@@ -1921,6 +1921,7 @@ actor AnalysisCoordinator {
                 chunks: hotPathChunks,
                 analysisAssetId: assetId,
                 episodeDuration: currentEpisodeDuration(),
+                podcastId: activePodcastId,
                 retireUnmatchedReplayCandidates: true
             )
             if !result.retiredWindowIDs.isEmpty {

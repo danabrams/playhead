@@ -5,14 +5,15 @@
 //
 // This is the on-disk UPGRADE-PATH evidence for the highest-stakes part of
 // the stall fix: a real v29 DB with existing `analysis_jobs` rows must open
-// at v30, add the two nullable columns at trailing indices, and leave every
+// through v30, add the two nullable columns at trailing indices, and leave every
 // positional reader (`readJob`, indices 0..22) correct — including the
 // `generationID` (21) / `schedulerEpoch` (22) columns the uzdq lease work
 // appended just before these.
 //
 // Coverage targets:
-//   1. Fresh-DB migrate() reaches head (v30) with both columns present.
-//   2. `currentSchemaVersion` is exactly 30 (drift guard).
+//   1. Fresh-DB migrate() reaches the current schema head with both columns
+//      present.
+//   2. `currentSchemaVersion` includes V30 and all later migrations.
 //   3. A v29-shaped `analysis_jobs` (no reject columns) upgrades in place:
 //      the columns are added, an existing pre-gy2s row survives with EVERY
 //      field intact — crucially its NON-DEFAULT generationID/schedulerEpoch,
@@ -52,7 +53,7 @@ struct AdmissionRejectReasonV30MigrationTests {
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Drift guard: head moved 30 → 31 (playhead-b6jq specialist_scan_results);
         // the V30 reject-advisory columns probed below are unchanged.
-        #expect(AnalysisStore.currentSchemaVersion == 34)
+        #expect(AnalysisStore.currentSchemaVersion == 36)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }

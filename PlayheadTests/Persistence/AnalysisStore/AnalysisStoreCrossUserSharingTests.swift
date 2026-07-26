@@ -40,7 +40,9 @@ private func makeSharingWindow(
     boundaryState: String = AdBoundaryState.acousticRefined.rawValue,
     decisionState: String = AdDecisionState.confirmed.rawValue,
     wasSkipped: Bool = true,
-    userDismissedBanner: Bool = false
+    userDismissedBanner: Bool = false,
+    includeCatalogMatch: Bool = false,
+    catalogMatchedShowId: String? = "podcast-1"
 ) -> AdWindow {
     AdWindow(
         id: id,
@@ -63,7 +65,21 @@ private func makeSharingWindow(
         userDismissedBanner: userDismissedBanner,
         evidenceSources: "semantic,fusion",
         eligibilityGate: SkipEligibilityGate.eligible.rawValue,
-        catalogStoreMatchSimilarity: 0.63
+        catalogStoreMatchSimilarity: includeCatalogMatch ? 0.93 : nil,
+        catalogFingerprintVersion:
+            includeCatalogMatch
+                ? CatalogFingerprintVersion.currentCatalog.rawValue : nil,
+        catalogMatchedEntryId:
+            includeCatalogMatch
+                ? "00000000-0000-0000-0000-000000000063" : nil,
+        catalogMatchedShowId:
+            includeCatalogMatch ? catalogMatchedShowId : nil,
+        catalogMatchedLearningSource:
+            includeCatalogMatch
+                ? CatalogLearningSource.userMarkedAd.rawValue : nil,
+        catalogMatchedLearningLifecycle:
+            includeCatalogMatch
+                ? CatalogLearningLifecycle.explicitConfirmation.rawValue : nil
     )
 }
 
@@ -108,7 +124,13 @@ struct AnalysisStoreCrossUserSharingTests {
             fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             episodeDurationSec: 180
         )
-        try await store.insertAdWindow(makeSharingWindow(id: "source-window", assetId: "asset-a"))
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-window",
+                assetId: "asset-a",
+                includeCatalogMatch: true
+            )
+        )
 
         let snapshot = try await store.exportCrossUserAnalysisSnapshot(
             assetId: "asset-a",
@@ -125,7 +147,7 @@ struct AnalysisStoreCrossUserSharingTests {
             fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             analysisVersion: 1
         ))
-        #expect(snapshot?.schemaVersion == 3)
+        #expect(snapshot?.schemaVersion == 4)
         #expect(snapshot?.measurements.fmMinutesSaved == nil)
         #expect(snapshot?.analysisCoverageEndSec == 40)
         #expect(snapshot?.measurements.queueToReadyLatencySec == 3.25)
@@ -135,11 +157,13 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(snapshot?.windows.first?.startTime == 10)
         #expect(snapshot?.windows.first?.endTime == 40)
         #expect(snapshot?.windows.first?.isAd == true)
+        #expect(snapshot?.windows.first?.catalogMatchedEntryId == nil)
 
         let encoded = try #require(snapshot).encodedJSONString()
         #expect(!encoded.contains("episodeId"))
         #expect(!encoded.contains("raw transcript evidence"))
         #expect(!encoded.contains("evidenceText"))
+        #expect(!encoded.contains("00000000-0000-0000-0000-000000000063"))
     }
 
     @Test(
@@ -408,6 +432,12 @@ struct AnalysisStoreCrossUserSharingTests {
         )
 
         #expect(snapshot == nil)
+        #expect(
+            try await store.exportCrossUserAnalysisSnapshot(
+                assetId: "asset-a",
+                podcastId: "podcast-1\u{0}other"
+            ) == nil
+        )
     }
 
     @Test("export suppresses snapshots when provenance source build is not canonical")
@@ -695,7 +725,7 @@ struct AnalysisStoreCrossUserSharingTests {
         let snapshot = makeSnapshot(
             key: key,
             windows: [CrossUserAnalysisSnapshot.Window(adWindow: makeSharingWindow(id: "source-window", assetId: "asset-a"))],
-            schemaVersion: CrossUserAnalysisSnapshot.currentSchemaVersion - 1
+            schemaVersion: 2
         )
 
         let result = try await store.importCrossUserAnalysisSnapshot(
@@ -711,6 +741,52 @@ struct AnalysisStoreCrossUserSharingTests {
         }
         let windows = try await store.fetchAdWindows(assetId: "asset-b")
         #expect(windows.isEmpty)
+    }
+
+    @Test("import rejects future schema snapshots before inserting windows")
+    func importRejectsFutureSchemaSnapshots() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-future-schema",
+            episodeId: "episode-future-schema",
+            fileSHA:
+                "dededededededededededededededededededededededededededededededede"
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                fileSHA:
+                    "dededededededededededededededededededededededededededededededede",
+                analysisVersion: 1
+            ),
+            windows: [
+                CrossUserAnalysisSnapshot.Window(
+                    adWindow: makeSharingWindow(
+                        id: "future-schema-window",
+                        assetId: "source-asset"
+                    )
+                ),
+            ],
+            analysisCoverageEndSec: 40,
+            schemaVersion: CrossUserAnalysisSnapshot.currentSchemaVersion + 1
+        )
+
+        if case .incompatibleSnapshot(let reason) =
+            try await store.importCrossUserAnalysisSnapshot(
+                snapshot,
+                targetAssetId: "asset-future-schema",
+                podcastId: "podcast-1"
+            ) {
+            #expect(reason == "schemaVersion")
+        } else {
+            Issue.record("expected future schema to fail closed")
+        }
+        #expect(
+            try await store.fetchAdWindows(
+                assetId: "asset-future-schema"
+            ).isEmpty
+        )
     }
 
     @Test("import rejects stale pipeline-version snapshots before inserting windows")
@@ -1802,8 +1878,10 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(exported.analysisCoverageEndSec == 40)
 
         let encoded = try exported.encodedJSONString()
-        #expect(!encoded.contains("userMarked"))
-        #expect(!encoded.contains("correctionReplay"))
+        #expect(!encoded.contains("\"boundaryState\":\"userMarked\""))
+        #expect(
+            !encoded.contains("\"boundaryState\":\"correctionReplay\"")
+        )
     }
 
     @Test("export drops non-actionable eligibility gates without inflating coverage")
@@ -2567,7 +2645,8 @@ struct AnalysisStoreCrossUserSharingTests {
                         id: "source-window",
                         assetId: "asset-a",
                         start: 12,
-                        end: 60
+                        end: 60,
+                        includeCatalogMatch: true
                     )
                 ),
             ],
@@ -2599,15 +2678,15 @@ struct AnalysisStoreCrossUserSharingTests {
         }
         #expect(firstReceipt.insertedWindowCount == 1)
         #expect(firstReceipt.insertedWindowIds.count == 1)
-        #expect(firstReceipt.bannerEligibleWindowIds == firstReceipt.insertedWindowIds)
-        #expect(firstReceipt.insertedCueCount == 1)
+        #expect(firstReceipt.bannerEligibleWindowIds.isEmpty)
+        #expect(firstReceipt.insertedCueCount == 0)
         #expect(firstReceipt.analysisCoverageEndSec == 60)
         #expect(firstReceipt.fmMinutesSaved == 2)
         #expect(firstReceipt.queueToReadyLatencySec == 2.5)
         #expect(firstReceipt.batteryDeltaPercent == -1.5)
         #expect(secondReceipt.insertedWindowCount == 0)
         #expect(secondReceipt.insertedWindowIds.isEmpty)
-        #expect(secondReceipt.bannerEligibleWindowIds == firstReceipt.insertedWindowIds)
+        #expect(secondReceipt.bannerEligibleWindowIds.isEmpty)
         #expect(secondReceipt.insertedCueCount == 0)
 
         let windows = try await store.fetchAdWindows(assetId: "asset-b")
@@ -2631,12 +2710,332 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(imported.metadataConfidence == 0.81)
         #expect(imported.metadataPromptVersion == "prompt-v1")
         #expect(imported.evidenceSources == "semantic,fusion")
-        #expect(imported.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
-        #expect(imported.catalogStoreMatchSimilarity == 0.63)
+        #expect(imported.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+        #expect(imported.catalogStoreMatchSimilarity == nil)
+        #expect(imported.catalogFingerprintVersion == nil)
+        #expect(imported.catalogMatchedEntryId == nil)
+        #expect(imported.catalogMatchedShowId == nil)
+        #expect(imported.catalogMatchedLearningSource == nil)
+        #expect(imported.catalogMatchedLearningLifecycle == nil)
         #expect(imported.evidenceText == nil)
         #expect(imported.evidenceStartTime == nil)
         #expect(imported.wasSkipped == false)
         #expect(imported.userDismissedBanner == false)
+    }
+
+    @Test("legacy nil-gate catalog score without compatible provenance is demoted")
+    func incompleteSharedCatalogProvenanceFailsClosed() async throws {
+        let store = try await makeTestStore()
+        let fileSHA =
+            "abababababababababababababababababababababababababababababababab"
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-legacy-catalog",
+            episodeId: "episode-legacy-catalog",
+            fileSHA: fileSHA
+        )
+        let legacyWindow = CrossUserAnalysisSnapshot.Window(
+            sourceWindowId: "legacy-catalog-window",
+            startTime: 12,
+            endTime: 42,
+            confidence: 0.95,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "legacy-catalog-test",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            evidenceSources: "catalog",
+            // Pre-gate snapshots used nil to mean automatic legacy admission.
+            // Import must replace it rather than merely excluding the row
+            // from this call's receipt.
+            eligibilityGate: nil,
+            catalogStoreMatchSimilarity: 0.99
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-legacy-catalog",
+                fileSHA: fileSHA,
+                analysisVersion: 1
+            ),
+            windows: [legacyWindow],
+            analysisCoverageEndSec: legacyWindow.endTime,
+            schemaVersion: 3
+        )
+        let legacyPayload = try JSONEncoder().encode(snapshot)
+        let decodedLegacySnapshot = try JSONDecoder().decode(
+            CrossUserAnalysisSnapshot.self,
+            from: legacyPayload
+        )
+
+        let result = try await store.importCrossUserAnalysisSnapshot(
+            decodedLegacySnapshot,
+            targetAssetId: "asset-legacy-catalog",
+            podcastId: "podcast-legacy-catalog"
+        )
+        guard case .imported(let receipt) = result else {
+            Issue.record("expected backward-decodable snapshot import")
+            return
+        }
+        #expect(receipt.bannerEligibleWindowIds.isEmpty)
+        #expect(receipt.insertedCueCount == 0)
+        let imported = try #require(
+            try await store.fetchAdWindows(
+                assetId: "asset-legacy-catalog"
+            ).first
+        )
+        #expect(
+            imported.eligibilityGate == SkipEligibilityGate.markOnly.rawValue
+        )
+        #expect(imported.catalogStoreMatchSimilarity == nil)
+        #expect(imported.catalogFingerprintVersion == nil)
+        #expect(imported.catalogMatchedEntryId == nil)
+        #expect(imported.catalogMatchedShowId == nil)
+        #expect(imported.catalogMatchedLearningSource == nil)
+        #expect(imported.catalogMatchedLearningLifecycle == nil)
+    }
+
+    @Test("JSON-array catalog evidence cannot carry automatic authority through import")
+    func jsonCatalogEvidenceFailsClosed() async throws {
+        let store = try await makeTestStore()
+        let fileSHA =
+            "afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf"
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-json-catalog-evidence",
+            episodeId: "episode-json-catalog-evidence",
+            fileSHA: fileSHA
+        )
+        let remote = CrossUserAnalysisSnapshot.Window(
+            sourceWindowId: "json-catalog-evidence-window",
+            startTime: 12,
+            endTime: 42,
+            confidence: 0.95,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "json-catalog-evidence-test",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            // Production fusion persistence uses a JSON string array, not the
+            // legacy comma-separated representation.
+            evidenceSources: "[\"classifier\",\"catalog\"]",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+            catalogStoreMatchSimilarity: nil
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-json-catalog-evidence",
+                fileSHA: fileSHA,
+                analysisVersion: 1
+            ),
+            windows: [remote],
+            analysisCoverageEndSec: remote.endTime
+        )
+
+        guard case .imported(let receipt) =
+            try await store.importCrossUserAnalysisSnapshot(
+                snapshot,
+                targetAssetId: "asset-json-catalog-evidence",
+                podcastId: "podcast-json-catalog-evidence"
+            )
+        else {
+            Issue.record("expected safe demoted import")
+            return
+        }
+        #expect(receipt.bannerEligibleWindowIds.isEmpty)
+        #expect(receipt.insertedCueCount == 0)
+        let imported = try #require(
+            try await store.fetchAdWindows(
+                assetId: "asset-json-catalog-evidence"
+            ).first
+        )
+        #expect(imported.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+        #expect(imported.evidenceSources == remote.evidenceSources)
+        #expect(imported.catalogStoreMatchSimilarity == nil)
+        #expect(imported.catalogFingerprintVersion == nil)
+        #expect(imported.catalogMatchedEntryId == nil)
+        #expect(imported.catalogMatchedShowId == nil)
+        #expect(imported.catalogMatchedLearningSource == nil)
+        #expect(imported.catalogMatchedLearningLifecycle == nil)
+    }
+
+    @Test("catalog matched-show mismatch is stripped and cannot retain automatic authority")
+    func catalogMatchedShowMustEqualSnapshotPodcast() async throws {
+        let store = try await makeTestStore()
+        let fileSHA =
+            "adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad"
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-mismatched-catalog-show",
+            episodeId: "episode-mismatched-catalog-show",
+            fileSHA: fileSHA
+        )
+        let remote = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "mismatched-catalog-show-window",
+                assetId: "remote-asset",
+                start: 12,
+                end: 42,
+                includeCatalogMatch: true,
+                catalogMatchedShowId: "different-podcast"
+            )
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                fileSHA: fileSHA,
+                analysisVersion: 1
+            ),
+            windows: [remote],
+            analysisCoverageEndSec: remote.endTime
+        )
+
+        guard case .imported(let receipt) =
+            try await store.importCrossUserAnalysisSnapshot(
+                snapshot,
+                targetAssetId: "asset-mismatched-catalog-show",
+                podcastId: "podcast-1"
+            ) else {
+            Issue.record("expected safe demoted import")
+            return
+        }
+        #expect(receipt.bannerEligibleWindowIds.isEmpty)
+        #expect(receipt.insertedCueCount == 0)
+        let imported = try #require(
+            try await store.fetchAdWindows(
+                assetId: "asset-mismatched-catalog-show"
+            ).first
+        )
+        #expect(imported.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+        #expect(imported.catalogStoreMatchSimilarity == nil)
+        #expect(imported.catalogFingerprintVersion == nil)
+        #expect(imported.catalogMatchedEntryId == nil)
+        #expect(imported.catalogMatchedShowId == nil)
+        #expect(imported.catalogMatchedLearningSource == nil)
+        #expect(imported.catalogMatchedLearningLifecycle == nil)
+    }
+
+    @Test("matching remote catalog show alone still has no local authority")
+    func matchingCatalogShowOnlyFailsClosed() async throws {
+        let store = try await makeTestStore()
+        let fileSHA =
+            "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-catalog-show-only",
+            episodeId: "episode-catalog-show-only",
+            fileSHA: fileSHA
+        )
+        let remote = CrossUserAnalysisSnapshot.Window(
+            sourceWindowId: "catalog-show-only-window",
+            startTime: 12,
+            endTime: 42,
+            confidence: 0.95,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "catalog-show-only-test",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            evidenceSources: "semantic",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+            catalogStoreMatchSimilarity: nil,
+            catalogMatchedShowId: "podcast-1"
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                fileSHA: fileSHA,
+                analysisVersion: 1
+            ),
+            windows: [remote],
+            analysisCoverageEndSec: remote.endTime
+        )
+
+        guard case .imported(let receipt) = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-catalog-show-only",
+            podcastId: "podcast-1"
+        ) else {
+            Issue.record("expected safe demoted import")
+            return
+        }
+        #expect(receipt.bannerEligibleWindowIds.isEmpty)
+        #expect(receipt.insertedCueCount == 0)
+        let imported = try #require(
+            try await store.fetchAdWindows(
+                assetId: "asset-catalog-show-only"
+            ).first
+        )
+        #expect(imported.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+        #expect(imported.catalogMatchedShowId == nil)
+    }
+
+    @Test("zero catalog score without match provenance stays eligible")
+    func zeroCatalogScoreDoesNotRequireMatchProvenance() async throws {
+        let store = try await makeTestStore()
+        let fileSHA =
+            "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-zero-catalog",
+            episodeId: "episode-zero-catalog",
+            fileSHA: fileSHA
+        )
+        let noMatchWindow = CrossUserAnalysisSnapshot.Window(
+            sourceWindowId: "zero-catalog-window",
+            startTime: 12,
+            endTime: 42,
+            confidence: 0.95,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "current-no-match-test",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            evidenceSources: "semantic",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+            catalogStoreMatchSimilarity: 0
+        )
+        let snapshot = makeSnapshot(
+            key: CrossUserAnalysisShareKey(
+                podcastId: "podcast-1",
+                fileSHA: fileSHA,
+                analysisVersion: 1
+            ),
+            windows: [noMatchWindow],
+            analysisCoverageEndSec: noMatchWindow.endTime
+        )
+
+        guard case .imported = try await store.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-zero-catalog",
+            podcastId: "podcast-1"
+        ) else {
+            Issue.record("expected no-match snapshot import")
+            return
+        }
+        let imported = try #require(
+            try await store.fetchAdWindows(
+                assetId: "asset-zero-catalog"
+            ).first
+        )
+        #expect(imported.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
+        #expect(imported.catalogStoreMatchSimilarity == 0)
+        #expect(imported.catalogFingerprintVersion == nil)
     }
 
     @Test("import does not duplicate an equivalent local span")
@@ -3113,7 +3512,13 @@ private extension AdWindow {
             userDismissedBanner: userDismissedBanner,
             evidenceSources: evidenceSources,
             eligibilityGate: eligibilityGate,
-            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            catalogFingerprintVersion: catalogFingerprintVersion,
+            catalogMatchedEntryId: catalogMatchedEntryId,
+            catalogMatchedShowId: catalogMatchedShowId,
+            catalogMatchedLearningSource: catalogMatchedLearningSource,
+            catalogMatchedLearningLifecycle:
+                catalogMatchedLearningLifecycle
         )
     }
 
@@ -3139,7 +3544,13 @@ private extension AdWindow {
             userDismissedBanner: userDismissedBanner,
             evidenceSources: evidenceSources,
             eligibilityGate: eligibilityGate,
-            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            catalogFingerprintVersion: catalogFingerprintVersion,
+            catalogMatchedEntryId: catalogMatchedEntryId,
+            catalogMatchedShowId: catalogMatchedShowId,
+            catalogMatchedLearningSource: catalogMatchedLearningSource,
+            catalogMatchedLearningLifecycle:
+                catalogMatchedLearningLifecycle
         )
     }
 
@@ -3165,7 +3576,13 @@ private extension AdWindow {
             userDismissedBanner: userDismissedBanner,
             evidenceSources: evidenceSources,
             eligibilityGate: eligibilityGate,
-            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            catalogFingerprintVersion: catalogFingerprintVersion,
+            catalogMatchedEntryId: catalogMatchedEntryId,
+            catalogMatchedShowId: catalogMatchedShowId,
+            catalogMatchedLearningSource: catalogMatchedLearningSource,
+            catalogMatchedLearningLifecycle:
+                catalogMatchedLearningLifecycle
         )
     }
 }

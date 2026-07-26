@@ -82,7 +82,9 @@ struct AutoSkipPrecisionGateIntegrationTests {
 
     private func makeService(
         store: AnalysisStore,
-        classifier: ClassifierService
+        classifier: ClassifierService,
+        classifierCalibrationProfile: ClassifierCalibrationProfile =
+            .production
     ) -> AdDetectionService {
         let config = AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -97,8 +99,65 @@ struct AutoSkipPrecisionGateIntegrationTests {
             store: store,
             classifier: classifier,
             metadataExtractor: FallbackExtractor(),
-            config: config
+            config: config,
+            classifierCalibrationProfile:
+                classifierCalibrationProfile
         )
+    }
+
+    @Test("malformed persisted music-bed level rejects the entire acoustic cohort")
+    func malformedPersistedMusicBedLevelFailsClosed() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-gtt9.11-malformed-music-level"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await insertFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: 14,
+            musicBedLevel: .background
+        )
+        try await store.execForTesting(
+            """
+            UPDATE feature_windows
+            SET musicBedLevelRaw = 'corrupt-level'
+            WHERE analysisAssetId = '\(assetId)' AND startTime = 12
+            """
+        )
+
+        await #expect(throws: AnalysisStoreError.self) {
+            _ = try await store.fetchFeatureWindows(
+                assetId: assetId,
+                from: 0,
+                to: 14,
+                minimumFeatureVersion: nil
+            )
+        }
+        await #expect(throws: AnalysisStoreError.self) {
+            _ = try await store.fetchAllFeatureWindows(
+                assetId: assetId,
+                minimumFeatureVersion: nil
+            )
+        }
+    }
+
+    /// Maps every finite raw score to 0.2, below the UI candidate threshold.
+    /// Matching both producer revision keys proves the production calibration
+    /// path—not a low raw classifier score—drives detection-only.
+    private func detectionOnlyCalibrationProfile()
+        -> ClassifierCalibrationProfile
+    {
+        ClassifierCalibrationProfile(fits: [
+            .init(
+                detectorVersion: "gtt9.11-test",
+                buildCommitSHA: BuildInfo.commitSHA,
+                coefficients: PlattCoefficients(
+                    a: 0,
+                    b: log(4)
+                ),
+                corpusLabel: "round3-detection-only",
+                trainingSampleCount: 2
+            )
+        ])
     }
 
     /// Helper to fabricate a Tier-1 slot-scoring pattern that fuses into ONE
@@ -130,6 +189,96 @@ struct AutoSkipPrecisionGateIntegrationTests {
         ]
         let mean = (baseline * 4 + spike * 2) / 6.0
         return (scores, mean)
+    }
+
+    @Test("single-window detection-only gate result is not persisted")
+    func singleWindowDetectionOnlyIsNotPersisted() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-round3-single-detection-only"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await insertFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: 3600
+        )
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: [:],
+            defaultScore: 0.1,
+            chunkScore: 0.99
+        )
+        let service = makeService(
+            store: store,
+            classifier: classifier,
+            classifierCalibrationProfile:
+                detectionOnlyCalibrationProfile()
+        )
+        let text =
+            "brought to you by squarespace use promo code playhead"
+        let chunk = TranscriptChunk(
+            id: "round3-single-detection-only",
+            analysisAssetId: assetId,
+            segmentFingerprint: "round3-single-fingerprint",
+            chunkIndex: 0,
+            startTime: 600,
+            endTime: 660,
+            text: text,
+            normalizedText: text,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
+        _ = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: 3600
+        )
+
+        #expect(
+            try await store.fetchAdWindows(assetId: assetId).isEmpty,
+            "a calibrated detection-only result must not become a legacy nil-gated AdWindow"
+        )
+    }
+
+    @Test("aggregator detection-only gate result is not persisted")
+    func aggregatorDetectionOnlyIsNotPersisted() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-round3-aggregator-detection-only"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration = 3600.0
+        try await insertFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration
+        )
+        var scores: [Double: Double] = [:]
+        for time in stride(from: 0.0, to: duration, by: 30.0) {
+            scores[time] = 0.1
+        }
+        scores[1500] = 0.85
+        scores[1530] = 0.85
+        scores[1560] = 0.85
+        let service = makeService(
+            store: store,
+            classifier: SlotScoringClassifier(
+                scoresByStartTime: scores,
+                defaultScore: 0.1
+            ),
+            classifierCalibrationProfile:
+                detectionOnlyCalibrationProfile()
+        )
+
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        #expect(
+            try await store.fetchAdWindows(assetId: assetId).isEmpty,
+            "the aggregator must honor detection-only instead of persisting a nil gate"
+        )
     }
 
     // MARK: - 1. segmentScore ≥ autoSkip, ZERO safety signals → markOnly

@@ -97,7 +97,7 @@ struct AcousticFingerprintTests {
         let a = AcousticFingerprint(values: va)!
         let b = AcousticFingerprint(values: vb)!
         let s = AcousticFingerprint.similarity(a, b)
-        #expect(s < 0.01)
+        #expect(s < 0.02)
     }
 
     @Test("zero fingerprint never matches")
@@ -142,6 +142,62 @@ struct AcousticFingerprintTests {
         #expect(AcousticFingerprint(data: badData) == nil)
     }
 
+    @Test("data rejects finite vectors that violate the normalized invariant")
+    func dataRejectsNonNormalizedFiniteVectors() {
+        var blob = Data()
+        for _ in 0..<AcousticFingerprint.vectorLength {
+            var bits = Float.greatestFiniteMagnitude.bitPattern.littleEndian
+            withUnsafeBytes(of: &bits) { blob.append(contentsOf: $0) }
+        }
+
+        #expect(AcousticFingerprint(data: blob) == nil)
+    }
+
+    @Test("JSON rejects finite vectors that violate the normalized invariant")
+    func jsonRejectsNonNormalizedFiniteVectors() throws {
+        let malformed = try JSONSerialization.data(withJSONObject: [
+            "values": [Float](
+                repeating: 1,
+                count: AcousticFingerprint.vectorLength
+            ),
+            "version": CatalogFingerprintVersion
+                .relativeFeatureSummaryV2.rawValue,
+        ])
+
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(
+                AcousticFingerprint.self,
+                from: malformed
+            )
+        }
+    }
+
+    @Test("pre-version JSON decodes into the quarantined legacy cohort")
+    func legacyJSONDefaultsToLegacyVersion() throws {
+        let current = AcousticFingerprint(
+            values: (1...AcousticFingerprint.vectorLength).map(Float.init)
+        )!
+        let legacyJSON = try JSONSerialization.data(withJSONObject: [
+            "values": current.values,
+        ])
+        let decoded = try JSONDecoder().decode(
+            AcousticFingerprint.self,
+            from: legacyJSON
+        )
+
+        #expect(decoded.version == .legacyCosineV1)
+        #expect(
+            AcousticFingerprint.similarity(current, decoded) == 0,
+            "unversioned legacy payloads must never compare as current"
+        )
+        let reencoded = try JSONEncoder().encode(decoded)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: reencoded)
+                as? [String: Any]
+        )
+        #expect(object["version"] as? Int == 1)
+    }
+
     // MARK: - PCM → fingerprint
 
     @Test("fromPCM of too-short buffer returns zero")
@@ -149,6 +205,30 @@ struct AcousticFingerprintTests {
         let shortPCM: [Float] = Array(repeating: 0.1, count: 10)
         let fp = AcousticFingerprint.fromPCM(shortPCM, sampleRate: 16000)
         #expect(fp.isZero)
+    }
+
+    @Test("fromPCM rejects non-finite and out-of-range sample rates without trapping")
+    func invalidSampleRatesReturnZero() {
+        let pcm = [Float](repeating: 0.1, count: 512)
+
+        #expect(
+            AcousticFingerprint.fromPCM(
+                pcm,
+                sampleRate: .infinity
+            ).isZero
+        )
+        #expect(
+            AcousticFingerprint.fromPCM(
+                pcm,
+                sampleRate: .nan
+            ).isZero
+        )
+        #expect(
+            AcousticFingerprint.fromPCM(
+                pcm,
+                sampleRate: Double.greatestFiniteMagnitude
+            ).isZero
+        )
     }
 
     @Test("fromPCM of identical PCM produces identical fingerprints (determinism)")
@@ -207,7 +287,7 @@ struct AcousticFingerprintTests {
         let s = AcousticFingerprint.similarity(a, b)
         // Different tones produce distinguishable fingerprints. They
         // won't be orthogonal (the scalars are similar) but should be
-        // below the catalog's default 0.80 floor.
+        // below the catalog's default 0.90 floor.
         #expect(s < 0.99)
     }
 }

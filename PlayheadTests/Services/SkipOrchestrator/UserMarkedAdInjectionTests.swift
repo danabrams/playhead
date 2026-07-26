@@ -217,6 +217,35 @@ struct UserMarkedAdInjectionTests {
         #expect((await orchestrator.activeWindowIDs()).isEmpty)
         #expect((await orchestrator.getDecisionLog()).isEmpty)
     }
+
+    @Test("invalid user-marked spans never arm a live cue")
+    func invalidUserMarkedSpansFailClosed() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        for (index, span) in [
+            (Double.nan, 90.0),
+            (30.0, Double.infinity),
+            (90.0, 30.0),
+            (-1.0, 30.0),
+        ].enumerated() {
+            await orchestrator.injectUserMarkedAd(
+                start: span.0,
+                end: span.1,
+                analysisAssetId: "asset-1",
+                windowId: "invalid-user-mark-\(index)"
+            )
+        }
+
+        #expect((await orchestrator.activeWindowIDs()).isEmpty)
+        #expect((await orchestrator.getDecisionLog()).isEmpty)
+    }
 }
 
 // MARK: - AdDetectionService.recordUserMarkedAd Tests
@@ -253,6 +282,42 @@ private actor UserMarkDerivedGate {
 
 @Suite("AdDetectionService - User Marked Ad Persistence")
 struct UserMarkedAdPersistenceTests {
+
+    @Test("invalid user-marked spans are not persisted")
+    func invalidUserMarkedSpansAreRejected() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let service = AdDetectionService(
+            store: store,
+            metadataExtractor: FallbackExtractor()
+        )
+
+        for (index, span) in [
+            (Double.nan, 90.0),
+            (30.0, Double.infinity),
+            (90.0, 30.0),
+            (-1.0, 30.0),
+        ].enumerated() {
+            #expect(
+                !(await service.recordUserMarkedAd(
+                    analysisAssetId: "asset-1",
+                    startTime: span.0,
+                    endTime: span.1,
+                    podcastId: "podcast-1",
+                    windowId: "invalid-user-mark-\(index)"
+                ))
+            )
+        }
+
+        #expect(
+            try await store.fetchAdWindows(assetId: "asset-1").isEmpty
+        )
+        #expect(
+            try await store.loadCorrectionEvents(
+                analysisAssetId: "asset-1"
+            ).isEmpty
+        )
+    }
 
     @Test("recordUserMarkedAd persists AdWindow to store")
     func recordPersistsAdWindow() async throws {
@@ -331,6 +396,89 @@ struct UserMarkedAdPersistenceTests {
         // source.kind persists through the AdDetectionService path.
         #expect(fn.correctionType == .falseNegative,
                 "falseNegative source must persist as correctionType.falseNegative")
+    }
+
+    @Test("user-marked ad learns only with an exact canonical show and full provenance")
+    func userMarkLearnsCatalogWithAuthoritativeProvenance() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let features = (0..<10).map { index in
+            FeatureWindow(
+                analysisAssetId: "asset-1",
+                startTime: 30 + Double(index) * 6,
+                endTime: 36 + Double(index) * 6,
+                rms: 0.55,
+                spectralFlux: 0.25,
+                musicProbability: 0.40,
+                speakerChangeProxyScore: 0.30,
+                musicBedLevel: .background,
+                pauseProbability: 0.05,
+                speakerClusterId: 1,
+                jingleHash: nil,
+                featureVersion: 5
+            )
+        }
+        try await store.insertFeatureWindows(features)
+        let catalog = try AdCatalogStore(
+            directoryURL: makeTempDir(prefix: "user-mark-catalog")
+        )
+        let repeatedStorage = InMemoryRepeatedAdCacheStorage()
+        let repeatedCache = RepeatedAdCacheService(
+            storage: repeatedStorage
+        )
+        let service = AdDetectionService(
+            store: store,
+            metadataExtractor: FallbackExtractor(),
+            adCatalogStore: catalog,
+            repeatedAdCache: repeatedCache
+        )
+
+        #expect(
+            await service.recordUserMarkedAd(
+                analysisAssetId: "asset-1",
+                startTime: 30,
+                endTime: 90,
+                podcastId: "podcast-1",
+                windowId: "user-mark-catalog-source"
+            )
+        )
+        await service._waitForUserMarkedAdDerivedWorkForTesting()
+        let learned = try #require(try await catalog.allEntries().first)
+        #expect(learned.showId == "podcast-1")
+        #expect(learned.learningSource == .userMarkedAd)
+        #expect(learned.learningLifecycle == .explicitConfirmation)
+        #expect(learned.sourceAssetId == "asset-1")
+        #expect(learned.sourceWindowId == "user-mark-catalog-source")
+        #expect(learned.sourceStartTime == 30)
+        #expect(learned.sourceEndTime == 90)
+        let recurrence = try #require(
+            try await repeatedStorage.fetchAll(showId: "podcast-1").first
+        )
+        #expect(recurrence.learningSource == .userMarkedAd)
+        #expect(recurrence.learningLifecycle == .explicitConfirmation)
+        #expect(recurrence.sourceAssetId == "asset-1")
+        #expect(recurrence.sourceWindowId == "user-mark-catalog-source")
+
+        for (podcastId, windowId) in [
+            (" \n\t", "user-mark-blank-show"),
+            (" podcast-2 ", "user-mark-noncanonical-show"),
+        ] {
+            #expect(
+                await service.recordUserMarkedAd(
+                    analysisAssetId: "asset-1",
+                    startTime: 30,
+                    endTime: 90,
+                    podcastId: podcastId,
+                    windowId: windowId
+                )
+            )
+            await service._waitForUserMarkedAdDerivedWorkForTesting()
+            #expect(
+                try await catalog.count() == 1,
+                "malformed show identity must not change the catalog"
+            )
+            #expect(try await repeatedStorage.totalCount() == 1)
+        }
     }
 
     @Test("A correction write failure rolls back the companion user-marked window")

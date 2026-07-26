@@ -12,7 +12,9 @@
 //     Array of all rows in memory. Per-asset fetches keep the working set
 //     proportional to the largest single asset's span count.
 //   - Schema version: every emitted record carries `schemaVersion: 1` so
-//     downstream tooling can drift-check per record.
+//     downstream tooling can drift-check per record. V1 permits additive,
+//     nullable diagnostic keys; incompatible meaning/type changes require a
+//     version bump.
 //   - Join keys: records use the analysisAssetId and atom-ordinal keys
 //     exactly as they appear on DecodedSpan / CorrectionEvent, matching
 //     narL's decision-log.jsonl by construction.
@@ -44,7 +46,8 @@ struct CorpusExportResult: Sendable, Equatable {
     /// Number of CorrectionEvent rows skipped due to unparseable `scope` strings.
     let skippedCorrectionCount: Int
     /// playhead-epfk: Number of `ad_window` rows emitted (one JSONL line
-    /// per persisted `AdWindow`, carrying `catalogStoreMatchSimilarity`).
+    /// per persisted `AdWindow`, carrying catalog match similarity and
+    /// compatible row/show/lifecycle provenance).
     let adWindowCount: Int
     /// playhead-q45f.1: Number of `listen_rewind` rows emitted (one
     /// JSONL line per persisted user listen-rewind tap).
@@ -77,9 +80,10 @@ protocol CorpusExportSource: ShadowDecisionsExportSource {
     func fetchAllAssets() async throws -> [AnalysisAsset]
     func fetchDecodedSpans(assetId: String) async throws -> [DecodedSpan]
     /// playhead-epfk: pull the persisted ad-window rows so the exporter
-    /// can emit a per-window record carrying `catalogStoreMatchSimilarity`
-    /// (the cross-episode `AdCatalogStore` top-match similarity recorded
-    /// at fusion time). NARL eval needs this column to measure the
+    /// can emit a per-window record carrying the cross-episode
+    /// `AdCatalogStore` match similarity plus its compatible fingerprint,
+    /// row/show, and learning-lifecycle provenance. NARL eval needs these
+    /// columns to measure the
     /// fingerprint-store firing rate independently from the in-pipeline
     /// transcript sponsor catalog (both share the `.catalog` evidence
     /// source label until the `subSource` disambiguator lands in
@@ -273,9 +277,11 @@ actor CorpusExportDedupMemo {
 
 enum CorpusExporter {
 
-    /// JSONL schema version stamped on every emitted record. Bump when
-    /// the record shape changes in a non-backward-compatible way; downstream
-    /// tooling is expected to version-gate at the per-record level.
+    /// JSONL schema version stamped on every emitted record. Additive nullable
+    /// diagnostics are backward compatible because JSON decoders ignore
+    /// unknown keys; bump this for removals, type changes, or semantic changes.
+    /// The catalog provenance keys added to `ad_window` are intentionally an
+    /// additive v1 extension.
     static let schemaVersion: Int = 1
 
     private static let logger = Logger(subsystem: "com.playhead", category: "CorpusExporter")
@@ -390,11 +396,12 @@ enum CorpusExporter {
 
     /// Serialize an `AdWindow` row as a single JSONL line body.
     ///
-    /// playhead-epfk: emits the per-window `catalogStoreMatchSimilarity`
-    /// (top match similarity from `AdCatalogStore.matches` recorded at
-    /// fusion time) as an explicit JSON value or `null`. NARL eval reads
-    /// this column to compute the fingerprint-store firing rate
-    /// (`catalogStoreMatchSimilarity >= 0.80 / total ad_windows with non-
+    /// playhead-epfk / playhead-o4qr: emits the per-window top catalog
+    /// similarity and its fingerprint-version, show, and learning provenance
+    /// as explicit JSON values or `null`. The private catalog row UUID is
+    /// always redacted. NARL eval reads the
+    /// similarity to compute the fingerprint-store firing rate
+    /// (`catalogStoreMatchSimilarity >= 0.90 / total ad_windows with non-
     /// null value`) — the only way to measure how tightly the
     /// correction loop closes on real corpora today.
     static func adWindowLine(
@@ -439,6 +446,14 @@ enum CorpusExporter {
             // produced no positive match (distinct from null — eval can
             // distinguish "loop is wired but inert" from "loop is off").
             "catalogStoreMatchSimilarity": window.catalogStoreMatchSimilarity as Any? ?? NSNull(),
+            "catalogFingerprintVersion": window.catalogFingerprintVersion as Any? ?? NSNull(),
+            // A catalog UUID has meaning only in this device's private store.
+            // Preserve the additive v1 key for decoder compatibility, but never
+            // let that device-local identifier cross the corpus boundary.
+            "catalogMatchedEntryId": NSNull(),
+            "catalogMatchedShowId": window.catalogMatchedShowId as Any? ?? NSNull(),
+            "catalogMatchedLearningSource": window.catalogMatchedLearningSource as Any? ?? NSNull(),
+            "catalogMatchedLearningLifecycle": window.catalogMatchedLearningLifecycle as Any? ?? NSNull(),
         ]
         return try jsonLineData(from: obj)
     }
@@ -699,9 +714,9 @@ enum CorpusExporter {
                 spanCount += 1
             }
 
-            // playhead-epfk: ad_window records for this asset. Carries
-            // the `catalogStoreMatchSimilarity` column NARL eval needs to
-            // measure the AdCatalogStore correction loop. Lookup failures
+            // playhead-epfk / playhead-o4qr: ad_window records for this asset.
+            // Carries the similarity and compatible catalog provenance NARL
+            // eval needs to audit the AdCatalogStore correction loop. Lookup failures
             // are non-fatal (parity with fetchDecodedSpans above): one
             // bad asset must not abort the entire export. Empty arrays
             // simply emit zero ad_window lines for that asset, which

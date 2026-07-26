@@ -55,6 +55,186 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             stripped.contains("recordWeakFalseSkipSignal"),
             "submitNotAdChunks must not call recordWeakFalseSkipSignal directly either; see canary above."
         )
+        XCTAssertFalse(
+            stripped.contains("recordVeto("),
+            "submitNotAdChunks must not pre-write a duplicate correction; the orchestrator owns the row+correction transaction."
+        )
+        let successGuard = try XCTUnwrap(
+            stripped.range(
+                of:
+                    "guard await revertCallback(syntheticSpan) else { return }"
+            )
+        )
+        let selectionClear = try XCTUnwrap(
+            stripped.range(of: "notAdMarkedChunkSelections = []")
+        )
+        XCTAssertLessThan(
+            successGuard.lowerBound,
+            selectionClear.lowerBound,
+            "Transcript veto selections must remain available until the exact transaction succeeds."
+        )
+        let markingModeExit = try XCTUnwrap(
+            stripped.range(of: "isNotAdMarkingMode = false")
+        )
+        XCTAssertLessThan(
+            successGuard.lowerBound,
+            markingModeExit.lowerBound,
+            "A failed transaction must keep not-ad marking mode open for retry."
+        )
+        XCTAssertTrue(
+            stripped.contains(
+                "defer { isSubmittingNotAdCorrection = false }"
+            ),
+            "Every success/failure path must release the duplicate-submit reservation."
+        )
+
+        let chunkRow = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: source,
+                after: "func chunkRow("
+            )
+        )
+        XCTAssertTrue(
+            SwiftSourceInspector.strippingComments(chunkRow).contains(
+                "guard !isSubmittingCorrection else { return }"
+            ),
+            "Transcript taps must not mutate a selection while its exact correction transaction is in flight."
+        )
+
+        let markModeToggle = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: source,
+                after: "var markModeToggle: some View"
+            )
+        )
+        XCTAssertTrue(
+            SwiftSourceInspector.strippingComments(markModeToggle).contains(
+                ".disabled(isSubmittingCorrection)"
+            ),
+            "The competing mark-ad mode must not clear veto retry state while persistence is suspended."
+        )
+    }
+
+    func testAdRegionPopoverUsesOnlyTransactionalRevertCallback() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath:
+                "Playhead/Views/NowPlaying/AdRegionPopover.swift"
+        )
+        XCTAssertFalse(
+            SwiftSourceInspector.strippingComments(source)
+                .contains("recordVeto("),
+            """
+            AdRegionPopover must not append a CorrectionEvent before invoking \
+            the orchestrator. Its callback owns the exact-row + correction \
+            transaction; a direct pre-write duplicates feedback and makes \
+            SQLite failure non-atomic.
+            """
+        )
+        XCTAssertTrue(
+            source.contains(
+                "guard await onRevertAdWindows(span) else { return }"
+            ),
+            "A failed or stale popover action must remain retryable."
+        )
+    }
+
+    func testTranscriptSheetCapturesImmutablePlaybackContext() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath:
+                "Playhead/Views/NowPlaying/NowPlayingView.swift"
+        )
+        XCTAssertTrue(
+            source.contains(
+                ".sheet(item: $transcriptPeekContext)"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "transcriptPeekContext = nil"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "sourceContext.playbackLifecycleGeneration"
+            )
+        )
+        XCTAssertTrue(
+            source.contains("onMarkAd: { startTime, endTime in")
+        )
+        XCTAssertTrue(
+            source.contains(
+                "ifCurrentAnalysisAssetId:\n                            sourceContext.analysisAssetId"
+            )
+        )
+    }
+
+    func testTranscriptPositiveMarksUseOnlyBoundTransactionalCallback() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath:
+                "Playhead/Views/NowPlaying/TranscriptPeekView.swift"
+        )
+        for signature in [
+            "func submitMarkedChunks()",
+            "func submitUntranscribedTailMark(",
+        ] {
+            let body = try XCTUnwrap(
+                SwiftSourceInspector.firstBody(in: source, after: signature)
+            )
+            let stripped = SwiftSourceInspector.strippingComments(body)
+            XCTAssertFalse(
+                stripped.contains("injectUserMarkedAd"),
+                "\(signature) must not read mutable runtime playback identity"
+            )
+            let durableGuard = try XCTUnwrap(
+                stripped.range(of: "guard await markAd(")
+            )
+            let trustWrite = try XCTUnwrap(
+                stripped.range(of: "recordFalseNegativeSignal")
+            )
+            XCTAssertLessThan(
+                durableGuard.lowerBound,
+                trustWrite.lowerBound,
+                "Trust may change only after the bound durable correction succeeds"
+            )
+            XCTAssertTrue(
+                stripped.contains(
+                    "defer { isSubmittingMarkAdCorrection = false }"
+                ),
+                "\(signature) must release its duplicate-submit reservation on every outcome"
+            )
+
+            if signature == "func submitMarkedChunks()" {
+                let selectionClear = try XCTUnwrap(
+                    stripped.range(of: "markedChunkSelections = []")
+                )
+                let modeExit = try XCTUnwrap(
+                    stripped.range(of: "isMarkingMode = false")
+                )
+                XCTAssertLessThan(
+                    durableGuard.lowerBound,
+                    selectionClear.lowerBound,
+                    "A failed positive correction must preserve the exact selected rows for retry"
+                )
+                XCTAssertLessThan(
+                    durableGuard.lowerBound,
+                    modeExit.lowerBound,
+                    "A failed positive correction must keep marking mode open for retry"
+                )
+            } else {
+                let pendingClear = try XCTUnwrap(
+                    stripped.range(of: "pendingTailSpan = nil")
+                )
+                XCTAssertLessThan(
+                    durableGuard.lowerBound,
+                    pendingClear.lowerBound,
+                    "A failed tail correction must preserve its exact captured range"
+                )
+                XCTAssertTrue(
+                    stripped.contains("showTailMarkConfirmation = true"),
+                    "A failed tail correction must surface the preserved action for retry"
+                )
+            }
+        }
     }
 
     /// Episode identity alone is insufficient for deferred banner actions:
@@ -67,6 +247,7 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         )
         let signatures = [
             "func denyAutoSkippedBanner(\n        windowId: String,",
+            "func revertByTimeRange(\n        start: Double,\n        end: Double,\n        analysisAssetId",
             "func revertWindow(\n        windowId: String,\n        podcastId: String? = nil,\n        ifCurrentEpisodeId",
             "func acceptSuggestedSkip(\n        windowId: String,\n        ifCurrentEpisodeId",
             "func declineSuggestedSkip(\n        windowId: String,\n        isExplicitDenial: Bool = false,\n        ifCurrentEpisodeId",
@@ -474,6 +655,34 @@ struct SkipOrchestratorRevertTests {
         #expect(acceptedCurrentAction)
     }
 
+    @Test("replacement episode drops the prior skip mode before hydration suspends")
+    func replacementEpisodeDefaultsToShadowBeforeHydration() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = SkipOrchestrator(store: store)
+        let hydrationGate = ControlledAsyncGate()
+        await orchestrator._setBeginEpisodeHydrationBarrierForTesting {
+            await hydrationGate.wait()
+        }
+        await orchestrator.setActiveSkipMode(.auto)
+
+        let beginTask = Task {
+            await orchestrator.beginEpisode(
+                analysisAssetId: "replacement-asset",
+                episodeId: "replacement-episode",
+                podcastId: "replacement-show"
+            )
+        }
+        await hydrationGate.waitUntilStarted()
+
+        #expect(
+            await orchestrator.currentSkipMode() == .shadow,
+            "new material must not inherit the prior show's auto mode while hydration is suspended"
+        )
+
+        await hydrationGate.release()
+        await beginTask.value
+    }
+
     @Test("revertByTimeRange reverts overlapping applied window")
     func revertByTimeRangeRevertsOverlapping() async throws {
         let store = try await makeTestStore()
@@ -591,6 +800,373 @@ struct SkipOrchestratorRevertTests {
 
         // Cues should remain unchanged.
         #expect(pushedCues.count == cuesBefore.count)
+    }
+
+    @Test(
+        "recurrence-store failure does not terminalize a veto and retry succeeds"
+    )
+    func recurrenceFailureLeavesVetoRetryable() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let storage = AnalysisStoreRepeatedAdCacheStorage(store: store)
+        let repeatedCache = RepeatedAdCacheService(storage: storage)
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore,
+            repeatedAdCache: repeatedCache
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        let ad = makeSkipTestAdWindow(
+            id: "ad-recurrence-retry",
+            startTime: 60,
+            endTime: 90,
+            confidence: 0.9,
+            decisionState: AdDecisionState.confirmed.rawValue
+        )
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+        #expect(try await repeatedCache.store(
+            showId: "podcast-1",
+            fingerprint: RepeatedAdFingerprint(bits: 0x6161),
+            boundaryStart: 60,
+            boundaryEnd: 90,
+            confidence: 0.9,
+            learningSource: .consumedAutoSkip,
+            learningLifecycle: .consumed,
+            sourceAssetId: ad.analysisAssetId,
+            sourceWindowId: ad.id
+        ))
+        try await store.execForTesting("""
+            CREATE TRIGGER fail_orchestrator_recurrence_revocation
+            BEFORE INSERT ON repeated_ad_cache_revocations
+            BEGIN
+                SELECT RAISE(ABORT, 'injected recurrence revocation failure');
+            END
+            """)
+
+        #expect(
+            !(await orchestrator.revertWindow(
+                windowId: ad.id,
+                podcastId: "podcast-1"
+            ))
+        )
+        #expect(
+            try await store.fetchAdWindow(id: ad.id)?.decisionState
+                == AdDecisionState.confirmed.rawValue
+        )
+        #expect(
+            try await store.loadCorrectionEvents(
+                analysisAssetId: ad.analysisAssetId
+            ).isEmpty
+        )
+        #expect(await orchestrator.activeWindowIDs().contains(ad.id))
+        #expect(try await storage.totalCount() == 1)
+
+        try await store.execForTesting(
+            "DROP TRIGGER fail_orchestrator_recurrence_revocation"
+        )
+        #expect(
+            await orchestrator.revertWindow(
+                windowId: ad.id,
+                podcastId: "podcast-1"
+            )
+        )
+        #expect(
+            try await store.fetchAdWindow(id: ad.id)?.decisionState
+                == AdDecisionState.reverted.rawValue
+        )
+        #expect(
+            try await store.loadCorrectionEvents(
+                analysisAssetId: ad.analysisAssetId
+            ).count == 1
+        )
+        #expect(try await storage.totalCount() == 0)
+    }
+
+    @Test("revertByTimeRange rejects malformed or reversed gesture bounds")
+    func revertByTimeRangeRejectsInvalidBounds() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+        let ad = makeSkipTestAdWindow(
+            id: "round3-invalid-veto-range",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9
+        )
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        let invalidRanges: [(Double, Double)] = [
+            (.nan, 110),
+            (70, .infinity),
+            (-1, 10),
+            (110, 70),
+            (70, 70),
+        ]
+        for (start, end) in invalidRanges {
+            #expect(
+                !(await orchestrator.revertByTimeRange(
+                    start: start,
+                    end: end,
+                    podcastId: "podcast-1"
+                ))
+            )
+        }
+        let mismatchedSpan = DecodedSpan(
+            id: "round3-mismatched-correction-span",
+            assetId: ad.analysisAssetId,
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 1,
+            startTime: 69,
+            endTime: 110,
+            anchorProvenance: []
+        )
+        #expect(
+            !(await orchestrator.revertByTimeRange(
+                start: 70,
+                end: 110,
+                analysisAssetId: ad.analysisAssetId,
+                podcastId: "podcast-1",
+                ifCurrentEpisodeId: "asset-1",
+                ifPlaybackLifecycleGeneration: nil,
+                correctionSpan: mismatchedSpan
+            )),
+            "the correction material must exactly own the submitted bounds"
+        )
+
+        #expect(
+            (await orchestrator.activeWindowIDs()).contains(ad.id)
+        )
+        #expect(
+            try await store.fetchAdWindow(id: ad.id)?.decisionState
+                == AdDecisionState.confirmed.rawValue
+        )
+        #expect(
+            try await correctionStore.activeCorrections(
+                for: ad.analysisAssetId
+            ).isEmpty
+        )
+    }
+
+    @Test("time-range veto rejects a durable same-ID material replacement")
+    func timeRangeVetoRejectsSameIDReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+        let displayed = makeSkipTestAdWindow(
+            id: "round3-range-same-id",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9
+        )
+        try await store.insertAdWindow(displayed)
+        await orchestrator.receiveAdWindows([displayed])
+
+        let replacement = makeSkipTestAdWindow(
+            id: displayed.id,
+            startTime: 180,
+            endTime: 240,
+            confidence: 0.95
+        )
+        try await store.insertOrReplaceAdWindow(replacement)
+
+        #expect(
+            !(await orchestrator.revertByTimeRange(
+                start: 70,
+                end: 110,
+                podcastId: "podcast-1"
+            ))
+        )
+        #expect(
+            (await orchestrator.activeWindowIDs()).contains(displayed.id),
+            "a failed exact-material transaction must leave the retryable live source intact"
+        )
+        let durable = try #require(
+            try await store.fetchAdWindow(id: displayed.id)
+        )
+        #expect(durable.startTime == replacement.startTime)
+        #expect(durable.endTime == replacement.endTime)
+        #expect(
+            durable.decisionState
+                == AdDecisionState.confirmed.rawValue
+        )
+        #expect(
+            try await correctionStore.activeCorrections(
+                for: displayed.analysisAssetId
+            ).isEmpty
+        )
+    }
+
+    @Test("episode-bound time-range veto cannot target a replacement lifecycle")
+    func timeRangeVetoRejectsOldEpisodeContext() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(
+                id: "round3-range-asset-a",
+                episodeId: "round3-range-episode-a"
+            )
+        )
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(
+                id: "round3-range-asset-b",
+                episodeId: "round3-range-episode-b"
+            )
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        let sharedID = "round3-old-sheet-shared-id"
+        let source = makeSkipTestAdWindow(
+            id: sharedID,
+            assetId: "round3-range-asset-a",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9
+        )
+        try await store.insertAdWindow(source)
+        await orchestrator.beginEpisode(
+            analysisAssetId: source.analysisAssetId,
+            episodeId: "round3-range-episode-a",
+            podcastId: "round3-show-a",
+            playbackLifecycleGeneration: 41
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+        await orchestrator.receiveAdWindows([source])
+
+        let replacement = makeSkipTestAdWindow(
+            id: sharedID,
+            assetId: "round3-range-asset-b",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.95
+        )
+        try await store.insertOrReplaceAdWindow(replacement)
+        await orchestrator.beginEpisode(
+            analysisAssetId: replacement.analysisAssetId,
+            episodeId: "round3-range-episode-b",
+            podcastId: "round3-show-b",
+            playbackLifecycleGeneration: 42
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+
+        #expect(
+            !(await orchestrator.revertByTimeRange(
+                start: 70,
+                end: 110,
+                analysisAssetId: source.analysisAssetId,
+                podcastId: "round3-show-a",
+                ifCurrentEpisodeId: "round3-range-episode-a",
+                ifPlaybackLifecycleGeneration: 41
+            ))
+        )
+        let durable = try #require(
+            try await store.fetchAdWindow(id: sharedID)
+        )
+        #expect(durable.analysisAssetId == replacement.analysisAssetId)
+        #expect(
+            durable.decisionState
+                == AdDecisionState.confirmed.rawValue
+        )
+        #expect(
+            try await correctionStore.activeCorrections(
+                for: replacement.analysisAssetId
+            ).isEmpty
+        )
+    }
+
+    @Test("time-range veto rolls back every row and correction on SQLite failure")
+    func timeRangeVetoRollsBackAtomically() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+        let ads = [
+            makeSkipTestAdWindow(
+                id: "round3-atomic-a",
+                startTime: 60,
+                endTime: 90,
+                confidence: 0.9
+            ),
+            makeSkipTestAdWindow(
+                id: "round3-atomic-z",
+                startTime: 92,
+                endTime: 120,
+                confidence: 0.9
+            ),
+        ]
+        for ad in ads {
+            try await store.insertAdWindow(ad)
+        }
+        await orchestrator.receiveAdWindows(ads)
+        try await store.execForTesting("""
+            CREATE TRIGGER round3_fail_second_range_revert
+            BEFORE UPDATE OF decisionState ON ad_windows
+            WHEN OLD.id = 'round3-atomic-z'
+              AND NEW.decisionState = 'reverted'
+            BEGIN
+                SELECT RAISE(ABORT, 'round3 injected revert failure');
+            END;
+            """)
+
+        #expect(
+            !(await orchestrator.revertByTimeRange(
+                start: 50,
+                end: 130,
+                podcastId: "podcast-1"
+            ))
+        )
+
+        for ad in ads {
+            #expect(
+                try await store.fetchAdWindow(id: ad.id)?.decisionState
+                    == AdDecisionState.confirmed.rawValue
+            )
+            #expect(
+                (await orchestrator.activeWindowIDs()).contains(ad.id)
+            )
+        }
+        #expect(
+            try await correctionStore.activeCorrections(
+                for: "asset-1"
+            ).isEmpty
+        )
     }
 
     @Test("revertByTimeRange reverts multiple overlapping windows in batch")
@@ -724,10 +1300,23 @@ struct SkipOrchestratorRevertTests {
         let decisionCountBeforeFeedback =
             await orchestrator.getDecisionLog().count
 
-        await orchestrator.revertWindow(
+        #expect(
+            !(await orchestrator.revertWindow(
+                windowId: ad.id,
+                podcastId: "podcast-stale"
+            ))
+        )
+        #expect(!pushedCues.isEmpty)
+        #expect(
+            try await store.loadCorrectionEvents(
+                analysisAssetId: ad.analysisAssetId
+            ).isEmpty
+        )
+
+        #expect(await orchestrator.revertWindow(
             windowId: ad.id,
             podcastId: "podcast-1"
-        )
+        ))
 
         let decisionLog = await orchestrator.getDecisionLog()
         #expect(decisionLog.count == decisionCountBeforeFeedback + 1)
@@ -742,6 +1331,123 @@ struct SkipOrchestratorRevertTests {
         #expect(correction.source == .manualVeto)
         #expect(!correction.isPrivateExplicitFeedbackReceipt)
         #expect(pushedCues.isEmpty)
+    }
+
+    @Test("generic revertWindow rejects a durable same-ID material replacement")
+    func genericRevertRejectsSameIDReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+        let displayed = makeSkipTestAdWindow(
+            id: "round3-generic-same-id",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9
+        )
+        try await store.insertAdWindow(displayed)
+        await orchestrator.receiveAdWindows([displayed])
+        let replacement = makeSkipTestAdWindow(
+            id: displayed.id,
+            startTime: 180,
+            endTime: 240,
+            confidence: 0.95
+        )
+        try await store.insertOrReplaceAdWindow(replacement)
+
+        #expect(
+            !(await orchestrator.revertWindow(
+                windowId: displayed.id,
+                podcastId: "podcast-1"
+            ))
+        )
+        #expect(
+            (await orchestrator.activeWindowIDs()).contains(displayed.id)
+        )
+        let durable = try #require(
+            try await store.fetchAdWindow(id: displayed.id)
+        )
+        #expect(durable.startTime == replacement.startTime)
+        #expect(durable.endTime == replacement.endTime)
+        #expect(
+            durable.decisionState
+                == AdDecisionState.confirmed.rawValue
+        )
+        #expect(
+            try await correctionStore.activeCorrections(
+                for: displayed.analysisAssetId
+            ).isEmpty
+        )
+    }
+
+    @Test("recordListenRevert rejects a durable same-ID material replacement")
+    func listenRevertRejectsSameIDReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+        let displayed = makeSkipTestAdWindow(
+            id: "round3-listen-same-id",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9
+        )
+        try await store.insertAdWindow(displayed)
+        await orchestrator.receiveAdWindows([displayed])
+        let replacement = makeSkipTestAdWindow(
+            id: displayed.id,
+            startTime: 180,
+            endTime: 240,
+            confidence: 0.95
+        )
+        try await store.insertOrReplaceAdWindow(replacement)
+
+        #expect(
+            !(await orchestrator.recordListenRevert(
+                windowId: displayed.id,
+                podcastId: "podcast-1"
+            ))
+        )
+        #expect(
+            (await orchestrator.activeWindowIDs()).contains(displayed.id)
+        )
+        #expect(
+            !(await orchestrator.getDecisionLog()).contains {
+                $0.adWindowId == displayed.id && $0.decision == .reverted
+            }
+        )
+        let durable = try #require(
+            try await store.fetchAdWindow(id: displayed.id)
+        )
+        #expect(durable.startTime == replacement.startTime)
+        #expect(durable.endTime == replacement.endTime)
+        #expect(
+            durable.decisionState
+                == AdDecisionState.confirmed.rawValue
+        )
+        #expect(
+            try await correctionStore.activeCorrections(
+                for: displayed.analysisAssetId
+            ).isEmpty
+        )
     }
 
     @Test("auto-skip Yes persists the exact validated receipt and emits no detailed decision record")
@@ -943,6 +1649,26 @@ struct SkipOrchestratorRevertTests {
                     item.windowMaterialRevisionToken
             )),
             "A near-distinct span that shares the three-decimal scope must fail exactly"
+        )
+        #expect(
+            try await store.loadCorrectionEvents(
+                analysisAssetId: producer.analysisAssetId
+            ).isEmpty
+        )
+        #expect(
+            !(await orchestrator.denyAutoSkippedBanner(
+                windowId: item.windowId,
+                analysisAssetId: item.analysisAssetId,
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: "podcast-stale",
+                ifCurrentEpisodeId: item.episodeId,
+                ifPlaybackLifecycleGeneration:
+                    item.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken:
+                    item.windowMaterialRevisionToken
+            )),
+            "exact card material must not authorize feedback for another show"
         )
         #expect(
             try await store.loadCorrectionEvents(
@@ -1249,6 +1975,21 @@ struct SkipOrchestratorRevertTests {
             ))
         )
         #expect(
+            !(await orchestrator.retireLiveSkipForListen(
+                windowId: itemA.windowId,
+                analysisAssetId: try #require(itemA.analysisAssetId),
+                startTime: itemA.adStartTime,
+                endTime: itemA.adEndTime,
+                podcastId: itemA.podcastId,
+                ifCurrentEpisodeId: itemA.episodeId,
+                ifPlaybackLifecycleGeneration:
+                    try #require(itemA.playbackLifecycleGeneration),
+                ifWindowMaterialRevisionToken:
+                    try #require(itemA.windowMaterialRevisionToken)
+            )),
+            "Listen from an old card must not retire its same-ID replacement"
+        )
+        #expect(
             try await store.loadCorrectionEvents(
                 analysisAssetId: revisionA.analysisAssetId
             ).isEmpty
@@ -1451,18 +2192,15 @@ struct SkipOrchestratorRevertTests {
                 episodeId: "episode-2"
             )
         )
-        let persistentCorrections = PersistentUserCorrectionStore(
-            store: store
-        )
-        let correctionGate = ControlledAsyncGate()
-        let gatedCorrections = GatedUserCorrectionStore(
-            wrapped: persistentCorrections,
-            recordGate: correctionGate
-        )
+        let persistentCorrections = PersistentUserCorrectionStore(store: store)
+        let persistenceGate = ControlledAsyncGate()
         let orchestrator = SkipOrchestrator(
             store: store,
-            correctionStore: gatedCorrections
+            correctionStore: persistentCorrections
         )
+        await orchestrator._setFeedbackPersistenceBarrierForTesting {
+            await persistenceGate.wait()
+        }
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1478,27 +2216,22 @@ struct SkipOrchestratorRevertTests {
         try await store.insertAdWindow(sourceWindow)
         await orchestrator.receiveAdWindows([sourceWindow])
 
-        let primaryResultGate = ControlledAsyncGate()
         let response = Task {
-            let result = await orchestrator.revertWindow(
+            await orchestrator.revertWindow(
                 windowId: sourceWindow.id,
                 podcastId: "podcast-1",
                 ifCurrentEpisodeId: "episode-1",
                 ifPlaybackLifecycleGeneration: 301
             )
-            await primaryResultGate.wait()
-            return result
         }
-        await correctionGate.waitUntilStarted()
-        await primaryResultGate.waitUntilStarted()
+        await persistenceGate.waitUntilStarted()
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-2",
             episodeId: "episode-2",
             podcastId: "podcast-2",
             playbackLifecycleGeneration: 302
         )
-        await correctionGate.release()
-        await primaryResultGate.release()
+        await persistenceGate.release()
 
         #expect(await response.value)
         let corrections = try await persistentCorrections.activeCorrections(
@@ -1514,6 +2247,10 @@ struct SkipOrchestratorRevertTests {
             sourceRow.decisionState == AdDecisionState.reverted.rawValue
         )
         #expect((await orchestrator.activeWindowIDs()).isEmpty)
+        #expect(
+            (await orchestrator.getDecisionLog()).isEmpty,
+            "old-episode feedback must not enter the replacement lifecycle's decision log"
+        )
     }
 
     @Test("revertWindow rejects an in-memory window with no durable row")
@@ -1821,20 +2558,50 @@ struct SkipOrchestratorRevertTests {
         for ad in ads { try await store.insertAdWindow(ad) }
         await orchestrator.receiveAdWindows(ads)
 
-        // One gesture: "none of this is an ad" from 50..130.
-        await orchestrator.revertByTimeRange(start: 50, end: 130, podcastId: "podcast-1")
+        // One gesture: "none of this is an ad" from 50..130. Carry the
+        // popover's source span into the same transaction so causal attribution
+        // is retained without a second direct correction write.
+        let correctionSpan = DecodedSpan(
+            id: "transcript-popover-span",
+            assetId: "asset-1",
+            firstAtomOrdinal: 4,
+            lastAtomOrdinal: 12,
+            startTime: 50,
+            endTime: 130,
+            anchorProvenance: [
+                .fmAcousticCorroborated(
+                    regionId: "transcript-popover-region",
+                    breakStrength: 0.7
+                )
+            ]
+        )
+        #expect(
+            await orchestrator.revertByTimeRange(
+                start: 50,
+                end: 130,
+                analysisAssetId: "asset-1",
+                podcastId: "podcast-1",
+                ifCurrentEpisodeId: "asset-1",
+                ifPlaybackLifecycleGeneration: nil,
+                correctionSpan: correctionSpan
+            )
+        )
 
-        // The veto persistence is fire-and-forget via an unstructured Task —
-        // poll (with a ceiling) until a CorrectionEvent appears.
-        var corrections: [CorrectionEvent] = []
-        for _ in 0..<20 {  // up to ~1s
-            corrections = try await correctionStore.activeCorrections(for: "asset-1")
-            if !corrections.isEmpty { break }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
+        // The correction and all row mutations commit synchronously in one
+        // store transaction; no polling or scheduler timing is involved.
+        let corrections =
+            try await correctionStore.activeCorrections(for: "asset-1")
 
         #expect(corrections.count == 1,
                 "Three overlapping windows reverted by one gesture must produce exactly one CorrectionEvent, got \(corrections.count)")
+        #expect(
+            corrections.first?.submissionCount == 1,
+            "one transcript gesture must not be counted by both the view and orchestrator"
+        )
+        #expect(
+            corrections.first?.causalSource == .foundationModel,
+            "the transaction must preserve popover provenance attribution"
+        )
         // And the persisted scope must span the user's gesture, not a window's snapped boundary.
         if let scope = corrections.first.flatMap({ CorrectionScope.deserialize($0.scope) }),
            case .exactTimeSpan(_, let startTime, let endTime) = scope {
@@ -2573,7 +3340,8 @@ struct SkipOrchestratorRevertTests {
         metadataSource: String = SpecialistMarkComposer.metadataSource,
         confidence: Double = 0.55,
         decisionState: String = AdDecisionState.candidate.rawValue,
-        eligibilityGate: String = SkipEligibilityGate.markOnly.rawValue
+        eligibilityGate: String = SkipEligibilityGate.markOnly.rawValue,
+        catalogStoreMatchSimilarity: Double? = nil
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -2592,7 +3360,8 @@ struct SkipOrchestratorRevertTests {
             wasSkipped: false,
             userDismissedBanner: false,
             evidenceSources: nil,
-            eligibilityGate: eligibilityGate
+            eligibilityGate: eligibilityGate,
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
         )
     }
 
@@ -2994,6 +3763,119 @@ struct SkipOrchestratorRevertTests {
         )
     }
 
+    @Test("same-ID AdWindow with changed bounds must pass inventory validation")
+    func managedAdWindowReplacementCannotBypassInventoryFilter()
+        async throws
+    {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            inventoryFilter: InventorySanityFilter(isEnabled: true)
+        )
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+
+        let admitted = makeSkipTestAdWindow(
+            id: "round3-inventory-adwindow",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9
+        )
+        let invalidReplacement = makeSkipTestAdWindow(
+            id: admitted.id,
+            startTime: 0,
+            endTime: 60,
+            confidence: 0.99
+        )
+        await orchestrator.receiveAdWindows([admitted])
+        await orchestrator.receiveAdWindows([invalidReplacement])
+        await orchestrator.setActiveSkipMode(.auto)
+
+        #expect(pushedCues.isEmpty)
+        #expect(
+            !(await orchestrator.activeWindowIDs()).contains(admitted.id),
+            "a same-ID geometry change has no reusable inventory admission"
+        )
+    }
+
+    @Test("same-ID decision with changed bounds must pass inventory validation")
+    func managedDecisionReplacementCannotBypassInventoryFilter()
+        async throws
+    {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            inventoryFilter: InventorySanityFilter(isEnabled: true)
+        )
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setActiveSkipMode(.manual)
+
+        let admitted = makeSkipTestAdWindow(
+            id: "round3-inventory-decision",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        let invalidReplacement = makeSkipTestAdWindow(
+            id: admitted.id,
+            startTime: 0,
+            endTime: 60,
+            confidence: 0.99,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        for (revision, window) in [
+            (1, admitted),
+            (2, invalidReplacement),
+        ] {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: window.id,
+                    analysisAssetId: window.analysisAssetId,
+                    startTime: window.startTime,
+                    endTime: window.endTime,
+                    skipConfidence: window.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: revision,
+                    producerRevision: window
+                )
+            ])
+        }
+        await orchestrator.setActiveSkipMode(.auto)
+
+        #expect(pushedCues.isEmpty)
+        #expect(
+            !(await orchestrator.activeWindowIDs()).contains(admitted.id),
+            "decision envelopes must not reuse inventory admission across geometry revisions"
+        )
+    }
+
     @Test("late inventory context retires a managed card and cue")
     func lateInventoryContextRetiresManagedCardAndCue() async throws {
         let store = try await makeTestStore()
@@ -3177,11 +4059,506 @@ struct SkipOrchestratorRevertTests {
         #expect(retirement.windowId == eligible.id)
         #expect(pushedCues.isEmpty)
         #expect(
+            (await orchestrator.confirmedWindows()).allSatisfy {
+                $0.id != eligible.id
+            },
+            "terminal producer material must not remain manually actionable"
+        )
+    }
+
+    @Test(
+        "identical-material terminal producer state disarms an applied cue",
+        arguments: [
+            AdDecisionState.reverted,
+            AdDecisionState.suppressed,
+        ]
+    )
+    func terminalProducerStateDisarmsAppliedCue(
+        terminalState: AdDecisionState
+    ) async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 78
+        )
+        let stream = await orchestrator.bannerEventStream()
+        let probe = BoundedStreamProbe(stream)
+        let eligible = makeSuggestWindow(
+            id: "applied-to-\(terminalState.rawValue)",
+            confidence: 0.9,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        await orchestrator.receiveAdWindows([eligible])
+        guard case .present = await probe.next() else {
+            Issue.record("Expected initial auto-tier presentation")
+            return
+        }
+        #expect(!pushedCues.isEmpty)
+
+        let terminal = makeSuggestWindow(
+            id: eligible.id,
+            confidence: eligible.confidence,
+            decisionState: terminalState.rawValue,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        )
+        await orchestrator.receiveAdWindows([terminal])
+        guard case let .retireWindow(retirement) =
+            await probe.next()
+        else {
+            Issue.record(
+                "\(terminalState.rawValue) producer state must retire the auto card"
+            )
+            return
+        }
+        #expect(retirement.windowId == eligible.id)
+        #expect(pushedCues.isEmpty)
+        #expect(
+            (await orchestrator.confirmedWindows()).allSatisfy {
+                $0.id != eligible.id
+            },
+            "terminal producer material must not remain manually actionable"
+        )
+        #expect(
+            !(await orchestrator.activeSuggestWindowIDs())
+                .contains(eligible.id)
+        )
+    }
+
+    @Test(
+        "fusion envelope cannot re-arm a terminal persisted producer",
+        arguments: [
+            AdDecisionState.reverted,
+            AdDecisionState.suppressed,
+        ]
+    )
+    func terminalProducerRevisionIsNotActionable(
+        terminalState: AdDecisionState
+    ) async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 79
+        )
+        let stream = await orchestrator.bannerEventStream()
+        let probe = BoundedStreamProbe(stream)
+        let eligible = makeSuggestWindow(
+            id: "fusion-terminal-\(terminalState.rawValue)",
+            confidence: 0.9,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        await orchestrator.receiveAdWindows([eligible])
+        guard case .present = await probe.next() else {
+            Issue.record("Expected initial auto-tier presentation")
+            return
+        }
+        #expect(!pushedCues.isEmpty)
+
+        let terminal = makeSuggestWindow(
+            id: eligible.id,
+            confidence: eligible.confidence,
+            decisionState: terminalState.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        let replay = AdDecisionResult(
+            id: terminal.id,
+            analysisAssetId: terminal.analysisAssetId,
+            startTime: terminal.startTime,
+            endTime: terminal.endTime,
+            skipConfidence: terminal.confidence,
+            eligibilityGate: .eligible,
+            recomputationRevision: 2
+        ).withProducerRevision(terminal)
+        #expect(replay.eligibilityGate == .blocked)
+        #expect(
+            replay.producerRevision?.decisionState
+                == terminalState.rawValue
+        )
+
+        await orchestrator.receiveAdDecisionResults([replay])
+        guard case let .retireWindow(retirement) =
+            await probe.next()
+        else {
+            Issue.record(
+                "\(terminalState.rawValue) producer revision must retire the auto card"
+            )
+            return
+        }
+        #expect(retirement.windowId == eligible.id)
+        #expect(pushedCues.isEmpty)
+        #expect(
             !(await orchestrator.activeWindowIDs()).contains(eligible.id)
         )
         #expect(
             !(await orchestrator.activeSuggestWindowIDs())
                 .contains(eligible.id)
+        )
+    }
+
+    @Test(
+        "terminal producer revision fences a stale eligible replay but permits new same-ID material",
+        arguments: [false, true]
+    )
+    func terminalProducerRevisionFencesStaleEligibleReplay(
+        usesDecisionResult: Bool
+    ) async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 80
+        )
+
+        let eligible = makeSuggestWindow(
+            id: "terminal-replay-\(usesDecisionResult)",
+            confidence: 0.9,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        try await store.insertAdWindow(eligible)
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: eligible.id,
+                    analysisAssetId: eligible.analysisAssetId,
+                    startTime: eligible.startTime,
+                    endTime: eligible.endTime,
+                    skipConfidence: eligible.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 0
+                ).withProducerRevision(eligible)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([eligible])
+        }
+        await orchestrator._waitForRecurrenceBackgroundWorkForTesting()
+        #expect(!pushedCues.isEmpty)
+
+        let terminal = makeSuggestWindow(
+            id: eligible.id,
+            confidence: eligible.confidence,
+            decisionState: AdDecisionState.suppressed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        try await store.insertOrReplaceAdWindow(terminal)
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: terminal.id,
+                    analysisAssetId: terminal.analysisAssetId,
+                    startTime: terminal.startTime,
+                    endTime: terminal.endTime,
+                    skipConfidence: terminal.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 1
+                ).withProducerRevision(terminal)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([terminal])
+        }
+        #expect(pushedCues.isEmpty)
+
+        // This object was captured before the durable terminal transition.
+        // Replaying it later must not recreate a cue or either banner tier.
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: eligible.id,
+                    analysisAssetId: eligible.analysisAssetId,
+                    startTime: eligible.startTime,
+                    endTime: eligible.endTime,
+                    skipConfidence: eligible.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 0
+                ).withProducerRevision(eligible)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([eligible])
+        }
+        #expect(pushedCues.isEmpty)
+        #expect(
+            !(await orchestrator.activeWindowIDs()).contains(eligible.id)
+        )
+        #expect(
+            !(await orchestrator.activeSuggestWindowIDs())
+                .contains(eligible.id)
+        )
+
+        // Terminal suppression is scoped to exact producer material. A real
+        // same-ID replacement still receives the normal admission checks.
+        let replacement = makeSuggestWindow(
+            id: eligible.id,
+            startTime: eligible.startTime + 1,
+            endTime: eligible.endTime + 1,
+            confidence: eligible.confidence,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        try await store.insertOrReplaceAdWindow(replacement)
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: replacement.id,
+                    analysisAssetId: replacement.analysisAssetId,
+                    startTime: replacement.startTime,
+                    endTime: replacement.endTime,
+                    skipConfidence: replacement.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 2
+                ).withProducerRevision(replacement)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([replacement])
+        }
+        #expect(
+            (await orchestrator.activeWindowIDs())
+                .contains(replacement.id)
+        )
+        #expect(!pushedCues.isEmpty)
+
+        // Once replacement B owns the ID, neither pre-terminal A nor terminal
+        // A may tear B down. The terminal fence is revision-scoped, not an
+        // implicit ID tombstone.
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: eligible.id,
+                    analysisAssetId: eligible.analysisAssetId,
+                    startTime: eligible.startTime,
+                    endTime: eligible.endTime,
+                    skipConfidence: eligible.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 0
+                ).withProducerRevision(eligible)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([eligible])
+        }
+        let expectedReplacementCueEnd =
+            replacement.endTime
+            - SkipPolicyConfig.default.adTrailingCushionSeconds
+        #expect(
+            pushedCues.first?.start.seconds == replacement.startTime
+        )
+        #expect(
+            pushedCues.first?.end.seconds == expectedReplacementCueEnd
+        )
+
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: terminal.id,
+                    analysisAssetId: terminal.analysisAssetId,
+                    startTime: terminal.startTime,
+                    endTime: terminal.endTime,
+                    skipConfidence: terminal.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 1
+                ).withProducerRevision(terminal)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([terminal])
+        }
+        #expect(
+            pushedCues.first?.start.seconds == replacement.startTime
+        )
+        #expect(
+            pushedCues.first?.end.seconds == expectedReplacementCueEnd
+        )
+        #expect(
+            (await orchestrator.activeWindowIDs())
+                .contains(replacement.id)
+        )
+        await orchestrator._waitForRecurrenceBackgroundWorkForTesting()
+    }
+
+    @Test(
+        "stale terminal material cannot supersede a suspended same-ID replacement",
+        arguments: [false, true], [false, true]
+    )
+    func terminalProducerReplayPreservesSuspendedReplacement(
+        usesDecisionResult: Bool,
+        replaysTerminalRevision: Bool
+    ) async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 81
+        )
+
+        let original = makeSuggestWindow(
+            id:
+                "terminal-pending-\(usesDecisionResult)-\(replaysTerminalRevision)",
+            confidence: 0.9,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: original.id,
+                    analysisAssetId: original.analysisAssetId,
+                    startTime: original.startTime,
+                    endTime: original.endTime,
+                    skipConfidence: original.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 0
+                ).withProducerRevision(original)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([original])
+        }
+        #expect((await orchestrator.activeWindowIDs()).contains(original.id))
+
+        let terminal = makeSuggestWindow(
+            id: original.id,
+            confidence: original.confidence,
+            decisionState: AdDecisionState.suppressed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: terminal.id,
+                    analysisAssetId: terminal.analysisAssetId,
+                    startTime: terminal.startTime,
+                    endTime: terminal.endTime,
+                    skipConfidence: terminal.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision: 1
+                ).withProducerRevision(terminal)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([terminal])
+        }
+        #expect(!(await orchestrator.activeWindowIDs()).contains(original.id))
+
+        // An incomplete catalog claim supplies the real actor suspension
+        // boundary while deterministically taking the fail-closed suggestion
+        // path after validation resumes.
+        let replacement = makeSuggestWindow(
+            id: original.id,
+            startTime: original.startTime + 1,
+            endTime: original.endTime + 1,
+            confidence: original.confidence,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+            catalogStoreMatchSimilarity: 0.99
+        )
+        let validationGate = ControlledAsyncGate()
+        await orchestrator
+            ._setCatalogAdmissionValidationBarrierForTesting {
+                await validationGate.wait()
+            }
+        let replacementIngestion = Task {
+            if usesDecisionResult {
+                await orchestrator.receiveAdDecisionResults([
+                    AdDecisionResult(
+                        id: replacement.id,
+                        analysisAssetId: replacement.analysisAssetId,
+                        startTime: replacement.startTime,
+                        endTime: replacement.endTime,
+                        skipConfidence: replacement.confidence,
+                        eligibilityGate: .eligible,
+                        recomputationRevision: 2
+                    ).withProducerRevision(replacement)
+                ])
+            } else {
+                await orchestrator.receiveAdWindows([replacement])
+            }
+        }
+        await validationGate.waitUntilStarted()
+
+        let staleReplay =
+            replaysTerminalRevision ? terminal : original
+        if usesDecisionResult {
+            await orchestrator.receiveAdDecisionResults([
+                AdDecisionResult(
+                    id: staleReplay.id,
+                    analysisAssetId: staleReplay.analysisAssetId,
+                    startTime: staleReplay.startTime,
+                    endTime: staleReplay.endTime,
+                    skipConfidence: staleReplay.confidence,
+                    eligibilityGate: .eligible,
+                    recomputationRevision:
+                        replaysTerminalRevision ? 1 : 0
+                ).withProducerRevision(staleReplay)
+            ])
+        } else {
+            await orchestrator.receiveAdWindows([staleReplay])
+        }
+
+        await validationGate.release()
+        await replacementIngestion.value
+        await orchestrator
+            ._setCatalogAdmissionValidationBarrierForTesting(nil)
+
+        let survivingReplacement =
+            await orchestrator._suggestWindowForTesting(id: replacement.id)
+        #expect(
+            survivingReplacement?.startTime == replacement.startTime
+        )
+        #expect(survivingReplacement?.endTime == replacement.endTime)
+        #expect(
+            survivingReplacement?.catalogStoreMatchSimilarity
+                == replacement.catalogStoreMatchSimilarity
+        )
+        #expect(
+            !(await orchestrator.activeWindowIDs()).contains(replacement.id)
         )
     }
 
@@ -3215,7 +4592,15 @@ struct SkipOrchestratorRevertTests {
             endTime: 120,
             skipConfidence: 0.9,
             eligibilityGate: .eligible,
-            recomputationRevision: 1
+            recomputationRevision: 1,
+            producerRevision: makeSkipTestAdWindow(
+                id: "decision-applied-to-blocked",
+                assetId: "asset-1",
+                startTime: 60,
+                endTime: 120,
+                confidence: 0.9,
+                eligibilityGate: SkipEligibilityGate.eligible.rawValue
+            )
         )
         await orchestrator.receiveAdDecisionResults([eligible])
         guard case .present = await probe.next() else {
@@ -4069,14 +5454,26 @@ struct SkipOrchestratorRevertTests {
             confidence: 0.9,
             decisionState: AdDecisionState.confirmed.rawValue
         )
+        let stream = await orchestrator.bannerEventStream()
+        let probe = BoundedStreamProbe(stream)
         await orchestrator.receiveAdWindows([ad])
+        guard case let .present(item) = await probe.next() else {
+            Issue.record("Expected Listen card material")
+            return
+        }
         #expect(!pushedCues.isEmpty)
 
         #expect(
             !(await orchestrator.retireLiveSkipForListen(
-                windowId: ad.id,
+                windowId: item.windowId,
+                analysisAssetId: try #require(item.analysisAssetId),
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: item.podcastId,
                 ifCurrentEpisodeId: "episode-1",
-                ifPlaybackLifecycleGeneration: 18
+                ifPlaybackLifecycleGeneration: 18,
+                ifWindowMaterialRevisionToken:
+                    try #require(item.windowMaterialRevisionToken)
             ))
         )
         #expect(!pushedCues.isEmpty,
@@ -4084,9 +5481,15 @@ struct SkipOrchestratorRevertTests {
 
         #expect(
             await orchestrator.retireLiveSkipForListen(
-                windowId: ad.id,
+                windowId: item.windowId,
+                analysisAssetId: try #require(item.analysisAssetId),
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: item.podcastId,
                 ifCurrentEpisodeId: "episode-1",
-                ifPlaybackLifecycleGeneration: 19
+                ifPlaybackLifecycleGeneration: 19,
+                ifWindowMaterialRevisionToken:
+                    try #require(item.windowMaterialRevisionToken)
             )
         )
         #expect(pushedCues.isEmpty)
@@ -4096,7 +5499,15 @@ struct SkipOrchestratorRevertTests {
     func liveListenRetirementReservationIsRetryable() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "episode-1",
@@ -4110,20 +5521,38 @@ struct SkipOrchestratorRevertTests {
             confidence: 0.9,
             decisionState: AdDecisionState.confirmed.rawValue
         )
+        let stream = await orchestrator.bannerEventStream()
+        let probe = BoundedStreamProbe(stream)
         await orchestrator.receiveAdWindows([ad])
+        guard case let .present(item) = await probe.next() else {
+            Issue.record("Expected retryable Listen card material")
+            return
+        }
 
         #expect(
             await orchestrator.retireLiveSkipForListen(
-                windowId: ad.id,
+                windowId: item.windowId,
+                analysisAssetId: try #require(item.analysisAssetId),
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: item.podcastId,
                 ifCurrentEpisodeId: "episode-1",
-                ifPlaybackLifecycleGeneration: 27
+                ifPlaybackLifecycleGeneration: 27,
+                ifWindowMaterialRevisionToken:
+                    try #require(item.windowMaterialRevisionToken)
             )
         )
         #expect(
             await orchestrator.retireLiveSkipForListen(
-                windowId: ad.id,
+                windowId: item.windowId,
+                analysisAssetId: try #require(item.analysisAssetId),
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: item.podcastId,
                 ifCurrentEpisodeId: "episode-1",
-                ifPlaybackLifecycleGeneration: 27
+                ifPlaybackLifecycleGeneration: 27,
+                ifWindowMaterialRevisionToken:
+                    try #require(item.windowMaterialRevisionToken)
             ),
             "a failed durable write must be able to retry after the cue was already retired"
         )
@@ -4135,9 +5564,15 @@ struct SkipOrchestratorRevertTests {
         )
         #expect(
             !(await orchestrator.retireLiveSkipForListen(
-                windowId: ad.id,
+                windowId: item.windowId,
+                analysisAssetId: try #require(item.analysisAssetId),
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: item.podcastId,
                 ifCurrentEpisodeId: "episode-1",
-                ifPlaybackLifecycleGeneration: 27
+                ifPlaybackLifecycleGeneration: 27,
+                ifWindowMaterialRevisionToken:
+                    try #require(item.windowMaterialRevisionToken)
             )),
             "once the receipt is durable, the reverted window must not be consumed again"
         )

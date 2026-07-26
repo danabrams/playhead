@@ -718,9 +718,9 @@ struct AdDetectionConfig: Sendable {
     /// playhead-xsdz.66: pre-roll start-at-zero clamp threshold, in seconds. When
     /// the episode's FIRST ad window starts within this many seconds of t=0 — the
     /// pre-roll position — `runBackfill` extends its start edge to exactly 0.0
-    /// (via `PreRollStartClamp`, applied AFTER the per-span decision loop so it is
-    /// a WIDTH / MARK improvement only and can never change auto-skip
-    /// eligibility). A pre-roll begins at 0:00, but the ASR / transcript
+    /// (via `PreRollStartClamp`, applied AFTER the per-span decision loop). The
+    /// widened result is capped to mark-only because the added prefix was not
+    /// classified. A pre-roll begins at 0:00, but the ASR / transcript
     /// cold-start ramp routinely makes the detected start a few seconds late, and
     /// a pre-roll's start edge is "free" at 0:00 — so recovering it is a
     /// deterministic-DAI width win (measured pre-roll width coverage ~57% → ~80%).
@@ -969,7 +969,7 @@ struct AdDetectionConfig: Sendable {
         certaintyTieredSkipEnabled: false,  // playhead-wraj: certainty-tiered auto-skip gate ships OFF; enablement is Dan's Gate-2 decision (2026-07-19 gate-delta measurement 32/32 at T=0.9 + 90s post-roll)
         hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); inert while certaintyTieredSkipEnabled is false
         postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
-        preRollStartClampSeconds: 20.0  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — width/mark only, applied post-decision so eligibility is untouched; 20s covers the cold-start miss, far below any mid-roll
+        preRollStartClampSeconds: 20.0  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -1071,11 +1071,11 @@ struct AdDetectionConfig: Sendable {
     ) -> Double {
         let eps = Self.fragilityEpsilon
 
-        // Scoring entries with strictly-positive weight. Observability-only
-        // rows (audit / operational) never enter fusion and must not count
-        // toward concentration or depth.
+        // Automatic-decision entries with strictly-positive weight.
+        // Observability rows and learned fingerprint-catalog diagnostics never
+        // enter fusion and must not count toward concentration or depth.
         let scoringEntries = ledger.filter {
-            !$0.source.isObservabilityOnly && $0.weight > 0
+            $0.contributesToAutomaticDecision && $0.weight > 0
         }
 
         let maxSingleEntryWeight = scoringEntries.map(\.weight).max() ?? 0.0
@@ -1154,8 +1154,9 @@ private struct LexicalRefinementRunContext {
 /// playhead-xsdz.10: a per-span decision captured AFTER the per-span scoring
 /// (DecisionMapper → FM-suppression → content-chapter demotion → xsdz.7
 /// fragility penalty → xsdz.9 negative-bank suppression) but BEFORE the hard
-/// auto-skip gate and the side-effect emission (window build, catalog /
-/// RepeatedAdCache ingress, decision events / log).
+/// auto-skip gate and the side-effect emission (window build, decision events /
+/// log). Catalog and recurrence ingress are intentionally deferred to
+/// authoritative runtime confirmation paths.
 ///
 /// The backfill loop collects these so the lightweight temporal-regularization
 /// pass can see ALL of an episode's candidate detections together — neighbor
@@ -1164,6 +1165,12 @@ private struct LexicalRefinementRunContext {
 /// `decision` is passed through to the emission loop UNCHANGED, so the output
 /// is byte-identical to pre-xsdz.10. The two-loop shape is the only structural
 /// change; each emission step is verbatim the code that previously ran inline.
+struct CatalogSpanEvidence: Sendable {
+    let topSimilarity: Float
+    let topMatch: CatalogMatch?
+    let wasEvaluated: Bool
+}
+
 private struct PendingBackfillDecision {
     /// playhead-p56a: `var` (was `let`) so the SpanFinalizer wire-in can
     /// substitute time-adjusted `DecodedSpan`s into the pending record after
@@ -1174,9 +1181,24 @@ private struct PendingBackfillDecision {
     var decision: DecisionResult
     let ledger: [EvidenceLedgerEntry]
     let effectiveLedger: [EvidenceLedgerEntry]
-    let spanFingerprint: AcousticFingerprint
-    let spanFeatureWindows: [FeatureWindow]
     let spanTopCatalogSimilarity: Float
+    let spanTopCatalogMatch: CatalogMatch?
+    let spanCatalogWasEvaluated: Bool
+    /// True when SpanFinalizer changed either persisted time edge. Earlier
+    /// boundary-refinement traces and exact anchors no longer describe the
+    /// emitted material in that case.
+    let finalizerRewroteGeometry: Bool
+    /// Present only for an additional finalizer split child whose inherited
+    /// atom ordinals would otherwise collide with the legacy fusion ID.
+    let fusionSplitDiscriminator: String?
+}
+
+private struct PrecisionGateResult {
+    let label: String?
+    let catalogMatch: CatalogMatch?
+    /// `nil` means catalog evaluation was unavailable; `0` is an observed
+    /// exact-show miss; a positive value is the persisted top match.
+    let catalogStoreMatchSimilarity: Double?
 }
 
 // MARK: - Decision State
@@ -1214,7 +1236,12 @@ enum AdBoundaryState: String, Sendable {
 
 /// Protocol abstraction for ad detection, enabling test stubs.
 protocol AdDetectionProviding: Sendable {
-    func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow]
+    func runHotPath(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        episodeDuration: Double,
+        podcastId: String?
+    ) async throws -> [AdWindow]
 
     /// Cycle 4 H5: callers that know the analysis session id at dispatch
     /// time (e.g. `AnalysisCoordinator.finalizeBackfill`) pass it here so
@@ -1255,6 +1282,23 @@ protocol AdDetectionProviding: Sendable {
     /// minted. The default is a no-op (`0`) so test/stub conformers that never
     /// run a day-0 mint compile unchanged; `AdDetectionService` overrides it.
     func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int
+}
+
+extension AdDetectionProviding {
+    /// Compatibility overload for callers that genuinely lack show identity.
+    /// Catalog matching fails closed in that case.
+    func runHotPath(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        episodeDuration: Double
+    ) async throws -> [AdWindow] {
+        try await runHotPath(
+            chunks: chunks,
+            analysisAssetId: analysisAssetId,
+            episodeDuration: episodeDuration,
+            podcastId: nil
+        )
+    }
 }
 
 extension AdDetectionProviding {
@@ -1326,6 +1370,9 @@ actor AdDetectionService {
         let window: AdWindow
         let matchedExistingID: String?
         let retiredExistingIDs: Set<String>
+        /// Exact rows observed while choosing the stable ID. The store uses
+        /// these as compare-and-swap revisions for both update and retirement.
+        let expectedExistingRevisions: [String: AdWindow]
     }
 
     private struct ReplaySignalProfile: Sendable {
@@ -1520,12 +1567,12 @@ actor AdDetectionService {
     private let skipOrchestrator: SkipOrchestrator?
 
     /// playhead-gtt9.17: optional on-device ad-catalog store. When non-nil,
-    /// `runBackfill` queries the store for each decoded span (egress) and
-    /// inserts a fingerprint when a span gates to `.autoSkipEligible`
-    /// (ingress). `nil` preserves the pre-gtt9.17 behavior exactly — no
-    /// catalog evidence in the ledger, no inserts, `lastCatalogMatchSimilarity`
-    /// stays at 0. Production wires a real `AdCatalogStore`; tests inject a
-    /// temp-dir store or leave nil to exercise the back-compat path.
+    /// `runBackfill` queries the store for each decoded span (egress).
+    /// Authoritative ingress lives in `SkipOrchestrator` consumption /
+    /// confirmation and the user-marked-ad path; proposals never write here.
+    /// `nil` preserves the no-catalog behavior — no catalog evidence in the
+    /// ledger and `lastCatalogMatchSimilarity` stays at 0. Production wires a
+    /// real `AdCatalogStore`; tests inject a temp-dir store or leave nil.
     private let adCatalogStore: AdCatalogStore?
 
     /// playhead-xsdz.9: optional HARD-NEGATIVE fingerprint bank. When non-nil
@@ -1606,6 +1653,9 @@ actor AdDetectionService {
         (@Sendable () async -> Void)?
     private var listenRewindTrustHandlerForTesting:
         (@Sendable (String) async -> Void)?
+    private var userMarkedAdDerivedWorkCount = 0
+    private var userMarkedAdDerivedWorkWaiters:
+        [CheckedContinuation<Void, Never>] = []
 #endif
 
     /// playhead-z3ch: Provider for feed-description metadata. `runBackfill`
@@ -1934,12 +1984,10 @@ actor AdDetectionService {
     private let stingerPCMProvider: StingerPCMProvider
 
     /// playhead-43ed: optional repeated-ad cache. When non-nil and enabled,
-    /// `classifyCandidates` derives a 128-bit perceptual fingerprint from
-    /// each candidate's feature windows and looks it up against entries
-    /// stored for the current podcast. A cache hit synthesizes a
-    /// `ClassifierResult` from the cached `(boundaryStart, boundaryEnd,
-    /// confidence)` and skips the FM classifier round-trip for that
-    /// candidate. Cache misses fall through to the normal classifier.
+    /// `classifyCandidates` derives a 64-bit perceptual fingerprint from each
+    /// candidate's feature windows and looks it up against entries stored for
+    /// the current podcast. Hits are recurrence telemetry only; source-episode
+    /// absolute bounds/confidence never replace the current classifier.
     /// `nil` preserves pre-43ed behaviour exactly. Production wires a
     /// real `RepeatedAdCacheService`; tests inject deterministic seams.
     private let repeatedAdCache: RepeatedAdCacheService?
@@ -2244,6 +2292,13 @@ actor AdDetectionService {
         postUserMarkCommitHandlerForTesting = handler
     }
 
+    func _waitForUserMarkedAdDerivedWorkForTesting() async {
+        guard userMarkedAdDerivedWorkCount > 0 else { return }
+        await withCheckedContinuation { continuation in
+            userMarkedAdDerivedWorkWaiters.append(continuation)
+        }
+    }
+
     func _setListenRewindTrustHandlerForTesting(
         _ handler: (@Sendable (String) async -> Void)?
     ) {
@@ -2426,10 +2481,9 @@ actor AdDetectionService {
     /// The DISTINCT corroborating evidence source kinds a run's
     /// `effectiveLedger` carries, computed with the EXACT formula
     /// `DecisionMapper.quorumGateForFMConsensus` uses for its
-    /// `corroboratingSources` set: filter to the scoring ledger (drop
-    /// `isObservabilityOnly` sources — `scoringLedger`), then drop the
-    /// always-present zero-weight `.classifier` entry, and take the distinct
-    /// `EvidenceSourceType.rawValue`s (sorted for a stable dump).
+    /// `corroboratingSources` set: filter to automatic-decision evidence,
+    /// then drop the always-present zero-weight `.classifier` entry, and take
+    /// the distinct `EvidenceSourceType.rawValue`s (sorted for a stable dump).
     ///
     /// PURE and behaviour-neutral — a re-derivation for the pipeline-dump test
     /// seam only. It is NOT called from the gate and changes no decision, but
@@ -2439,7 +2493,9 @@ actor AdDetectionService {
     static func corroboratingEvidenceSourceKinds(
         _ effectiveLedger: [EvidenceLedgerEntry]
     ) -> [String] {
-        let scoringLedger = effectiveLedger.filter { !$0.source.isObservabilityOnly }
+        let scoringLedger = effectiveLedger.filter(
+            \.contributesToAutomaticDecision
+        )
         let kinds = Set(scoringLedger.compactMap { entry -> EvidenceSourceType? in
             if entry.source == .classifier, entry.weight == 0 { return nil }
             return entry.source
@@ -2783,6 +2839,19 @@ actor AdDetectionService {
         podcastId: String?,
         windowId: String = UUID().uuidString
     ) async -> Bool {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(
+                  analysisAssetId
+              ) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(windowId) != nil,
+              podcastId == nil
+                || RecurrenceMaterialIdentity.canonicalIdentifier(podcastId)
+                    != nil,
+              startTime.isFinite,
+              endTime.isFinite,
+              startTime >= 0,
+              endTime > startTime else {
+            return false
+        }
         let adWindow = AdWindow(
             id: windowId,
             analysisAssetId: analysisAssetId,
@@ -2876,7 +2945,8 @@ actor AdDetectionService {
                 analysisAssetId: analysisAssetId,
                 startTime: startTime,
                 endTime: endTime,
-                podcastId: podcastId
+                podcastId: podcastId,
+                windowId: windowId
             )
         }
 #else
@@ -2884,7 +2954,8 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId,
             startTime: startTime,
             endTime: endTime,
-            podcastId: podcastId
+            podcastId: podcastId,
+            windowId: windowId
         )
 #endif
         return true
@@ -2894,23 +2965,45 @@ actor AdDetectionService {
         analysisAssetId: String,
         startTime: Double,
         endTime: Double,
-        podcastId: String?
+        podcastId: String?,
+        windowId: String
     ) {
+#if DEBUG
+        userMarkedAdDerivedWorkCount += 1
+#endif
         Task {
             await performUserMarkedAdDerivedWork(
                 analysisAssetId: analysisAssetId,
                 startTime: startTime,
                 endTime: endTime,
-                podcastId: podcastId
+                podcastId: podcastId,
+                windowId: windowId
             )
+#if DEBUG
+            finishUserMarkedAdDerivedWorkForTesting()
+#endif
         }
     }
+
+#if DEBUG
+    private func finishUserMarkedAdDerivedWorkForTesting() {
+        precondition(userMarkedAdDerivedWorkCount > 0)
+        userMarkedAdDerivedWorkCount -= 1
+        guard userMarkedAdDerivedWorkCount == 0 else { return }
+        let waiters = userMarkedAdDerivedWorkWaiters
+        userMarkedAdDerivedWorkWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+#endif
 
     private func performUserMarkedAdDerivedWork(
         analysisAssetId: String,
         startTime: Double,
         endTime: Double,
-        podcastId: String?
+        podcastId: String?,
+        windowId: String
     ) async {
         // The atomic store path intentionally bypasses
         // `PersistentUserCorrectionStore.record`, whose optional ingestor
@@ -2920,13 +3013,21 @@ actor AdDetectionService {
         // A user-confirmed span is the strongest catalog label. Missing
         // feature windows or catalog failures are secondary precision misses,
         // never failures of the already-committed user action.
-        guard let adCatalogStore else { return }
+        guard adCatalogStore != nil || repeatedAdCache != nil,
+              let showId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(podcastId)
+        else {
+            return
+        }
+        let sourceStartTime = min(startTime, endTime)
+        let sourceEndTime = max(startTime, endTime)
+        guard sourceEndTime > sourceStartTime else { return }
         let featureWindows: [FeatureWindow]
         do {
             featureWindows = try await store.fetchFeatureWindows(
                 assetId: analysisAssetId,
-                from: startTime,
-                to: endTime
+                from: sourceStartTime,
+                to: sourceEndTime
             )
         } catch {
             logger.warning("recordUserMarkedAd: fetchFeatureWindows failed (skipping catalog insert): \(error.localizedDescription, privacy: .public)")
@@ -2935,20 +3036,47 @@ actor AdDetectionService {
         let fingerprint = AcousticFingerprint.fromFeatureWindows(
             featureWindows
         )
-        guard !fingerprint.isZero else { return }
-        do {
-            _ = try await adCatalogStore.insert(
-                showId: podcastId,
-                episodePosition: .unknown,
-                durationSec: max(0, endTime - startTime),
-                acousticFingerprint: fingerprint,
-                transcriptSnippet: nil,
-                sponsorTokens: nil,
-                originalConfidence: 1.0
-            )
-            logger.debug("recordUserMarkedAd: inserted catalog entry for user-marked ad on asset \(analysisAssetId, privacy: .public)")
-        } catch {
-            logger.warning("recordUserMarkedAd: catalog insert failed: \(error.localizedDescription, privacy: .public)")
+        if let adCatalogStore, !fingerprint.isZero {
+            do {
+                _ = try await adCatalogStore.insert(
+                    showId: showId,
+                    episodePosition: .unknown,
+                    durationSec: sourceEndTime - sourceStartTime,
+                    acousticFingerprint: fingerprint,
+                    transcriptSnippet: nil,
+                    sponsorTokens: nil,
+                    originalConfidence: 1.0,
+                    learningSource: .userMarkedAd,
+                    learningLifecycle: .explicitConfirmation,
+                    sourceAssetId: analysisAssetId,
+                    sourceWindowId: windowId,
+                    sourceStartTime: sourceStartTime,
+                    sourceEndTime: sourceEndTime
+                )
+                logger.debug("recordUserMarkedAd: inserted catalog entry for user-marked ad on asset \(analysisAssetId, privacy: .public)")
+            } catch {
+                logger.warning("recordUserMarkedAd: catalog insert failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        let repeatedFingerprint = RepeatedAdFingerprint.from(
+            featureWindows: featureWindows
+        )
+        if let repeatedAdCache, !repeatedFingerprint.isZero {
+            do {
+                _ = try await repeatedAdCache.store(
+                    showId: showId,
+                    fingerprint: repeatedFingerprint,
+                    boundaryStart: sourceStartTime,
+                    boundaryEnd: sourceEndTime,
+                    confidence: 1,
+                    learningSource: .userMarkedAd,
+                    learningLifecycle: .explicitConfirmation,
+                    sourceAssetId: analysisAssetId,
+                    sourceWindowId: windowId
+                )
+            } catch {
+                logger.warning("recordUserMarkedAd: repeated-ad insert failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -3331,12 +3459,14 @@ actor AdDetectionService {
     func runHotPath(
         chunks: [TranscriptChunk],
         analysisAssetId: String,
-        episodeDuration: Double
+        episodeDuration: Double,
+        podcastId: String?
     ) async throws -> [AdWindow] {
         try await runHotPathResult(
             chunks: chunks,
             analysisAssetId: analysisAssetId,
-            episodeDuration: episodeDuration
+            episodeDuration: episodeDuration,
+            podcastId: podcastId
         ).windows
     }
 
@@ -3344,6 +3474,7 @@ actor AdDetectionService {
         chunks: [TranscriptChunk],
         analysisAssetId: String,
         episodeDuration: Double,
+        podcastId: String? = nil,
         retireUnmatchedReplayCandidates: Bool = false
     ) async throws -> HotPathRunResult {
         // playhead-hygc.1.8 (R7): enforce the documented
@@ -3432,7 +3563,8 @@ actor AdDetectionService {
                 tier1Results: tier1Results,
                 tier2Results: [],
                 singleWindowAdWindows: [],
-                analysisAssetId: analysisAssetId
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
             )
             if !aggregatorWindows.isEmpty {
                 try await store.upsertHotPathAdWindows(
@@ -3455,10 +3587,10 @@ actor AdDetectionService {
         // emitted in the same run were retired before the run finished;
         // R4 found the same bug shifted by one run — a previously-emitted
         // replay row, present in the DB on a subsequent run, would be
-        // included in `replayCandidateIDs` because `hotPathCandidateIDs`
+        // included in `replayCandidateIDs` because `hotPathCandidateRevisions`
         // filters by `(decisionState=.candidate, detectorVersion=current)`
         // — exactly the stamp on a replay row. The single authoritative
-        // fix lives in `hotPathCandidateIDs`, which now excludes any row
+        // fix lives in `hotPathCandidateRevisions`, which now excludes any row
         // whose `boundaryState == correctionReplay`. The local
         // `subtracting` below is retained as a belt-and-suspenders defense
         // against future regressions in that filter (e.g. a replay row
@@ -3466,15 +3598,16 @@ actor AdDetectionService {
         // is a no-op when the source filter is doing its job.
         let correctionReplayWindowIDs: Set<String> =
             Set(correctionReplayWindows.map(\.id))
-        let replayCandidateIDs: Set<String>
+        let replayCandidateRevisions: [String: AdWindow]
         if retireUnmatchedReplayCandidates {
-            replayCandidateIDs = try await hotPathCandidateIDs(
+            replayCandidateRevisions = try await hotPathCandidateRevisions(
                 analysisAssetId: analysisAssetId,
                 overlapping: replayEnvelope(for: chunks)
-            ).subtracting(correctionReplayWindowIDs)
+            ).filter { !correctionReplayWindowIDs.contains($0.key) }
         } else {
-            replayCandidateIDs = []
+            replayCandidateRevisions = [:]
         }
+        let replayCandidateIDs = Set(replayCandidateRevisions.keys)
 
         // Layer 1: hypothesis windows take precedence when active; otherwise
         // preserve the legacy lexical merge path.
@@ -3493,13 +3626,15 @@ actor AdDetectionService {
                 tier1Results: tier1Results,
                 tier2Results: [],
                 singleWindowAdWindows: [],
-                analysisAssetId: analysisAssetId
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
             )
             if !aggregatorWindows.isEmpty || !replayCandidateIDs.isEmpty {
                 try await store.upsertHotPathAdWindows(
                     aggregatorWindows,
                     existingIDs: [],
-                    retiredIDs: replayCandidateIDs
+                    retiredIDs: replayCandidateIDs,
+                    expectedProducerRevisions: replayCandidateRevisions
                 )
             }
             if !aggregatorWindows.isEmpty {
@@ -3517,7 +3652,8 @@ actor AdDetectionService {
         // Layer 0 + Layer 2: Fetch features, classify, refine boundaries.
         let classifierResults = try await classifyCandidates(
             candidates,
-            analysisAssetId: analysisAssetId
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId
         )
 
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
@@ -3547,13 +3683,19 @@ actor AdDetectionService {
             } else {
                 lexicalCategories = []
             }
-            let gateLabel = await precisionGateLabel(
+            let gateResult = await precisionGateLabel(
                 analysisAssetId: analysisAssetId,
                 startTime: expanded.startTime,
                 endTime: expanded.endTime,
                 segmentScore: result.adProbability,
-                lexicalCategories: lexicalCategories
+                lexicalCategories: lexicalCategories,
+                podcastId: podcastId
             )
+            // `.detectionOnly` is represented by a nil label and is a
+            // terminal "do not persist" result. Persisting it would erase the
+            // precision decision at the AdWindow boundary because legacy nil
+            // gates remain admissible to SkipOrchestrator.
+            guard let eligibilityGate = gateResult.label else { continue }
             adWindows.append(buildAdWindow(
                 from: result,
                 boundaryState: .acousticRefined,
@@ -3562,7 +3704,10 @@ actor AdDetectionService {
                 evidenceStartTime: candidatesByID[result.candidateId]?.evidenceStartTime,
                 expandedStartTime: expanded.startTime,
                 expandedEndTime: expanded.endTime,
-                eligibilityGate: gateLabel
+                eligibilityGate: eligibilityGate,
+                catalogMatch: gateResult.catalogMatch,
+                catalogStoreMatchSimilarity:
+                    gateResult.catalogStoreMatchSimilarity
             ))
         }
 
@@ -3588,7 +3733,8 @@ actor AdDetectionService {
             tier2Results: classifierResults,
             singleWindowAdWindows: adWindows,
             analysisAssetId: analysisAssetId,
-            lexicalCandidates: candidates
+            lexicalCandidates: candidates,
+            podcastId: podcastId
         )
 
         guard !adWindows.isEmpty || !aggregatorWindows.isEmpty else {
@@ -3597,7 +3743,8 @@ actor AdDetectionService {
                 try await store.upsertHotPathAdWindows(
                     [],
                     existingIDs: [],
-                    retiredIDs: replayCandidateIDs
+                    retiredIDs: replayCandidateIDs,
+                    expectedProducerRevisions: replayCandidateRevisions
                 )
             }
             // playhead-hygc.1.8: include correction-replay windows.
@@ -3617,7 +3764,8 @@ actor AdDetectionService {
                 try await store.upsertHotPathAdWindows(
                     [],
                     existingIDs: [],
-                    retiredIDs: replayCandidateIDs
+                    retiredIDs: replayCandidateIDs,
+                    expectedProducerRevisions: replayCandidateRevisions
                 )
             }
             // playhead-hygc.1.8: include correction-replay windows.
@@ -3644,10 +3792,17 @@ actor AdDetectionService {
         // no lexical evidence to match against existing candidates), so they
         // are appended alongside the reconciled single-window set.
         let allWindowsToPersist = reconciledWindows.map(\.window) + aggregatorWindows
+        var expectedProducerRevisions = replayCandidateRevisions
+        for reconciled in reconciledWindows {
+            for (id, revision) in reconciled.expectedExistingRevisions {
+                expectedProducerRevisions[id] = revision
+            }
+        }
         try await store.upsertHotPathAdWindows(
             allWindowsToPersist,
             existingIDs: matchedExistingIDs,
-            retiredIDs: retiredWindowIDs
+            retiredIDs: retiredWindowIDs,
+            expectedProducerRevisions: expectedProducerRevisions
         )
 
         logger.info("Hot path: persisted \(reconciledWindows.count) single-window + \(aggregatorWindows.count) aggregator AdWindows")
@@ -3793,7 +3948,8 @@ actor AdDetectionService {
         if !lexicalCandidates.isEmpty {
             classifierResults = try await classifyCandidates(
                 lexicalCandidates,
-                analysisAssetId: analysisAssetId
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
             )
         } else {
             classifierResults = []
@@ -4070,6 +4226,8 @@ actor AdDetectionService {
         let chapterEvidenceBuilder = ChapterMetadataEvidenceBuilder()
         var fusionWindows: [AdWindow] = []
         var decisionEvents: [DecisionEvent] = []
+        var decisionLogEntries:
+            [(windowId: String, entry: DecisionLogEntry)] = []
         // Phase 6.5 (playhead-4my.16): accumulate AdDecisionResult for step 17 forwarding.
         var fusionDecisionResults: [AdDecisionResult] = []
         // playhead-ud4n: nonterminal hot-path rows this backfill retired
@@ -4103,7 +4261,8 @@ actor AdDetectionService {
         lastCatalogMatchSimilarity = 0
         // Capture showId for catalog scoping: null when no podcast was
         // supplied (rare — matches the analogous priors-update guard above).
-        let catalogShowId: String? = podcastId.isEmpty ? nil : podcastId
+        let catalogShowId =
+            RecurrenceMaterialIdentity.canonicalIdentifier(podcastId)
 
         // playhead-xsdz.11: resolve the per-show auto-skip threshold OFFSET
         // ONCE per backfill so every span's gate decision uses the same
@@ -4596,22 +4755,25 @@ actor AdDetectionService {
             // playhead-gtt9.17: catalog egress. Fingerprint the span's feature
             // windows (time-invariant) and query `AdCatalogStore` for known
             // entries that match above the default similarity floor. The top
-            // similarity enters both the evidence ledger (for fusion mass)
-            // and `AutoSkipPrecisionGateInput.catalogMatchSimilarity` (for
-            // the safety-signal conjunction). Zero when no store is wired,
-            // the store is empty, or nothing clears the floor.
-            let spanFeatureWindows = featureWindows.filter { fw in
-                fw.startTime < refinedSpan.endTime && fw.endTime > refinedSpan.startTime
-            }
-            let spanFingerprint = AcousticFingerprint.fromFeatureWindows(spanFeatureWindows)
-            var spanTopCatalogSimilarity: Float = 0
-            if let adCatalogStore, !spanFingerprint.isZero {
-                let matches = await adCatalogStore.matches(
-                    fingerprint: spanFingerprint,
-                    show: catalogShowId
+            // similarity is retained in the evidence ledger and persisted
+            // provenance for diagnostics, and enters
+            // `AutoSkipPrecisionGateInput.catalogMatchSimilarity` as a
+            // suggest-only signal. `DecisionMapper` excludes this learned
+            // fingerprint-store row from scoring and quorum. Zero when no
+            // valid query finds a match. Query-unavailable paths remain nil in
+            // persisted telemetry rather than masquerading as observed misses.
+            let spanCatalogEvidence =
+                await Self.resolveCatalogSpanEvidence(
+                    span: refinedSpan,
+                    featureWindows: featureWindows,
+                    catalogStore: adCatalogStore,
+                    showId: catalogShowId
                 )
-                spanTopCatalogSimilarity = matches.first?.similarity ?? 0
-            }
+            let spanTopCatalogSimilarity =
+                spanCatalogEvidence.topSimilarity
+            let spanTopCatalogMatch = spanCatalogEvidence.topMatch
+            let spanCatalogWasEvaluated =
+                spanCatalogEvidence.wasEvaluated
             if spanTopCatalogSimilarity > lastCatalogMatchSimilarity {
                 lastCatalogMatchSimilarity = spanTopCatalogSimilarity
             }
@@ -5040,9 +5202,11 @@ actor AdDetectionService {
                 decision: decision,
                 ledger: ledger,
                 effectiveLedger: effectiveLedger,
-                spanFingerprint: spanFingerprint,
-                spanFeatureWindows: spanFeatureWindows,
-                spanTopCatalogSimilarity: spanTopCatalogSimilarity
+                spanTopCatalogSimilarity: spanTopCatalogSimilarity,
+                spanTopCatalogMatch: spanTopCatalogMatch,
+                spanCatalogWasEvaluated: spanCatalogWasEvaluated,
+                finalizerRewroteGeometry: false,
+                fusionSplitDiscriminator: nil
             ))
         }
 
@@ -5152,14 +5316,14 @@ actor AdDetectionService {
                 )
             }
             // Index pending by spanId so finalized spans can be paired with
-            // their upstream ledger / fingerprint / feature-window context
-            // in O(1). The finalizer preserves `DecodedSpan.id` across
-            // trims, merges, splits, and suppressions (suppressed spans are
-            // simply absent from the returned array); splits reuse the
-            // parent id, so multiple finalized rows may map back to the
-            // same pending record — that's acceptable here because the
-            // per-id ledger / fingerprint context is genuinely the same
-            // for both halves.
+            // their upstream non-catalog decision context in O(1). The
+            // The finalizer preserves the source identity separately from
+            // each emitted identity. Trims and merges retain the surviving
+            // id; splits mint deterministic child ids so independently
+            // persisted chunks cannot collide. Multiple finalized rows may
+            // still map back to the same pending source record. Catalog
+            // evidence is not inherited from that record when geometry
+            // changes; each finalized material slice is re-fingerprinted.
             var pendingByOriginalId: [String: PendingBackfillDecision] = [:]
             pendingByOriginalId.reserveCapacity(pendingDecisions.count)
             for pending in pendingDecisions {
@@ -5180,15 +5344,85 @@ actor AdDetectionService {
             rebuilt.reserveCapacity(finalized.count)
             var traceById: [String: [String]] = [:]
             for span in finalized {
-                guard let pending = pendingByOriginalId[span.span.id] else {
+                try Task.checkCancellation()
+                let sourcePendings = span.sourceSpanIds.compactMap {
+                    pendingByOriginalId[$0]
+                }
+                guard sourcePendings.count == span.sourceSpanIds.count,
+                      let pending = sourcePendings.first else {
                     // Shouldn't happen — finalizer only emits spans whose id
-                    // came from the input candidates. Log and skip rather
-                    // than crash the backfill.
-                    logger.warning("[p56a] finalizer emitted unknown spanId \(span.span.id, privacy: .public); dropping")
+                    // came from the input candidates. A partial merge cohort
+                    // would produce incomplete provenance, so drop the whole
+                    // output rather than silently attributing it to one source.
+                    logger.warning("[p56a] finalizer emitted unknown source cohort for spanId \(span.span.id, privacy: .public); dropping")
                     continue
                 }
-                var updated = pending
-                updated.refinedSpan = span.span
+                let geometryWasRewritten =
+                    pending.refinedSpan.startTime.bitPattern
+                        != span.span.startTime.bitPattern
+                    || pending.refinedSpan.endTime.bitPattern
+                        != span.span.endTime.bitPattern
+                // Width-ownership provenance and boundary-refinement traces are
+                // exact-edge claims. Once the finalizer moves either edge, keep
+                // the new geometry but drop whole-span width ownership so no
+                // downstream diagnostic or policy can treat the rewritten span
+                // as byte/splice exact.
+                let finalizedSpan: DecodedSpan
+                if geometryWasRewritten {
+                    finalizedSpan = DecodedSpan(
+                        id: span.span.id,
+                        assetId: span.span.assetId,
+                        firstAtomOrdinal: span.span.firstAtomOrdinal,
+                        lastAtomOrdinal: span.span.lastAtomOrdinal,
+                        startTime: span.span.startTime,
+                        endTime: span.span.endTime,
+                        anchorProvenance: span.span.anchorProvenance.filter {
+                            !$0.isWidthOwnership
+                        }
+                    )
+                } else {
+                    finalizedSpan = span.span
+                }
+
+                let catalogEvidence: CatalogSpanEvidence
+                let refreshedLedger: [EvidenceLedgerEntry]
+                let refreshedEffectiveLedger: [EvidenceLedgerEntry]
+                if geometryWasRewritten {
+                    // A merge represents material from every absorbed source
+                    // candidate. Retain all non-catalog diagnostic evidence,
+                    // then replace the old per-source fingerprint rows with
+                    // one match recomputed over the exact finalized geometry.
+                    let sourceLedger = sourcePendings.flatMap(\.ledger)
+                    let sourceEffectiveLedger =
+                        sourcePendings.flatMap(\.effectiveLedger)
+                    catalogEvidence =
+                        await Self.resolveCatalogSpanEvidence(
+                            span: finalizedSpan,
+                            featureWindows: featureWindows,
+                            catalogStore: adCatalogStore,
+                            showId: catalogShowId
+                        )
+                    refreshedLedger =
+                        Self.replacingFingerprintStoreCatalogEvidence(
+                            in: sourceLedger,
+                            with: catalogEvidence,
+                            catalogCap: fusionConfig.catalogCap
+                        )
+                    refreshedEffectiveLedger =
+                        Self.replacingFingerprintStoreCatalogEvidence(
+                            in: sourceEffectiveLedger,
+                            with: catalogEvidence,
+                            catalogCap: fusionConfig.catalogCap
+                        )
+                } else {
+                    catalogEvidence = CatalogSpanEvidence(
+                        topSimilarity: pending.spanTopCatalogSimilarity,
+                        topMatch: pending.spanTopCatalogMatch,
+                        wasEvaluated: pending.spanCatalogWasEvaluated
+                    )
+                    refreshedLedger = pending.ledger
+                    refreshedEffectiveLedger = pending.effectiveLedger
+                }
                 // SpanFinalizer's `WorkingSpan` does NOT retain the upstream
                 // `promotionTrack` (its `toFinalized()` builds a new
                 // `DecisionResult` via the default `.standard` track).
@@ -5199,26 +5433,54 @@ actor AdDetectionService {
                 // pass would silently demote every qualified-track span to
                 // the standard 0.80 threshold — a hidden behavioral change
                 // outside the byte-identical-OFF contract's coverage.
-                updated.decision = DecisionResult(
+                let finalizedEligibilityGate: SkipEligibilityGate
+                if geometryWasRewritten,
+                   span.decision.eligibilityGate.severity
+                       < SkipEligibilityGate.markOnly.severity {
+                    // Geometry is decision material. A trim, merge, or split
+                    // has not been classified as this exact interval, so the
+                    // finalizer may keep it as a marker but may not carry the
+                    // source interval's automatic authority forward. This is
+                    // also a defense-in-depth backstop for any future
+                    // SpanFinalizer transform that forgets to demote itself.
+                    finalizedEligibilityGate = .markOnly
+                } else {
+                    finalizedEligibilityGate =
+                        span.decision.eligibilityGate
+                }
+                let finalizedDecision = DecisionResult(
                     proposalConfidence: span.decision.proposalConfidence,
                     skipConfidence: span.decision.skipConfidence,
-                    eligibilityGate: span.decision.eligibilityGate,
+                    eligibilityGate: finalizedEligibilityGate,
                     promotionTrack: pending.decision.promotionTrack
                 )
+                let updated = PendingBackfillDecision(
+                    refinedSpan: finalizedSpan,
+                    decision: finalizedDecision,
+                    ledger: refreshedLedger,
+                    effectiveLedger: refreshedEffectiveLedger,
+                    spanTopCatalogSimilarity:
+                        catalogEvidence.topSimilarity,
+                    spanTopCatalogMatch: catalogEvidence.topMatch,
+                    spanCatalogWasEvaluated:
+                        catalogEvidence.wasEvaluated,
+                    finalizerRewroteGeometry: geometryWasRewritten,
+                    fusionSplitDiscriminator:
+                        span.span.id == span.sourceSpanId
+                            ? nil
+                            : span.span.id
+                )
                 rebuilt.append(updated)
-                // Preserve order across splits / multi-emit by appending to
-                // any existing trace under the same id.
+                // Split outputs have distinct ids, so their traces remain
+                // independently attributable through persistence/runtime.
                 let traceRaw = span.constraintTrace.map { $0.rawValue }
                 if !traceRaw.isEmpty {
-                    if var existing = traceById[span.span.id] {
-                        existing.append(contentsOf: traceRaw)
-                        traceById[span.span.id] = existing
-                    } else {
-                        traceById[span.span.id] = traceRaw
-                    }
+                    traceById[span.span.id] = traceRaw
                 }
             }
             pendingDecisions = rebuilt
+            lastCatalogMatchSimilarity =
+                rebuilt.map(\.spanTopCatalogSimilarity).max() ?? 0
             lastSpanFinalizerConstraintsBySpanId = traceById
 
             logger.info(
@@ -5237,9 +5499,9 @@ actor AdDetectionService {
             let decision = pending.decision
             let ledger = pending.ledger
             let effectiveLedger = pending.effectiveLedger
-            let spanFingerprint = pending.spanFingerprint
-            let spanFeatureWindows = pending.spanFeatureWindows
             let spanTopCatalogSimilarity = pending.spanTopCatalogSimilarity
+            let spanTopCatalogMatch = pending.spanTopCatalogMatch
+            let spanCatalogWasEvaluated = pending.spanCatalogWasEvaluated
 
             // Step 14: SkipPolicyMatrix + confidence promotion.
             // Phase 6.5 (playhead-4my.16): (.unknown, .unknown) → .detectOnly so Phase 7
@@ -5318,13 +5580,14 @@ actor AdDetectionService {
             // Build AdWindow from fusion decision (uses already-refined span boundaries).
             // playhead-epfk: thread the per-span top `AdCatalogStore`
             // similarity computed above so it persists to `ad_windows`
-            // and surfaces in the corpus export. `nil` only when no
-            // catalog store was wired; otherwise we record the queried
-            // value (which may be 0 if no match cleared the floor —
-            // distinguishable from `nil` by NARL eval).
-            let catalogStoreMatchSimilarity: Double? = (adCatalogStore == nil)
-                ? nil
-                : Double(spanTopCatalogSimilarity)
+            // and surfaces in the corpus export. `nil` means catalog
+            // evaluation was unavailable (including missing/stale show
+            // identity or SQLite failure); `0` means an exact-show query
+            // completed but no row cleared the floor.
+            let catalogStoreMatchSimilarity: Double? =
+                spanCatalogWasEvaluated
+                    ? Double(spanTopCatalogSimilarity)
+                    : nil
             // playhead-hdgk: derive the per-edge anchor tier from the two
             // authoritative sources in scope here — the refined span's width
             // provenance (`.rediffSlot`) and the stinger snap trace keyed by
@@ -5334,7 +5597,8 @@ actor AdDetectionService {
             // resolve `.unanchored` — byte-identical to pre-hdgk.
             let edgeAnchors = Self.deriveFusionEdgeAnchors(
                 anchorProvenance: refinedSpan.anchorProvenance,
-                stingerTrace: lastStingerRefinementTraceBySpanId[refinedSpan.id]
+                stingerTrace: lastStingerRefinementTraceBySpanId[refinedSpan.id],
+                geometryWasRewritten: pending.finalizerRewroteGeometry
             )
             let window = buildFusionAdWindow(
                 span: refinedSpan,
@@ -5342,8 +5606,11 @@ actor AdDetectionService {
                 policyAction: policyAction,
                 analysisAssetId: analysisAssetId,
                 catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+                catalogMatch: spanTopCatalogMatch,
                 startEdgeAnchor: edgeAnchors.start,
-                endEdgeAnchor: edgeAnchors.end
+                endEdgeAnchor: edgeAnchors.end,
+                fusionSplitDiscriminator:
+                    pending.fusionSplitDiscriminator
             )
             fusionWindows.append(window)
 
@@ -5367,7 +5634,8 @@ actor AdDetectionService {
             // iteration is the only place that knows both ids. When the
             // flag is off the spanId map is empty (see top-of-run reset)
             // and the window-keyed map stays empty — byte-identical OFF.
-            if let stingerTrace = lastStingerRefinementTraceBySpanId[refinedSpan.id] {
+            if !pending.finalizerRewroteGeometry,
+               let stingerTrace = lastStingerRefinementTraceBySpanId[refinedSpan.id] {
                 lastStingerRefinementTraceByWindowId[window.id] = stingerTrace
             }
 
@@ -5376,7 +5644,8 @@ actor AdDetectionService {
             // block. Same stamp point and rationale as the stinger trace above;
             // when the flag is off the spanId map is empty (top-of-run reset)
             // so the window-keyed map stays empty — byte-identical OFF.
-            if let lexicalTrace = lastLexicalRefinementTraceBySpanId[refinedSpan.id] {
+            if !pending.finalizerRewroteGeometry,
+               let lexicalTrace = lastLexicalRefinementTraceBySpanId[refinedSpan.id] {
                 lastLexicalRefinementTraceByWindowId[window.id] = lexicalTrace
             }
 
@@ -5395,73 +5664,10 @@ actor AdDetectionService {
                 evidenceSourceKinds: Self.corroboratingEvidenceSourceKinds(effectiveLedger)
             )
 
-            // playhead-gtt9.17: catalog ingress. When a span gates to
-            // `.autoSkipEligible`, store its fingerprint so future episodes
-            // of the same show can match on the same creative. `markOnly`
-            // decisions are deliberately excluded — those aren't confirmed
-            // ads yet; inserting them would inflate false-positive recurrence
-            // later. A zero fingerprint (e.g., silent span with no feature
-            // signal) is also rejected by `AdCatalogStore.insert` but we
-            // short-circuit the call to avoid touching SQLite needlessly.
-            if let adCatalogStore,
-               policyAction == .autoSkipEligible,
-               !spanFingerprint.isZero {
-                do {
-                    _ = try await adCatalogStore.insert(
-                        showId: catalogShowId,
-                        episodePosition: .unknown,
-                        durationSec: max(0, refinedSpan.endTime - refinedSpan.startTime),
-                        acousticFingerprint: spanFingerprint,
-                        transcriptSnippet: nil,
-                        sponsorTokens: nil,
-                        originalConfidence: decision.skipConfidence
-                    )
-                    logger.debug("Backfill: inserted catalog entry for autoSkipEligible span \(refinedSpan.id, privacy: .public) show=\(catalogShowId ?? "<none>", privacy: .public)")
-                } catch {
-                    logger.warning("Backfill: catalog insert failed for span \(refinedSpan.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                }
-            }
-
-            // playhead-43ed: B3 RepeatedAdCache ingress. Same trigger
-            // condition as the catalog insert above (`autoSkipEligible`
-            // backfill verdict), but writes to the per-show RepeatedAdCache
-            // so the next episode of THIS show can short-circuit the
-            // classifier on a fingerprint hit. Three guards:
-            //   1. Service wired (nil-default in init).
-            //   2. Non-empty showId — cache rows are per-show-scoped; an
-            //      anonymous span has nowhere to land.
-            //   3. RepeatedAdFingerprint derives non-zero from the span's
-            //      feature windows. The cache uses a different fingerprint
-            //      kind than `AdCatalogStore` (128-bit median-binarized
-            //      vs the legacy 64-bit catalog fingerprint), so we
-            //      recompute here rather than reusing `spanFingerprint`.
-            //   4. Confidence ≥ store threshold is enforced inside
-            //      `RepeatedAdCacheService.store` so we don't duplicate
-            //      it here.
-            // Errors are swallowed — a cache write failure must never bring
-            // down the backfill pipeline; missed cache writes degrade to
-            // a future cache miss, never to a wrong skip.
-            if let repeatedAdCache,
-               policyAction == .autoSkipEligible,
-               let cacheShowId = catalogShowId,
-               !cacheShowId.isEmpty {
-                let repeatedFp = RepeatedAdFingerprint.from(
-                    featureWindows: spanFeatureWindows
-                )
-                if !repeatedFp.isZero {
-                    do {
-                        _ = try await repeatedAdCache.store(
-                            showId: cacheShowId,
-                            fingerprint: repeatedFp,
-                            boundaryStart: refinedSpan.startTime,
-                            boundaryEnd: refinedSpan.endTime,
-                            confidence: decision.skipConfidence
-                        )
-                    } catch {
-                        logger.warning("RepeatedAdCache: store failed for span \(refinedSpan.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    }
-                }
-            }
+            // Neither recurrence mechanism is learned here. A proposal, even
+            // one labelled autoSkipEligible, is not an authoritative positive.
+            // SkipOrchestrator admits both the catalog and repeated-ad cache
+            // only after delayed consumption or explicit confirmation.
 
             // Accumulate AdDecisionResult for step 17 (orchestrator forwarding).
             // SkipEligibilityGate has more cases than AdDecisionEligibilityGate; collapse
@@ -5475,7 +5681,11 @@ actor AdDetectionService {
                 endTime: refinedSpan.endTime,
                 skipConfidence: decision.skipConfidence,
                 eligibilityGate: orchestratorGate,
-                recomputationRevision: 0
+                recomputationRevision: 0,
+                // The final persisted row is attached only after all
+                // reconciliation, clamping, and metadata writes complete.
+                // Never substitute this pre-write material.
+                producerRevision: nil
             ))
 
             // Accumulate DecisionEvent for step 16. Bug 6: cohortJSON is hoisted
@@ -5538,7 +5748,7 @@ actor AdDetectionService {
                     thresholdCrossed: autoSkipThreshold
                 )
             )
-            await decisionLogger.record(logEntry)
+            decisionLogEntries.append((window.id, logEntry))
         }
 
         // ── Pre-roll start-at-zero clamp (playhead-xsdz.66) ──────────────────
@@ -5551,25 +5761,11 @@ actor AdDetectionService {
         // second-guesses a precise boundary), so this only reclaims the width the
         // cold-start ramp lost on the guessed presence-core starts.
         //
-        // WIDTH / MARK: applied HERE — after the per-span decision loop — so every
-        // window already carries its final `eligibilityGate` / `decisionState` /
-        // `confidence`; the clamp moves only the mark's start edge and can NEVER
-        // flip a window's auto-skip ELIGIBILITY (the gate field is copied verbatim).
-        // It can't change an auto-skip SPAN either — but NOT because the clamped
-        // rows stay out of the orchestrator: `AnalysisCoordinator.finalizeBackfill`
-        // re-fetches these persisted rows and re-pushes them via `receiveAdWindows`
-        // in-session (and the cross-launch `beginEpisode` preload reads them too),
-        // so the clamped start DOES reach the managed window and overwrites its
-        // `snappedStart`. What keeps that skip-safe is the `.unanchored` gate: the
-        // clamp fires ONLY on `.unanchored` starts, and `AutoSkipEdgePadding` (the
-        // Gate-2 auto-skip policy) refuses to auto-skip any `.unanchored` start —
-        // `skipWindow` returns nil and the span stays markOnly. So once auto-skip +
-        // edge padding are enabled the clamped span is never skipped, exactly as it
-        // wouldn't have been before the clamp; and auto-skip is OFF today
-        // (mark-only), so the clamp is currently a pure banner / overlay width win.
-        // (Residual: auto-skip enabled with edge padding OFF — not the intended
-        // Gate-2 config — would skip the raw clamped [0, end]; tracked for the
-        // enablement bead, same posture as the playhead-hdgk Gate-2 note.)
+        // WIDTH / MARK: applied HERE — after the per-span decision loop. The
+        // clamp adds material the classifier did not evaluate, so every changed
+        // row is capped to mark-only (or keeps a stricter existing gate). This
+        // remains fail-closed even when the independent edge-padding feature is
+        // disabled.
         // The window id is ordinal-addressed, so the clamp keeps it and the
         // content-addressed reconcile below stays in place — no reorder, no churn.
         // Idempotent + monotonic (start only moves leftward → coverage never
@@ -5578,12 +5774,130 @@ actor AdDetectionService {
         //
         // The widened start does also flow into the learned priors + metadata
         // extraction below (both read `nonSuppressedWindows`); that is benign and
-        // arguably correct — a pre-roll genuinely starts at 0:00 — and touches no
-        // eligibility decision for this episode.
+        // arguably correct — a pre-roll genuinely starts at 0:00.
         fusionWindows = PreRollStartClamp.clamp(
             windows: fusionWindows,
             config: .init(maxPreRollStartSeconds: config.preRollStartClampSeconds)
         )
+        // The clamp runs after decisions are assembled, so refresh the
+        // persisted/runtime decision envelope from the final window geometry.
+        // Otherwise DecisionResultArtifact would serialize the detected
+        // pre-clamp start while `ad_windows` and live orchestration use 0.0.
+        let finalFusionWindowByID = fusionWindows.reduce(
+            into: [String: AdWindow]()
+        ) { result, window in
+            result[window.id] = window
+        }
+        fusionDecisionResults = fusionDecisionResults.map { result in
+            guard let window = finalFusionWindowByID[result.id],
+                  window.analysisAssetId == result.analysisAssetId else {
+                return result
+            }
+            let finalEligibilityGate: AdDecisionEligibilityGate =
+                result.eligibilityGate == .eligible
+                    && window.eligibilityGate
+                        == SkipEligibilityGate.eligible.rawValue
+                    ? .eligible
+                    : .blocked
+            return AdDecisionResult(
+                id: result.id,
+                analysisAssetId: result.analysisAssetId,
+                startTime: window.startTime,
+                endTime: window.endTime,
+                skipConfidence: window.confidence,
+                eligibilityGate: finalEligibilityGate,
+                recomputationRevision: result.recomputationRevision,
+                // Metadata and reconciliation can still revise durable
+                // material; Step 17 attaches the exact row after persistence.
+                producerRevision: nil
+            )
+        }
+        // Decision events and replay logs were assembled before the clamp.
+        // Rebind their geometry and gate now so every durable or exported
+        // decision artifact describes the same final material as ad_windows.
+        decisionEvents = decisionEvents.map { event in
+            guard let window = finalFusionWindowByID[event.windowId],
+                  window.analysisAssetId == event.analysisAssetId else {
+                return event
+            }
+            let finalGate =
+                window.eligibilityGate ?? event.eligibilityGate
+            let finalExplanationJSON: String?
+            if let raw = event.explanationJSON,
+               let data = raw.data(using: .utf8),
+               let explanation = try? JSONDecoder().decode(
+                   DecisionExplanation.self,
+                   from: data
+               ) {
+                let finalized = DecisionExplanation(
+                    evidenceBreakdown: explanation.evidenceBreakdown,
+                    contributingFamilies:
+                        explanation.contributingFamilies,
+                    actionRationale: ActionRationale(
+                        threshold:
+                            explanation.actionRationale.threshold,
+                        gate: finalGate,
+                        policyAction:
+                            explanation.actionRationale.policyAction,
+                        skipEligible:
+                            event.policyAction
+                                == SkipPolicyAction.autoSkipEligible.rawValue
+                            && finalGate
+                                == SkipEligibilityGate.eligible.rawValue
+                    )
+                )
+                finalExplanationJSON = (try? JSONEncoder().encode(finalized))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+            } else {
+                finalExplanationJSON = event.explanationJSON
+            }
+            return DecisionEvent(
+                id: event.id,
+                analysisAssetId: event.analysisAssetId,
+                eventType: event.eventType,
+                windowId: event.windowId,
+                proposalConfidence: event.proposalConfidence,
+                skipConfidence: event.skipConfidence,
+                eligibilityGate: finalGate,
+                policyAction: event.policyAction,
+                decisionCohortJSON: event.decisionCohortJSON,
+                createdAt: event.createdAt,
+                explanationJSON: finalExplanationJSON
+            )
+        }
+        decisionLogEntries = decisionLogEntries.map { pending in
+            let entry = pending.entry
+            guard let window =
+                    finalFusionWindowByID[pending.windowId] else {
+                return pending
+            }
+            let finalized = DecisionLogEntry(
+                schemaVersion: entry.schemaVersion,
+                analysisAssetID: entry.analysisAssetID,
+                timestamp: entry.timestamp,
+                windowBounds: .init(
+                    start: window.startTime,
+                    end: window.endTime
+                ),
+                activationConfig: entry.activationConfig,
+                evidence: entry.evidence,
+                fusedConfidence: entry.fusedConfidence,
+                finalDecision: .init(
+                    action: entry.finalDecision.action,
+                    gate:
+                        window.eligibilityGate
+                            ?? entry.finalDecision.gate,
+                    skipConfidence:
+                        entry.finalDecision.skipConfidence,
+                    thresholdCrossed:
+                        entry.finalDecision.thresholdCrossed
+                )
+            )
+            return (pending.windowId, finalized)
+        }
+        for pending in decisionLogEntries {
+            await decisionLogger.record(pending.entry)
+        }
 
         // Persist fusion windows and retire the nonterminal hot-path rows this
         // backfill supersedes. playhead-ud4n: backfill is authoritative over the
@@ -5734,7 +6048,32 @@ actor AdDetectionService {
             }
 
             if !fusionDecisionResults.isEmpty {
-                await orchestrator.receiveAdDecisionResults(fusionDecisionResults)
+                // Metadata extraction and pre-roll clamping can update producer
+                // material after the in-memory decision was assembled. Re-read
+                // the durable rows now so the orchestrator receives the exact
+                // revision (including catalog provenance) its conditional
+                // applied write will fence against.
+                let persistedById: [String: AdWindow]
+                do {
+                    persistedById = Dictionary(
+                        uniqueKeysWithValues: try await store
+                            .fetchAdWindows(assetId: analysisAssetId)
+                            .map { ($0.id, $0) }
+                    )
+                } catch {
+                    persistedById = [:]
+                    logger.warning(
+                        "Backfill: producer revision reload failed for asset \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+                let liveDecisionResults = fusionDecisionResults.map {
+                    $0.withProducerRevision(
+                        persistedById[$0.id]
+                    )
+                }
+                await orchestrator.receiveAdDecisionResults(
+                    liveDecisionResults
+                )
                 let eligibleCount = fusionDecisionResults.filter { $0.eligibilityGate == .eligible }.count
                 logger.info("Backfill: forwarded \(fusionDecisionResults.count) fusion results (\(eligibleCount) eligible) to SkipOrchestrator")
             }
@@ -6953,6 +7292,93 @@ actor AdDetectionService {
             : raw
     }
 
+    /// Resolve the acoustic-catalog evidence bound to one exact span geometry.
+    /// A nil store, zero fingerprint, missing/non-canonical show, or catalog
+    /// failure remains unevaluated; an available exact-show query with no match
+    /// is an observed miss.
+    static func resolveCatalogSpanEvidence(
+        span: DecodedSpan,
+        featureWindows: [FeatureWindow],
+        catalogStore: AdCatalogStore?,
+        showId: String?
+    ) async -> CatalogSpanEvidence {
+        guard span.startTime.isFinite,
+              span.endTime.isFinite,
+              span.startTime >= 0,
+              span.endTime > span.startTime,
+              RecurrenceMaterialIdentity.canonicalIdentifier(span.assetId)
+                != nil,
+              featureWindows.allSatisfy({
+                  $0.analysisAssetId == span.assetId
+              }) else {
+            return CatalogSpanEvidence(
+                topSimilarity: 0,
+                topMatch: nil,
+                wasEvaluated: false
+            )
+        }
+        // Match AnalysisStore.fetchFeatureWindows(assetId:from:to:), which is
+        // the population used when authoritative learning, correction, and
+        // final runtime admission re-fingerprint this exact material. Including
+        // edge-straddling windows here would stamp a match that cannot be
+        // reproduced from persistence and would be demoted on the next actor
+        // hop or launch.
+        let contained = featureWindows.filter {
+            $0.startTime >= span.startTime && $0.endTime <= span.endTime
+        }
+        let fingerprint = AcousticFingerprint.fromFeatureWindows(contained)
+        guard let catalogStore, !fingerprint.isZero,
+              let matches = await catalogStore.matchesIfAvailable(
+                  fingerprint: fingerprint,
+                  show: showId
+              ) else {
+            return CatalogSpanEvidence(
+                topSimilarity: 0,
+                topMatch: nil,
+                wasEvaluated: false
+            )
+        }
+        let topMatch = matches.first
+        return CatalogSpanEvidence(
+            topSimilarity: topMatch?.similarity ?? 0,
+            topMatch: topMatch,
+            wasEvaluated: true
+        )
+    }
+
+    /// Replace only the device-local acoustic-catalog diagnostic row while
+    /// preserving transcript-catalog and every other evidence producer. Used
+    /// after SpanFinalizer rewrites geometry so persistence, replay telemetry,
+    /// and later exact-row correction all describe the emitted material.
+    static func replacingFingerprintStoreCatalogEvidence(
+        in ledger: [EvidenceLedgerEntry],
+        with evidence: CatalogSpanEvidence,
+        catalogCap: Double
+    ) -> [EvidenceLedgerEntry] {
+        let isFingerprintStoreRow: (EvidenceLedgerEntry) -> Bool = {
+            $0.source == .catalog && $0.subSource == .fingerprintStore
+        }
+        let priorIndex = ledger.firstIndex(where: isFingerprintStoreRow)
+        var result = ledger.filter { !isFingerprintStoreRow($0) }
+        guard evidence.wasEvaluated,
+              evidence.topMatch != nil,
+              evidence.topSimilarity.isFinite,
+              evidence.topSimilarity >= AdCatalogStore.defaultSimilarityFloor,
+              evidence.topSimilarity <= 1,
+              catalogCap.isFinite,
+              catalogCap >= 0 else {
+            return result
+        }
+        let row = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: Double(evidence.topSimilarity) * catalogCap,
+            detail: .catalog(entryCount: 1),
+            subSource: .fingerprintStore
+        )
+        result.insert(row, at: min(priorIndex ?? result.endIndex, result.endIndex))
+        return result
+    }
+
     private func buildEvidenceLedger(
         span: DecodedSpan,
         classifierResults: [ClassifierResult],
@@ -7134,12 +7560,11 @@ actor AdDetectionService {
 
         // playhead-gtt9.17: add a catalog ledger entry from the
         // `AdCatalogStore` match similarity when a prior stored ad creative
-        // fingerprint-matches this span above the default floor. The weight
-        // is scaled by similarity so a near-perfect match (≈1.0) gets full
-        // `fusionConfig.catalogCap` mass and borderline matches (≈0.8) get
-        // proportionally less. `entryCount: 1` preserves the existing
-        // `.catalog(entryCount:)` detail variant — the fusion distinctKinds
-        // gate only cares about the source type, not the count.
+        // fingerprint-matches this span above the default floor. The
+        // similarity-scaled diagnostic weight is retained for replay, but
+        // `DecisionMapper.scoringLedger` excludes this `.fingerprintStore`
+        // row from confidence and quorum. `entryCount: 1` preserves the
+        // existing `.catalog(entryCount:)` telemetry detail variant.
         if catalogMatchSimilarity >= AdCatalogStore.defaultSimilarityFloor {
             let weight = Double(catalogMatchSimilarity) * fusionConfig.catalogCap
             catalogLedgerEntries.append(EvidenceLedgerEntry(
@@ -7629,11 +8054,17 @@ actor AdDetectionService {
     /// contributes no snap, so both edges fall through to `.unanchored` unless
     /// rediff owns the width. Deliberately splice-agnostic: `.spliceSlot` is
     /// acoustic width, NOT byte-exact, so a splice-owned edge stays
-    /// `.unanchored` (it does not qualify for the tight rediff margin).
+    /// `.unanchored` (it does not qualify for the tight rediff margin). A
+    /// post-fusion geometry rewrite invalidates both earlier edge claims and
+    /// forces the conservative pair regardless of their original source.
     static func deriveFusionEdgeAnchors(
         anchorProvenance: [AnchorRef],
-        stingerTrace: StingerRefinementTrace?
+        stingerTrace: StingerRefinementTrace?,
+        geometryWasRewritten: Bool = false
     ) -> (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor) {
+        guard !geometryWasRewritten else {
+            return (start: .unanchored, end: .unanchored)
+        }
         let rediffOwnsWidth = anchorProvenance.contains(.rediffSlot)
         return (
             start: AutoSkipEdgeAnchor.derive(
@@ -7653,8 +8084,10 @@ actor AdDetectionService {
         policyAction: SkipPolicyAction,
         analysisAssetId: String,
         catalogStoreMatchSimilarity: Double? = nil,
+        catalogMatch: CatalogMatch? = nil,
         startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
-        endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored
+        endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
+        fusionSplitDiscriminator: String? = nil
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
@@ -7676,14 +8109,14 @@ actor AdDetectionService {
             // UUID. Keyed on (assetId, detectorVersion, span ordinals) so an
             // identical rerun mints an identical id — the reconcile is a no-op
             // and `AdDetectionService.reconcileBackfillWindows` retires nothing.
-            // Each distinct span still yields a distinct id (ordinals differ),
-            // so the per-window trace/metadata maps keyed on this id stay
-            // collision-free.
+            // Extra finalizer split children inherit the same ordinals, so
+            // those children alone carry a deterministic discriminator.
             id: BackfillJobRunner.makeFusionWindowId(
                 analysisAssetId: analysisAssetId,
                 detectorVersion: config.detectorVersion,
                 spanStartOrdinal: span.firstAtomOrdinal,
-                spanEndOrdinal: span.lastAtomOrdinal
+                spanEndOrdinal: span.lastAtomOrdinal,
+                splitDiscriminator: fusionSplitDiscriminator
             ),
             analysisAssetId: analysisAssetId,
             startTime: span.startTime,
@@ -7712,6 +8145,13 @@ actor AdDetectionService {
             // ad_windows row and decision_events row consistent.
             eligibilityGate: decision.eligibilityGate.rawValue,
             catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            catalogFingerprintVersion: catalogMatch?.entry.acousticFingerprint.version.rawValue,
+            catalogMatchedEntryId: catalogMatch?.entry.id.uuidString,
+            catalogMatchedShowId: catalogMatch?.entry.showId,
+            catalogMatchedLearningSource:
+                catalogMatch?.entry.learningSource.rawValue,
+            catalogMatchedLearningLifecycle:
+                catalogMatch?.entry.learningLifecycle.rawValue,
             // playhead-hdgk: persist the per-edge anchor tier derived at
             // fusion time so the (dormant) auto-skip edge-padding policy can
             // classify this span by its real provenance on ingest, instead of
@@ -8626,11 +9066,15 @@ actor AdDetectionService {
     /// still letting repeated rewinds accumulate into a mode demotion.
     ///
     /// Side effects on every accepted call:
-    ///   1. Atomically flip `AdWindowDecision` to `.reverted` and append a
+    ///   1. Revoke exact recurrence material from the show catalog and
+    ///      repeated-ad cache. Any revocation failure rejects the correction
+    ///      before its one-shot durable receipt is consumed, so the banner
+    ///      remains retryable. Successful partial tombstones are idempotent.
+    ///   2. Atomically flip `AdWindowDecision` to `.reverted` and append a
     ///      row to `ad_listen_rewinds`, keyed to `window.startTime`.
     ///      A missing window or insert failure rejects and rolls back the
     ///      whole receipt so the banner can remain retryable.
-    ///   2. Only after that receipt commits, delegate to
+    ///   3. Only after that receipt commits, delegate to
     ///      `trustScoringService?.recordWeakFalseSkipSignal` for the atomic
     ///      profile mutation + demotion evaluation. Optional chaining lets
     ///      legacy test factories still get the durable correction.
@@ -8641,8 +9085,125 @@ actor AdDetectionService {
     func recordListenRewind(
         windowId: String,
         analysisAssetId: String,
-        podcastId: String
+        podcastId: String,
+        expectedProducerRevision: AdWindow? = nil
     ) async throws {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(windowId) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  analysisAssetId
+              ) != nil,
+              let canonicalPodcastId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(podcastId)
+        else {
+            throw AnalysisStoreError.invalidRow(column: 0)
+        }
+        let correctedWindow: AdWindow
+        if let expectedProducerRevision {
+            guard expectedProducerRevision.id == windowId,
+                  expectedProducerRevision.analysisAssetId
+                    == analysisAssetId else {
+                throw AnalysisStoreError.notFound
+            }
+            correctedWindow = expectedProducerRevision
+        } else {
+            guard let fetched = try await store.fetchAdWindow(id: windowId),
+                  fetched.analysisAssetId == analysisAssetId else {
+                throw AnalysisStoreError.notFound
+            }
+            correctedWindow = fetched
+        }
+        // Revoke recurrence material before making the correction terminal.
+        // Source/creative tombstones fence delayed learners. If either
+        // independent store fails, propagate the failure while the durable
+        // window and banner are still retryable; any tombstone that did land
+        // is a conservative, idempotent partial result.
+        if adCatalogStore != nil || repeatedAdCache != nil {
+            var matchingFingerprint: AcousticFingerprint?
+            var matchingRepeatedFingerprint: RepeatedAdFingerprint?
+            var firstRevocationFailure: Error?
+            let trustedCorrectedWindow: AdWindow? =
+                correctedWindow.analysisAssetId == analysisAssetId
+                    && correctedWindow.id == windowId
+                    ? correctedWindow
+                    : nil
+            if let trustedCorrectedWindow {
+                do {
+                    let featureWindows = try await store.fetchFeatureWindows(
+                        assetId: trustedCorrectedWindow.analysisAssetId,
+                        from: trustedCorrectedWindow.startTime,
+                        to: trustedCorrectedWindow.endTime
+                    )
+                    let fingerprint = AcousticFingerprint.fromFeatureWindows(
+                        featureWindows
+                    )
+                    if !fingerprint.isZero {
+                        matchingFingerprint = fingerprint
+                    }
+                    let repeatedFingerprint = RepeatedAdFingerprint.from(
+                        featureWindows: featureWindows
+                    )
+                    if !repeatedFingerprint.isZero {
+                        matchingRepeatedFingerprint = repeatedFingerprint
+                    }
+                } catch {
+                    firstRevocationFailure = error
+                    logger.warning(
+                        "recordListenRewind: recurrence fingerprint fetch failed"
+                    )
+                }
+            }
+            // The correction request owns current show scope. Persisted
+            // catalogMatchedShowId is historical diagnostic material and can
+            // be stale or corrupt; it must never redirect a tombstone into a
+            // different show's catalog/cache.
+            if let adCatalogStore {
+                do {
+                    _ = try await adCatalogStore.revoke(
+                        matchedEntryId: trustedCorrectedWindow?
+                            .catalogMatchedEntryId
+                            .flatMap(UUID.init),
+                        sourceAssetId: analysisAssetId,
+                        sourceWindowId: windowId,
+                        sourceStartTime: trustedCorrectedWindow?.startTime,
+                        sourceEndTime: trustedCorrectedWindow?.endTime,
+                        source: .listenRevert,
+                        matchingFingerprint: matchingFingerprint,
+                        showId: canonicalPodcastId
+                    )
+                } catch {
+                    if firstRevocationFailure == nil {
+                        firstRevocationFailure = error
+                    }
+                    logger.warning(
+                        "recordListenRewind: catalog revocation failed"
+                    )
+                }
+            }
+            if let repeatedAdCache {
+                do {
+                    _ = try await repeatedAdCache.revokeMatches(
+                        showId: canonicalPodcastId,
+                        fingerprint: matchingRepeatedFingerprint,
+                        sourceAssetId: analysisAssetId,
+                        sourceWindowId: windowId,
+                        sourceStartTime: trustedCorrectedWindow?.startTime,
+                        sourceEndTime: trustedCorrectedWindow?.endTime,
+                        source: .listenRevert
+                    )
+                } catch {
+                    if firstRevocationFailure == nil {
+                        firstRevocationFailure = error
+                    }
+                    logger.warning(
+                        "recordListenRewind: repeated-ad revocation failed"
+                    )
+                }
+            }
+            if let firstRevocationFailure {
+                throw firstRevocationFailure
+            }
+        }
+
         // The decision flip and append-only event are one durable receipt.
         // Propagate any failure so the banner remains retryable; accepting a
         // partial write would consume the user's only correction surface.
@@ -8650,7 +9211,8 @@ actor AdDetectionService {
             windowId: windowId,
             analysisAssetId: analysisAssetId,
             podcastId: podcastId,
-            createdAt: Date()
+            createdAt: Date(),
+            expectedProducerRevision: correctedWindow
         )
 
         // playhead-q45f: route the trust-score side-effect through
@@ -8891,7 +9453,8 @@ actor AdDetectionService {
                     ReconciledHotPathWindow(
                         window: adWindow,
                         matchedExistingID: nil,
-                        retiredExistingIDs: []
+                        retiredExistingIDs: [],
+                        expectedExistingRevisions: [:]
                     )
                 )
                 continue
@@ -8900,6 +9463,29 @@ actor AdDetectionService {
             let allMatchingIDs = Set(matchingWindows.map(\.id))
             matchedExistingIDs.formUnion(allMatchingIDs)
             let retiredExistingIDs = allMatchingIDs.subtracting([existing.id])
+            let sameGeometry = Self.hasSameHotPathGeometry(
+                existing,
+                adWindow
+            )
+            // Reusing an ID is an identity/replay convenience, not permission
+            // to transplant authority. Catalog/evidence state always comes
+            // from this run: even unchanged geometry may now have a revoked,
+            // unavailable, or differently-scoped learned row. An earlier
+            // recognized demotion may remain as a conservative ceiling for
+            // exact geometry, but an earlier automatic/legacy gate cannot
+            // override the fresh verdict. Physical edge anchors may survive
+            // only while both edges remain byte-identical.
+            let existingDecodedGate = existing.eligibilityGate.flatMap {
+                SkipEligibilityGate(rawValue: $0)
+            }
+            let eligibilityGate =
+                sameGeometry
+                    && existingDecodedGate != nil
+                    && existingDecodedGate != .eligible
+                ? existing.eligibilityGate
+                : adWindow.eligibilityGate
+            let edgeAuthority = sameGeometry ? existing : adWindow
+            let descriptiveAuthority = sameGeometry ? existing : adWindow
 
             let preservedWindow = AdWindow(
                 id: existing.id,
@@ -8910,45 +9496,71 @@ actor AdDetectionService {
                 boundaryState: adWindow.boundaryState,
                 decisionState: existing.decisionState,
                 detectorVersion: adWindow.detectorVersion,
-                advertiser: existing.advertiser,
-                product: existing.product,
-                adDescription: existing.adDescription,
+                advertiser: descriptiveAuthority.advertiser,
+                product: descriptiveAuthority.product,
+                adDescription: descriptiveAuthority.adDescription,
                 evidenceText: adWindow.evidenceText,
-                evidenceStartTime: existing.evidenceStartTime ?? adWindow.evidenceStartTime,
-                metadataSource: existing.metadataSource,
-                metadataConfidence: existing.metadataConfidence,
-                metadataPromptVersion: existing.metadataPromptVersion,
+                evidenceStartTime: sameGeometry
+                    ? existing.evidenceStartTime
+                        ?? adWindow.evidenceStartTime
+                    : adWindow.evidenceStartTime,
+                metadataSource: descriptiveAuthority.metadataSource,
+                metadataConfidence: descriptiveAuthority.metadataConfidence,
+                metadataPromptVersion:
+                    descriptiveAuthority.metadataPromptVersion,
                 wasSkipped: existing.wasSkipped,
                 userDismissedBanner: existing.userDismissedBanner,
-                evidenceSources: existing.evidenceSources,
-                eligibilityGate: existing.eligibilityGate,
-                // playhead-epfk: hot-path reconciliation preserves the
-                // existing row's catalog-store match similarity. Hot-path
-                // candidates are not re-fingerprinted; the value lives or
-                // dies with the originating backfill row.
-                catalogStoreMatchSimilarity: existing.catalogStoreMatchSimilarity,
-                // playhead-hdgk: likewise preserve the existing row's per-edge
-                // anchor tiers. The hot path derives no rediff/stinger
-                // provenance of its own, so a fresh reconciled window would
-                // default them to `.unanchored` and lose the fusion-derived
-                // tiers of the matched backfill row. (Today `upsertHotPath…`
-                // routes matched IDs through a targeted UPDATE that never
-                // rewrites these columns, so the persisted values already
-                // survive; carrying them here keeps the in-memory row honest
-                // and hardens against a future switch to full-row REPLACE.)
-                startEdgeAnchor: existing.startEdgeAnchor,
-                endEdgeAnchor: existing.endEdgeAnchor
+                evidenceSources: adWindow.evidenceSources,
+                eligibilityGate: eligibilityGate,
+                catalogStoreMatchSimilarity:
+                    adWindow.catalogStoreMatchSimilarity,
+                catalogFingerprintVersion:
+                    adWindow.catalogFingerprintVersion,
+                catalogMatchedEntryId:
+                    adWindow.catalogMatchedEntryId,
+                catalogMatchedShowId:
+                    adWindow.catalogMatchedShowId,
+                catalogMatchedLearningSource:
+                    adWindow.catalogMatchedLearningSource,
+                catalogMatchedLearningLifecycle:
+                    adWindow.catalogMatchedLearningLifecycle,
+                startEdgeAnchor: edgeAuthority.startEdgeAnchor,
+                endEdgeAnchor: edgeAuthority.endEdgeAnchor
+            )
+            let expectedExistingRevisions = Dictionary(
+                uniqueKeysWithValues: matchingWindows.map { ($0.id, $0) }
             )
             reconciled.append(
                 ReconciledHotPathWindow(
                     window: preservedWindow,
                     matchedExistingID: existing.id,
-                    retiredExistingIDs: retiredExistingIDs
+                    retiredExistingIDs: retiredExistingIDs,
+                    expectedExistingRevisions: expectedExistingRevisions
                 )
             )
         }
 
         return reconciled
+    }
+
+    /// Uses the same numeric equivalence as SQLite persistence. In particular,
+    /// SQLite does not distinguish `-0.0` from `+0.0`; treating those spellings
+    /// as a geometry replacement here could discard a persisted conservative
+    /// eligibility ceiling when a replay emits the opposite zero sign.
+    static func hasSameHotPathGeometry(
+        _ existing: AdWindow,
+        _ incoming: AdWindow
+    ) -> Bool {
+        RecurrenceMaterialIdentity.canonicalTimeBitPattern(
+            existing.startTime
+        ) == RecurrenceMaterialIdentity.canonicalTimeBitPattern(
+            incoming.startTime
+        )
+            && RecurrenceMaterialIdentity.canonicalTimeBitPattern(
+                existing.endTime
+            ) == RecurrenceMaterialIdentity.canonicalTimeBitPattern(
+                incoming.endTime
+            )
     }
 
     private func currentHotPathCandidateWindows(
@@ -8961,15 +9573,15 @@ actor AdDetectionService {
             }
     }
 
-    private func hotPathCandidateIDs(
+    private func hotPathCandidateRevisions(
         analysisAssetId: String,
         overlapping replayEnvelope: ClosedRange<Double>
-    ) async throws -> Set<String> {
+    ) async throws -> [String: AdWindow] {
         let windows = try await currentHotPathCandidateWindows(
             analysisAssetId: analysisAssetId
         )
-        return Set(
-            windows
+        return Dictionary(
+            uniqueKeysWithValues: windows
                 .filter { window in
                     // playhead-hygc.1.8 (R4): correction-replay rows are
                     // user-correction-backed shadow windows that the
@@ -8997,7 +9609,7 @@ actor AdDetectionService {
                         && window.endTime > replayEnvelope.lowerBound
                         && window.startTime < replayEnvelope.upperBound
                 }
-                .map(\.id)
+                .map { ($0.id, $0) }
         )
     }
 
@@ -9629,25 +10241,18 @@ actor AdDetectionService {
 
     /// Fetch feature windows for each lexical candidate and run the classifier.
     ///
-    /// playhead-43ed: when `repeatedAdCache` is wired and an entry for the
-    /// current show matches a candidate's perceptual fingerprint, the
-    /// classifier round-trip is skipped and the cached
-    /// `(boundaryStart, boundaryEnd, confidence)` is replayed as a
-    /// synthesized `ClassifierResult`. The cache lookup is per-candidate;
-    /// hits and misses interleave freely. Misses fall through to the
-    /// usual classifier path.
+    /// playhead-43ed: when `repeatedAdCache` is wired, lookups measure
+    /// show-scoped recurrence alongside the classifier. A cache row contains
+    /// source-episode absolute coordinates, so it must never replace the
+    /// current candidate's classifier result.
     private func classifyCandidates(
         _ candidates: [LexicalCandidate],
-        analysisAssetId: String
+        analysisAssetId: String,
+        podcastId: String?
     ) async throws -> [ClassifierResult] {
         var inputs: [ClassifierInput] = []
-        // Index back from the in-order `inputs` array to its candidate so
-        // we can splice cached hits back into the same positions in the
-        // returned result without losing input ordering.
-        var inputIndexByCandidate: [String: Int] = [:]
-        var cacheHits: [String: ClassifierResult] = [:]
-        // playhead-43ed C2: candidates whose cache lookup MISSED. We
-        // intentionally do NOT call `recordOutcome(false)` at miss time
+        var deferredCacheOutcomeByCandidate: [String: Bool] = [:]
+        // We intentionally do NOT record outcomes at lookup time
         // because most lexical candidates are non-ads — recording a miss
         // for a candidate the classifier ultimately rejects below the
         // store-confidence floor would saturate the rolling-window
@@ -9656,14 +10261,17 @@ actor AdDetectionService {
         // cache has had any chance to warm.
         //
         // Instead we defer the outcome to AFTER classification and only
-        // record `recordOutcome(false)` when the classifier verdict
+        // record the hit/miss when the classifier verdict
         // clears the same gate that controls `store(...)`
         // (`adProbability >= storeConfidenceThreshold`). That makes the
         // metric "out of confirmed-ad candidates, how many were answered
         // from cache" — the actual signal the auto-disable guard wants.
-        var deferredMissCandidateIds: [String] = []
-
-        let cacheShowId = currentPodcastProfile?.podcastId
+        // The request's show identity is authoritative for recurrence
+        // matching. Never fall back to `currentPodcastProfile`: that actor
+        // state may belong to the previous episode, and a nil/blank request
+        // must fail closed instead of querying a stale show's cache.
+        let cacheShowId =
+            RecurrenceMaterialIdentity.canonicalIdentifier(podcastId)
 
         for candidate in candidates {
             // Layer 0: Fetch acoustic features overlapping this candidate.
@@ -9675,10 +10283,10 @@ actor AdDetectionService {
                 to: candidate.endTime + margin
             )
 
-            // playhead-43ed: cache lookup BEFORE invoking the classifier.
+            // playhead-43ed: cache lookup before invoking the classifier.
             // Three guards keep the cache strictly opt-in and side-effect-
             // safe: (1) a real RepeatedAdCacheService has been wired,
-            // (2) the current podcast profile carries a non-empty showId,
+            // (2) the current request carries a non-empty showId,
             // (3) the fingerprint derives to a non-zero value (zero is a
             // documented "do not cache" sentinel — see
             // RepeatedAdFingerprint.zero).
@@ -9689,60 +10297,17 @@ actor AdDetectionService {
                 if !fp.isZero {
                     // Both lookup and outcome recording are best-effort:
                     // a transient SQLite hiccup must not bring down the
-                    // hot path. Failures are logged once and the candidate
-                    // falls through to the classifier as if the cache had
-                    // missed.
+                    // hot path. Lookup failures are logged and the candidate
+                    // falls through to the classifier as if the cache missed.
                     do {
                         let outcome = try await cache.lookup(showId: showId, fingerprint: fp)
                         switch outcome {
-                        case let .hit(entry):
-                            // Synthesize a ClassifierResult that the rest
-                            // of the hot path can consume identically to a
-                            // real classifier output. Boundary times come
-                            // from the cached entry; `adProbability` is
-                            // the cached detection confidence (always
-                            // ≥ 0.85 — `store` enforces that floor). The
-                            // signal breakdown is zeroed — the cache
-                            // doesn't preserve individual contributors.
-                            cacheHits[candidate.id] = ClassifierResult(
-                                candidateId: candidate.id,
-                                analysisAssetId: analysisAssetId,
-                                startTime: entry.boundaryStart,
-                                endTime: entry.boundaryEnd,
-                                adProbability: entry.confidence,
-                                startAdjustment: 0,
-                                endAdjustment: 0,
-                                signalBreakdown: SignalBreakdown(
-                                    lexicalScore: 0,
-                                    rmsDropScore: 0,
-                                    spectralChangeScore: 0,
-                                    musicScore: 0,
-                                    speakerChangeScore: 0,
-                                    priorScore: 0
-                                )
-                            )
-                            // playhead-43ed C2: A hit's synthesized
-                            // adProbability is `entry.confidence`, which
-                            // `store(...)` guarantees is
-                            // ≥ storeConfidenceThreshold. So a hit here
-                            // is unambiguously a confirmed-ad-shaped
-                            // outcome and we can record it immediately.
-                            try? await cache.recordOutcome(hit: true)
-                            // Skip building a ClassifierInput for this
-                            // candidate — the cache hit replaces the
-                            // classifier round-trip outright.
-                            continue
+                        case .hit:
+                            deferredCacheOutcomeByCandidate[candidate.id] =
+                                true
                         case .miss:
-                            // playhead-43ed C2: defer the miss outcome
-                            // until classification finishes. We only
-                            // record `recordOutcome(false)` if the
-                            // classifier verdict clears the same
-                            // `storeConfidenceThreshold` gate that
-                            // controls `store(...)`. Pre-fix this fired
-                            // for every lexical candidate (mostly non-
-                            // ads) and tripped the 5% auto-disable floor
-                            // on the first session.
-                            deferredMissCandidateIds.append(candidate.id)
+                            deferredCacheOutcomeByCandidate[candidate.id] =
+                                false
                         case .skippedDisabled:
                             // Cache is currently disabled (kill-switch or
                             // auto-disable). Do NOT record an outcome —
@@ -9756,7 +10321,6 @@ actor AdDetectionService {
                 }
             }
 
-            inputIndexByCandidate[candidate.id] = inputs.count
             inputs.append(ClassifierInput(
                 candidate: candidate,
                 featureWindows: featureWindows,
@@ -9764,43 +10328,35 @@ actor AdDetectionService {
             ))
         }
 
-        // Layer 2: Classify the candidates that didn't hit the cache.
+        // Layer 2: classify every candidate. Recurrence is never a parallel
+        // automatic promotion channel.
         let classifierResults = classifier.classify(inputs: inputs, priors: showPriors)
 
-        // playhead-43ed C2: now that classification is done, replay any
-        // deferred miss outcomes — but only for candidates whose verdict
+        // Now that classification is done, record recurrence outcomes only
+        // for candidates whose current-episode verdict
         // clears the same `storeConfidenceThreshold` gate that controls
         // `store(...)`. A non-ad candidate with low classifier
         // probability is noise, not signal, and must not feed the
         // rolling-window auto-disable metric.
-        if let cache = repeatedAdCache, !deferredMissCandidateIds.isEmpty {
+        if let cache = repeatedAdCache,
+           !deferredCacheOutcomeByCandidate.isEmpty {
             let storeFloor = cache.config.storeConfidenceThreshold
-            for candidateId in deferredMissCandidateIds {
-                guard let idx = inputIndexByCandidate[candidateId],
-                      idx < classifierResults.count else { continue }
-                let result = classifierResults[idx]
-                if result.adProbability >= storeFloor {
-                    try? await cache.recordOutcome(hit: false)
+            for result in classifierResults
+            where result.adProbability >= storeFloor {
+                if let hit =
+                    deferredCacheOutcomeByCandidate[result.candidateId] {
+                    do {
+                        try await cache.recordOutcome(hit: hit)
+                    } catch {
+                        logger.error(
+                            "RepeatedAdCache outcome recording failed: \(String(describing: error))"
+                        )
+                    }
                 }
             }
         }
 
-        // Reassemble in the original candidate order: hits first replaced
-        // by their synthesized result, misses by their classifier output.
-        // Iterating `candidates` (rather than `classifierResults`)
-        // preserves the input ordering that the rest of the hot path
-        // assumes (`runHotPathResult` indexes by `candidatesByID`, which
-        // is order-agnostic, but emit-decision-logs is positional).
-        var combined: [ClassifierResult] = []
-        combined.reserveCapacity(candidates.count)
-        for candidate in candidates {
-            if let hit = cacheHits[candidate.id] {
-                combined.append(hit)
-            } else if let idx = inputIndexByCandidate[candidate.id], idx < classifierResults.count {
-                combined.append(classifierResults[idx])
-            }
-        }
-        return combined
+        return classifierResults
     }
 
     // MARK: - Hot-path Decision Logging
@@ -9953,7 +10509,8 @@ actor AdDetectionService {
         tier2Results: [ClassifierResult],
         singleWindowAdWindows: [AdWindow],
         analysisAssetId: String,
-        lexicalCandidates: [LexicalCandidate] = []
+        lexicalCandidates: [LexicalCandidate] = [],
+        podcastId: String?
     ) async throws -> [AdWindow] {
         // Merge tier 1 + tier 2 into a single sorted WindowScore stream.
         // SegmentAggregator requires ASC by startTime.
@@ -10087,13 +10644,18 @@ actor AdDetectionService {
                 .reduce(into: Set<LexicalPatternCategory>()) { acc, lc in
                     acc.formUnion(lc.categories)
                 }
-            let gateLabel = await precisionGateLabel(
+            let gateResult = await precisionGateLabel(
                 analysisAssetId: analysisAssetId,
                 startTime: segment.startTime,
                 endTime: segment.endTime,
                 segmentScore: segment.segmentScore,
-                lexicalCategories: overlappingCategories
+                lexicalCategories: overlappingCategories,
+                podcastId: podcastId
             )
+            // A nil label means detection-only. Do not turn that fail-closed
+            // result into a legacy nil-gated AdWindow at this second producer
+            // site.
+            guard let eligibilityGate = gateResult.label else { continue }
             newWindows.append(
                 AdWindow(
                     id: UUID().uuidString,
@@ -10114,7 +10676,17 @@ actor AdDetectionService {
                     metadataPromptVersion: nil,
                     wasSkipped: false,
                     userDismissedBanner: false,
-                    eligibilityGate: gateLabel
+                    eligibilityGate: eligibilityGate,
+                    catalogStoreMatchSimilarity:
+                        gateResult.catalogStoreMatchSimilarity,
+                    catalogFingerprintVersion: gateResult.catalogMatch?
+                        .entry.acousticFingerprint.version.rawValue,
+                    catalogMatchedEntryId: gateResult.catalogMatch?.entry.id.uuidString,
+                    catalogMatchedShowId: gateResult.catalogMatch?.entry.showId,
+                    catalogMatchedLearningSource: gateResult.catalogMatch?
+                        .entry.learningSource.rawValue,
+                    catalogMatchedLearningLifecycle: gateResult.catalogMatch?
+                        .entry.learningLifecycle.rawValue
                 )
             )
         }
@@ -10321,7 +10893,7 @@ actor AdDetectionService {
     /// a later analysis run whose transcript/FM fusion would not re-emit them.
     /// The literal "dayZeroRediffByteExact" is therefore also listed in
     /// `reconcileProtectedBoundaryStates` (backfill), excluded in
-    /// `hotPathCandidateIDs` (hot-path retirement), and recognized as
+    /// `hotPathCandidateRevisions` (hot-path retirement), and recognized as
     /// local-only in `CrossUserSharing.isLocalOnlyBoundaryState` (so it is never
     /// exported and never aborts a cross-user snapshot). Retirable ONLY by an
     /// explicit user veto (`decisionState = .reverted`).
@@ -10596,7 +11168,9 @@ actor AdDetectionService {
         evidenceStartTime: Double?,
         expandedStartTime: Double? = nil,
         expandedEndTime: Double? = nil,
-        eligibilityGate: String? = nil
+        eligibilityGate: String? = nil,
+        catalogMatch: CatalogMatch? = nil,
+        catalogStoreMatchSimilarity: Double? = nil
     ) -> AdWindow {
         AdWindow(
             id: UUID().uuidString,
@@ -10617,7 +11191,16 @@ actor AdDetectionService {
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false,
-            eligibilityGate: eligibilityGate
+            eligibilityGate: eligibilityGate,
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            catalogFingerprintVersion: catalogMatch?
+                .entry.acousticFingerprint.version.rawValue,
+            catalogMatchedEntryId: catalogMatch?.entry.id.uuidString,
+            catalogMatchedShowId: catalogMatch?.entry.showId,
+            catalogMatchedLearningSource:
+                catalogMatch?.entry.learningSource.rawValue,
+            catalogMatchedLearningLifecycle:
+                catalogMatch?.entry.learningLifecycle.rawValue
         )
     }
 
@@ -10653,8 +11236,9 @@ actor AdDetectionService {
         startTime: Double,
         endTime: Double,
         segmentScore: Double,
-        lexicalCategories: Set<LexicalPatternCategory>
-    ) async -> String? {
+        lexicalCategories: Set<LexicalPatternCategory>,
+        podcastId: String?
+    ) async -> PrecisionGateResult {
         let overlappingFeatureWindows: [FeatureWindow]
         do {
             overlappingFeatureWindows = try await store.fetchFeatureWindows(
@@ -10667,8 +11251,8 @@ actor AdDetectionService {
             overlappingFeatureWindows = []
         }
 
-        // TODO(gtt9.11): correctionStore is optional and only present once
-        // PlayheadRuntime installs it post-init. Absence → factor 1.0, which
+        // correctionStore is optional and only present once PlayheadRuntime
+        // installs it post-init. Absence → factor 1.0, which
         // disables the userConfirmedLocalPattern safety signal for this
         // window. This is honest: without a correction store we genuinely
         // have no user-confirmation evidence.
@@ -10699,9 +11283,11 @@ actor AdDetectionService {
             slotFraction: AutoSkipPrecisionGateConfig.default.slotFraction
         )
 
-        // playhead-2m2i: query the catalog so `SafetySignal.catalogMatch`
-        // actually contributes to the auto-vs-markOnly decision. Prior to
-        // this bead, `precisionGateLabel` constructed
+        // playhead-2m2i / playhead-o4qr: query the catalog so
+        // `SafetySignal.catalogMatch` is available as diagnostic context.
+        // Catalog evidence is deliberately excluded from automatic authority;
+        // the service still requires a strong independent corroborator. Prior
+        // to the original wiring bead, `precisionGateLabel` constructed
         // `AutoSkipPrecisionGateInput` without `catalogMatchSimilarity`,
         // so the field defaulted to 0 and the catalog signal could never
         // fire from the hot path — even when the catalog had a real
@@ -10711,35 +11297,32 @@ actor AdDetectionService {
         // the gate uses for the acoustic safety signal — no second
         // `fetchFeatureWindows` round trip. The catalog DB query itself
         // (SQLite) still runs, but only when a catalog store is wired.
-        // Returns 0 when no catalog store is wired (preserves the
-        // pre-bead behaviour byte-for-byte) or when the fingerprint is
-        // zero (sparse / silent span — `AdCatalogStore.matches` would
-        // refuse to match anyway).
+        // Optional match arrays preserve the telemetry distinction: nil when
+        // the store/show/fingerprint/query is unavailable, an empty array for
+        // an observed exact-show miss, and a populated array for a match.
         //
-        // Show context: the hot path doesn't carry `podcastId` through
-        // `runHotPath`, so this query passes `show: nil` (global match
-        // across all shows). `AdCatalogStore.matches(show:)` accepts a
-        // nil show and falls back to the unscoped query, which matches
-        // both `show_id IS NULL` rows and any per-show entry; that is
-        // strictly looser than the fusion path's per-show query (which
-        // does have `podcastId` available) but still correct: a
-        // cross-show fingerprint collision at the 0.80 default floor is
-        // an extreme positive, and elevating those is precisely the
-        // precision win the catalog signal is designed to deliver.
-        let catalogMatchSimilarity: Float
-        if let adCatalogStore, !overlappingFeatureWindows.isEmpty {
+        let normalizedShowId =
+            RecurrenceMaterialIdentity.canonicalIdentifier(podcastId)
+        let catalogMatches: [CatalogMatch]?
+        if let adCatalogStore,
+           let normalizedShowId,
+           !overlappingFeatureWindows.isEmpty {
             let fingerprint = AcousticFingerprint.fromFeatureWindows(overlappingFeatureWindows)
             if fingerprint.isZero {
-                catalogMatchSimilarity = 0
+                catalogMatches = nil
             } else {
-                let matches = await adCatalogStore.matches(
+                catalogMatches = await adCatalogStore.matchesIfAvailable(
                     fingerprint: fingerprint,
-                    show: nil
+                    show: normalizedShowId
                 )
-                catalogMatchSimilarity = matches.first?.similarity ?? 0
             }
         } else {
-            catalogMatchSimilarity = 0
+            catalogMatches = nil
+        }
+        let catalogMatch = catalogMatches?.first
+        let catalogMatchSimilarity = catalogMatch?.similarity ?? 0
+        let persistedCatalogMatchSimilarity = catalogMatches.map {
+            Double($0.first?.similarity ?? 0)
         }
 
         // playhead-gtt9.26: Calibrate the post-fusion classifier score
@@ -10757,6 +11340,7 @@ actor AdDetectionService {
         let calibratedScore = calibrator.calibrate(segmentScore)
 
         let input = AutoSkipPrecisionGateInput(
+            analysisAssetId: analysisAssetId,
             segmentStartTime: startTime,
             segmentEndTime: endTime,
             segmentScore: calibratedScore,
@@ -10769,9 +11353,19 @@ actor AdDetectionService {
 
         switch AutoSkipPrecisionGate.classify(input: input, config: gateConfig) {
         case .detectionOnly:
-            return nil
+            return PrecisionGateResult(
+                label: nil,
+                catalogMatch: catalogMatch,
+                catalogStoreMatchSimilarity:
+                    persistedCatalogMatchSimilarity
+            )
         case .uiCandidate:
-            return "markOnly"
+            return PrecisionGateResult(
+                label: "markOnly",
+                catalogMatch: catalogMatch,
+                catalogStoreMatchSimilarity:
+                    persistedCatalogMatchSimilarity
+            )
         case .autoSkipEligible(let firedSignals):
             // playhead-9ro7 (cycle-2 follow-up): metadataSlotPrior fires by
             // construction whenever the segment center is in the first/last
@@ -10795,12 +11389,21 @@ actor AdDetectionService {
                 .strongLexicalAdPhrase,
                 .sustainedAcousticAdSignature,
                 .userConfirmedLocalPattern,
-                .catalogMatch,
             ]
             if firedSignals.isDisjoint(with: strongCorroborators) {
-                return "markOnly"
+                return PrecisionGateResult(
+                    label: "markOnly",
+                    catalogMatch: catalogMatch,
+                    catalogStoreMatchSimilarity:
+                        persistedCatalogMatchSimilarity
+                )
             }
-            return "autoSkip"
+            return PrecisionGateResult(
+                label: "autoSkip",
+                catalogMatch: catalogMatch,
+                catalogStoreMatchSimilarity:
+                    persistedCatalogMatchSimilarity
+            )
         }
     }
 
@@ -10882,8 +11485,8 @@ actor AdDetectionService {
                 windowEndTime: window.endTime
             ) else { return }
 
-            try await store.updateAdWindowMetadata(
-                id: window.id,
+            let persisted = try await store.updateAdWindowMetadataIfCurrent(
+                expectedProducerRevision: window,
                 advertiser: metadata.advertiser,
                 product: metadata.product,
                 evidenceText: metadata.evidenceText,
@@ -10891,6 +11494,11 @@ actor AdDetectionService {
                 metadataConfidence: metadata.confidence,
                 metadataPromptVersion: metadata.promptVersion
             )
+            if !persisted {
+                logger.debug(
+                    "Metadata extraction result ignored for stale window \(window.id, privacy: .public)"
+                )
+            }
         } catch {
             logger.warning("Metadata extraction failed for window \(window.id): \(error.localizedDescription)")
         }

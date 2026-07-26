@@ -6,23 +6,19 @@
 // This file pins the *seam between* `RepeatedAdCacheService` and
 // `AdDetectionService` so a future refactor can't quietly disconnect either:
 //
-//   #11. cacheHitSkipsClassifierAndReusesCachedConfidence
+//   #11. cacheHitDoesNotReplaceCurrentEpisodeClassifier
 //        Pre-seed the cache with a fingerprint that matches what the
 //        candidate's feature windows will hash to. Run the hot path.
-//        Assert the resulting AdWindow's confidence equals the cached
-//        confidence (the classifier round-trip was bypassed).
+//        Assert stale source-episode bounds/confidence are never replayed.
 //
 //   #12. cacheMissFallsThroughToFullPipeline
 //        Cache empty. Run the hot path on the same input. Assert the
 //        pipeline runs end-to-end (windows produced, the cache records
 //        a miss outcome).
 //
-// These tests deliberately reach down into `runHotPath` rather than
-// `runBackfill` because `classifyCandidates` (the lookup site) sits on the
-// hot path. The store-side hook (in `runBackfill`'s fusion loop) is exercised
-// by AdCatalogWiringTests's autoSkipEligible path interleaved with the cache;
-// here we focus on the lookup contract because that is the user-visible
-// performance win.
+// These tests deliberately reach down into `runHotPath` because
+// `classifyCandidates` (the lookup site) sits there. Authoritative cache
+// ingress is exercised with the catalog lifecycle in AdCatalogWiringTests.
 
 import Foundation
 import Testing
@@ -221,10 +217,10 @@ struct RepeatedAdCacheWiringTests {
         return RepeatedAdFingerprint.from(featureWindows: windows)
     }
 
-    // MARK: - #11 — cache hit short-circuits the classifier
+    // MARK: - #11 — cache hit remains non-authoritative
 
-    @Test("cache hit replays cached confidence and boundary, bypassing the classifier")
-    func cacheHitSkipsClassifierAndReusesCachedConfidence() async throws {
+    @Test("cache hit cannot replay stale source bounds or replace current classifier")
+    func cacheHitDoesNotReplaceCurrentEpisodeClassifier() async throws {
         let analysisStore = try await makeTestStore()
         let assetId = "asset-43ed-cache-hit"
         try await analysisStore.insertAsset(makeAsset(id: assetId))
@@ -239,28 +235,145 @@ struct RepeatedAdCacheWiringTests {
             initiallyEnabled: true
         )
 
-        // Pre-seed with the fingerprint the candidate will hash to, plus
-        // a recognizable cached confidence + boundaries that differ from
-        // anything the classifier would produce. confidence=0.97 is well
-        // above any plausible classifier output for this fixture.
+        // Pre-seed with the fingerprint the candidate will hash to, but use
+        // absolute coordinates from a different episode. Replaying them into
+        // this 200-second episode would be unmistakably unsafe.
         let fp = try await candidateFingerprint(for: assetId, store: analysisStore)
         try #require(!fp.isZero, "fixture must yield a non-zero fingerprint")
-        let cachedBoundaryStart = 62.0
-        let cachedBoundaryEnd = 82.0
+        let cachedBoundaryStart = 3_493.02
+        let cachedBoundaryEnd = 3_537.95
         let cachedConfidence = 0.97
         let stored = try await cache.store(
             showId: "show-43ed-cache-hit",
             fingerprint: fp,
             boundaryStart: cachedBoundaryStart,
             boundaryEnd: cachedBoundaryEnd,
-            confidence: cachedConfidence
+            confidence: cachedConfidence,
+            learningSource: .userMarkedAd,
+            learningLifecycle: .explicitConfirmation,
+            sourceAssetId: "asset-43ed-confirmed",
+            sourceWindowId: "window-43ed-confirmed"
         )
         try #require(stored, "precondition: cache must accept the seed entry")
 
-        // Same showId on the profile — required guard inside
-        // `classifyCandidates` for the cache lookup to fire.
+        // The request below carries this same show ID. The profile remains
+        // present for classifier priors, but is never a cache-key fallback.
         let profile = PodcastProfile(
             podcastId: "show-43ed-cache-hit",
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.5,
+            observationCount: 0,
+            mode: SkipMode.auto.rawValue,
+            recentFalseSkipSignals: 0
+        )
+        struct CurrentEpisodeClassifier: ClassifierService {
+            func classify(
+                inputs: [ClassifierInput],
+                priors: ShowPriors
+            ) -> [ClassifierResult] {
+                inputs.map { classify(input: $0, priors: priors) }
+            }
+
+            func classify(
+                input: ClassifierInput,
+                priors: ShowPriors
+            ) -> ClassifierResult {
+                ClassifierResult(
+                    candidateId: input.candidate.id,
+                    analysisAssetId: input.candidate.analysisAssetId,
+                    startTime: input.candidate.startTime,
+                    endTime: input.candidate.endTime,
+                    adProbability: 0.91,
+                    startAdjustment: 0,
+                    endAdjustment: 0,
+                    signalBreakdown: SignalBreakdown(
+                        lexicalScore: 0.91,
+                        rmsDropScore: 0,
+                        spectralChangeScore: 0,
+                        musicScore: 0,
+                        speakerChangeScore: 0,
+                        priorScore: 0
+                    )
+                )
+            }
+        }
+        let service = AdDetectionService(
+            store: analysisStore,
+            classifier: CurrentEpisodeClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90,
+                detectorVersion: "playhead-43ed-current-episode-test",
+                fmBackfillMode: .off
+            ),
+            podcastProfile: profile,
+            repeatedAdCache: cache
+        )
+
+        let windows = try await service.runHotPath(
+            chunks: lexicalAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            episodeDuration: 200.0,
+            podcastId: profile.podcastId
+        )
+
+        #expect(!windows.isEmpty)
+        #expect(windows.allSatisfy { $0.endTime <= 200 })
+        #expect(windows.allSatisfy {
+            $0.startTime != cachedBoundaryStart
+                && $0.endTime != cachedBoundaryEnd
+                && $0.confidence != cachedConfidence
+        })
+        // The lookup still contributes recurrence telemetry after the current
+        // classifier independently confirms the candidate.
+        let snapshot = try await cache.currentHitRateSnapshot()
+        #expect(snapshot.totalSamples >= 1, "expected at least one outcome sample after hot path")
+        #expect(snapshot.hitCount >= 1, "expected at least one cache hit after hot path with pre-seeded fingerprint")
+    }
+
+    @Test("missing and noncanonical request show IDs never query a stale podcast profile cache")
+    func missingRequestShowFailsClosedDespiteProfile() async throws {
+        let analysisStore = try await makeTestStore()
+        let assetId = "asset-43ed-missing-request-show"
+        try await analysisStore.insertAsset(makeAsset(id: assetId))
+        try await analysisStore.insertFeatureWindows(
+            syntheticAdWindows(assetId: assetId)
+        )
+
+        let storage = AnalysisStoreRepeatedAdCacheStorage(
+            store: analysisStore
+        )
+        let cache = RepeatedAdCacheService(
+            config: .production,
+            storage: storage,
+            initiallyEnabled: true
+        )
+        let fingerprint = try await candidateFingerprint(
+            for: assetId,
+            store: analysisStore
+        )
+        try #require(!fingerprint.isZero)
+        #expect(try await cache.store(
+            showId: "stale-profile-show",
+            fingerprint: fingerprint,
+            boundaryStart: 62,
+            boundaryEnd: 82,
+            confidence: 0.97,
+            learningSource: .userMarkedAd,
+            learningLifecycle: .explicitConfirmation,
+            sourceAssetId: "seed-asset",
+            sourceWindowId: "seed-window"
+        ))
+
+        let staleProfile = PodcastProfile(
+            podcastId: "stale-profile-show",
             sponsorLexicon: nil,
             normalizedAdSlotPriors: nil,
             repeatedCTAFragments: nil,
@@ -274,19 +387,27 @@ struct RepeatedAdCacheWiringTests {
         let service = makeService(
             store: analysisStore,
             repeatedAdCache: cache,
-            podcastProfile: profile
+            podcastProfile: staleProfile
         )
 
-        _ = try await service.runHotPath(
-            chunks: lexicalAdChunks(assetId: assetId),
-            analysisAssetId: assetId,
-            episodeDuration: 200.0
-        )
+        for requestShowId: String? in [
+            nil,
+            " \n ",
+            " stale-profile-show ",
+        ] {
+            _ = try await service.runHotPath(
+                chunks: lexicalAdChunks(assetId: assetId),
+                analysisAssetId: assetId,
+                episodeDuration: 200,
+                podcastId: requestShowId
+            )
+        }
 
-        // The lookup should have produced a hit — the cache records it.
         let snapshot = try await cache.currentHitRateSnapshot()
-        #expect(snapshot.totalSamples >= 1, "expected at least one outcome sample after hot path")
-        #expect(snapshot.hitCount >= 1, "expected at least one cache hit after hot path with pre-seeded fingerprint")
+        #expect(
+            snapshot.totalSamples == 0,
+            "missing request identity must perform no recurrence lookup, even when the actor still holds a matching profile"
+        )
     }
 
     // MARK: - #12 — cache miss falls through to the full pipeline
@@ -327,7 +448,8 @@ struct RepeatedAdCacheWiringTests {
         _ = try await service.runHotPath(
             chunks: lexicalAdChunks(assetId: assetId),
             analysisAssetId: assetId,
-            episodeDuration: 200.0
+            episodeDuration: 200.0,
+            podcastId: profile.podcastId
         )
 
         // The lookup ran, missed, and recorded a miss outcome.
@@ -367,7 +489,8 @@ struct RepeatedAdCacheWiringTests {
         _ = try await service.runHotPath(
             chunks: lexicalAdChunks(assetId: assetId),
             analysisAssetId: assetId,
-            episodeDuration: 200.0
+            episodeDuration: 200.0,
+            podcastId: profile.podcastId
         )
     }
 
@@ -481,7 +604,8 @@ struct RepeatedAdCacheWiringTests {
         _ = try await service.runHotPath(
             chunks: lexicalAdChunks(assetId: assetId),
             analysisAssetId: assetId,
-            episodeDuration: 200.0
+            episodeDuration: 200.0,
+            podcastId: profile.podcastId
         )
 
         // The cache must remain enabled — a fresh cache with miss-only
@@ -582,7 +706,8 @@ struct RepeatedAdCacheWiringTests {
         _ = try await service.runHotPath(
             chunks: lexicalAdChunks(assetId: assetId),
             analysisAssetId: assetId,
-            episodeDuration: 200.0
+            episodeDuration: 200.0,
+            podcastId: profile.podcastId
         )
 
         // At least one miss outcome should have been recorded — the

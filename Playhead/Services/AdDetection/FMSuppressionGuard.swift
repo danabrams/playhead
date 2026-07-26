@@ -9,7 +9,8 @@
 //   Suppression only activates when ALL five strict guards pass:
 //     1. FM disposition is .noAds
 //     2. CertaintyBand is at least .moderate
-//     3. No strong anchors present (no URL, promo code, disclosure in lexical/catalog)
+//     3. No strong current-episode anchors present (no URL, promo code, or
+//        disclosure in lexical/transcript-catalog evidence)
 //     4. No fingerprint match in ledger
 //     5. 2+ overlapping noAds FM windows (consensus)
 
@@ -69,8 +70,8 @@ struct FMSuppressionGuard: Sendable {
     // MARK: - Private
 
     /// Strong anchors are urlCTA, promoCode, or sponsor categories in lexical entries,
-    /// or any positive catalog entry. These represent high-trust positive evidence
-    /// that must never be suppressed.
+    /// or any positive transcript-catalog entry. Learned fingerprint-catalog
+    /// rows are diagnostic-only and cannot block a safety suppression.
     private var hasStrongAnchors: Bool {
         let strongLexicalCategories: Set<String> = [
             LexicalPatternCategory.urlCTA.rawValue,
@@ -78,7 +79,7 @@ struct FMSuppressionGuard: Sendable {
             LexicalPatternCategory.sponsor.rawValue,
         ]
         for entry in ledger {
-            guard !entry.source.isObservabilityOnly else { continue }
+            guard entry.contributesToAutomaticDecision else { continue }
             switch entry.detail {
             case .lexical(let matchedCategories):
                 if matchedCategories.contains(where: { strongLexicalCategories.contains($0) }) {
@@ -205,7 +206,7 @@ struct FMSuppressionApplicator: Sendable {
         var hasStrongProposal = false
 
         for entry in ledger {
-            if entry.source.isObservabilityOnly {
+            if !entry.contributesToAutomaticDecision {
                 suppressedLedger.append(entry)
                 continue
             }

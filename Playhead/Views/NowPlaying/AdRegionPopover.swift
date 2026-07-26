@@ -12,10 +12,10 @@ import SwiftUI
 struct AdRegionPopover: View {
 
     let span: DecodedSpan
-    let correctionStore: any UserCorrectionStore
-    /// Callback to revert overlapping ad windows in the SkipOrchestrator.
-    /// Injected by the caller; defaults to no-op for backward compatibility.
-    var onRevertAdWindows: (DecodedSpan) async -> Void = { _ in }
+    /// Sole correction boundary. The callback commits the CorrectionEvent and
+    /// every exact overlapping AdWindow revision in one transaction. `false`
+    /// leaves the popover open so a failed/stale action can be retried.
+    var onRevertAdWindows: (DecodedSpan) async -> Bool = { _ in false }
     var onDismiss: () -> Void = {}
 
     @State private var showVetoConfirmation = false
@@ -37,11 +37,8 @@ struct AdRegionPopover: View {
         .alert("Mark as not an ad?", isPresented: $showVetoConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Confirm", role: .destructive) {
-                Task {
-                    await correctionStore.recordVeto(span: span)
-                    // Revert overlapping ad windows in the orchestrator so the
-                    // skip cue is removed and the timeline updates immediately.
-                    await onRevertAdWindows(span)
+                Task { @MainActor in
+                    guard await onRevertAdWindows(span) else { return }
                     onDismiss()
                 }
             }

@@ -83,7 +83,14 @@ struct RepeatedAdFingerprint: Sendable, Hashable, Codable {
     /// Parse back from `hexString`. Returns `nil` if the string is not
     /// exactly 16 lowercase hex characters.
     init?(hexString: String) {
-        guard hexString.count == 16 else { return nil }
+        guard hexString.count == 16,
+              hexString == hexString.lowercased(),
+              hexString.unicodeScalars.allSatisfy({
+                  (48...57).contains($0.value)
+                      || (97...102).contains($0.value)
+              }) else {
+            return nil
+        }
         guard let v = UInt64(hexString, radix: 16) else { return nil }
         self.init(bits: v)
     }
@@ -117,6 +124,9 @@ extension RepeatedAdFingerprint {
         var padded = Array(values.prefix(n))
         if padded.count < n {
             padded.append(contentsOf: [Float](repeating: 0, count: n - padded.count))
+        }
+        guard padded.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
+            return .zero
         }
         // All-zero vector → all-zero fingerprint sentinel.
         if padded.allSatisfy({ $0 == 0 }) { return .zero }

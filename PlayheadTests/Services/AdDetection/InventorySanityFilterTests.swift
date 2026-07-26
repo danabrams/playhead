@@ -775,7 +775,15 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
             endTime: 120,
             skipConfidence: 0.9,
             eligibilityGate: .eligible,
-            recomputationRevision: 1
+            recomputationRevision: 1,
+            producerRevision: makeSkipTestAdWindow(
+                id: "fusion-good",
+                assetId: "asset-xr3t",
+                startTime: 60,
+                endTime: 120,
+                confidence: 0.9,
+                eligibilityGate: SkipEligibilityGate.eligible.rawValue
+            )
         )
         await orchestrator.receiveAdDecisionResults([tooShort, valid])
 

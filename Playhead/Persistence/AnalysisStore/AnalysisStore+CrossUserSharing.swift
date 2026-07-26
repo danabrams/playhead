@@ -56,6 +56,7 @@ struct CrossUserAnalysisShareKey: Codable, Equatable, Hashable, Sendable {
     }
 
     private static func isCanonicalTupleComponent(_ value: String) -> Bool {
+        guard !value.utf8.contains(0) else { return false }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed == value
     }
@@ -108,7 +109,12 @@ struct CrossUserAnalysisMeasurements: Codable, Equatable, Sendable {
 }
 
 struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 3
+    /// V4 adds catalog match diagnostics to the wire contract. Entry UUIDs are
+    /// device-local and are never exported as transferable authority; all
+    /// catalog-assisted gates are demoted and stripped again on import. V3
+    /// remains importable because the added fields are optional.
+    static let currentSchemaVersion = 4
+    static let supportedImportSchemaVersions: ClosedRange<Int> = 3...4
 
     let schemaVersion: Int
     let key: CrossUserAnalysisShareKey
@@ -151,6 +157,11 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         let evidenceSources: String?
         let eligibilityGate: String?
         let catalogStoreMatchSimilarity: Double?
+        let catalogFingerprintVersion: Int?
+        let catalogMatchedEntryId: String?
+        let catalogMatchedShowId: String?
+        let catalogMatchedLearningSource: String?
+        let catalogMatchedLearningLifecycle: String?
 
         init(
             sourceWindowId: String,
@@ -169,7 +180,12 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             metadataPromptVersion: String?,
             evidenceSources: String?,
             eligibilityGate: String?,
-            catalogStoreMatchSimilarity: Double?
+            catalogStoreMatchSimilarity: Double?,
+            catalogFingerprintVersion: Int? = nil,
+            catalogMatchedEntryId: String? = nil,
+            catalogMatchedShowId: String? = nil,
+            catalogMatchedLearningSource: String? = nil,
+            catalogMatchedLearningLifecycle: String? = nil
         ) {
             self.sourceWindowId = sourceWindowId
             self.startTime = startTime
@@ -188,6 +204,12 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             self.evidenceSources = evidenceSources
             self.eligibilityGate = eligibilityGate
             self.catalogStoreMatchSimilarity = catalogStoreMatchSimilarity
+            self.catalogFingerprintVersion = catalogFingerprintVersion
+            self.catalogMatchedEntryId = catalogMatchedEntryId
+            self.catalogMatchedShowId = catalogMatchedShowId
+            self.catalogMatchedLearningSource = catalogMatchedLearningSource
+            self.catalogMatchedLearningLifecycle =
+                catalogMatchedLearningLifecycle
         }
 
         init(adWindow: AdWindow) {
@@ -208,7 +230,19 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 metadataPromptVersion: adWindow.metadataPromptVersion,
                 evidenceSources: adWindow.evidenceSources,
                 eligibilityGate: adWindow.eligibilityGate,
-                catalogStoreMatchSimilarity: adWindow.catalogStoreMatchSimilarity
+                catalogStoreMatchSimilarity:
+                    adWindow.catalogStoreMatchSimilarity,
+                catalogFingerprintVersion:
+                    adWindow.catalogFingerprintVersion,
+                // This UUID names a row in the exporting device's private
+                // catalog. It has no identity on another device and must not
+                // cross the sharing boundary.
+                catalogMatchedEntryId: nil,
+                catalogMatchedShowId: adWindow.catalogMatchedShowId,
+                catalogMatchedLearningSource:
+                    adWindow.catalogMatchedLearningSource,
+                catalogMatchedLearningLifecycle:
+                    adWindow.catalogMatchedLearningLifecycle
             )
         }
 
@@ -245,7 +279,19 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 metadataPromptVersion: adWindow.metadataPromptVersion,
                 evidenceSources: adWindow.evidenceSources,
                 eligibilityGate: adWindow.eligibilityGate,
-                catalogStoreMatchSimilarity: adWindow.catalogStoreMatchSimilarity
+                catalogStoreMatchSimilarity:
+                    adWindow.catalogStoreMatchSimilarity,
+                catalogFingerprintVersion:
+                    adWindow.catalogFingerprintVersion,
+                // This UUID names a row in the exporting device's private
+                // catalog. It has no identity on another device and must not
+                // cross the sharing boundary.
+                catalogMatchedEntryId: nil,
+                catalogMatchedShowId: adWindow.catalogMatchedShowId,
+                catalogMatchedLearningSource:
+                    adWindow.catalogMatchedLearningSource,
+                catalogMatchedLearningLifecycle:
+                    adWindow.catalogMatchedLearningLifecycle
             )
         }
 
@@ -535,7 +581,8 @@ extension AnalysisStore {
         guard expectedKey == snapshot.key else {
             return .mismatchedKey(expected: expectedKey, actual: snapshot.key)
         }
-        guard snapshot.schemaVersion == CrossUserAnalysisSnapshot.currentSchemaVersion else {
+        guard CrossUserAnalysisSnapshot.supportedImportSchemaVersions
+            .contains(snapshot.schemaVersion) else {
             return .incompatibleSnapshot(reason: "schemaVersion")
         }
         guard snapshot.provenance.exportedAt.isFinite,
@@ -602,6 +649,9 @@ extension AnalysisStore {
             let sharedWindowIsCueEligible = Self.isCueWindow(
                 window,
                 normalizedDecisionState: decisionState
+            ) && !Self.requiresCatalogAuthorityDemotion(
+                window,
+                expectedShowId: snapshot.key.podcastId
             )
             let id = Self.importedAdWindowId(
                 key: snapshot.key,
@@ -631,6 +681,7 @@ extension AnalysisStore {
                         id: supersedingId,
                         window: window,
                         targetAssetId: targetAssetId,
+                        expectedShowId: snapshot.key.podcastId,
                         decisionState: decisionState
                     )
                     windowsToInsert.append(adWindow)
@@ -658,6 +709,7 @@ extension AnalysisStore {
                 id: id,
                 window: window,
                 targetAssetId: targetAssetId,
+                expectedShowId: snapshot.key.podcastId,
                 decisionState: decisionState
             )
             windowsToInsert.append(adWindow)
@@ -770,9 +822,27 @@ extension AnalysisStore {
         id: String,
         window: CrossUserAnalysisSnapshot.Window,
         targetAssetId: String,
+        expectedShowId: String,
         decisionState: String
     ) -> AdWindow {
-        AdWindow(
+        // A remote catalog row cannot be resolved against this device's
+        // private catalog, even when its claimed show matches the snapshot
+        // key. A mismatched claimed show is an additional fail-closed reason.
+        let mustDemoteCatalogAuthority =
+            requiresCatalogAuthorityDemotion(
+                window,
+                expectedShowId: expectedShowId
+        )
+        let importedEligibilityGate: String?
+        if mustDemoteCatalogAuthority {
+            // A legacy nil gate means "admit through the managed path" when
+            // the row is later reloaded. It is therefore just as automatic as
+            // an explicit eligible gate and must be replaced, not preserved.
+            importedEligibilityGate = SkipEligibilityGate.markOnly.rawValue
+        } else {
+            importedEligibilityGate = window.eligibilityGate
+        }
+        return AdWindow(
             id: id,
             analysisAssetId: targetAssetId,
             startTime: window.startTime,
@@ -792,9 +862,44 @@ extension AnalysisStore {
             wasSkipped: false,
             userDismissedBanner: false,
             evidenceSources: window.evidenceSources,
-            eligibilityGate: window.eligibilityGate,
-            catalogStoreMatchSimilarity: window.catalogStoreMatchSimilarity
+            eligibilityGate: importedEligibilityGate,
+            catalogStoreMatchSimilarity:
+                window.catalogStoreMatchSimilarity == 0 ? 0 : nil,
+            catalogFingerprintVersion: nil,
+            catalogMatchedEntryId: nil,
+            catalogMatchedShowId: nil,
+            catalogMatchedLearningSource: nil,
+            catalogMatchedLearningLifecycle: nil
         )
+    }
+
+    private static func requiresCatalogAuthorityDemotion(
+        _ window: CrossUserAnalysisSnapshot.Window,
+        expectedShowId: String
+    ) -> Bool {
+        let catalogScopeMismatch = window.catalogMatchedShowId.map {
+            $0 != expectedShowId
+        } ?? false
+        let hasCatalogEvidence =
+            window.catalogStoreMatchSimilarity.map { $0 != 0 } == true
+            || window.catalogFingerprintVersion != nil
+            || window.catalogMatchedEntryId != nil
+            || window.catalogMatchedShowId != nil
+            || window.catalogMatchedLearningSource != nil
+            || window.catalogMatchedLearningLifecycle != nil
+            || evidenceSourcesClaimCatalog(window.evidenceSources)
+        return hasCatalogEvidence || catalogScopeMismatch
+    }
+
+    /// Evidence sources have existed as both comma-separated text and a JSON
+    /// string array. Tokenizing on non-alphanumerics recognizes either form
+    /// (and conservative malformed variants) without treating a source such
+    /// as `transcriptCatalog` as the device-local `catalog` channel.
+    private static func evidenceSourcesClaimCatalog(_ rawValue: String?) -> Bool {
+        guard let rawValue else { return false }
+        return rawValue
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .contains { $0.caseInsensitiveCompare("catalog") == .orderedSame }
     }
 
     private static func cueCoverage(from windows: [AdWindow]) -> Double {
@@ -814,6 +919,14 @@ extension AnalysisStore {
             && isCanonicalOptionalString(window.metadataPromptVersion)
             && isCanonicalOptionalString(window.evidenceSources)
             && isCanonicalOptionalString(window.eligibilityGate)
+            && isCanonicalOptionalString(window.catalogMatchedEntryId)
+            && isCanonicalOptionalString(window.catalogMatchedShowId)
+            && isCanonicalOptionalString(
+                window.catalogMatchedLearningSource
+            )
+            && isCanonicalOptionalString(
+                window.catalogMatchedLearningLifecycle
+            )
             && window.startTime.isFinite
             && window.endTime.isFinite
             && window.confidence.isFinite
@@ -823,6 +936,9 @@ extension AnalysisStore {
             && AdBoundaryState(rawValue: window.boundaryState) != nil
             && window.metadataConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.catalogStoreMatchSimilarity.map { $0.isFinite && (0...1).contains($0) } ?? true
+            && window.catalogFingerprintVersion.map {
+                CatalogFingerprintVersion(rawValue: $0) != nil
+            } ?? true
             && CrossUserAnalysisSnapshot.Window.isValidSharedDecisionState(
                 window.decisionState,
                 isAd: window.isAd
@@ -846,6 +962,7 @@ extension AnalysisStore {
     }
 
     private static func hasCanonicalRequiredString(_ value: String) -> Bool {
+        guard !value.utf8.contains(0) else { return false }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed == value
     }

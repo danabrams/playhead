@@ -98,18 +98,9 @@ func attachDeallocLatch(to object: AnyObject) -> DeallocLatch {
 
 // MARK: - SignalingCorrectionStore
 
-/// Test decorator over `any UserCorrectionStore` that forwards every
-/// call to a wrapped store and fires a `TestEventCounter` after each
-/// `recordVeto(startTime:...)` completes.
-///
-/// playhead-vsot round 3: `SkipOrchestrator.recordListenRevert` persists
-/// the veto in a fire-and-forget `Task { await store.recordVeto(...) }`,
-/// so `recordListenRevert` returns before the write lands. The old tests
-/// polled `activeCorrections` under a 5 s deadline — the same
-/// fire-and-forget-write-then-short-poll class that flaked the download
-/// harvest under the parallel gate. Wrapping the store lets the test
-/// await the write's actual completion, then read results through the
-/// underlying concrete store. Pure test code; no production change.
+/// Test decorator over `any UserCorrectionStore` that fires a deterministic
+/// signal after either legacy veto persistence or an atomic transaction's
+/// post-commit learning notification completes.
 final class SignalingCorrectionStore: UserCorrectionStore, @unchecked Sendable {
     private let wrapped: any UserCorrectionStore
     let vetoRecorded: TestEventCounter
@@ -153,6 +144,7 @@ final class SignalingCorrectionStore: UserCorrectionStore, @unchecked Sendable {
             event,
             wasNewlyInserted: wasNewlyInserted
         )
+        vetoRecorded.increment()
     }
 
     func correctionPassthroughFactor(for analysisAssetId: String) async -> Double {

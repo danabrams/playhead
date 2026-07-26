@@ -67,7 +67,8 @@ struct PreRollStartClampWireInTests {
 
     private func makeService(
         store: AnalysisStore,
-        preRollStartClampSeconds: Double
+        preRollStartClampSeconds: Double,
+        decisionLogger: DecisionLoggerProtocol? = nil
     ) -> AdDetectionService {
         let config = AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -82,7 +83,8 @@ struct PreRollStartClampWireInTests {
             store: store,
             classifier: RuleBasedClassifier(),
             metadataExtractor: FallbackExtractor(),
-            config: config
+            config: config,
+            decisionLogger: decisionLogger
         )
     }
 
@@ -132,5 +134,97 @@ struct PreRollStartClampWireInTests {
             assetId: "asset-preroll-on"
         )
         #expect(start == 0.0)
+    }
+
+    @Test("clamped geometry and mark-only gate agree across every decision artifact")
+    func decisionArtifactsUseClampedMarkOnlyMaterial() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-preroll-artifact"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let decisionLogger = SpyDecisionLogger()
+        let service = makeService(
+            store: store,
+            preRollStartClampSeconds:
+                AdDetectionConfig.default.preRollStartClampSeconds,
+            decisionLogger: decisionLogger
+        )
+        try await service.runBackfill(
+            chunks: makeEarlyAdChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: Self.podcastId,
+            episodeDuration: 74.0
+        )
+
+        let windows = try await store.fetchAdWindows(assetId: assetId)
+        let firstVisible = try #require(
+            windows
+                .filter {
+                    $0.decisionState
+                        != AdDecisionState.suppressed.rawValue
+                }
+                .min { $0.startTime < $1.startTime }
+        )
+        #expect(
+            firstVisible.startTime == 0,
+            "precondition: the production clamp must rewrite this fixture"
+        )
+        #expect(
+            firstVisible.eligibilityGate
+                == SkipEligibilityGate.markOnly.rawValue
+        )
+
+        let artifact = try #require(
+            try await store.loadDecisionResultArtifact(for: assetId)
+        )
+        let data = try #require(artifact.decisionJSON.data(using: .utf8))
+        let decisions = try JSONDecoder().decode(
+            [PersistedDecisionResult].self,
+            from: data
+        )
+        let persistedDecision = try #require(
+            decisions.first { $0.id == firstVisible.id }
+        )
+        #expect(persistedDecision.startTime == firstVisible.startTime)
+        #expect(persistedDecision.endTime == firstVisible.endTime)
+        #expect(persistedDecision.skipConfidence == firstVisible.confidence)
+        #expect(
+            persistedDecision.eligibilityGate
+                == AdDecisionEligibilityGate.blocked.rawValue
+        )
+
+        let events = try await store.loadDecisionEvents(for: assetId)
+        let event = try #require(
+            events.first { $0.windowId == firstVisible.id }
+        )
+        #expect(
+            event.eligibilityGate
+                == SkipEligibilityGate.markOnly.rawValue
+        )
+        let explanation = try #require(
+            event.explanationJSON?
+                .data(using: .utf8)
+                .flatMap {
+                    try? JSONDecoder().decode(
+                        DecisionExplanation.self,
+                        from: $0
+                    )
+                }
+        )
+        #expect(
+            explanation.actionRationale.gate
+                == SkipEligibilityGate.markOnly.rawValue
+        )
+        #expect(!explanation.actionRationale.skipEligible)
+
+        let loggedEntries = await decisionLogger.entries
+        let logged = try #require(
+            loggedEntries.first { $0.analysisAssetID == assetId }
+        )
+        #expect(logged.windowBounds.start == firstVisible.startTime)
+        #expect(logged.windowBounds.end == firstVisible.endTime)
+        #expect(
+            logged.finalDecision.gate
+                == SkipEligibilityGate.markOnly.rawValue
+        )
     }
 }

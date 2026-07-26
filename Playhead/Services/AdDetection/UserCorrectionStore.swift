@@ -313,8 +313,16 @@ extension CorrectionEvent {
         if let exactSpan = refs.exactFeedbackSpan {
             receiptVersion = "explicit-banner-receipt-v2"
             exactSpanIdentity = [
-                String(exactSpan.startTimeBitPattern),
-                String(exactSpan.endTimeBitPattern),
+                String(
+                    RecurrenceMaterialIdentity.canonicalTimeBitPattern(
+                        exactSpan.startTime
+                    )
+                ),
+                String(
+                    RecurrenceMaterialIdentity.canonicalTimeBitPattern(
+                        exactSpan.endTime
+                    )
+                ),
             ]
         } else {
             // Migration compatibility for receipts created before the

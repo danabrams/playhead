@@ -782,7 +782,8 @@ actor AnalysisJobRunner {
                 adWindows = try await adDetection.runHotPath(
                     chunks: chunks,
                     analysisAssetId: assetId,
-                    episodeDuration: episodeDuration
+                    episodeDuration: episodeDuration,
+                    podcastId: request.podcastId
                 )
             } catch {
                 PreAnalysisInstrumentation.endStage(detectionSignpost)

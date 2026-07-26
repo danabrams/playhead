@@ -443,12 +443,8 @@ struct SkipOrchestratorCorrectionScopeTests {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 
-        // playhead-vsot round 3: wrap the store so the fire-and-forget
-        // veto write (SkipOrchestrator.recordListenRevert spawns
-        // `Task { await store.recordVeto(...) }`) signals its completion
-        // — event-driven, replacing the 5 s `pollUntil` deadline (same
-        // fire-and-forget-write-then-short-poll class that flaked the
-        // download harvest under the parallel gate).
+        // Await post-commit learning notification instead of polling SQLite
+        // after the atomic correction transaction.
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
         let vetoRecorded = TestEventCounter()
         let signalingStore = SignalingCorrectionStore(
@@ -485,8 +481,7 @@ struct SkipOrchestratorCorrectionScopeTests {
             podcastId: "podcast-1"
         )
 
-        // Event-driven: resumes when the veto write actually lands. No
-        // deadline; the `.timeLimit` trait is the hang backstop.
+        // The `.timeLimit` trait remains the hang backstop.
         await vetoRecorded.wait(for: 1)
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")
@@ -545,8 +540,7 @@ struct ListenRevertSponsorScopeTests {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 
-        // playhead-vsot round 3: event-driven veto-write signal (see
-        // listenRevertScopeContent) replaces the 5 s pollUntil deadline.
+        // Event-driven post-commit signal; see listenRevertScopeContent.
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
         let vetoRecorded = TestEventCounter()
         let signalingStore = SignalingCorrectionStore(
@@ -584,7 +578,7 @@ struct ListenRevertSponsorScopeTests {
             podcastId: "podcast-1"
         )
 
-        // Event-driven: resumes when the veto write lands.
+        // Event-driven: resumes when post-commit notification lands.
         await vetoRecorded.wait(for: 1)
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")

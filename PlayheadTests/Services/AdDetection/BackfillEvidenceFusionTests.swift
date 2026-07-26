@@ -392,6 +392,67 @@ struct BackfillEvidenceFusionTests {
         #expect(result.skipConfidence <= 1.0)
     }
 
+    @Test("device catalog weight cannot lift the exact THEMOVE mixed span")
+    func fingerprintCatalogIsDiagnosticOnlyForFusion() {
+        let span = makeSpan(
+            startTime: 3493.02,
+            endTime: 3537.95
+        )
+        let baseline: [EvidenceLedgerEntry] = [
+            .init(
+                source: .classifier,
+                weight: 0.6988968699323662,
+                detail: .classifier(score: 0.6988968699323662)
+            )
+        ]
+        let fingerprintAssisted = baseline + [
+            .init(
+                source: .catalog,
+                weight: 0.30,
+                detail: .catalog(entryCount: 1),
+                subSource: .fingerprintStore
+            )
+        ]
+        let transcriptCatalogAssisted = baseline + [
+            .init(
+                source: .catalog,
+                weight: 0.30,
+                detail: .catalog(entryCount: 1),
+                subSource: .transcriptCatalog
+            )
+        ]
+
+        let baselineDecision = DecisionMapper(
+            span: span,
+            ledger: baseline,
+            config: defaultConfig()
+        ).map()
+        let fingerprintDecision = DecisionMapper(
+            span: span,
+            ledger: fingerprintAssisted,
+            config: defaultConfig()
+        ).map()
+        let transcriptDecision = DecisionMapper(
+            span: span,
+            ledger: transcriptCatalogAssisted,
+            config: defaultConfig()
+        ).map()
+
+        #expect(
+            fingerprintDecision.skipConfidence
+                == baselineDecision.skipConfidence
+        )
+        #expect(
+            fingerprintDecision.skipConfidence
+                < AdDetectionConfig.default.autoSkipConfidenceThreshold
+        )
+        #expect(
+            transcriptDecision.skipConfidence
+                > fingerprintDecision.skipConfidence,
+            "only the learned fingerprint-store sub-source is diagnostic-only"
+        )
+    }
+
     @Test("DecisionMapper produces eligible gate for span with fmConsensus and sufficient evidence")
     func eligibleGateWithFMConsensus() {
         // fmConsensus + 2 distinct kinds + good quality + valid duration (10–40s)
@@ -2121,6 +2182,17 @@ struct FusionEdgeAnchorDerivationTests {
         let anchors = AdDetectionService.deriveFusionEdgeAnchors(
             anchorProvenance: [.spliceSlot],
             stingerTrace: nil
+        )
+        #expect(anchors.start == .unanchored)
+        #expect(anchors.end == .unanchored)
+    }
+
+    @Test("a finalizer geometry rewrite invalidates all earlier exact edge anchors")
+    func rewrittenGeometryClearsEarlierAnchors() {
+        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+            anchorProvenance: [.rediffSlot],
+            stingerTrace: trace(startSnapped: true, endSnapped: true),
+            geometryWasRewritten: true
         )
         #expect(anchors.start == .unanchored)
         #expect(anchors.end == .unanchored)

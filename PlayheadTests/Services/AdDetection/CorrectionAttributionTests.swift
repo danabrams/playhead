@@ -11,6 +11,36 @@ final class CorrectionAttributionTests: XCTestCase {
 
     // MARK: - CorrectionType round-trip
 
+    func testMaterialIdentityCanonicalizesSignedZero() {
+        let negativeZero = makePrivacyWindow(
+            id: "signed-zero-window",
+            startTime: -0.0
+        )
+        let positiveZero = makePrivacyWindow(
+            id: "signed-zero-window",
+            startTime: 0.0
+        )
+
+        XCTAssertTrue(
+            AdWindowMaterialIdentity.sameProducerRevision(
+                negativeZero,
+                positiveZero
+            )
+        )
+        XCTAssertTrue(
+            ExactFeedbackSpan(startTime: -0.0, endTime: 45)
+                .matches(startTime: 0.0, endTime: 45)
+        )
+    }
+
+    func testExplicitReceiptRejectsEmbeddedNULWindowIdentity() {
+        XCTAssertNil(
+            CorrectionTargetRefs(
+                adWindowId: "window\u{0}other"
+            ).canonicalExplicitAdWindowIDs
+        )
+    }
+
     func testCorrectionTypeRawValueRoundTrip() {
         for type in CorrectionType.allCases {
             let raw = type.rawValue
@@ -78,6 +108,29 @@ final class CorrectionAttributionTests: XCTestCase {
         let result = CausalInference.inferCausalSource(provenance: [], ledgerEntries: entries)
 
         XCTAssertEqual(result, .lexical)
+    }
+
+    func testInferCausalSourceIgnoresLearnedCatalogDiagnostic() {
+        let entries: [EvidenceLedgerEntry] = [
+            EvidenceLedgerEntry(
+                source: .catalog,
+                weight: 1,
+                detail: .catalog(entryCount: 1),
+                subSource: .fingerprintStore
+            ),
+            EvidenceLedgerEntry(
+                source: .acoustic,
+                weight: 0.1,
+                detail: .acoustic(breakStrength: 0.5)
+            ),
+        ]
+
+        let result = CausalInference.inferCausalSource(
+            provenance: [],
+            ledgerEntries: entries
+        )
+
+        XCTAssertEqual(result, .acoustic)
     }
 
     // MARK: - inferCausalSource: FM > 0.3 of total

@@ -42,7 +42,12 @@ final class StubAdDetectionProvider: AdDetectionProviding, @unchecked Sendable {
     /// runner forwarded the parameters intact.
     var revalidateFromFeaturesCalls: [(assetId: String, podcastId: String, episodeDuration: Double, sessionId: String?)] = []
 
-    func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow] {
+    func runHotPath(
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        episodeDuration: Double,
+        podcastId: String?
+    ) async throws -> [AdWindow] {
         hotPathCallCount += 1
         if let error = hotPathError { throw error }
         return hotPathResult

@@ -355,15 +355,26 @@ struct AdWindow: Sendable {
     let eligibilityGate: String?
     /// playhead-epfk: top `AdCatalogStore.matches(...)` similarity in
     /// `[0, 1]` for this window's acoustic fingerprint, computed at
-    /// fusion time. `nil` when the catalog store was unavailable, the
-    /// fingerprint was zero, or no match cleared the floor; `0.0` when
-    /// the catalog ran but produced no positive match. Surfaced into
+    /// fusion time. `nil` when the catalog store was unavailable or the
+    /// fingerprint/show scope could not be evaluated; `0.0` when an
+    /// exact-show query ran but no match cleared the floor. Surfaced into
     /// `corpus-export.jsonl` so NARL eval can measure the
     /// fingerprint-store firing rate independently from the
     /// transcript-token catalog (which shares the `.catalog` evidence
     /// source label). Persisted on the row so a re-export of an old
     /// device DB doesn't lose the value.
     let catalogStoreMatchSimilarity: Double?
+    /// Versioned fingerprint semantics used for the match. Nil means no
+    /// compatible catalog match was admitted.
+    let catalogFingerprintVersion: Int?
+    /// Durable catalog row identity and show scope used for the match. These
+    /// fields make a later veto auditable and let it revoke the exact learned
+    /// row instead of guessing from similarity alone.
+    let catalogMatchedEntryId: String?
+    let catalogMatchedShowId: String?
+    /// Authoritative lifecycle that originally admitted the matched row.
+    let catalogMatchedLearningSource: String?
+    let catalogMatchedLearningLifecycle: String?
     /// playhead-hdgk: the per-edge auto-skip anchor tier (an
     /// `AutoSkipEdgeAnchor` raw value — `"rediffByteExact"` /
     /// `"stingerSnapped"` / `"unanchored"`) derived at fusion/decision-build
@@ -376,6 +387,55 @@ struct AdWindow: Sendable {
     /// persistence layer stays decoupled from the orchestrator's enum for I/O.
     let startEdgeAnchor: String
     let endEdgeAnchor: String
+
+    /// A non-zero score or any match-provenance field claims that catalog
+    /// evidence participated in this decision. Invalid non-finite values also
+    /// count as a claim so corrupted rows fail closed instead of slipping
+    /// through the zero-score compatibility case.
+    var claimsCatalogMatch: Bool {
+        if let similarity = catalogStoreMatchSimilarity,
+           !similarity.isFinite || similarity != 0 {
+            return true
+        }
+        return catalogFingerprintVersion != nil
+            || catalogMatchedEntryId != nil
+            || catalogMatchedShowId != nil
+            || catalogMatchedLearningSource != nil
+            || catalogMatchedLearningLifecycle != nil
+    }
+
+    /// Complete provenance required before a persisted catalog-assisted
+    /// decision may remain in an automatic tier. Runtime admission requires a
+    /// canonical active show; nil/blank identity fails closed.
+    func hasCompatibleCatalogMatchProvenance(
+        expectedShowId: String?
+    ) -> Bool {
+        guard let similarity = catalogStoreMatchSimilarity,
+              similarity.isFinite,
+              similarity >= Double(AdCatalogStore.defaultSimilarityFloor),
+              similarity <= 1,
+              catalogFingerprintVersion
+                == CatalogFingerprintVersion.currentCatalog.rawValue,
+              let entryId = catalogMatchedEntryId,
+              UUID(uuidString: entryId) != nil,
+              let showId = catalogMatchedShowId,
+              RecurrenceMaterialIdentity.canonicalIdentifier(showId) != nil,
+              let sourceRaw = catalogMatchedLearningSource,
+              let source = CatalogLearningSource(rawValue: sourceRaw),
+              let lifecycleRaw = catalogMatchedLearningLifecycle,
+              let lifecycle = CatalogLearningLifecycle(rawValue: lifecycleRaw),
+              source.authoritativeLifecycle == lifecycle else {
+            return false
+        }
+        guard let canonicalExpected =
+                RecurrenceMaterialIdentity.canonicalIdentifier(
+                    expectedShowId
+                ),
+              showId == canonicalExpected else {
+            return false
+        }
+        return true
+    }
 
     init(
         id: String,
@@ -399,6 +459,11 @@ struct AdWindow: Sendable {
         evidenceSources: String? = nil,
         eligibilityGate: String? = nil,
         catalogStoreMatchSimilarity: Double? = nil,
+        catalogFingerprintVersion: Int? = nil,
+        catalogMatchedEntryId: String? = nil,
+        catalogMatchedShowId: String? = nil,
+        catalogMatchedLearningSource: String? = nil,
+        catalogMatchedLearningLifecycle: String? = nil,
         startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
         endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue
     ) {
@@ -423,6 +488,12 @@ struct AdWindow: Sendable {
         self.evidenceSources = evidenceSources
         self.eligibilityGate = eligibilityGate
         self.catalogStoreMatchSimilarity = catalogStoreMatchSimilarity
+        self.catalogFingerprintVersion = catalogFingerprintVersion
+        self.catalogMatchedEntryId = catalogMatchedEntryId
+        self.catalogMatchedShowId = catalogMatchedShowId
+        self.catalogMatchedLearningSource = catalogMatchedLearningSource
+        self.catalogMatchedLearningLifecycle =
+            catalogMatchedLearningLifecycle
         self.startEdgeAnchor = startEdgeAnchor
         self.endEdgeAnchor = endEdgeAnchor
     }
@@ -927,6 +998,11 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
     case invalidRow(column: Int)
     case invalidEvidenceEvent(String)
     case invalidScanCohortJSON(String)
+    /// A hot-path reconciliation observed one producer revision, suspended,
+    /// then found different same-ID material when its transaction began.
+    /// Rejecting the whole transaction prevents stale updates/retirements from
+    /// mutating the replacement.
+    case staleAdWindowRevision(id: String)
     /// C-2: raised when a backfill-job state transition is attempted against
     /// a row whose current status does not permit it (e.g. transitioning a
     /// `.complete` or `.failed` row back into `.running`).
@@ -960,6 +1036,8 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
         case .invalidRow(let col): "Unexpected NULL in non-null column \(col)"
         case .invalidEvidenceEvent(let msg): "Invalid evidence event: \(msg)"
         case .invalidScanCohortJSON(let msg): "Invalid scanCohortJSON: \(msg)"
+        case .staleAdWindowRevision(let id):
+            "Stale ad-window producer revision: \(id)"
         case .invalidStateTransition(let id, let from, let to):
             "Invalid backfill job state transition for \(id): \(from ?? "<missing>") -> \(to)"
         case .evidenceEventBodyMismatch(let id):
@@ -1006,7 +1084,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 34
+    nonisolated static let currentSchemaVersion = 36
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1733,6 +1811,11 @@ actor AnalysisStore {
             // R29: freeze the complete response-independent AdWindow egress
             // projection before the first explicit banner mutation.
             try migrateExplicitFeedbackEgressBaselinesV34IfNeeded()
+            // playhead-o4qr: persist the compatible fingerprint cohort and
+            // exact matched catalog identity alongside the similarity.
+            try migrateAdWindowCatalogProvenanceV35IfNeeded()
+            try createRepeatedAdCacheRevocationsTableIfNeeded()
+            try migrateRepeatedAdCacheProducerRevisionV36IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2024,6 +2107,9 @@ actor AnalysisStore {
         try migrateCorrectionReceiptIdentityV32IfNeeded()
         try migrateTrainingExamplePrivacyV33IfNeeded()
         try migrateExplicitFeedbackEgressBaselinesV34IfNeeded()
+        try migrateAdWindowCatalogProvenanceV35IfNeeded()
+        try createRepeatedAdCacheRevocationsTableIfNeeded()
+        try migrateRepeatedAdCacheProducerRevisionV36IfNeeded()
     }
     #endif
 
@@ -3362,6 +3448,10 @@ actor AnalysisStore {
     ///     boundaryEnd REAL NOT NULL           — seconds, episode-relative
     ///     confidence REAL NOT NULL            — original detection confidence ∈ [0,1]
     ///     lastSeenAt REAL NOT NULL            — UNIX seconds (LRU clock)
+    ///     learningSource TEXT NOT NULL         — authoritative event, or legacy quarantine
+    ///     learningLifecycle TEXT NOT NULL      — consumed / explicit confirmation
+    ///     sourceAssetId TEXT                   — exact source asset provenance
+    ///     sourceWindowId TEXT                  — exact source window provenance
     ///     PRIMARY KEY (showId, fingerprint)
     ///
     ///   `repeated_ad_cache_outcomes`
@@ -3381,6 +3471,10 @@ actor AnalysisStore {
                 boundaryEnd REAL NOT NULL,
                 confidence REAL NOT NULL,
                 lastSeenAt REAL NOT NULL,
+                learningSource TEXT NOT NULL DEFAULT 'legacyUnconfirmed',
+                learningLifecycle TEXT NOT NULL DEFAULT 'legacyUnconfirmed',
+                sourceAssetId TEXT,
+                sourceWindowId TEXT,
                 PRIMARY KEY (showId, fingerprint)
             );
         """)
@@ -4908,6 +5002,121 @@ actor AnalysisStore {
         try setSchemaVersion(34)
     }
 
+    /// Adds audit provenance for catalog-assisted decisions and recurrence
+    /// learning. AdWindow columns are nullable because their historical match
+    /// cannot be reconstructed. Existing recurrence rows receive explicit
+    /// legacy-unconfirmed sentinels so they are preserved for audit/cleanup
+    /// but cannot promote future episodes.
+    private func migrateAdWindowCatalogProvenanceV35IfNeeded() throws {
+        let startingVersion = try schemaVersion() ?? 1
+        // Always repair the additive shape. A development build may have
+        // stamped v35 before every column landed; version-only gating would
+        // leave that database permanently unreadable.
+        if try tableExists("ad_windows") {
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "catalogFingerprintVersion",
+                definition: "INTEGER"
+            )
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "catalogMatchedEntryId",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "catalogMatchedShowId",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "catalogMatchedLearningSource",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "catalogMatchedLearningLifecycle",
+                definition: "TEXT"
+            )
+        }
+        if try tableExists("repeated_ad_cache") {
+            try addColumnIfNeeded(
+                table: "repeated_ad_cache",
+                column: "learningSource",
+                definition: "TEXT NOT NULL DEFAULT 'legacyUnconfirmed'"
+            )
+            try addColumnIfNeeded(
+                table: "repeated_ad_cache",
+                column: "learningLifecycle",
+                definition: "TEXT NOT NULL DEFAULT 'legacyUnconfirmed'"
+            )
+            try addColumnIfNeeded(
+                table: "repeated_ad_cache",
+                column: "sourceAssetId",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "repeated_ad_cache",
+                column: "sourceWindowId",
+                definition: "TEXT"
+            )
+        }
+        if startingVersion < 35 {
+            try setSchemaVersion(35)
+        }
+    }
+
+    /// Durable source and show-scoped fingerprint tombstones for the repeated-
+    /// ad cache. Kept separate from entries so corrections survive eviction and
+    /// cache clearing. This helper is deliberately called even when the
+    /// database is already at schema v35: early development builds may have
+    /// reached v35 before these additive tables were introduced, and
+    /// `IF NOT EXISTS` makes repairing that shape safe and idempotent.
+    private func createRepeatedAdCacheRevocationsTableIfNeeded() throws {
+        try exec("""
+            CREATE TABLE IF NOT EXISTS repeated_ad_cache_revocations (
+                sourceAssetId TEXT NOT NULL,
+                sourceWindowId TEXT NOT NULL,
+                revokedAt REAL NOT NULL,
+                revocationSource TEXT NOT NULL,
+                PRIMARY KEY (sourceAssetId, sourceWindowId)
+            );
+            CREATE TABLE IF NOT EXISTS repeated_ad_cache_fingerprint_revocations (
+                showId TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                revokedAt REAL NOT NULL,
+                sourceAssetId TEXT NOT NULL,
+                sourceWindowId TEXT NOT NULL,
+                revocationSource TEXT NOT NULL,
+                PRIMARY KEY (showId, fingerprint)
+            );
+        """)
+    }
+
+    /// Adds an opaque per-write revision used by compare-and-delete cleanup.
+    /// Existing rows get a deterministic legacy token derived from their
+    /// primary key; future UPSERTs replace it with the producer's UUID token.
+    private func migrateRepeatedAdCacheProducerRevisionV36IfNeeded() throws {
+        let startingVersion = try schemaVersion() ?? 1
+        if try tableExists("repeated_ad_cache") {
+            try addColumnIfNeeded(
+                table: "repeated_ad_cache",
+                column: "producerRevision",
+                definition: "TEXT NOT NULL DEFAULT 'legacy'"
+            )
+            try exec("""
+                UPDATE repeated_ad_cache
+                SET producerRevision =
+                    'legacy:' || showId || ':' || fingerprint
+                WHERE producerRevision = 'legacy'
+                   OR trim(producerRevision) = ''
+                """)
+        }
+        if startingVersion < 36 {
+            try setSchemaVersion(36)
+        }
+    }
+
     /// playhead-b6jq PR 4: canonical column list for `specialist_scan_results`.
     /// Positional index mapping (see `readSpecialistScanResult`):
     ///   0  id                    7  modelVersion
@@ -5235,40 +5444,398 @@ actor AnalysisStore {
     // of the schema — `lastPlayedAt`, `createdAt`, etc. all use this
     // representation).
 
-    func repeatedAdCacheUpsert(_ entry: RepeatedAdCacheEntry) throws {
+    @discardableResult
+    func repeatedAdCacheUpsert(_ entry: RepeatedAdCacheEntry) throws -> Bool {
+        let normalizedShowId =
+            RecurrenceMaterialIdentity.canonicalIdentifier(entry.showId)
+        let normalizedSourceAssetId =
+            RecurrenceMaterialIdentity.canonicalIdentifier(
+                entry.sourceAssetId
+            )
+        let normalizedSourceWindowId =
+            RecurrenceMaterialIdentity.canonicalIdentifier(
+                entry.sourceWindowId
+            )
+        let exactTombstoneWindowKey: String?
+        let signedZeroLegacyTombstoneWindowKey: String?
+        if let normalizedSourceWindowId {
+            guard let key = RecurrenceMaterialIdentity.tombstoneWindowKey(
+                sourceWindowId: normalizedSourceWindowId,
+                sourceStartTime: entry.boundaryStart,
+                sourceEndTime: entry.boundaryEnd
+            ) else {
+                return false
+            }
+            exactTombstoneWindowKey = key
+            signedZeroLegacyTombstoneWindowKey =
+                RecurrenceMaterialIdentity
+                .legacyNegativeZeroTombstoneWindowKey(
+                    sourceWindowId: normalizedSourceWindowId,
+                    sourceStartTime: entry.boundaryStart,
+                    sourceEndTime: entry.boundaryEnd
+                )
+        } else {
+            exactTombstoneWindowKey = nil
+            signedZeroLegacyTombstoneWindowKey = nil
+        }
+        guard let normalizedShowId,
+              !entry.fingerprint.isZero,
+              entry.boundaryStart.isFinite,
+              entry.boundaryEnd.isFinite,
+              entry.boundaryStart >= 0,
+              entry.boundaryEnd > entry.boundaryStart,
+              entry.confidence.isFinite,
+              (0...1).contains(entry.confidence),
+              entry.lastSeenAt.timeIntervalSince1970.isFinite,
+              entry.lastSeenAt.timeIntervalSince1970 >= 0,
+              (entry.sourceAssetId == nil) == (entry.sourceWindowId == nil),
+              entry.sourceAssetId == nil || normalizedSourceAssetId != nil,
+              entry.sourceWindowId == nil || normalizedSourceWindowId != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  entry.producerRevision
+              ) != nil
+        else {
+            return false
+        }
         let sql = """
             INSERT INTO repeated_ad_cache
-            (showId, fingerprint, boundaryStart, boundaryEnd, confidence, lastSeenAt)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (showId, fingerprint, boundaryStart, boundaryEnd, confidence,
+             lastSeenAt, learningSource, learningLifecycle, sourceAssetId,
+             sourceWindowId, producerRevision)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM repeated_ad_cache_revocations
+                WHERE sourceAssetId = ? AND sourceWindowId IN (?, ?, ?)
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM repeated_ad_cache_fingerprint_revocations
+                WHERE showId = ? AND fingerprint = ?
+            )
             ON CONFLICT(showId, fingerprint) DO UPDATE SET
                 boundaryStart = excluded.boundaryStart,
                 boundaryEnd = excluded.boundaryEnd,
                 confidence = excluded.confidence,
-                lastSeenAt = excluded.lastSeenAt
+                lastSeenAt = MAX(
+                    repeated_ad_cache.lastSeenAt,
+                    excluded.lastSeenAt
+                ),
+                learningSource = excluded.learningSource,
+                learningLifecycle = excluded.learningLifecycle,
+                sourceAssetId = excluded.sourceAssetId,
+                sourceWindowId = excluded.sourceWindowId,
+                producerRevision = excluded.producerRevision
+            WHERE
+                CASE repeated_ad_cache.learningLifecycle
+                    WHEN 'explicitConfirmation' THEN 2
+                    WHEN 'consumed' THEN 1
+                    ELSE 0
+                END
+                <=
+                CASE excluded.learningLifecycle
+                    WHEN 'explicitConfirmation' THEN 2
+                    WHEN 'consumed' THEN 1
+                    ELSE 0
+                END
+                AND (
+                    CASE repeated_ad_cache.learningLifecycle
+                        WHEN 'explicitConfirmation' THEN 2
+                        WHEN 'consumed' THEN 1
+                        ELSE 0
+                    END
+                    <
+                    CASE excluded.learningLifecycle
+                        WHEN 'explicitConfirmation' THEN 2
+                        WHEN 'consumed' THEN 1
+                        ELSE 0
+                    END
+                    OR excluded.lastSeenAt
+                        >= repeated_ad_cache.lastSeenAt
+                )
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, entry.showId)
+        bind(stmt, 1, normalizedShowId)
         bind(stmt, 2, entry.fingerprint.hexString)
         bind(stmt, 3, entry.boundaryStart)
         bind(stmt, 4, entry.boundaryEnd)
         bind(stmt, 5, entry.confidence)
         bind(stmt, 6, entry.lastSeenAt.timeIntervalSince1970)
+        bind(stmt, 7, entry.learningSource.rawValue)
+        bind(stmt, 8, entry.learningLifecycle.rawValue)
+        bind(stmt, 9, normalizedSourceAssetId)
+        bind(stmt, 10, normalizedSourceWindowId)
+        bind(stmt, 11, entry.producerRevision)
+        bind(stmt, 12, normalizedSourceAssetId)
+        bind(stmt, 13, exactTombstoneWindowKey)
+        bind(stmt, 14, signedZeroLegacyTombstoneWindowKey)
+        bind(stmt, 15, normalizedSourceWindowId)
+        bind(stmt, 16, normalizedShowId)
+        bind(stmt, 17, entry.fingerprint.hexString)
         try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    /// One logical cache admission: the UPSERT and both LRU limits commit
+    /// together. Keeping this synchronous on the AnalysisStore actor prevents
+    /// another service writer from observing or evicting an intermediate row.
+    @discardableResult
+    func repeatedAdCacheUpsertEnforcingCapacity(
+        _ entry: RepeatedAdCacheEntry,
+        perShowCap: Int,
+        globalCap: Int
+    ) throws -> Bool {
+        guard perShowCap > 0, globalCap > 0 else { return false }
+        try exec("BEGIN IMMEDIATE")
+        do {
+            guard try repeatedAdCacheUpsert(entry) else {
+                try exec("COMMIT")
+                return false
+            }
+            while try repeatedAdCacheCount(showId: entry.showId) > perShowCap {
+                guard try repeatedAdCacheEvictOldest(showId: entry.showId) else {
+                    throw AnalysisStoreError.queryFailed(
+                        "repeated-ad per-show eviction made no progress"
+                    )
+                }
+            }
+            while try repeatedAdCacheTotalCount() > globalCap {
+                guard try repeatedAdCacheEvictOldestGlobal() else {
+                    throw AnalysisStoreError.queryFailed(
+                        "repeated-ad global eviction made no progress"
+                    )
+                }
+            }
+            try exec("COMMIT")
+            return true
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    @discardableResult
+    func repeatedAdCacheRecordRevocation(
+        sourceAssetId: String,
+        sourceWindowId: String,
+        source: CatalogRevocationSource,
+        at: Date
+    ) throws -> Bool {
+        guard let normalizedAssetId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceAssetId),
+              let normalizedWindowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceWindowId),
+              at.timeIntervalSince1970.isFinite,
+              at.timeIntervalSince1970 >= 0 else {
+            return false
+        }
+        let stmt = try prepare("""
+            INSERT INTO repeated_ad_cache_revocations
+                (sourceAssetId, sourceWindowId, revokedAt, revocationSource)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(sourceAssetId, sourceWindowId) DO UPDATE SET
+                revokedAt = excluded.revokedAt,
+                revocationSource = excluded.revocationSource
+            WHERE excluded.revokedAt >= repeated_ad_cache_revocations.revokedAt
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, normalizedAssetId)
+        bind(stmt, 2, normalizedWindowId)
+        bind(stmt, 3, at.timeIntervalSince1970)
+        bind(stmt, 4, source.rawValue)
+        try step(stmt, expecting: SQLITE_DONE)
+        return true
+    }
+
+    @discardableResult
+    func repeatedAdCacheRecordFingerprintRevocation(
+        showId: String,
+        fingerprintHex: String,
+        sourceAssetId: String,
+        sourceWindowId: String,
+        source: CatalogRevocationSource,
+        at: Date
+    ) throws -> Bool {
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(showId),
+              let fingerprint = RepeatedAdFingerprint(
+                  hexString: fingerprintHex
+              ),
+              !fingerprint.isZero,
+              let normalizedAssetId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceAssetId),
+              let normalizedWindowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceWindowId),
+              at.timeIntervalSince1970.isFinite,
+              at.timeIntervalSince1970 >= 0 else {
+            return false
+        }
+        let stmt = try prepare("""
+            INSERT INTO repeated_ad_cache_fingerprint_revocations
+                (showId, fingerprint, revokedAt, sourceAssetId,
+                 sourceWindowId, revocationSource)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(showId, fingerprint) DO UPDATE SET
+                revokedAt = excluded.revokedAt,
+                sourceAssetId = excluded.sourceAssetId,
+                sourceWindowId = excluded.sourceWindowId,
+                revocationSource = excluded.revocationSource
+            WHERE excluded.revokedAt
+                >= repeated_ad_cache_fingerprint_revocations.revokedAt
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, normalizedShowId)
+        bind(stmt, 2, fingerprint.hexString)
+        bind(stmt, 3, at.timeIntervalSince1970)
+        bind(stmt, 4, normalizedAssetId)
+        bind(stmt, 5, normalizedWindowId)
+        bind(stmt, 6, source.rawValue)
+        try step(stmt, expecting: SQLITE_DONE)
+        return true
+    }
+
+    /// One correction is a single durable mutation. Source and creative
+    /// tombstones must never become visible without their matching deletes,
+    /// or vice versa, when any SQLite statement fails.
+    @discardableResult
+    func repeatedAdCacheRevokeMatchesAtomically(
+        showId: String?,
+        fingerprintHex: String?,
+        sourceAssetId: String,
+        sourceWindowId: String,
+        sourceStartTime: Double?,
+        sourceEndTime: Double?,
+        source: CatalogRevocationSource,
+        at: Date
+    ) throws -> Int {
+        guard let normalizedSourceAssetId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceAssetId),
+              let normalizedSourceWindowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceWindowId),
+              let tombstoneWindowKey =
+                RecurrenceMaterialIdentity.tombstoneWindowKey(
+                    sourceWindowId: normalizedSourceWindowId,
+                    sourceStartTime: sourceStartTime,
+                    sourceEndTime: sourceEndTime
+                ),
+              at.timeIntervalSince1970.isFinite,
+              at.timeIntervalSince1970 >= 0 else {
+            return 0
+        }
+
+        let creative: (showId: String, fingerprint: RepeatedAdFingerprint)?
+        if let showId,
+           let fingerprintHex,
+           let canonicalShowId =
+            RecurrenceMaterialIdentity.canonicalIdentifier(showId),
+           let fingerprint = RepeatedAdFingerprint(hexString: fingerprintHex),
+           !fingerprint.isZero {
+            creative = (
+                canonicalShowId,
+                fingerprint
+            )
+        } else {
+            creative = nil
+        }
+
+        try exec("BEGIN IMMEDIATE")
+        do {
+            guard try repeatedAdCacheRecordRevocation(
+                sourceAssetId: normalizedSourceAssetId,
+                sourceWindowId: tombstoneWindowKey,
+                source: source,
+                at: at
+            ) else {
+                throw AnalysisStoreError.insertFailed(
+                    "invalid repeated-ad source revocation"
+                )
+            }
+            var revoked = try repeatedAdCacheDelete(
+                sourceAssetId: normalizedSourceAssetId,
+                sourceWindowId: normalizedSourceWindowId,
+                sourceStartTime: sourceStartTime,
+                sourceEndTime: sourceEndTime
+            )
+
+            if let creative {
+                guard try repeatedAdCacheRecordFingerprintRevocation(
+                    showId: creative.showId,
+                    fingerprintHex: creative.fingerprint.hexString,
+                    sourceAssetId: normalizedSourceAssetId,
+                    sourceWindowId: normalizedSourceWindowId,
+                    source: source,
+                    at: at
+                ) else {
+                    throw AnalysisStoreError.insertFailed(
+                        "invalid repeated-ad fingerprint revocation"
+                    )
+                }
+                if try repeatedAdCacheDelete(
+                    showId: creative.showId,
+                    fingerprintHex: creative.fingerprint.hexString
+                ) {
+                    revoked += 1
+                }
+            }
+
+            try exec("COMMIT")
+            return revoked
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    func repeatedAdCacheFetchRevokedFingerprints(
+        showId: String
+    ) throws -> [RepeatedAdFingerprint] {
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(showId)
+        else {
+            return []
+        }
+        let stmt = try prepare("""
+            SELECT fingerprint
+            FROM repeated_ad_cache_fingerprint_revocations
+            WHERE showId = ?
+            ORDER BY fingerprint ASC
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, normalizedShowId)
+        var fingerprints: [RepeatedAdFingerprint] = []
+        while try nextRow(stmt) {
+            guard let fingerprint = optionalText(stmt, 0)
+                .flatMap(RepeatedAdFingerprint.init(hexString:)),
+                  !fingerprint.isZero else {
+                throw AnalysisStoreError.queryFailed(
+                    "invalid repeated-ad fingerprint revocation row"
+                )
+            }
+            fingerprints.append(fingerprint)
+        }
+        return fingerprints
     }
 
     func repeatedAdCacheFetchAll(showId: String) throws -> [RepeatedAdCacheEntry] {
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(showId)
+        else {
+            return []
+        }
         let sql = """
-            SELECT showId, fingerprint, boundaryStart, boundaryEnd, confidence, lastSeenAt
+            SELECT showId, fingerprint, boundaryStart, boundaryEnd, confidence,
+                   lastSeenAt, learningSource, learningLifecycle, sourceAssetId,
+                   sourceWindowId, producerRevision
             FROM repeated_ad_cache
             WHERE showId = ?
-            ORDER BY lastSeenAt DESC
+            ORDER BY lastSeenAt DESC, fingerprint ASC
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, showId)
+        bind(stmt, 1, normalizedShowId)
         var rows: [RepeatedAdCacheEntry] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             let show = try requireText(stmt, 0)
             let hex = try requireText(stmt, 1)
             guard let fp = RepeatedAdFingerprint(hexString: hex) else {
@@ -5281,44 +5848,157 @@ actor AnalysisStore {
             let bEnd = sqlite3_column_double(stmt, 3)
             let conf = sqlite3_column_double(stmt, 4)
             let last = sqlite3_column_double(stmt, 5)
+            let learningSource = optionalText(stmt, 6)
+                .flatMap(CatalogLearningSource.init(rawValue:))
+                ?? .legacyUnconfirmed
+            let learningLifecycle = optionalText(stmt, 7)
+                .flatMap(CatalogLearningLifecycle.init(rawValue:))
+                ?? .legacyUnconfirmed
             rows.append(RepeatedAdCacheEntry(
                 showId: show,
                 fingerprint: fp,
                 boundaryStart: bStart,
                 boundaryEnd: bEnd,
                 confidence: conf,
-                lastSeenAt: Date(timeIntervalSince1970: last)
+                lastSeenAt: Date(timeIntervalSince1970: last),
+                learningSource: learningSource,
+                learningLifecycle: learningLifecycle,
+                sourceAssetId: optionalText(stmt, 8),
+                sourceWindowId: optionalText(stmt, 9),
+                producerRevision: try requireText(stmt, 10)
             ))
         }
         return rows
     }
 
     func repeatedAdCacheTouch(showId: String, fingerprintHex: String, at: Date) throws {
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(showId),
+              at.timeIntervalSince1970.isFinite,
+              at.timeIntervalSince1970 >= 0 else {
+            return
+        }
         let sql = """
             UPDATE repeated_ad_cache
-            SET lastSeenAt = ?
+            SET lastSeenAt = MAX(lastSeenAt, ?)
             WHERE showId = ? AND fingerprint = ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, at.timeIntervalSince1970)
-        bind(stmt, 2, showId)
+        bind(stmt, 2, normalizedShowId)
         bind(stmt, 3, fingerprintHex)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    func repeatedAdCacheDelete(
+        showId: String,
+        fingerprintHex: String
+    ) throws -> Bool {
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(showId)
+        else {
+            return false
+        }
+        let stmt = try prepare(
+            "DELETE FROM repeated_ad_cache WHERE showId = ? AND fingerprint = ?"
+        )
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, normalizedShowId)
+        bind(stmt, 2, fingerprintHex)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    func repeatedAdCacheDelete(
+        sourceAssetId: String,
+        sourceWindowId: String,
+        sourceStartTime: Double? = nil,
+        sourceEndTime: Double? = nil
+    ) throws -> Int {
+        guard let normalizedSourceAssetId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceAssetId),
+              let normalizedSourceWindowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(sourceWindowId),
+              RecurrenceMaterialIdentity.tombstoneWindowKey(
+                  sourceWindowId: normalizedSourceWindowId,
+                  sourceStartTime: sourceStartTime,
+                  sourceEndTime: sourceEndTime
+              ) != nil else {
+            return 0
+        }
+        let geometryPredicate = sourceStartTime == nil
+            ? ""
+            : " AND boundaryStart = ? AND boundaryEnd = ?"
+        let stmt = try prepare(
+            """
+            DELETE FROM repeated_ad_cache
+            WHERE sourceAssetId = ? AND sourceWindowId = ?\(geometryPredicate)
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, normalizedSourceAssetId)
+        bind(stmt, 2, normalizedSourceWindowId)
+        if let sourceStartTime, let sourceEndTime {
+            bind(stmt, 3, sourceStartTime)
+            bind(stmt, 4, sourceEndTime)
+        }
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Retract one stale actor write only while its opaque producer revision
+    /// still owns the cache key. Byte-equivalent newer writes are distinct.
+    func repeatedAdCacheDeleteIfUnchanged(
+        _ entry: RepeatedAdCacheEntry
+    ) throws -> Bool {
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(entry.showId),
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  entry.producerRevision
+              ) != nil
+        else {
+            return false
+        }
+        let stmt = try prepare("""
+            DELETE FROM repeated_ad_cache
+            WHERE showId = ?
+              AND fingerprint = ?
+              AND producerRevision = ?
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, normalizedShowId)
+        bind(stmt, 2, entry.fingerprint.hexString)
+        bind(stmt, 3, entry.producerRevision)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
     func repeatedAdCacheCount(showId: String) throws -> Int {
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(showId)
+        else {
+            return 0
+        }
         let stmt = try prepare("SELECT COUNT(*) FROM repeated_ad_cache WHERE showId = ?")
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, showId)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        bind(stmt, 1, normalizedShowId)
+        guard try nextRow(stmt) else {
+            throw AnalysisStoreError.queryFailed(
+                "repeated-ad cache count returned no row"
+            )
+        }
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
     func repeatedAdCacheTotalCount() throws -> Int {
         let stmt = try prepare("SELECT COUNT(*) FROM repeated_ad_cache")
         defer { sqlite3_finalize(stmt) }
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        guard try nextRow(stmt) else {
+            throw AnalysisStoreError.queryFailed(
+                "repeated-ad cache total count returned no row"
+            )
+        }
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
@@ -5327,15 +6007,20 @@ actor AnalysisStore {
         // scan the whole table. The `idx_repeated_ad_cache_show_lastseen`
         // index (showId, lastSeenAt) gives us O(log n) lookup of the
         // oldest row for the show.
+        guard let normalizedShowId =
+                RecurrenceMaterialIdentity.canonicalIdentifier(showId)
+        else {
+            return false
+        }
         let sel = try prepare("""
             SELECT rowid FROM repeated_ad_cache
             WHERE showId = ?
-            ORDER BY lastSeenAt ASC
+            ORDER BY lastSeenAt ASC, fingerprint ASC
             LIMIT 1
         """)
         defer { sqlite3_finalize(sel) }
-        bind(sel, 1, showId)
-        guard sqlite3_step(sel) == SQLITE_ROW else { return false }
+        bind(sel, 1, normalizedShowId)
+        guard try nextRow(sel) else { return false }
         let rowid = sqlite3_column_int64(sel, 0)
         let del = try prepare("DELETE FROM repeated_ad_cache WHERE rowid = ?")
         defer { sqlite3_finalize(del) }
@@ -5347,11 +6032,11 @@ actor AnalysisStore {
     func repeatedAdCacheEvictOldestGlobal() throws -> Bool {
         let sel = try prepare("""
             SELECT rowid FROM repeated_ad_cache
-            ORDER BY lastSeenAt ASC
+            ORDER BY lastSeenAt ASC, showId ASC, fingerprint ASC
             LIMIT 1
         """)
         defer { sqlite3_finalize(sel) }
-        guard sqlite3_step(sel) == SQLITE_ROW else { return false }
+        guard try nextRow(sel) else { return false }
         let rowid = sqlite3_column_int64(sel, 0)
         let del = try prepare("DELETE FROM repeated_ad_cache WHERE rowid = ?")
         defer { sqlite3_finalize(del) }
@@ -5362,6 +6047,7 @@ actor AnalysisStore {
 
     @discardableResult
     func repeatedAdCachePurgeStale(olderThan: Date) throws -> Int {
+        guard olderThan.timeIntervalSince1970.isFinite else { return 0 }
         let stmt = try prepare("DELETE FROM repeated_ad_cache WHERE lastSeenAt < ?")
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, olderThan.timeIntervalSince1970)
@@ -5374,6 +6060,12 @@ actor AnalysisStore {
     }
 
     func repeatedAdCacheAppendOutcome(_ sample: RepeatedAdCacheOutcomeSample) throws {
+        guard sample.timestamp.timeIntervalSince1970.isFinite,
+              sample.timestamp.timeIntervalSince1970 >= 0 else {
+            throw AnalysisStoreError.insertFailed(
+                "invalid repeated-ad outcome timestamp"
+            )
+        }
         let stmt = try prepare("""
             INSERT INTO repeated_ad_cache_outcomes (timestamp, isHit) VALUES (?, ?)
         """)
@@ -5384,6 +6076,11 @@ actor AnalysisStore {
     }
 
     func repeatedAdCacheFetchOutcomes(newerThan: Date) throws -> [RepeatedAdCacheOutcomeSample] {
+        guard newerThan.timeIntervalSince1970.isFinite else {
+            throw AnalysisStoreError.queryFailed(
+                "invalid repeated-ad outcome cutoff"
+            )
+        }
         let sql = """
             SELECT timestamp, isHit FROM repeated_ad_cache_outcomes
             WHERE timestamp >= ?
@@ -5393,12 +6090,19 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, newerThan.timeIntervalSince1970)
         var rows: [RepeatedAdCacheOutcomeSample] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while try nextRow(stmt) {
             let ts = sqlite3_column_double(stmt, 0)
-            let hit = sqlite3_column_int(stmt, 1) != 0
+            let rawHit = sqlite3_column_int(stmt, 1)
+            guard ts.isFinite,
+                  ts >= 0,
+                  rawHit == 0 || rawHit == 1 else {
+                throw AnalysisStoreError.queryFailed(
+                    "invalid repeated-ad outcome row"
+                )
+            }
             rows.append(RepeatedAdCacheOutcomeSample(
                 timestamp: Date(timeIntervalSince1970: ts),
-                isHit: hit
+                isHit: rawHit == 1
             ))
         }
         return rows
@@ -5406,6 +6110,7 @@ actor AnalysisStore {
 
     @discardableResult
     func repeatedAdCachePurgeOutcomes(olderThan: Date) throws -> Int {
+        guard olderThan.timeIntervalSince1970.isFinite else { return 0 }
         let stmt = try prepare("DELETE FROM repeated_ad_cache_outcomes WHERE timestamp < ?")
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, olderThan.timeIntervalSince1970)
@@ -5445,9 +6150,11 @@ actor AnalysisStore {
         createdAt: Date
     ) throws {
         let createdAtSeconds = createdAt.timeIntervalSince1970
-        guard !windowId.isEmpty,
-              !analysisAssetId.isEmpty,
-              !podcastId.isEmpty,
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(windowId) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  analysisAssetId
+              ) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(podcastId) != nil,
               time.isFinite,
               time >= 0,
               createdAtSeconds.isFinite,
@@ -5478,13 +6185,25 @@ actor AnalysisStore {
         windowId: String,
         analysisAssetId: String,
         podcastId: String,
-        createdAt: Date
+        createdAt: Date,
+        expectedProducerRevision: AdWindow? = nil
     ) throws {
         try exec("BEGIN TRANSACTION")
         do {
             guard let window = try fetchAdWindow(id: windowId),
                   window.analysisAssetId == analysisAssetId else {
                 throw AnalysisStoreError.notFound
+            }
+            if let expectedProducerRevision {
+                guard expectedProducerRevision.id == windowId,
+                      expectedProducerRevision.analysisAssetId
+                        == analysisAssetId,
+                      AdWindowMaterialIdentity.sameProducerRevision(
+                          window,
+                          expectedProducerRevision
+                      ) else {
+                    throw AnalysisStoreError.notFound
+                }
             }
             try updateAdWindowDecision(
                 id: windowId,
@@ -5536,9 +6255,9 @@ actor AnalysisStore {
             let t = sqlite3_column_double(stmt, 3)
             let created = sqlite3_column_double(stmt, 4)
             guard owner == assetId,
-                  !owner.isEmpty,
-                  !win.isEmpty,
-                  !pod.isEmpty,
+                  RecurrenceMaterialIdentity.canonicalIdentifier(owner) != nil,
+                  RecurrenceMaterialIdentity.canonicalIdentifier(win) != nil,
+                  RecurrenceMaterialIdentity.canonicalIdentifier(pod) != nil,
                   t.isFinite,
                   t >= 0,
                   created.isFinite,
@@ -5760,10 +6479,10 @@ actor AnalysisStore {
         // ad_windows
         // playhead-epfk: `catalogStoreMatchSimilarity` carries the
         // per-window top similarity returned by `AdCatalogStore.matches`
-        // (cosine in `[0, 1]`); nullable because not every backfill has
-        // a wired store. Appended at the END of the column list so the
-        // positional `SELECT *` reader below stays correct without
-        // reshuffling indices.
+        // (the fingerprint-version metric in `[0, 1]`); nullable because not
+        // every backfill has a wired store. Like the later provenance and
+        // anchor columns, readers resolve it by name because fresh and upgraded
+        // databases can have different physical column order.
         // playhead-hdgk: `startEdgeAnchor` / `endEdgeAnchor` carry the
         // per-edge auto-skip anchor tier (an `AutoSkipEdgeAnchor` raw value).
         // NOT NULL DEFAULT 'unanchored' so every existing row (V29 upgrade)
@@ -5796,6 +6515,11 @@ actor AnalysisStore {
                 evidenceSources     TEXT,
                 eligibilityGate     TEXT,
                 catalogStoreMatchSimilarity REAL,
+                catalogFingerprintVersion INTEGER,
+                catalogMatchedEntryId TEXT,
+                catalogMatchedShowId TEXT,
+                catalogMatchedLearningSource TEXT,
+                catalogMatchedLearningLifecycle TEXT,
                 startEdgeAnchor     TEXT NOT NULL DEFAULT 'unanchored',
                 endEdgeAnchor       TEXT NOT NULL DEFAULT 'unanchored'
             )
@@ -7232,8 +7956,8 @@ actor AnalysisStore {
             bind(stmt, 4, minimumFeatureVersion)
         }
         var results: [FeatureWindow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(readFeatureWindow(stmt))
+        while try nextRow(stmt) {
+            results.append(try readFeatureWindow(stmt))
         }
         return results
     }
@@ -7821,7 +8545,7 @@ actor AnalysisStore {
     }
 
     /// playhead-ud4n: INSERT-OR-REPLACE variant used by the backfill reconcile
-    /// transaction. All 23 columns are authoritative on replace, so a re-run of
+    /// transaction. All columns are authoritative on replace, so a re-run of
     /// the same content-addressed id overwrites the row wholesale (a true no-op
     /// when the inputs are unchanged). `ad_windows.id` is a TEXT PK with no
     /// child FK referencing it, so the REPLACE's implicit delete has no cascade
@@ -7831,6 +8555,33 @@ actor AnalysisStore {
     }
 
     private func writeAdWindow(_ ad: AdWindow, orReplace: Bool) throws {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(ad.id) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  ad.analysisAssetId
+              ) != nil,
+              ([
+                  ad.boundaryState,
+                  ad.decisionState,
+                  ad.detectorVersion,
+                  ad.advertiser,
+                  ad.product,
+                  ad.adDescription,
+                  ad.evidenceText,
+                  ad.metadataSource,
+                  ad.metadataPromptVersion,
+                  ad.evidenceSources,
+                  ad.eligibilityGate,
+                  ad.catalogMatchedEntryId,
+                  ad.catalogMatchedShowId,
+                  ad.catalogMatchedLearningSource,
+                  ad.catalogMatchedLearningLifecycle,
+                  ad.startEdgeAnchor,
+                  ad.endEdgeAnchor,
+              ] as [String?]).allSatisfy({ value in
+                  value.map { !$0.utf8.contains(0) } ?? true
+              }) else {
+            throw AnalysisStoreError.invalidRow(column: 0)
+        }
         // Column positions (1-indexed): id=1 analysisAssetId=2 startTime=3 endTime=4
         // confidence=5 boundaryState=6 decisionState=7 detectorVersion=8 advertiser=9
         // product=10 adDescription=11 evidenceText=12 evidenceStartTime=13
@@ -7838,6 +8589,9 @@ actor AnalysisStore {
         // userDismissedBanner=18 evidenceSources=19 eligibilityGate=20
         // catalogStoreMatchSimilarity=21 (playhead-epfk)
         // startEdgeAnchor=22 endEdgeAnchor=23 (playhead-hdgk)
+        // catalogFingerprintVersion=24 catalogMatchedEntryId=25
+        // catalogMatchedShowId=26 catalogMatchedLearningSource=27
+        // catalogMatchedLearningLifecycle=28 (playhead-o4qr)
         // Keep bind() call indices and this comment in sync when adding columns.
         let conflictClause = orReplace ? "OR REPLACE " : ""
         let sql = """
@@ -7847,8 +8601,10 @@ actor AnalysisStore {
              evidenceText, evidenceStartTime, metadataSource, metadataConfidence,
              metadataPromptVersion, wasSkipped, userDismissedBanner,
              evidenceSources, eligibilityGate, catalogStoreMatchSimilarity,
-             startEdgeAnchor, endEdgeAnchor)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             startEdgeAnchor, endEdgeAnchor, catalogFingerprintVersion,
+             catalogMatchedEntryId, catalogMatchedShowId,
+             catalogMatchedLearningSource, catalogMatchedLearningLifecycle)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -7875,6 +8631,11 @@ actor AnalysisStore {
         bind(stmt, 21, ad.catalogStoreMatchSimilarity)
         bind(stmt, 22, ad.startEdgeAnchor)
         bind(stmt, 23, ad.endEdgeAnchor)
+        bind(stmt, 24, ad.catalogFingerprintVersion)
+        bind(stmt, 25, ad.catalogMatchedEntryId)
+        bind(stmt, 26, ad.catalogMatchedShowId)
+        bind(stmt, 27, ad.catalogMatchedLearningSource)
+        bind(stmt, 28, ad.catalogMatchedLearningLifecycle)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -7885,6 +8646,9 @@ actor AnalysisStore {
     /// Returns `nil` when no such row exists — callers must decide
     /// whether the rewind tap still warrants a placeholder log entry.
     func fetchAdWindow(id: String) throws -> AdWindow? {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(id) != nil else {
+            return nil
+        }
         let sql = "SELECT * FROM ad_windows WHERE id = ? LIMIT 1"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -7918,6 +8682,18 @@ actor AnalysisStore {
             // set and stay positional. Missing (defensive) → the safe default.
             catalogStoreMatchSimilarity: columnIndex(stmt, name: "catalogStoreMatchSimilarity")
                 .flatMap { optionalDouble(stmt, $0) },
+            catalogFingerprintVersion: columnIndex(stmt, name: "catalogFingerprintVersion")
+                .flatMap { optionalInt(stmt, $0) },
+            catalogMatchedEntryId: columnIndex(stmt, name: "catalogMatchedEntryId")
+                .flatMap { optionalText(stmt, $0) },
+            catalogMatchedShowId: columnIndex(stmt, name: "catalogMatchedShowId")
+                .flatMap { optionalText(stmt, $0) },
+            catalogMatchedLearningSource:
+                columnIndex(stmt, name: "catalogMatchedLearningSource")
+                    .flatMap { optionalText(stmt, $0) },
+            catalogMatchedLearningLifecycle:
+                columnIndex(stmt, name: "catalogMatchedLearningLifecycle")
+                    .flatMap { optionalText(stmt, $0) },
             startEdgeAnchor: columnIndex(stmt, name: "startEdgeAnchor").map { text(stmt, $0) }
                 ?? AutoSkipEdgeAnchor.unanchored.rawValue,
             endEdgeAnchor: columnIndex(stmt, name: "endEdgeAnchor").map { text(stmt, $0) }
@@ -7926,6 +8702,10 @@ actor AnalysisStore {
     }
 
     func fetchAdWindows(assetId: String) throws -> [AdWindow] {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(assetId) != nil
+        else {
+            return []
+        }
         let sql = "SELECT * FROM ad_windows WHERE analysisAssetId = ? ORDER BY startTime"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -7937,6 +8717,17 @@ actor AnalysisStore {
         // fixed-index read was wrong on upgraded DBs where the model/policy/
         // feature-schema columns precede it.
         let catalogIdx = columnIndex(stmt, name: "catalogStoreMatchSimilarity")
+        let catalogVersionIdx = columnIndex(stmt, name: "catalogFingerprintVersion")
+        let catalogEntryIdx = columnIndex(stmt, name: "catalogMatchedEntryId")
+        let catalogShowIdx = columnIndex(stmt, name: "catalogMatchedShowId")
+        let catalogLearningSourceIdx = columnIndex(
+            stmt,
+            name: "catalogMatchedLearningSource"
+        )
+        let catalogLearningLifecycleIdx = columnIndex(
+            stmt,
+            name: "catalogMatchedLearningLifecycle"
+        )
         let startAnchorIdx = columnIndex(stmt, name: "startEdgeAnchor")
         let endAnchorIdx = columnIndex(stmt, name: "endEdgeAnchor")
         var results: [AdWindow] = []
@@ -7973,6 +8764,17 @@ actor AnalysisStore {
                 // and the anchor tiers are ALTER-appended; read by pre-resolved
                 // name index (not fixed position). Missing → nil / safe default.
                 catalogStoreMatchSimilarity: catalogIdx.flatMap { optionalDouble(stmt, $0) },
+                catalogFingerprintVersion: catalogVersionIdx.flatMap { optionalInt(stmt, $0) },
+                catalogMatchedEntryId: catalogEntryIdx.flatMap { optionalText(stmt, $0) },
+                catalogMatchedShowId: catalogShowIdx.flatMap { optionalText(stmt, $0) },
+                catalogMatchedLearningSource:
+                    catalogLearningSourceIdx.flatMap {
+                        optionalText(stmt, $0)
+                    },
+                catalogMatchedLearningLifecycle:
+                    catalogLearningLifecycleIdx.flatMap {
+                        optionalText(stmt, $0)
+                    },
                 startEdgeAnchor: startAnchorIdx.map { text(stmt, $0) }
                     ?? AutoSkipEdgeAnchor.unanchored.rawValue,
                 endEdgeAnchor: endAnchorIdx.map { text(stmt, $0) }
@@ -8379,6 +9181,104 @@ actor AnalysisStore {
                 analysisAssetId: analysisAssetId,
                 decisionState: AdDecisionState.reverted.rawValue
             )
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Atomically reverts every row represented by one generic correction,
+    /// but only while the exact producer revisions captured by the caller
+    /// still own those IDs. This is the durable serialization boundary for
+    /// transcript/time-range vetoes: a same-ID replacement, missing row, or
+    /// malformed correction returns nil without partially mutating rows or
+    /// appending feedback. Episode/lifecycle ownership is checked by the
+    /// orchestrator before entering this actor; an already-admitted tap may
+    /// finish against its exact old material across a playback transition.
+    func persistRevertedAdWindowsIfCurrent(
+        expectedWindows: [AdWindow],
+        analysisAssetId: String,
+        expectedPodcastId: String?,
+        correction: CorrectionEvent?,
+        expectedCorrectionSource: CorrectionSource = .manualVeto
+    ) throws -> Bool? {
+        try exec("BEGIN TRANSACTION")
+        do {
+            let expectedIDs = expectedWindows.map(\.id)
+            guard !expectedWindows.isEmpty,
+                  !analysisAssetId.isEmpty,
+                  Set(expectedIDs).count == expectedIDs.count
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+
+            for expected in expectedWindows {
+                guard expected.analysisAssetId == analysisAssetId,
+                      !expected.id.isEmpty,
+                      expected.startTime.isFinite,
+                      expected.endTime.isFinite,
+                      expected.confidence.isFinite,
+                      expected.startTime >= 0,
+                      expected.endTime > expected.startTime,
+                      (0...1).contains(expected.confidence),
+                      let current = try fetchAdWindow(id: expected.id),
+                      current.analysisAssetId == analysisAssetId,
+                      [
+                          AdDecisionState.candidate.rawValue,
+                          AdDecisionState.confirmed.rawValue,
+                          AdDecisionState.applied.rawValue,
+                      ].contains(current.decisionState),
+                      AdWindowMaterialIdentity.sameProducerRevision(
+                          current,
+                          expected
+                      )
+                else {
+                    try exec("ROLLBACK")
+                    return nil
+                }
+            }
+
+            if let correction {
+                guard correction.podcastId == expectedPodcastId,
+                      let scope = CorrectionScope.deserialize(
+                          correction.scope
+                      ),
+                      case let .exactTimeSpan(
+                          scopedAssetId,
+                          correctionStart,
+                          correctionEnd
+                      ) = scope,
+                      scopedAssetId == analysisAssetId,
+                      let first = expectedWindows.first,
+                      Self.feedbackCorrectionMatches(
+                          correction,
+                          source: expectedCorrectionSource,
+                          analysisAssetId: analysisAssetId,
+                          startTime: correctionStart,
+                          endTime: correctionEnd,
+                          requiredTargetIDs: Set(expectedIDs),
+                          expectedProjection:
+                              ExplicitFeedbackDetectionProjection(first)
+                      )
+                else {
+                    try exec("ROLLBACK")
+                    return nil
+                }
+            }
+
+            let wasNewlyInserted = try correction.map {
+                try appendCorrectionEvent($0)
+            } ?? false
+            for expected in expectedWindows {
+                try updateAdWindowDecision(
+                    id: expected.id,
+                    analysisAssetId: analysisAssetId,
+                    decisionState: AdDecisionState.reverted.rawValue
+                )
+            }
             try exec("COMMIT")
             return wasNewlyInserted
         } catch {
@@ -9008,8 +9908,16 @@ actor AnalysisStore {
         let sql = """
             UPDATE ad_windows SET
                 startTime = ?, endTime = ?, confidence = ?, boundaryState = ?,
-                evidenceText = ?, evidenceStartTime = ?, evidenceSources = ?
-            WHERE id = ?
+                advertiser = ?, product = ?, adDescription = ?,
+                evidenceText = ?, evidenceStartTime = ?, metadataSource = ?,
+                metadataConfidence = ?, metadataPromptVersion = ?,
+                evidenceSources = ?, eligibilityGate = ?,
+                catalogStoreMatchSimilarity = ?, catalogFingerprintVersion = ?,
+                catalogMatchedEntryId = ?, catalogMatchedShowId = ?,
+                catalogMatchedLearningSource = ?,
+                catalogMatchedLearningLifecycle = ?, startEdgeAnchor = ?,
+                endEdgeAnchor = ?
+            WHERE id = ? AND analysisAssetId = ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -9017,11 +9925,30 @@ actor AnalysisStore {
         bind(stmt, 2, ad.endTime)
         bind(stmt, 3, ad.confidence)
         bind(stmt, 4, ad.boundaryState)
-        bind(stmt, 5, ad.evidenceText)
-        bind(stmt, 6, ad.evidenceStartTime)
-        bind(stmt, 7, ad.evidenceSources)
-        bind(stmt, 8, ad.id)
+        bind(stmt, 5, ad.advertiser)
+        bind(stmt, 6, ad.product)
+        bind(stmt, 7, ad.adDescription)
+        bind(stmt, 8, ad.evidenceText)
+        bind(stmt, 9, ad.evidenceStartTime)
+        bind(stmt, 10, ad.metadataSource)
+        bind(stmt, 11, ad.metadataConfidence)
+        bind(stmt, 12, ad.metadataPromptVersion)
+        bind(stmt, 13, ad.evidenceSources)
+        bind(stmt, 14, ad.eligibilityGate)
+        bind(stmt, 15, ad.catalogStoreMatchSimilarity)
+        bind(stmt, 16, ad.catalogFingerprintVersion)
+        bind(stmt, 17, ad.catalogMatchedEntryId)
+        bind(stmt, 18, ad.catalogMatchedShowId)
+        bind(stmt, 19, ad.catalogMatchedLearningSource)
+        bind(stmt, 20, ad.catalogMatchedLearningLifecycle)
+        bind(stmt, 21, ad.startEdgeAnchor)
+        bind(stmt, 22, ad.endEdgeAnchor)
+        bind(stmt, 23, ad.id)
+        bind(stmt, 24, ad.analysisAssetId)
         try step(stmt, expecting: SQLITE_DONE)
+        guard sqlite3_changes(db) == 1 else {
+            throw AnalysisStoreError.staleAdWindowRevision(id: ad.id)
+        }
     }
 
     func insertAdWindows(_ windows: [AdWindow]) throws {
@@ -9041,11 +9968,48 @@ actor AnalysisStore {
     func upsertHotPathAdWindows(
         _ windows: [AdWindow],
         existingIDs: Set<String>,
-        retiredIDs: Set<String> = []
+        retiredIDs: Set<String> = [],
+        expectedProducerRevisions: [String: AdWindow] = [:]
     ) throws {
         guard !windows.isEmpty || !retiredIDs.isEmpty else { return }
         try exec("BEGIN TRANSACTION")
         do {
+            let windowIDs = Set(windows.map(\.id))
+            guard windowIDs.count == windows.count,
+                  existingIDs.isSubset(of: windowIDs),
+                  retiredIDs.isDisjoint(with: windowIDs),
+                  existingIDs.isDisjoint(with: retiredIDs) else {
+                throw AnalysisStoreError.queryFailed(
+                    "Invalid hot-path reconcile mutation set"
+                )
+            }
+
+            // Validate every ID-backed mutation before writing any row. The
+            // actor serializes this transaction, so the revisions cannot
+            // change between these reads and the update/delete statements.
+            for id in existingIDs.union(retiredIDs).sorted() {
+                guard let expected = expectedProducerRevisions[id],
+                      expected.id == id,
+                      expected.decisionState
+                        == AdDecisionState.candidate.rawValue,
+                      let current = try fetchAdWindow(id: id),
+                      current.decisionState == expected.decisionState,
+                      current.wasSkipped == expected.wasSkipped,
+                      current.userDismissedBanner
+                        == expected.userDismissedBanner,
+                      Self.sameAdWindowProducerRevision(current, expected)
+                else {
+                    throw AnalysisStoreError.staleAdWindowRevision(id: id)
+                }
+                if existingIDs.contains(id) {
+                    guard let incoming = windows.first(where: { $0.id == id }),
+                          incoming.analysisAssetId
+                            == expected.analysisAssetId else {
+                        throw AnalysisStoreError.staleAdWindowRevision(id: id)
+                    }
+                }
+            }
+
             for ad in windows {
                 if existingIDs.contains(ad.id) {
                     try updateAdWindowHotPathCandidate(ad)
@@ -9181,20 +10145,37 @@ actor AnalysisStore {
         }
     }
 
-    func updateAdWindowMetadata(
-        id: String,
+    @discardableResult
+    func updateAdWindowMetadataIfCurrent(
+        expectedProducerRevision: AdWindow,
         advertiser: String?,
         product: String?,
         evidenceText: String?,
         metadataSource: String,
         metadataConfidence: Double?,
         metadataPromptVersion: String?
-    ) throws {
+    ) throws -> Bool {
+        guard let current = try fetchAdWindow(
+                  id: expectedProducerRevision.id
+              ),
+              current.analysisAssetId
+                == expectedProducerRevision.analysisAssetId,
+              current.decisionState
+                == expectedProducerRevision.decisionState,
+              current.wasSkipped == expectedProducerRevision.wasSkipped,
+              current.userDismissedBanner
+                == expectedProducerRevision.userDismissedBanner,
+              Self.sameAdWindowProducerRevision(
+                  current,
+                  expectedProducerRevision
+              ) else {
+            return false
+        }
         let sql = """
             UPDATE ad_windows SET
                 advertiser = ?, product = ?, evidenceText = ?,
                 metadataSource = ?, metadataConfidence = ?, metadataPromptVersion = ?
-            WHERE id = ?
+            WHERE id = ? AND analysisAssetId = ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -9204,8 +10185,10 @@ actor AnalysisStore {
         bind(stmt, 4, metadataSource)
         bind(stmt, 5, metadataConfidence)
         bind(stmt, 6, metadataPromptVersion)
-        bind(stmt, 7, id)
+        bind(stmt, 7, expectedProducerRevision.id)
+        bind(stmt, 8, expectedProducerRevision.analysisAssetId)
         try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) == 1
     }
 
     func updateAdWindowWasSkipped(id: String, wasSkipped: Bool) throws {
@@ -9285,15 +10268,19 @@ actor AnalysisStore {
             bind(stmt, 2, minimumFeatureVersion)
         }
         var results: [FeatureWindow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(readFeatureWindow(stmt))
+        while try nextRow(stmt) {
+            results.append(try readFeatureWindow(stmt))
         }
         return results
     }
 
-    private func readFeatureWindow(_ stmt: OpaquePointer?) -> FeatureWindow {
-        let levelRaw = optionalText(stmt, 10) ?? "none"
-        let level = MusicBedLevel(rawValue: levelRaw) ?? .none
+    private func readFeatureWindow(
+        _ stmt: OpaquePointer?
+    ) throws -> FeatureWindow {
+        guard let levelRaw = optionalText(stmt, 10),
+              let level = MusicBedLevel(rawValue: levelRaw) else {
+            throw AnalysisStoreError.invalidRow(column: 10)
+        }
         return FeatureWindow(
             analysisAssetId: text(stmt, 0),
             startTime: sqlite3_column_double(stmt, 1),
@@ -13455,15 +14442,35 @@ actor AnalysisStore {
         }
     }
 
+    /// Advance a SELECT statement, distinguishing a clean end-of-results from
+    /// a SQLite failure. Callers must not interpret I/O/corruption errors as an
+    /// empty cache because that can bypass revocation and capacity checks.
+    private func nextRow(_ stmt: OpaquePointer?) throws -> Bool {
+        let rc = sqlite3_step(stmt)
+        if rc == SQLITE_ROW { return true }
+        if rc == SQLITE_DONE { return false }
+        throw AnalysisStoreError.queryFailed(
+            String(cString: sqlite3_errmsg(db))
+        )
+    }
+
     // Bind helpers
 
     private func bind(_ stmt: OpaquePointer?, _ idx: Int32, _ value: String?) {
         if let value {
-            // `withCString` guarantees the pointer is valid for the closure, and
-            // `SQLITE_TRANSIENT` tells SQLite to copy the bytes immediately, so
-            // no autoreleased NSString trampoline is needed per bind call.
+            // Pass the exact UTF-8 byte length instead of asking SQLite to
+            // scan for a C terminator. Source/diagnostic text may contain an
+            // embedded NUL, and truncating it would break exact persistence.
+            // SQLITE_TRANSIENT copies the bytes before this closure returns.
             value.withCString { cstr in
-                _ = sqlite3_bind_text(stmt, idx, cstr, -1, SQLITE_TRANSIENT_PTR)
+                _ = sqlite3_bind_text64(
+                    stmt,
+                    idx,
+                    cstr,
+                    UInt64(value.utf8.count),
+                    SQLITE_TRANSIENT_PTR,
+                    UInt8(SQLITE_UTF8)
+                )
             }
         } else {
             sqlite3_bind_null(stmt, idx)
@@ -13496,7 +14503,14 @@ actor AnalysisStore {
 
     private func bind(_ stmt: OpaquePointer?, _ idx: Int32, _ value: String) {
         value.withCString { cstr in
-            _ = sqlite3_bind_text(stmt, idx, cstr, -1, SQLITE_TRANSIENT_PTR)
+            _ = sqlite3_bind_text64(
+                stmt,
+                idx,
+                cstr,
+                UInt64(value.utf8.count),
+                SQLITE_TRANSIENT_PTR,
+                UInt8(SQLITE_UTF8)
+            )
         }
     }
 
@@ -13510,7 +14524,7 @@ actor AnalysisStore {
     /// New code on the persistence boundary should call ``requireText(_:_:)``
     /// instead so an unexpected NULL throws `AnalysisStoreError.invalidRow`.
     private func text(_ stmt: OpaquePointer?, _ idx: Int32) -> String {
-        sqlite3_column_text(stmt, idx).map { String(cString: $0) } ?? ""
+        decodedText(stmt, idx) ?? ""
     }
 
     /// playhead-hdgk: resolve a result column's 0-based index by NAME.
@@ -13543,16 +14557,38 @@ actor AnalysisStore {
     /// `AnalysisStoreError.invalidRow` when a non-null column is unexpectedly
     /// NULL instead of masking the issue with an empty string.
     private func requireText(_ stmt: OpaquePointer?, _ idx: Int32) throws -> String {
-        guard sqlite3_column_type(stmt, idx) != SQLITE_NULL,
-              let cstr = sqlite3_column_text(stmt, idx) else {
+        guard let value = decodedText(stmt, idx) else {
             throw AnalysisStoreError.invalidRow(column: Int(idx))
         }
-        return String(cString: cstr)
+        return value
     }
 
     private func optionalText(_ stmt: OpaquePointer?, _ idx: Int32) -> String? {
         guard sqlite3_column_type(stmt, idx) != SQLITE_NULL else { return nil }
-        return sqlite3_column_text(stmt, idx).map { String(cString: $0) }
+        return decodedText(stmt, idx)
+    }
+
+    /// Decode the byte length SQLite reports instead of treating TEXT as a C
+    /// string. `String(cString:)` silently truncated an embedded NUL, allowing
+    /// malformed persisted identities such as `"show\0other"` to masquerade
+    /// as the canonical `"show"` namespace before validation.
+    private func decodedText(
+        _ stmt: OpaquePointer?,
+        _ idx: Int32
+    ) -> String? {
+        guard sqlite3_column_type(stmt, idx) != SQLITE_NULL else {
+            return nil
+        }
+        let byteCount = Int(sqlite3_column_bytes(stmt, idx))
+        guard byteCount >= 0 else { return nil }
+        if byteCount == 0 { return "" }
+        guard let bytes = sqlite3_column_text(stmt, idx) else {
+            return nil
+        }
+        return String(
+            bytes: UnsafeBufferPointer(start: bytes, count: byteCount),
+            encoding: .utf8
+        )
     }
 
     private func optionalDouble(_ stmt: OpaquePointer?, _ idx: Int32) -> Double? {

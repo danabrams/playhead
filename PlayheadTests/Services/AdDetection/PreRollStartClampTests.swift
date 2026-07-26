@@ -7,8 +7,9 @@
 //     first slot at 4 s → 0.0 using `AdDetectionConfig.default.preRollStartClampSeconds`.
 //   • A first slot far past `N` (a mid-roll) is NOT clamped; mid/post slots are
 //     never clamped.
-//   • Auto-skip eligibility is UNCHANGED — the clamp copies `eligibilityGate` /
-//     `decisionState` / `confidence` / `id` verbatim and moves ONLY the start.
+//   • Widened material is capped to mark-only while stricter gates,
+//     `decisionState`, `confidence`, and `id` are preserved. Exact
+//     acoustic-catalog provenance is cleared because widening invalidates it.
 //   • Idempotent, monotonic (never shrink, never invert), order-preserving.
 //   • Empty-slots and start-already-0 are no-ops.
 
@@ -31,7 +32,8 @@ struct PreRollStartClampTests {
         decisionState: AdDecisionState = .confirmed,
         eligibilityGate: SkipEligibilityGate? = .eligible,
         evidenceStart: Double? = nil,
-        startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored
+        startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
+        catalogMatch: Bool = false
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -53,8 +55,72 @@ struct PreRollStartClampTests {
             wasSkipped: false,
             userDismissedBanner: false,
             eligibilityGate: eligibilityGate?.rawValue,
+            catalogStoreMatchSimilarity: catalogMatch ? 0.99 : nil,
+            catalogFingerprintVersion: catalogMatch
+                ? CatalogFingerprintVersion.currentCatalog.rawValue
+                : nil,
+            catalogMatchedEntryId: catalogMatch
+                ? "11111111-1111-1111-1111-111111111111"
+                : nil,
+            catalogMatchedShowId: catalogMatch ? "show-pre-roll" : nil,
+            catalogMatchedLearningSource: catalogMatch
+                ? CatalogLearningSource.userMarkedAd.rawValue
+                : nil,
+            catalogMatchedLearningLifecycle: catalogMatch
+                ? CatalogLearningLifecycle.explicitConfirmation.rawValue
+                : nil,
             startEdgeAnchor: startEdgeAnchor.rawValue
         )
+    }
+
+    private func expectUnchanged(
+        _ actual: AdWindow,
+        from expected: AdWindow
+    ) {
+        #expect(actual.id == expected.id)
+        #expect(actual.analysisAssetId == expected.analysisAssetId)
+        #expect(actual.startTime.bitPattern == expected.startTime.bitPattern)
+        #expect(actual.endTime.bitPattern == expected.endTime.bitPattern)
+        #expect(actual.confidence.bitPattern == expected.confidence.bitPattern)
+        #expect(actual.boundaryState == expected.boundaryState)
+        #expect(actual.decisionState == expected.decisionState)
+        #expect(actual.detectorVersion == expected.detectorVersion)
+        #expect(actual.advertiser == expected.advertiser)
+        #expect(actual.product == expected.product)
+        #expect(actual.adDescription == expected.adDescription)
+        #expect(actual.evidenceText == expected.evidenceText)
+        #expect(actual.evidenceStartTime == expected.evidenceStartTime)
+        #expect(actual.metadataSource == expected.metadataSource)
+        #expect(actual.metadataConfidence == expected.metadataConfidence)
+        #expect(actual.metadataPromptVersion == expected.metadataPromptVersion)
+        #expect(actual.wasSkipped == expected.wasSkipped)
+        #expect(actual.userDismissedBanner == expected.userDismissedBanner)
+        #expect(actual.evidenceSources == expected.evidenceSources)
+        #expect(actual.eligibilityGate == expected.eligibilityGate)
+        #expect(
+            actual.catalogStoreMatchSimilarity
+                == expected.catalogStoreMatchSimilarity
+        )
+        #expect(
+            actual.catalogFingerprintVersion
+                == expected.catalogFingerprintVersion
+        )
+        #expect(
+            actual.catalogMatchedEntryId == expected.catalogMatchedEntryId
+        )
+        #expect(
+            actual.catalogMatchedShowId == expected.catalogMatchedShowId
+        )
+        #expect(
+            actual.catalogMatchedLearningSource
+                == expected.catalogMatchedLearningSource
+        )
+        #expect(
+            actual.catalogMatchedLearningLifecycle
+                == expected.catalogMatchedLearningLifecycle
+        )
+        #expect(actual.startEdgeAnchor == expected.startEdgeAnchor)
+        #expect(actual.endEdgeAnchor == expected.endEdgeAnchor)
     }
 
     // MARK: - Fires at the production default
@@ -209,10 +275,10 @@ struct PreRollStartClampTests {
         #expect(clamped[1].startTime == 300.0)   // later slot untouched (not a pre-roll anyway)
     }
 
-    // MARK: - Auto-skip eligibility / all non-boundary fields preserved
+    // MARK: - Geometry changes are mark-only
 
-    @Test("eligibility, decisionState, confidence, id, anchors, end all preserved")
-    func eligibilityPathUntouched() {
+    @Test("widened eligible material is mark-only and other fields are preserved")
+    func widenedEligibleMaterialIsDemoted() {
         let original = window(
             id: "pre-roll-id",
             start: 4.0,
@@ -225,15 +291,33 @@ struct PreRollStartClampTests {
         )
         let clamped = PreRollStartClamp.clamp(windows: [original])[0]
 
-        #expect(clamped.startTime == 0.0)                       // only this moved
+        #expect(clamped.startTime == 0.0)
         #expect(clamped.endTime == original.endTime)
-        #expect(clamped.id == original.id)                      // ordinal id stable
-        #expect(clamped.eligibilityGate == original.eligibilityGate)
+        #expect(clamped.id == original.id)
+        #expect(
+            clamped.eligibilityGate
+                == SkipEligibilityGate.markOnly.rawValue
+        )
         #expect(clamped.decisionState == original.decisionState)
         #expect(clamped.confidence == original.confidence)
         #expect(clamped.evidenceStartTime == original.evidenceStartTime)  // evidence not widened
         #expect(clamped.startEdgeAnchor == original.startEdgeAnchor)
         #expect(clamped.endEdgeAnchor == original.endEdgeAnchor)
+    }
+
+    @Test("widening never weakens an existing correction block")
+    func stricterGateIsPreserved() {
+        let blocked = window(
+            start: 4,
+            end: 34,
+            eligibilityGate: .blockedByUserCorrection
+        )
+        let clamped = PreRollStartClamp.clamp(windows: [blocked])[0]
+        #expect(clamped.startTime == 0)
+        #expect(
+            clamped.eligibilityGate
+                == SkipEligibilityGate.blockedByUserCorrection.rawValue
+        )
     }
 
     /// A NON-deterministic (host-read, mark-only) pre-roll must stay mark-only —
@@ -251,6 +335,83 @@ struct PreRollStartClampTests {
         #expect(clamped.startTime == 0.0)                        // widened
         #expect(clamped.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)  // still mark-only
         #expect(clamped.decisionState == AdDecisionState.candidate.rawValue)
+    }
+
+    @Test("widening a pre-roll clears exact catalog-match provenance")
+    func clampedGeometryClearsCatalogMatchProvenance() {
+        let original = window(
+            start: 4.0,
+            end: 34.0,
+            catalogMatch: true
+        )
+        #expect(
+            original.hasCompatibleCatalogMatchProvenance(
+                expectedShowId: "show-pre-roll"
+            )
+        )
+
+        let clamped = PreRollStartClamp.clamp(windows: [original])[0]
+
+        #expect(clamped.startTime == 0)
+        #expect(clamped.catalogStoreMatchSimilarity == nil)
+        #expect(clamped.catalogFingerprintVersion == nil)
+        #expect(clamped.catalogMatchedEntryId == nil)
+        #expect(clamped.catalogMatchedShowId == nil)
+        #expect(clamped.catalogMatchedLearningSource == nil)
+        #expect(clamped.catalogMatchedLearningLifecycle == nil)
+        #expect(!clamped.claimsCatalogMatch)
+    }
+
+    @Test("a no-op pre-roll clamp preserves still-bound catalog provenance")
+    func noOpPreservesCatalogMatchProvenance() {
+        let original = window(
+            start: 30.0,
+            end: 60.0,
+            catalogMatch: true
+        )
+
+        let unchanged = PreRollStartClamp.clamp(windows: [original])[0]
+
+        #expect(unchanged.startTime == original.startTime)
+        #expect(
+            unchanged.catalogStoreMatchSimilarity
+                == original.catalogStoreMatchSimilarity
+        )
+        #expect(
+            unchanged.catalogMatchedEntryId
+                == original.catalogMatchedEntryId
+        )
+        #expect(
+            unchanged.hasCompatibleCatalogMatchProvenance(
+                expectedShowId: "show-pre-roll"
+            )
+        )
+    }
+
+    @Test("non-finite configuration and geometry fail closed")
+    func malformedInputsDoNotClamp() {
+        let valid = window(start: 10, end: 40)
+        for threshold in [Double.nan, .infinity] {
+            let output = PreRollStartClamp.clamp(
+                windows: [valid],
+                config: .init(maxPreRollStartSeconds: threshold)
+            )
+            #expect(output.count == 1)
+            guard let first = output.first else { continue }
+            expectUnchanged(first, from: valid)
+        }
+
+        let malformed = [
+            window(start: .infinity, end: .infinity),
+            window(start: 10, end: .infinity),
+            window(start: 10, end: 5),
+        ]
+        for input in malformed {
+            let output = PreRollStartClamp.clamp(windows: [input])
+            #expect(output.count == 1)
+            guard let first = output.first else { continue }
+            expectUnchanged(first, from: input)
+        }
     }
 
     // MARK: - Suppressed windows are not the "first slot"

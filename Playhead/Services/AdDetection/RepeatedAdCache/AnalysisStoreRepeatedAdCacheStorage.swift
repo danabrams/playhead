@@ -27,7 +27,8 @@ struct AnalysisStoreRepeatedAdCacheStorage: RepeatedAdCacheStorage {
 
     // MARK: Entries
 
-    func upsert(_ entry: RepeatedAdCacheEntry) async throws {
+    @discardableResult
+    func upsert(_ entry: RepeatedAdCacheEntry) async throws -> Bool {
         // Defense in depth (review/v0.5-head-polish L3):
         // `RepeatedAdCacheService.store(...)` already refuses zero-
         // fingerprint entries, but the storage protocol can be reached
@@ -35,8 +36,87 @@ struct AnalysisStoreRepeatedAdCacheStorage: RepeatedAdCacheStorage {
         // restores, hypothetical batch importers). Drop the row at the
         // storage boundary so the "zero is a sentinel, never persisted"
         // invariant is enforced at every entry point — not just one.
-        guard !entry.fingerprint.isZero else { return }
-        try await store.repeatedAdCacheUpsert(entry)
+        guard !entry.fingerprint.isZero else { return false }
+        return try await store.repeatedAdCacheUpsert(entry)
+    }
+
+    @discardableResult
+    func upsertEnforcingCapacity(
+        _ entry: RepeatedAdCacheEntry,
+        perShowCap: Int,
+        globalCap: Int
+    ) async throws -> Bool {
+        guard !entry.fingerprint.isZero else { return false }
+        return try await store.repeatedAdCacheUpsertEnforcingCapacity(
+            entry,
+            perShowCap: perShowCap,
+            globalCap: globalCap
+        )
+    }
+
+    @discardableResult
+    func recordRevocation(
+        sourceAssetId: String,
+        sourceWindowId: String,
+        source: CatalogRevocationSource,
+        at: Date
+    ) async throws -> Bool {
+        try await store.repeatedAdCacheRecordRevocation(
+            sourceAssetId: sourceAssetId,
+            sourceWindowId: sourceWindowId,
+            source: source,
+            at: at
+        )
+    }
+
+    @discardableResult
+    func recordFingerprintRevocation(
+        showId: String,
+        fingerprint: RepeatedAdFingerprint,
+        sourceAssetId: String,
+        sourceWindowId: String,
+        source: CatalogRevocationSource,
+        at: Date
+    ) async throws -> Bool {
+        try await store.repeatedAdCacheRecordFingerprintRevocation(
+            showId: showId,
+            fingerprintHex: fingerprint.hexString,
+            sourceAssetId: sourceAssetId,
+            sourceWindowId: sourceWindowId,
+            source: source,
+            at: at
+        )
+    }
+
+    @discardableResult
+    func revokeMatchesAtomically(
+        showId: String?,
+        fingerprint: RepeatedAdFingerprint?,
+        sourceAssetId: String,
+        sourceWindowId: String,
+        sourceStartTime: Double? = nil,
+        sourceEndTime: Double? = nil,
+        source: CatalogRevocationSource,
+        at: Date
+    ) async throws -> Int {
+        try await store.repeatedAdCacheRevokeMatchesAtomically(
+            showId: showId,
+            fingerprintHex: fingerprint?.hexString,
+            sourceAssetId: sourceAssetId,
+            sourceWindowId: sourceWindowId,
+            sourceStartTime: sourceStartTime,
+            sourceEndTime: sourceEndTime,
+            source: source,
+            at: at
+        )
+    }
+
+    func fetchRevokedFingerprints(
+        showId: String
+    ) async throws -> [RepeatedAdFingerprint] {
+        try await store.repeatedAdCacheFetchRevokedFingerprints(
+            showId: showId
+        )
     }
 
     func fetchAll(showId: String) async throws -> [RepeatedAdCacheEntry] {
@@ -49,6 +129,35 @@ struct AnalysisStoreRepeatedAdCacheStorage: RepeatedAdCacheStorage {
             fingerprintHex: fingerprint.hexString,
             at: at
         )
+    }
+
+    @discardableResult
+    func delete(
+        showId: String,
+        fingerprint: RepeatedAdFingerprint
+    ) async throws -> Bool {
+        try await store.repeatedAdCacheDelete(
+            showId: showId,
+            fingerprintHex: fingerprint.hexString
+        )
+    }
+
+    @discardableResult
+    func delete(
+        sourceAssetId: String,
+        sourceWindowId: String
+    ) async throws -> Int {
+        try await store.repeatedAdCacheDelete(
+            sourceAssetId: sourceAssetId,
+            sourceWindowId: sourceWindowId
+        )
+    }
+
+    @discardableResult
+    func deleteIfUnchanged(
+        _ entry: RepeatedAdCacheEntry
+    ) async throws -> Bool {
+        try await store.repeatedAdCacheDeleteIfUnchanged(entry)
     }
 
     func count(showId: String) async throws -> Int {

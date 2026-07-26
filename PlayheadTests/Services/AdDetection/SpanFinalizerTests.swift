@@ -17,7 +17,8 @@ struct SpanFinalizerTests {
         startTime: Double = 10.0,
         endTime: Double = 40.0,
         firstOrdinal: Int = 100,
-        lastOrdinal: Int = 200
+        lastOrdinal: Int = 200,
+        anchorProvenance: [AnchorRef] = []
     ) -> DecodedSpan {
         DecodedSpan(
             id: DecodedSpan.makeId(assetId: assetId, firstAtomOrdinal: firstOrdinal, lastAtomOrdinal: lastOrdinal),
@@ -26,7 +27,7 @@ struct SpanFinalizerTests {
             lastAtomOrdinal: lastOrdinal,
             startTime: startTime,
             endTime: endTime,
-            anchorProvenance: []
+            anchorProvenance: anchorProvenance
         )
     }
 
@@ -116,6 +117,10 @@ struct SpanFinalizerTests {
         #expect(result[0].span.startTime == 10)
         #expect(result[0].span.endTime == 80)
         #expect(result[0].decision.skipConfidence == 0.9)
+        #expect(
+            result[0].decision.eligibilityGate == .markOnly,
+            "trimmed/merged geometry must not inherit automatic authority"
+        )
     }
 
     @Test("Fully contained lower-confidence span is suppressed")
@@ -222,7 +227,70 @@ struct SpanFinalizerTests {
         #expect(result[0].span.endTime == 50)
         // Merged span takes higher confidence.
         #expect(result[0].decision.skipConfidence == 0.8)
+        #expect(
+            result[0].decision.eligibilityGate == .markOnly,
+            "the unclassified gap in a merged interval must be mark-only"
+        )
         #expect(result[0].constraintTrace.contains(.mergedWithAdjacent))
+    }
+
+    @Test("Merge preserves every source span's atom range, identity, and anchor provenance")
+    func mergePreservesCompleteSourceAuditCohort() throws {
+        let firstAnchor = AnchorRef.classifierSeed(
+            regionId: "first-region",
+            score: 0.81
+        )
+        let secondAnchor = AnchorRef.userCorrection(
+            correctionId: "second-correction",
+            reportedTime: 42
+        )
+        let firstSpan = makeSpan(
+            startTime: 10,
+            endTime: 30,
+            firstOrdinal: 100,
+            lastOrdinal: 140,
+            anchorProvenance: [firstAnchor]
+        )
+        let secondSpan = makeSpan(
+            startTime: 32,
+            endTime: 50,
+            firstOrdinal: 300,
+            lastOrdinal: 340,
+            anchorProvenance: [secondAnchor, firstAnchor]
+        )
+        let candidates = [
+            CandidateSpan(
+                span: firstSpan,
+                decision: DecisionResult(
+                    proposalConfidence: 0.7,
+                    skipConfidence: 0.7,
+                    eligibilityGate: .eligible
+                ),
+                commercialIntent: .paid,
+                adOwnership: .thirdParty
+            ),
+            CandidateSpan(
+                span: secondSpan,
+                decision: DecisionResult(
+                    proposalConfidence: 0.8,
+                    skipConfidence: 0.8,
+                    eligibilityGate: .eligible
+                ),
+                commercialIntent: .paid,
+                adOwnership: .thirdParty
+            ),
+        ]
+
+        let merged = try #require(makeFinalizer().finalize(candidates).first)
+
+        #expect(merged.sourceSpanIds == [firstSpan.id, secondSpan.id])
+        #expect(merged.sourceSpanId == firstSpan.id)
+        #expect(merged.span.firstAtomOrdinal == firstSpan.firstAtomOrdinal)
+        #expect(merged.span.lastAtomOrdinal == secondSpan.lastAtomOrdinal)
+        #expect(
+            merged.span.anchorProvenance == [firstAnchor, secondAnchor],
+            "merged provenance must be ordered and de-duplicated"
+        )
     }
 
     @Test("Merge takes the more restrictive gate: eligible + markOnly → markOnly (post-roll guard shape)")
@@ -399,22 +467,31 @@ struct SpanFinalizerTests {
         #expect(result[0].span.endTime == 180)
         #expect(result[1].span.startTime == 180)
         #expect(result[1].span.endTime == 300)
+        #expect(result[0].decision.eligibilityGate == .markOnly)
+        #expect(result[1].decision.eligibilityGate == .markOnly)
         #expect(result[0].constraintTrace.contains(.splitAboveMaxDuration))
     }
 
-    @Test("Split absorbs tiny trailing fragment")
-    func splitAbsorbsTrailingFragment() {
-        // 183s → should not create a 3s trailing fragment (< 5s).
-        // Instead, first chunk extends to absorb it.
+    @Test("Oversized span with a sub-minimum tail keeps its fenced identity but cannot auto-skip")
+    func oversizedSubminimumTailIsDemotedWithoutChangingIdentity() {
+        // 183s must not create a 3s trailing fragment (< 5s), because replacing
+        // the parent with split identities would bypass same-ID correction and
+        // terminal fences. It remains one span, but its implausible duration
+        // cannot retain automatic authority.
         let candidates = [
             makeCandidate(startTime: 0, endTime: 183, ordinalBase: 100),
         ]
+        let originalId = candidates[0].span.id
         let result = makeFinalizer().finalize(candidates)
 
         // Trailing 3s (< 5s) absorbed into first chunk.
         #expect(result.count == 1)
         #expect(result[0].span.startTime == 0)
         #expect(result[0].span.endTime == 183)
+        #expect(result[0].span.id == originalId)
+        #expect(result[0].decision.eligibilityGate == .markOnly)
+        #expect(!result[0].constraintTrace.contains(.splitAboveMaxDuration))
+        #expect(result[0].constraintTrace.contains(.oversizedTailDemoted))
     }
 
     @Test("Span exactly 180s is not split")
@@ -426,6 +503,10 @@ struct SpanFinalizerTests {
 
         #expect(result.count == 1)
         #expect(!result[0].constraintTrace.contains(.splitAboveMaxDuration))
+        #expect(
+            result[0].decision.eligibilityGate == .eligible,
+            "unchanged exact geometry must retain its source gate"
+        )
     }
 
     // MARK: - Constraint 4: Chapter penalties
@@ -640,7 +721,6 @@ struct SpanFinalizerTests {
     func capEligibilityAllowsDemotion() {
         // A span at .markOnly (severity 1) should be demoted to .blockedByPolicy (severity 2)
         // by the action cap when over budget.
-        let chapters = [ChapterMarker(startTime: 5, endTime: 35, isContent: true)]
         // Episode is 60s. Two eligible 30s spans = 60s = 100% > 50% budget.
         // But one span gets markOnly from chapter penalty, so only one counts as eligible.
         // 30s/60s = 50% exactly, not over budget. Use a tighter episode.

@@ -194,6 +194,7 @@ final class SilenceCompressionCoordinator {
     /// User initiated a seek. Drop any in-flight compression and
     /// force the next tick to re-fetch lookahead windows.
     func recordUserSeek(to time: TimeInterval) async {
+        guard time.isFinite, time >= 0 else { return }
         compressor.recordSeek(to: time)
         #if DEBUG
         lastAcceptedUserSeekTimeForTesting = time
@@ -217,7 +218,9 @@ final class SilenceCompressionCoordinator {
         ifEpisodeLifecycleGeneration expectedGeneration: UInt64,
         userSeekOperationGeneration operationGeneration: UInt64? = nil
     ) async -> Bool {
-        guard episodeLifecycleGeneration == expectedGeneration else {
+        guard time.isFinite,
+              time >= 0,
+              episodeLifecycleGeneration == expectedGeneration else {
             return false
         }
         if let operationGeneration {

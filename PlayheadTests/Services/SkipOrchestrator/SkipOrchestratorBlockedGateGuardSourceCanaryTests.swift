@@ -29,8 +29,9 @@ final class SkipOrchestratorBlockedGateGuardSourceCanaryTests: XCTestCase {
     /// any decoded `SkipEligibilityGate` that is non-`.eligible` (the
     /// markOnly branch already returned earlier in the loop, so the
     /// `decoded != .eligible` form correctly excludes blocked cases
-    /// while letting nil / unknown raw values fall through to the
-    /// non-fusion producer path).
+    /// while letting legacy nil / `"autoSkip"` reach the non-fusion
+    /// producer path). Unknown non-nil values are rejected by the separate
+    /// malformed-persistence guard before this branch.
     ///
     /// We assert two things:
     ///   1. The guard literal is present (whitespace-tolerant).

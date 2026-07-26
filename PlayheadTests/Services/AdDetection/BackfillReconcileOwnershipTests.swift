@@ -235,17 +235,29 @@ struct BackfillReconcilePersistenceTests {
     func t5Idempotency() async throws {
         // Direct determinism of the id factory.
         let a = BackfillJobRunner.makeFusionWindowId(
-            analysisAssetId: "asset-x", detectorVersion: "v1", spanStartOrdinal: 3, spanEndOrdinal: 9
+            analysisAssetId: "asset-x", detectorVersion: "v1",
+            spanStartOrdinal: 3, spanEndOrdinal: 9
         )
         let b = BackfillJobRunner.makeFusionWindowId(
-            analysisAssetId: "asset-x", detectorVersion: "v1", spanStartOrdinal: 3, spanEndOrdinal: 9
+            analysisAssetId: "asset-x", detectorVersion: "v1",
+            spanStartOrdinal: 3, spanEndOrdinal: 9
         )
         #expect(a == b, "identical inputs must yield an identical fusion id")
-        #expect(a.hasPrefix("fusion-"))
+        #expect(
+            a == "fusion-0504dd2e17ececfe",
+            "ordinary spans must preserve the deployed content-addressed ID"
+        )
         let different = BackfillJobRunner.makeFusionWindowId(
-            analysisAssetId: "asset-x", detectorVersion: "v1", spanStartOrdinal: 3, spanEndOrdinal: 10
+            analysisAssetId: "asset-x", detectorVersion: "v1",
+            spanStartOrdinal: 3, spanEndOrdinal: 10
         )
         #expect(a != different, "different ordinals must yield different ids")
+        let split = BackfillJobRunner.makeFusionWindowId(
+            analysisAssetId: "asset-x", detectorVersion: "v1",
+            spanStartOrdinal: 3, spanEndOrdinal: 9,
+            splitDiscriminator: "span-3-9#split-0"
+        )
+        #expect(split != a)
 
         let store = try await makeTestStore()
         let assetId = "asset-ud4n-t5"
@@ -885,5 +897,150 @@ struct BackfillReconcileTerminalGuardTests {
                 "the terminal retiredID must be preserved")
         #expect(!after.contains { $0.id == nonTerminalId },
                 "a non-terminal retiredID must still be deleted — the guard must not over-guard the retire path")
+    }
+}
+
+@Suite("AdWindow metadata producer-revision fencing")
+struct AdWindowMetadataRevisionFenceTests {
+
+    @Test("metadata update lands only on the exact unchanged lifecycle")
+    func exactRevisionUpdatesMetadata() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-metadata-cas-current"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+        let expected = makeReconcileWindow(
+            id: "fusion-metadata-cas-current",
+            assetId: assetId,
+            decisionState: AdDecisionState.confirmed.rawValue
+        )
+        try await store.insertAdWindow(expected)
+
+        let updated = try await store.updateAdWindowMetadataIfCurrent(
+            expectedProducerRevision: expected,
+            advertiser: "Current advertiser",
+            product: "Current product",
+            evidenceText: "Current evidence",
+            metadataSource: "test-extractor",
+            metadataConfidence: 0.91,
+            metadataPromptVersion: "prompt-current"
+        )
+
+        #expect(updated)
+        let persisted = try #require(
+            try await store.fetchAdWindow(id: expected.id)
+        )
+        #expect(persisted.advertiser == "Current advertiser")
+        #expect(persisted.product == "Current product")
+        #expect(persisted.evidenceText == "Current evidence")
+        #expect(persisted.metadataSource == "test-extractor")
+        #expect(persisted.metadataConfidence == 0.91)
+        #expect(persisted.metadataPromptVersion == "prompt-current")
+    }
+
+    @Test("metadata source text preserves embedded NUL exactly")
+    func metadataTextPreservesEmbeddedNUL() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-metadata-nul-roundtrip"
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId))
+        let expected = makeReconcileWindow(
+            id: "fusion-metadata-nul-roundtrip",
+            assetId: assetId,
+            decisionState: AdDecisionState.confirmed.rawValue
+        )
+        try await store.insertAdWindow(expected)
+        let evidence = "verbatim-before\u{0}verbatim-after"
+
+        #expect(try await store.updateAdWindowMetadataIfCurrent(
+            expectedProducerRevision: expected,
+            advertiser: nil,
+            product: nil,
+            evidenceText: evidence,
+            metadataSource: "test-extractor",
+            metadataConfidence: 0.91,
+            metadataPromptVersion: "prompt-current"
+        ))
+
+        let persisted = try #require(
+            try await store.fetchAdWindow(id: expected.id)
+        )
+        #expect(persisted.evidenceText == evidence)
+    }
+
+    @Test("stale metadata cannot mutate a lifecycle change or same-ID replacement")
+    func staleRevisionDoesNotUpdateMetadata() async throws {
+        let lifecycleStore = try await makeTestStore()
+        let lifecycleAsset = "asset-metadata-cas-lifecycle"
+        try await lifecycleStore.insertAsset(
+            makeSkipTestAnalysisAsset(id: lifecycleAsset)
+        )
+        let lifecycleExpected = makeReconcileWindow(
+            id: "fusion-metadata-cas-lifecycle",
+            assetId: lifecycleAsset,
+            decisionState: AdDecisionState.confirmed.rawValue
+        )
+        try await lifecycleStore.insertAdWindow(lifecycleExpected)
+        try await lifecycleStore.updateAdWindowDecision(
+            id: lifecycleExpected.id,
+            decisionState: AdDecisionState.applied.rawValue
+        )
+
+        let lifecycleUpdated =
+            try await lifecycleStore.updateAdWindowMetadataIfCurrent(
+                expectedProducerRevision: lifecycleExpected,
+                advertiser: "Stale advertiser",
+                product: nil,
+                evidenceText: "Stale evidence",
+                metadataSource: "stale-extractor",
+                metadataConfidence: 0.5,
+                metadataPromptVersion: "stale-prompt"
+            )
+        #expect(!lifecycleUpdated)
+        let terminal = try #require(
+            try await lifecycleStore.fetchAdWindow(
+                id: lifecycleExpected.id
+            )
+        )
+        #expect(terminal.decisionState == AdDecisionState.applied.rawValue)
+        #expect(terminal.advertiser == nil)
+
+        let replacementStore = try await makeTestStore()
+        let replacementAsset = "asset-metadata-cas-replacement"
+        try await replacementStore.insertAsset(
+            makeSkipTestAnalysisAsset(id: replacementAsset)
+        )
+        let replacementExpected = makeReconcileWindow(
+            id: "fusion-metadata-cas-replacement",
+            assetId: replacementAsset,
+            startTime: 60,
+            endTime: 120,
+            decisionState: AdDecisionState.confirmed.rawValue
+        )
+        try await replacementStore.insertAdWindow(replacementExpected)
+        let replacement = makeReconcileWindow(
+            id: replacementExpected.id,
+            assetId: replacementAsset,
+            startTime: 180,
+            endTime: 240,
+            decisionState: AdDecisionState.confirmed.rawValue
+        )
+        try await replacementStore.insertOrReplaceAdWindow(replacement)
+
+        let replacementUpdated =
+            try await replacementStore.updateAdWindowMetadataIfCurrent(
+                expectedProducerRevision: replacementExpected,
+                advertiser: "Stale advertiser",
+                product: nil,
+                evidenceText: "Stale evidence",
+                metadataSource: "stale-extractor",
+                metadataConfidence: 0.5,
+                metadataPromptVersion: "stale-prompt"
+            )
+        #expect(!replacementUpdated)
+        let persistedReplacement = try #require(
+            try await replacementStore.fetchAdWindow(id: replacement.id)
+        )
+        #expect(persistedReplacement.startTime == 180)
+        #expect(persistedReplacement.endTime == 240)
+        #expect(persistedReplacement.advertiser == nil)
     }
 }

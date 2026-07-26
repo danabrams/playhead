@@ -132,7 +132,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         skipThreshold: Double
     ) -> DecisionExplanation {
         // Aggregate weights per source type
-        let scoringLedger = ledger.filter { !$0.source.isObservabilityOnly }
+        let scoringLedger = ledger.filter(\.contributesToAutomaticDecision)
         var weightBySource: [EvidenceSourceType: Double] = [:]
         for entry in scoringLedger {
             weightBySource[entry.source, default: 0.0] += entry.weight

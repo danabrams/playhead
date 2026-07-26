@@ -213,7 +213,9 @@ final class NowPlayingViewModel {
     ) async -> Bool {
         let expectedEpisodeId = item.episodeId
         guard let expectedPlaybackGeneration =
-            item.playbackLifecycleGeneration
+            item.playbackLifecycleGeneration,
+              let expectedMaterialRevisionToken =
+                item.windowMaterialRevisionToken
         else {
             return false
         }
@@ -226,11 +228,14 @@ final class NowPlayingViewModel {
         return await runtime.listenRewind(
             windowId: item.windowId,
             podcastId: item.podcastId,
+            analysisAssetId: item.analysisAssetId,
             to: item.adStartTime,
             bannerEndTime: item.adEndTime,
             ifCurrentEpisodeId: expectedEpisodeId,
             ifPlaybackLifecycleGeneration:
-                expectedPlaybackGeneration
+                expectedPlaybackGeneration,
+            ifWindowMaterialRevisionToken:
+                expectedMaterialRevisionToken
         )
     }
 

@@ -48,6 +48,24 @@ struct MigrationLadderTests {
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogFingerprintVersion"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedEntryId"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedShowId"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningSource"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningLifecycle"))
+        for column in [
+            "learningSource",
+            "learningLifecycle",
+            "sourceAssetId",
+            "sourceWindowId",
+            "producerRevision",
+        ] {
+            #expect(try probeColumnExists(
+                in: dir,
+                table: "repeated_ad_cache",
+                column: column
+            ))
+        }
 
         // Rev3-M5 phase columns present.
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
@@ -105,6 +123,11 @@ struct MigrationLadderTests {
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogFingerprintVersion"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedEntryId"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedShowId"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningSource"))
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningLifecycle"))
 
         // Migration is committed and the store is usable.
         try await store.insertAsset(
@@ -882,6 +905,161 @@ struct MigrationLadderTests {
             in: dir,
             table: "explicit_feedback_egress_baselines",
             column: "payloadJSON"
+        ))
+    }
+
+    @Test("playhead-o4qr: direct v34 adds catalog and recurrence provenance without losing rows")
+    func directV34AddsCatalogProvenanceV35() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        let asset = makeSkipTestAnalysisAsset(
+            id: "asset-v34-catalog",
+            episodeId: "episode-v34-catalog"
+        )
+        let window = makeSkipTestAdWindow(
+            id: "window-v34-catalog",
+            assetId: asset.id,
+            startTime: 10,
+            endTime: 20
+        )
+        try await store.insertAsset(asset)
+        try await store.insertAdWindow(window)
+        try await store.execForTesting("""
+            INSERT INTO repeated_ad_cache
+                (showId, fingerprint, boundaryStart, boundaryEnd, confidence, lastSeenAt)
+            VALUES
+                ('legacy-show', '1111222233334444', 10, 20, 0.99, 100);
+            ALTER TABLE ad_windows DROP COLUMN catalogFingerprintVersion;
+            ALTER TABLE ad_windows DROP COLUMN catalogMatchedEntryId;
+            ALTER TABLE ad_windows DROP COLUMN catalogMatchedShowId;
+            ALTER TABLE ad_windows DROP COLUMN catalogMatchedLearningSource;
+            ALTER TABLE ad_windows DROP COLUMN catalogMatchedLearningLifecycle;
+            ALTER TABLE repeated_ad_cache DROP COLUMN learningSource;
+            ALTER TABLE repeated_ad_cache DROP COLUMN learningLifecycle;
+            ALTER TABLE repeated_ad_cache DROP COLUMN sourceAssetId;
+            ALTER TABLE repeated_ad_cache DROP COLUMN sourceWindowId;
+            UPDATE _meta SET value = '34' WHERE key = 'schema_version';
+            """)
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(
+            try await store.schemaVersion()
+                == AnalysisStore.currentSchemaVersion
+        )
+        for column in [
+            "catalogFingerprintVersion",
+            "catalogMatchedEntryId",
+            "catalogMatchedShowId",
+            "catalogMatchedLearningSource",
+            "catalogMatchedLearningLifecycle",
+        ] {
+            #expect(
+                try probeColumnExists(
+                    in: dir,
+                    table: "ad_windows",
+                    column: column
+                )
+            )
+        }
+        let preserved = try #require(
+            try await store.fetchAdWindow(id: window.id)
+        )
+        #expect(preserved.catalogFingerprintVersion == nil)
+        #expect(preserved.catalogMatchedEntryId == nil)
+        #expect(preserved.catalogMatchedShowId == nil)
+        #expect(preserved.catalogMatchedLearningSource == nil)
+        #expect(preserved.catalogMatchedLearningLifecycle == nil)
+
+        for column in [
+            "learningSource",
+            "learningLifecycle",
+            "sourceAssetId",
+            "sourceWindowId",
+        ] {
+            #expect(try probeColumnExists(
+                in: dir,
+                table: "repeated_ad_cache",
+                column: column
+            ))
+        }
+        let repeatedStorage = AnalysisStoreRepeatedAdCacheStorage(store: store)
+        let legacy = try #require(
+            try await repeatedStorage.fetchAll(showId: "legacy-show").first
+        )
+        #expect(legacy.fingerprint.hexString == "1111222233334444")
+        #expect(legacy.boundaryStart == 10)
+        #expect(legacy.boundaryEnd == 20)
+        #expect(legacy.learningSource == .legacyUnconfirmed)
+        #expect(legacy.learningLifecycle == .legacyUnconfirmed)
+        #expect(legacy.sourceAssetId == nil)
+        #expect(legacy.sourceWindowId == nil)
+        #expect(
+            legacy.producerRevision
+                == "legacy:legacy-show:1111222233334444"
+        )
+
+        let cache = RepeatedAdCacheService(
+            storage: repeatedStorage
+        )
+        let outcome = try await cache.lookup(
+            showId: "legacy-show",
+            fingerprint: legacy.fingerprint
+        )
+        if case .hit = outcome {
+            Issue.record("migrated unconfirmed recurrence row must be quarantined")
+        }
+    }
+
+    @Test("playhead-o4qr: stamped head repairs missing additive columns and tombstone tables")
+    func stampedV35RepairsPartialShapeIdempotently() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.execForTesting("""
+            ALTER TABLE ad_windows DROP COLUMN catalogMatchedEntryId;
+            ALTER TABLE repeated_ad_cache DROP COLUMN sourceWindowId;
+            ALTER TABLE repeated_ad_cache DROP COLUMN producerRevision;
+            DROP TABLE repeated_ad_cache_revocations;
+            DROP TABLE repeated_ad_cache_fingerprint_revocations;
+            """)
+        #expect(
+            try await store.schemaVersion()
+                == AnalysisStore.currentSchemaVersion
+        )
+
+        try await store.migrateOnlyForTesting()
+        try await store.migrateOnlyForTesting()
+
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "ad_windows",
+            column: "catalogMatchedEntryId"
+        ))
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "repeated_ad_cache",
+            column: "sourceWindowId"
+        ))
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "repeated_ad_cache",
+            column: "producerRevision"
+        ))
+        #expect(try probeTableExists(
+            in: dir,
+            table: "repeated_ad_cache_revocations"
+        ))
+        #expect(try probeTableExists(
+            in: dir,
+            table: "repeated_ad_cache_fingerprint_revocations"
         ))
     }
 

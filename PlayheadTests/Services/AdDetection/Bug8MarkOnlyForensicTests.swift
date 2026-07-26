@@ -44,9 +44,9 @@ struct Bug8MarkOnlyForensicTests {
 
     /// Default `catalogMatchSimilarity: 0` matches the production default
     /// in `AutoSkipPrecisionGateInput.init` and is load-bearing for the
-    /// Class C ("no safety signals") tests: similarity below the 0.80
+    /// Class C ("no safety signals") tests: similarity below the 0.90
     /// floor disables `SafetySignal.catalogMatch`. Pass an explicit
-    /// value > 0.80 to fire the catalog signal in tests that exercise it.
+    /// value >= 0.90 to fire the catalog signal in tests that exercise it.
     private func makeInput(
         startTime: Double = 100,
         endTime: Double = 160,
@@ -58,6 +58,7 @@ struct Bug8MarkOnlyForensicTests {
         catalogMatchSimilarity: Float = 0
     ) -> AutoSkipPrecisionGateInput {
         AutoSkipPrecisionGateInput(
+            analysisAssetId: "asset-bug8-forensics",
             segmentStartTime: startTime,
             segmentEndTime: endTime,
             segmentScore: segmentScore,
@@ -96,7 +97,8 @@ struct Bug8MarkOnlyForensicTests {
                 pauseProbability: 0.1,
                 speakerClusterId: 1,
                 jingleHash: nil,
-                featureVersion: 1
+                featureVersion:
+                    FeatureExtractionConfig.default.featureVersion
             )
         }
         // Score chosen at the upper edge of the (0.40, 0.55) band but
@@ -112,7 +114,7 @@ struct Bug8MarkOnlyForensicTests {
             overlappingFeatureWindows: features,
             lexicalCategories: [.sponsor, .promoCode, .urlCTA, .purchaseLanguage],
             userCorrectionBoostFactor: 5.0,
-            catalogMatchSimilarity: 0.95   // > 0.80 floor → catalogMatch fires
+            catalogMatchSimilarity: 0.95   // > 0.90 floor → catalogMatch fires
         )
 
         // Sanity: confirm the four evidence-driven signals genuinely

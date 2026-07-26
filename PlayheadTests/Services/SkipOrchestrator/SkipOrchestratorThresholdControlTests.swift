@@ -45,7 +45,12 @@ struct SkipOrchestratorThresholdControlTests {
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeControllerStore()
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: podcastId)
@@ -54,7 +59,12 @@ struct SkipOrchestratorThresholdControlTests {
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
 
-        await orchestrator.recordListenRevert(windowId: "ad-fp", podcastId: podcastId)
+        #expect(
+            await orchestrator.recordListenRevert(
+                windowId: "ad-fp",
+                podcastId: podcastId
+            )
+        )
 
         let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
         #expect(state.sampleCount == 1, "one revert must record exactly one controller sample")
@@ -68,7 +78,12 @@ struct SkipOrchestratorThresholdControlTests {
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeControllerStore()
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: podcastId)
@@ -77,7 +92,12 @@ struct SkipOrchestratorThresholdControlTests {
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
 
-        await orchestrator.revertWindow(windowId: "ad-veto", podcastId: podcastId)
+        #expect(
+            await orchestrator.revertWindow(
+                windowId: "ad-veto",
+                podcastId: podcastId
+            )
+        )
 
         let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
         #expect(state.integral == 1, "a manual veto of a managed window is a FALSE-POSITIVE signal → integral +1")
@@ -90,7 +110,12 @@ struct SkipOrchestratorThresholdControlTests {
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeControllerStore()
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: podcastId)
@@ -99,7 +124,13 @@ struct SkipOrchestratorThresholdControlTests {
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
 
-        await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: podcastId)
+        #expect(
+            await orchestrator.revertByTimeRange(
+                start: 70,
+                end: 110,
+                podcastId: podcastId
+            )
+        )
 
         let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
         #expect(state.integral == 1, "a managed-window time-range revert is a FALSE-POSITIVE signal → integral +1")
@@ -109,10 +140,17 @@ struct SkipOrchestratorThresholdControlTests {
     @Test("Accepting a suggested (not-auto-skipped) ad records a MISS signal (integral −1)")
     func acceptSuggestedSkipRecordsMiss() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeControllerStore()
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1", podcastId: podcastId)
@@ -142,7 +180,11 @@ struct SkipOrchestratorThresholdControlTests {
         await orchestrator.receiveAdWindows([markOnly])
         #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-miss"))
 
-        await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-miss")
+        #expect(
+            await orchestrator.acceptSuggestedSkip(
+                windowId: "ad-suggest-miss"
+            )
+        )
 
         let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
         #expect(state.integral == -1, "accepting a suggested (missed) ad is a MISS signal → integral −1")

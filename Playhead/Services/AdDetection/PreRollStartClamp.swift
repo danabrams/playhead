@@ -15,10 +15,9 @@
 // SCOPE (pinned)
 // -------------
 // This is a WIDTH / MARK improvement ONLY. In the pipeline it is applied AFTER
-// the per-span decision loop, so every window already carries its final
-// `eligibilityGate`, `decisionState`, and `confidence`; the clamp moves only the
-// mark's start edge and can NEVER change a window's auto-skip eligibility (a
-// host-read pre-roll keeps its mark-only banner — just wider).
+// the per-span decision loop. Because the widened prefix was not classified,
+// every changed window is capped to mark-only (or keeps a stricter existing
+// gate); confidence and lifecycle remain diagnostic, never automatic authority.
 //
 // TRUSTWORTHY EDGES ARE EXEMPT: only an `.unanchored` start edge is clamped. A
 // byte-exact rediff edge or a stinger-snapped edge already located the boundary
@@ -88,8 +87,9 @@ enum PreRollStartClamp {
     /// is clamped ONLY when its start edge is `.unanchored`; a trustworthy
     /// `.rediffByteExact` / `.stingerSnapped` start is left untouched. Everything
     /// else is unchanged: the end edge, every other window, the array ordering,
-    /// and every non-boundary field of the clamped window (`id`,
-    /// `eligibilityGate`, `decisionState`, `confidence`, `evidenceStartTime`, …).
+    /// and every non-authority field of the clamped window (`id`,
+    /// `decisionState`, `confidence`, `evidenceStartTime`, …). An eligible or
+    /// missing gate is demoted to mark-only; a stricter gate is preserved.
     ///
     /// - Parameters:
     ///   - windows: the episode's finalized ad windows (any order).
@@ -100,7 +100,10 @@ enum PreRollStartClamp {
         config: Configuration = .default
     ) -> [AdWindow] {
         // Disabled: a non-positive threshold means "never clamp".
-        guard config.maxPreRollStartSeconds > 0 else { return windows }
+        guard config.maxPreRollStartSeconds.isFinite,
+              config.maxPreRollStartSeconds > 0 else {
+            return windows
+        }
 
         let suppressedState = AdDecisionState.suppressed.rawValue
 
@@ -139,7 +142,10 @@ enum PreRollStartClamp {
         //     (idempotent no-op).
         //   • `startTime <= maxPreRollStartSeconds` — a later start is a mid-roll,
         //     not a pre-roll, so there is no free start edge to extend.
-        guard first.startTime > 0,
+        guard first.startTime.isFinite,
+              first.endTime.isFinite,
+              first.endTime > first.startTime,
+              first.startTime > 0,
               first.startTime <= config.maxPreRollStartSeconds else {
             return windows
         }
@@ -147,8 +153,6 @@ enum PreRollStartClamp {
         // Monotonic guard: moving the start to 0.0 must never invert the window.
         // A real window always has `endTime >= 0`; this only rejects degenerate
         // input rather than emitting `start (0) > end`.
-        guard first.endTime >= 0 else { return windows }
-
         var result = windows
         result[index] = first.withStartTimeClampedToZero()
         return result
@@ -158,16 +162,27 @@ enum PreRollStartClamp {
 // MARK: - AdWindow copy helper
 
 private extension AdWindow {
-    /// A copy of this window with `startTime` moved to `0.0` and every other
-    /// field carried over verbatim.
+    /// A copy of this window with `startTime` moved to `0.0`.
     ///
     /// `evidenceStartTime` is deliberately LEFT WHERE THE EVIDENCE ACTUALLY
     /// STARTS — the clamp widens the MARK, not the evidence — and the
-    /// ordinal-addressed `id`, the `eligibilityGate`, the `decisionState`, and the
-    /// `confidence` are all copied unchanged, so nothing but the mark's start edge
-    /// moves.
+    /// ordinal-addressed `id`, `decisionState`, and `confidence` are copied
+    /// unchanged. The gate is capped to mark-only because the newly added prefix
+    /// has no classifier authority. Catalog-match provenance is also cleared: it
+    /// describes the old `[startTime, endTime)` fingerprint, and retaining its
+    /// exact row identity after widening would let a later correction revoke
+    /// unrelated source material.
     func withStartTimeClampedToZero() -> AdWindow {
-        AdWindow(
+        let safeEligibilityGate: String
+        if let existing = eligibilityGate.flatMap(
+            SkipEligibilityGate.init(rawValue:)
+        ),
+           existing.severity >= SkipEligibilityGate.markOnly.severity {
+            safeEligibilityGate = existing.rawValue
+        } else {
+            safeEligibilityGate = SkipEligibilityGate.markOnly.rawValue
+        }
+        return AdWindow(
             id: id,
             analysisAssetId: analysisAssetId,
             startTime: 0.0,
@@ -187,8 +202,13 @@ private extension AdWindow {
             wasSkipped: wasSkipped,
             userDismissedBanner: userDismissedBanner,
             evidenceSources: evidenceSources,
-            eligibilityGate: eligibilityGate,
-            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            eligibilityGate: safeEligibilityGate,
+            catalogStoreMatchSimilarity: nil,
+            catalogFingerprintVersion: nil,
+            catalogMatchedEntryId: nil,
+            catalogMatchedShowId: nil,
+            catalogMatchedLearningSource: nil,
+            catalogMatchedLearningLifecycle: nil,
             startEdgeAnchor: startEdgeAnchor,
             endEdgeAnchor: endEdgeAnchor
         )

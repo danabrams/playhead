@@ -22,6 +22,14 @@ import OSLog
 /// Carries a trace of which constraints fired for diagnostics.
 struct FinalizedSpan: Sendable, Equatable {
     let span: DecodedSpan
+    /// Identity of the candidate whose decision context produced this row.
+    /// Split outputs receive distinct `span.id` values, so the wire-in uses
+    /// this source identity to recover the original pending decision.
+    let sourceSpanId: String
+    /// Ordered identities of every candidate whose material contributes to
+    /// this output. Usually one; merges retain the complete source cohort so
+    /// persistence/replay can combine the corresponding evidence ledgers.
+    let sourceSpanIds: [String]
     let decision: DecisionResult
     /// Which finalizer constraints modified this span. Empty if the span passed through unchanged.
     let constraintTrace: [FinalizerConstraint]
@@ -36,6 +44,7 @@ enum FinalizerConstraint: String, Sendable, Equatable {
     case mergedWithAdjacent
     case droppedBelowMinDuration
     case splitAboveMaxDuration
+    case oversizedTailDemoted
     case chapterPenaltyApplied
     case actionCapApplied
     case policyOverrideApplied
@@ -227,6 +236,19 @@ struct SpanFinalizer: Sendable {
         guard duration > DecoderConstants.maxDurationSeconds else {
             return [span]
         }
+        // A single max-sized chunk plus a sub-minimum tail is intentionally
+        // retained whole. Constructing a child and then absorbing the tail
+        // would return the original geometry under a new identity and bypass
+        // same-ID terminal/correction fences for a transformation that did not
+        // actually happen. The oversized geometry is nevertheless outside the
+        // automatic-action contract, so retain it only as a mark.
+        guard duration
+            >= DecoderConstants.maxDurationSeconds
+                + DecoderConstants.minDurationSeconds else {
+            var retained = span
+            retained.demoteOversizedTail()
+            return [retained]
+        }
 
         var splits: [WorkingSpan] = []
         var cursor = span.startTime
@@ -240,10 +262,26 @@ struct SpanFinalizer: Sendable {
                 splits[splits.count - 1].extendEnd(to: span.endTime, constraint: .splitAboveMaxDuration)
                 break
             }
-            var chunk = span.copy(startTime: cursor, endTime: chunkEnd)
+            // Every split is independently persisted and orchestrated. Reusing
+            // the parent identity for every chunk would collapse them onto one
+            // content-addressed AdWindow ID. Child ordinals are deterministic.
+            var chunk = span.copy(
+                startTime: cursor,
+                endTime: chunkEnd,
+                spanId: "\(span.spanId)#split-\(splits.count)"
+            )
             chunk.addConstraint(.splitAboveMaxDuration)
             splits.append(chunk)
             cursor = chunkEnd
+        }
+
+        // Before split identities existed, every chunk used the parent's
+        // fusion ID and the last emitted chunk won the persistence overwrite.
+        // Keep that final chunk on the legacy identity so an existing applied,
+        // reverted, or suppressed receipt still fences the same material after
+        // upgrade. Only the additional earlier chunks need new discriminators.
+        if splits.count > 1 {
+            splits[splits.count - 1].spanId = span.spanId
         }
 
         return splits
@@ -348,6 +386,10 @@ private struct WorkingSpan {
 
     // Original span for identity.
     var originalSpan: DecodedSpan
+    /// Complete ordered source cohort. Trims/splits retain one source; merges
+    /// append every absorbed candidate so atom and anchor audit material is not
+    /// silently attributed only to the surviving identity.
+    var sourceSpans: [DecodedSpan]
 
     init(candidate: CandidateSpan) {
         self.spanId = candidate.span.id
@@ -361,20 +403,24 @@ private struct WorkingSpan {
         self.commercialIntent = candidate.commercialIntent
         self.adOwnership = candidate.adOwnership
         self.originalSpan = candidate.span
+        self.sourceSpans = [candidate.span]
     }
 
     mutating func trimStart(to newStart: Double, constraint: FinalizerConstraint) {
         startTime = newStart
+        demoteRewrittenGeometry()
         addConstraint(constraint)
     }
 
     mutating func trimEnd(to newEnd: Double, constraint: FinalizerConstraint) {
         endTime = newEnd
+        demoteRewrittenGeometry()
         addConstraint(constraint)
     }
 
     mutating func extendEnd(to newEnd: Double, constraint: FinalizerConstraint) {
         endTime = newEnd
+        demoteRewrittenGeometry()
         addConstraint(constraint)
     }
 
@@ -384,6 +430,10 @@ private struct WorkingSpan {
 
     mutating func mergeWith(_ other: WorkingSpan) {
         endTime = other.endTime
+        for sourceSpan in other.sourceSpans
+        where !sourceSpans.contains(where: { $0.id == sourceSpan.id }) {
+            sourceSpans.append(sourceSpan)
+        }
         skipConfidence = max(skipConfidence, other.skipConfidence)
         proposalConfidence = max(proposalConfidence, other.proposalConfidence)
         // playhead-wraj R2 review: the merged span takes the MORE RESTRICTIVE
@@ -398,7 +448,25 @@ private struct WorkingSpan {
         if other.eligibilityGate.severity > eligibilityGate.severity {
             eligibilityGate = other.eligibilityGate
         }
+        // The merged interval includes material (including the intervening
+        // content gap) that neither input decision classified as this exact
+        // span. Preserve stricter vetoes, but never retain automatic
+        // eligibility across the geometry rewrite.
+        demoteRewrittenGeometry()
         addConstraint(.mergedWithAdjacent)
+    }
+
+    mutating func demoteRewrittenGeometry() {
+        if SkipEligibilityGate.markOnly.severity > eligibilityGate.severity {
+            eligibilityGate = .markOnly
+        }
+    }
+
+    mutating func demoteOversizedTail() {
+        if SkipEligibilityGate.markOnly.severity > eligibilityGate.severity {
+            eligibilityGate = .markOnly
+        }
+        addConstraint(.oversizedTailDemoted)
     }
 
     mutating func capEligibility(_ gate: SkipEligibilityGate, constraint: FinalizerConstraint) {
@@ -421,23 +489,47 @@ private struct WorkingSpan {
         constraintTrace.append(constraint)
     }
 
-    func copy(startTime: Double, endTime: Double) -> WorkingSpan {
+    func copy(
+        startTime: Double,
+        endTime: Double,
+        spanId: String? = nil
+    ) -> WorkingSpan {
         var copy = self
+        if let spanId {
+            copy.spanId = spanId
+        }
         copy.startTime = startTime
         copy.endTime = endTime
+        if startTime.bitPattern != self.startTime.bitPattern
+            || endTime.bitPattern != self.endTime.bitPattern {
+            copy.demoteRewrittenGeometry()
+        }
         return copy
     }
 
     func toFinalized() -> FinalizedSpan {
+        let firstAtomOrdinal =
+            sourceSpans.map(\.firstAtomOrdinal).min()
+                ?? originalSpan.firstAtomOrdinal
+        let lastAtomOrdinal =
+            sourceSpans.map(\.lastAtomOrdinal).max()
+                ?? originalSpan.lastAtomOrdinal
+        var anchorProvenance: [AnchorRef] = []
+        for sourceSpan in sourceSpans {
+            for anchor in sourceSpan.anchorProvenance
+            where !anchorProvenance.contains(anchor) {
+                anchorProvenance.append(anchor)
+            }
+        }
         // Build a modified span with adjusted times.
         let adjustedSpan = DecodedSpan(
-            id: originalSpan.id,
+            id: spanId,
             assetId: originalSpan.assetId,
-            firstAtomOrdinal: originalSpan.firstAtomOrdinal,
-            lastAtomOrdinal: originalSpan.lastAtomOrdinal,
+            firstAtomOrdinal: firstAtomOrdinal,
+            lastAtomOrdinal: lastAtomOrdinal,
             startTime: startTime,
             endTime: endTime,
-            anchorProvenance: originalSpan.anchorProvenance
+            anchorProvenance: anchorProvenance
         )
         let adjustedDecision = DecisionResult(
             proposalConfidence: proposalConfidence,
@@ -446,6 +538,8 @@ private struct WorkingSpan {
         )
         return FinalizedSpan(
             span: adjustedSpan,
+            sourceSpanId: originalSpan.id,
+            sourceSpanIds: sourceSpans.map(\.id),
             decision: adjustedDecision,
             constraintTrace: constraintTrace,
             policyAction: policyAction
