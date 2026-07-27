@@ -595,10 +595,12 @@ struct SkipOrchestratorThresholdControlTests {
         let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         // Own the trust store so the ABSENCE of a penalty is readable.
         let trustStore = try await makeTestStore()
-        try await seedSkipTestTrustProfile(
-            in: trustStore, podcastId: podcastId,
-            mode: "auto", trustScore: 0.9, observations: 10
-        )
+        for show in [podcastId, trustWriteBarrierShow] {
+            try await seedSkipTestTrustProfile(
+                in: trustStore, podcastId: show,
+                mode: "auto", trustScore: 0.9, observations: 10
+            )
+        }
         let trustService = TrustScoringService(store: trustStore)
         let negativeBank = try NegativeFingerprintBank(
             directoryURL: try makeTempDir(prefix: "o4qr-anon-bank")
@@ -691,6 +693,9 @@ struct SkipOrchestratorThresholdControlTests {
             correction would suppress this copy across the whole library.
             """
         )
+        // Ordered, not settled — see `drainTrustWrites`. `drainOrchestratorEffects`
+        // alone gets a leaked penalty only as far as ENQUEUED on the trust actor.
+        try await drainTrustWrites(trustService, trustStore, orchestrator)
         let profile = try #require(
             try await trustStore.fetchProfile(podcastId: podcastId)
         )
@@ -747,7 +752,7 @@ struct SkipOrchestratorThresholdControlTests {
         // `recordFalseSkipSignal` never lazy-creates, so an unseeded profile
         // silently swallows a misrouted penalty.
         let trustStore = try await makeTestStore()
-        for show in [podcastId, "podcast-stale"] {
+        for show in [podcastId, "podcast-stale", trustWriteBarrierShow] {
             try await seedSkipTestTrustProfile(
                 in: trustStore, podcastId: show,
                 mode: "auto", trustScore: 0.9, observations: 10
@@ -815,7 +820,8 @@ struct SkipOrchestratorThresholdControlTests {
             try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
             "no show may be calibrated by a No whose show identity did not validate"
         )
-        await drainOrchestratorEffects(orchestrator)
+        // Ordered, not settled — see `drainTrustWrites`.
+        try await drainTrustWrites(trustService, trustStore, orchestrator)
         for show in [podcastId, "podcast-stale"] {
             let profile = try #require(try await trustStore.fetchProfile(podcastId: show))
             #expect(

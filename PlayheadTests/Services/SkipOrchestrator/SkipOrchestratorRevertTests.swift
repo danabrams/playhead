@@ -472,31 +472,6 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
 /// Counts skip-cue republications. The orchestrator's cue handler is a
 /// synchronous `@Sendable` closure, so it cannot read an actor; a lock-guarded
 /// counter is the smallest thing that can observe it.
-/// Captures the show ids a fire-and-forget trust hop was asked to penalise.
-///
-/// playhead-o4qr: "no trust penalty fired" is a NEGATIVE assertion, so it has
-/// to be observed on a surface that would have recorded one — counting nothing
-/// against a service whose store the test cannot read proves nothing. The
-/// orchestrator's `falseSkipSignalHandlerForTesting` hook is that surface, and
-/// keeping the SHOW (not just a count) is what makes a leak's failure message
-/// name the show that was wrongly penalised.
-private final class RecordedShowSignals: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: [String] = []
-
-    func record(_ show: String) {
-        lock.lock()
-        value.append(show)
-        lock.unlock()
-    }
-
-    var shows: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return value
-    }
-}
-
 private final class SkipCuePushCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
@@ -2253,11 +2228,17 @@ struct SkipOrchestratorRevertTests {
     func revertWindowRemovesCue() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let trustService = try await makeSkipTestTrustService(
-            mode: "auto",
-            trustScore: 0.9,
-            observations: 10
-        )
+        // Own the trust store: the stale-show probe at the end of this test is
+        // a NEGATIVE assertion about the per-show penalty, and the penalty is
+        // only observable on the profile it would have decremented.
+        let trustStore = try await makeTestStore()
+        for show in ["podcast-1", trustWriteBarrierShow] {
+            try await seedSkipTestTrustProfile(
+                in: trustStore, podcastId: show,
+                mode: "auto", trustScore: 0.9, observations: 10
+            )
+        }
+        let trustService = TrustScoringService(store: trustStore)
         let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
@@ -2334,14 +2315,6 @@ struct SkipOrchestratorRevertTests {
         await orchestrator.receiveAdWindows([stale])
         #expect(!pushedCues.isEmpty, "positive control: the stale probe has a live target")
 
-        // Installed only now, so the handler observes the stale gesture alone —
-        // the correctly-attributed revert above legitimately penalises
-        // "podcast-1" and would otherwise mask a leak.
-        let staleShowPenalties = RecordedShowSignals()
-        await orchestrator._setFalseSkipSignalHandlerForTesting { show in
-            staleShowPenalties.record(show)
-        }
-
         #expect(
             await orchestrator.revertWindow(
                 windowId: stale.id,
@@ -2369,14 +2342,36 @@ struct SkipOrchestratorRevertTests {
         let staleRow = try #require(try await store.fetchAdWindow(id: stale.id))
         #expect(staleRow.decisionState == AdDecisionState.reverted.rawValue)
         #expect(pushedCues.isEmpty)
-        await drainOrchestratorEffects(orchestrator)
+
+        // REFUSE THE LEARNING: the per-show trust penalty has nowhere to land
+        // for a correction whose show cannot be established, so "podcast-1"
+        // must still carry ONLY the penalty its own correctly-attributed revert
+        // earned above. That earlier penalty is also the positive control —
+        // `== 1` cannot be satisfied by a trust path that is simply dead.
+        //
+        // Polled, then barriered — see `awaitTrustFalseSkipSignals`. Two
+        // earlier shapes were measured and rejected: watching
+        // `falseSkipSignalHandlerForTesting` behind `drainOrchestratorEffects`
+        // SURVIVED battery entry O02 (the drain orders only the task's first
+        // segment; the handler body runs in a later one), and a bare
+        // `drainTrustWrites` failed on the UNMUTATED tree because
+        // `revertWindow`'s penalty had not reached the trust actor 11 ms
+        // later. Waiting for the positive control is what makes the exactness
+        // assertion below meaningful in both directions.
+        let profile = try await awaitTrustFalseSkipSignals(
+            trustStore,
+            service: trustService,
+            orchestrator: orchestrator,
+            show: "podcast-1",
+            expected: 1
+        )
         #expect(
-            staleShowPenalties.shows.isEmpty,
+            profile.recentFalseSkipSignals == 1,
             """
-            REFUSE THE LEARNING: the per-show trust penalty has nowhere to land \
-            for a correction whose show cannot be established. Recording it \
-            against \(staleShowPenalties.shows) would penalise a show on the \
-            strength of a gesture that never named it.
+            Expected exactly the one penalty the correctly-attributed revert \
+            earned; got \(profile.recentFalseSkipSignals). A second means the \
+            stale-show gesture fell back to the live show and penalised it on \
+            the strength of a correction that never named it.
             """
         )
     }
