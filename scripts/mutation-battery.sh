@@ -142,6 +142,29 @@
 #       `revertWindowRemovesCue` (now O02's second victim) and
 #       `autoSkipNoWinsBlockedAppliedPersistenceRace`, whose show probe moved
 #       to `staleShowBannerNoKeepsReceiptAndRecordsNoLearning` (O05's victim).
+#     • N06's EDIT was rewritten (its expectation was not) — see the entry.
+#
+# RESULTS, 2026-07-27, after the decision landed
+#   Batches 8, 9, 13, 14, 15, 16 run — 12 mutations, 12 KILLED, 0 survivors.
+#   Batch 14 was run WITH the baseline (baseline green); the rest with
+#   PLAYHEAD_MB_SKIP_BASELINE=1 behind that same green baseline and an
+#   independent focused-suite pass (116/116).
+#
+#   Batches 1-7 and 10-12 were NOT re-run this session, for build budget. All
+#   31 anchors are `--dry-run` verified to apply exactly once against the
+#   current source, so the file is not silently rotten — but batches 1-7's last
+#   real verdicts (14 KILLED / M17 SURVIVED) predate the decision, and 10-12
+#   still have not been re-run since the merge. A whole-battery green cannot be
+#   claimed until they are.
+#
+#   Two survivors were found and BOTH were fixed at the source of the problem
+#   rather than by touching an expectation:
+#     • O02 survived because the test observing it watched
+#       `falseSkipSignalHandlerForTesting` behind `drainOrchestratorEffects`,
+#       which orders only the task's first segment. The probe was rebuilt on
+#       the trust store (`awaitTrustFalseSkipSignals`); O02 now KILLED.
+#     • N06 survived because its edit had become an equivalent mutant. The EDIT
+#       was rewritten to the shape the defect now takes; N06 now KILLED.
 
 set -uo pipefail
 
