@@ -251,9 +251,11 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
 // MARK: - playhead-i08e: revert seams under mid-gesture episode replacement
 //
 // These replace a ~560-line SOURCE canary that scanned `SkipOrchestrator.swift`
-// for the ORDER and NESTING of the revert seams' statements. That canary was
-// deleted, not weakened, and the reasoning is worth keeping because it applies
-// to every rail of its kind:
+// for the ORDER and NESTING of the revert seams' statements. Do not go looking
+// for it in history on `main`: this bead BUILT that canary and then discarded
+// it (commits 5c592521 → 4de76d33 on `bead/playhead-i08e`), so the branch's
+// net diff shows only these tests. It was dropped rather than weakened, and
+// the reasoning is worth keeping because it applies to every rail of its kind:
 //
 //   • A textual rail can only reject the spellings someone thought of. Five
 //     consecutive review passes each found a fresh spelling that reproduced the
@@ -322,8 +324,13 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
     /// the guard fails it on the hard-negative poll; attributing the sample to
     /// `activePodcastId` instead of the captured `podcastId` fails it on the
     /// same poll (the replacement episode is a DIFFERENT show, which is what
-    /// makes "the captured show" an assertable claim here); and deleting the
-    /// guard outright fails it on the cue-push count.
+    /// makes "the captured show" an assertable claim here); deleting the
+    /// guard outright fails it on the cue-push count; deleting the trust
+    /// penalty, downgrading it to the weak listen-rewind variant, or
+    /// attributing it to `activePodcastId`, fails it on the trust profile; and
+    /// attributing the RECEIPT to `activePodcastId` fails it on the receipt's
+    /// own `podcastId` — those last four each survived the whole repo-wide
+    /// gate before the ninth pass added them.
     @Test(
         "A Listen revert whose episode is replaced mid-flight still calibrates the captured show",
         .timeLimit(.minutes(1))
@@ -332,9 +339,18 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
         try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
-        let trustService = try await makeSkipTestTrustService(
-            mode: "auto", trustScore: 0.9, observations: 10
-        )
+        // Own the trust store so the penalty is readable, and seed BOTH shows
+        // so "the replacement was not penalised" is a positive observation
+        // rather than a vacuous one — `recordFalseSkipSignal` never
+        // lazy-creates, so an unseeded show swallows a misrouted penalty.
+        let trustStore = try await makeTestStore()
+        for show in ["podcast-1", "podcast-2"] {
+            try await seedSkipTestTrustProfile(
+                in: trustStore, podcastId: show,
+                mode: "auto", trustScore: 0.9, observations: 10
+            )
+        }
+        let trustService = TrustScoringService(store: trustStore)
         let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
         // The hard-negative ingest is the third calibration effect the seam
         // owes the captured show, and it is invisible unless a bank is wired.
@@ -400,6 +416,15 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         )
         #expect(receipts.count == 1, "the captured show's receipt must still commit")
         #expect(receipts.first?.source == .listenRevert)
+        #expect(
+            receipts.first?.podcastId == "podcast-1",
+            """
+            The receipt was stamped with the show that is live at effect time. \
+            Show attribution is what routes derived learning, so a receipt \
+            minted for the CAPTURED episode must not inherit the replacement's \
+            identity.
+            """
+        )
 
         let negatives = try await awaitNegativeBankEntries(
             negativeBank, orchestrator: orchestrator, expected: 1
@@ -422,6 +447,49 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         let row = try #require(try await store.fetchAdWindow(id: "ad-race"))
         #expect(row.decisionState == AdDecisionState.reverted.rawValue)
 
+        // The seam's FOURTH effect, and the premise the three above rest on:
+        // the penalty is applied to the CAPTURED show before the replacement
+        // lands, which is precisely why dropping the receipt / hard negative /
+        // controller sample would leave trust and corrections out of step. It
+        // is awaited inside the gesture, so no poll is needed. Nothing else in
+        // the repo pinned it — deleting the trust call left the full gate green.
+        let penalised = try #require(
+            try await trustStore.fetchProfile(podcastId: "podcast-1")
+        )
+        #expect(
+            penalised.recentFalseSkipSignals == 1,
+            "the captured show must carry exactly one false-skip signal"
+        )
+        // MAGNITUDE, not merely direction. `recentFalseSkipSignals` and a
+        // downward trust nudge are common to `recordFalseSkipSignal` and
+        // `recordWeakFalseSkipSignal`, so `< 0.9` alone is satisfied by the
+        // weak listen-rewind variant — a live routing distinction this
+        // subsystem makes deliberately (see `revertByTimeRange`'s
+        // managed-vs-suggest split). A Listen revert of an auto-skip is the
+        // strong signal: the algorithm pre-committed and was wrong.
+        let expectedTrust = 0.9 - TrustScoringConfig.default.falseSignalPenalty
+        #expect(
+            abs(penalised.skipTrustScore - expectedTrust) < 1e-9,
+            """
+            expected the FULL-magnitude penalty \
+            (0.9 − \(TrustScoringConfig.default.falseSignalPenalty) = \
+            \(expectedTrust)), got \(penalised.skipTrustScore). The weak \
+            listen-rewind variant leaves \
+            \(0.9 - TrustScoringConfig.default.weakFalseSignalPenalty).
+            """
+        )
+        let untouched = try #require(
+            try await trustStore.fetchProfile(podcastId: "podcast-2")
+        )
+        #expect(
+            untouched.recentFalseSkipSignals == 0,
+            "the replacement show must not absorb the captured gesture's penalty"
+        )
+        #expect(
+            untouched.skipTrustScore >= 0.9,
+            "the replacement show's trust must not be decremented by a gesture that predates it"
+        )
+
         #expect(
             cuePushes.count == pushesBeforeResume,
             """
@@ -434,8 +502,8 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         await negativeBank.close()
     }
 
-    /// `revertByTimeRange`, managed loop. One interleave pins three contracts
-    /// the deleted canary needed three separate regex rails for:
+    /// `revertByTimeRange`, managed loop. One interleave pins four contracts
+    /// the discarded canary needed a separate regex rail for each of:
     ///
     ///   • the in-loop guard must `break`, not `return` — a `return` abandons a
     ///     gesture whose row is already durably reverted, dropping the receipt
@@ -479,19 +547,26 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         // this test cannot tell a guard that `break`s from no guard at all.
         //
         // The spans are deliberately LONG (90s and 195s) rather than merely
-        // over `minimumSpanSeconds` (15s). `evaluateWindow` has exactly one
-        // span-sensitive demotion — `span < minimumSpanSeconds` and
-        // `confidence < shortSpanOverrideConfidence` ⇒ `.suppressed` — and the
-        // revert loop `continue`s past suppressed entries, so a fixture sized
-        // just over today's threshold silently drops back to ONE effective
-        // iteration the day either constant is retuned, re-opening exactly the
-        // vacuity this pair exists to close. Sizing them 6x and 13x clear of
-        // the threshold removes that coupling instead of documenting it: no
-        // plausible retune of `minimumSpanSeconds` or
-        // `shortSpanOverrideConfidence` can demote either window.
-        // (`activeWindowIDs()` below is dictionary membership only — it is a
-        // spelling check on the fixture, NOT evidence that both entries are
-        // walkable, so it cannot be the thing that guards this.)
+        // over `minimumSpanSeconds` (15s), because the revert loop `continue`s
+        // past `.suppressed` entries: a fixture window that `evaluateWindow`
+        // demotes silently drops this pair back to ONE effective iteration and
+        // re-opens exactly the vacuity it exists to close.
+        //
+        // Span is not the only demotion route, though — `evaluateWindow` also
+        // suppresses a `.confirmed` window whose `confidence` falls under
+        // `stayThreshold`, so sizing the spans clear of `minimumSpanSeconds`
+        // moves the coupling to a confidence constant rather than removing it.
+        // The two self-checks after ingest are therefore what actually holds
+        // this together, and between them they cover both ways the loop can
+        // skip an entry (`SkipOrchestrator.revertByTimeRange`'s two `continue`s):
+        //   • `suppressedFixtureWindows` — a demotion, observed directly, so it
+        //     is indifferent to every threshold constant;
+        //   • `fixtureWindowsOverlapVetoRange` — the overlap predicate, which
+        //     `ad-range-b` clears by only 5s against the vetoed [70, 110]. An
+        //     edit to either bound or to B's start silently collapses this to
+        //     one effective iteration, and no threshold check can see that.
+        // (`activeWindowIDs()` is dictionary membership only — a spelling check
+        // on the fixture, not evidence that either entry is walkable.)
         let managedA = makeSkipTestAdWindow(
             id: "ad-range-a", startTime: 10, endTime: 100,
             confidence: 0.85, decisionState: "confirmed"
@@ -500,20 +575,64 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             id: "ad-range-b", startTime: 105, endTime: 300,
             confidence: 0.85, decisionState: "confirmed"
         )
+        let vetoStart = 70.0
+        let vetoEnd = 110.0
         try await store.insertAdWindow(managedA)
         try await store.insertAdWindow(managedB)
         await orchestrator.receiveAdWindows([managedA, managedB])
-        // Fixture self-check: both ids really did land in the managed
+        // Fixture self-check 1/3: both ids really did land in the managed
         // dictionary the loop iterates.
-        #expect(await orchestrator.activeWindowIDs() == ["ad-range-a", "ad-range-b"])
+        let fixtureIds = Set([managedA.id, managedB.id])
+        #expect(await orchestrator.activeWindowIDs() == fixtureIds)
+        // 2/3: neither was demoted to `.suppressed` on ingest, which the revert
+        // loop `continue`s past. Reading the decision log observes the demotion
+        // directly, so this stays honest under any retune of
+        // `minimumSpanSeconds`, `shortSpanOverrideConfidence`, `enterThreshold`
+        // or `stayThreshold` — the whole point of a two-iteration fixture is
+        // that BOTH iterations exist.
+        let suppressedFixtureWindows = Set(
+            await orchestrator.getDecisionLog()
+                .filter {
+                    $0.decision == .suppressed
+                        && fixtureIds.contains($0.adWindowId)
+                }
+                .map(\.adWindowId)
+        )
+        #expect(
+            suppressedFixtureWindows.isEmpty,
+            """
+            \(suppressedFixtureWindows.sorted()) demoted to .suppressed on \
+            ingest, so the revert loop skips past it and this test silently \
+            drops back to ONE effective iteration — it can then no longer tell \
+            an in-loop lifecycle guard that `break`s from no guard at all.
+            """
+        )
+        // 3/3: both still satisfy the loop's OTHER `continue` — its overlap
+        // predicate. `ad-range-b` clears it by only 5s, so this mirrors the
+        // production condition rather than restating the numbers, and no
+        // threshold check would catch a fixture edit that broke it.
+        let nonOverlapping = [managedA, managedB].filter {
+            !($0.startTime < vetoEnd && $0.endTime > vetoStart)
+        }
+        #expect(
+            nonOverlapping.isEmpty,
+            """
+            \(nonOverlapping.map(\.id).sorted()) no longer overlaps the vetoed \
+            range [\(vetoStart), \(vetoEnd)], so the revert loop skips past it \
+            — same one-effective-iteration vacuity as a demotion, by a \
+            different route.
+            """
+        )
 
         let gate = ControlledAsyncGate()
         await orchestrator._setRevertPersistenceBarrierForTesting {
             await gate.wait()
         }
         let gesture = Task {
+            // Same bounds the self-check above validated the fixture against,
+            // so the two cannot drift apart.
             await orchestrator.revertByTimeRange(
-                start: 70, end: 110, podcastId: "podcast-1"
+                start: vetoStart, end: vetoEnd, podcastId: "podcast-1"
             )
         }
         await gate.waitUntilStarted()
@@ -550,6 +669,15 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         )
         #expect(receipts.count == 1, "the captured show's receipt must still commit")
         #expect(receipts.first?.source == .manualVeto)
+        #expect(
+            receipts.first?.podcastId == "podcast-1",
+            """
+            The receipt was stamped with the show that is live at effect time \
+            rather than the one captured at gesture time. The controller \
+            sample is already pinned to the captured show; the receipt's own \
+            attribution is what routes derived learning and must agree with it.
+            """
+        )
 
         #expect(
             try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 1,
@@ -1873,11 +2001,17 @@ struct SkipOrchestratorRevertTests {
 
         // Several windows are ingested, so collect presentations until both
         // auto-skip cards have arrived rather than assuming an emission order.
+        // Only an exhausted stream ends the loop: an event of some OTHER kind
+        // is skipped rather than treated as the end, so a retirement emitted
+        // between the two presentations cannot strand this at one card and
+        // fail the test for a reason unrelated to the contract it names.
         var cards: [String: AdSkipBannerItem] = [:]
         let autoSkipIds = Set([denyTarget.id, confirmTarget.id])
         for _ in 0..<8 where !autoSkipIds.isSubset(of: Set(cards.keys)) {
-            guard case let .present(candidate) = await probe.next() else { break }
-            cards[candidate.windowId] = candidate
+            guard let event = await probe.next() else { break }
+            if case let .present(candidate) = event {
+                cards[candidate.windowId] = candidate
+            }
         }
         guard let denyCard = cards[denyTarget.id],
               let confirmCard = cards[confirmTarget.id]

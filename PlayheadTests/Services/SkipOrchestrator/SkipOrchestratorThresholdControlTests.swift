@@ -73,7 +73,7 @@ struct SkipOrchestratorThresholdControlTests {
     /// receipt it asserts. `recordListenRevert` had none: every test that
     /// exercised it wired a trust service, so reintroducing the shape there
     /// (`guard trustService != nil else { return }` above the calibration
-    /// effects) left the ENTIRE 8,548-test gate green. Verified by mutation
+    /// effects) left the ENTIRE repo-wide gate green. Verified by mutation
     /// before and after: that edit now reddens this test and nothing else.
     ///
     /// The trust service is the only thing dropped, and dropping it costs no
@@ -163,12 +163,18 @@ struct SkipOrchestratorThresholdControlTests {
     /// controller write kills both, so this is not independent coverage of the
     /// write itself.
     ///
-    /// playhead-i08e (seventh pass): the learning INGESTOR has to be wired too,
-    /// not just the store. `PersistentUserCorrectionStore
-    /// .correctionDidPersistAtomically` opens with `guard let learningIngestor
-    /// else { return }`, so without one the post-commit hop is a no-op by
-    /// construction and this test had no discriminating power over its sibling
-    /// at all. `PlayheadRuntime` wires both, so this is the production shape.
+    /// playhead-i08e (ninth pass) — correcting the seventh pass, which claimed
+    /// the learning INGESTOR is what gives this test its discriminating power
+    /// and that without one it "had none at all". Mutation says otherwise: with
+    /// the ingestor wiring removed and a second controller write injected into
+    /// `schedulePostCommitCorrectionLearning`, this test and its `…Miss` twin
+    /// still redden while both unwired siblings stay green. The power comes
+    /// from that method's own `guard let correctionStore`, which gates the hop
+    /// before `PersistentUserCorrectionStore.correctionDidPersistAtomically`
+    /// (and its `guard let learningIngestor`) is ever reached. The ingestor
+    /// stays wired for the narrower, honest reason: it is the shape
+    /// `PlayheadRuntime` runs, so the hop executes real derived-learning work
+    /// here instead of returning at its first statement.
     @Test("Manual 'not an ad' revertWindow records exactly one FALSE-POSITIVE with the correction store wired")
     func revertWindowWithCorrectionStoreRecordsOneFalsePositive() async throws {
         let store = try await makeTestStore()
@@ -318,8 +324,9 @@ struct SkipOrchestratorThresholdControlTests {
 
     /// playhead-i08e: the same seam in the PRODUCTION wiring — see
     /// `revertWindowWithCorrectionStoreRecordsOneFalsePositive` for exactly
-    /// what the wired variant does and does not add, including why the learning
-    /// ingestor (not just the store) has to be wired for it to add anything.
+    /// what the wired variant does and does not add, and for why the learning
+    /// ingestor is NOT what supplies that (it is wired to match
+    /// `PlayheadRuntime`, not to make the test discriminate).
     @Test("Accepting a suggested ad records exactly one MISS with the correction store wired")
     func acceptSuggestedSkipWithCorrectionStoreRecordsOneMiss() async throws {
         let store = try await makeTestStore()

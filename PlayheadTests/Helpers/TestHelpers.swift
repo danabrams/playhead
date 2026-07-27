@@ -685,16 +685,27 @@ func makeSkipTestMarkOnlyWindow(
     )
 }
 
-func makeSkipTestTrustService(
+/// Seeds one show's trust profile.
+///
+/// Split out of ``makeSkipTestTrustService(mode:trustScore:observations:falseSignals:)``
+/// so a test that needs to READ the penalty back — or to seed a second show so
+/// "the OTHER show was not penalised" is positively observable rather than
+/// vacuous — can own the store. `recordFalseSkipSignal` never lazy-creates a
+/// profile, so an unseeded show absorbs a misrouted penalty silently.
+/// `podcastId` is deliberately NOT defaulted: seeding a second show is this
+/// helper's whole reason for existing, so a silent wrong-show default is the
+/// one mistake it must not make easy.
+func seedSkipTestTrustProfile(
+    in store: AnalysisStore,
+    podcastId: String,
     mode: String,
     trustScore: Double,
     observations: Int,
     falseSignals: Int = 0
-) async throws -> TrustScoringService {
-    let trustStore = try await makeTestStore()
-    try await trustStore.upsertProfile(
+) async throws {
+    try await store.upsertProfile(
         PodcastProfile(
-            podcastId: "podcast-1",
+            podcastId: podcastId,
             sponsorLexicon: nil,
             normalizedAdSlotPriors: nil,
             repeatedCTAFragments: nil,
@@ -705,6 +716,23 @@ func makeSkipTestTrustService(
             mode: mode,
             recentFalseSkipSignals: falseSignals
         )
+    )
+}
+
+func makeSkipTestTrustService(
+    mode: String,
+    trustScore: Double,
+    observations: Int,
+    falseSignals: Int = 0
+) async throws -> TrustScoringService {
+    let trustStore = try await makeTestStore()
+    try await seedSkipTestTrustProfile(
+        in: trustStore,
+        podcastId: "podcast-1",
+        mode: mode,
+        trustScore: trustScore,
+        observations: observations,
+        falseSignals: falseSignals
     )
     return TrustScoringService(store: trustStore)
 }
