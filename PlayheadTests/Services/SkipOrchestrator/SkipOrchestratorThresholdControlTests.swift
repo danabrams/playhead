@@ -140,16 +140,30 @@ struct SkipOrchestratorThresholdControlTests {
     /// precondition reddens it and leaves this one green.) Deleting the seam's
     /// controller write kills both, so this is not independent coverage of the
     /// write itself.
+    ///
+    /// playhead-i08e (seventh pass): the learning INGESTOR has to be wired too,
+    /// not just the store. `PersistentUserCorrectionStore
+    /// .correctionDidPersistAtomically` opens with `guard let learningIngestor
+    /// else { return }`, so without one the post-commit hop is a no-op by
+    /// construction and this test had no discriminating power over its sibling
+    /// at all. `PlayheadRuntime` wires both, so this is the production shape.
     @Test("Manual 'not an ad' revertWindow records exactly one FALSE-POSITIVE with the correction store wired")
     func revertWindowWithCorrectionStoreRecordsOneFalsePositive() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        await correctionStore.setLearningArtifactIngestor(
+            LearningArtifactIngestor(
+                store: store,
+                knowledgeStore: SponsorKnowledgeStore(store: store)
+            )
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
-            correctionStore: PersistentUserCorrectionStore(store: store)
+            correctionStore: correctionStore
         )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
@@ -282,17 +296,25 @@ struct SkipOrchestratorThresholdControlTests {
 
     /// playhead-i08e: the same seam in the PRODUCTION wiring — see
     /// `revertWindowWithCorrectionStoreRecordsOneFalsePositive` for exactly
-    /// what the wired variant does and does not add.
+    /// what the wired variant does and does not add, including why the learning
+    /// ingestor (not just the store) has to be wired for it to add anything.
     @Test("Accepting a suggested ad records exactly one MISS with the correction store wired")
     func acceptSuggestedSkipWithCorrectionStoreRecordsOneMiss() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        await correctionStore.setLearningArtifactIngestor(
+            LearningArtifactIngestor(
+                store: store,
+                knowledgeStore: SponsorKnowledgeStore(store: store)
+            )
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
-            correctionStore: PersistentUserCorrectionStore(store: store)
+            correctionStore: correctionStore
         )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }

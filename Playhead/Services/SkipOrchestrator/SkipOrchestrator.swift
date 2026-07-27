@@ -3195,7 +3195,13 @@ actor SkipOrchestrator {
     ///   • FALSE-POSITIVE (raise) — every path that vetoes a MANAGED
     ///     (auto-skip-tier) window: `recordListenRevert`, `revertByTimeRange`
     ///     (only when `revertedManagedAny`), `revertWindow`, and
-    ///     `denyAutoSkippedBanner`.
+    ///     `denyAutoSkippedBanner`. This is a census of SEAMS, not of shipped
+    ///     behaviour: `recordListenRevert` currently has no production caller
+    ///     (the banner Listen tap runs `retireLiveSkipForListen` plus
+    ///     `AdDetectionService.recordListenRewind`, neither of which
+    ///     calibrates), so it is reachable only from tests today. Wiring it is
+    ///     tracked separately — do not read this list as "what the controller
+    ///     is being fed in production".
     ///   • MISS (lower) — `acceptSuggestedSkip`. This is the one SUGGEST-tier
     ///     gesture that calibrates: the user saying "this WAS an ad" about
     ///     something we did not auto-skip is a false negative, which is a

@@ -473,13 +473,23 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             id: "ad-range-a", startTime: 60, endTime: 90,
             confidence: 0.85, decisionState: "confirmed"
         )
+        // Both spans are kept comfortably above `minimumSpanSeconds` (15s).
+        // A short span is only skippable when `confidence >=
+        // shortSpanOverrideConfidence`, which is ALSO 0.85 — so a 0.85/10s
+        // fixture survives `evaluateWindow` only on the strictness of `<`, and
+        // any tuning of either constant would silently demote it to
+        // `.suppressed`. The loop `continue`s past suppressed entries, which
+        // would put this test back to one effective iteration and re-open
+        // exactly the vacuity it exists to close.
         let managedB = makeSkipTestAdWindow(
-            id: "ad-range-b", startTime: 95, endTime: 105,
+            id: "ad-range-b", startTime: 95, endTime: 115,
             confidence: 0.85, decisionState: "confirmed"
         )
         try await store.insertAdWindow(managedA)
         try await store.insertAdWindow(managedB)
         await orchestrator.receiveAdWindows([managedA, managedB])
+        // Fixture self-check: the loop must really have two entries to walk.
+        #expect(await orchestrator.activeWindowIDs() == ["ad-range-a", "ad-range-b"])
 
         let gate = ControlledAsyncGate()
         await orchestrator._setRevertPersistenceBarrierForTesting {
@@ -577,6 +587,85 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             "the final lifecycle guard must still gate evaluateAndPush()"
         )
         await controllerStore.close()
+    }
+
+    /// `revertByTimeRange` with NO show attribution and NO trust service — the
+    /// one behavioural change playhead-i08e's guard relocation actually makes,
+    /// and the only configuration that can observe it.
+    ///
+    /// The guard this replaces sat INSIDE `if let podcastId, let trustService`,
+    /// so an anonymous revert fell straight through to `evaluateAndPush()` and
+    /// republished cues into an episode it no longer owned. Every other test in
+    /// this suite passes a podcastId AND wires a trust service, so moving the
+    /// guard back inside that branch leaves them all green.
+    ///
+    /// Dropping the trust service also makes this the one race test that fails
+    /// if an early exit keyed on an OPTIONAL DEPENDENCY (rather than on the
+    /// lifecycle) is introduced above the effects — e.g.
+    /// `guard trustService != nil else { return }` — which the deleted canary
+    /// rejected wholesale via `assertNoEarlyExit` and no other test now covers.
+    @Test(
+        "An anonymous time-range revert replaced mid-loop keeps its receipt and still gates cue republication",
+        .timeLimit(.minutes(1))
+    )
+    func anonymousTimeRangeRevertSurvivesEpisodeReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        // No trustService and no correction-store-side show attribution.
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: nil
+        )
+
+        let managed = makeSkipTestAdWindow(
+            id: "ad-anon-range", startTime: 60, endTime: 120,
+            confidence: 0.85, decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(managed)
+        await orchestrator.receiveAdWindows([managed])
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.revertByTimeRange(
+                start: 70, end: 110, podcastId: nil
+            )
+        }
+        await gate.waitUntilStarted()
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: nil
+        )
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        // The gesture is still owed to the captured episode even unattributed.
+        let receipts = try await awaitCorrectionReceipts(
+            store, assetId: "asset-1", expected: 1
+        )
+        #expect(receipts.count == 1, "an anonymous revert still commits its receipt")
+        #expect(receipts.first?.source == .manualVeto)
+        let row = try #require(try await store.fetchAdWindow(id: "ad-anon-range"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            """
+            An anonymous revert republished cues into the REPLACEMENT episode. \
+            The live-state guard must sit outside the podcastId/trustService \
+            branch so it holds for gestures that never reach the trust engine.
+            """
+        )
     }
 
     /// `revertByTimeRange`, suggest-tier loop. The mirror of the case above for
