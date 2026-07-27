@@ -3028,6 +3028,27 @@ actor SkipOrchestrator {
         // delayed correction into the replacement show's catalog/cache.
         // Missing captured identity still permits exact source/row revocation
         // and fails closed on fuzzy scope.
+        //
+        // playhead-o4qr, ACCEPT THE RECEIPT / REFUSE THE LEARNING: that last
+        // sentence is what makes this call safe on an ANONYMOUS correction
+        // (`showId == nil`), and why it is deliberately still made rather than
+        // skipped. `normalizedCatalogShowId(nil)` is nil, and both stores then
+        // take only their show-FREE branches: `AdCatalogStore.revoke` requires
+        // a canonical show for BOTH the matched-entry and the
+        // fingerprint-similarity targets, and
+        // `RepeatedAdCacheService.revokeMatches` drops show+fingerprint scope
+        // unless both are present. What is left is the exact source-window
+        // tombstone keyed on this asset/window — not show-keyed, not
+        // attributable to any other episode, and a RETRACTION of learning
+        // rather than a write of it.
+        //
+        // Skipping the whole call for an anonymous correction would be the
+        // strictly worse reading of the rule: the in-memory retraction above
+        // (`pendingCatalogLearning` / `revokedLearningSources`) is what stops a
+        // delayed consumed-skip learner from writing catalog evidence for the
+        // very span the user just vetoed — and THAT write would be keyed to
+        // the live show. Refusing the retraction would manufacture the
+        // contamination the rule forbids.
         let matchingShowId = normalizedCatalogShowId(showId)
         var matchingFingerprint: AcousticFingerprint?
         var matchingRepeatedFingerprint: RepeatedAdFingerprint?
@@ -3234,6 +3255,30 @@ actor SkipOrchestrator {
     /// orchestrator lifecycle. A completely showless lifecycle remains valid
     /// for device-local exact-span corrections; once either side has a show,
     /// both values are mandatory, canonical, and exactly equal.
+    ///
+    /// playhead-o4qr — WHAT A FAILURE MEANS, because the two consumers read it
+    /// differently and the difference is the whole contract:
+    ///
+    ///   • The four CORRECTION seams (`recordListenRevert`,
+    ///     `revertByTimeRange`, `denyAutoSkippedBanner`, `revertWindow`) treat
+    ///     `showId` as the LEARNING KEY, not as an admission gate. A nil
+    ///     `showId` — whether from a showless lifecycle or from an outright
+    ///     validation failure — still commits the user's durable receipt and
+    ///     still returns true; it withholds only the show-keyed effects.
+    ///     ACCEPT THE RECEIPT, REFUSE THE LEARNING.
+    ///
+    ///   • `retireLiveSkipRevisionForListen` keeps it as a hard gate, and that
+    ///     is not an inconsistency: it takes a NON-optional `podcastId` from
+    ///     the banner it is retiring and asserts `showId == expectedPodcastId`,
+    ///     so a failure there means the caller is describing material this
+    ///     lifecycle does not own. It writes no receipt and performs no
+    ///     learning, so there is nothing to accept — refusing is the only
+    ///     available behaviour.
+    ///
+    /// Note the deliberate asymmetry in the return value: an INVALID result
+    /// always carries `showId == nil`, so callers never need to consult
+    /// `isValid` to make the learning decision. `isValid` distinguishes
+    /// "showless but agreed" from "disagreed" for the gate consumer only.
     private func exactFeedbackShowIdentity(
         requested requestedShowId: String?
     ) -> (isValid: Bool, showId: String?) {
@@ -3290,9 +3335,31 @@ actor SkipOrchestrator {
         windowId: String,
         podcastId: String? = nil
     ) async -> Bool {
+        // playhead-o4qr: ACCEPT THE RECEIPT, REFUSE THE LEARNING.
+        //
+        // An unusable show identity — absent, empty, non-canonical, or
+        // disagreeing with the active episode — is NOT grounds to drop the
+        // gesture. The durable `CorrectionEvent` is a record of what the
+        // listener said; it is scoped to an exact asset + time span and needs
+        // no show to be meaningful, so it is committed and the gesture reports
+        // success. What an unusable identity DOES forbid is every show-KEYED
+        // effect below (trust penalty, hard-negative bank, per-show threshold
+        // controller, show-scoped recurrence revocation): those are
+        // unattributable without a show, and letting them fall back to the
+        // live `activePodcastId` — or to a null/global bucket — is exactly the
+        // cross-contamination this bead exists to prevent. The dangerous part
+        // was never the receipt.
+        //
+        // `exactFeedbackShowIdentity` already yields `showId == nil` for every
+        // unusable case, so `sourceShowId` is the ONE predicate the effects
+        // below test. Read `sourceShowId == nil` as "anonymous correction".
+        //
+        // Stated-invariant change more than a behaviour change: production
+        // reaches this seam only through `PlayheadRuntime`, which guards on
+        // `hasExactCurrentPodcastIdentity` upstream and always supplies the
+        // exact show id.
         let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
-        guard validatedShow.isValid,
-              let sourceAssetId = activeAssetId,
+        guard let sourceAssetId = activeAssetId,
               let sourceEpisodeId = activeEpisodeId
         else {
             return false
@@ -3416,7 +3483,9 @@ actor SkipOrchestrator {
         // so future episodes with the same copy are suppressed. No-op when no
         // bank is wired — and a bank is wired ONLY when the
         // `crossEpisodeMemoryEnabled` feature flag is on (see PlayheadRuntime),
-        // so this is inert in the flag-OFF production default.
+        // so this is inert in the flag-OFF production default. Also a no-op
+        // when `sourceShowId` is nil (playhead-o4qr: an anonymous correction
+        // must not become a NULL-show negative that every show reads back).
         ingestNegativeFingerprint(
             text: requestedManaged.adWindow.evidenceText,
             podcastId: sourceShowId
@@ -3475,6 +3544,11 @@ actor SkipOrchestrator {
         ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64?,
         correctionSpan: DecodedSpan? = nil
     ) async -> Bool {
+        // playhead-o4qr: ACCEPT THE RECEIPT, REFUSE THE LEARNING — see the long
+        // form above `recordListenRevert`'s call to
+        // `exactFeedbackShowIdentity`. An unusable show identity leaves
+        // `sourceShowId == nil`, which is the single predicate every show-keyed
+        // effect in this seam already tests; it does not cancel the gesture.
         let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
         guard start.isFinite,
               end.isFinite,
@@ -3486,8 +3560,7 @@ actor SkipOrchestrator {
               activeEpisodeId == expectedEpisodeId,
               expectedPlaybackGeneration == nil
                 || activePlaybackLifecycleGeneration
-                    == expectedPlaybackGeneration,
-              validatedShow.isValid
+                    == expectedPlaybackGeneration
         else {
             return false
         }
@@ -3741,6 +3814,14 @@ actor SkipOrchestrator {
         else {
             return false
         }
+        // playhead-o4qr split audit: this seam takes NO caller-supplied show,
+        // so `exactFeedbackShowIdentity` has nothing to validate and cannot
+        // fail here. Its one show-keyed effect,
+        // `scheduleConfirmedRecurrenceLearning`, already fails closed on an
+        // absent show (`learnConfirmedRecurrence` requires
+        // `normalizedCatalogShowId(showId)`), and the seam writes no trust,
+        // controller or negative-bank signal at all. Nothing to split;
+        // adding a guard here would be dead code.
         let sourcePodcastId = activePodcastId
 
         let receipt = CorrectionEvent(
@@ -3814,12 +3895,16 @@ actor SkipOrchestrator {
         ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64?,
         ifWindowMaterialRevisionToken expectedMaterialToken: String?
     ) async -> Bool {
+        // playhead-o4qr: ACCEPT THE RECEIPT, REFUSE THE LEARNING — see the long
+        // form above `recordListenRevert`'s call to
+        // `exactFeedbackShowIdentity`. The banner No still commits its durable
+        // receipt when the card's show identity is unusable; only the
+        // show-keyed calibration below is withheld, via `sourceShowId == nil`.
         let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
         guard let expectedAssetId,
               let expectedEpisodeId,
               let expectedPlaybackGeneration,
               let expectedMaterialToken,
-              validatedShow.isValid,
               activeEpisodeId == expectedEpisodeId,
               activePlaybackLifecycleGeneration
                 == expectedPlaybackGeneration,
@@ -3961,12 +4046,17 @@ actor SkipOrchestrator {
         ifCurrentEpisodeId expectedEpisodeId: String?,
         ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil
     ) async -> Bool {
+        // playhead-o4qr: ACCEPT THE RECEIPT, REFUSE THE LEARNING — see the long
+        // form above `recordListenRevert`'s call to
+        // `exactFeedbackShowIdentity`. This is the seam
+        // `anonymousRevertRecordsNoControllerSample` drives: a revert carrying
+        // no show id keeps its durable receipt and returns true, while
+        // `sourceShowId == nil` withholds every show-keyed effect.
         let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
         guard activeEpisodeId == expectedEpisodeId,
               expectedPlaybackGeneration == nil
                 || activePlaybackLifecycleGeneration
-                    == expectedPlaybackGeneration,
-              validatedShow.isValid
+                    == expectedPlaybackGeneration
         else {
             return false
         }
@@ -4194,6 +4284,15 @@ actor SkipOrchestrator {
     /// FPs exclusively.
     private func ingestNegativeFingerprint(text: String?, podcastId: String?) {
         guard let bank = negativeFingerprintBank else { return }
+        // playhead-o4qr: REFUSE THE LEARNING half of the anonymous-correction
+        // contract, enforced here rather than at the call site so the bank has
+        // ONE gate no future seam can route around. A nil/empty show writes a
+        // NULL-show row, and `loadEntries(forShow:includeGlobal:)` returns
+        // NULL-show negatives to EVERY show — so a single unattributable
+        // correction would suppress matching copy across the whole library.
+        // Deliberately mirrors `recordThresholdControlSignal`'s guard below:
+        // both are per-show stores with nowhere to put an anonymous sample.
+        guard let podcastId, !podcastId.isEmpty else { return }
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let pid = podcastId
         Task {
@@ -4318,6 +4417,12 @@ actor SkipOrchestrator {
         }
         let sourceEpisodeId = activeEpisodeId
         let sourceLifecycleGeneration = episodeLifecycleGeneration
+        // playhead-o4qr split audit: no caller-supplied show, so the identity
+        // check cannot fail here. Every show-keyed effect below is already
+        // nil-refusing — `learnConfirmedRecurrence` requires a canonical show,
+        // the trust hop is an `if let`, and `recordThresholdControlMiss` funnels
+        // into `recordThresholdControlSignal`'s nil/empty guard. Nothing to
+        // split; a guard here would be dead code.
         let sourcePodcastId = activePodcastId
         guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
             return false
@@ -4607,6 +4712,11 @@ actor SkipOrchestrator {
         }
         let sourceEpisodeId = activeEpisodeId
         let sourceLifecycleGeneration = episodeLifecycleGeneration
+        // playhead-o4qr split audit: no caller-supplied show, so the identity
+        // check cannot fail here. This seam is capture-only — its sole
+        // catalog touch is `revokeRecurrenceEvidence`, a retraction that takes
+        // only its show-free exact-source branch when the show is absent (see
+        // that method). Nothing to split.
         let sourcePodcastId = activePodcastId
         guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
             return false
