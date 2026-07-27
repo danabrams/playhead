@@ -85,9 +85,18 @@ struct Bug8MarkOnlyForensicTests {
     @Test("class A: 0.40 ≤ score < 0.55 stays markOnly even when all four evidence-driven safety signals fire")
     func belowThresholdMarkOnlyEvenWithAllSafetySignals() {
         // Mid-roll @ 1500..1560 in a 3000-s episode → slot prior does NOT fire.
+        // playhead-o4qr: the asset id MUST match `makeInput`'s
+        // ("asset-bug8-forensics"). It used to read "asset-bug8", and the
+        // mismatch was inert until o4qr made `isSustainedAcousticAdSignature`
+        // verify that every feature window belongs to the asset it is being
+        // asked about — exact provenance being the whole point of that bead.
+        // With the mismatch the acoustic signal cannot fire, so the sanity
+        // preamble below stopped being true and the test went red. That is the
+        // preamble doing precisely the job its comment claims; the fixture is
+        // what was wrong, so the fixture is what is repaired.
         let features: [FeatureWindow] = stride(from: 1500.0, to: 1560.0, by: 2.0).map { t in
             FeatureWindow(
-                analysisAssetId: "asset-bug8",
+                analysisAssetId: "asset-bug8-forensics",
                 startTime: t,
                 endTime: t + 2,
                 rms: 0.3,
@@ -113,7 +122,13 @@ struct Bug8MarkOnlyForensicTests {
             episodeDuration: 3000,
             overlappingFeatureWindows: features,
             lexicalCategories: [.sponsor, .promoCode, .urlCTA, .purchaseLanguage],
-            userCorrectionBoostFactor: 5.0,
+            // playhead-o4qr: 2.0, not the 5.0 this used to pass.
+            // `.userConfirmedLocalPattern` fires on `1.0 < factor <= 2.0`, so
+            // 5.0 is OUTSIDE the accepted band and fires nothing — it does not
+            // make the input more adversarial, it makes it inert. 2.0 is the
+            // maximum admissible boost and therefore the genuinely strongest
+            // input, which is what this test's premise says it uses.
+            userCorrectionBoostFactor: 2.0,
             catalogMatchSimilarity: 0.95   // > 0.90 floor → catalogMatch fires
         )
 

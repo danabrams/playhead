@@ -5463,7 +5463,34 @@ actor SkipOrchestrator {
             evidenceText: nil, evidenceStartTime: start,
             metadataSource: "userCorrection",
             metadataConfidence: nil, metadataPromptVersion: nil,
-            wasSkipped: false, userDismissedBanner: false
+            wasSkipped: false, userDismissedBanner: false,
+            // playhead-o4qr: this stamp is MANDATORY, and its absence was a
+            // real defect rather than a cosmetic gap.
+            //
+            // `AdDetectionService.recordUserMarkedAd` persists the durable row
+            // for this same window with `eligibilityGate: .eligible` (see
+            // playhead-527u: a manual mark is the highest-certainty "this IS an
+            // ad" signal we have). This synthesized in-memory twin left it nil,
+            // and `eligibilityGate` is part of
+            // `AdWindowMaterialIdentity.producerRevisionToken` — so the two
+            // representations of one window were NOT the same producer
+            // revision.
+            //
+            // That was inert until o4qr routed the correction seams through
+            // `persistRevertedAdWindowsIfCurrent`, which validates the exact
+            // producer revision before mutating a row. From then on, vetoing a
+            // freshly marked ad IN THE SAME SESSION failed the revision check
+            // and silently did nothing — while the identical gesture AFTER a
+            // relaunch worked, because `beginEpisode` preloads the durable row
+            // (gate `.eligible`) and the in-memory copy then matches. A user
+            // correction that works only after quitting the app is a bug, and
+            // the shipped surface is `revertByTimeRange` (the transcript "This
+            // isn't an ad" gesture), not just the test-only `revertWindow`.
+            //
+            // The fix is to make the synthesized twin tell the truth the
+            // durable writer already tells. Keep these two constructions in
+            // step: any field either one stamps must be stamped by both.
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
 
         let key = idempotencyKey(assetId: analysisAssetId, windowId: windowId)
