@@ -1165,6 +1165,51 @@ struct SchedulingTests {
         #expect(backfillRequests.count == 1,
                 "Backgrounding the app must submit a backfill request so iOS can wake the app to drain queued analysis work")
     }
+
+    // playhead-txq3: the pending-request guard. Before this fix,
+    // `scheduleBackfillIfNeeded()` re-submitted on EVERY `.background`
+    // transition / `playbackDidStop` / self-rearm; while
+    // `BGTaskScheduler.submit(_:)` de-dups on identifier, each submit
+    // age-resets the pending request's scheduling, so an evening of app-use
+    // kept pushing the wake further out (the y5mk bulldozing bug).
+    @Test("scheduleBackfillIfNeeded skips the submit while a backfill request is already pending (playhead-txq3)")
+    func scheduleBackfillSkipsWhenPending() async throws {
+        let (bps, _, scheduler, _) = makeBPS()
+
+        // First call: nothing pending → submits.
+        await bps.scheduleBackfillIfNeeded()
+        // Further calls (a second .background transition, an explicit
+        // schedule) must NOT re-submit while the request is still pending.
+        await bps.scheduleBackfillIfNeeded()
+        await bps.appDidEnterBackground()
+
+        let backfillRequests = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.backfillProcessing
+        }
+        #expect(backfillRequests.count == 1,
+                "duplicate submits must be suppressed while a backfill request is already pending")
+    }
+
+    // playhead-txq3: arm backfill at launch. Previously backfill was only
+    // submitted on a `.background` / `playbackDidStop` / self-rearm
+    // transition, so a user who queues episodes and never plays or
+    // backgrounds left iOS with no submitted backfill BGProcessingTask.
+    @Test("start() arms a backfill request at launch, without a play/background transition (playhead-txq3)")
+    func startArmsBackfillAtLaunch() async throws {
+        let (bps, _, scheduler, _) = makeBPS()
+
+        #expect(scheduler.submittedRequests.allSatisfy {
+            $0.identifier != BackgroundTaskID.backfillProcessing
+        })
+
+        await bps.start()
+
+        let backfillRequests = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.backfillProcessing
+        }
+        #expect(!backfillRequests.isEmpty,
+                "launch must submit a backfill task so a user who queues episodes and never plays/backgrounds still gets one")
+    }
 }
 
 // MARK: - Lifecycle
