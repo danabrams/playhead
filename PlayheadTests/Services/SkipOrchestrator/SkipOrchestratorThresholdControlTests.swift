@@ -50,6 +50,46 @@ private func firstPresentedBannerItem(
     }
 }
 
+/// Feature coverage for one span, shaped so
+/// `AcousticFingerprint.fromFeatureWindows` accepts it: 2-second windows (a
+/// `MusicDetectionConfig.supportedWindowDurations` value), the CURRENT feature
+/// version, non-negative finite scalars, and no overlap. Values vary across the
+/// span so the derived vector is non-zero — a zero fingerprint would silently
+/// make `anonymousRevertRecordsNoControllerSample`'s catalog clause vacuous,
+/// which is why that test `#require`s non-zero rather than assuming it.
+private func anonymousRevertFeatureWindows(
+    assetId: String,
+    from start: Double,
+    to end: Double
+) -> [FeatureWindow] {
+    var out: [FeatureWindow] = []
+    var t = start
+    var i = 0
+    while t + 2 <= end {
+        let phase = Double(i % 5) / 10.0
+        out.append(FeatureWindow(
+            analysisAssetId: assetId,
+            startTime: t,
+            endTime: t + 2,
+            rms: 0.3 + phase,
+            spectralFlux: 0.2 + phase,
+            musicProbability: 0.1 + phase,
+            speakerChangeProxyScore: 0.05 + phase,
+            musicBedChangeScore: phase,
+            musicBedOnsetScore: phase / 2,
+            musicBedOffsetScore: phase / 3,
+            musicBedLevel: .none,
+            pauseProbability: 0.05 + phase,
+            speakerClusterId: 0,
+            jingleHash: nil,
+            featureVersion: FeatureExtractionConfig.default.featureVersion
+        ))
+        t += 2
+        i += 1
+    }
+    return out
+}
+
 @Suite("SkipOrchestrator per-show threshold control write path (playhead-xsdz.11)")
 struct SkipOrchestratorThresholdControlTests {
 
@@ -471,37 +511,319 @@ struct SkipOrchestratorThresholdControlTests {
     /// orchestrator-half-alone case is equivalent by the same swallowed-throw
     /// argument rather than by a separate run. Both halves are load-bearing
     /// only together, which is the shape this assertion is mutation-verified in.
-    @Test("An anonymous revert (no podcastId, or an empty one) records no controller sample")
+    ///
+    /// playhead-o4qr — THE DECIDED CONTRACT, and the reason this test now
+    /// carries four negative clauses instead of one.
+    ///
+    /// o4qr's `exactFeedbackShowIdentity` originally REFUSED a correction whose
+    /// show identity was unusable, which collided head-on with i08e's contract
+    /// that a listener's correction is never silently dropped. The resolution
+    /// splits the two halves that were being conflated: ACCEPT THE RECEIPT,
+    /// REFUSE THE LEARNING. The receipt is scoped to an exact asset + time span
+    /// and is meaningful with no show at all; the LEARNING is per-show state
+    /// with nowhere to land, and letting any of it fall back to
+    /// `activePodcastId` — or into a null/global bucket — is precisely the
+    /// cross-contamination the bead exists to prevent.
+    ///
+    /// So each half needs its own POSITIVE CONTROL, or the other half proves
+    /// nothing: "recorded no learning" is trivially satisfied by a seam that
+    /// refused (the pre-split behaviour), and "committed a receipt" says
+    /// nothing about what else leaked. Both are asserted here.
+    ///
+    /// The four learning surfaces, and which gesture reaches each, because
+    /// three of them are NOT reachable from `revertWindow` and a single-gesture
+    /// version of this test would have been vacuous for them:
+    ///   • per-show threshold controller — `revertWindow` (both id clauses).
+    ///   • hard-negative bank — `recordListenRevert` ONLY. It is the sole
+    ///     orchestrator seam that calls `ingestNegativeFingerprint`, so the
+    ///     bank clause needs its own gesture; a nil show there would write a
+    ///     NULL-show row that `loadEntries(forShow:includeGlobal:)` hands back
+    ///     to EVERY show.
+    ///   • per-show trust penalty — read off the trust store, which this test
+    ///     owns so the ABSENCE of a penalty is observable. The show is seeded:
+    ///     `recordFalseSkipSignal` never lazy-creates, so an unseeded profile
+    ///     would swallow the very leak being tested.
+    ///   • show-scoped catalog revocation — an ACTIVE catalog entry for this
+    ///     show is seeded with the exact fingerprint of `ad-anon`'s feature
+    ///     span, and its source provenance deliberately names a DIFFERENT
+    ///     asset/window so the show-free exact-source tombstone cannot be what
+    ///     clears it. An anonymous revert must leave it active; attributing the
+    ///     revocation to `activePodcastId` revokes it and turns this red.
+    @Test("An anonymous revert (no podcastId, or an empty one) keeps its receipt and records NO show-keyed learning")
     func anonymousRevertRecordsNoControllerSample() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Feature coverage for `ad-anon`'s span only. `revokeRecurrenceEvidence`
+        // fingerprints exactly this range, so the catalog entry below is a
+        // show-scoped revocation target the anonymous gesture must not reach.
+        try await store.insertFeatureWindows(
+            anonymousRevertFeatureWindows(assetId: "asset-1", from: 60, to: 120)
+        )
+        let adFingerprint = AcousticFingerprint.fromFeatureWindows(
+            try await store.fetchFeatureWindows(
+                assetId: "asset-1",
+                from: 60,
+                to: 120
+            )
+        )
+        try #require(
+            !adFingerprint.isZero,
+            "a zero fingerprint would make the catalog clause vacuous"
+        )
+        let catalog = try AdCatalogStore(
+            directoryURL: try makeTempDir(prefix: "o4qr-anon-catalog")
+        )
+        let learned = try #require(
+            try await catalog.insert(
+                showId: podcastId,
+                episodePosition: .midRoll,
+                durationSec: 20,
+                acousticFingerprint: adFingerprint,
+                originalConfidence: 0.99,
+                learningSource: .userMarkedAd,
+                learningLifecycle: .explicitConfirmation,
+                // Deliberately NOT the reverted window's asset/window: the
+                // exact-source tombstone is show-free and always written, so
+                // naming the same source here would let it clear this row and
+                // the assertion would stop discriminating.
+                sourceAssetId: "source-asset-o4qr-anon",
+                sourceWindowId: "source-window-o4qr-anon",
+                sourceStartTime: 62,
+                sourceEndTime: 82
+            )
+        )
         let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
+        // Own the trust store so the ABSENCE of a penalty is readable.
+        let trustStore = try await makeTestStore()
+        try await seedSkipTestTrustProfile(
+            in: trustStore, podcastId: podcastId,
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let trustService = TrustScoringService(store: trustStore)
+        let negativeBank = try NegativeFingerprintBank(
+            directoryURL: try makeTempDir(prefix: "o4qr-anon-bank")
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
-            correctionStore: PersistentUserCorrectionStore(store: store)
+            trustService: trustService,
+            correctionStore: correctionStore,
+            adCatalogStore: catalog
         )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setNegativeFingerprintBank(negativeBank)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
 
-        let ad = makeSkipTestAdWindow(id: "ad-anon", startTime: 60, endTime: 120, confidence: 0.85, decisionState: "confirmed")
+        // Copy comfortably above the bank's 4-token floor, so "no hard
+        // negative" can never be satisfied by text too short to be storable.
+        let adCopy = "this episode is brought to you by our sponsor"
+        let ad = makeSkipTestAdWindow(
+            id: "ad-anon", startTime: 60, endTime: 120,
+            confidence: 0.85, decisionState: "confirmed", evidenceText: adCopy
+        )
         // A second window, vetoed under an EMPTY show id, so both clauses of
         // the guard are exercised by the same negative assertion below.
-        let empty = makeSkipTestAdWindow(id: "ad-empty-show", startTime: 300, endTime: 360, confidence: 0.85, decisionState: "confirmed")
+        let empty = makeSkipTestAdWindow(
+            id: "ad-empty-show", startTime: 300, endTime: 360,
+            confidence: 0.85, decisionState: "confirmed", evidenceText: adCopy
+        )
+        // The bank's only write trigger is `recordListenRevert`, so it needs a
+        // gesture of its own.
+        let listened = makeSkipTestAdWindow(
+            id: "ad-anon-listen", startTime: 600, endTime: 660,
+            confidence: 0.85, decisionState: "confirmed", evidenceText: adCopy
+        )
         try await store.insertAdWindow(ad)
         try await store.insertAdWindow(empty)
-        await orchestrator.receiveAdWindows([ad, empty])
+        try await store.insertAdWindow(listened)
+        await orchestrator.receiveAdWindows([ad, empty, listened])
 
+        // ACCEPT THE RECEIPT — all three gestures report success.
         #expect(await orchestrator.revertWindow(windowId: "ad-anon", podcastId: nil))
         #expect(await orchestrator.revertWindow(windowId: "ad-empty-show", podcastId: ""))
-        let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
-        #expect(receipts.count == 2, "each veto still commits its own durable receipt")
-        #expect(receipts.allSatisfy { $0.source == .manualVeto })
+        #expect(
+            await orchestrator.recordListenRevert(
+                windowId: "ad-anon-listen", podcastId: nil
+            )
+        )
+        let receipts = try await awaitCorrectionReceipts(
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 3
+        )
+        #expect(
+            receipts.count == 3,
+            "each anonymous correction still commits its own durable receipt"
+        )
+        #expect(receipts.filter { $0.source == .manualVeto }.count == 2)
+        #expect(receipts.filter { $0.source == .listenRevert }.count == 1)
+        #expect(
+            receipts.allSatisfy { $0.podcastId == nil },
+            """
+            The receipt records WHAT the listener said, not a show it cannot \
+            be attributed to. Stamping the live `activePodcastId` on an \
+            unattributable correction is the same cross-contamination the \
+            learning surfaces below refuse.
+            """
+        )
+        for id in ["ad-anon", "ad-empty-show", "ad-anon-listen"] {
+            let row = try #require(try await store.fetchAdWindow(id: id))
+            #expect(
+                row.decisionState == AdDecisionState.reverted.rawValue,
+                "\(id): the user's correction must be durable, not merely reported"
+            )
+        }
 
+        // REFUSE THE LEARNING — nothing keyed by show may move.
         #expect(
             try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
             "an unattributed correction must not be folded into any show's controller state"
         )
+        await drainOrchestratorEffects(orchestrator)
+        #expect(
+            try await negativeBank.allEntries().isEmpty,
+            """
+            A nil/empty show writes a NULL-show hard negative, and NULL-show \
+            negatives are read back by EVERY show — one unattributable \
+            correction would suppress this copy across the whole library.
+            """
+        )
+        let profile = try #require(
+            try await trustStore.fetchProfile(podcastId: podcastId)
+        )
+        #expect(
+            profile.recentFalseSkipSignals == 0,
+            "the live show must not absorb a penalty the correction cannot attribute to it"
+        )
+        #expect(
+            abs(profile.skipTrustScore - 0.9) < 1e-9,
+            "trust must be untouched — magnitude, so the weak variant cannot pass either"
+        )
+        let catalogEntries = try await catalog.allEntries()
+        #expect(catalogEntries.count == 1, "the seeded entry is the only catalog row")
+        #expect(
+            catalogEntries.first?.id == learned.id,
+            "the assertion below must be reading the seeded row"
+        )
+        #expect(
+            catalogEntries.first?.revokedAt == nil,
+            """
+            Show-scoped catalog revocation is show-keyed learning. An anonymous \
+            correction may write only its show-free exact-source tombstone; \
+            reaching this show's creative evidence would let an unattributable \
+            gesture retract learning for every episode of it.
+            """
+        )
+        await controllerStore.close()
+        await negativeBank.close()
+        await catalog.close()
+    }
+
+    /// playhead-o4qr: the banner-No half of the same decision, re-homed from
+    /// `autoSkipNoWinsBlockedAppliedPersistenceRace`
+    /// (SkipOrchestratorRevertTests), where it was a one-line refusal probe —
+    /// "exact card material must not authorize feedback for another show" —
+    /// that could not survive the split: a mismatched show now durably reverts
+    /// its target, which would have consumed the applied window that test's
+    /// race is about.
+    ///
+    /// It is re-pointed, not weakened. The old probe asserted two things
+    /// (returned false, no receipt); this asserts five, and the three new ones
+    /// are the ones that actually matter now — the receipt is UNATTRIBUTED,
+    /// and neither the requested show nor the live one is calibrated. Every
+    /// other identity the card carries (asset, episode, playback generation,
+    /// span, material token) is taken straight off the live banner, so the
+    /// requested show is the sole discriminator.
+    @Test("A banner No naming another show keeps its receipt and records NO show-keyed learning")
+    func staleShowBannerNoKeepsReceiptAndRecordsNoLearning() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
+        // Own the trust store, and seed BOTH the live show and the show the
+        // gesture names, so "neither was penalised" is positively observable —
+        // `recordFalseSkipSignal` never lazy-creates, so an unseeded profile
+        // silently swallows a misrouted penalty.
+        let trustStore = try await makeTestStore()
+        for show in [podcastId, "podcast-stale"] {
+            try await seedSkipTestTrustProfile(
+                in: trustStore, podcastId: show,
+                mode: "auto", trustScore: 0.9, observations: 10
+            )
+        }
+        let trustService = TrustScoringService(store: trustStore)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: episodeId,
+            podcastId: podcastId,
+            playbackLifecycleGeneration: 7
+        )
+        let events = await orchestrator.bannerEventStream()
+
+        let ad = makeSkipTestAdWindow(
+            id: "ad-deny-stale-show", startTime: 60, endTime: 120,
+            confidence: 0.9, decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        let item = try #require(await firstPresentedBannerItem(events))
+        #expect(item.windowId == "ad-deny-stale-show")
+        #expect(
+            item.podcastId == podcastId,
+            "positive control: the card really does carry the live show, so \"podcast-stale\" is a genuine mismatch"
+        )
+
+        // ACCEPT THE RECEIPT.
+        #expect(
+            await orchestrator.denyAutoSkippedBanner(
+                windowId: item.windowId,
+                analysisAssetId: item.analysisAssetId,
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: "podcast-stale",
+                ifCurrentEpisodeId: item.episodeId,
+                ifPlaybackLifecycleGeneration: item.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken: item.windowMaterialRevisionToken
+            ),
+            "a listener's No is never dropped for want of a usable show"
+        )
+        let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
+        #expect(receipts.count == 1, "the unattributable No is still durable")
+        #expect(receipts.first?.source == .bannerAutoSkipDenied)
+        #expect(
+            receipts.first?.podcastId == nil,
+            """
+            Neither the requested "podcast-stale" nor the live "\(podcastId)" \
+            may be stamped on a receipt whose show identity did not validate.
+            """
+        )
+        let row = try #require(try await store.fetchAdWindow(id: "ad-deny-stale-show"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+
+        // REFUSE THE LEARNING.
+        #expect(
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
+            "no show may be calibrated by a No whose show identity did not validate"
+        )
+        await drainOrchestratorEffects(orchestrator)
+        for show in [podcastId, "podcast-stale"] {
+            let profile = try #require(try await trustStore.fetchProfile(podcastId: show))
+            #expect(
+                profile.recentFalseSkipSignals == 0,
+                "\(show) must not absorb a penalty from an unattributable gesture"
+            )
+            #expect(abs(profile.skipTrustScore - 0.9) < 1e-9, "\(show) trust must be untouched")
+        }
         await controllerStore.close()
     }
 

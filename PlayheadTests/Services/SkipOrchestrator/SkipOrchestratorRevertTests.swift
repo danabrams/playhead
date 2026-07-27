@@ -472,6 +472,31 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
 /// Counts skip-cue republications. The orchestrator's cue handler is a
 /// synchronous `@Sendable` closure, so it cannot read an actor; a lock-guarded
 /// counter is the smallest thing that can observe it.
+/// Captures the show ids a fire-and-forget trust hop was asked to penalise.
+///
+/// playhead-o4qr: "no trust penalty fired" is a NEGATIVE assertion, so it has
+/// to be observed on a surface that would have recorded one — counting nothing
+/// against a service whose store the test cannot read proves nothing. The
+/// orchestrator's `falseSkipSignalHandlerForTesting` hook is that surface, and
+/// keeping the SHOW (not just a count) is what makes a leak's failure message
+/// name the show that was wrongly penalised.
+private final class RecordedShowSignals: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: [String] = []
+
+    func record(_ show: String) {
+        lock.lock()
+        value.append(show)
+        lock.unlock()
+    }
+
+    var shows: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 private final class SkipCuePushCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
@@ -2263,19 +2288,6 @@ struct SkipOrchestratorRevertTests {
         let decisionCountBeforeFeedback =
             await orchestrator.getDecisionLog().count
 
-        #expect(
-            !(await orchestrator.revertWindow(
-                windowId: ad.id,
-                podcastId: "podcast-stale"
-            ))
-        )
-        #expect(!pushedCues.isEmpty)
-        #expect(
-            try await store.loadCorrectionEvents(
-                analysisAssetId: ad.analysisAssetId
-            ).isEmpty
-        )
-
         #expect(await orchestrator.revertWindow(
             windowId: ad.id,
             podcastId: "podcast-1"
@@ -2290,10 +2302,83 @@ struct SkipOrchestratorRevertTests {
         let corrections = try await store.loadCorrectionEvents(
             analysisAssetId: ad.analysisAssetId
         )
+        #expect(corrections.count == 1)
         let correction = try #require(corrections.first)
         #expect(correction.source == .manualVeto)
+        #expect(correction.podcastId == "podcast-1")
         #expect(!correction.isPrivateExplicitFeedbackReceipt)
         #expect(pushedCues.isEmpty)
+
+        // playhead-o4qr: this test used to end with a STALE-SHOW probe that
+        // asserted `revertWindow(podcastId: "podcast-stale")` returned false and
+        // left no receipt. That refusal is exactly the contract collision the
+        // bead resolved, and the resolution reverses it: ACCEPT THE RECEIPT,
+        // REFUSE THE LEARNING. A show that disagrees with the live episode is
+        // an unusable identity, not a reason to discard what the listener said.
+        //
+        // The probe is not weakened, it is re-pointed: what "must not authorize
+        // feedback for another show" means now is that the SHOW-KEYED half is
+        // withheld — the receipt lands UNATTRIBUTED (`podcastId == nil`, not
+        // "podcast-stale" and not the live "podcast-1"), and the per-show trust
+        // penalty never fires. It also moves to its own window, because a stale
+        // veto now genuinely reverts its target and reusing `ad` would leave
+        // the happy path above nothing to revert.
+        let stale = makeSkipTestAdWindow(
+            id: "ad-generic-stale-show",
+            startTime: 300,
+            endTime: 360,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(stale)
+        await orchestrator.receiveAdWindows([stale])
+        #expect(!pushedCues.isEmpty, "positive control: the stale probe has a live target")
+
+        // Installed only now, so the handler observes the stale gesture alone —
+        // the correctly-attributed revert above legitimately penalises
+        // "podcast-1" and would otherwise mask a leak.
+        let staleShowPenalties = RecordedShowSignals()
+        await orchestrator._setFalseSkipSignalHandlerForTesting { show in
+            staleShowPenalties.record(show)
+        }
+
+        #expect(
+            await orchestrator.revertWindow(
+                windowId: stale.id,
+                podcastId: "podcast-stale"
+            ),
+            "a listener's correction is never dropped for want of a usable show"
+        )
+        let afterStale = try await store.loadCorrectionEvents(
+            analysisAssetId: stale.analysisAssetId
+        )
+        #expect(afterStale.count == 2, "the unattributable correction is still durable")
+        let staleReceipt = try #require(
+            afterStale.first { $0.targetRefs?.adWindowId == stale.id }
+        )
+        #expect(staleReceipt.source == .manualVeto)
+        #expect(
+            staleReceipt.podcastId == nil,
+            """
+            A show identity the live episode does not agree with is not an \
+            attribution. Stamping either the requested "podcast-stale" or the \
+            live "podcast-1" onto this receipt is the cross-contamination the \
+            refusal used to prevent by dropping the gesture entirely.
+            """
+        )
+        let staleRow = try #require(try await store.fetchAdWindow(id: stale.id))
+        #expect(staleRow.decisionState == AdDecisionState.reverted.rawValue)
+        #expect(pushedCues.isEmpty)
+        await drainOrchestratorEffects(orchestrator)
+        #expect(
+            staleShowPenalties.shows.isEmpty,
+            """
+            REFUSE THE LEARNING: the per-show trust penalty has nowhere to land \
+            for a correction whose show cannot be established. Recording it \
+            against \(staleShowPenalties.shows) would penalise a show on the \
+            strength of a gesture that never named it.
+            """
+        )
     }
 
     @Test("generic revertWindow rejects a durable same-ID material replacement")
@@ -2618,26 +2703,22 @@ struct SkipOrchestratorRevertTests {
                 analysisAssetId: producer.analysisAssetId
             ).isEmpty
         )
-        #expect(
-            !(await orchestrator.denyAutoSkippedBanner(
-                windowId: item.windowId,
-                analysisAssetId: item.analysisAssetId,
-                startTime: item.adStartTime,
-                endTime: item.adEndTime,
-                podcastId: "podcast-stale",
-                ifCurrentEpisodeId: item.episodeId,
-                ifPlaybackLifecycleGeneration:
-                    item.playbackLifecycleGeneration,
-                ifWindowMaterialRevisionToken:
-                    item.windowMaterialRevisionToken
-            )),
-            "exact card material must not authorize feedback for another show"
-        )
-        #expect(
-            try await store.loadCorrectionEvents(
-                analysisAssetId: producer.analysisAssetId
-            ).isEmpty
-        )
+        // playhead-o4qr: a second probe used to sit here — the same call with
+        // `podcastId: "podcast-stale"` — asserting it returned false and left
+        // no receipt ("exact card material must not authorize feedback for
+        // another show"). It CANNOT stay in this test, and not because the
+        // contract was dropped: under ACCEPT THE RECEIPT, REFUSE THE LEARNING a
+        // mismatched show now commits an unattributed receipt and durably
+        // reverts the row, which would consume the very applied window whose
+        // race this test exists to pin, leaving the real No below nothing to
+        // answer.
+        //
+        // The contract moved to a test that can assert its NEW shape in full —
+        // receipt lands with `podcastId == nil`, no controller sample, no trust
+        // penalty: `staleShowBannerNoKeepsReceiptAndRecordsNoLearning` in
+        // SkipOrchestratorThresholdControlTests. What remains here is the
+        // near-distinct-SPAN probe above, whose refusal is span-based and
+        // untouched by the show-identity split.
         #expect(
             await orchestrator.denyAutoSkippedBanner(
                 windowId: item.windowId,
