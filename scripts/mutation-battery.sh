@@ -100,6 +100,13 @@ FOCUSED_SUITES=(
 # already sweeps at 3 days, so kept logs are reaped by the existing weekly cron
 # instead of accumulating on a box with documented disk pressure.
 WORK="$(mktemp -d /private/tmp/playhead-mutation-battery.XXXXXX)"
+# Without this, a failed mktemp leaves WORK empty and every `>"$WORK/…"` fails
+# quietly-ish while `rm -rf "$WORK"` runs against the empty string. Cheaper to
+# refuse than to reason about.
+[ -n "$WORK" ] && [ -d "$WORK" ] || {
+  echo "mutation-battery: could not create a work directory under /private/tmp" >&2
+  exit 2
+}
 KEEP_WORK=0
 # Armed only once `require_clean_tree` has proved every mutable file is
 # pristine; before that a `git checkout --` would destroy the caller's work.
@@ -262,6 +269,13 @@ open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
 # Multi-line snippets are read with `read -r -d ''`, which always returns 1 at
 # EOF; `|| true` keeps `set -e`-style habits from tripping over it.
 snippet() { IFS= read -r -d '' "$1" || true; }
+
+# A mutation with TWO sites (M13, M17, N06) must abort on the first failed
+# anchor. Without this, `apply_mutation` returns only the LAST patch's status,
+# so a drifted first anchor yields a HALF-APPLIED mutation that reports success
+# — and a half-mutation that survives is a fabricated coverage hole, while one
+# that kills is a fabricated rail. Use `patch … || return $?` for every patch
+# but the last in a case arm.
 
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
@@ -451,7 +465,7 @@ EOF
         guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
             // A replacement episode owns the live cue state now; the durable
 EOF
-    patch "$file" "$OLD" "$NEW"
+    patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
             if revertedManagedAny {
                 recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
@@ -519,7 +533,7 @@ EOF
             podcastId: activePodcastId,
             source: .listenRevert
 EOF
-    patch "$file" "$OLD" "$NEW"
+    patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
                     podcastId: podcastId,
                     source: .manualVeto
@@ -665,7 +679,7 @@ EOF
     snippet NEW <<'EOF'
         guard let podcastId else { return }
 EOF
-    patch "$file" "$OLD" "$NEW"
+    patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
         guard !podcastId.isEmpty else {
             throw PerShowThresholdControllerStoreError.writeFailed("empty podcastId")
@@ -736,6 +750,42 @@ restore_sources() {
   git checkout -- "${MUTABLE_FILES[@]}"
 }
 
+# Verify the restore actually produced the ORIGINAL bytes, after EVERY batch —
+# not only at the end.
+#
+# `git checkout --` is not guaranteed to succeed: an `index.lock` left by a
+# concurrent git process, a file turned read-only, a checkout racing an editor.
+# If it fails mid-run the tree keeps this batch's injected defect, and every
+# LATER batch is then evaluated against a codebase that already contains a bug —
+# reddening tests for reasons that have nothing to do with their own mutation,
+# i.e. false KILLs. The end-of-run check cannot see this: the final restore
+# repairs the tree, the hashes match, and the corrupted verdicts print as
+# "All mutations killed". Checking here is what makes the table trustworthy.
+#
+# Returns 1 rather than exiting so the caller can `break` and still print the
+# partial table — an aborted run that shows its work beats a silent one.
+restore_and_verify() {
+  local where="${1:-final}" now="" f
+  restore_sources
+  for f in "${MUTABLE_FILES[@]}"; do
+    now="$now$(hash_of "$f")  $f
+"
+  done
+  if [ "$now" != "$HASHES_BEFORE" ]; then
+    echo >&2
+    echo "mutation-battery: FATAL — restore after $where was NOT byte-exact." >&2
+    printf 'before:\n%s\nafter:\n%s\n' "$HASHES_BEFORE" "$now" >&2
+    echo "The working tree may still carry an injected defect. Run" >&2
+    echo "  git status --porcelain -- ${MUTABLE_FILES[*]}" >&2
+    echo "before doing anything else. Verdicts printed below this line are only" >&2
+    echo "trustworthy up to $where." >&2
+    RESTORE_OK=0
+    FATAL=1
+    return 1
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Focused run + failure extraction
 # ---------------------------------------------------------------------------
@@ -797,7 +847,10 @@ while [ $# -gt 0 ]; do
     --only)  ONLY="$2"; shift 2 ;;
     --batch) ONLY_BATCH="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+      # Print the whole header block and stop at the first non-comment line.
+      # A line range would silently truncate the moment the header grows — it
+      # already had, cutting USAGE off the bottom of --help.
+      awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
       exit 0 ;;
     *) echo "mutation-battery: unknown argument '$1'" >&2; exit 2 ;;
   esac
@@ -851,6 +904,9 @@ RESULTS="$WORK/results"
 : >"$RESULTS"
 BUILD_COUNT=0
 FATAL=0
+# Cleared by `restore_and_verify` and never re-set; see the note at the final
+# restore for why a repaired tree must not un-fail the run.
+RESTORE_OK=1
 START_TS="$(date +%s)"
 
 echo "mutation-battery: DEVELOPER_DIR=$DEVELOPER_DIR"
@@ -916,21 +972,21 @@ for b in "${BATCH_IDS[@]}"; do
   done
 
   if [ "$APPLY_FAILED" -eq 1 ]; then
-    restore_sources
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|ERROR|anchor did not apply — source moved on" >>"$RESULTS"
     done
     FATAL=1
+    restore_and_verify "batch $b" || break
     continue
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
     git --no-pager diff --stat -- "${MUTABLE_FILES[@]}"
     git --no-pager diff -U1 -- "${MUTABLE_FILES[@]}"
-    restore_sources
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|DRY-RUN|anchor applied" >>"$RESULTS"
     done
+    restore_and_verify "batch $b" || break
     echo
     continue
   fi
@@ -945,11 +1001,11 @@ for b in "${BATCH_IDS[@]}"; do
   if ! grep -q "Test run with" "$LOG.last"; then
     echo "mutation-battery: batch $b did not run tests (build failure?), rc=$RC" >&2
     grep -m 20 -E "error:|BUILD FAILED|Killed: 9" "$LOG" >&2 || true
-    restore_sources
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|ERROR|batch did not build/run" >>"$RESULTS"
     done
     FATAL=1
+    restore_and_verify "batch $b" || break
     continue
   fi
 
@@ -982,25 +1038,21 @@ for b in "${BATCH_IDS[@]}"; do
     fi
   done
 
-  restore_sources
+  restore_and_verify "batch $b" || break
   echo
 done
 
 # ---------------------------------------------------------------------------
-# Restoration must be byte-exact.
+# Restoration must be byte-exact. Per-batch checks above already enforce this
+# after every mutation; this is the belt for the final state (and the only
+# check that runs at all when the loop was skipped entirely).
+#
+# `restore_and_verify` only ever clears RESTORE_OK — it is never re-set to 1
+# here, so a mid-run mismatch that a later restore happened to repair still
+# fails the run. The tree being clean NOW does not make the verdicts above it
+# trustworthy.
 # ---------------------------------------------------------------------------
-restore_sources
-HASHES_AFTER=""
-for f in "${MUTABLE_FILES[@]}"; do
-  HASHES_AFTER="$HASHES_AFTER$(hash_of "$f")  $f
-"
-done
-RESTORE_OK=1
-if [ "$HASHES_BEFORE" != "$HASHES_AFTER" ]; then
-  echo "mutation-battery: FATAL — a mutated file was NOT restored byte-exactly" >&2
-  printf 'before:\n%s\nafter:\n%s\n' "$HASHES_BEFORE" "$HASHES_AFTER" >&2
-  RESTORE_OK=0
-fi
+restore_and_verify "the last batch" || true
 
 # ---------------------------------------------------------------------------
 # Report
