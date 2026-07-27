@@ -90,6 +90,24 @@ while [ $# -gt 0 ]; do
     --quiet)    QUIET="--quiet" ;;
     --fix|--autocorrect) ACTION="fix" ;;
     -h|--help)  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Everything after a bare `--` is forwarded to swiftlint verbatim, with no
+    # flag/path classification. The escape hatch for anything below.
+    --)         shift
+                while [ $# -gt 0 ]; do PASSTHROUGH+=("$1"); shift; done
+                break ;;
+    # Options that take a SEPARATE value argument. Without this the value gets
+    # classified as a path and swiftlint dies with "Missing value for
+    # --reporter". `--flag=value` needs no special case and falls through to
+    # the generic `-*` branch below.
+    --reporter|--baseline|--write-baseline|--cache-path|--compiler-log-path|--working-directory)
+                PASSTHROUGH+=("$1")
+                if [ $# -ge 2 ]; then PASSTHROUGH+=("$2"); shift; fi ;;
+    # --config would collide with the one this script passes; refuse rather
+    # than hand swiftlint two and let it pick.
+    --config|--config=*)
+                echo "lint: --config is not overridable; this script always uses $REPO_ROOT/.swiftlint.yml" >&2
+                echo "lint: to lint with a different config, call swiftlint directly" >&2
+                exit 70 ;;
     -*)         PASSTHROUGH+=("$1") ;;
     *)          PATHS+=("$1") ;;
   esac
@@ -114,6 +132,40 @@ if [ "$ACTION" = "fix" ]; then
   exit $?
 fi
 
+# ── Exclusion filter for auto-derived paths ──────────────────────────────────
+# MEASURED GOTCHA: SwiftLint applies `excluded:` when it walks a directory, but
+# NOT to paths handed to it explicitly. So `--changed` touching a Vendor file
+# would lint vendored third-party source we do not author — a bead that changed
+# nothing of ours could go red after a Vendor bump. Filter the derived list
+# against the same `excluded:` block, so there is one source of truth.
+#
+# Explicitly-typed paths are deliberately NOT filtered: naming a file yourself
+# is an intentional override.
+excluded_prefixes() {
+  awk '
+    /^excluded:/            { inblock = 1; next }
+    inblock && /^[^ #]/     { inblock = 0 }
+    inblock && /^[[:space:]]*-[[:space:]]/ {
+      sub(/^[[:space:]]*-[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print
+    }
+  ' "$REPO_ROOT/.swiftlint.yml"
+}
+
+is_excluded() {
+  local candidate="$1" prefix
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    case "$candidate" in
+      "$prefix"|"$prefix"/*) return 0 ;;
+    esac
+  done <<EOF
+$EXCLUDED
+EOF
+  return 1
+}
+
+EXCLUDED="$(excluded_prefixes)"
+
 # ── --changed: resolve the diff against the merge-base ───────────────────────
 if [ "$MODE" = "changed" ]; then
   BASE=""
@@ -129,8 +181,15 @@ if [ "$MODE" = "changed" ]; then
     # Committed changes vs the base, plus anything dirty or untracked in the
     # working tree — the point of --changed is "what am I about to hand over",
     # which includes edits not yet committed.
+    SKIPPED=0
     while IFS= read -r f; do
-      [ -n "$f" ] && [ -f "$f" ] && PATHS+=("$f")
+      [ -z "$f" ] && continue
+      [ -f "$f" ] || continue          # deleted/renamed-away files
+      if is_excluded "$f"; then
+        SKIPPED=$((SKIPPED + 1))
+        continue
+      fi
+      PATHS+=("$f")
     done < <(
       {
         git diff --name-only --diff-filter=ACMR "$BASE" -- '*.swift'
@@ -138,8 +197,9 @@ if [ "$MODE" = "changed" ]; then
         git ls-files --others --exclude-standard -- '*.swift'
       } | sort -u
     )
+    [ "$SKIPPED" -gt 0 ] && echo "lint: skipped $SKIPPED changed file(s) under an excluded path"
     if [ ${#PATHS[@]} -eq 0 ]; then
-      echo "lint: no Swift files changed vs $(git rev-parse --short "$BASE") — nothing to lint"
+      echo "lint: no lintable Swift files changed vs $(git rev-parse --short "$BASE") — nothing to lint"
       exit 0
     fi
     echo "lint: ${#PATHS[@]} changed Swift file(s) vs $(git rev-parse --short "$BASE")"

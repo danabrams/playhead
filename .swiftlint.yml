@@ -396,6 +396,7 @@ deployment_target:
 #   empty_string .......................    17
 #   redundant_string_enum_value ........    15
 #   unneeded_escaping ..................    15
+#   empty_collection_literal ...........    12
 #   xct_specific_matcher ...............    13
 #   unneeded_parentheses_in_closure_argument 13
 #   balanced_xctest_lifecycle ..........    12
