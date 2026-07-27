@@ -111,6 +111,7 @@ func runDebugDiagnosticsExport(
         journalFetch: journalFetch,
         musicBedProfilesFetch: musicBedProfilesFetch,
         learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
+        stabilityFetch: DebugDiagnosticsHatch.stabilityFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -179,6 +180,15 @@ enum DebugDiagnosticsHatch {
                 return snapshots.map { LearnedDeviceProfileDiagnosticRecord.from(snapshot: $0) }
             }
         }
+    }
+
+    // MARK: Stability-diagnostics adapter (playhead-jw63.4)
+
+    /// Reads the local MetricKit crash + hang ring buffer, newest first.
+    /// Kept in lock-step with `ReleaseDiagnosticsHatch.stabilityFetch`
+    /// so a DEBUG build's bundle has the same shape as a Release one.
+    static let stabilityFetch: DiagnosticsStabilityFetch = {
+        await StabilityDiagnosticsStore.shared.recent()
     }
 
     // MARK: Environment construction

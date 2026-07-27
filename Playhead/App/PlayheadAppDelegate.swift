@@ -76,6 +76,16 @@ final class PlayheadAppDelegate: NSObject, UIApplicationDelegate {
         // invoked it.
         SliceCompletionInstrumentation.bootstrap()
 
+        // playhead-jw63.4: subscribe to MetricKit so the crash and
+        // main-thread-hang diagnostics iOS collected since the last
+        // launch land in the local ring buffer that the diagnostics
+        // bundle exports. Must happen here, in `didFinishLaunching`:
+        // MetricKit delivers its once-a-day payload shortly after
+        // launch and drops it if nobody is subscribed yet. Idempotent,
+        // and a no-op under XCTest / on the simulator — see
+        // `MetricKitDiagnosticsInstaller.shouldInstall(processInfo:)`.
+        MetricKitDiagnosticsInstaller.install()
+
         if let manager = DownloadManager.shared {
             let logger = self.logger
             Task {

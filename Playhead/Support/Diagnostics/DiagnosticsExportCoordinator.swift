@@ -43,6 +43,7 @@ final class DiagnosticsExportCoordinator {
     private let chapterPhaseEventsFetch: DiagnosticsChapterPhaseEventsFetch
     private let musicBedProfilesFetch: DiagnosticsMusicBedProfilesFetch
     private let learnedDeviceProfilesFetch: DiagnosticsLearnedDeviceProfilesFetch
+    private let stabilityFetch: DiagnosticsStabilityFetch
     private let optInSink: DiagnosticsOptInSink
     private let optInEpisodes: [DiagnosticsEpisodeInput]
 
@@ -71,6 +72,13 @@ final class DiagnosticsExportCoordinator {
     ///     adaptive feature flag is OFF the store is never queried so
     ///     the array is empty — but the JSON key is still emitted by
     ///     the builder for grep stability.
+    ///   - stabilityFetch: playhead-jw63.4 — async read of the local
+    ///     MetricKit crash + hang ring buffer, newest first. Defaults to
+    ///     "no records"; production wires it to
+    ///     `StabilityDiagnosticsStore.shared.recent()`. A device that has
+    ///     never crashed yields an empty array, and the builder still
+    ///     emits the `stability_diagnostics` key so key presence stays
+    ///     grep-stable.
     ///   - optInSink: adapter that mutates `Episode.diagnosticsOptIn`.
     ///   - optInEpisodes: per-episode inputs for the OptIn bundle. Only
     ///     entries with `diagnosticsOptIn == true` ship; the builder
@@ -83,6 +91,7 @@ final class DiagnosticsExportCoordinator {
         chapterPhaseEventsFetch: @escaping DiagnosticsChapterPhaseEventsFetch = { [] },
         musicBedProfilesFetch: @escaping DiagnosticsMusicBedProfilesFetch = { [] },
         learnedDeviceProfilesFetch: @escaping DiagnosticsLearnedDeviceProfilesFetch = { [] },
+        stabilityFetch: @escaping DiagnosticsStabilityFetch = { [] },
         optInSink: DiagnosticsOptInSink,
         optInEpisodes: [DiagnosticsEpisodeInput] = []
     ) {
@@ -92,6 +101,7 @@ final class DiagnosticsExportCoordinator {
         self.chapterPhaseEventsFetch = chapterPhaseEventsFetch
         self.musicBedProfilesFetch = musicBedProfilesFetch
         self.learnedDeviceProfilesFetch = learnedDeviceProfilesFetch
+        self.stabilityFetch = stabilityFetch
         self.optInSink = optInSink
         self.optInEpisodes = optInEpisodes
     }
@@ -128,6 +138,7 @@ final class DiagnosticsExportCoordinator {
         let chapterPhaseEvents = try await chapterPhaseEventsFetch()
         let musicBedProfileSnapshots = await musicBedProfilesFetch()
         let learnedDeviceProfiles = try await learnedDeviceProfilesFetch()
+        let stabilityDiagnostics = await stabilityFetch()
 
         let defaultBundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: environment.appVersion,
@@ -139,7 +150,8 @@ final class DiagnosticsExportCoordinator {
             installID: environment.installID,
             chapterPhaseEvents: chapterPhaseEvents,
             musicBedProfileSnapshots: musicBedProfileSnapshots,
-            learnedDeviceProfiles: learnedDeviceProfiles
+            learnedDeviceProfiles: learnedDeviceProfiles,
+            stabilityDiagnostics: stabilityDiagnostics
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 

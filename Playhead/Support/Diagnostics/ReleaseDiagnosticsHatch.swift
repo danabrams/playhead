@@ -96,6 +96,7 @@ func runReleaseDiagnosticsExport(
         journalFetch: journalFetch,
         musicBedProfilesFetch: musicBedProfilesFetch,
         learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
+        stabilityFetch: ReleaseDiagnosticsHatch.stabilityFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -146,6 +147,17 @@ enum ReleaseDiagnosticsHatch {
                 return snapshots.map { LearnedDeviceProfileDiagnosticRecord.from(snapshot: $0) }
             }
         }
+    }
+
+    // MARK: Stability-diagnostics adapter (playhead-jw63.4)
+
+    /// Reads the local MetricKit crash + hang ring buffer, newest first.
+    /// `StabilityDiagnosticsStore.shared` is the process-wide handle the
+    /// `MXMetricManagerSubscriber` writes into; there is no runtime or
+    /// ModelContext dependency to thread through, so unlike the other
+    /// adapters this is a stored closure rather than a factory.
+    static let stabilityFetch: DiagnosticsStabilityFetch = {
+        await StabilityDiagnosticsStore.shared.recent()
     }
 
     // MARK: Environment construction

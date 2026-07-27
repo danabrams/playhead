@@ -32,6 +32,10 @@
 //   (d) `feature_summaries` is restricted here to coarse aggregates
 //       (mean/max only). Adding a new metric requires explicit legal
 //       review.
+//   (e) `stability_diagnostics` (playhead-jw63.4) carries MetricKit
+//       crash + hang records. `StabilityDiagnosticRecord` is a closed
+//       shape with no free-text field; the allowlist that produces it
+//       lives in `MetricKitDiagnosticProjector`.
 
 import Foundation
 
@@ -108,6 +112,19 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// `init(from:)`'s `decodeIfPresent` fallback below.
     let learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord]
 
+    /// playhead-jw63.4: the local MetricKit crash + hang ring buffer,
+    /// newest first. ALWAYS encoded (empty array when the device has had
+    /// no incidents, which is the healthy case) so a support engineer
+    /// can distinguish "no crashes" from "this bundle predates the
+    /// crash pipeline". Legacy bundles missing the key decode as `[]`.
+    ///
+    /// Privacy: every field of `StabilityDiagnosticRecord` is a number,
+    /// a boolean, an enum rawValue, or a string that passed
+    /// `DiagnosticTextSanitizer`'s character allowlist. It carries NO
+    /// episode reference at all — not even a hash — because a stack
+    /// trace has nothing to correlate to an episode.
+    let stabilityDiagnostics: [StabilityDiagnosticRecord]
+
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
         case osVersion = "os_version"
@@ -120,6 +137,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case chapterPhaseEvents = "chapter_phase_events"
         case musicBedProfiles = "music_bed_profiles"
         case learnedDeviceProfiles = "learned_device_profiles"
+        case stabilityDiagnostics = "stability_diagnostics"
     }
 
     init(
@@ -133,7 +151,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         workJournalTail: [WorkJournalRecord],
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
         musicBedProfiles: [MusicBedProfileSummary] = [],
-        learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = []
+        learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
+        stabilityDiagnostics: [StabilityDiagnosticRecord] = []
     ) {
         self.appVersion = appVersion
         self.osVersion = osVersion
@@ -146,6 +165,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.chapterPhaseEvents = chapterPhaseEvents
         self.musicBedProfiles = musicBedProfiles
         self.learnedDeviceProfiles = learnedDeviceProfiles
+        self.stabilityDiagnostics = stabilityDiagnostics
     }
 
     /// Decode-time tolerance for older bundles that pre-date the
@@ -180,6 +200,9 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         ) ?? []
         self.learnedDeviceProfiles = try container.decodeIfPresent(
             [LearnedDeviceProfileDiagnosticRecord].self, forKey: .learnedDeviceProfiles
+        ) ?? []
+        self.stabilityDiagnostics = try container.decodeIfPresent(
+            [StabilityDiagnosticRecord].self, forKey: .stabilityDiagnostics
         ) ?? []
     }
 
