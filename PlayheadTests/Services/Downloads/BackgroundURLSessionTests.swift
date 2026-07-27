@@ -298,69 +298,149 @@ struct DownloadManagerDualSessionsTests {
 @Suite("EpisodeDownloadDelegate – work-journal emission")
 struct DelegateWorkJournalTests {
 
-    @Test("didCompleteWithError(nil) is a no-op (finalized is emitted by didFinishDownloadingTo)")
+    @Test("didCompleteWithError(nil) is a no-op (manager finalizes after durable placement)")
     func noErrorDoesNotEmitFailure() async {
-        let recorder = RecordingWorkJournal()
         let delegate = EpisodeDownloadDelegate()
-        delegate.workJournal = recorder
+        var terminalFailures = 0
+        delegate.onBackgroundDownloadFailed = { _ in
+            terminalFailures += 1
+        }
 
         let task = StubTask(taskDescription: "ep-1")
         delegate.urlSession(URLSession.shared, task: task, didCompleteWithError: nil)
 
-        // Let the detached work journal Task schedule.
-        try? await Task.sleep(nanoseconds: 50_000_000)
-
-        let failures = await recorder.failures
-        #expect(failures.isEmpty)
+        #expect(terminalFailures == 0)
     }
 
     @Test("didCompleteWithError(URLError.timedOut) emits failed with taskExpired")
-    func timedOutEmitsTaskExpired() async {
+    func timedOutEmitsTaskExpired() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let recorder = RecordingWorkJournal()
-        let delegate = EpisodeDownloadDelegate()
-        delegate.workJournal = recorder
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            workJournalRecorder: recorder
+        )
+        try await manager.bootstrap()
+        let delegate = await manager.sessionDelegateForTesting()
 
         let task = StubTask(taskDescription: "ep-timeout")
+        let identity = BackgroundTransferIdentity(
+            sessionIdentifier: URLSession.shared.configuration.identifier ?? "",
+            taskIdentifier: task.taskIdentifier
+        )
+        await manager._registerBackgroundTransferForTesting(
+            episodeId: "ep-timeout",
+            identity: identity
+        )
         delegate.urlSession(
             URLSession.shared,
             task: task,
             didCompleteWithError: URLError(.timedOut)
         )
 
-        // Spin until recorder sees the event or we give up.
-        for _ in 0..<20 {
-            try? await Task.sleep(nanoseconds: 25_000_000)
-            let failures = await recorder.failures
-            if !failures.isEmpty { break }
-        }
-
+        #expect(await pollUntil { await recorder.failures.count == 1 })
         let failures = await recorder.failures
         #expect(failures.count == 1)
         #expect(failures.first?.episodeId == "ep-timeout")
         #expect(failures.first?.cause == .taskExpired)
+        #expect(
+            !(await manager._isBackgroundDownloadInFlightForTesting(
+                episodeId: "ep-timeout"
+            ))
+        )
     }
 
     @Test("didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork")
-    func notConnectedEmitsNoNetwork() async {
+    func notConnectedEmitsNoNetwork() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
         let recorder = RecordingWorkJournal()
-        let delegate = EpisodeDownloadDelegate()
-        delegate.workJournal = recorder
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            workJournalRecorder: recorder
+        )
+        try await manager.bootstrap()
+        let delegate = await manager.sessionDelegateForTesting()
 
         let task = StubTask(taskDescription: "ep-offline")
+        let identity = BackgroundTransferIdentity(
+            sessionIdentifier: URLSession.shared.configuration.identifier ?? "",
+            taskIdentifier: task.taskIdentifier
+        )
+        await manager._registerBackgroundTransferForTesting(
+            episodeId: "ep-offline",
+            identity: identity
+        )
         delegate.urlSession(
             URLSession.shared,
             task: task,
             didCompleteWithError: URLError(.notConnectedToInternet)
         )
 
-        for _ in 0..<20 {
-            try? await Task.sleep(nanoseconds: 25_000_000)
-            let failures = await recorder.failures
-            if !failures.isEmpty { break }
-        }
-
+        #expect(await pollUntil { await recorder.failures.count == 1 })
         let failures = await recorder.failures
         #expect(failures.first?.cause == .noNetwork)
+        #expect(
+            !(await manager._isBackgroundDownloadInFlightForTesting(
+                episodeId: "ep-offline"
+            ))
+        )
+    }
+
+    @Test("delegate staging failure releases ownership and permits retry")
+    func stagingFailureReleasesOwnership() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let recorder = RecordingWorkJournal()
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            workJournalRecorder: recorder
+        )
+        try await manager.bootstrap()
+        let delegate = await manager.sessionDelegateForTesting()
+        let episodeId = "ep-stage-failure"
+        let identity = BackgroundTransferIdentity(
+            sessionIdentifier: "stage-failure-session",
+            taskIdentifier: 73
+        )
+        await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId,
+            identity: identity
+        )
+
+        delegate._stageBackgroundDownloadForTesting(
+            identity: identity,
+            episodeId: episodeId,
+            location: dir.appendingPathComponent("missing-os-temp-file"),
+            originalURL: URL(
+                string: "https://example.com/episode.mp3"
+            )
+        )
+
+        #expect(
+            await pollUntil {
+                let failed = await recorder.failures.count == 1
+                let inFlight =
+                    await manager._isBackgroundDownloadInFlightForTesting(
+                        episodeId: episodeId
+                    )
+                return failed && !inFlight
+            }
+        )
+        #expect(await recorder.finalized.isEmpty)
+
+        let admissions =
+            await manager._backgroundDownloadAdmissionCountForTesting()
+        await manager.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://example.invalid/retry.mp3")!
+        )
+        #expect(
+            await manager._backgroundDownloadAdmissionCountForTesting()
+                == admissions + 1
+        )
+        await manager.cancelDownload(episodeId: episodeId)
     }
 
     @Test("urlSessionDidFinishEvents invokes the pending completion handler")

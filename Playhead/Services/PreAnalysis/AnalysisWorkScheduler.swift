@@ -192,6 +192,20 @@ actor AnalysisWorkScheduler {
     static let soonCap = 1
     static let backgroundCap = 1
 
+    /// playhead-glo9: conservative "hot path comfortably ahead" runway
+    /// (seconds) gating the opportunistic backlog-drain relaxation. Set
+    /// to 2× the default catch-up trigger
+    /// (`PlayheadCatchupPolicy.default.triggerThresholdSec` == 60 s) so
+    /// other-episode backlog drain begins only when the active episode
+    /// has a clear margin of transcript runway beyond the catch-up
+    /// trigger distance. The 2× gap is a deliberate hysteresis band: in
+    /// `[triggerThreshold, 2×triggerThreshold)` the scheduler neither
+    /// drains other-episode work nor fires catch-up — it keeps the
+    /// pre-glo9 block — which avoids thrashing between backlog drain and
+    /// hot-path catch-up right at the boundary. See
+    /// `activeEpisodeHotPathCaughtUp`.
+    static let opportunisticDrainRunwaySec: TimeInterval = 120
+
     /// Admission decision the scheduler derives from the current QualityProfile
     /// and applies to every loop iteration. Consolidates thermal/battery/
     /// low-power gating into a single surface — see `QualityProfile.derive`.
@@ -660,6 +674,14 @@ actor AnalysisWorkScheduler {
     /// explicit `desiredCoverage`. Consumed alongside
     /// `pendingUserIntentEpisodes`.
     private var pendingUserIntentCoverage: [String: Double] = [:]
+    /// Monotonic ownership epoch for enqueue work derived from a cached
+    /// download. Cache removal increments the episode's value before deleting
+    /// scheduler rows; an enqueue suspended in AnalysisStore must observe the
+    /// mismatch and clean up instead of resurrecting the removed job.
+    private var downloadRetirementGenerationByEpisode:
+        [String: UInt64] = [:]
+    private var enqueueBarrierForTesting:
+        (@Sendable () async -> Void)?
 
     init(
         store: AnalysisStore,
@@ -723,6 +745,11 @@ actor AnalysisWorkScheduler {
         podcastTitle: String? = nil,
         episodeTitle: String? = nil
     ) async {
+        let capturedRetirementGeneration =
+            downloadRetirementGenerationByEpisode[episodeId, default: 0]
+        if let enqueueBarrierForTesting {
+            await enqueueBarrierForTesting()
+        }
         // playhead-3xtw: a user tapped "Download & Analyze" for this
         // episode (recorded via `markEpisodeUserIntent`). Route its
         // analysis to the user-intent (`.now`) lane — priority >= 20 —
@@ -753,6 +780,13 @@ actor AnalysisWorkScheduler {
         // the empty-string sentinel (the live-lease check is
         // `leaseOwner IS NOT NULL`).
         let currentEpoch = (try? await store.fetchSchedulerEpoch()) ?? 0
+        guard downloadRetirementGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] == capturedRetirementGeneration else {
+            clearPendingDownloadState(episodeId: episodeId)
+            return
+        }
         let job = AnalysisJob(
             jobId: UUID().uuidString,
             jobType: "preAnalysis",
@@ -779,7 +813,21 @@ actor AnalysisWorkScheduler {
             schedulerEpoch: currentEpoch
         )
         do {
-            try await store.insertJob(job)
+            _ = try await store.insertJob(job)
+            guard downloadRetirementGenerationByEpisode[
+                episodeId,
+                default: 0
+            ] == capturedRetirementGeneration else {
+                try await store.deleteRetiredAnalysisEnqueue(
+                    jobId: job.jobId,
+                    generationID: job.generationID
+                )
+                queueWaitStates.removeValue(
+                    forKey: job.jobId
+                )
+                clearPendingDownloadState(episodeId: episodeId)
+                return
+            }
             queueWaitStates[job.jobId] = PreAnalysisInstrumentation.beginQueueWait(jobId: job.jobId)
             logger.info("Enqueued job \(job.jobId) for episode \(episodeId), priority=\(priority), coverage=\(coverage)s")
         } catch {
@@ -937,6 +985,13 @@ actor AnalysisWorkScheduler {
             }
         }
 
+        guard downloadRetirementGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] == capturedRetirementGeneration else {
+            clearPendingDownloadState(episodeId: episodeId)
+            return
+        }
         wakeSchedulerLoop()
 
         // playhead-gjz6 (Gap-4 second half): if the app is currently
@@ -959,6 +1014,56 @@ actor AnalysisWorkScheduler {
             await backfillScheduler?.scheduleBackfillIfNeeded()
         }
     }
+
+    /// Retires every scheduler artifact owned by the removed cached download.
+    /// The generation increment occurs before the first suspension, closing
+    /// both sides of the enqueue/remove race on this actor.
+    func retireDownloadAnalysis(
+        episodeId: String,
+        downloadId: String
+    ) async {
+        downloadRetirementGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] &+= 1
+        clearPendingDownloadState(episodeId: episodeId)
+        if currentEpisodeId == episodeId {
+            shouldCancelCurrentJob = true
+            lostOwnership = true
+            leaseRenewalTask?.cancel()
+            currentRunningTask?.cancel()
+        }
+        do {
+            let removed = try await store
+                .deleteAnalysisJobsForRemovedDownload(
+                    episodeId: episodeId,
+                    downloadId: downloadId
+                )
+            for jobID in removed {
+                queueWaitStates.removeValue(forKey: jobID)
+            }
+        } catch {
+            logger.error(
+                "Failed to retire download analysis for \(episodeId): \(error)"
+            )
+        }
+    }
+
+    private func clearPendingDownloadState(episodeId: String) {
+        pendingUserIntentEpisodes.remove(episodeId)
+        pendingUserIntentCoverage[episodeId] = nil
+        pendingEpisodeTitles[episodeId] = nil
+        pendingProbedEpisodeDurations = pendingProbedEpisodeDurations
+            .filter { $0.key.episodeId != episodeId }
+    }
+
+    #if DEBUG
+    func _setEnqueueBarrierForTesting(
+        _ barrier: (@Sendable () async -> Void)?
+    ) {
+        enqueueBarrierForTesting = barrier
+    }
+    #endif
 
     // MARK: - User-intent preparation (playhead-3xtw)
 
@@ -1444,7 +1549,10 @@ actor AnalysisWorkScheduler {
     func wouldAdmitDeferredWorkForTesting() async -> Bool {
         let admission = await currentLaneAdmission()
         if admission.pauseAllWork { return false }
-        return !admissionBlocksDeferred()
+        // playhead-glo9: mirror the run loop's effective decision,
+        // including the flag-gated opportunistic backlog-drain
+        // relaxation, so this seam stays truthful once the flag is on.
+        return !(await shouldBlockDeferredWork(admission: admission))
     }
     #endif
 
@@ -1480,6 +1588,139 @@ actor AnalysisWorkScheduler {
     /// to wait for a cooler device.
     private func isForegroundAggressiveMode() -> Bool {
         schedulerScenePhase == .foreground && playbackContext != .playing
+    }
+
+    // MARK: - Opportunistic backlog drain during playback (playhead-glo9)
+
+    /// playhead-glo9: the effective "block deferred work this pass?"
+    /// decision the run loop applies. The baseline is
+    /// ``admissionBlocksDeferred()`` (the gtt9.14 4-state matrix). The
+    /// opportunistic backlog-drain relaxation (flag-gated, DEFAULT-OFF)
+    /// can override a `(foreground, playing)` block to ADMIT
+    /// other-episode Soon/Background backlog during a foreground
+    /// listening session under a safe charging-only gate.
+    ///
+    /// **Flag OFF ⇒ byte-identical to pre-glo9.** The leading guard
+    /// returns immediately for the admit cases (no new work), and when
+    /// the baseline blocks, ``opportunisticDrainRelaxationApplies(admission:)``
+    /// short-circuits on the flag before any battery/store read — so the
+    /// returned decision equals ``admissionBlocksDeferred()`` exactly for
+    /// every (scenePhase, playbackContext, QualityProfile) combination.
+    private func shouldBlockDeferredWork(admission: LaneAdmission) async -> Bool {
+        guard admissionBlocksDeferred() else { return false }
+        // Baseline blocks this pass — consider the flag-gated relaxation.
+        if await opportunisticDrainRelaxationApplies(admission: admission) {
+            return false
+        }
+        return true
+    }
+
+    /// playhead-glo9: opportunistic backlog-drain relaxation predicate.
+    /// Returns `true` when the standard `(foreground, playing)` block on
+    /// deferred work should be RELAXED so OTHER-episode Soon/Background
+    /// backlog can drain during a foreground listening session. Ships
+    /// behind a DEFAULT-OFF flag; when the flag is off this returns
+    /// `false` immediately (no battery/store read), so admission is
+    /// byte-identical to pre-glo9.
+    ///
+    /// All of the following must hold (Dan's ratified charging-only gate,
+    /// 2026-07-23):
+    ///   1. `config.opportunisticBacklogDrainDuringPlayback` — flag ON.
+    ///   2. `(foreground, playing)` — a live foreground listening
+    ///      session. Background states are NEVER relaxed here:
+    ///      `BackgroundProcessingService` owns the background window and
+    ///      the hot-path-caught-up signal (condition 5) is only defined
+    ///      for foreground playback, so background playback can never
+    ///      satisfy this predicate. This keeps the BG granting
+    ///      architecture untouched.
+    ///   3. `QualityProfile == .nominal` — no thermal / low-power /
+    ///      low-battery stress. `.fair`, `.serious`, and `.critical` all
+    ///      leave the block in place (the whole relaxation is off under
+    ///      any stress). This also means `pauseAllWork` (`.critical`) can
+    ///      never be relaxed, independent of the run loop's earlier
+    ///      pauseAllWork guard.
+    ///   4. The device is CHARGING. FM-heavy analysis work is charging-
+    ///      only by this same condition — there is no separate off-charge
+    ///      route through this relaxation.
+    ///   5. The active episode's hot path is comfortably caught up
+    ///      (``activeEpisodeHotPathCaughtUp()``) — its transcript
+    ///      coverage sits at least ``opportunisticDrainRunwaySec`` ahead
+    ///      of the playhead. This is what guarantees the active episode
+    ///      is never starved: other-episode drain is only admitted while
+    ///      the hot path has clear runway, and the run loop re-evaluates
+    ///      the catch-up bypass FIRST on every iteration, so the moment
+    ///      the active episode falls behind, catch-up wins and this
+    ///      predicate flips false.
+    private func opportunisticDrainRelaxationApplies(admission: LaneAdmission) async -> Bool {
+        // Condition 1 — flag ON (default OFF → ships dormant). Checked
+        // first so the flag-off path does zero extra work.
+        guard config.opportunisticBacklogDrainDuringPlayback else { return false }
+        // Condition 2 — foreground listening session only.
+        guard schedulerScenePhase == .foreground, playbackContext == .playing else {
+            return false
+        }
+        // Condition 3 — nominal profile only (no thermal/low-power/low-
+        // battery stress). `admission.qualityProfile` is the RAW derived
+        // profile (not the foreground-aggressive-relaxed policy).
+        guard admission.qualityProfile == .nominal else { return false }
+        // Condition 4 — charging only. Reuses the actor's existing
+        // `batteryProvider` (the same charge source consumed by
+        // `currentLaneAdmission` / `evaluateAdmissionGate`).
+        let batteryState = await batteryProvider.currentBatteryState()
+        guard batteryState.isCharging else { return false }
+        // Condition 5 — active-episode hot path comfortably ahead.
+        return await activeEpisodeHotPathCaughtUp()
+    }
+
+    /// playhead-glo9: `true` when the actively-playing foreground
+    /// episode's transcript coverage sits at least
+    /// ``opportunisticDrainRunwaySec`` ahead of the live playhead — i.e.
+    /// the hot path is comfortably caught up, so draining OTHER-episode
+    /// backlog will not steal bandwidth the active episode imminently
+    /// needs.
+    ///
+    /// Reuses the exact transcribed-ahead computation from
+    /// ``currentCatchupOpportunity(admission:now:)`` (latest job → asset
+    /// → `fastTranscriptCoverageEndTime − playhead`) so the two signals
+    /// are consistent duals: whenever this returns `true` the catch-up
+    /// trigger (runway `< triggerThresholdSec`, a strictly smaller bound)
+    /// cannot also be pending. Best-effort: a missing job/asset or a
+    /// store hiccup returns `false` (stay blocked — the conservative
+    /// choice), because without a persisted hot-path signal we cannot
+    /// prove the active episode is caught up.
+    private func activeEpisodeHotPathCaughtUp() async -> Bool {
+        guard schedulerScenePhase == .foreground,
+              playbackContext == .playing,
+              let episodeId = activePlaybackEpisodeId,
+              let playheadPosition = playheadPositionSec
+        else { return false }
+
+        let job: AnalysisJob
+        do {
+            guard let row = try await store.fetchLatestJobForEpisode(episodeId) else { return false }
+            job = row
+        } catch {
+            logger.warning("activeEpisodeHotPathCaughtUp: fetchLatestJobForEpisode threw for \(episodeId): \(error)")
+            return false
+        }
+
+        let asset: AnalysisAsset?
+        do {
+            if let assetId = job.analysisAssetId {
+                asset = try await store.fetchAsset(id: assetId)
+            } else if let byEpisode = try await store.fetchAssetByEpisodeId(episodeId) {
+                asset = byEpisode
+            } else {
+                asset = nil
+            }
+        } catch {
+            logger.warning("activeEpisodeHotPathCaughtUp: fetchAsset threw for \(episodeId): \(error)")
+            return false
+        }
+
+        let transcriptCoverageEnd = asset?.fastTranscriptCoverageEndTime ?? 0
+        let transcribedAhead = max(0, transcriptCoverageEnd - playheadPosition)
+        return transcribedAhead >= Self.opportunisticDrainRunwaySec
     }
 
     // MARK: - Foreground catch-up (playhead-yqax)
@@ -2093,6 +2334,18 @@ actor AnalysisWorkScheduler {
         while !Task.isCancelled, ContinuousClock.now < deadline {
             let dispatched = await runSingleDispatchPass()
             if !dispatched { break }
+            // playhead-bbut: cooperative yield between passes. In the one
+            // pathology where the eligibility SELECT keeps succeeding but the
+            // lease UPDATE persistently throws (a stuck DB write-lock),
+            // `runSingleDispatchPass` returns `true` without the row leaving the
+            // queue, so this loop would otherwise TIGHT-spin (re-selecting the
+            // same row) until the caller deadline. A plain CPU-pegging spin
+            // starves other actor work and delays cancellation observation; the
+            // yield makes the loop cooperative and gives `Task.isCancelled` /
+            // the deadline a prompt suspension point without changing dispatch
+            // semantics on the healthy path (where each pass runs a real,
+            // slow, awaited job).
+            await Task.yield()
         }
     }
 
@@ -2229,9 +2482,21 @@ actor AnalysisWorkScheduler {
             // playhead-yqax: this block now follows the catch-up
             // bypass above. When `(foreground, playing)` is hit we
             // first ask "is catch-up needed?" — if yes we dispatched
-            // and `continue`'d above; if no we fall through to the
-            // pre-yqax behavior (sleep the loop).
-            if admissionBlocksDeferred() {
+            // and `continue`'d above; if no we fall through here.
+            //
+            // playhead-glo9: `shouldBlockDeferredWork` folds the
+            // opportunistic backlog-drain relaxation into the baseline
+            // `admissionBlocksDeferred()` matrix. With the flag OFF
+            // (default) this is byte-identical to the pre-glo9 block.
+            // With the flag ON, a `(foreground, playing)` block is
+            // RELAXED — admitting OTHER-episode Soon/Background backlog —
+            // only when the device is charging, the QualityProfile is
+            // `.nominal`, and the active episode's hot path is
+            // comfortably caught up. The admitted work still flows
+            // through the same lane caps, admission gate, and
+            // preemption hook below, and the catch-up bypass above wins
+            // on every iteration if the active episode falls behind.
+            if await shouldBlockDeferredWork(admission: admission) {
                 await sleepOrWake(seconds: Self.idlePollSeconds)
                 continue
             }
@@ -2971,6 +3236,24 @@ actor AnalysisWorkScheduler {
                 logger.error("Failed to update job state: \(error)")
             }
             return
+        }
+
+        // playhead-wrj8 (#4): protect the cached audio file from LRU
+        // eviction for the duration of this analysis job, so a large cache
+        // over budget can't delete the file mid-analysis (which would strand
+        // the job or, worse, force a re-fetch of a different DAI stitch).
+        // Refcounted + released on every exit via `defer`, so it composes
+        // with the playback-side protection on the same episode. Reached
+        // via a concrete cast (the eviction refcount is DownloadManager
+        // state, deliberately NOT on the `DownloadProviding` query
+        // protocol) so lightweight test stubs are unaffected.
+        let protectedEpisodeId = job.episodeId
+        let evictionProtector = downloadManager as? DownloadManager
+        await evictionProtector?.protectForAnalysis(episodeId: protectedEpisodeId)
+        defer {
+            if let evictionProtector {
+                Task { await evictionProtector.unprotectFromAnalysis(episodeId: protectedEpisodeId) }
+            }
         }
 
         // Acquire lease. playhead-5uvz.1 (Gap-1): use the journal-aware

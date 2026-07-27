@@ -34,7 +34,7 @@ struct TranscriptParagraph: Identifiable, Sendable {
     /// First chunk's `startTime`.
     let startTime: TimeInterval
 
-    /// Last chunk's `endTime`.
+    /// Farthest `endTime` covered by any chunk in the paragraph.
     let endTime: TimeInterval
 
     /// True when any chunk in this paragraph overlaps an `AdWindow`.
@@ -56,8 +56,8 @@ struct TranscriptParagraph: Identifiable, Sendable {
 ///
 /// Boundary rules (bead spec):
 ///   1. Consecutive non-ad chunks coalesce into one paragraph.
-///   2. A new paragraph starts when the gap between chunk N's
-///      `endTime` and chunk N+1's `startTime` exceeds 2.0 seconds.
+///   2. A new paragraph starts when the gap between the current run's
+///      farthest covered end and chunk N+1's `startTime` exceeds 2.0 seconds.
 ///   3. A new paragraph starts when the ad-overlap status flips
 ///      (non-ad → ad or ad → non-ad).
 ///
@@ -82,9 +82,12 @@ enum TranscriptParagraphGrouper {
         var paragraphs: [TranscriptParagraph] = []
         var currentRun: [TranscriptChunk] = []
         var currentIsAd: Bool = false
+        var currentCoverageEnd: TimeInterval?
 
         func flush() {
-            guard let first = currentRun.first, let last = currentRun.last else {
+            guard let first = currentRun.first,
+                  let coverageEnd = currentCoverageEnd
+            else {
                 return
             }
             paragraphs.append(
@@ -92,12 +95,13 @@ enum TranscriptParagraphGrouper {
                     id: first.segmentFingerprint,
                     chunks: currentRun,
                     startTime: first.startTime,
-                    endTime: last.endTime,
+                    endTime: coverageEnd,
                     isAd: currentIsAd,
                     text: currentRun.map(\.text).joined(separator: " ")
                 )
             )
             currentRun = []
+            currentCoverageEnd = nil
         }
 
         for chunk in sorted {
@@ -106,12 +110,14 @@ enum TranscriptParagraphGrouper {
             if currentRun.isEmpty {
                 currentRun = [chunk]
                 currentIsAd = chunkIsAd
+                currentCoverageEnd = chunk.endTime
                 continue
             }
 
-            // Detect a paragraph break against the current run's last chunk.
-            let lastChunk = currentRun[currentRun.count - 1]
-            let gap = chunk.startTime - lastChunk.endTime
+            // Retained partial-overlap rows can be nested, so chronological
+            // start order does not imply monotonically increasing end times.
+            // Measure the gap from the run's farthest covered edge.
+            let gap = chunk.startTime - (currentCoverageEnd ?? chunk.startTime)
             let gapTooLong = gap > maxIntraParagraphGap
             let adFlipped = chunkIsAd != currentIsAd
 
@@ -119,8 +125,10 @@ enum TranscriptParagraphGrouper {
                 flush()
                 currentRun = [chunk]
                 currentIsAd = chunkIsAd
+                currentCoverageEnd = chunk.endTime
             } else {
                 currentRun.append(chunk)
+                currentCoverageEnd = max(currentCoverageEnd ?? chunk.endTime, chunk.endTime)
             }
         }
         flush()

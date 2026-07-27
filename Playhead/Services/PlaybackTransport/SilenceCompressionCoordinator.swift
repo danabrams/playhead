@@ -88,6 +88,16 @@ final class SilenceCompressionCoordinator {
     private var lastTickTime: TimeInterval = -.greatestFiniteMagnitude
     private var keepFullMusic: Bool = false
     private var inFlightWindowsRefresh: Task<Void, Never>?
+    /// Monotonic identity for the active episode transaction. Deferred banner
+    /// seeks capture this before crossing executors so a stale action cannot
+    /// reset the replacement episode's compressor.
+    private var episodeLifecycleGeneration: UInt64 = 0
+    private var latestUserSeekOperationGeneration: UInt64 = 0
+    #if DEBUG
+    private var userSeekEffectHookForTesting:
+        (@MainActor @Sendable () async -> Void)?
+    private var lastAcceptedUserSeekTimeForTesting: TimeInterval?
+    #endif
 
     // MARK: - Init
 
@@ -110,6 +120,8 @@ final class SilenceCompressionCoordinator {
     /// internal pacing state so the next `notePlayhead(time:)` call
     /// always triggers a fresh fetch.
     func beginEpisode(assetId: String, keepFullMusic: Bool) async {
+        episodeLifecycleGeneration &+= 1
+        latestUserSeekOperationGeneration = 0
         inFlightWindowsRefresh?.cancel()
         inFlightWindowsRefresh = nil
         currentAssetId = assetId
@@ -124,6 +136,8 @@ final class SilenceCompressionCoordinator {
     /// Called when playback stops or the user navigates away. Forces
     /// the planner back to idle and disengages PlaybackService.
     func endEpisode() async {
+        episodeLifecycleGeneration &+= 1
+        latestUserSeekOperationGeneration = 0
         inFlightWindowsRefresh?.cancel()
         inFlightWindowsRefresh = nil
         currentAssetId = nil
@@ -173,10 +187,17 @@ final class SilenceCompressionCoordinator {
 
     // MARK: - Seek
 
+    func episodeLifecycleGenerationSnapshot() -> UInt64 {
+        episodeLifecycleGeneration
+    }
+
     /// User initiated a seek. Drop any in-flight compression and
     /// force the next tick to re-fetch lookahead windows.
     func recordUserSeek(to time: TimeInterval) async {
         compressor.recordSeek(to: time)
+        #if DEBUG
+        lastAcceptedUserSeekTimeForTesting = time
+        #endif
         lastWindowsRefreshTime = -.greatestFiniteMagnitude
         // Reset the per-tick cadence sentinel so the next playhead
         // tick after the seek is not gated by the "tickDelta < cadence
@@ -185,6 +206,64 @@ final class SilenceCompressionCoordinator {
         lastTickTime = -.greatestFiniteMagnitude
         await playback.endCompression()
     }
+
+    /// Episode-bound form for deferred banner actions. If a replacement
+    /// lifecycle starts while `endCompression` suspends, that lifecycle
+    /// performs its own reset; the final comparison tells the caller not to
+    /// continue into the replacement transport item.
+    @discardableResult
+    func recordUserSeek(
+        to time: TimeInterval,
+        ifEpisodeLifecycleGeneration expectedGeneration: UInt64,
+        userSeekOperationGeneration operationGeneration: UInt64? = nil
+    ) async -> Bool {
+        guard episodeLifecycleGeneration == expectedGeneration else {
+            return false
+        }
+        if let operationGeneration {
+            guard operationGeneration
+                    >= latestUserSeekOperationGeneration
+            else {
+                return false
+            }
+            latestUserSeekOperationGeneration = operationGeneration
+        }
+        #if DEBUG
+        await userSeekEffectHookForTesting?()
+        #endif
+        guard episodeLifecycleGeneration == expectedGeneration,
+              operationGeneration == nil
+                || latestUserSeekOperationGeneration
+                    == operationGeneration
+        else {
+            return false
+        }
+        compressor.recordSeek(to: time)
+        #if DEBUG
+        lastAcceptedUserSeekTimeForTesting = time
+        #endif
+        lastWindowsRefreshTime = -.greatestFiniteMagnitude
+        lastTickTime = -.greatestFiniteMagnitude
+        await playback.endCompression()
+        return episodeLifecycleGeneration == expectedGeneration
+            && (
+                operationGeneration == nil
+                    || latestUserSeekOperationGeneration
+                        == operationGeneration
+            )
+    }
+
+    #if DEBUG
+    func _setUserSeekEffectHookForTesting(
+        _ hook: (@MainActor @Sendable () async -> Void)?
+    ) {
+        userSeekEffectHookForTesting = hook
+    }
+
+    func _lastAcceptedUserSeekTimeForTesting() -> TimeInterval? {
+        lastAcceptedUserSeekTimeForTesting
+    }
+    #endif
 
     // MARK: - Speed change
 

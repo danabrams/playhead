@@ -137,6 +137,20 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
             Self.logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public) error=\(error, privacy: .public)")
             let parked = RediffRefetchPolicy.isParked(newState, config: config)
             await persist(assetId: assetId, state: newState, cost: cost, unchanged: 0, rotated: 0, failed: 1, parked: parked ? 1 : 0)
+
+        case let .dayZeroMarked(assetId, cost, markCount, newState):
+            // Day-0 byte-exact mint that PRODUCED marks → resolve the shared
+            // state (day-0 K≥3 supersets the lagged K=1 sweep) + account bytes.
+            Self.logger.info("rediff DAY-0 MARKED assetId=\(assetId, privacy: .public) marks=\(markCount, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public)")
+            await persist(assetId: assetId, state: newState, cost: cost, unchanged: 0, rotated: 1, failed: 0, parked: 0)
+
+        case let .dayZeroUnmarked(assetId, cost, error):
+            // POISONING FIX: bandwidth ONLY — NO `upsertRediffRefetchState`, so a
+            // no-mark/failed day-0 run never resolves or advances the lagged
+            // attempt-state (`fetchRediffCandidateSeeds` still enumerates the
+            // asset for a later lagged sweep).
+            Self.logger.info("rediff DAY-0 unmarked assetId=\(assetId, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) error=\(error ?? "none", privacy: .public)")
+            await accumulateBandwidthOnly(cost: cost)
         }
     }
 
@@ -170,6 +184,26 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
             Self.logger.warning("rediff-refetch state persist failed assetId=\(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
+
+    /// playhead-xsdz.36.4 (poisoning fix): accumulate ONLY the bandwidth ledger,
+    /// never the per-asset attempt state. Used for a `.dayZeroUnmarked` outcome
+    /// so an empty/failed day-0 run is accounted for but leaves the shared
+    /// `rediff_refetch_state` untouched (the lagged sweep still enumerates it).
+    private func accumulateBandwidthOnly(cost: RediffRefetchPolicy.BandwidthCost) async {
+        do {
+            try await store.accumulateRediffBandwidth(
+                precheckBytes: cost.precheckBytes,
+                fullFetchBytes: cost.fullFetchBytes,
+                unchangedCount: 0,
+                rotatedCount: 0,
+                failedCount: 0,
+                parkedCount: 0,
+                at: now()
+            )
+        } catch {
+            Self.logger.warning("rediff DAY-0 bandwidth accounting failed: \(String(describing: error), privacy: .public)")
+        }
+    }
 }
 
 // MARK: - B-side staging provider (the production RediffBSideProvider)
@@ -186,7 +220,11 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
 /// A-side used), duration-capped by
 /// `RediffActivation.maxBSideDecodeDurationSeconds`.
 actor RediffBSideStagingProvider: RediffBSideProvider {
-    private var staged: [String: URL] = [:]
+    /// playhead-xsdz.36.2 (k-way): assetId → the K staged B-side files (one per
+    /// distinct-persona re-fetch). A single-fetch (K=1) asset holds a one-element
+    /// list — `refetchedBSideFileURL` returns its first element, byte-identical
+    /// to the pre-k-way single-URL map.
+    private var staged: [String: [URL]] = [:]
     private let decoder: any AudioFileDecoding
     private let maxDecodeDurationSeconds: TimeInterval
     private let durationProbe: @Sendable (URL) async -> TimeInterval?
@@ -202,23 +240,41 @@ actor RediffBSideStagingProvider: RediffBSideProvider {
         self.durationProbe = durationProbe
     }
 
+    /// Single-B stage (the K=1 / pre-k-way path): replaces any prior mapping
+    /// with a one-element list.
     func stage(assetId: String, fileURL: URL) {
-        staged[assetId] = fileURL
+        staged[assetId] = [fileURL]
+    }
+
+    /// playhead-xsdz.36.2 (k-way): stage ALL K distinct-persona B-copies at once
+    /// so `computeByteAlignedPlayedSlots` can align A vs each and union. An empty
+    /// list unstages (defensive — the consumer always stages ≥1).
+    func stageAll(assetId: String, fileURLs: [URL]) {
+        staged[assetId] = fileURLs.isEmpty ? nil : fileURLs
     }
 
     func unstage(assetId: String) {
         staged[assetId] = nil
     }
 
-    /// Test/diagnostic surface: how many B-sides are currently staged.
+    /// Test/diagnostic surface: how many ASSETS currently have staged B-sides
+    /// (not the total file count).
     var stagedCount: Int { staged.count }
 
     func refetchedBSideFileURL(assetId: String) async -> URL? {
-        staged[assetId]
+        staged[assetId]?.first
+    }
+
+    func refetchedBSideFileURLs(assetId: String) async -> [URL] {
+        staged[assetId] ?? []
     }
 
     func refetchedBSideMono16kHz(assetId: String) async -> [Float]? {
-        guard let url = staged[assetId] else { return nil }
+        // The chroma FALLBACK stays single-B: decode the PRIMARY (first-persona)
+        // copy. k-way union is a byte-path concept (the byte differ aligns A vs
+        // each staged B); the chroma path is only reached when the byte path is
+        // unavailable/rejected for ALL of them.
+        guard let url = staged[assetId]?.first else { return nil }
         // Cost bound for the chroma fallback: a >cap episode returns nil →
         // the pass falls through to status quo (the byte path has already
         // been tried by this point).
@@ -318,7 +374,18 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
 
     private static let logger = Logger(subsystem: "com.playhead", category: "RediffRefetch")
 
+    /// Single-B consume (K=1 / pre-k-way): stage the one B-copy and revalidate.
+    /// Byte-identical to routing through `consumeRotatedBSides` with a
+    /// one-element list.
     func consumeRotatedBSide(assetId: String, fileURL: URL) async throws {
+        try await consumeRotatedBSides(assetId: assetId, fileURLs: [fileURL])
+    }
+
+    /// playhead-xsdz.36.2 (k-way): stage ALL K B-copies, run ONE revalidation
+    /// (so `computeByteAlignedPlayedSlots` aligns A vs each and unions the
+    /// divergent regions), then unstage on every exit.
+    func consumeRotatedBSides(assetId: String, fileURLs: [URL]) async throws {
+        guard !fileURLs.isEmpty else { return }
         let asset: AnalysisAsset
         do {
             guard let fetched = try await store.fetchAsset(id: assetId) else {
@@ -360,8 +427,8 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
         let latestJob = (try? await store.fetchLatestJobForEpisode(asset.episodeId)) ?? nil
         let podcastId = latestJob?.podcastId ?? ""
 
-        await staging.stage(assetId: assetId, fileURL: fileURL)
-        Self.logger.info("rediff B-side staged for revalidation asset=\(assetId, privacy: .public)")
+        await staging.stageAll(assetId: assetId, fileURLs: fileURLs)
+        Self.logger.info("rediff B-side staged for revalidation asset=\(assetId, privacy: .public) copies=\(fileURLs.count, privacy: .public)")
         do {
             try await adDetection.revalidateFromFeatures(
                 analysisAssetId: assetId,
@@ -376,5 +443,26 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
             await staging.unstage(assetId: assetId)
             throw error
         }
+    }
+}
+
+// MARK: - Day-0 byte-exact minter (playhead-xsdz.36.4)
+
+/// Production `RediffDayZeroMinting`: routes the k-way day-0 B-copies straight
+/// to `AdDetectionService.mintByteExactDayZeroMarks`, which resolves the PINNED
+/// A-side from the asset row (wrj8 read-only mmap), byte-aligns A vs each B,
+/// keeps only byte-EXACT ≥2-persona-robust divergent slots, and persists them
+/// as MARK-ONLY AdWindow banners — the FIRST-LISTEN marking path.
+///
+/// It deliberately does NOT stage into the `RediffBSideStagingProvider` or run
+/// `revalidateFromFeatures`: those re-run the slot pass over PERSISTED analysis
+/// that a true first listen does not yet have. The byte-exact divergent region
+/// is its OWN deterministic ad-presence core, so the mint needs no persisted
+/// transcript. The chroma differ is never consulted (byte-exact only).
+struct AdDetectionDayZeroByteExactMinter: RediffDayZeroMinting {
+    let adDetection: any AdDetectionProviding
+
+    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> Int {
+        await adDetection.mintByteExactDayZeroMarks(analysisAssetId: assetId, bSideURLs: bSideURLs)
     }
 }

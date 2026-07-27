@@ -194,6 +194,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
         case .crossEpisodeMemory: return config.crossEpisodeMemoryCap  // playhead-xsdz.9: cross-episode positive copy-alignment boost; modest corroborative cap, no qualified track.
         case .rhetoricalGrammar: return config.rhetoricalGrammarCap  // playhead-xsdz.12: rhetorical act-sequence grammar; modest text-derived corroborative cap, no qualified track.
         case .crossShowSyndication: return config.crossShowSyndicationCap  // playhead-xsdz.13: cross-show syndication footprint; modest cross-library corroborative cap, no qualified track.
+        case .rediffConfirmed: return 0.0  // playhead-xsdz.62: deterministic byte-exact presence KIND marker; emitted weight-0 (no score budget) — it only increments the corroboration quorum's distinctKinds.count, never adds skip mass.
         case .fusedScore: return 1.0  // Fused score is post-aggregation; no per-source cap applies.
         case .audit, .operational: return 0.0  // Phase 11 observability rows are not fusion inputs.
         }
@@ -210,6 +211,28 @@ enum CorrectionSource: String, Sendable, Codable {
     case manualVeto
     /// User reported a missed ad (false negative) — "Hearing an ad" button or transcript tap-to-mark.
     case falseNegative
+    /// Durable, private receipt for Yes on an already auto-skipped banner.
+    case bannerAutoSkipConfirmed
+    /// Durable, private receipt for No on an already auto-skipped banner.
+    case bannerAutoSkipDenied
+    /// Durable, private receipt for Yes on a suggest-tier banner.
+    case bannerSuggestionConfirmed
+    /// Durable, private receipt for No on a suggest-tier banner.
+    case bannerSuggestionDenied
+
+    /// Explicit banner answers are retained on-device for correctness and
+    /// learning, but are never diagnostic-export material.
+    var isExplicitBannerFeedback: Bool {
+        switch self {
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return true
+        case .listenRevert, .manualVeto, .falseNegative:
+            return false
+        }
+    }
 }
 
 // MARK: - CorrectionKind
@@ -227,9 +250,11 @@ extension CorrectionSource {
     /// The semantic kind of correction this source represents.
     var kind: CorrectionKind {
         switch self {
-        case .listenRevert, .manualVeto:
+        case .listenRevert, .manualVeto,
+             .bannerAutoSkipDenied, .bannerSuggestionDenied:
             return .falsePositive
-        case .falseNegative:
+        case .falseNegative,
+             .bannerAutoSkipConfirmed, .bannerSuggestionConfirmed:
             return .falseNegative
         }
     }
@@ -285,6 +310,18 @@ struct CorrectionEvent: Sendable, Equatable {
     /// correction; updated on each idempotent upsert. `nil` for legacy
     /// rows; readers should treat `nil` as `createdAt`.
     let lastSeenAt: Double?
+    /// Durable privacy discriminator for explicit banner receipts.
+    ///
+    /// Fresh in-memory events derive this from `source`. Persistence readers
+    /// additionally set it when the v32 `correctionIdentityKey` is non-empty,
+    /// so a damaged/unknown source string cannot turn a private receipt into
+    /// diagnostic export material.
+    let isPrivateExplicitFeedbackReceipt: Bool
+    /// Exact v32 persistence discriminator when this event was loaded from
+    /// SQLite. In-memory events leave it nil and compute their identity from
+    /// source/targets. Keeping the stored key lets read-side dedupe honor the
+    /// durable identity even when those descriptive columns are damaged.
+    let persistedCorrectionIdentityKey: String?
 
     init(
         id: String = UUID().uuidString,
@@ -297,7 +334,9 @@ struct CorrectionEvent: Sendable, Equatable {
         causalSource: CausalSource? = nil,
         targetRefs: CorrectionTargetRefs? = nil,
         submissionCount: Int? = nil,
-        lastSeenAt: Double? = nil
+        lastSeenAt: Double? = nil,
+        isPrivateExplicitFeedbackReceipt: Bool? = nil,
+        persistedCorrectionIdentityKey: String? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -310,5 +349,27 @@ struct CorrectionEvent: Sendable, Equatable {
         self.targetRefs = targetRefs
         self.submissionCount = submissionCount
         self.lastSeenAt = lastSeenAt
+        self.persistedCorrectionIdentityKey =
+            persistedCorrectionIdentityKey
+        self.isPrivateExplicitFeedbackReceipt =
+            isPrivateExplicitFeedbackReceipt == true
+                || persistedCorrectionIdentityKey?.isEmpty == false
+                || source?.isExplicitBannerFeedback == true
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id
+            && lhs.analysisAssetId == rhs.analysisAssetId
+            && lhs.scope == rhs.scope
+            && lhs.createdAt == rhs.createdAt
+            && lhs.source == rhs.source
+            && lhs.podcastId == rhs.podcastId
+            && lhs.correctionType == rhs.correctionType
+            && lhs.causalSource == rhs.causalSource
+            && lhs.targetRefs == rhs.targetRefs
+            && lhs.submissionCount == rhs.submissionCount
+            && lhs.lastSeenAt == rhs.lastSeenAt
+            && lhs.isPrivateExplicitFeedbackReceipt
+                == rhs.isPrivateExplicitFeedbackReceipt
     }
 }

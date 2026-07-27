@@ -252,6 +252,56 @@ enum RediffSlotOwnership {
         return merged.filter { $0.durationSeconds <= config.maxSlotSeconds }
     }
 
+    // MARK: - K-way union (playhead-xsdz.36.2)
+
+    /// UNION the played-slot lists from K pairwise byte diffs (A vs each of the
+    /// K distinct-persona B-sides) into ONE slot set. Because a single
+    /// fetch-PAIR can MISS an ad pod when both draws land the same fill on a
+    /// low-entropy slot, unioning the divergent regions across the fetch set
+    /// recovers pods any one pair misses (the "B vs C misses / B+C+D recovers"
+    /// case).
+    ///
+    /// BACKWARD-COMPAT: a single list (K=1) is returned UNCHANGED — byte-identical
+    /// to the pre-k-way single-fetch differ output, which is already cleaned by
+    /// `gateAndDiffBytes`. Multiple lists are concatenated and re-cleaned by the
+    /// SAME `mergedAndCapped` the 2-way path uses, so overlapping detections of
+    /// the same pod collapse to one slot and the union carries the identical slot
+    /// shape downstream (candidate → veto → disposition). Each input list is
+    /// assumed already `mergedAndCapped` (as `gateAndDiffBytes` returns them);
+    /// re-cleaning is idempotent for a single list and correct for the union.
+    static func unionedPlayedSlots(
+        _ perBSideSlots: [[PlayedSlot]],
+        config: Configuration = .default
+    ) -> [PlayedSlot] {
+        // K=1 (or a single accepted B) → verbatim, no re-clean: the crisp
+        // "reduces to today's EXACT single-fetch behavior" guarantee.
+        guard perBSideSlots.count > 1 else { return perBSideSlots.first ?? [] }
+        return mergedAndCapped(perBSideSlots.flatMap { $0 }, config: config)
+    }
+
+    // MARK: - Day-0 k-way minimum (playhead-xsdz.36.4 / playhead-wybg)
+
+    /// Minimum number of DISTINCT-persona B-copies a day-0 byte-exact probe must
+    /// have staged before it attempts a mint. `2` — this is NOT a corroboration
+    /// quorum. The day-0 mint UNIONs the per-persona byte-exact slots via
+    /// `unionedPlayedSlots` (quorum = 1: a slot mints if ANY one persona's diff
+    /// reveals it), exactly like the lagged path. This constant is instead a
+    /// COLLISION-RECOVERY floor: on a client-PINNED show (Conan/AdsWizz) a single
+    /// re-fetch can land the SAME stitch as the played copy (byte-identical → 0
+    /// divergent slots → reveals nothing), so day-0 requires ≥2 distinct-persona
+    /// B-copies to give a divergence a chance. The per-persona byte gate
+    /// (`gateAndDiffBytes`: min-run-bytes, monotonic-clean, chainedFractionB ≥
+    /// floor) is the PRECISION guard; staging ≥2 personas is the RECALL guard.
+    ///
+    /// playhead-wybg: the former `kWayRobustPlayedSlots` ≥2-AGREEMENT quorum was
+    /// REMOVED. A minutes-apart (realistic day-0 timing) measurement showed that on
+    /// pinned shows only ONE persona (e.g. Overcast) diverges and reveals the real
+    /// ads (211 s), while the same-persona re-fetch collides (byte-identical); a
+    /// ≥2-agreement quorum dropped those ads, defeating the entire k-way
+    /// collision-recovery purpose. Union + the byte gate is precise single-fetch,
+    /// so day-0 unifies with the lagged union path.
+    static let dayZeroMinKWayBCopies = 2
+
     // MARK: - Byte-path gate (playhead-xsdz.57 — PRIMARY differ)
 
     /// Why a byte alignment did or did not yield trustworthy slots. EVERY
@@ -271,7 +321,11 @@ enum RediffSlotOwnership {
         /// unique-frame anchor set toward 0) or nothing survived min-run.
         case rejectedNoChainedRuns
         /// The chain dropped runs (python `monotonic_clean == false`) — an
-        /// out-of-order byte structure the slot semantics cannot trust.
+        /// out-of-order byte structure the strict slot semantics cannot trust.
+        /// playhead-9s6q: with `recoverNonMonotonicSegments` set (day-0 opt-in),
+        /// a fetch that would land here is instead segment-recovered; it only
+        /// still reaches this case when the segmented recovery finds no
+        /// trustworthy slot (low coverage / all sub-ad-width).
         case rejectedNonMonotonic(dropped: Int)
         /// `chainedFractionB` below the re-encode floor (the byte analogue of
         /// the chroma `alignedFractionB` guard, SAME `minAlignedFractionB`).
@@ -306,15 +360,30 @@ enum RediffSlotOwnership {
     /// analogue of the chroma differ's `minGapFps` floor — pure-B insertions
     /// have zero A-width and drop out here), then fragment-merged and
     /// duration-capped by the SAME `mergedAndCapped` the chroma path uses.
+    ///
+    /// playhead-9s6q FIX A (`recoverNonMonotonicSegments`): DEFAULT `false` is
+    /// the historical WHOLESALE reject on a non-monotonic chain — byte-identical
+    /// to the pre-9s6q lagged/production path. When `true` (the day-0 opt-in),
+    /// a non-monotonic alignment is instead RECOVERED via the aligner's
+    /// monotonic-SEGMENT partition (`segmentRecoveredByteGate`), preserving every
+    /// precision guard. The lagged sweep passes `false`; nothing changes until a
+    /// separate corpus go/no-go flips the flag on.
     static func gateAndDiffBytes(
         alignment: RediffByteAligner.Alignment,
-        config: Configuration = .default
+        config: Configuration = .default,
+        recoverNonMonotonicSegments: Bool = false
     ) -> ByteGateOutcome {
         guard !alignment.chain.isEmpty else {
             return .rejectedNoChainedRuns
         }
         guard alignment.monotonicClean else {
-            return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
+            // playhead-9s6q FIX A: the day-0 opt-in RECOVERS the divergent slots
+            // from the monotonic segments; the strict path (default) discards the
+            // whole fetch exactly as before.
+            guard recoverNonMonotonicSegments else {
+                return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
+            }
+            return segmentRecoveredByteGate(alignment: alignment, config: config)
         }
         guard alignment.chainedFractionB >= config.minAlignedFractionB else {
             return .rejectedLowChainedFraction(alignment.chainedFractionB)
@@ -334,6 +403,47 @@ enum RediffSlotOwnership {
             chainedFractionB: alignment.chainedFractionB,
             runsFound: alignment.runsFound,
             runsChained: alignment.chain.count,
+            playedSlots: playedSlots
+        ))
+    }
+
+    /// playhead-9s6q FIX A: the non-monotonic RECOVERY arm. Preserves EVERY
+    /// precision guard of the strict path, applied to the SEGMENTED coverage:
+    ///   • re-encode floor — `segmentedChainedFractionB` (Σ segment run bytes /
+    ///     B audio bytes) must clear `minAlignedFractionB`, so a low-coverage
+    ///     island (a re-encode) is STILL rejected wholesale (not widened);
+    ///   • min-run-bytes — intrinsic (every segmented run is already ≥
+    ///     `minRunBytes` from `byteRuns`);
+    ///   • min-ad-width + fragment-merge + duration-cap — the SAME
+    ///     `mergedAndCapped` cleaning the strict path applies, so sub-ad and
+    ///     alignment-breakdown gaps are dropped.
+    /// If nothing survives the guards, this returns the SAME `.rejectedNonMonotonic`
+    /// the strict path would (no manufactured acceptance).
+    private static func segmentRecoveredByteGate(
+        alignment: RediffByteAligner.Alignment,
+        config: Configuration
+    ) -> ByteGateOutcome {
+        guard alignment.segmentedChainedFractionB >= config.minAlignedFractionB else {
+            return .rejectedLowChainedFraction(alignment.segmentedChainedFractionB)
+        }
+        let playedSlots = mergedAndCapped(
+            alignment.segmentedSlots
+                .filter { $0.aSeconds >= config.minAdSeconds }
+                .map { PlayedSlot(
+                    startSeconds: $0.aStartSeconds,
+                    endSeconds: $0.aEndSeconds,
+                    leftRunSeconds: $0.leftFlankSeconds,
+                    rightRunSeconds: $0.rightFlankSeconds
+                ) },
+            config: config
+        )
+        guard !playedSlots.isEmpty else {
+            return .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic)
+        }
+        return .accepted(ByteAcceptance(
+            chainedFractionB: alignment.segmentedChainedFractionB,
+            runsFound: alignment.runsFound,
+            runsChained: alignment.segmentedRunsChained,
             playedSlots: playedSlots
         ))
     }
@@ -565,11 +675,29 @@ protocol RediffBSideProvider: Sendable {
     /// file — bf4a2383 precedent) before reading a byte, and the bytes NEVER
     /// outlive the diff (xsdz.28 never-persist-B).
     func refetchedBSideFileURL(assetId: String) async -> URL?
+
+    /// playhead-xsdz.36.2 (k-way): ALL staged B-side files for `assetId` — the K
+    /// distinct-persona re-fetches the byte differ aligns A against and unions.
+    ///
+    /// A PROTOCOL REQUIREMENT (not extension-only) so a concrete provider's
+    /// override is DYNAMICALLY dispatched through the `any RediffBSideProvider`
+    /// existential the service holds — an extension-only method would statically
+    /// bind to the default and silently drop every B-side but the first. The
+    /// default (see below) wraps the single `refetchedBSideFileURL` so pre-k-way
+    /// providers drive exactly today's one alignment.
+    func refetchedBSideFileURLs(assetId: String) async -> [URL]
 }
 
 extension RediffBSideProvider {
     /// Default: no byte-level B-side — the byte path falls back to chroma.
     func refetchedBSideFileURL(assetId: String) async -> URL? { nil }
+
+    /// Default: the single `refetchedBSideFileURL` as a one-element list (or
+    /// empty) — one alignment, exactly the pre-k-way behavior.
+    func refetchedBSideFileURLs(assetId: String) async -> [URL] {
+        if let url = await refetchedBSideFileURL(assetId: assetId) { return [url] }
+        return []
+    }
 }
 
 // MARK: - Rediff shadow breadcrumb (distinct tag; reuses the frozen row type)

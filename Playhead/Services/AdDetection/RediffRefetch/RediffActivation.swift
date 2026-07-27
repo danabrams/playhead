@@ -59,4 +59,87 @@ enum RediffActivation {
     /// chroma-fallback path (`refetchedBSideMono16kHz`); the byte-primary
     /// path is unaffected by this cap.
     static let maxBSideDecodeDurationSeconds: TimeInterval = maxASideCaptureDurationSeconds
+
+    /// playhead-xsdz.36.2 (k-way): the number of DISTINCT-persona B-side
+    /// re-fetches the PRODUCTION sweep performs per rotated candidate.
+    ///
+    /// **Deliberately 1 — the single-fetch status quo.** k-way (K≥3) drives
+    /// per-slot divergence up (a pod one fetch-pair misses is recovered from
+    /// another persona's distinct stitch) but MULTIPLIES the re-fetch bandwidth
+    /// on the WiFi+charging BGTask: ~54 MB × K per rotated episode
+    /// (~1.1 GB/library-week at K=1, so ~3.3 GB at K=3). Raising K is a data
+    /// go/no-go that belongs to the SEPARATE xsdz.36 rollout, NOT this bead — the
+    /// k-way MECHANISM ships here config-gated, defaulting to today's bandwidth.
+    ///
+    /// To activate k-way in production, flip THIS ONE constant (e.g. to `3` for
+    /// the iPhone+Mac core plus Overcast). K is capped at the curated persona
+    /// bank size (4); see `RediffFetchPersona.kWayPersonas`.
+    static let productionKWayFetchCount = 1
+
+    // MARK: - playhead-xsdz.36.4 (day-0 / immediate play-time rediff)
+
+    /// THE day-0 switch (playhead-xsdz.36.4). `true` = the PLAY-TIME trigger
+    /// (`DayZeroRediffTrigger`) kicks off an IMMEDIATE k-way rediff for the
+    /// just-started episode, so a drop-day listener gets DAI width marks on
+    /// FIRST listen instead of waiting for the lagged ≥24h BGTask sweep.
+    /// `false` = the trigger site is INERT: no play-time re-fetch is ever
+    /// started and no power/network signal is even read — byte-identical to the
+    /// lagged-only app.
+    ///
+    /// ACTIVATED `true` (playhead-xsdz.36, 2026-07-23). The bandwidth/battery
+    /// go/no-go was cleared by the minutes-apart corpus measurement: varied
+    /// personas + 9s6q segment recovery turn the two dominant client-PINNED
+    /// stacks from 0 → real day-0 width (Conan 211 s; Fresh Air 203 s,
+    /// corroborated across Mac+Overcast at matching A-times). A day-0 fetch is
+    /// ~54 MB × K at PLAY TIME, so it only runs on WiFi + (charging OR a user
+    /// "deep-scan" opt-in), never on cellular or unplugged-without-opt-in; see
+    /// `DayZeroRediffGate`. Auto-skip stays held — day-0 is MARK-ONLY, on the
+    /// SAME `RediffSlotOwnership` marks path as the lagged sweep (a wrong slot
+    /// is a banner, never a skip).
+    static let dayZeroEnabledByDefault = true
+
+    /// playhead-xsdz.36.4 / playhead-9s6q (FIX B): the k-way fetch count the
+    /// DAY-0 trigger uses, INDEPENDENT of `productionKWayFetchCount` (which
+    /// governs the lagged BGTask sweep and stays 1). Day-0 is a single
+    /// deliberate, gated, immediate probe.
+    ///
+    /// **2 (playhead-9s6q FIX B), down from 3.** The played A-side copy is
+    /// downloaded under a fixed request context (`RediffFetchPersona.download`).
+    /// On a client-PINNED show (AdsWizz/ART19) a B-fetch reusing THAT persona
+    /// returns a byte-IDENTICAL body — 0 divergent slots, a wasted ~54 MB fetch.
+    /// The former K=3 drew `[iPhone, Mac, Overcast]`, whose FIRST persona
+    /// collided with the download. Day-0 now stages K=2 VARIED personas
+    /// GUARANTEED distinct from the download UA
+    /// (`RediffFetchPersona.kWayPersonasDistinct(from:count:)` → `[Mac,
+    /// Overcast]`): two real divergence draws, no wasted collision fetch
+    /// (~108 MB/play). Still ≥ `RediffSlotOwnership.dayZeroMinKWayBCopies` (2),
+    /// the collision-recovery floor. This bandwidth lives ENTIRELY behind the
+    /// OFF `dayZeroEnabledByDefault` flag, so it never perturbs the lagged
+    /// path's single-fetch default. Capped at the distinct-persona count by
+    /// `kWayPersonasDistinct`.
+    static let dayZeroKWayFetchCount = 2
+
+    // MARK: - playhead-9s6q FIX A (non-monotonic segment recovery)
+
+    /// THE non-monotonic-recovery switch (playhead-9s6q FIX A). `false`
+    /// (DEFAULT) = the byte gate REJECTS a non-monotonic alignment wholesale, as
+    /// it always has — byte-for-byte identical to the pre-9s6q lagged/production
+    /// path. `true` = the byte gate RECOVERS the divergent slots from the
+    /// aligner's monotonic-SEGMENT partition
+    /// (`RediffSlotOwnership.gateAndDiffBytes(recoverNonMonotonicSegments:)`),
+    /// so a high-coverage fetch whose multi-break chain went non-monotonic
+    /// (Fresh Air-class: real rotated ads of differing lengths) yields its ad
+    /// slots instead of nothing.
+    ///
+    /// ACTIVATED `true` (playhead-xsdz.36, 2026-07-23). The width-oracle
+    /// correctness go/no-go was cleared: on the minutes-apart corpus the
+    /// aligner's monotonic-SEGMENT partition recovers Fresh Air's 3 rotated-ad
+    /// slots (≈203 s) that the strict wholesale reject discarded, and the slots
+    /// are corroborated across the Mac and Overcast personas at matching A-times
+    /// (real ad replacements, not fabrication). Only the DAY-0 byte-exact mint
+    /// path (`AdDetectionService.mintByteExactDayZeroMarks`) reads this flag; the
+    /// LAGGED sweep still passes `false` unconditionally and stays on the strict
+    /// wholesale-reject behavior — this activation does NOT touch the lagged
+    /// width oracle, so there is no lagged false-widening exposure.
+    static let nonMonotonicSegmentRecoveryEnabled = true
 }

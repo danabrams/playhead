@@ -145,6 +145,16 @@ final class SignalingCorrectionStore: UserCorrectionStore, @unchecked Sendable {
         try await wrapped.record(event)
     }
 
+    func correctionDidPersistAtomically(
+        _ event: CorrectionEvent,
+        wasNewlyInserted: Bool
+    ) async {
+        await wrapped.correctionDidPersistAtomically(
+            event,
+            wasNewlyInserted: wasNewlyInserted
+        )
+    }
+
     func correctionPassthroughFactor(for analysisAssetId: String) async -> Double {
         await wrapped.correctionPassthroughFactor(for: analysisAssetId)
     }

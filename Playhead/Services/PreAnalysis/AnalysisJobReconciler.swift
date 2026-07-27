@@ -51,6 +51,12 @@ struct ReconciliationReport: Sendable {
     /// only their routing metadata was stale. Purely a correctness bundle;
     /// dispatch eligibility never consulted `schedulerEpoch`.
     let queuedJobEpochsRestamped: Int
+    /// playhead-dqfm: queued background-lane rows promoted into the Soon band
+    /// by the scarcity-aware re-prioritization pass because the backlog
+    /// exceeded one background window's drain capacity and the row's episode
+    /// ranked as next-to-play. Zero whenever the backlog fit the window (not
+    /// scarce) or no ranking provider is wired (plain FIFO preserved).
+    let scarcityReprioritizedJobs: Int
 }
 
 // MARK: - AnalysisJobReconciler
@@ -60,6 +66,12 @@ actor AnalysisJobReconciler {
     private let downloadManager: any DownloadProviding
     private let capabilitiesService: any CapabilitiesProviding
     private let config: PreAnalysisConfig
+    /// playhead-dqfm: scarcity-aware backfill re-prioritization inputs
+    /// (one-window drain capacity + per-episode ranking signals). Injected
+    /// post-init via `setBacklogScarcityRanking` once the SwiftData
+    /// `ModelContainer` exists (same late-attach shape as the runtime's other
+    /// model-container-dependent providers). `nil` = pass no-ops → plain FIFO.
+    private var backlogScarcityRanking: (any BacklogScarcityRanking)?
     private let logger = Logger(subsystem: "com.playhead", category: "JobReconciler")
     private var isReconciling = false
 
@@ -71,12 +83,22 @@ actor AnalysisJobReconciler {
         store: AnalysisStore,
         downloadManager: any DownloadProviding,
         capabilitiesService: any CapabilitiesProviding,
-        config: PreAnalysisConfig = .load()
+        config: PreAnalysisConfig = .load(),
+        backlogScarcityRanking: (any BacklogScarcityRanking)? = nil
     ) {
         self.store = store
         self.downloadManager = downloadManager
         self.capabilitiesService = capabilitiesService
         self.config = config
+        self.backlogScarcityRanking = backlogScarcityRanking
+    }
+
+    /// playhead-dqfm: install the scarcity-ranking provider once the SwiftData
+    /// `ModelContainer` is available. Idempotent — re-installing replaces the
+    /// prior provider. A no-op-preserving default (`nil`) keeps the reconciler
+    /// constructible without the provider (preview runtimes, unit tests).
+    func setBacklogScarcityRanking(_ ranking: (any BacklogScarcityRanking)?) {
+        self.backlogScarcityRanking = ranking
     }
 
     // MARK: - Reconcile
@@ -94,7 +116,8 @@ actor AnalysisJobReconciler {
                 failedJobsBackedOff: 0, unEnqueuedDownloadsCreated: 0,
                 strandedBackfillJobsReset: 0,
                 strandedFinalPassJobsReset: 0,
-                queuedJobEpochsRestamped: 0
+                queuedJobEpochsRestamped: 0,
+                scarcityReprioritizedJobs: 0
             )
         }
         isReconciling = true
@@ -125,6 +148,11 @@ actor AnalysisJobReconciler {
         let step7 = try await discoverUnEnqueuedDownloads()
         let stepBackfillReaper = try await reconcileStrandedBackfillJobs()
         let stepFinalPassReaper = try await reconcileStrandedFinalPassJobs()
+        // playhead-dqfm: LAST — runs after `discoverUnEnqueuedDownloads`
+        // (step 7) so freshly-minted priority-0 background rows are part of
+        // the backlog it ranks, and after the reapers (disjoint tables) so it
+        // sees a fully-reconciled `analysis_jobs` set at window entry.
+        let stepScarcity = await reprioritizeScarceBacklog()
 
         let report = ReconciliationReport(
             expiredLeasesRecovered: step1,
@@ -139,7 +167,8 @@ actor AnalysisJobReconciler {
             unEnqueuedDownloadsCreated: step7,
             strandedBackfillJobsReset: stepBackfillReaper,
             strandedFinalPassJobsReset: stepFinalPassReaper,
-            queuedJobEpochsRestamped: stepRestamped
+            queuedJobEpochsRestamped: stepRestamped,
+            scarcityReprioritizedJobs: stepScarcity
         )
 
         logger.info("""
@@ -156,7 +185,8 @@ actor AnalysisJobReconciler {
         newJobs=\(report.unEnqueuedDownloadsCreated), \
         strandedBackfillJobs=\(report.strandedBackfillJobsReset), \
         strandedFinalPassJobs=\(report.strandedFinalPassJobsReset), \
-        queuedEpochsRestamped=\(report.queuedJobEpochsRestamped)
+        queuedEpochsRestamped=\(report.queuedJobEpochsRestamped), \
+        scarcityReprioritized=\(report.scarcityReprioritizedJobs)
         """)
 
         return report
@@ -623,6 +653,58 @@ actor AnalysisJobReconciler {
             logger.info("stranded_final_pass_reset count=\(count)")
         }
         return count
+    }
+
+    // MARK: - Step: Scarcity-aware backfill re-prioritization (playhead-dqfm)
+
+    /// When the queued Background-lane backlog exceeds one background
+    /// window's drain capacity, bump the next-to-play episodes out of the
+    /// plain-FIFO Background band and into a low Soon sub-range so a scarce
+    /// grant covers what the user will actually play. When the backlog fits
+    /// the window (not scarce) — or no ranking provider is wired — this is a
+    /// pure no-op and the queue stays plain FIFO.
+    ///
+    /// Best-effort by contract: it is `async` (not `async throws`) and
+    /// swallows every provider/store error, because a re-ranking hiccup must
+    /// never fail `reconcile()` or block the drain that follows it at window
+    /// entry. Falling back to plain FIFO is always safe.
+    private func reprioritizeScarceBacklog() async -> Int {
+        guard let ranking = backlogScarcityRanking else { return 0 }
+        do {
+            guard let capacity = await ranking.currentWindowDrainCapacity(),
+                  capacity >= 0 else { return 0 }
+            // The backlog that competes for a fresh grant is the QUEUED
+            // Background-lane rows (priority <= 0). Running/paused rows are
+            // already in-flight or gated and are not what selection picks up
+            // first, so they neither count toward scarcity nor get re-ranked.
+            let queued = try await store.fetchJobsByState("queued")
+            let backlog = queued.filter { $0.schedulerLane == .background }
+            guard backlog.count > capacity else { return 0 } // not scarce → unchanged FIFO
+
+            let signals = await ranking.rankingSignals(forEpisodeIds: backlog.map(\.episodeId))
+            let candidates = backlog.map { job in
+                ScarcityReprioritizer.Candidate(
+                    jobId: job.jobId,
+                    episodeId: job.episodeId,
+                    priority: job.priority,
+                    createdAt: job.createdAt,
+                    signals: signals[job.episodeId] ?? BacklogRankingSignals()
+                )
+            }
+            let bumps = ScarcityReprioritizer.plan(candidates: candidates, drainCapacity: capacity)
+            var applied = 0
+            for bump in bumps {
+                try await store.updateJobPriority(jobId: bump.jobId, priority: bump.newPriority)
+                applied += 1
+            }
+            if applied > 0 {
+                logger.info("scarcity_reprioritized applied=\(applied) backlog=\(backlog.count) capacity=\(capacity)")
+            }
+            return applied
+        } catch {
+            logger.warning("scarcity reprioritization skipped: \(error)")
+            return 0
+        }
     }
 
     // MARK: - Helpers

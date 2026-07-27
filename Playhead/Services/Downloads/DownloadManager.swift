@@ -36,6 +36,30 @@ struct HTTPAssetMetadata: Sendable, Equatable {
     let lastModified: String?
 }
 
+/// Stable identity for one task inside one background URLSession. Task
+/// identifiers are only unique within a session, so both components are
+/// required when fencing late delegate callbacks after cache removal.
+struct BackgroundTransferIdentity: Sendable, Hashable {
+    let sessionIdentifier: String
+    let taskIdentifier: Int
+}
+
+/// One terminal background-transfer failure harvested entirely on the
+/// URLSession delegate queue before crossing into DownloadManager's actor.
+/// Resume persistence, ownership release, and WorkJournal failure emission
+/// are then sequenced by one actor callback.
+struct BackgroundTransferFailure: Sendable {
+    let identity: BackgroundTransferIdentity
+    let episodeId: String
+    let resumeData: Data?
+    let sourceURL: URL?
+    let metadata: HTTPAssetMetadata?
+    let cause: InternalMissCause
+    let errorDescription: String
+    let bytesReceived: Int
+    let stage: String
+}
+
 // MARK: - AudioFingerprint
 
 /// Identifies an audio asset across re-downloads and URL changes.
@@ -66,6 +90,39 @@ struct CacheEntry: Sendable {
     let lastAccessedAt: Date
     let isFullyDownloaded: Bool
     let hasActiveAnalysis: Bool
+}
+
+// MARK: - AudioAssetPin
+
+/// playhead-wrj8: the immutable-artifact "content pin" persisted next to a
+/// downloaded episode's audio file (`<hash>.pin`). Its presence + the
+/// `expectedBytes` field are what let the cache distinguish a COMPLETE,
+/// serveable artifact from a truncated / mid-stream / interrupted file — an
+/// existence-only check cannot.
+///
+/// Invariant: for the life of a downloaded episode the pinned artifact is
+/// immutable. Once a pin exists whose `expectedBytes` matches the on-disk
+/// length, no non-rediff path may overwrite that file in place — the bytes
+/// PLAYED == ANALYZED == MARKED-AGAINST never change (DAI shows re-cut a
+/// different ad stitch on every fetch, so silently re-fetching would rotate
+/// the audio the user marked ads against).
+///
+/// A `nil` pin (legacy files downloaded before wrj8) is treated as
+/// complete-by-existence so the change is non-destructive; freshly
+/// downloaded/streamed files always write a pin.
+struct AudioAssetPin: Codable, Sendable, Equatable {
+    /// Authoritative complete byte length. During a streaming download this
+    /// is seeded to the HTTP `Content-Length` (or `Int64.max` when unknown)
+    /// so the growing file reads as INCOMPLETE until finalized; on
+    /// completion it is rewritten to the actual on-disk size.
+    var expectedBytes: Int64
+    /// Full-file SHA-256, populated once the download completes. Optional
+    /// because it is not known until the bytes are all on disk.
+    var sha256: String?
+    /// Enclosure URL the bytes were fetched from (diagnostics only).
+    var sourceURL: String?
+    /// HTTP validator captured at download time (diagnostics only).
+    var etag: String?
 }
 
 // MARK: - DownloadManagerError
@@ -191,6 +248,18 @@ actor DownloadManager {
     /// Active download tasks keyed by episode ID.
     private var activeDownloads: [String: Task<URL, Error>] = [:]
 
+    /// The play-while-downloading lane is singular because its raw-audio
+    /// subscribers and progressive playback surface are singular. A transfer
+    /// token prevents a cancelled episode's detached byte pump from finalizing
+    /// or publishing into its replacement.
+    private struct ActiveStreamingTransfer {
+        let id: UUID
+        let episodeId: String
+        let fileURL: URL
+        var task: Task<Void, Never>?
+    }
+    private var activeStreamingTransfer: ActiveStreamingTransfer?
+
     /// playhead-44h1 (fix): last observed progress for each active
     /// download, used to build a ``ForegroundAssistTransferSnapshot``
     /// on `UIApplication.willResignActiveNotification`. Populated from
@@ -215,14 +284,29 @@ actor DownloadManager {
     /// testing surface stays consistent.
     private var backgroundTaskScheduler: any BackgroundTaskScheduling = BGTaskScheduler.shared
 
+    /// playhead-wrj8: fetches the CURRENT server validator (ETag /
+    /// Content-Length) for a URL, used to decide whether a persisted
+    /// resume-data blob is still safe to splice. Defaults to a real HTTP
+    /// HEAD request; tests inject a deterministic stub via
+    /// ``setResumeValidatorProviderForTesting(_:)``. Returns `nil` when the
+    /// validator cannot be established (treated as "cannot prove freshness"
+    /// → re-download fresh rather than risk splicing a rotated stitch).
+    private var resumeValidatorProvider: (@Sendable (URL) async -> HTTPAssetMetadata?)?
+
     /// Metadata cache: episode ID -> HTTP metadata from last response.
     private var metadataCache: [String: HTTPAssetMetadata] = [:]
 
     /// LRU tracking: episode ID -> last access time.
     private var accessLog: [String: Date] = [:]
 
-    /// Episodes with active/incomplete analysis (protected from eviction).
-    private var analysisProtectedEpisodes: Set<String> = []
+    /// Episodes with active/incomplete analysis or in-flight playback
+    /// (protected from eviction). playhead-wrj8: refcounted (was a plain
+    /// `Set`) so overlapping owners — the playback lifecycle and one or
+    /// more analysis jobs on the SAME episode — compose correctly: the
+    /// file backing the current episode is only eligible for eviction once
+    /// EVERY protector has released. A bare `Set` let whichever owner
+    /// finished first drop protection out from under the others.
+    private var analysisProtectedEpisodes: [String: Int] = [:]
 
     /// Episode IDs whose background URLSession download is currently
     /// in flight. Background tasks aren't tracked in `activeDownloads`
@@ -232,14 +316,72 @@ actor DownloadManager {
     /// and `handleBackgroundDownloadComplete` running `touchAccess`.
     private var bgInFlightEpisodes: Set<String> = []
 
+    /// Background tasks admitted by this manager instance. Cache deletion
+    /// retires identities before cancelling URLSession tasks; delegate
+    /// callbacks carrying a retired identity are then cleanup-only.
+    private var activeBackgroundTransfers:
+        [BackgroundTransferIdentity: String] = [:]
+    private var retiredBackgroundTransfers:
+        Set<BackgroundTransferIdentity> = []
+    /// Cancellable journal tails for placed background artifacts. Cache
+    /// deletion retires these before unlinking bytes so a recorder suspended
+    /// before its durable append cannot publish a stale `.finalized` row.
+    private struct BackgroundJournalFinalization {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private var backgroundJournalFinalizations:
+        [String: BackgroundJournalFinalization] = [:]
+
+    /// Once an episode has been explicitly removed, any background callback
+    /// for it must carry an identity registered after that removal. This also
+    /// rejects a completion that was staged just before URLSession task
+    /// enumeration and reached the actor just after deletion.
+    private var backgroundIdentityRequiredEpisodes: Set<String> = []
+    private var requireRegisteredBackgroundIdentityAfterBulkClear = false
+    /// Per-episode cache ownership epoch. A completion captures this before
+    /// placement; explicit cache removal increments it before its first await
+    /// so every suspended continuation can prove it still owns the artifact.
+    private var cacheOwnershipGenerationByEpisode:
+        [String: UInt64] = [:]
+
     /// Fingerprint cache: episode ID -> computed fingerprint.
     private var fingerprintCache: [String: AudioFingerprint] = [:]
+
+    /// A successful strong-pin verification is reusable only while the
+    /// manager-owned immutable path retains the same file identity metadata.
+    /// This removes repeated full-file hashes from ordinary cache lookups
+    /// while causing an external replacement or rewrite to miss the memo and
+    /// be authenticated again.
+    private struct StrongPinVerification: Equatable {
+        let path: String
+        let expectedHash: String
+        let expectedBytes: Int64
+        let modificationDate: Date?
+        let fileNumber: UInt64?
+    }
+    private var strongPinVerifications:
+        [String: StrongPinVerification] = [:]
+    #if DEBUG
+    private var strongPinVerificationHashCount = 0
+    private var audioArtifactURLsOverrideForTesting: [String: [URL]] = [:]
+    private var backgroundDownloadAdmissionCountForTesting = 0
+    private var forcePinWriteFailureForTesting = false
+    #endif
 
     /// Cached file extension per episode ID (e.g. "mp3", "m4a").
     private var extensionCache: [String: String] = [:]
 
     /// Optional scheduler for enqueuing pre-analysis jobs after download.
     private var analysisWorkScheduler: AnalysisWorkScheduler?
+
+    /// playhead-xsdz.71 (Signal 1, ADDITIVE/observational): optional recorder
+    /// that receives the enclosure download's redirect-chain hop hosts so the
+    /// DAI-stitch classifier can persist a show-level DAI-EXPECTED prior. `nil`
+    /// (default, and every test) ⇒ NO redirect-recording delegate is attached
+    /// and the download is byte-identical to before. Injected once by
+    /// `PlayheadRuntime`. This only OBSERVES — no consumer wiring.
+    private var daiStitchRecorder: (any DAIStitchChainRecording)?
 
     /// Background URL sessions keyed by role. Lazy-instantiated on first
     /// use so tests can construct a `DownloadManager` without spinning
@@ -314,7 +456,6 @@ actor DownloadManager {
         // Wire delegate → manager so finalize / failure events route back
         // onto the actor. The delegate owns the URLSession-side closure;
         // we own the state it needs to mutate.
-        self.sessionDelegate.workJournal = workJournalRecorder
         self.sessionDelegate.onUrlSessionDidFinishEvents = { identifier in
             Task { @MainActor in
                 if let delegate = DownloadManager.appDelegate {
@@ -322,40 +463,15 @@ actor DownloadManager {
                 }
             }
         }
-        // playhead-g2wq: route harvested resume-data blobs from the
-        // delegate back into the actor's `resumeDataDirectory`. Wired at
-        // init (not per-session like onBackgroundDownloadStaged) because
-        // the harvest is independent of which background session fired.
-        //
-        // Retain-cycle note: `[weak manager = self]` avoids the cycle
-        // `delegate → closure → manager → sessionDelegate → closure`.
-        // `DownloadManager` is long-lived (typically a singleton), so a
-        // strong capture would leak forever and defeat `deinit` cleanup.
-        //
-        // Async Task hop is safe here (Option A): per the hyht bead's
-        // force-quit state machine, `didCompleteWithError` does NOT
-        // fire at force-quit time. The OS suspends the in-flight task
-        // without delivering completion. The callback only fires while
-        // the app is alive — either during normal runtime or during
-        // background-session rehydration after cold relaunch (see
-        // `scanForSuspendedTransfers`). In both cases the process stays
-        // alive long enough for the FileManager write inside
-        // `persistResumeData` to complete, so the Task hop introduces
-        // no loss-of-write risk.
-        self.sessionDelegate.onResumeDataHarvested = { [weak manager = self] episodeId, data in
+        // One identity-qualified terminal callback owns resume persistence,
+        // transfer release, and WorkJournal failure emission. Keeping these
+        // operations in a single actor task prevents a retry from racing a
+        // separate resume-harvest task for the same failed transfer.
+        self.sessionDelegate.onBackgroundDownloadFailed = {
+            [weak manager = self] failure in
             guard let manager else { return }
-            Task { [manager, episodeId, data] in
-                do {
-                    try await manager.persistResumeData(episodeId: episodeId, data: data)
-                } catch {
-                    // A write failure here is best-effort; the next
-                    // cold-launch scan simply won't see this blob. Log
-                    // via the shared resume-data category so support
-                    // triage can correlate.
-                    Logger(
-                        subsystem: "com.playhead", category: "ForceQuitResume"
-                    ).error("persistResumeData (harvest) failed for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)")
-                }
+            Task {
+                await manager.handleBackgroundDownloadFailed(failure)
             }
         }
         // Wire onBackgroundDownloadStaged once at init (not per-session).
@@ -374,19 +490,21 @@ actor DownloadManager {
         // harvested on the delegate queue.
         //
         // Retain-cycle note: `[weak manager = self]` mirrors
-        // `onResumeDataHarvested` above. The cycle would otherwise be
+        // `onBackgroundDownloadFailed` above. The cycle would otherwise be
         // `delegate → closure → manager → sessionDelegate → closure`,
         // leaking every `DownloadManager` forever and defeating
         // `deinit` cleanup of the willResignActive observer.
         self.sessionDelegate.onBackgroundDownloadStaged = {
-            [weak manager = self] episodeId, stagedURL, originalURL, metadata in
+            [weak manager = self] identity, episodeId, stagedURL,
+                originalURL, metadata in
             guard let manager else { return }
-            Task { [manager, episodeId, stagedURL, originalURL, metadata] in
+            Task {
                 await manager.handleBackgroundDownloadComplete(
                     episodeId: episodeId,
                     stagedURL: stagedURL,
                     originalURL: originalURL,
-                    metadata: metadata
+                    metadata: metadata,
+                    transferIdentity: identity
                 )
             }
         }
@@ -419,22 +537,29 @@ actor DownloadManager {
     /// (that budget is for foreground transfers only). `totalBytes <= 0`
     /// (size unknown) is dropped rather than broadcast as a
     /// divide-by-zero 0% event.
-    private func broadcastBackgroundProgress(
+    // playhead-y3q5: internal (not private) so the monotonicity regression
+    // test can drive out-of-order completion/straggler ticks directly.
+    func broadcastBackgroundProgress(
         episodeId: String,
         bytesWritten: Int64,
         totalBytes: Int64
     ) {
         guard totalBytes > 0 else { return }
         // playhead-3xtw (L2): drop stale, out-of-order ticks so the
-        // delivered fraction is monotonic within a transfer. Cleared on
-        // completion here and on a fresh `backgroundDownload` start.
+        // delivered fraction is monotonic within a transfer.
+        // playhead-y3q5: on the completion tick, PIN the high-water at
+        // `totalBytes` (never reset it to nil). Each didWriteData callback
+        // hops to the actor via an unstructured Task with NO ordering
+        // guarantee, so if the 100% tick's Task wins the race, a
+        // later-arriving earlier tick used to read `nil ?? 0 = 0`, pass the
+        // guard, and broadcast a REGRESSED (<100%) fraction after 100% — the
+        // exact non-monotonicity this guard exists to prevent. Pinning at
+        // `totalBytes` (via the `min` cap) makes that straggler fail the
+        // `>= highWater` guard and get dropped. The slot is cleared for a
+        // re-download by the fresh-start reset in `backgroundDownload`.
         let highWater = lastBackgroundProgressBytes[episodeId] ?? 0
         guard bytesWritten >= highWater else { return }
-        if bytesWritten >= totalBytes {
-            lastBackgroundProgressBytes[episodeId] = nil
-        } else {
-            lastBackgroundProgressBytes[episodeId] = bytesWritten
-        }
+        lastBackgroundProgressBytes[episodeId] = min(bytesWritten, totalBytes)
         let progress = DownloadProgress(
             episodeId: episodeId,
             bytesWritten: bytesWritten,
@@ -543,12 +668,80 @@ actor DownloadManager {
         self.analysisWorkScheduler = scheduler
     }
 
+    /// playhead-xsdz.71 (Signal 1): inject the DAI-stitch redirect-chain
+    /// recorder. Wired once by `PlayheadRuntime`; left `nil` in tests so the
+    /// download path stays byte-identical.
+    func setDAIStitchRecorder(_ recorder: any DAIStitchChainRecording) {
+        self.daiStitchRecorder = recorder
+    }
+
+    /// playhead-xsdz.71 (Signal 1): build a redirect-recording delegate when a
+    /// recorder is wired AND we know the show, else `nil` (no delegate → the
+    /// download call is byte-identical). Shared by the download + streaming
+    /// paths.
+    private func makeRedirectRecordingDelegate(
+        url: URL,
+        context: DownloadContext?
+    ) -> RedirectChainRecordingDelegate? {
+        guard daiStitchRecorder != nil, context?.podcastId != nil else { return nil }
+        return RedirectChainRecordingDelegate(initialHost: url.host)
+    }
+
+    /// playhead-xsdz.71 (Signal 1): hand the observed redirect chain to the
+    /// recorder off the download's critical path. Best-effort/observational; a
+    /// `nil` recorder/delegate/podcastId is a no-op. `finalHost` is the final
+    /// response URL host, appended when it differs from the last recorded hop.
+    private func recordDAIStitchChain(
+        delegate: RedirectChainRecordingDelegate?,
+        context: DownloadContext?,
+        finalHost: String?
+    ) {
+        guard let recorder = daiStitchRecorder,
+              let delegate,
+              let podcastId = context?.podcastId else { return }
+        var hosts = delegate.hopHosts
+        if let finalHost, !finalHost.isEmpty, hosts.last != finalHost {
+            hosts.append(finalHost)
+        }
+        Task { await recorder.recordRedirectChain(podcastId: podcastId, hopHosts: hosts) }
+    }
+
     /// playhead-44h1 (fix): inject a `BackgroundTaskScheduling` so
     /// tests can observe the `BGContinuedProcessingTaskRequest`
     /// submission path without touching `BGTaskScheduler.shared`.
     /// Production leaves the default `.shared` scheduler in place.
     func setBackgroundTaskSchedulerForTesting(_ scheduler: any BackgroundTaskScheduling) {
         self.backgroundTaskScheduler = scheduler
+    }
+
+    /// playhead-wrj8: inject the resume-freshness validator provider so
+    /// tests can exercise the ETag/length-mismatch → re-download-fresh path
+    /// without real network. Production leaves this `nil` and the resume
+    /// path issues a real HTTP HEAD.
+    func setResumeValidatorProviderForTesting(
+        _ provider: @escaping @Sendable (URL) async -> HTTPAssetMetadata?
+    ) {
+        self.resumeValidatorProvider = provider
+    }
+
+    /// playhead-wrj8: resolves the current server validator for `url`,
+    /// using the injected provider when present, otherwise a real HTTP HEAD.
+    func currentServerValidator(for url: URL) async -> HTTPAssetMetadata? {
+        if let provider = resumeValidatorProvider {
+            return await provider(url)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else {
+            return nil
+        }
+        let len = http.expectedContentLength
+        return HTTPAssetMetadata(
+            etag: http.value(forHTTPHeaderField: "ETag"),
+            contentLength: len > 0 ? len : nil,
+            lastModified: http.value(forHTTPHeaderField: "Last-Modified")
+        )
     }
 
     // MARK: - playhead-44h1 (fix): Foreground-assist lifecycle
@@ -789,8 +982,11 @@ actor DownloadManager {
         // from earlier builds) that AVURLAsset can't open.
         if let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) {
             for file in files {
-                let ext = (file as NSString).pathExtension
-                if !ext.isEmpty, !Self.knownAudioExtensions.contains(ext), ext != "partial" {
+                let ext = (file as NSString).pathExtension.lowercased()
+                if !ext.isEmpty,
+                   !Self.knownAudioExtensions.contains(ext),
+                   ext != "partial",
+                   ext != Self.pinExtension {
                     let staleURL = completeDirectory.appendingPathComponent(file)
                     try? fm.removeItem(at: staleURL)
                     logger.info("Removed stale cache file: \(file)")
@@ -987,15 +1183,21 @@ actor DownloadManager {
         from url: URL,
         context: DownloadContext? = nil
     ) async throws -> URL {
+        guard activeStreamingTransfer?.episodeId != episodeId else {
+            throw DownloadManagerError.alreadyDownloading(episodeId)
+        }
+
         // Cache the source extension for this episode.
-        let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+        let sourceExt = Self.cacheExtension(for: url)
         extensionCache[episodeId] = sourceExt
 
-        // Already fully cached?
-        let completeURL = completeFileURL(for: episodeId)
-        if FileManager.default.fileExists(atPath: completeURL.path) {
+        // Already fully cached? playhead-wrj8: completeness-gated so a
+        // truncated file is re-fetched rather than served, and a complete
+        // pinned artifact is returned as-is (never re-fetched → never
+        // rotated by a fresh DAI stitch).
+        if let complete = servingURLIfComplete(for: episodeId) {
             touchAccess(episodeId: episodeId)
-            return completeURL
+            return complete
         }
 
         // Already downloading?
@@ -1028,16 +1230,31 @@ actor DownloadManager {
         let request = URLRequest(url: url)
         let fm = FileManager.default
 
+        // playhead-xsdz.71 (Signal 1, additive): observe the enclosure's
+        // redirect chain when a recorder is wired. The delegate only records hop
+        // hosts and returns the proposed redirect, so passing it (or `nil`) is
+        // byte-identical to today's `download(for:)`.
+        let redirectDelegate = makeRedirectRecordingDelegate(url: url, context: context)
+
         // Download to a temporary file (handled efficiently by URLSession).
-        let (tempURL, response) = try await URLSession.shared.download(for: request)
+        let (tempURL, response) = try await URLSession.shared.download(
+            for: request, delegate: redirectDelegate
+        )
         // Clean up temp file on any error path.
         defer { try? fm.removeItem(at: tempURL) }
+        try Task.checkCancellation()
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
         }
+
+        // playhead-xsdz.71 (Signal 1): record the observed redirect chain
+        // (no-op unless a recorder is wired).
+        recordDAIStitchChain(
+            delegate: redirectDelegate, context: context, finalHost: httpResponse.url?.host
+        )
 
         // Harvest HTTP metadata for weak fingerprinting.
         let reportedLength = httpResponse.expectedContentLength
@@ -1053,10 +1270,36 @@ actor DownloadManager {
         let weakFP = AudioFingerprint.makeWeak(url: url, metadata: metadata)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: nil)
 
-        // Move temp -> complete first, then hash from final location.
-        if fm.fileExists(atPath: completeURL.path) {
-            try fm.removeItem(at: completeURL)
+        // playhead-wrj8: refuse to overwrite an already-complete pinned
+        // artifact. If a complete file materialized between the
+        // early-return check and now (a concurrent writer, or a bg
+        // pre-cache that finished first), keep it — never replace the
+        // played/analyzed bytes with a freshly-cut DAI stitch. The temp
+        // file is cleaned up by the `defer` above.
+        if let existing = servingURLIfComplete(for: episodeId) {
+            touchAccess(episodeId: episodeId)
+            logger.info("Download for \(episodeId): complete pinned artifact already present — keeping it, discarding re-fetch")
+            return existing
         }
+
+        // Publish an incomplete pin BEFORE placing bytes at the canonical
+        // path. If the process dies between placement and finalization, the
+        // leftover file remains withheld instead of being mistaken for a
+        // legacy no-pin artifact on the next launch.
+        try requirePinWrite(
+            AudioAssetPin(
+                expectedBytes: Int64.max,
+                sha256: nil,
+                sourceURL: url.absoluteString,
+                etag: metadata.etag
+            ),
+            for: episodeId
+        )
+
+        // Move temp -> complete first, then hash from final location. An
+        // incomplete leftover (partial from a failed stream) is safe to
+        // replace — `servingURLIfComplete` returned nil for it above.
+        try removeAllAudioArtifacts(for: episodeId)
         try fm.copyItem(at: tempURL, to: completeURL)
 
         // Get the file size.
@@ -1066,6 +1309,25 @@ actor DownloadManager {
         // Compute strong fingerprint from the final file.
         let strongHash = try FileHasher.sha256(fileURL: completeURL)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
+
+        // playhead-wrj8: pin the artifact as COMPLETE. From here the file
+        // is immutable — cachedFileURL/streaming cache-hit/overwrite guards
+        // all treat it as the single served copy.
+        try requirePinWrite(
+            AudioAssetPin(
+                expectedBytes: downloaded,
+                sha256: strongHash,
+                sourceURL: url.absoluteString,
+                etag: metadata.etag
+            ),
+            for: episodeId
+        )
+        rememberStrongPinVerification(
+            episodeId: episodeId,
+            fileURL: completeURL,
+            expectedBytes: downloaded,
+            expectedHash: strongHash
+        )
 
         // Enqueue pre-analysis if scheduler is wired up.
         if let scheduler = analysisWorkScheduler {
@@ -1116,7 +1378,278 @@ actor DownloadManager {
         let contentType: String
         /// Resolves when the entire file has been written to disk.
         let downloadComplete: @Sendable () async throws -> Void
+        /// Cancels this exact transfer. A replacement transfer cannot be
+        /// cancelled accidentally because the closure carries its token.
+        let cancel: @Sendable () -> Void
+
+        init(
+            fileURL: URL,
+            totalBytes: Int64?,
+            contentType: String,
+            downloadComplete: @escaping @Sendable () async throws -> Void,
+            cancel: @escaping @Sendable () -> Void = {}
+        ) {
+            self.fileURL = fileURL
+            self.totalBytes = totalBytes
+            self.contentType = contentType
+            self.downloadComplete = downloadComplete
+            self.cancel = cancel
+        }
     }
+
+    /// Supersedes the singular streaming lane before any shared cache path is
+    /// recreated. The old file descriptor may finish writing its now-unlinked
+    /// inode, but it no longer owns a path, pin, subscriber, or finalization
+    /// token that can affect the replacement.
+    private func beginStreamingTransfer(episodeId: String, fileURL: URL) -> UUID {
+        cancelActiveStreamingTransfer()
+        let id = UUID()
+        activeStreamingTransfer = ActiveStreamingTransfer(
+            id: id,
+            episodeId: episodeId,
+            fileURL: fileURL,
+            task: nil
+        )
+        return id
+    }
+
+    private func isCurrentStreamingTransfer(
+        episodeId: String,
+        transferId: UUID
+    ) -> Bool {
+        activeStreamingTransfer?.id == transferId
+            && activeStreamingTransfer?.episodeId == episodeId
+    }
+
+    private func installStreamingTransferTask(
+        _ task: Task<Void, Never>,
+        episodeId: String,
+        transferId: UUID
+    ) {
+        guard isCurrentStreamingTransfer(
+            episodeId: episodeId,
+            transferId: transferId
+        ) else {
+            task.cancel()
+            return
+        }
+        activeStreamingTransfer?.task = task
+    }
+
+    private func cancelActiveStreamingTransfer() {
+        guard let active = activeStreamingTransfer else { return }
+        active.task?.cancel()
+        activeStreamingTransfer = nil
+        do {
+            try removeAllAudioArtifacts(for: active.episodeId)
+            deletePin(for: active.episodeId)
+        } catch {
+            // The incomplete pin is the fail-closed barrier. If any artifact
+            // cannot be removed, keep the pin so leftover partial bytes can
+            // never be reinterpreted as a legacy complete cache entry.
+            logger.error(
+                "Failed to remove cancelled stream artifacts for \(active.episodeId, privacy: .public); retaining incomplete pin: \(String(describing: error), privacy: .public)"
+            )
+        }
+        finishAudioDataSubscribers()
+    }
+
+    private func cancelStreamingTransfer(
+        episodeId: String,
+        transferId: UUID
+    ) {
+        guard isCurrentStreamingTransfer(
+            episodeId: episodeId,
+            transferId: transferId
+        ) else {
+            return
+        }
+        cancelActiveStreamingTransfer()
+    }
+
+    private func broadcastAudioData(
+        _ chunk: AudioDataChunk,
+        episodeId: String,
+        transferId: UUID
+    ) {
+        guard isCurrentStreamingTransfer(
+            episodeId: episodeId,
+            transferId: transferId
+        ) else {
+            return
+        }
+        broadcastAudioData(chunk)
+    }
+
+    private func broadcastStreamingProgress(
+        _ progress: DownloadProgress,
+        episodeId: String,
+        transferId: UUID
+    ) {
+        guard isCurrentStreamingTransfer(
+            episodeId: episodeId,
+            transferId: transferId
+        ) else {
+            return
+        }
+        broadcastProgress(progress)
+    }
+
+    /// Hashes and finalizes the canonical path while actor isolation prevents
+    /// a replacement from interleaving between the ownership check and the
+    /// synchronous filesystem reads. Returns `accepted == false` for a stale
+    /// detached pump, which must finish only its private completion stream.
+    private func finalizeStreamingTransfer(
+        episodeId: String,
+        transferId: UUID,
+        sourceURL: String,
+        etag: String?,
+        weakFingerprint: String,
+        bytesWritten: Int64,
+        context: DownloadContext?
+    ) async throws -> (accepted: Bool, strongHash: String?) {
+        guard let active = activeStreamingTransfer,
+              active.id == transferId,
+              active.episodeId == episodeId else {
+            return (false, nil)
+        }
+
+        let fileURL = active.fileURL
+        let strongHash = try? FileHasher.sha256(fileURL: fileURL)
+        try finalizeStreamingPin(
+            episodeId: episodeId,
+            fileURL: fileURL,
+            sourceURL: sourceURL,
+            etag: etag,
+            sha256: strongHash
+        )
+        if let strongHash {
+            setFingerprint(
+                episodeId: episodeId,
+                weak: weakFingerprint,
+                strong: strongHash
+            )
+        }
+
+        // Publish completion and release ownership before the optional
+        // scheduler/eviction awaits. At this point the full canonical artifact
+        // and its completeness pin are already immutable and serveable.
+        extensionCache[episodeId] = fileURL.pathExtension
+        activeStreamingTransfer = nil
+        finishAudioDataSubscribers()
+        touchAccess(episodeId: episodeId)
+        broadcastProgress(
+            DownloadProgress(
+                episodeId: episodeId,
+                bytesWritten: bytesWritten,
+                totalBytes: bytesWritten
+            )
+        )
+
+        if let strongHash {
+            await enqueueAnalysisIfNeeded(
+                episodeId: episodeId,
+                sourceFingerprint: strongHash,
+                context: context
+            )
+        }
+        try await evictIfNeeded()
+        return (true, strongHash)
+    }
+
+    #if DEBUG
+    /// Deterministic ownership seams for the stale-completion regression.
+    /// They exercise the same begin/finalize helpers as the network path
+    /// without depending on URLSession timing.
+    func _beginStreamingTransferForTesting(
+        episodeId: String,
+        fileExtension: String? = nil
+    ) -> UUID {
+        if let fileExtension {
+            extensionCache[episodeId] = fileExtension
+        }
+        return beginStreamingTransfer(
+            episodeId: episodeId,
+            fileURL: completeFileURL(for: episodeId)
+        )
+    }
+
+    func _setExtensionCacheForTesting(
+        episodeId: String,
+        fileExtension: String
+    ) {
+        extensionCache[episodeId] = fileExtension
+    }
+
+    func _isBackgroundDownloadInFlightForTesting(
+        episodeId: String
+    ) -> Bool {
+        bgInFlightEpisodes.contains(episodeId)
+    }
+
+    func _registerBackgroundTransferForTesting(
+        episodeId: String,
+        identity requestedIdentity: BackgroundTransferIdentity? = nil
+    ) -> BackgroundTransferIdentity {
+        let identity = requestedIdentity ?? BackgroundTransferIdentity(
+            sessionIdentifier: "test-session",
+            taskIdentifier: Int.random(in: 1...Int.max)
+        )
+        retiredBackgroundTransfers.remove(identity)
+        activeBackgroundTransfers[identity] = episodeId
+        bgInFlightEpisodes.insert(episodeId)
+        return identity
+    }
+
+    func _strongPinVerificationHashCountForTesting() -> Int {
+        strongPinVerificationHashCount
+    }
+
+    func _backgroundDownloadAdmissionCountForTesting() -> Int {
+        backgroundDownloadAdmissionCountForTesting
+    }
+
+    func _setAudioArtifactURLsForTesting(
+        episodeId: String,
+        candidates: [URL]?
+    ) {
+        audioArtifactURLsOverrideForTesting[episodeId] = candidates
+    }
+
+    func _setForcePinWriteFailureForTesting(_ enabled: Bool) {
+        forcePinWriteFailureForTesting = enabled
+    }
+
+    func _hasAccessIndexForTesting(episodeId: String) -> Bool {
+        accessLog[episodeId] != nil
+    }
+
+    func _analysisProtectionCountForTesting(
+        episodeId: String
+    ) -> Int {
+        analysisProtectedEpisodes[episodeId] ?? 0
+    }
+
+    func _finalizeStreamingTransferForTesting(
+        episodeId: String,
+        transferId: UUID,
+        bytesWritten: Int64
+    ) async -> Bool {
+        do {
+            return try await finalizeStreamingTransfer(
+                episodeId: episodeId,
+                transferId: transferId,
+                sourceURL: "https://example.invalid/\(episodeId).mp3",
+                etag: nil,
+                weakFingerprint: "test-weak",
+                bytesWritten: bytesWritten,
+                context: nil
+            ).accepted
+        } catch {
+            return false
+        }
+    }
+    #endif
 
     /// Downloads episode audio incrementally, returning the local file URL
     /// as soon as `playableThreshold` bytes have been written.
@@ -1130,23 +1663,88 @@ actor DownloadManager {
         playableThreshold: Int64 = DownloadManager.defaultPlayableThreshold,
         context: DownloadContext? = nil
     ) async throws -> StreamingDownloadResult {
-        let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
-        extensionCache[episodeId] = sourceExt
-
-        let completeURL = completeFileURL(for: episodeId)
-        if FileManager.default.fileExists(atPath: completeURL.path) {
-            touchAccess(episodeId: episodeId)
-            let uti = Self.utiForExtension(sourceExt)
-            // File size is the total for a complete file.
-            let attrs = try? FileManager.default.attributesOfItem(atPath: completeURL.path)
-            let size = (attrs?[.size] as? Int64)
-            return StreamingDownloadResult(fileURL: completeURL, totalBytes: size, contentType: uti, downloadComplete: {})
+        if let existing = activeDownloads[episodeId] {
+            existing.cancel()
+            activeDownloads[episodeId] = nil
         }
 
-        // Write directly to the final location so AVPlayer can read it.
+        let sourceExt = Self.cacheExtension(for: url)
+        extensionCache[episodeId] = sourceExt
+
+        // A playback request owns the singular streaming lane even when its
+        // target is already cached. This closes the replacement race where an
+        // older episode's byte pump could otherwise outlive the cached switch
+        // and later finish the new episode's global subscribers.
+        cancelActiveStreamingTransfer()
+
+        let completeURL = completeFileURL(for: episodeId)
+        // playhead-wrj8: completeness-gated cache-hit. A COMPLETE pinned
+        // artifact is served as-is (never re-streamed → the played bytes
+        // can't be swapped for a different DAI stitch). A mid-stream /
+        // truncated leftover (pin present but under-length) is NOT a
+        // cache-hit and falls through to a fresh stream below.
+        if let complete = servingURLIfComplete(for: episodeId) {
+            touchAccess(episodeId: episodeId)
+            let uti: String
+            switch pinReadState(for: episodeId) {
+            case .valid(let pin)
+                where pin.sourceURL.flatMap(URL.init(string:)) != nil:
+                let sourceURL = pin.sourceURL
+                    .flatMap(URL.init(string:))!
+                // Managed artifacts retain their true enclosure identity in
+                // the pin. This matters when a routing suffix was normalized
+                // to `.mp3` for cache discoverability: the filename is not
+                // evidence that the bytes are MP3.
+                uti = Self.playbackContentType(
+                    sourceURL: sourceURL,
+                    mimeType: nil
+                )
+            case .valid:
+                // A managed artifact with no source provenance may have been
+                // assigned the `.mp3` fallback solely for discoverability.
+                // Let AVFoundation inspect it instead of asserting MP3 bytes.
+                uti = "public.audio"
+            case .absent:
+                // Legacy no-pin files have no stronger provenance, so retain
+                // the historical on-disk-extension behavior.
+                uti = Self.utiForExtension(complete.pathExtension)
+            case .invalid:
+                // `servingURLIfComplete` fails closed for this case. Keep the
+                // branch total in case the sidecar changes between reads.
+                uti = "public.audio"
+            }
+            let attrs = try? FileManager.default.attributesOfItem(atPath: complete.path)
+            let size = (attrs?[.size] as? Int64)
+            return StreamingDownloadResult(fileURL: complete, totalBytes: size, contentType: uti, downloadComplete: {})
+        }
+
+        let transferId = beginStreamingTransfer(
+            episodeId: episodeId,
+            fileURL: completeURL
+        )
+
+        // Seed the fail-closed sidecar BEFORE creating/replacing anything at
+        // the canonical audio path. This ordering makes a crash at every
+        // later instruction safe: a file can never appear in the managed
+        // cache without either a valid incomplete or complete pin.
         let fm = FileManager.default
-        if fm.fileExists(atPath: completeURL.path) {
-            try fm.removeItem(at: completeURL)
+        do {
+            try requirePinWrite(
+                AudioAssetPin(
+                    expectedBytes: Int64.max,
+                    sha256: nil,
+                    sourceURL: url.absoluteString,
+                    etag: nil
+                ),
+                for: episodeId
+            )
+            try removeAllAudioArtifacts(for: episodeId)
+        } catch {
+            cancelStreamingTransfer(
+                episodeId: episodeId,
+                transferId: transferId
+            )
+            throw error
         }
         // playhead-h3h: create with explicit
         // `.completeUntilFirstUserAuthentication` rather than letting the
@@ -1158,18 +1756,100 @@ actor DownloadManager {
             contents: nil,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
         )
-        let fileHandle = try FileHandle(forWritingTo: completeURL)
+        let fileHandle: FileHandle
+        do {
+            fileHandle = try FileHandle(forWritingTo: completeURL)
+        } catch {
+            cancelStreamingTransfer(
+                episodeId: episodeId,
+                transferId: transferId
+            )
+            throw error
+        }
+        var didHandOffBytePump = false
+        defer {
+            if !didHandOffBytePump {
+                try? fileHandle.close()
+                cancelStreamingTransfer(
+                    episodeId: episodeId,
+                    transferId: transferId
+                )
+            }
+        }
+
+        // playhead-wrj8 (R1): seed an always-incomplete pin (Int64.max) the
+        // instant the empty file exists, BEFORE the network await below.
+        // Without it, `servingURLIfComplete` treats the freshly-created
+        // 0-byte / mid-connection file as complete-by-existence (no pin yet)
+        // for the whole connection-setup window, so a concurrent cache-hit
+        // reader could be handed a truncated file — the exact "serve a
+        // partial" hole the invariant forbids. The real Content-Length
+        // rewrites this a few lines down; `finalizeStreamingPin` stamps the
+        // true length at completion.
+        try requirePinWrite(
+            AudioAssetPin(
+                expectedBytes: Int64.max,
+                sha256: nil,
+                sourceURL: url.absoluteString,
+                etag: nil
+            ),
+            for: episodeId
+        )
 
         let request = URLRequest(url: url)
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        // playhead-xsdz.71 (Signal 1, additive): observe the enclosure's
+        // redirect chain when a recorder is wired. Behavior-preserving — the
+        // delegate only records hop hosts and follows the proposed redirect, so
+        // passing it (or `nil`) is byte-identical to today's `bytes(for:)`.
+        let redirectDelegate = makeRedirectRecordingDelegate(url: url, context: context)
+        let cancelTransfer: @Sendable () -> Void = { [weak self] in
+            Task {
+                await self?.cancelStreamingTransfer(
+                    episodeId: episodeId,
+                    transferId: transferId
+                )
+            }
+        }
+        let (bytes, response) = try await withTaskCancellationHandler {
+            try await URLSession.shared.bytes(
+                for: request,
+                delegate: redirectDelegate
+            )
+        } onCancel: {
+            cancelTransfer()
+        }
+        guard !Task.isCancelled,
+              isCurrentStreamingTransfer(
+            episodeId: episodeId,
+            transferId: transferId
+        ) else {
+            throw DownloadManagerError.cancelled
+        }
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             try? fileHandle.close()
-            try? fm.removeItem(at: completeURL)
+            do {
+                try removeAllAudioArtifacts(for: episodeId)
+                // Drop the seed pin only after proving no audio sibling
+                // remains. Otherwise partial bytes would become a legacy hit.
+                deletePin(for: episodeId)
+            } catch {
+                logger.error(
+                    "Failed to remove rejected stream artifacts for \(episodeId, privacy: .public); retaining incomplete pin: \(String(describing: error), privacy: .public)"
+                )
+            }
             throw DownloadManagerError.downloadFailed(episodeId, "HTTP \(code)")
         }
+
+        // playhead-xsdz.71 (Signal 1): record the observed redirect chain now
+        // that the response headers are in (the redirects completed during the
+        // `bytes(for:)` await). No-op unless a recorder is wired. Fired before
+        // the detached streaming body so it stays off the byte-copy loop.
+        recordDAIStitchChain(
+            delegate: redirectDelegate, context: context, finalHost: httpResponse.url?.host
+        )
 
         // Harvest HTTP metadata for weak fingerprinting.
         let reportedLength = httpResponse.expectedContentLength
@@ -1183,127 +1863,204 @@ actor DownloadManager {
         let weakFP = AudioFingerprint.makeWeak(url: url, metadata: metadata)
         fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: nil)
 
+        // playhead-wrj8: seed an INCOMPLETE pin — `expectedBytes` is the
+        // full Content-Length (or Int64.max when the server omits it).
+        // While the file grows below its size stays under `expectedBytes`,
+        // so `servingURLIfComplete` withholds it from every cache path
+        // (and a force-quit mid-stream leaves it withheld across relaunch,
+        // never serving a truncated file). `finalizeStreamingPin` rewrites
+        // it to the real length on completion.
+        try requirePinWrite(
+            AudioAssetPin(
+                expectedBytes: totalContentLength ?? Int64.max,
+                sha256: nil,
+                sourceURL: url.absoluteString,
+                etag: metadata.etag
+            ),
+            for: episodeId
+        )
+
         let signalURL = completeURL
         let threshold = min(playableThreshold, totalContentLength ?? playableThreshold)
-        let audioUTI = Self.utiForExtension(sourceExt)
+        let audioUTI = Self.playbackContentType(
+            sourceURL: url,
+            mimeType: httpResponse.mimeType
+        )
 
         // Completion continuation — signaled when the full file is written.
         let completionStream = AsyncStream<Result<Void, Error>>.makeStream()
-
-        // Playback-ready continuation — signaled when threshold is reached.
-        let result: StreamingDownloadResult = try await withCheckedThrowingContinuation { continuation in
-            let capturedLogger = self.logger
-            let capturedEpisodeId = episodeId
-            let completionContinuation = completionStream.1
-            Task.detached { [weak self] in
-                var bytesWritten: Int64 = 0
-                var signaled = false
-                var buffer = Data()
-                let flushSize = 64 * 1024
-
-                do {
-                    for try await byte in bytes {
-                        buffer.append(byte)
-
-                        if buffer.count >= flushSize {
-                            fileHandle.write(buffer)
-                            bytesWritten += Int64(buffer.count)
-                            await self?.broadcastAudioData(AudioDataChunk(
-                                episodeId: capturedEpisodeId,
-                                data: buffer,
-                                totalBytesWritten: bytesWritten
-                            ))
-                            buffer.removeAll(keepingCapacity: true)
-
-                            if !signaled, bytesWritten >= threshold {
-                                signaled = true
-                                capturedLogger.info("Playable threshold reached for \(capturedEpisodeId): \(bytesWritten) bytes")
-                                let waitForComplete: @Sendable () async throws -> Void = {
-                                    for await result in completionStream.0 {
-                                        switch result {
-                                        case .success: return
-                                        case .failure(let error): throw error
-                                        }
-                                    }
-                                }
-                                continuation.resume(returning: StreamingDownloadResult(
-                                    fileURL: signalURL,
-                                    totalBytes: totalContentLength,
-                                    contentType: audioUTI,
-                                    downloadComplete: waitForComplete
-                                ))
-                            }
-
-                            await self?.broadcastProgress(DownloadProgress(
-                                episodeId: capturedEpisodeId,
-                                bytesWritten: bytesWritten,
-                                totalBytes: totalContentLength ?? bytesWritten
-                            ))
-                        }
+        let waitForComplete: @Sendable () async throws -> Void = {
+            try await withTaskCancellationHandler {
+                for await result in completionStream.0 {
+                    switch result {
+                    case .success: return
+                    case .failure(let error): throw error
                     }
-
-                    // Flush remaining bytes.
-                    if !buffer.isEmpty {
-                        fileHandle.write(buffer)
-                        bytesWritten += Int64(buffer.count)
-                        await self?.broadcastAudioData(AudioDataChunk(
-                            episodeId: capturedEpisodeId,
-                            data: buffer,
-                            totalBytesWritten: bytesWritten
-                        ))
-                    }
-                    try fileHandle.close()
-
-                    // If file was smaller than threshold, signal both at once.
-                    if !signaled {
-                        continuation.resume(returning: StreamingDownloadResult(
-                            fileURL: signalURL,
-                            totalBytes: totalContentLength,
-                            contentType: audioUTI,
-                            downloadComplete: {}
-                        ))
-                    }
-
-                    // Compute strong fingerprint now that file is complete.
-                    if let strongHash = try? FileHasher.sha256(fileURL: signalURL) {
-                        await self?.setFingerprint(
-                            episodeId: capturedEpisodeId, weak: weakFP, strong: strongHash
-                        )
-                        // Enqueue pre-analysis if scheduler is wired up.
-                        await self?.enqueueAnalysisIfNeeded(
-                            episodeId: capturedEpisodeId,
-                            sourceFingerprint: strongHash,
-                            context: context
-                        )
-                        capturedLogger.info("Download complete for \(capturedEpisodeId): \(bytesWritten) bytes, hash=\(strongHash.prefix(16))...")
-                    }
-
-                    await self?.finishAudioDataSubscribers()
-                    await self?.touchAccess(episodeId: capturedEpisodeId)
-                    try await self?.evictIfNeeded()
-
-                    await self?.broadcastProgress(DownloadProgress(
-                        episodeId: capturedEpisodeId,
-                        bytesWritten: bytesWritten,
-                        totalBytes: bytesWritten
-                    ))
-
-                    // Signal download complete.
-                    completionContinuation.yield(.success(()))
-                    completionContinuation.finish()
-                } catch {
-                    try? fileHandle.close()
-                    if !signaled {
-                        continuation.resume(throwing: error)
-                    }
-                    await self?.finishAudioDataSubscribers()
-                    completionContinuation.yield(.failure(error))
-                    completionContinuation.finish()
-                    capturedLogger.error("Streaming download failed for \(capturedEpisodeId): \(error)")
                 }
+            } onCancel: {
+                cancelTransfer()
             }
         }
 
+        // Playback-ready continuation — signaled when threshold is reached.
+        let result: StreamingDownloadResult = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let capturedLogger = self.logger
+                let capturedEpisodeId = episodeId
+                // playhead-wrj8: carry the source URL + validator into the
+                // detached completion so the finalized pin records them.
+                let capturedSourceURL = url.absoluteString
+                let capturedEtag = metadata.etag
+                let completionContinuation = completionStream.1
+                let task = Task.detached { [weak self] in
+                    var bytesWritten: Int64 = 0
+                    var signaled = false
+                    var buffer = Data()
+                    let flushSize = 64 * 1024
+
+                    do {
+                        for try await byte in bytes {
+                            buffer.append(byte)
+
+                            if buffer.count >= flushSize {
+                                guard !Task.isCancelled,
+                                    await self?.isCurrentStreamingTransfer(
+                                        episodeId: capturedEpisodeId,
+                                        transferId: transferId
+                                    ) == true
+                                else {
+                                    throw DownloadManagerError.cancelled
+                                }
+                                fileHandle.write(buffer)
+                                bytesWritten += Int64(buffer.count)
+                                await self?.broadcastAudioData(
+                                    AudioDataChunk(
+                                        episodeId: capturedEpisodeId,
+                                        data: buffer,
+                                        totalBytesWritten: bytesWritten
+                                    ),
+                                    episodeId: capturedEpisodeId,
+                                    transferId: transferId
+                                )
+                                buffer.removeAll(keepingCapacity: true)
+
+                                if !signaled, bytesWritten >= threshold {
+                                    signaled = true
+                                    capturedLogger.info(
+                                        "Playable threshold reached for \(capturedEpisodeId): \(bytesWritten) bytes")
+                                    continuation.resume(
+                                        returning: StreamingDownloadResult(
+                                            fileURL: signalURL,
+                                            totalBytes: totalContentLength,
+                                            contentType: audioUTI,
+                                            downloadComplete: waitForComplete,
+                                            cancel: cancelTransfer
+                                        ))
+                                }
+
+                                await self?.broadcastStreamingProgress(
+                                    DownloadProgress(
+                                        episodeId: capturedEpisodeId,
+                                        bytesWritten: bytesWritten,
+                                        totalBytes: totalContentLength ?? bytesWritten
+                                    ),
+                                    episodeId: capturedEpisodeId,
+                                    transferId: transferId
+                                )
+                            }
+                        }
+
+                        // Flush remaining bytes.
+                        if !buffer.isEmpty {
+                            guard !Task.isCancelled,
+                                await self?.isCurrentStreamingTransfer(
+                                    episodeId: capturedEpisodeId,
+                                    transferId: transferId
+                                ) == true
+                            else {
+                                throw DownloadManagerError.cancelled
+                            }
+                            fileHandle.write(buffer)
+                            bytesWritten += Int64(buffer.count)
+                            await self?.broadcastAudioData(
+                                AudioDataChunk(
+                                    episodeId: capturedEpisodeId,
+                                    data: buffer,
+                                    totalBytesWritten: bytesWritten
+                                ),
+                                episodeId: capturedEpisodeId,
+                                transferId: transferId
+                            )
+                        }
+                        try fileHandle.close()
+
+                        // If file was smaller than threshold, signal both at once.
+                        if !signaled {
+                            guard
+                                await self?.isCurrentStreamingTransfer(
+                                    episodeId: capturedEpisodeId,
+                                    transferId: transferId
+                                ) == true
+                            else {
+                                throw DownloadManagerError.cancelled
+                            }
+                            signaled = true
+                            continuation.resume(
+                                returning: StreamingDownloadResult(
+                                    fileURL: signalURL,
+                                    totalBytes: totalContentLength,
+                                    contentType: audioUTI,
+                                    downloadComplete: waitForComplete,
+                                    cancel: cancelTransfer
+                                ))
+                        }
+
+                        let completion = try await self?.finalizeStreamingTransfer(
+                            episodeId: capturedEpisodeId,
+                            transferId: transferId,
+                            sourceURL: capturedSourceURL,
+                            etag: capturedEtag,
+                            weakFingerprint: weakFP,
+                            bytesWritten: bytesWritten,
+                            context: context
+                        )
+                        guard completion?.accepted == true else {
+                            throw DownloadManagerError.cancelled
+                        }
+                        if let strongHash = completion?.strongHash {
+                            capturedLogger.info(
+                                "Download complete for \(capturedEpisodeId): \(bytesWritten) bytes, hash=\(strongHash.prefix(16))..."
+                            )
+                        }
+
+                        // Signal download complete.
+                        completionContinuation.yield(.success(()))
+                        completionContinuation.finish()
+                    } catch {
+                        try? fileHandle.close()
+                        if !signaled {
+                            continuation.resume(throwing: error)
+                        }
+                        await self?.cancelStreamingTransfer(
+                            episodeId: capturedEpisodeId,
+                            transferId: transferId
+                        )
+                        completionContinuation.yield(.failure(error))
+                        completionContinuation.finish()
+                        capturedLogger.error("Streaming download failed for \(capturedEpisodeId): \(error)")
+                    }
+                }
+                self.installStreamingTransferTask(
+                    task,
+                    episodeId: capturedEpisodeId,
+                    transferId: transferId
+                )
+            }
+        } onCancel: {
+            cancelTransfer()
+        }
+
+        didHandOffBytePump = true
         return result
     }
 
@@ -1347,15 +2104,53 @@ actor DownloadManager {
         }
     }
 
+    /// Content type advertised to AVAsset's resource loader. Cache-path
+    /// normalization and media typing are intentionally separate: a routing
+    /// URL ending in `.php` is stored under a discoverable `.mp3` fallback,
+    /// but must not be asserted to contain MP3 bytes. Prefer a known source
+    /// suffix, then the HTTP MIME type, and otherwise use the neutral audio
+    /// supertype so AVFoundation can inspect the stream.
+    static func playbackContentType(
+        sourceURL: URL,
+        mimeType: String?
+    ) -> String {
+        let sourceExtension = sourceURL.pathExtension.lowercased()
+        if knownAudioExtensions.contains(sourceExtension) {
+            return utiForExtension(sourceExtension)
+        }
+        switch mimeType?.lowercased() {
+        case "audio/mpeg", "audio/mp3":
+            return "public.mp3"
+        case "audio/mp4", "audio/m4a", "audio/x-m4a":
+            return "public.mpeg-4-audio"
+        case "audio/aac", "audio/aacp":
+            return "public.aac-audio"
+        case "audio/wav", "audio/x-wav":
+            return "com.microsoft.waveform-audio"
+        case "audio/ogg":
+            return "org.xiph.ogg"
+        case "audio/opus":
+            return "org.xiph.opus"
+        default:
+            return "public.audio"
+        }
+    }
+
     // MARK: - Background Pre-Cache
 
     /// Queues a background download for an episode (pre-caching).
     /// Completes even if the app is suspended.
     func backgroundDownload(episodeId: String, from url: URL) {
-        let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+        guard activeStreamingTransfer?.episodeId != episodeId else {
+            logger.debug(
+                "Skipping background download for \(episodeId): foreground stream active"
+            )
+            return
+        }
+
+        let sourceExt = Self.cacheExtension(for: url)
         extensionCache[episodeId] = sourceExt
-        let completeURL = completeFileURL(for: episodeId)
-        guard !FileManager.default.fileExists(atPath: completeURL.path) else {
+        guard servingURLIfComplete(for: episodeId) == nil else {
             logger.debug("Skipping background download for \(episodeId): already cached")
             return
         }
@@ -1378,6 +2173,14 @@ actor DownloadManager {
             : backgroundSession(for: .legacy)
         let task = session.downloadTask(with: url)
         task.taskDescription = episodeId
+        registerBackgroundTransfer(
+            task: task,
+            session: session,
+            episodeId: episodeId
+        )
+        #if DEBUG
+        backgroundDownloadAdmissionCountForTesting += 1
+        #endif
         bgInFlightEpisodes.insert(episodeId)
         // playhead-3xtw (L2): reset the progress high-water mark for a fresh
         // transfer so a retry's early ticks aren't dropped as "stale".
@@ -1389,12 +2192,259 @@ actor DownloadManager {
     // MARK: - Cancel
 
     /// Cancels an active download for the given episode.
-    func cancelDownload(episodeId: String) {
+    func cancelDownload(episodeId: String) async {
+        var cancelled = false
+
+        if activeStreamingTransfer?.episodeId == episodeId {
+            cancelActiveStreamingTransfer()
+            cancelled = true
+        }
+
         if let task = activeDownloads[episodeId] {
             task.cancel()
             activeDownloads[episodeId] = nil
+            cancelled = true
+        }
+
+        if await retireBackgroundTransfers(episodeId: episodeId) {
+            cancelled = true
+        }
+
+        if cancelled {
             logger.info("Cancelled download for \(episodeId)")
         }
+    }
+
+    private func backgroundTransferIdentity(
+        task: URLSessionTask,
+        session: URLSession
+    ) -> BackgroundTransferIdentity {
+        BackgroundTransferIdentity(
+            sessionIdentifier: session.configuration.identifier ?? "",
+            taskIdentifier: task.taskIdentifier
+        )
+    }
+
+    func registerBackgroundTransfer(
+        task: URLSessionTask,
+        session: URLSession,
+        episodeId: String
+    ) {
+        let identity = backgroundTransferIdentity(task: task, session: session)
+        retiredBackgroundTransfers.remove(identity)
+        activeBackgroundTransfers[identity] = episodeId
+        bgInFlightEpisodes.insert(episodeId)
+    }
+
+    /// Cancels every matching OS-owned background task and retires both the
+    /// enumerated identities and any completion already staged for an actor
+    /// hop. All three known session identifiers are instantiated here
+    /// deliberately: explicit deletion is not latency-sensitive like the
+    /// launch scan, and must find tasks retained by an older process.
+    @discardableResult
+    private func retireBackgroundTransfers(
+        episodeId: String?
+    ) async -> Bool {
+        if let episodeId {
+            backgroundJournalFinalizations[episodeId]?.task.cancel()
+        } else {
+            for finalization in
+                backgroundJournalFinalizations.values {
+                finalization.task.cancel()
+            }
+        }
+        let roles: [BackgroundSessionRole] = [
+            .interactive, .maintenance, .legacy,
+        ]
+        var sessions: [URLSession] = []
+        var seenSessionIdentifiers: Set<String> = []
+        for role in roles {
+            let session = backgroundSession(for: role)
+            let identifier = session.configuration.identifier ?? ""
+            if seenSessionIdentifiers.insert(identifier).inserted {
+                sessions.append(session)
+            }
+        }
+
+        let taskLists = await withTaskGroup(of: (URLSession, [URLSessionTask]).self) {
+            group in
+            for session in sessions {
+                group.addTask {
+                    (session, await session.allTasks)
+                }
+            }
+            var result: [(URLSession, [URLSessionTask])] = []
+            for await item in group {
+                result.append(item)
+            }
+            return result
+        }
+
+        var retiredAny = false
+        for (session, tasks) in taskLists {
+            for task in tasks {
+                guard let taskEpisodeId = task.taskDescription,
+                      episodeId == nil || taskEpisodeId == episodeId
+                else {
+                    continue
+                }
+                let identity = backgroundTransferIdentity(
+                    task: task,
+                    session: session
+                )
+                retiredBackgroundTransfers.insert(identity)
+                activeBackgroundTransfers.removeValue(forKey: identity)
+                task.cancel()
+                retiredAny = true
+            }
+        }
+
+        // A completed task can disappear from URLSession.allTasks after its
+        // delegate staged bytes but before the actor receives that callback.
+        // Retire the manager's admitted identity map as a second source.
+        let tracked = activeBackgroundTransfers.filter {
+            episodeId == nil || $0.value == episodeId
+        }
+        for (identity, _) in tracked {
+            retiredBackgroundTransfers.insert(identity)
+            activeBackgroundTransfers.removeValue(forKey: identity)
+            retiredAny = true
+        }
+
+        if let episodeId {
+            backgroundIdentityRequiredEpisodes.insert(episodeId)
+            bgInFlightEpisodes.remove(episodeId)
+            lastBackgroundProgressBytes.removeValue(forKey: episodeId)
+        } else {
+            requireRegisteredBackgroundIdentityAfterBulkClear = true
+            bgInFlightEpisodes.removeAll()
+            lastBackgroundProgressBytes.removeAll()
+        }
+        return retiredAny
+    }
+
+    private func backgroundCallbackIsRetired(
+        identity: BackgroundTransferIdentity,
+        episodeId: String
+    ) -> Bool {
+        if retiredBackgroundTransfers.contains(identity) {
+            return true
+        }
+        let identityIsRegistered =
+            activeBackgroundTransfers[identity] == episodeId
+        if requireRegisteredBackgroundIdentityAfterBulkClear,
+           !identityIsRegistered {
+            return true
+        }
+        if backgroundIdentityRequiredEpisodes.contains(episodeId),
+           !identityIsRegistered {
+            return true
+        }
+        return false
+    }
+
+    private func backgroundCompletionLostOwnership(
+        identity: BackgroundTransferIdentity?,
+        episodeId: String,
+        capturedCacheOwnershipGeneration: UInt64
+    ) -> Bool {
+        if cacheOwnershipGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] != capturedCacheOwnershipGeneration {
+            return true
+        }
+        guard let identity else { return false }
+        return backgroundCallbackIsRetired(
+            identity: identity,
+            episodeId: episodeId
+        )
+    }
+
+    private func finishBackgroundTransfer(
+        identity: BackgroundTransferIdentity?,
+        episodeId: String
+    ) {
+        if let identity {
+            activeBackgroundTransfers.removeValue(forKey: identity)
+            retiredBackgroundTransfers.remove(identity)
+        }
+        if !activeBackgroundTransfers.values.contains(episodeId) {
+            bgInFlightEpisodes.remove(episodeId)
+        }
+    }
+
+    private func handleBackgroundDownloadFailed(
+        _ failure: BackgroundTransferFailure
+    ) async {
+        guard !backgroundCallbackIsRetired(
+            identity: failure.identity,
+            episodeId: failure.episodeId
+        ) else {
+            // A cancellation can itself produce resume data. Explicit cache
+            // deletion is terminal for that transfer, so remove any older
+            // retained blob and never persist the cancellation payload.
+            try? deleteResumeData(episodeId: failure.episodeId)
+            finishBackgroundTransfer(
+                identity: failure.identity,
+                episodeId: failure.episodeId
+            )
+            return
+        }
+
+        if let resumeData = failure.resumeData {
+            do {
+                try persistResumeData(
+                    episodeId: failure.episodeId,
+                    data: resumeData,
+                    sourceURL: failure.sourceURL,
+                    validator: failure.metadata
+                )
+            } catch {
+                Logger(
+                    subsystem: "com.playhead", category: "ForceQuitResume"
+                ).error("persistResumeData (harvest) failed for \(failure.episodeId, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
+
+        // Release ownership before the first suspension below so a retry is
+        // admitted immediately after resume persistence has completed.
+        finishBackgroundTransfer(
+            identity: failure.identity,
+            episodeId: failure.episodeId
+        )
+        await recordBackgroundFailure(
+            episodeId: failure.episodeId,
+            cause: failure.cause,
+            errorDescription: failure.errorDescription,
+            bytesProcessed: failure.bytesReceived,
+            stage: failure.stage
+        )
+    }
+
+    private func recordBackgroundFailure(
+        episodeId: String,
+        cause: InternalMissCause,
+        errorDescription: String,
+        bytesProcessed: Int,
+        stage: String
+    ) async {
+        let metadata = await SliceCompletionInstrumentation.recordFailed(
+            cause: cause,
+            deviceClass: DeviceClass.detect(),
+            sliceDurationMs: 0,
+            bytesProcessed: bytesProcessed,
+            shardsCompleted: 0,
+            extras: [
+                "stage": stage,
+                "error": errorDescription,
+            ]
+        )
+        await workJournalRecorder.recordFailed(
+            episodeId: episodeId,
+            cause: cause,
+            metadataJSON: metadata.encodeJSON()
+        )
     }
 
     // MARK: - File Locations
@@ -1404,6 +2454,22 @@ actor DownloadManager {
     static func safeFilename(for episodeId: String) -> String {
         let digest = SHA256.hash(data: Data(episodeId.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Stable, collision-resistant staging name for one OS-owned background
+    /// transfer. Episode identity alone is insufficient because duplicate
+    /// same-episode tasks can coexist across URLSession roles or process
+    /// rehydration. Hash the session/task identity so it is safe as a path
+    /// component and cannot collide with another task's actor-hop bytes.
+    static func backgroundStagingFilename(
+        episodeId: String,
+        fileExtension: String,
+        identity: BackgroundTransferIdentity
+    ) -> String {
+        let identityMaterial =
+            "\(identity.sessionIdentifier)\u{0}\(identity.taskIdentifier)"
+        let identityHash = safeFilename(for: identityMaterial)
+        return "\(safeFilename(for: episodeId)).\(identityHash).\(fileExtension)"
     }
 
     /// URL for a partially-downloaded episode file.
@@ -1423,6 +2489,387 @@ actor DownloadManager {
         "mp3", "m4a", "aac", "wav", "caf", "aiff", "mp4", "ogg", "opus"
     ]
 
+    /// Keep every newly-written artifact inside the extension set used by
+    /// sibling discovery, serving, cleanup, and eviction. Podcast enclosure
+    /// URLs commonly end in routing suffixes such as `.php` or `.ashx`; those
+    /// bytes are still audio, and defaulting their cache name to `.mp3`
+    /// preserves the same header-sniffing fallback used for extensionless
+    /// URLs without creating an artifact the cache can no longer find.
+    static func cacheExtension(for url: URL) -> String {
+        let candidate = url.pathExtension.lowercased()
+        return knownAudioExtensions.contains(candidate) ? candidate : "mp3"
+    }
+
+    // MARK: - Completeness pin (playhead-wrj8)
+
+    /// File extension for the per-episode completeness pin sidecar.
+    static let pinExtension = "pin"
+
+    /// URL of the `<hash>.pin` completeness sidecar for an episode. Shares
+    /// the audio file's hashed basename but a distinct extension, so it is
+    /// never mistaken for the audio file by `resolveExtension`/eviction/etc.
+    func pinFileURL(for episodeId: String) -> URL {
+        completeDirectory
+            .appendingPathComponent("\(Self.safeFilename(for: episodeId)).\(Self.pinExtension)")
+    }
+
+    private enum PinReadState {
+        case absent
+        case valid(AudioAssetPin)
+        case invalid
+    }
+
+    /// Separates a genuinely absent legacy sidecar from an unreadable or
+    /// malformed managed sidecar. Collapsing both to `nil` makes corruption
+    /// fail open by reclassifying a partial managed file as legacy.
+    private func pinReadState(for episodeId: String) -> PinReadState {
+        let url = pinFileURL(for: episodeId)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return .absent
+        }
+        guard let data = try? Data(contentsOf: url),
+              let pin = try? JSONDecoder().decode(AudioAssetPin.self, from: data) else {
+            return .invalid
+        }
+        return .valid(pin)
+    }
+
+    /// Loads a valid persisted completeness pin, or `nil` for callers that
+    /// only need the decoded value. Completeness decisions use
+    /// `pinReadState(for:)` so malformed pins never inherit legacy behavior.
+    func loadPin(for episodeId: String) -> AudioAssetPin? {
+        guard case .valid(let pin) = pinReadState(for: episodeId) else {
+            return nil
+        }
+        return pin
+    }
+
+    /// Atomically writes/overwrites the completeness pin for an episode.
+    @discardableResult
+    func writePin(_ pin: AudioAssetPin, for episodeId: String) -> Bool {
+        strongPinVerifications[episodeId] = nil
+        #if DEBUG
+        guard !forcePinWriteFailureForTesting else { return false }
+        #endif
+        let url = pinFileURL(for: episodeId)
+        guard let data = try? JSONEncoder().encode(pin) else { return false }
+        do {
+            let dir = url.deletingLastPathComponent()
+            if !FileManager.default.fileExists(atPath: dir.path) {
+                try FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true
+                )
+            }
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            logger.error(
+                "Failed to write completeness pin for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    /// Production placements must not expose bytes unless their fail-closed
+    /// sidecar was durably written. Tests may still call `writePin` directly
+    /// and inspect its result.
+    private func requirePinWrite(
+        _ pin: AudioAssetPin,
+        for episodeId: String
+    ) throws {
+        guard writePin(pin, for: episodeId) else {
+            throw DownloadManagerError.downloadFailed(
+                episodeId,
+                "Failed to persist completeness pin"
+            )
+        }
+    }
+
+    /// Removes the completeness pin for an episode (no-op when absent).
+    func deletePin(for episodeId: String) {
+        strongPinVerifications[episodeId] = nil
+        try? FileManager.default.removeItem(at: pinFileURL(for: episodeId))
+    }
+
+    /// playhead-wrj8: finalize a streaming download's pin to the actual
+    /// on-disk length so `servingURLIfComplete` starts serving it. Reads the
+    /// true size from disk (authoritative — the streamed byte counter could
+    /// drift) and stamps the optional strong hash. Called from the detached
+    /// streaming-completion task.
+    fileprivate func finalizeStreamingPin(
+        episodeId: String,
+        fileURL: URL,
+        sourceURL: String,
+        etag: String?,
+        sha256: String?
+    ) throws {
+        let attrs = try? FileManager.default.attributesOfItem(
+            atPath: fileURL.path
+        )
+        let size = (attrs?[.size] as? Int64) ?? 0
+        guard size > 0 else {
+            // No bytes on disk — leave any incomplete pin in place so the
+            // file stays withheld rather than being marked complete-at-zero.
+            throw DownloadManagerError.downloadFailed(
+                episodeId,
+                "Cannot finalize an empty streamed artifact"
+            )
+        }
+        try requirePinWrite(
+            AudioAssetPin(
+                expectedBytes: size,
+                sha256: sha256,
+                sourceURL: sourceURL,
+                etag: etag
+            ),
+            for: episodeId
+        )
+        if let sha256 {
+            rememberStrongPinVerification(
+                episodeId: episodeId,
+                fileURL: fileURL,
+                expectedBytes: size,
+                expectedHash: sha256
+            )
+        }
+    }
+
+    /// On-disk byte length of the complete audio file, or `nil` if absent.
+    private func completeFileSize(for episodeId: String) -> Int64? {
+        fileSize(at: completeFileURL(for: episodeId))
+    }
+
+    private func fileSize(at url: URL) -> Int64? {
+        guard let attrs = try? FileManager.default.attributesOfItem(
+            atPath: url.path
+        ) else {
+            return nil
+        }
+        return (attrs[.size] as? Int64)
+    }
+
+    private func listedAudioArtifactURLs(for episodeId: String) throws -> [URL] {
+        let prefix = Self.safeFilename(for: episodeId)
+        return try FileManager.default.contentsOfDirectory(
+            at: completeDirectory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ).filter {
+            $0.deletingPathExtension().lastPathComponent == prefix
+                && Self.knownAudioExtensions.contains(
+                    $0.pathExtension.lowercased()
+                )
+        }.sorted {
+            $0.lastPathComponent < $1.lastPathComponent
+        }
+    }
+
+    /// Read paths fail closed: an unavailable directory simply yields no
+    /// serveable candidate. Destructive paths use the throwing enumerator
+    /// below so they never mistake "could not inspect" for "nothing remains."
+    private func audioArtifactURLs(for episodeId: String) -> [URL] {
+        #if DEBUG
+        if let override = audioArtifactURLsOverrideForTesting[episodeId] {
+            return override
+        }
+        #endif
+        return (try? listedAudioArtifactURLs(for: episodeId)) ?? []
+    }
+
+    /// Removes every supported-extension artifact sharing this episode's
+    /// canonical basename. Internal so force-quit recovery can establish a
+    /// genuinely clean target before dropping the shared completeness pin.
+    func removeAllAudioArtifacts(for episodeId: String) throws {
+        strongPinVerifications[episodeId] = nil
+        for artifact in try listedAudioArtifactURLs(for: episodeId) {
+            try FileManager.default.removeItem(at: artifact)
+        }
+        guard try listedAudioArtifactURLs(for: episodeId).isEmpty else {
+            throw DownloadManagerError.downloadFailed(
+                episodeId,
+                "Audio artifacts remain after cleanup"
+            )
+        }
+    }
+
+    private func strongPinVerification(
+        fileURL: URL,
+        expectedBytes: Int64,
+        expectedHash: String
+    ) -> StrongPinVerification? {
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: fileURL.path
+        ) else {
+            return nil
+        }
+        let size = (attributes[.size] as? NSNumber)?.int64Value
+        guard size == expectedBytes else { return nil }
+        return StrongPinVerification(
+            path: fileURL.path,
+            expectedHash: expectedHash.lowercased(),
+            expectedBytes: expectedBytes,
+            modificationDate: attributes[.modificationDate] as? Date,
+            fileNumber: (attributes[.systemFileNumber] as? NSNumber)?
+                .uint64Value
+        )
+    }
+
+    private func rememberStrongPinVerification(
+        episodeId: String,
+        fileURL: URL,
+        expectedBytes: Int64,
+        expectedHash: String
+    ) {
+        strongPinVerifications[episodeId] = strongPinVerification(
+            fileURL: fileURL,
+            expectedBytes: expectedBytes,
+            expectedHash: expectedHash
+        )
+    }
+
+    private func strongPinMatches(
+        episodeId: String,
+        fileURL: URL,
+        expectedBytes: Int64,
+        expectedHash: String
+    ) -> Bool {
+        guard let verification = strongPinVerification(
+            fileURL: fileURL,
+            expectedBytes: expectedBytes,
+            expectedHash: expectedHash
+        ) else {
+            strongPinVerifications[episodeId] = nil
+            return false
+        }
+        if strongPinVerifications[episodeId] == verification {
+            return true
+        }
+        #if DEBUG
+        strongPinVerificationHashCount += 1
+        #endif
+        guard let actualHash = try? FileHasher.sha256(fileURL: fileURL),
+              actualHash.lowercased() == expectedHash.lowercased()
+        else {
+            strongPinVerifications[episodeId] = nil
+            return false
+        }
+        strongPinVerifications[episodeId] = verification
+        return true
+    }
+
+    private static func uniqueWeakPinCandidate(
+        candidates: [URL],
+        sourceURL: String?
+    ) -> URL? {
+        guard let sourceExtension = sourceURL
+            .flatMap(URL.init(string:))
+            .map(cacheExtension(for:))
+        else {
+            return nil
+        }
+        let matches = candidates.filter {
+            $0.pathExtension.lowercased() == sourceExtension
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    /// playhead-wrj8: the single completeness gate. Returns the audio file
+    /// URL ONLY when the episode has a fully-downloaded, serveable artifact:
+    ///
+    ///   * file present AND a pin exists → serveable iff the on-disk length
+    ///     reached the pin's `expectedBytes` (a truncated / mid-stream /
+    ///     interrupted file has fewer bytes and is withheld);
+    ///   * file present AND no pin → treated as complete-by-existence
+    ///     (legacy files downloaded before wrj8), so the change is
+    ///     non-destructive;
+    ///   * file absent → `nil`.
+    ///
+    /// Every "is this cached?" and "may I overwrite this?" decision routes
+    /// through here so playback, analysis, and the download writers all
+    /// agree on exactly one immutable artifact per episode.
+    func servingURLIfComplete(for episodeId: String) -> URL? {
+        // A progressive transfer owns a mutable canonical path until
+        // `finalizeStreamingTransfer` closes the file, rewrites the final pin,
+        // and releases this token. In particular, the growing file can equal a
+        // server-supplied Content-Length just before the byte pump reaches its
+        // completion boundary. Never let that transient equality promote a
+        // still-owned path through the ordinary immutable-cache surface.
+        guard activeStreamingTransfer?.episodeId != episodeId else {
+            return nil
+        }
+
+        let candidates = audioArtifactURLs(for: episodeId).filter {
+            fileSize(at: $0) != nil
+        }
+
+        guard !candidates.isEmpty else { return nil }
+
+        let selected: URL
+        switch pinReadState(for: episodeId) {
+        case .invalid:
+            // A sidecar exists, so this is a managed artifact. Corruption or
+            // unreadability must withhold it; only genuine absence receives
+            // the legacy compatibility behavior.
+            return nil
+        case .valid(let pin):
+            guard pin.expectedBytes > 0 else { return nil }
+            let completeCandidates = candidates.filter {
+                // A managed weak pin is a byte-exact completeness claim.
+                // Under-length is incomplete; over-length is corruption or a
+                // different stitch and must not be accepted merely because it
+                // crossed the expected threshold. Strong pins receive the
+                // hash check below as an additional identity proof.
+                (fileSize(at: $0) ?? -1) == pin.expectedBytes
+            }
+            guard !completeCandidates.isEmpty else { return nil }
+
+            if let expectedHash = pin.sha256 {
+                // Size is completeness, not identity. Validate the strong pin
+                // even when only one extension candidate exists; otherwise a
+                // lone wrong-stitch sibling with the same length is accepted.
+                guard let hashMatch = completeCandidates.first(where: {
+                    strongPinMatches(
+                        episodeId: episodeId,
+                        fileURL: $0,
+                        expectedBytes: pin.expectedBytes,
+                        expectedHash: expectedHash
+                    )
+                }) else {
+                    return nil
+                }
+                selected = hashMatch
+            } else if completeCandidates.count == 1 {
+                selected = completeCandidates[0]
+            } else if let sourceMatch = Self.uniqueWeakPinCandidate(
+                candidates: completeCandidates,
+                sourceURL: pin.sourceURL
+            ) {
+                selected = sourceMatch
+            } else {
+                // A weak pin with no unique canonical sibling cannot
+                // authenticate an arbitrary same-sized file. This includes
+                // case-variant siblings whose normalized extensions collide.
+                return nil
+            }
+        case .absent:
+            // Legacy no-pin artifacts remain non-destructively serveable even
+            // when a refreshed enclosure URL changes its extension, but only
+            // while exactly one supported-extension sibling exists. With no
+            // pin there is no identity evidence that can choose between
+            // multiple candidates, so arbitrary sorted-first selection would
+            // risk playing a stale or differently stitched asset.
+            guard candidates.count == 1 else { return nil }
+            selected = candidates[0]
+        }
+
+        // Preserve the on-disk extension spelling. Bootstrap deliberately
+        // accepts supported extensions case-insensitively; normalizing the
+        // selected path to lowercase here would make `completeFileURL` point
+        // at a different, nonexistent sibling on a case-sensitive volume.
+        extensionCache[episodeId] = selected.pathExtension
+        return selected
+    }
+
     /// Resolve the file extension for an episode. Checks the in-memory cache
     /// first, then scans the complete directory for a matching file.
     private func resolveExtension(for episodeId: String) -> String {
@@ -1435,7 +2882,7 @@ actor DownloadManager {
         if let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) {
             for file in files where file.hasPrefix(prefix) {
                 let ext = (file as NSString).pathExtension
-                if Self.knownAudioExtensions.contains(ext) {
+                if Self.knownAudioExtensions.contains(ext.lowercased()) {
                     extensionCache[episodeId] = ext
                     return ext
                 }
@@ -1445,16 +2892,18 @@ actor DownloadManager {
     }
 
     /// Returns the cached file URL if the episode is fully downloaded.
+    /// playhead-wrj8: gated on completeness (a truncated / mid-stream file
+    /// no longer reads as "cached"), so playback + analysis never resolve a
+    /// partial artifact.
     func cachedFileURL(for episodeId: String) -> URL? {
-        let url = completeFileURL(for: episodeId)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard let url = servingURLIfComplete(for: episodeId) else { return nil }
         touchAccess(episodeId: episodeId)
         return url
     }
 
     /// Returns true if the episode audio is fully cached on disk.
     func isCached(episodeId: String) -> Bool {
-        FileManager.default.fileExists(atPath: completeFileURL(for: episodeId).path)
+        servingURLIfComplete(for: episodeId) != nil
     }
 
     /// Returns the set of episode IDs that have fully-downloaded cached audio.
@@ -1468,22 +2917,11 @@ actor DownloadManager {
     /// file is present on disk.
     ///
     /// Unlike `allCachedEpisodeIds()`, this does not depend on the LRU access
-    /// log being keyed by episode ID; Activity already knows the relevant
-    /// episode IDs, so we can match their safe filenames against the complete
-    /// directory in one pass.
+    /// log being keyed by episode ID. Each candidate still routes through the
+    /// canonical completeness gate: filename existence alone cannot promote a
+    /// managed, under-length artifact to downloaded/ready.
     func cachedEpisodeIds(matching episodeIds: Set<String>) -> Set<String> {
-        guard !episodeIds.isEmpty else { return [] }
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: completeDirectory.path) else {
-            return []
-        }
-        let completeBasenames = Set(files.compactMap { file -> String? in
-            let filename = file as NSString
-            let ext = filename.pathExtension.lowercased()
-            guard Self.knownAudioExtensions.contains(ext) else { return nil }
-            return filename.deletingPathExtension
-        })
-        return Set(episodeIds.filter { completeBasenames.contains(Self.safeFilename(for: $0)) })
+        Set(episodeIds.filter { servingURLIfComplete(for: $0) != nil })
     }
 
     // MARK: - Fingerprinting
@@ -1528,14 +2966,28 @@ actor DownloadManager {
 
     // MARK: - Analysis Protection
 
-    /// Marks an episode as having active analysis, protecting it from eviction.
+    /// Marks an episode as in-use (active analysis or in-flight playback),
+    /// protecting its cached audio file from LRU eviction. playhead-wrj8:
+    /// refcounted — balance every call with exactly one
+    /// ``unprotectFromAnalysis(episodeId:)``.
     func protectForAnalysis(episodeId: String) {
-        analysisProtectedEpisodes.insert(episodeId)
+        analysisProtectedEpisodes[episodeId, default: 0] += 1
     }
 
-    /// Removes analysis protection, allowing the episode to be evicted.
+    /// Releases one unit of eviction protection. The episode becomes
+    /// eviction-eligible only when the refcount returns to zero.
     func unprotectFromAnalysis(episodeId: String) {
-        analysisProtectedEpisodes.remove(episodeId)
+        guard let count = analysisProtectedEpisodes[episodeId] else { return }
+        if count <= 1 {
+            analysisProtectedEpisodes.removeValue(forKey: episodeId)
+        } else {
+            analysisProtectedEpisodes[episodeId] = count - 1
+        }
+    }
+
+    /// Test/diagnostic accessor: episodes currently protected from eviction.
+    func protectedEpisodeIdsForTesting() -> Set<String> {
+        Set(analysisProtectedEpisodes.keys)
     }
 
     // MARK: - Cache Size & Eviction
@@ -1576,36 +3028,77 @@ actor DownloadManager {
             includingPropertiesForKeys: [.fileSizeKey]
         ) else { return }
 
-        var candidates: [(episodeId: String?, displayName: String, url: URL, size: Int64, lastAccess: Date)] = []
+        var candidates: [(
+            episodeId: String?,
+            displayName: String,
+            urls: [URL],
+            size: Int64,
+            lastAccess: Date
+        )] = []
         // Build a reverse map from hashed filename → episode ID. Union
         // accessLog with protected and active sets so a file deposited
         // outside the manager (or before its accessLog entry was
         // written) can still be identified for protection checks.
-        let knownEpisodeIds = Set(accessLog.keys)
-            .union(analysisProtectedEpisodes)
+        var knownEpisodeIds = Set(accessLog.keys)
+            .union(analysisProtectedEpisodes.keys)
             .union(activeDownloads.keys)
             .union(bgInFlightEpisodes)
+        if let activeStreamingTransfer {
+            knownEpisodeIds.insert(activeStreamingTransfer.episodeId)
+        }
         let hashToEpisodeId: [String: String] = Dictionary(
             uniqueKeysWithValues: knownEpisodeIds.map { (Self.safeFilename(for: $0), $0) }
         )
+
+        var urlsByHashedBasename: [String: [URL]] = [:]
         for fileURL in contents {
             let name = fileURL.deletingPathExtension().lastPathComponent
+            let ext = fileURL.pathExtension.lowercased()
+            guard ext == Self.pinExtension
+                    || Self.knownAudioExtensions.contains(ext) else {
+                continue
+            }
+            urlsByHashedBasename[name, default: []].append(fileURL)
+        }
+
+        for (name, urls) in urlsByHashedBasename {
+            guard urls.contains(where: {
+                Self.knownAudioExtensions.contains(
+                    $0.pathExtension.lowercased()
+                )
+            }) else {
+                continue
+            }
             let episodeId = hashToEpisodeId[name]
-            guard !(episodeId.map { analysisProtectedEpisodes.contains($0) } ?? false) else { continue }
+            guard !(episodeId.map { analysisProtectedEpisodes[$0] != nil } ?? false) else { continue }
             guard !(episodeId.map { activeDownloads.keys.contains($0) } ?? false) else { continue }
             guard !(episodeId.map { bgInFlightEpisodes.contains($0) } ?? false) else { continue }
+            if let activeStreamingTransfer,
+               episodeId == activeStreamingTransfer.episodeId {
+                continue
+            }
 
-            let values = try? fileURL.resourceValues(
-                forKeys: [.fileSizeKey, .contentModificationDateKey]
-            )
-            let size = Int64(values?.fileSize ?? 0)
+            let values = urls.map {
+                try? $0.resourceValues(
+                    forKeys: [.fileSizeKey, .contentModificationDateKey]
+                )
+            }
+            let size = values.reduce(Int64(0)) {
+                $0 + Int64($1?.fileSize ?? 0)
+            }
             // Fall back to file mtime — not `.distantPast` — so a
             // freshly-deposited background download whose accessLog
             // entry hasn't been written yet isn't the first victim.
             let lastAccess = episodeId.flatMap { accessLog[$0] }
-                ?? values?.contentModificationDate
+                ?? values.compactMap { $0?.contentModificationDate }.max()
                 ?? .distantPast
-            candidates.append((episodeId, episodeId ?? name, fileURL, size, lastAccess))
+            candidates.append((
+                episodeId,
+                episodeId ?? name,
+                urls,
+                size,
+                lastAccess
+            ))
         }
 
         // Sort: least recently accessed first.
@@ -1614,7 +3107,25 @@ actor DownloadManager {
         for candidate in candidates {
             guard currentSize > maxCacheBytes else { break }
 
-            try fm.removeItem(at: candidate.url)
+            // Completeness identity is episode-scoped, so extension siblings
+            // and the shared pin are one eviction unit.
+            let audioURLs = candidate.urls.filter {
+                Self.knownAudioExtensions.contains(
+                    $0.pathExtension.lowercased()
+                )
+            }
+            let pinURLs = candidate.urls.filter {
+                $0.pathExtension.lowercased() == Self.pinExtension
+            }
+            // Delete bytes first and the completeness barrier last. A failed
+            // audio deletion therefore leaves the pin in place and cannot
+            // expose a partial sibling through legacy no-pin semantics.
+            for url in audioURLs {
+                try fm.removeItem(at: url)
+            }
+            for url in pinURLs {
+                try fm.removeItem(at: url)
+            }
             currentSize -= candidate.size
             // Only scrub the per-episode caches when we resolved a real
             // episode id. Writing nil at the hashed-filename key would
@@ -1630,42 +3141,145 @@ actor DownloadManager {
     }
 
     /// Manually clear all cached episode audio.
-    func clearCache() throws {
-        let fm = FileManager.default
-        // Include resumeDataDirectory so a clearCache + relaunch sequence
-        // doesn't resurrect phantom suspended-transfer events for episodes
-        // whose audio is gone.
-        for dir in [completeDirectory, partialsDirectory, resumeDataDirectory] {
-            guard let contents = try? fm.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: nil
-            ) else { continue }
-            for fileURL in contents {
-                try fm.removeItem(at: fileURL)
+    func clearCache() async throws {
+        // A cache clear is also an ownership boundary. Stop every foreground
+        // and background writer before unlinking its path. Retiring background
+        // task identities first also makes cancellation-produced resume data
+        // and already-staged completion callbacks cleanup-only.
+        cancelActiveStreamingTransfer()
+        for task in activeDownloads.values {
+            task.cancel()
+        }
+        activeDownloads.removeAll()
+        _ = await retireBackgroundTransfers(episodeId: nil)
+        try clearCache(
+            enumerating: { directory in
+                try FileManager.default.contentsOfDirectory(
+                    at: directory,
+                    includingPropertiesForKeys: nil
+                )
+            },
+            removing: { url in
+                try FileManager.default.removeItem(at: url)
+            }
+        )
+    }
+
+    /// Fail-closed bulk deletion. Completeness pins are barriers shared by
+    /// every extension sibling with the same canonical basename, so they must
+    /// be removed only after every potentially serveable audio path is gone.
+    /// Keeping the deletion operation injectable under DEBUG gives tests a
+    /// deterministic failure point without weakening the production ordering.
+    private func clearCache(
+        enumerating contentsOfDirectory: (URL) throws -> [URL],
+        removing removeItem: (URL) throws -> Void
+    ) throws {
+        // Enumerate every directory before deleting anything. If any
+        // directory is inaccessible, the operation throws with cache indexes
+        // and completeness barriers untouched instead of reporting success
+        // after a partial clear.
+        let completeContents = try contentsOfDirectory(completeDirectory)
+        let partialContents = try contentsOfDirectory(partialsDirectory)
+        let resumeContents = try contentsOfDirectory(resumeDataDirectory)
+
+        let (pins, nonPins) = completeContents.reduce(
+            into: (pins: [URL](), nonPins: [URL]())
+        ) { result, url in
+            if url.pathExtension.lowercased() == Self.pinExtension {
+                result.pins.append(url)
+            } else {
+                result.nonPins.append(url)
+            }
+        }
+        // Bytes first. If any removal fails, throwing here retains every pin
+        // and prevents a leftover sibling from becoming a legacy hit.
+        for fileURL in nonPins.sorted(by: {
+            $0.lastPathComponent < $1.lastPathComponent
+        }) {
+            try removeItem(fileURL)
+        }
+        // Barriers last, only after the complete directory contains no
+        // potentially serveable non-pin artifact.
+        for fileURL in pins.sorted(by: {
+            $0.lastPathComponent < $1.lastPathComponent
+        }) {
+            try removeItem(fileURL)
+        }
+        // Include partial and resume-data directories so a clear + relaunch
+        // cannot resurrect a suspended transfer.
+        for contents in [partialContents, resumeContents] {
+            for fileURL in contents.sorted(by: {
+                $0.lastPathComponent < $1.lastPathComponent
+            }) {
+                try removeItem(fileURL)
             }
         }
         accessLog.removeAll()
         fingerprintCache.removeAll()
         metadataCache.removeAll()
+        strongPinVerifications.removeAll()
         logger.info("Cache cleared")
     }
 
+    #if DEBUG
+    func _clearCacheForTesting(
+        removing removeItem: @escaping @Sendable (URL) throws -> Void
+    ) throws {
+        try clearCache(
+            enumerating: { directory in
+                try FileManager.default.contentsOfDirectory(
+                    at: directory,
+                    includingPropertiesForKeys: nil
+                )
+            },
+            removing: removeItem
+        )
+    }
+
+    func _clearCacheForTesting(
+        enumerating contentsOfDirectory:
+            @escaping @Sendable (URL) throws -> [URL],
+        removing removeItem: @escaping @Sendable (URL) throws -> Void
+    ) throws {
+        try clearCache(
+            enumerating: contentsOfDirectory,
+            removing: removeItem
+        )
+    }
+    #endif
+
     /// Removes cached audio for a specific episode.
-    func removeCache(for episodeId: String) throws {
-        let fm = FileManager.default
-        let complete = completeFileURL(for: episodeId)
-        let partial = partialFileURL(for: episodeId)
-        if fm.fileExists(atPath: complete.path) {
-            try fm.removeItem(at: complete)
+    func removeCache(for episodeId: String) async throws {
+        // Symmetric with clearCache(): deletion revokes any foreground
+        // writer's ownership before touching its canonical paths.
+        cacheOwnershipGenerationByEpisode[
+            episodeId,
+            default: 0
+        ] &+= 1
+        if let analysisWorkScheduler {
+            await analysisWorkScheduler.retireDownloadAnalysis(
+                episodeId: episodeId,
+                downloadId: episodeId
+            )
         }
+        await cancelDownload(episodeId: episodeId)
+        let fm = FileManager.default
+        let partial = partialFileURL(for: episodeId)
+        try removeAllAudioArtifacts(for: episodeId)
         if fm.fileExists(atPath: partial.path) {
             try fm.removeItem(at: partial)
         }
+        // playhead-wrj8: drop the completeness pin too so a later
+        // re-download is treated as a fresh artifact rather than colliding
+        // with a stale "complete" claim.
+        deletePin(for: episodeId)
         // Symmetric blob cleanup so a future scan doesn't resurrect a
         // suspended-transfer event for an episode the user just deleted.
-        try? deleteResumeData(episodeId: episodeId)
+        try deleteResumeData(episodeId: episodeId)
         accessLog[episodeId] = nil
         fingerprintCache[episodeId] = nil
         metadataCache[episodeId] = nil
+        strongPinVerifications[episodeId] = nil
     }
 
     // MARK: - Helpers
@@ -1695,30 +3309,112 @@ actor DownloadManager {
         episodeId: String,
         stagedURL: URL,
         originalURL: URL?,
-        metadata: HTTPAssetMetadata?
+        metadata: HTTPAssetMetadata?,
+        transferIdentity: BackgroundTransferIdentity? = nil
     ) async {
         let fm = FileManager.default
+        let capturedCacheOwnershipGeneration =
+            cacheOwnershipGenerationByEpisode[episodeId, default: 0]
+
+        if let transferIdentity {
+            guard !backgroundCallbackIsRetired(
+                identity: transferIdentity,
+                episodeId: episodeId
+            ) else {
+                try? fm.removeItem(at: stagedURL)
+                try? deleteResumeData(episodeId: episodeId)
+                finishBackgroundTransfer(
+                    identity: transferIdentity,
+                    episodeId: episodeId
+                )
+                logger.info(
+                    "Discarded retired background completion for \(episodeId, privacy: .public)"
+                )
+                return
+            }
+            // A task reattached from a prior process may not have been in this
+            // instance's admission map. Register it before any await so a
+            // concurrent clear/remove can retire its already-staged callback.
+            activeBackgroundTransfers[transferIdentity] = episodeId
+            bgInFlightEpisodes.insert(episodeId)
+        }
+
+        // Playback's foreground stream owns the canonical artifact. A
+        // background transfer already in flight when playback began must
+        // discard its late deposit without changing path resolution.
+        if activeStreamingTransfer?.episodeId == episodeId {
+            try? fm.removeItem(at: stagedURL)
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            try? deleteResumeData(episodeId: episodeId)
+            logger.info(
+                "Background completion for \(episodeId, privacy: .public): discarded because foreground stream owns the artifact"
+            )
+            return
+        }
 
         // Cache the file extension so `completeFileURL(for:)` returns
         // the right path. Mirrors the progressive path which sets
         // `extensionCache` from `url.pathExtension` before computing
         // `completeFileURL`.
-        let stagedExt = stagedURL.pathExtension
-        if !stagedExt.isEmpty {
-            extensionCache[episodeId] = stagedExt
-        } else if let originalExt = originalURL?.pathExtension, !originalExt.isEmpty {
-            extensionCache[episodeId] = originalExt
-        }
+        // The delegate normally canonicalizes this already, but normalize
+        // again at the actor boundary because tests and future resume paths
+        // may provide an arbitrary staged suffix directly.
+        let extensionSource = originalURL ?? stagedURL
+        extensionCache[episodeId] = Self.cacheExtension(for: extensionSource)
 
         let destURL = completeFileURL(for: episodeId)
         let destDir = destURL.deletingLastPathComponent()
 
+        // playhead-wrj8: REFUSE to overwrite an already-complete pinned
+        // artifact. This is the vector that best matches the incident: a
+        // background transfer (or a force-quit RESUME, which finalizes
+        // through this same path) completing with a DIFFERENT DAI ad
+        // stitch must NOT clobber the bytes the user already played and
+        // marked ads against. Discard the staged deposit, adopt a pin for
+        // the existing file if it has none, and keep the played copy.
+        if let existing = servingURLIfComplete(for: episodeId) {
+            try? fm.removeItem(at: stagedURL)
+            if loadPin(for: episodeId) == nil,
+               let size = completeFileSize(for: episodeId) {
+                writePin(
+                    AudioAssetPin(
+                        expectedBytes: size,
+                        sha256: fingerprintCache[episodeId]?.strong,
+                        sourceURL: originalURL?.absoluteString,
+                        etag: metadata?.etag
+                    ),
+                    for: episodeId
+                )
+            }
+            touchAccess(episodeId: episodeId)
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            try? deleteResumeData(episodeId: episodeId)
+            logger.info("Background completion for \(episodeId, privacy: .public): complete pinned artifact already present — kept it, discarded re-fetch at \(existing.lastPathComponent, privacy: .public)")
+            return
+        }
+
         do {
+            // Establish a durable incomplete state before the staged file can
+            // appear at the canonical path. A crash or final-pin write error
+            // then leaves the bytes withheld rather than legacy-serveable.
+            try requirePinWrite(
+                AudioAssetPin(
+                    expectedBytes: Int64.max,
+                    sha256: nil,
+                    sourceURL: originalURL?.absoluteString,
+                    etag: metadata?.etag
+                ),
+                for: episodeId
+            )
+            try removeAllAudioArtifacts(for: episodeId)
             if !fm.fileExists(atPath: destDir.path) {
                 try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
-            }
-            if fm.fileExists(atPath: destURL.path) {
-                try fm.removeItem(at: destURL)
             }
             try fm.moveItem(at: stagedURL, to: destURL)
             // playhead-h3h: stamp the freshly-deposited cached audio so
@@ -1739,7 +3435,17 @@ actor DownloadManager {
             // Best-effort cleanup of the staged file; otherwise it
             // accumulates in the temp directory.
             try? fm.removeItem(at: stagedURL)
-            bgInFlightEpisodes.remove(episodeId)
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            await recordBackgroundFailure(
+                episodeId: episodeId,
+                cause: .pipelineError,
+                errorDescription: String(describing: error),
+                bytesProcessed: 0,
+                stage: "downloadManager.placeBackgroundCompletion"
+            )
             return
         }
 
@@ -1765,10 +3471,80 @@ actor DownloadManager {
         // triage can spot a corrupt deposit; the cache entry without
         // the strong field still carries the weak fingerprint and is
         // useful to dedup re-downloads (playhead-24cm.1 I4).
+        // playhead-wrj8: pin the freshly-deposited artifact as COMPLETE
+        // (actual on-disk length) so it becomes the single immutable served
+        // copy. Written regardless of whether the strong-hash step below
+        // succeeds, so the file can never remain "unpinned/incomplete" and
+        // get re-fetched into a different stitch.
+        guard let size = completeFileSize(for: episodeId) else {
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) has no readable final size; leaving it withheld"
+            )
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            await recordBackgroundFailure(
+                episodeId: episodeId,
+                cause: .pipelineError,
+                errorDescription: "Final artifact size is unreadable",
+                bytesProcessed: 0,
+                stage: "downloadManager.finalizeBackgroundPin"
+            )
+            return
+        }
+        do {
+            try requirePinWrite(
+                AudioAssetPin(
+                    expectedBytes: size,
+                    sha256: nil,
+                    sourceURL: originalURL?.absoluteString,
+                    etag: metadata?.etag
+                ),
+                for: episodeId
+            )
+        } catch {
+            logger.error(
+                "Failed to finalize completeness pin for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            await recordBackgroundFailure(
+                episodeId: episodeId,
+                cause: .pipelineError,
+                errorDescription: String(describing: error),
+                bytesProcessed: Int(size),
+                stage: "downloadManager.finalizeBackgroundPin"
+            )
+            return
+        }
+
         do {
             let strongHash = try FileHasher.sha256(fileURL: destURL)
             let weakFP = fingerprintCache[episodeId]?.weak ?? ""
             fingerprintCache[episodeId] = AudioFingerprint(weak: weakFP, strong: strongHash)
+            // Backfill the strong hash into the pin now that it's computed.
+            guard var pin = loadPin(for: episodeId) else {
+                throw DownloadManagerError.downloadFailed(
+                    episodeId,
+                    "Final completeness pin disappeared"
+                )
+            }
+            pin.sha256 = strongHash
+            guard writePin(pin, for: episodeId) else {
+                throw DownloadManagerError.downloadFailed(
+                    episodeId,
+                    "Strong completeness pin write failed"
+                )
+            }
+            rememberStrongPinVerification(
+                episodeId: episodeId,
+                fileURL: destURL,
+                expectedBytes: pin.expectedBytes,
+                expectedHash: strongHash
+            )
             await enqueueAnalysisIfNeeded(
                 episodeId: episodeId,
                 sourceFingerprint: strongHash,
@@ -1778,10 +3554,74 @@ actor DownloadManager {
             logger.error(
                 "Strong fingerprint hash failed for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"
             )
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            await recordBackgroundFailure(
+                episodeId: episodeId,
+                cause: .pipelineError,
+                errorDescription: String(describing: error),
+                bytesProcessed: Int(size),
+                stage: "downloadManager.strongBackgroundIdentity"
+            )
+            return
         }
 
+        if backgroundCompletionLostOwnership(
+            identity: transferIdentity,
+            episodeId: episodeId,
+            capturedCacheOwnershipGeneration:
+                capturedCacheOwnershipGeneration
+        ) {
+            // Explicit deletion may have run while analysis enqueue yielded.
+            // It already removed the artifact; do not recreate cache indexes
+            // or a resume-data record on this stale continuation.
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            return
+        }
+
+        // WorkJournal success belongs to the manager, not the delegate's
+        // staging callback. At this point canonical placement, the strong pin,
+        // and required analysis enqueue work have all completed.
+        let journalFinalizationID = UUID()
+        let recorder = workJournalRecorder
+        let journalTask = Task {
+            guard !Task.isCancelled else { return }
+            await recorder.recordFinalized(episodeId: episodeId)
+        }
+        backgroundJournalFinalizations[episodeId] =
+            BackgroundJournalFinalization(
+                id: journalFinalizationID,
+                task: journalTask
+            )
+        await journalTask.value
+        if backgroundJournalFinalizations[episodeId]?.id
+            == journalFinalizationID {
+            backgroundJournalFinalizations.removeValue(
+                forKey: episodeId
+            )
+        }
+        if backgroundCompletionLostOwnership(
+            identity: transferIdentity,
+            episodeId: episodeId,
+            capturedCacheOwnershipGeneration:
+                capturedCacheOwnershipGeneration
+        ) {
+            finishBackgroundTransfer(
+                identity: transferIdentity,
+                episodeId: episodeId
+            )
+            return
+        }
         touchAccess(episodeId: episodeId)
-        bgInFlightEpisodes.remove(episodeId)
+        finishBackgroundTransfer(
+            identity: transferIdentity,
+            episodeId: episodeId
+        )
         // A successful completion can resurrect a stale resume-data blob
         // from a prior failed attempt: without this delete, the next
         // cold-launch `scanForSuspendedTransfers` would emit a phantom
@@ -1942,9 +3782,16 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// original request URL, and HTTP response metadata harvested for
     /// weak-fingerprint synthesis (playhead-24cm.1 I3 + I4).
     ///
-    /// Same init-once / read-many invariant as `onResumeDataHarvested`.
+    /// Same init-once / read-many invariant as
+    /// `onBackgroundDownloadFailed`.
     nonisolated(unsafe) var onBackgroundDownloadStaged: (
-        (String, URL, URL?, HTTPAssetMetadata?) -> Void
+        (
+            BackgroundTransferIdentity,
+            String,
+            URL,
+            URL?,
+            HTTPAssetMetadata?
+        ) -> Void
     )?
 
     /// playhead-3xtw: fired on the delegate queue for each byte-progress
@@ -1965,32 +3812,15 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// delegate can match it against its pending completion-handler map.
     nonisolated(unsafe) var onUrlSessionDidFinishEvents: ((String) -> Void)?
 
-    /// Invoked when a terminated transfer's didCompleteWithError callback
-    /// carries an `NSURLSessionDownloadTaskResumeData` blob in its
-    /// userInfo. Routes the blob back into DownloadManager's
-    /// `resumeDataDirectory` via `persistResumeData(episodeId:data:)`
-    /// (playhead-g2wq) so the next cold-launch `scanForSuspendedTransfers`
-    /// pass can see it. Without this callback the resume-data directory
-    /// stays empty in production and the hyht follow-up UX never fires.
+    /// Identity-qualified terminal failure callback. The delegate harvests
+    /// every non-Sendable task field synchronously, then emits one Sendable
+    /// value. DownloadManager performs optional resume persistence, ownership
+    /// release, and WorkJournal failure recording in that actor order.
     ///
-    /// Thread-safety invariant: init-once / read-many. The property is
-    /// assigned exactly once by `DownloadManager.init(...)` during actor
-    /// construction (before the delegate is handed to any URLSession),
-    /// and is only READ thereafter from URLSession's delegate queue.
-    /// Mutation after init is forbidden — the `nonisolated(unsafe)`
-    /// qualifier opts out of Swift concurrency checking and relies on
-    /// this invariant for safety. Same contract as
-    /// `onBackgroundDownloadStaged` and `onUrlSessionDidFinishEvents`
-    /// above.
-    nonisolated(unsafe) var onResumeDataHarvested: ((String, Data) -> Void)?
-
-    /// WorkJournal recorder for finalized / failed events. Defaults to
-    /// `NoopWorkJournalRecorder`; the real implementation is injected at
-    /// init via `DownloadManager(workJournalRecorder:)` and assigned
-    /// here in one shot by `DownloadManager.init(...)` before the
-    /// delegate is handed to any URLSession (same init-once contract as
-    /// `onBackgroundDownloadStaged`). Mutation after init is forbidden.
-    nonisolated(unsafe) var workJournal: WorkJournalRecording = NoopWorkJournalRecorder()
+    /// Thread-safety invariant: init-once / read-many, matching the other
+    /// delegate callbacks above.
+    nonisolated(unsafe) var onBackgroundDownloadFailed:
+        ((BackgroundTransferFailure) -> Void)?
 
     func urlSession(
         _ session: URLSession,
@@ -2001,15 +3831,12 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             logger.warning("Background download finished but no episode ID set")
             return
         }
+        let transferIdentity = BackgroundTransferIdentity(
+            sessionIdentifier: session.configuration.identifier ?? "",
+            taskIdentifier: downloadTask.taskIdentifier
+        )
 
-        // Derive extension from the original request URL, falling back to mp3.
         let originalURL = downloadTask.originalRequest?.url
-        let ext: String = {
-            let raw = originalURL?.pathExtension ?? ""
-            return raw.isEmpty ? "mp3" : raw
-        }()
-        let filename = DownloadManager.safeFilename(for: episodeId)
-
         // Harvest HTTP metadata for the weak fingerprint here, while the
         // delegate-queue stack still has access to the task. The actor
         // hop below cannot read `downloadTask.response` because
@@ -2025,6 +3852,26 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
                 lastModified: response.value(forHTTPHeaderField: "Last-Modified")
             )
         }()
+        stageBackgroundDownload(
+            identity: transferIdentity,
+            episodeId: episodeId,
+            location: location,
+            originalURL: originalURL,
+            metadata: httpMetadata
+        )
+    }
+
+    private func stageBackgroundDownload(
+        identity: BackgroundTransferIdentity,
+        episodeId: String,
+        location: URL,
+        originalURL: URL?,
+        metadata: HTTPAssetMetadata?
+    ) {
+        // Stage under the same canonical extension set used by serving,
+        // cleanup, and eviction. Routing suffixes such as .php/.ashx are not
+        // audio types and must never create an invisible cache artifact.
+        let ext = originalURL.map(DownloadManager.cacheExtension(for:)) ?? "mp3"
 
         // playhead-24cm.1 (I3): stage the file into a process-global temp
         // directory synchronously on the delegate queue. The OS-provided
@@ -2034,7 +3881,13 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
         // even when it's not the default — perform the final placement.
         let stagingDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("PlayheadBGStaging", isDirectory: true)
-        let stagedURL = stagingDir.appendingPathComponent("\(filename).\(ext)")
+        let stagedURL = stagingDir.appendingPathComponent(
+            DownloadManager.backgroundStagingFilename(
+                episodeId: episodeId,
+                fileExtension: ext,
+                identity: identity
+            )
+        )
 
         let fm = FileManager.default
         do {
@@ -2051,44 +3904,50 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             // the correct `cacheDirectory`-relative `complete/` directory
             // and populate fingerprint state with a real weak fingerprint
             // (playhead-24cm.1 I3 + I4).
-            onBackgroundDownloadStaged?(episodeId, stagedURL, originalURL, httpMetadata)
-
-            // Emit finalized event for WorkJournal (playhead-uzdq).
-            let recorder = workJournal
-            Task {
-                await recorder.recordFinalized(episodeId: episodeId)
-            }
+            onBackgroundDownloadStaged?(
+                identity,
+                episodeId,
+                stagedURL,
+                originalURL,
+                metadata
+            )
         } catch {
             logger.error("Failed to stage background download for \(episodeId): \(error.localizedDescription)")
-            let recorder = workJournal
-            let errorDescription = error.localizedDescription
-            Task {
-                // Background URLSession callbacks land outside the app's
-                // foreground lifecycle; we don't have a wall-clock slice
-                // start timestamp here, so sliceDurationMs is 0. The byte
-                // count is what URLSession reported for the transfer
-                // itself (captured from the downloaded file at `location`).
-                let bytesProcessed = (try? FileManager.default
-                    .attributesOfItem(atPath: location.path)[.size] as? Int) ?? 0
-                let metadata = await SliceCompletionInstrumentation.recordFailed(
-                    cause: .pipelineError,
-                    deviceClass: DeviceClass.detect(),
-                    sliceDurationMs: 0,
-                    bytesProcessed: bytesProcessed,
-                    shardsCompleted: 0,
-                    extras: [
-                        "stage": "downloadManager.didFinishDownloadingTo",
-                        "error": errorDescription,
-                    ]
-                )
-                await recorder.recordFailed(
+            let bytesProcessed = (try? fm
+                .attributesOfItem(atPath: location.path)[.size] as? Int) ?? 0
+            onBackgroundDownloadFailed?(
+                BackgroundTransferFailure(
+                    identity: identity,
                     episodeId: episodeId,
+                    resumeData: nil,
+                    sourceURL: originalURL,
+                    metadata: metadata,
                     cause: .pipelineError,
-                    metadataJSON: metadata.encodeJSON()
+                    errorDescription: error.localizedDescription,
+                    bytesReceived: bytesProcessed,
+                    stage: "downloadManager.didFinishDownloadingTo"
                 )
-            }
+            )
         }
     }
+
+    #if DEBUG
+    func _stageBackgroundDownloadForTesting(
+        identity: BackgroundTransferIdentity,
+        episodeId: String,
+        location: URL,
+        originalURL: URL?,
+        metadata: HTTPAssetMetadata? = nil
+    ) {
+        stageBackgroundDownload(
+            identity: identity,
+            episodeId: episodeId,
+            location: location,
+            originalURL: originalURL,
+            metadata: metadata
+        )
+    }
+    #endif
 
     func urlSession(
         _ session: URLSession,
@@ -2123,67 +3982,53 @@ final class EpisodeDownloadDelegate: NSObject, URLSessionDownloadDelegate, Senda
             return
         }
         let episodeId = task.taskDescription ?? "<missing-task-description>"
+        let transferIdentity = BackgroundTransferIdentity(
+            sessionIdentifier: session.configuration.identifier ?? "",
+            taskIdentifier: task.taskIdentifier
+        )
         let cause = InternalMissCause.fromTaskError(error)
         logger.error("Episode \(episodeId, privacy: .public) download failed (\(cause.rawValue)): \(error.localizedDescription)")
 
-        // playhead-g2wq: harvest OS-produced resume-data BEFORE emitting
-        // `recordFailed`. URLSession stashes the resume blob in
-        // `NSError.userInfo[NSURLSessionDownloadTaskResumeData]` whenever
-        // the terminated transfer is eligible for `downloadTask(withResumeData:)`
-        // replay. Persisting it here is what populates `resumeDataDirectory`
-        // so `scanForSuspendedTransfers` can find suspended transfers on
-        // the next cold launch. If the error carries no blob (server-side
-        // failure, name resolution error, etc.) we skip the harvest and
-        // fall through to `recordFailed` unchanged.
-        //
-        // Lifecycle note: the callback closure hops onto an async Task
-        // to write to disk. That hop is safe because this delegate
-        // callback only fires while the app is alive — either during
-        // normal runtime or during background-session rehydration after
-        // cold relaunch (the hyht force-quit flow: OS suspends the
-        // in-flight task at force-quit WITHOUT delivering
-        // didCompleteWithError; on the next cold launch URLSession
-        // re-attaches the delegate and drains pending events, at which
-        // point this callback fires with the process alive and running
-        // `scanForSuspendedTransfers`). The FileManager write is
-        // therefore guaranteed to complete before the process exits.
         let nsError = error as NSError
-        // Only URLSession populates `NSURLSessionDownloadTaskResumeData`
-        // in `NSURLErrorDomain` errors. Filtering on domain prevents a
-        // foreign-domain error that coincidentally carries the key from
-        // being persisted as if it were a valid resume blob.
-        if nsError.domain == NSURLErrorDomain,
-           let resumeData = nsError.userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
-           !resumeData.isEmpty {
-            onResumeDataHarvested?(episodeId, resumeData)
-        }
-
-        let recorder = workJournal
-        let bytesReceived = Int(task.countOfBytesReceived)
-        let errorDescription = error.localizedDescription
-        Task {
-            // Background URLSession does not expose a wall-clock slice
-            // start to the delegate, so sliceDurationMs is 0 here. This
-            // is NOT skipping the metadata blob — every acquired→terminal
-            // transition emits metadata per the 1nl6 spec; we just record
-            // the fields we have from URLSession's own accounting.
-            let metadata = await SliceCompletionInstrumentation.recordFailed(
-                cause: cause,
-                deviceClass: DeviceClass.detect(),
-                sliceDurationMs: 0,
-                bytesProcessed: bytesReceived,
-                shardsCompleted: 0,
-                extras: [
-                    "stage": "downloadManager.didCompleteWithError",
-                    "error": errorDescription,
-                ]
+        // Only URLSession populates the resume-data key in NSURLErrorDomain.
+        // Harvest every task-bound value now and emit exactly one callback;
+        // the manager actor persists the optional blob before releasing
+        // ownership, then records the terminal failure.
+        let resumeData: Data? = {
+            guard nsError.domain == NSURLErrorDomain,
+                  let data = nsError.userInfo[
+                      NSURLSessionDownloadTaskResumeData
+                  ] as? Data,
+                  !data.isEmpty else {
+                return nil
+            }
+            return data
+        }()
+        let sourceURL = task.originalRequest?.url ?? task.currentRequest?.url
+        let harvestedMetadata: HTTPAssetMetadata? = {
+            guard let response = task.response as? HTTPURLResponse else {
+                return nil
+            }
+            let len = response.expectedContentLength
+            return HTTPAssetMetadata(
+                etag: response.value(forHTTPHeaderField: "ETag"),
+                contentLength: len > 0 ? len : nil,
+                lastModified: response.value(forHTTPHeaderField: "Last-Modified")
             )
-            await recorder.recordFailed(
+        }()
+        onBackgroundDownloadFailed?(
+            BackgroundTransferFailure(
+                identity: transferIdentity,
                 episodeId: episodeId,
+                resumeData: resumeData,
+                sourceURL: sourceURL,
+                metadata: harvestedMetadata,
                 cause: cause,
-                metadataJSON: metadata.encodeJSON()
+                errorDescription: error.localizedDescription,
+                bytesReceived: Int(task.countOfBytesReceived),
+                stage: "downloadManager.didCompleteWithError"
             )
-        }
+        )
     }
 
     /// Called by URLSession after all pending background events have

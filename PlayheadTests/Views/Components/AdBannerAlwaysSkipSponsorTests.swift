@@ -238,7 +238,11 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
     func testQueueAdvanceMakesStaleBannerIdNotMatchCurrent() async {
         let queue = AdBannerQueue()
         let bannerA = makeItem(id: "banner-A", advertiser: "Squarespace")
-        let bannerB = makeItem(id: "banner-B", advertiser: "BetterHelp")
+        let bannerB = makeItem(
+            id: "banner-B",
+            windowId: "w-2",
+            advertiser: "BetterHelp"
+        )
 
         queue.enqueue(bannerA)
         XCTAssertEqual(queue.currentBanner?.id, "banner-A")

@@ -454,7 +454,10 @@ struct RediffByteAlignerTests {
         slots: [RediffByteAligner.Slot],
         chained: Int = 1_000_000,
         dropped: Int = 0,
-        fraction: Double = 0.95
+        fraction: Double = 0.95,
+        segmentedSlots: [RediffByteAligner.Slot]? = nil,
+        segmentedFraction: Double? = nil,
+        segmentedRunsChained: Int = 2
     ) -> RediffByteAligner.Alignment {
         RediffByteAligner.Alignment(
             runsFound: slots.count + 1 + dropped,
@@ -464,7 +467,10 @@ struct RediffByteAlignerTests {
             chainedFractionB: fraction,
             slots: slots,
             aDurationSeconds: 3600,
-            bDurationSeconds: 3600
+            bDurationSeconds: 3600,
+            segmentedSlots: segmentedSlots ?? slots,
+            segmentedChainedFractionB: segmentedFraction ?? fraction,
+            segmentedRunsChained: segmentedRunsChained
         )
     }
 
@@ -676,5 +682,168 @@ struct RediffByteAlignerTests {
             #expect(acceptedPlayedSlotCount(aa) == 0,
                     "\(name) vs itself must not synthesize a played ad slot")
         }
+    }
+
+    // MARK: - playhead-9s6q FIX A: non-monotonic segment recovery
+    //
+    // Day-0's recall bottleneck was the byte gate's WHOLESALE reject of a
+    // non-monotonic chain: a Fresh Air-class fetch with real rotated ads of
+    // differing lengths goes non-monotonic (a later break's run overlaps an
+    // earlier one in B — here forced by the CBR header-bleed the `unhardenedCBR`
+    // test documents) and yielded 0 slots despite ~92% coverage. FIX A adds an
+    // opt-in (default OFF) recovery that partitions the runs into monotonic
+    // SEGMENTS and unions their divergent A-gaps. These tests pin: RED on the
+    // strict path → GREEN with recovery; flag-OFF byte-identity for BOTH a clean
+    // and a non-monotonic alignment; and that per-segment precision guards
+    // (re-encode floor + min-ad-width) forbid manufacturing a spurious slot.
+
+    /// A multi-break `removed_in_B` pair (Fresh Air-class): `content` frames of
+    /// three distinct blocks in A separated by two distinct ad blocks, with the
+    /// ads ABSENT in B. Deliberately UN-hardened (no ID3 separators, no
+    /// `pinTailByte`) so the shared 4-byte CBR header bleeds each content run
+    /// past its splice, overlapping the B-adjacent next run → the chain drops a
+    /// run → NOT monotonic-clean (exactly the day-0 reject the fix targets).
+    private func multiBreakRemovedInBPair(
+        contentFrames: Int, adFrames: Int
+    ) -> (a: Data, b: Data) {
+        let c0 = SyntheticMP3.frames(count: contentFrames, seed: 0x0C0_0001)
+        let c1 = SyntheticMP3.frames(count: contentFrames, seed: 0x0C1_0002)
+        let c2 = SyntheticMP3.frames(count: contentFrames, seed: 0x0C2_0003)
+        let ad1 = SyntheticMP3.frames(count: adFrames, seed: 0xAD1_0004)
+        let ad2 = SyntheticMP3.frames(count: adFrames, seed: 0xAD2_0005)
+        let a = SyntheticMP3.file(c0 + ad1 + c1 + ad2 + c2)
+        let b = SyntheticMP3.file(c0 + c1 + c2)
+        return (a, b)
+    }
+
+    @Test("RED→GREEN: a non-monotonic MULTI-break fetch the strict gate rejects wholesale recovers both divergent ad slots with recovery enabled")
+    func nonMonotonicMultiBreakRecoversDivergentSlotsWhenEnabled() throws {
+        // 250-frame content blocks (≫ minRun) and 250-frame ads (≈ 6.53 s each,
+        // ≥ the 5 s min-ad-width) → both ads survive the gate's width filter.
+        let pair = multiBreakRemovedInBPair(contentFrames: 250, adFrames: 250)
+        let alignment = RediffByteAligner.align(
+            aData: pair.a, bData: pair.b, config: SyntheticMP3.smallRunConfig)
+
+        // The header-bleed makes the chain non-monotonic (a run is dropped), and
+        // the segmented coverage nonetheless spans essentially all of B.
+        #expect(!alignment.monotonicClean, "multi-break header-bleed → chain drops a run")
+        #expect(alignment.runsDroppedNonMonotonic >= 1)
+        #expect(alignment.segmentedChainedFractionB > 0.9, "≈92%+ of B is aligned across segments")
+        #expect(alignment.segmentedSlots.count >= 2, "the aligner recovered both divergent regions")
+
+        // STRICT path (flag OFF) = today's wholesale reject: 0 slots.
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+            == .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic))
+
+        // RECOVERY (flag ON): both ad slots come back, byte-exact in A-time.
+        guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: alignment, recoverNonMonotonicSegments: true) else {
+            Issue.record("expected acceptance under recovery"); return
+        }
+        #expect(acceptance.playedSlots.count == 2, "both divergent ads recovered (unioned across segments)")
+        let spf = SyntheticMP3.secondsPerFrame
+        // ad1 spans A-frames [250,500) ≈ [6.53, 13.06]; ad2 [750,1000) ≈ [19.59, 26.12].
+        let s0 = try #require(acceptance.playedSlots.first)
+        #expect(abs(s0.startSeconds - 250 * spf) < 0.3, "ad1 start ≈ 6.53 s, got \(s0.startSeconds)")
+        #expect(abs(s0.endSeconds - 500 * spf) < 0.3, "ad1 end ≈ 13.06 s, got \(s0.endSeconds)")
+        let s1 = acceptance.playedSlots[1]
+        #expect(abs(s1.startSeconds - 750 * spf) < 0.3, "ad2 start ≈ 19.59 s, got \(s1.startSeconds)")
+        #expect(abs(s1.endSeconds - 1000 * spf) < 0.3, "ad2 end ≈ 26.12 s, got \(s1.endSeconds)")
+        // Recovery never spans the intervening C1 content (no over-widening).
+        #expect(s0.endSeconds < s1.startSeconds)
+        #expect((s1.startSeconds - s0.endSeconds) > 5.0, "the C1 content block sits UN-widened between the two ads")
+    }
+
+    @Test("flag OFF is byte-identical to today for BOTH a clean monotonic AND a non-monotonic alignment")
+    func flagOffIsByteIdenticalForCleanAndNonMonotonic() {
+        // Clean monotonic pair (hardened single removed_in_B) — recovery must not
+        // perturb it: the flag only ever changes the non-monotonic branch.
+        let content = SyntheticMP3.frames(count: 60, seed: 0x0FF_0001)
+        let sep = SyntheticMP3.id3v2(payloadBytes: 32)
+        var head = Array(content[0..<30]); SyntheticMP3.pinTailByte(&head, to: 0xAA)
+        var ad = SyntheticMP3.frames(count: 250, seed: 0x0FF_0002); SyntheticMP3.pinTailByte(&ad, to: 0x55)
+        let cleanA = SyntheticMP3.file(head + [sep] + ad + Array(content[30...]))
+        let cleanB = SyntheticMP3.file(head + Array(content[30...]))
+        let clean = RediffByteAligner.align(aData: cleanA, bData: cleanB, config: SyntheticMP3.smallRunConfig)
+        #expect(clean.monotonicClean)
+        // Toggling recovery is a NO-OP on a monotonic alignment (same code path).
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: clean, recoverNonMonotonicSegments: false)
+            == RediffSlotOwnership.gateAndDiffBytes(alignment: clean, recoverNonMonotonicSegments: true))
+        guard case .accepted = RediffSlotOwnership.gateAndDiffBytes(alignment: clean) else {
+            Issue.record("clean monotonic case should accept"); return
+        }
+
+        // Non-monotonic pair — flag OFF is EXACTLY today's wholesale reject.
+        let pair = multiBreakRemovedInBPair(contentFrames: 250, adFrames: 250)
+        let nonMono = RediffByteAligner.align(aData: pair.a, bData: pair.b, config: SyntheticMP3.smallRunConfig)
+        #expect(!nonMono.monotonicClean)
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: nonMono, recoverNonMonotonicSegments: false)
+            == .rejectedNonMonotonic(dropped: nonMono.runsDroppedNonMonotonic))
+    }
+
+    @Test("a monotonic-clean alignment mirrors its segmented fields onto the single chain (recovery is a no-op)")
+    func monotonicAlignmentMirrorsSegmentedFields() {
+        let content = SyntheticMP3.frames(count: 60, seed: 0x111_0001)
+        let sep = SyntheticMP3.id3v2(payloadBytes: 32)
+        var head = Array(content[0..<30]); SyntheticMP3.pinTailByte(&head, to: 0xAA)
+        var ad = SyntheticMP3.frames(count: 20, seed: 0x111_0002); SyntheticMP3.pinTailByte(&ad, to: 0x55)
+        let a = SyntheticMP3.file(head + [sep] + ad + Array(content[30...]))
+        let b = SyntheticMP3.file(head + Array(content[30...]))
+        let alignment = RediffByteAligner.align(aData: a, bData: b, config: SyntheticMP3.smallRunConfig)
+        #expect(alignment.monotonicClean)
+        #expect(alignment.segmentedSlots == alignment.slots)
+        #expect(alignment.segmentedChainedFractionB == alignment.chainedFractionB)
+        #expect(alignment.segmentedRunsChained == alignment.chain.count)
+    }
+
+    @Test("PRECISION: a low-coverage non-monotonic island stays rejected under recovery (re-encode floor, no false-widening)")
+    func segmentRecoveryLowCoverageStaysRejected() {
+        // A real divergent slot exists, but the segmented aligned coverage is only
+        // 0.2 of B (a re-encode-class island) → the floor rejects it even ON.
+        let alignment = alignmentFixture(
+            slots: [byteSlot(100, 130)], dropped: 1,
+            segmentedSlots: [byteSlot(100, 130)], segmentedFraction: 0.2)
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: alignment, recoverNonMonotonicSegments: true)
+            == .rejectedLowChainedFraction(0.2))
+    }
+
+    @Test("PRECISION: a high-coverage non-monotonic chain whose divergences are all sub-min-ad-width manufactures NO slot")
+    func segmentRecoverySubAdWidthManufacturesNoSlot() {
+        // Fixture: coverage clears the floor, but the only segmented slot is 2 s
+        // (< the 5 s min-ad-width) → filtered → no acceptance (same reject class).
+        let alignment = alignmentFixture(
+            slots: [byteSlot(100, 130)], dropped: 1,
+            segmentedSlots: [byteSlot(100, 102)], segmentedFraction: 0.9)
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: alignment, recoverNonMonotonicSegments: true)
+            == .rejectedNonMonotonic(dropped: 1))
+
+        // Real bytes: the SAME multi-break structure but with tiny (~1 s) ads —
+        // segmentation sees the non-monotonic chain yet fabricates no played slot.
+        let pair = multiBreakRemovedInBPair(contentFrames: 250, adFrames: 40)
+        let real = RediffByteAligner.align(aData: pair.a, bData: pair.b, config: SyntheticMP3.smallRunConfig)
+        #expect(!real.monotonicClean, "still non-monotonic (content header-bleed), just tiny ads")
+        if case .accepted(let acc) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: real, recoverNonMonotonicSegments: true) {
+            Issue.record("sub-min-ad divergences must not manufacture a slot, got \(acc.playedSlots.count)")
+        }
+    }
+
+    @Test("recovery ACCEPTS a valid high-coverage divergent slot and reports the segmented diagnostics")
+    func segmentRecoveryAcceptsValidDivergentSlot() throws {
+        let alignment = alignmentFixture(
+            slots: [byteSlot(1000, 1600)],           // the strict chain's over-span
+            dropped: 1,
+            segmentedSlots: [byteSlot(100, 130, left: 200, right: 300)],
+            segmentedFraction: 0.9, segmentedRunsChained: 3)
+        guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: alignment, recoverNonMonotonicSegments: true) else {
+            Issue.record("expected acceptance for a valid segmented slot"); return
+        }
+        #expect(acceptance.playedSlots.count == 1)
+        let slot = try #require(acceptance.playedSlots.first)
+        #expect(slot.startSeconds == 100)
+        #expect(slot.endSeconds == 130)
+        #expect(acceptance.chainedFractionB == 0.9, "diagnostics report the SEGMENTED fraction")
+        #expect(acceptance.runsChained == 3, "diagnostics report the segmented run count")
     }
 }

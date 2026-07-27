@@ -132,6 +132,55 @@ enum EpisodeSummarySampler {
     }
 }
 
+// MARK: - Ad exclusion
+
+/// A confirmed-ad time range to exclude from the summarizer input.
+/// Half-open `[start, end)` seconds on the episode's playback timeline.
+/// Derived from confirmed `ad_windows` and decoded ad spans by the
+/// backfill coordinator's hydrate step.
+struct EpisodeSummaryAdRange: Sendable, Equatable {
+    let start: Double
+    let end: Double
+}
+
+/// Pure helper: drop transcript chunks that overlap any confirmed-ad
+/// range before the summarizer samples/prompts them.
+///
+/// playhead-g4dk: episode summaries were dominated by ads because the
+/// summarizer was fed the RAW transcript with no ad-exclusion — a
+/// pre-roll sponsor read in the opening sample window crowded out the
+/// actual editorial content. Ads are detected and stored, but the
+/// summary pipeline never consulted them. This helper is the exclusion
+/// gate: whole overlapping chunks are removed (simple and robust — a
+/// sponsor read that bleeds into a chunk's editorial tail is rare, and
+/// keeping a partial ad token is worse than dropping a little editorial
+/// context the neighboring chunks still cover).
+enum EpisodeSummaryAdExclusion {
+
+    /// Return `chunks` with every chunk that overlaps any range in
+    /// `adRanges` removed. Overlap is half-open: a chunk overlaps
+    /// `[range.start, range.end)` when
+    /// `chunk.startTime < range.end && chunk.endTime > range.start`.
+    ///
+    /// Degenerate / non-finite ad ranges (`end <= start`, `NaN`, `±Inf`)
+    /// are ignored so a single poisoned range can't drop the whole
+    /// transcript. An empty `adRanges` returns `chunks` unchanged.
+    static func excludingAds(
+        chunks: [TranscriptChunk],
+        adRanges: [EpisodeSummaryAdRange]
+    ) -> [TranscriptChunk] {
+        let validRanges = adRanges.filter {
+            $0.start.isFinite && $0.end.isFinite && $0.end > $0.start
+        }
+        guard !validRanges.isEmpty else { return chunks }
+        return chunks.filter { chunk in
+            !validRanges.contains { range in
+                chunk.startTime < range.end && chunk.endTime > range.start
+            }
+        }
+    }
+}
+
 // MARK: - Prompt grammar
 
 /// Pure prompt builder + parser, lifted out of the actor so simulator
@@ -171,6 +220,8 @@ enum EpisodeSummaryGrammar {
         \(titleBlock)You are summarizing a podcast episode for a backlog-browsing screen.
 
         Below is a sampled transcript drawn from the opening, middle, and closing of the episode.
+
+        The transcript may still contain advertisements, sponsor reads, or promotional messages. Ignore all advertising and sponsorship content: do not mention any products, brands, promo codes, discounts, or sponsors, and never let an ad determine the summary or topics. Summarize only the editorial content of the episode.
 
         Write a 2 to 3 sentence summary that captures what the episode is about. Keep the language concrete and grounded in what is actually said. Do not invent details, statistics, or quotes.
 
@@ -214,6 +265,8 @@ enum EpisodeSummaryGrammar {
         let titleBlock = titleLine.isEmpty ? "" : titleLine + "\n\n"
         return """
         \(titleBlock)Summarize this podcast episode for a listener browsing their backlog.
+
+        The transcript may still contain advertisements, sponsor reads, or promotional messages. Ignore all advertising and sponsorship content: do not mention any products, brands, promo codes, discounts, or sponsors, and never let an ad determine the summary or topics. Summarize only the editorial content of the episode.
 
         Output exactly three sections, in this order, with these literal headings on their own lines:
           SUMMARY:

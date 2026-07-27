@@ -237,12 +237,17 @@ enum CorrectionScope: Sendable, Equatable {
 /// Identity-key components for a `CorrectionEvent`.
 ///
 /// The `correction_events` semantic identity is the tuple
-///   `(analysisAssetId, effectiveCorrectionType, normalizedScopeKey)`
+///   `(analysisAssetId, effectiveCorrectionType, normalizedScopeKey,
+///     correctionIdentityKey)`
 ///
 /// where `effectiveCorrectionType` falls back to a derivation from
 /// `source` for legacy rows that pre-date the `correctionType` column
 /// (those rows have `correctionType == nil`; per the existing
 /// passthrough-factor convention they are all false-positive vetoes).
+/// `correctionIdentityKey` is empty for every non-banner correction, preserving
+/// the v23 generic dedupe contract. Explicit banner receipts use a canonical
+/// route + exact-scope + target-window key so two same-span answers cannot
+/// overwrite each other's private ownership records.
 ///
 /// Stable across app launches: every component is derived from the
 /// scope/source value, never from a per-row UUID. Stable across
@@ -252,6 +257,7 @@ struct CorrectionEventIdentity: Hashable, Sendable {
     let analysisAssetId: String
     let effectiveCorrectionType: CorrectionType
     let normalizedScopeKey: String
+    let correctionIdentityKey: String
 }
 
 extension CorrectionEvent {
@@ -279,8 +285,52 @@ extension CorrectionEvent {
         return CorrectionEventIdentity(
             analysisAssetId: analysisAssetId,
             effectiveCorrectionType: effectiveCorrectionType,
-            normalizedScopeKey: normalized
+            normalizedScopeKey: normalized,
+            correctionIdentityKey:
+                persistedCorrectionIdentityKey
+                ?? explicitReceiptIdentityKey
+                ?? ""
         )
+    }
+
+    /// Stable on-disk discriminator for a valid explicit banner receipt.
+    ///
+    /// Every component is length-prefixed before concatenation, avoiding
+    /// delimiter ambiguity without relying on Swift's process-randomized
+    /// `Hashable`. The exact serialized scope participates in addition to the
+    /// normalized v23 scope column: generic corrections still absorb sub-100ms
+    /// boundary jitter, while a private receipt is owned by the exact window
+    /// and lossless displayed span the user answered.
+    var explicitReceiptIdentityKey: String? {
+        guard let source, source.isExplicitBannerFeedback,
+              let refs = targetRefs,
+              let targetIDs = refs.canonicalExplicitAdWindowIDs
+        else {
+            return nil
+        }
+        let receiptVersion: String
+        let exactSpanIdentity: [String]
+        if let exactSpan = refs.exactFeedbackSpan {
+            receiptVersion = "explicit-banner-receipt-v2"
+            exactSpanIdentity = [
+                String(exactSpan.startTimeBitPattern),
+                String(exactSpan.endTimeBitPattern),
+            ]
+        } else {
+            // Migration compatibility for receipts created before the
+            // lossless private-span payload existed.
+            receiptVersion = "explicit-banner-receipt-v1"
+            exactSpanIdentity = [scope]
+        }
+        let components = [
+            receiptVersion,
+            analysisAssetId,
+            effectiveCorrectionType.rawValue,
+            source.rawValue,
+        ] + exactSpanIdentity + targetIDs
+        return components.map {
+            "\($0.utf8.count):\($0)"
+        }.joined(separator: "|")
     }
 }
 
@@ -405,6 +455,18 @@ protocol UserCorrectionStore: Sendable {
     /// Append a fully-formed correction event to the store.
     func record(_ event: CorrectionEvent) async throws
 
+    /// Runs derived learning work for a correction that the owning
+    /// `AnalysisStore` already committed atomically with its authoritative
+    /// user-facing row mutation. Implementations must not append the event
+    /// again: doing so would turn one banner response into two submissions.
+    ///
+    /// The default is intentionally a no-op for in-memory/test stores. The
+    /// production persistent store forwards to its learning ingestor.
+    func correctionDidPersistAtomically(
+        _ event: CorrectionEvent,
+        wasNewlyInserted: Bool
+    ) async
+
     /// Phase 7.2: Return an aggregate correction suppression factor for the
     /// given analysis asset. The factor is in [0.0, 1.0]:
     ///   - 1.0 means no active corrections (no suppression)
@@ -454,13 +516,38 @@ protocol UserCorrectionStore: Sendable {
     /// returns `[]` (no corrections), so stores that don't persist corrections
     /// (`NoOpUserCorrectionStore`, test doubles) are correct without change.
     func activeFalsePositiveScopes(for analysisAssetId: String) async -> [CorrectionScope]
+
+    /// playhead-527u (false-negative read-side): the active `.falseNegative`
+    /// (ADD-direction) correction scopes for the asset, deduped, decoded to
+    /// `CorrectionScope`. The symmetric counterpart of `activeFalsePositiveScopes`
+    /// — it feeds `StoreBackedCorrectionMaskProvider` so an explicit "this IS an
+    /// ad" mark becomes a `.userConfirmed` atom mask that FORCE-ANCHORS the
+    /// region, so re-analysis never undoes a user-added mark.
+    ///
+    /// MUST include ONLY `.falseNegative` corrections (guardrail 1, mirrored: the
+    /// confirm mask acts only in the ADD direction). Legacy nil-source rows are
+    /// false-positive vetoes by convention and are therefore excluded here. The
+    /// default implementation returns `[]`.
+    func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope]
 }
 
 // MARK: - UserCorrectionStore default
 
 extension UserCorrectionStore {
+    func correctionDidPersistAtomically(
+        _ event: CorrectionEvent,
+        wasNewlyInserted: Bool
+    ) async {
+        // No derived persistence contract by default.
+    }
+
     /// Default: no corrections. Overridden by `PersistentUserCorrectionStore`.
     func activeFalsePositiveScopes(for analysisAssetId: String) async -> [CorrectionScope] {
+        []
+    }
+
+    /// Default: no corrections. Overridden by `PersistentUserCorrectionStore`.
+    func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope] {
         []
     }
 }
@@ -694,6 +781,32 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             return
         }
         try await store.appendCorrectionEvent(event)
+    }
+
+    func correctionDidPersistAtomically(
+        _ event: CorrectionEvent,
+        wasNewlyInserted: Bool
+    ) async {
+        guard let learningIngestor else { return }
+        do {
+            _ = try await learningIngestor.ingestAlreadyPersisted(
+                correction: event,
+                wasNewlyInserted: wasNewlyInserted
+            )
+        } catch {
+            // The banner's primary receipt is already committed. Derived
+            // training material is idempotent and may be rebuilt later; never
+            // turn a successful user action into a retry that re-submits it.
+            if event.source?.isExplicitBannerFeedback == true {
+                // The receipt already contains the exact asset/span and the
+                // user's response. Keep OSLog operational-only for this route.
+                logger.error("Banner feedback follow-up failed")
+            } else {
+                logger.error(
+                    "correctionDidPersistAtomically: derived learning failed for asset \(event.analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     // MARK: - Protocol: correctionPassthroughFactor
@@ -1057,6 +1170,34 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         }
         return events.compactMap { event -> CorrectionScope? in
             guard event.source?.kind == .falsePositive || event.source == nil else { return nil }
+            return CorrectionScope.deserialize(event.scope)
+        }
+    }
+
+    /// playhead-527u (false-negative read-side): the deduped `.falseNegative`
+    /// correction scopes for the asset, backed by `activeCorrections(for:)`.
+    ///
+    /// Filtered to false negatives with the SAME predicate `correctionBoostFactor`
+    /// uses (`source?.kind == .falseNegative`), so the ADD-direction confirm mask
+    /// sees exactly the user's "missed ad here" reports. Legacy nil-source rows
+    /// are excluded (they are false-positive vetoes by convention). Corrupt scope
+    /// strings decode to `nil` and are dropped. The synthetic negative-ordinal
+    /// `.exactSpan` spans DO appear here (they are `.falseNegative`), but their
+    /// negative ordinals never intersect real transcript ordinals, so they mask
+    /// no real atom — the `.exactTimeSpan` marks from `recordUserMarkedAd` are
+    /// what force-anchor a re-derived region.
+    func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope] {
+        let events: [CorrectionEvent]
+        do {
+            events = try await activeCorrections(for: analysisAssetId)
+        } catch {
+            logger.warning(
+                "activeFalseNegativeScopes: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return []
+        }
+        return events.compactMap { event -> CorrectionScope? in
+            guard event.source?.kind == .falseNegative else { return nil }
             return CorrectionScope.deserialize(event.scope)
         }
     }

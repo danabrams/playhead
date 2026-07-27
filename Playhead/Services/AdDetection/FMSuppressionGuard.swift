@@ -268,6 +268,16 @@ struct FMSuppressionApplicator: Sendable {
             return false
         case .fingerprint:
             return true
+        case .rediffConfirmed:
+            // playhead-xsdz.62: a BYTE-EXACT rediff-confirmed kind is DETERMINISTIC
+            // ground truth (the origin served different ad bytes on a re-fetch) —
+            // the strongest positive evidence there is. The epic thesis is that FM
+            // HEDGES/says noAds on exactly these produced-DAI insertions, so an FM
+            // noAds consensus must NEVER erase a rediff confirmation. Preserved
+            // through suppression, like `.fingerprint` / `.lexicalAutoAd`. (The
+            // entry is emitted weight-0, so this never sets `hasStrongProposal`
+            // and never adds score — it stays a pure corroboration-kind marker.)
+            return true
         case .lexicalAutoAd:
             // playhead-xsdz.1: the high-precision lexical auto-ad rule is
             // STRONG positive evidence and is preserved through FM noAds

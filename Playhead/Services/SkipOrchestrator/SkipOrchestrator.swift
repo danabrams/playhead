@@ -16,6 +16,12 @@ import CoreMedia
 import Foundation
 import OSLog
 
+private enum SkipOrchestratorFeedbackError: Error {
+    case invalidCorrectionRange
+    case correctionStoreUnavailable
+    case staleDurableMaterial
+}
+
 // MARK: - Future Contract Scaffold
 
 /// Phase 6 contract scaffold introduced by bead 6.7 so the pending
@@ -40,6 +46,21 @@ struct AdDecisionResult: Sendable {
     let skipConfidence: Double
     let eligibilityGate: AdDecisionEligibilityGate
     let recomputationRevision: Int
+}
+
+/// Ordered UI events emitted by the skip orchestrator. Presentations and
+/// invalidations share one stream so a gate flip retires a stale suggestion
+/// before any replacement auto-skip presentation is delivered.
+enum AdBannerStreamEvent: Sendable {
+    case present(AdSkipBannerItem)
+    case retireWindow(AdBannerRetirement)
+}
+
+/// Identity of a banner presentation that is no longer actionable.
+struct AdBannerRetirement: Sendable {
+    let windowId: String
+    let episodeId: String?
+    let playbackLifecycleGeneration: UInt64?
 }
 
 // MARK: - Skip Decision State
@@ -188,6 +209,20 @@ actor SkipOrchestrator {
     private let store: AnalysisStore
     private let config: SkipPolicyConfig
     private let trustService: TrustScoringService?
+    /// Test override for holding the secondary false-skip calibration write.
+    /// Production leaves this nil and uses `trustService`.
+    private var falseSkipSignalHandlerForTesting:
+        (@Sendable (String) async -> Void)?
+    /// Test override for holding secondary false-negative calibration.
+    /// Production leaves this nil and uses `trustService`.
+    private var falseNegativeSignalHandlerForTesting:
+        (@Sendable (String) async -> Void)?
+    private var feedbackPersistenceBarrierForTesting:
+        (@Sendable () async -> Void)?
+    /// Test-only suspension point for the fire-and-forget durable applied
+    /// transition. Production leaves this nil.
+    private var appliedPersistenceBarrierForTesting:
+        (@Sendable () async -> Void)?
 
     // MARK: - Phase 7.2: User Correction Store
 
@@ -309,6 +344,10 @@ actor SkipOrchestrator {
 
     /// All managed windows for the current episode, keyed by adWindowId.
     private var windows: [String: ManagedWindow] = [:]
+    /// Auto-skip windows whose live cue has been retired for a banner Listen
+    /// action but whose durable rewind receipt has not yet committed. Retaining
+    /// the ID makes a persistence failure retryable without re-arming the cue.
+    private var pendingListenRewindWindowIds: Set<String> = []
 
     /// Current analysis asset ID.
     private var activeAssetId: String?
@@ -330,6 +369,14 @@ actor SkipOrchestrator {
 
     /// Latest known playhead position.
     private var currentPlayheadTime: TimeInterval = 0
+    /// Runtime operation token admitted by the newest same-lifecycle seek.
+    /// This is separate from episode lifecycle because overlapping seeks may
+    /// target the same episode and transport item.
+    private var latestUserSeekOperationGeneration: UInt64 = 0
+    #if DEBUG
+    private var userSeekEffectHookForTesting:
+        (@Sendable () async -> Void)?
+    #endif
 
     /// Decision log for evaluation harness. Capped to prevent unbounded growth.
     private var decisionLog: [SkipDecisionRecord] = []
@@ -348,8 +395,12 @@ actor SkipOrchestrator {
     private var segmentContinuations: [UUID: AsyncStream<[(start: Double, end: Double)]>.Continuation] = [:]
 
     /// Continuation-backed stream of banner items.
-    /// Emits once per window the first time it reaches .confirmed or .applied state.
+    /// Emits once per window after an actual skip reaches `.applied`.
     private var bannerContinuations: [UUID: AsyncStream<AdSkipBannerItem>.Continuation] = [:]
+
+    /// Production banner stream, including ordered invalidations.
+    private var bannerEventContinuations:
+        [UUID: AsyncStream<AdBannerStreamEvent>.Continuation] = [:]
 
     /// Window IDs for which a banner has already been emitted. Prevents re-fires.
     private var banneredWindowIds: Set<String> = []
@@ -395,18 +446,72 @@ actor SkipOrchestrator {
     /// candidate. Cleared at episode end.
     private var suggestWindows: [String: AdWindow] = [:]
 
+    /// Revision identity for each producer suggestion ID. A producer may
+    /// recompute a window in-place (same ID and playback lifecycle, different
+    /// span or attribution). The UI token must therefore identify the current
+    /// revision, not merely the producer ID.
+    private var suggestRevisionTokensByWindowId: [String: String] = [:]
+
+    /// Last producer value used to decide whether a same-ID delivery is an
+    /// exact replay or a new actionable revision. Retained after a neutral or
+    /// explicit exit so an identical late delivery keeps the old presentation
+    /// gate, while a materially changed value gets a fresh token and card.
+    private var lastSuggestRevisionByWindowId: [String: AdWindow] = [:]
+
+    /// Revision tokens whose delivery reached the active banner host.
+    /// Presentation acknowledgement is revision-scoped so a late ack from an
+    /// older same-ID card cannot suppress replay of the current revision.
+    private var acknowledgedSuggestRevisionTokens: Set<String> = []
+
+    /// Suggestion IDs explicitly vetoed during the active episode. Unlike a
+    /// presentation acknowledgement, a user "No" is authoritative for the
+    /// producer row itself: neither an exact late replay nor a materially
+    /// changed stale producer value with the same ID may recreate the card.
+    private var vetoedSuggestWindowIds: Set<String> = []
+
     /// playhead-rfu-sad: tap-then-flip race guard. AdWindow ids that have
     /// already been promoted via `acceptSuggestedSkip` (the user tapped
     /// the suggest banner). A late-arriving ingest with the same id and
-    /// gate cleared must NOT register a second managed window — the
-    /// promoted UUID-keyed entry is already authoritative for that span.
-    /// Bounded LRU so a long episode doesn't grow the set unboundedly;
-    /// 256 ids covers any realistic single-episode tap volume.
-    private var recentlyAcceptedSuggestIds: [String] = []
-    private let recentlyAcceptedSuggestCapacity = 256
+    /// any gate must NOT register a second managed or suggested window —
+    /// the promoted UUID-keyed entry is already authoritative for that span.
+    ///
+    /// This set is intentionally unbounded within one playback lifecycle.
+    /// It is cleared at both `beginEpisode` and `endEpisode`; evicting an
+    /// accepted ID earlier would let a sufficiently late producer replay
+    /// create a second durable promotion for the same explicit Yes.
+    private var recentlyAcceptedSuggestIds: Set<String> = []
+
+    /// Producer updates that arrive while an explicit suggest response is
+    /// waiting for its transaction. The user's answer becomes terminal only
+    /// after persistence succeeds; on failure, the newest buffered producer
+    /// value—not the stale pre-tap revision—must resume ownership.
+    private enum BufferedSuggestProducerUpdate {
+        case adWindow(AdWindow)
+        case decisionResult(AdDecisionResult)
+        case retired
+    }
+    private var provisionallyResolvingSuggestWindowIds: Set<String> = []
+    private var bufferedSuggestProducerUpdates:
+        [String: BufferedSuggestProducerUpdate] = [:]
+
+    /// A user's explicit Yes or No is terminal for that producer ID for the
+    /// active episode, regardless of which ingress path or eligibility gate
+    /// redelivers it afterward.
+    private func hasTerminalSuggestResolution(_ windowId: String) -> Bool {
+        vetoedSuggestWindowIds.contains(windowId)
+            || recentlyAcceptedSuggestIds.contains(windowId)
+    }
 
     /// The podcast ID for the current episode. Needed to populate banner items.
     private var activePodcastId: String?
+    /// Latest-wins token for reentrant episode starts. `beginEpisode` performs
+    /// several actor hops while hydrating trust and persisted windows; an older
+    /// start must not resume and overwrite a newer episode's state.
+    private var episodeLifecycleGeneration: UInt64 = 0
+    /// Runtime playback request that owns the active episode transaction.
+    /// Unlike canonical episode identity, this changes when the same episode
+    /// is replayed or replaced and is stamped onto every banner emission.
+    private var activePlaybackLifecycleGeneration: UInt64?
 
     /// The deterministic evidence catalog for the current episode's transcript,
     /// pushed by `AnalysisCoordinator` whenever new transcript material lands.
@@ -513,6 +618,46 @@ actor SkipOrchestrator {
         skipCueHandler = handler
     }
 
+#if DEBUG
+    func _setFalseSkipSignalHandlerForTesting(
+        _ handler: (@Sendable (String) async -> Void)?
+    ) {
+        falseSkipSignalHandlerForTesting = handler
+    }
+
+    func _setFalseNegativeSignalHandlerForTesting(
+        _ handler: (@Sendable (String) async -> Void)?
+    ) {
+        falseNegativeSignalHandlerForTesting = handler
+    }
+
+    func _setSuggestPersistenceBarrierForTesting(
+        _ barrier: (@Sendable () async -> Void)?
+    ) {
+        feedbackPersistenceBarrierForTesting = barrier
+    }
+
+    func _setFeedbackPersistenceBarrierForTesting(
+        _ barrier: (@Sendable () async -> Void)?
+    ) {
+        feedbackPersistenceBarrierForTesting = barrier
+    }
+
+    func _setAppliedPersistenceBarrierForTesting(
+        _ barrier: (@Sendable () async -> Void)?
+    ) {
+        appliedPersistenceBarrierForTesting = barrier
+    }
+
+    func _suggestWindowForTesting(id: String) -> AdWindow? {
+        suggestWindows[id]
+    }
+
+    func _isSuggestResolutionProvisionalForTesting(id: String) -> Bool {
+        provisionallyResolvingSuggestWindowIds.contains(id)
+    }
+#endif
+
     // MARK: - Ad Segment Stream
 
     /// Returns an AsyncStream of applied ad segment ranges (in seconds).
@@ -536,8 +681,8 @@ actor SkipOrchestrator {
 
     // MARK: - Banner Item Stream
 
-    /// Returns an AsyncStream that emits an AdSkipBannerItem the first time
-    /// each ad window transitions to .confirmed or .applied state.
+    /// Returns an AsyncStream that emits an AdSkipBannerItem after an
+    /// automatic skip is actually applied.
     /// Each window fires at most once per episode, regardless of subsequent state changes.
     func bannerItemStream() -> AsyncStream<AdSkipBannerItem> {
         let id = UUID()
@@ -548,11 +693,34 @@ actor SkipOrchestrator {
                     await self?.removeBannerContinuation(id: id)
                 }
             }
+            // Suggestions can be produced while Now Playing is absent. Keep
+            // them pending, but do not call them "bannered" until a real
+            // subscriber exists. A newly attached host receives each pending
+            // suggestion exactly once.
+            self.replayPendingSuggestBanners(to: continuation)
         }
     }
 
     private func removeBannerContinuation(id: UUID) {
         bannerContinuations.removeValue(forKey: id)
+    }
+
+    /// Returns the ordered production banner event stream.
+    func bannerEventStream() -> AsyncStream<AdBannerStreamEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            self.bannerEventContinuations[id] = continuation
+            continuation.onTermination = { @Sendable _ in
+                Task { [weak self] in
+                    await self?.removeBannerEventContinuation(id: id)
+                }
+            }
+            self.replayPendingSuggestBannerEvents(to: continuation)
+        }
+    }
+
+    private func removeBannerEventContinuation(id: UUID) {
+        bannerEventContinuations.removeValue(forKey: id)
     }
 
     // MARK: - Evidence Catalog (banner transparency)
@@ -595,7 +763,11 @@ actor SkipOrchestrator {
 
     /// Emit a banner item for the given managed window to all banner listeners.
     private func emitBannerItem(for managed: ManagedWindow) {
-        guard !bannerContinuations.isEmpty else { return }
+        guard !bannerContinuations.isEmpty
+                || !bannerEventContinuations.isEmpty
+        else {
+            return
+        }
         let adWindow = managed.adWindow
         let podcastId = activePodcastId ?? ""
         let entries = catalogEntries(overlapping: managed.snappedStart, end: managed.snappedEnd)
@@ -609,6 +781,12 @@ actor SkipOrchestrator {
             metadataConfidence: adWindow.metadataConfidence,
             metadataSource: adWindow.metadataSource,
             podcastId: podcastId,
+            episodeId: activeEpisodeId,
+            playbackLifecycleGeneration:
+                activePlaybackLifecycleGeneration,
+            analysisAssetId: adWindow.analysisAssetId,
+            windowMaterialRevisionToken:
+                bannerMaterialRevisionToken(for: managed),
             evidenceCatalogEntries: entries,
             tier: .autoSkipped
         )
@@ -618,27 +796,89 @@ actor SkipOrchestrator {
         // — NOT this set. The gate is written at four production sites
         // (pinned by source canary `BanneredWindowIdsInsertSiteCount`):
         // `evaluateAndPush`'s terminal-state branch and its promotion
-        // branch (each before calling this method), `injectUserMarkedAd`
-        // (also before calling this method), and `beginEpisode`'s
-        // preload pre-population for `.applied` rows (which suppresses
-        // without ever calling this method). Do not remove this line as
+        // branch (each before calling this method), `beginEpisode`'s
+        // preload pre-population for `.applied` rows, and accepted
+        // suggestions whose original card already collected feedback (the
+        // latter two suppress without calling this method). Do not remove this line as
         // "dead state"; see field doc.
         emittedAutoSkipBannerWindowIds.insert(adWindow.id)
         for (_, continuation) in bannerContinuations {
             continuation.yield(item)
         }
+        for (_, continuation) in bannerEventContinuations {
+            continuation.yield(.present(item))
+        }
+    }
+
+    /// Stable opaque identity for the exact producer material shown on an
+    /// auto-skipped card. Length-prefixing strings avoids delimiter ambiguity;
+    /// floating-point bit patterns preserve exact persisted values.
+    private func bannerMaterialRevisionToken(
+        for managed: ManagedWindow
+    ) -> String {
+        AdWindowMaterialIdentity.autoSkipToken(
+            window: managed.adWindow,
+            displayedStart: managed.snappedStart,
+            displayedEnd: managed.snappedEnd
+        )
     }
 
     /// playhead-gtt9.23: emit a suggest-tier banner for a markOnly window.
-    /// Suggest banners ask the user "Sounds like a sponsor break. Skip?";
-    /// they never imply a skip has happened. Persistence and trust signals
-    /// are deferred to the user's tap (handled by `acceptSuggestedSkip` /
+    /// Suggest banners ask whether Playhead's sponsor-break assessment was
+    /// right; they never imply a skip has happened. Persistence and trust
+    /// signals are deferred to the user's answer (handled by `acceptSuggestedSkip` /
     /// `declineSuggestedSkip` below).
     private func emitSuggestBanner(for adWindow: AdWindow) {
-        guard !bannerContinuations.isEmpty else { return }
+        guard !bannerContinuations.isEmpty
+                || !bannerEventContinuations.isEmpty
+        else {
+            return
+        }
+        let item = makeSuggestBannerItem(for: adWindow)
+        var terminatedContinuationIDs: [UUID] = []
+        for (id, continuation) in bannerContinuations {
+            switch continuation.yield(item) {
+            case .enqueued, .dropped:
+                break
+            case .terminated:
+                terminatedContinuationIDs.append(id)
+            @unknown default:
+                break
+            }
+        }
+        for id in terminatedContinuationIDs {
+            bannerContinuations.removeValue(forKey: id)
+        }
+        var terminatedEventContinuationIDs: [UUID] = []
+        for (id, continuation) in bannerEventContinuations {
+            switch continuation.yield(.present(item)) {
+            case .enqueued, .dropped:
+                break
+            case .terminated:
+                terminatedEventContinuationIDs.append(id)
+            @unknown default:
+                break
+            }
+        }
+        for id in terminatedEventContinuationIDs {
+            bannerEventContinuations.removeValue(forKey: id)
+        }
+    }
+
+    private func makeSuggestBannerItem(
+        for adWindow: AdWindow
+    ) -> AdSkipBannerItem {
         let podcastId = activePodcastId ?? ""
         let entries = catalogEntries(overlapping: adWindow.startTime, end: adWindow.endTime)
-        let item = AdSkipBannerItem(
+        let revisionToken: String
+        if let existing = suggestRevisionTokensByWindowId[adWindow.id] {
+            revisionToken = existing
+        } else {
+            revisionToken =
+                AdWindowMaterialIdentity.suggestionToken(adWindow)
+            suggestRevisionTokensByWindowId[adWindow.id] = revisionToken
+        }
+        return AdSkipBannerItem(
             id: UUID().uuidString,
             windowId: adWindow.id,
             advertiser: adWindow.advertiser,
@@ -648,12 +888,231 @@ actor SkipOrchestrator {
             metadataConfidence: adWindow.metadataConfidence,
             metadataSource: adWindow.metadataSource,
             podcastId: podcastId,
+            episodeId: activeEpisodeId,
+            playbackLifecycleGeneration:
+                activePlaybackLifecycleGeneration,
+            suggestionRevisionToken: revisionToken,
             evidenceCatalogEntries: entries,
             tier: .suggest
         )
-        for (_, continuation) in bannerContinuations {
-            continuation.yield(item)
+    }
+
+    /// Register one mark-only producer value as the current suggest revision.
+    /// Exact replays preserve their delivery gate. Material changes retire any
+    /// older card before emitting a fresh token-bound presentation.
+    private func registerSuggestedWindow(_ adWindow: AdWindow) {
+        guard !hasTerminalSuggestResolution(adWindow.id) else {
+            return
         }
+        let priorRevision = lastSuggestRevisionByWindowId[adWindow.id]
+        let revisionChanged = priorRevision.map {
+            !Self.sameSuggestRevision($0, adWindow)
+        } ?? true
+
+        if revisionChanged {
+            if suggestWindows[adWindow.id] != nil
+                    || suggestBanneredWindowIds.contains(adWindow.id) {
+                emitBannerRetirement(windowId: adWindow.id)
+            }
+            lastSuggestRevisionByWindowId[adWindow.id] = adWindow
+            suggestRevisionTokensByWindowId[adWindow.id] =
+                AdWindowMaterialIdentity.suggestionToken(adWindow)
+            suggestBanneredWindowIds.remove(adWindow.id)
+            suggestWindows[adWindow.id] = adWindow
+            emitSuggestBanner(for: adWindow)
+            return
+        }
+
+        guard let revisionToken =
+                suggestRevisionTokensByWindowId[adWindow.id],
+              !acknowledgedSuggestRevisionTokens.contains(revisionToken)
+        else {
+            return
+        }
+        let isNewActiveSuggestion = suggestWindows[adWindow.id] == nil
+        suggestWindows[adWindow.id] = adWindow
+        if isNewActiveSuggestion {
+            emitSuggestBanner(for: adWindow)
+        }
+    }
+
+    /// Equality over every persisted producer field that can change the card,
+    /// its correction attribution, or the span acted on by Yes/No.
+    private static func sameSuggestRevision(
+        _ lhs: AdWindow,
+        _ rhs: AdWindow
+    ) -> Bool {
+        AdWindowMaterialIdentity.suggestionToken(lhs)
+            == AdWindowMaterialIdentity.suggestionToken(rhs)
+    }
+
+    private func replayPendingSuggestBanners(
+        to continuation: AsyncStream<AdSkipBannerItem>.Continuation
+    ) {
+        let pending = suggestWindows.values
+            .filter {
+                guard let revisionToken =
+                        suggestRevisionTokensByWindowId[$0.id]
+                else {
+                    return true
+                }
+                return !acknowledgedSuggestRevisionTokens
+                    .contains(revisionToken)
+                    && !banneredWindowIds.contains($0.id)
+            }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+
+        for window in pending {
+            switch continuation.yield(makeSuggestBannerItem(for: window)) {
+            case .enqueued, .dropped:
+                break
+            case .terminated:
+                return
+            @unknown default:
+                return
+            }
+        }
+    }
+
+    private func replayPendingSuggestBannerEvents(
+        to continuation: AsyncStream<AdBannerStreamEvent>.Continuation
+    ) {
+        let pending = suggestWindows.values
+            .filter {
+                guard let revisionToken =
+                        suggestRevisionTokensByWindowId[$0.id]
+                else {
+                    return true
+                }
+                return !acknowledgedSuggestRevisionTokens
+                    .contains(revisionToken)
+                    && !banneredWindowIds.contains($0.id)
+            }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+
+        for window in pending {
+            continuation.yield(.present(makeSuggestBannerItem(for: window)))
+        }
+    }
+
+    /// Invalidates an orchestrator-owned banner without manufacturing a
+    /// neutral or explicit user response.
+    private func emitBannerRetirement(windowId: String) {
+        let retirement = AdBannerRetirement(
+            windowId: windowId,
+            episodeId: activeEpisodeId,
+            playbackLifecycleGeneration:
+                activePlaybackLifecycleGeneration
+        )
+        for (_, continuation) in bannerEventContinuations {
+            continuation.yield(.retireWindow(retirement))
+        }
+    }
+
+    /// Atomically invalidates an actionable suggestion and tells the banner
+    /// host to retire any presentation for it. Every producer-side invalidation
+    /// path must use this helper before returning; otherwise a stale Yes action
+    /// can promote a window after a newer precision or inventory decision has
+    /// forbidden it.
+    @discardableResult
+    private func retireSuggestedWindowIfPresent(
+        windowId: String
+    ) -> Bool {
+        guard suggestWindows.removeValue(forKey: windowId) != nil else {
+            return false
+        }
+        emitBannerRetirement(windowId: windowId)
+        return true
+    }
+
+    /// Removes a managed window whose latest producer decision no longer
+    /// permits the active auto-skip path. Reverted state is terminal: a later
+    /// producer update must never undo the user's correction.
+    @discardableResult
+    private func removeNonRevertedManagedWindowIfPresent(
+        windowId: String
+    ) -> Bool {
+        guard let managed = windows[windowId],
+              managed.decisionState != .reverted
+        else {
+            return false
+        }
+        windows.removeValue(forKey: windowId)
+        banneredWindowIds.remove(windowId)
+        edgeAnchorsByWindowId.removeValue(forKey: windowId)
+        userInitiatedSkipWindowIds.remove(windowId)
+        if managed.decisionState == .applied,
+           !windows.values.contains(where: {
+               $0.decisionState == .applied
+           }) {
+            inAdState = false
+        }
+        return true
+    }
+
+    /// Retires any managed and/or suggested representation for a producer
+    /// window with one ordered UI invalidation event.
+    @discardableResult
+    private func retireAllNonRevertedWindowStateIfPresent(
+        windowId: String
+    ) -> Bool {
+        let removedSuggestion =
+            suggestWindows.removeValue(forKey: windowId) != nil
+        let removedManaged =
+            removeNonRevertedManagedWindowIfPresent(windowId: windowId)
+        guard removedSuggestion || removedManaged else { return false }
+        emitBannerRetirement(windowId: windowId)
+        return true
+    }
+
+    /// Retires only the managed representation before routing the newest
+    /// producer state into the suggest tier.
+    @discardableResult
+    private func retireManagedWindowIfPresent(
+        windowId: String
+    ) -> Bool {
+        guard removeNonRevertedManagedWindowIfPresent(
+            windowId: windowId
+        ) else {
+            return false
+        }
+        emitBannerRetirement(windowId: windowId)
+        return true
+    }
+
+    /// Marks a suggestion as actually presented only after the host queue
+    /// accepts the streamed item. `AsyncStream.yield(.enqueued)` proves only
+    /// that the item entered the stream buffer; a canceled observer or stale
+    /// episode generation may still reject it before any UI can answer.
+    func acknowledgeSuggestedBannerDelivery(
+        windowId: String,
+        episodeId: String?,
+        playbackLifecycleGeneration: UInt64?,
+        suggestionRevisionToken expectedRevisionToken: String? = nil
+    ) {
+        guard activeEpisodeId == episodeId,
+              activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              suggestWindows[windowId] != nil,
+              let currentRevisionToken =
+                suggestRevisionTokensByWindowId[windowId],
+              expectedRevisionToken == nil
+                || currentRevisionToken == expectedRevisionToken
+        else {
+            return
+        }
+        acknowledgedSuggestRevisionTokens.insert(currentRevisionToken)
+        suggestBanneredWindowIds.insert(windowId)
     }
 
     /// Slice catalog entries whose coverage span overlaps the skipped window.
@@ -697,12 +1156,17 @@ actor SkipOrchestrator {
     func beginEpisode(
         analysisAssetId: String,
         episodeId: String,
-        podcastId: String? = nil
+        podcastId: String? = nil,
+        playbackLifecycleGeneration: UInt64? = nil
     ) async {
+        episodeLifecycleGeneration &+= 1
+        let lifecycleGeneration = episodeLifecycleGeneration
         windows.removeAll()
+        pendingListenRewindWindowIds.removeAll()
         activeAssetId = analysisAssetId
         activeEpisodeId = episodeId
         activePodcastId = podcastId
+        activePlaybackLifecycleGeneration = playbackLifecycleGeneration
         activeEvidenceCatalog = nil
         // playhead-xr3t: clear per-episode inventory-filter context.
         // Episode duration is rehydrated from the persisted asset row
@@ -715,18 +1179,36 @@ actor SkipOrchestrator {
         lastSeekTime = nil
         skipSuppressedAfterSeek = false
         currentPlayheadTime = 0
+        latestUserSeekOperationGeneration = 0
         decisionLog.removeAll()
         banneredWindowIds.removeAll()
         emittedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
+        suggestRevisionTokensByWindowId.removeAll()
+        lastSuggestRevisionByWindowId.removeAll()
+        acknowledgedSuggestRevisionTokens.removeAll()
+        vetoedSuggestWindowIds.removeAll()
+        recentlyAcceptedSuggestIds.removeAll()
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
         // playhead-98co: per-episode edge-padding state.
         edgeAnchorsByWindowId.removeAll()
         userInitiatedSkipWindowIds.removeAll()
+        // A direct episode switch does not call `endEpisode`. Publish the
+        // cleared state synchronously so the transport and UI cannot retain
+        // the prior episode's skip cues or segment markers while hydration
+        // for the replacement episode is in flight.
+        pushSkipCues()
+        broadcastAppliedSegments()
 
         // Load per-show trust mode.
         if let podcastId, let trustService {
-            activeSkipMode = await trustService.effectiveMode(podcastId: podcastId)
+            let mode = await trustService.effectiveMode(podcastId: podcastId)
+            guard episodeLifecycleGeneration == lifecycleGeneration else {
+                return
+            }
+            activeSkipMode = mode
         } else {
             activeSkipMode = .shadow
         }
@@ -740,7 +1222,11 @@ actor SkipOrchestrator {
         // `setEpisodeDuration(_:)` once `AnalysisCoordinator`'s
         // duration-backfill probe rewrites the row.
         do {
-            if let asset = try await store.fetchAsset(id: analysisAssetId),
+            let asset = try await store.fetchAsset(id: analysisAssetId)
+            guard episodeLifecycleGeneration == lifecycleGeneration else {
+                return
+            }
+            if let asset,
                let duration = asset.episodeDurationSec,
                duration > 0,
                duration.isFinite {
@@ -790,6 +1276,9 @@ actor SkipOrchestrator {
         // `eligible.append` regardless of the banner gate).
         do {
             let preWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+            guard episodeLifecycleGeneration == lifecycleGeneration else {
+                return
+            }
             let eligible = preWindows.filter {
                 $0.confidence >= Self.preloadConfidenceThreshold
                     && $0.endTime > $0.startTime
@@ -802,6 +1291,9 @@ actor SkipOrchestrator {
                     banneredWindowIds.insert(window.id)
                 }
                 await receiveAdWindows(eligible)
+                guard episodeLifecycleGeneration == lifecycleGeneration else {
+                    return
+                }
             }
         } catch {
             logger.warning("Failed to load preload ad_windows: \(error.localizedDescription)")
@@ -812,25 +1304,35 @@ actor SkipOrchestrator {
 
     /// End orchestration for the current episode.
     func endEpisode() {
+        episodeLifecycleGeneration &+= 1
         let windowCount = windows.count
         let appliedCount = windows.values.filter { $0.decisionState == .applied }.count
         logger.info("End episode: \(windowCount) windows, \(appliedCount) applied, \(self.decisionLog.count) decisions logged")
 
         windows.removeAll()
+        pendingListenRewindWindowIds.removeAll()
         activeAssetId = nil
         activeEpisodeId = nil
         activePodcastId = nil
+        activePlaybackLifecycleGeneration = nil
         activeEvidenceCatalog = nil
         // playhead-xr3t: clear per-episode inventory-filter context so
         // the next episode doesn't inherit stale duration/chapters.
         activeEpisodeDuration = nil
         activeDeclaredChapters = []
         inAdState = false
+        latestUserSeekOperationGeneration = 0
         banneredWindowIds.removeAll()
         emittedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
+        suggestRevisionTokensByWindowId.removeAll()
+        lastSuggestRevisionByWindowId.removeAll()
+        acknowledgedSuggestRevisionTokens.removeAll()
+        vetoedSuggestWindowIds.removeAll()
         recentlyAcceptedSuggestIds.removeAll()
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
         // playhead-98co: clear per-episode edge-padding state here as well
         // as in `beginEpisode`, mirroring every sibling per-episode
         // collection above (see the endEpisode-clears regression pattern on
@@ -839,6 +1341,7 @@ actor SkipOrchestrator {
         edgeAnchorsByWindowId.removeAll()
         userInitiatedSkipWindowIds.removeAll()
         pushSkipCues()
+        broadcastAppliedSegments()
     }
 
     // MARK: - playhead-xr3t: inventory sanity context setters
@@ -954,11 +1457,12 @@ actor SkipOrchestrator {
         return result
     }
 
-    /// Re-evaluate currently-managed windows against the inventory
+    /// Re-evaluate currently-managed and suggested windows against the inventory
     /// sanity filter using the freshest `activeEpisodeDuration` /
-    /// `activeDeclaredChapters` context. Removes any window that the
-    /// filter now rejects, subject to the user-already-acted guard
-    /// below.
+    /// `activeDeclaredChapters` context. Removes any window that the filter now
+    /// rejects, subject to the managed-window user-already-acted guard below.
+    /// Suggestions have not been acted on yet, so every rejected suggestion is
+    /// retired immediately before a stale Yes can promote it.
     ///
     /// Called after `setDeclaredChapters` and `setEpisodeDuration` so
     /// preloaded windows (which entered the active set before the
@@ -976,7 +1480,11 @@ actor SkipOrchestrator {
     ///   * `.candidate` / `.confirmed` / `.suppressed` — re-evaluate
     ///     freely; nothing user-visible has happened.
     private func reapplyInventoryFilterToManagedWindows() {
-        guard inventoryFilter.isEnabled, !windows.isEmpty else { return }
+        guard inventoryFilter.isEnabled,
+              !windows.isEmpty || !suggestWindows.isEmpty
+        else {
+            return
+        }
         var idsToRetire: [String] = []
         for (id, managed) in windows {
             switch managed.decisionState {
@@ -1006,10 +1514,29 @@ actor SkipOrchestrator {
                 idsToRetire.append(id)
             }
         }
-        guard !idsToRetire.isEmpty else { return }
-        for id in idsToRetire {
-            windows.removeValue(forKey: id)
-            banneredWindowIds.remove(id)
+
+        let suggestionIDsToRetire = suggestWindows.compactMap {
+            id, suggested -> String? in
+            let verdict = inventoryFilter.evaluate(
+                startTime: suggested.startTime,
+                endTime: suggested.endTime,
+                episodeDuration: activeEpisodeDuration,
+                declaredChapters: activeDeclaredChapters
+            )
+            guard case let .rejected(reason) = verdict else {
+                return nil
+            }
+            logger.info(
+                "Suggested AdWindow \(id, privacy: .public) retroactively rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
+            )
+            return id
+        }
+
+        let allIDsToRetire =
+            Set(idsToRetire).union(suggestionIDsToRetire)
+        guard !allIDsToRetire.isEmpty else { return }
+        for id in allIDsToRetire {
+            retireAllNonRevertedWindowStateIfPresent(windowId: id)
         }
         evaluateAndPush()
     }
@@ -1025,10 +1552,30 @@ actor SkipOrchestrator {
         for adWindow in adWindows {
             guard adWindow.analysisAssetId == assetId else { continue }
 
+            if provisionallyResolvingSuggestWindowIds.contains(adWindow.id) {
+                bufferedSuggestProducerUpdates[adWindow.id] =
+                    .adWindow(adWindow)
+                continue
+            }
+
+            // A user's explicit answer is authoritative for this producer ID
+            // across both precision tiers. Check before gate decoding so No
+            // cannot become an automatic skip and Yes cannot become another
+            // suggestion if a stale producer revises the gate.
+            if hasTerminalSuggestResolution(adWindow.id) {
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) ignored — suggestion already resolved by the user"
+                )
+                continue
+            }
+
             let existingState = windows[adWindow.id]?.decisionState
 
-            // Never process a window that was already applied or reverted.
-            if existingState == .applied || existingState == .reverted {
+            // A user-reverted window is terminal. Applied windows remain
+            // terminal only while the newest precision gate still permits the
+            // managed path; markOnly/blocked updates below must disarm them.
+            if existingState == .reverted {
+                retireSuggestedWindowIfPresent(windowId: adWindow.id)
                 continue
             }
 
@@ -1057,6 +1604,9 @@ actor SkipOrchestrator {
                     logger.info(
                         "AdWindow \(adWindow.id, privacy: .public) rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
                     )
+                    retireAllNonRevertedWindowStateIfPresent(
+                        windowId: adWindow.id
+                    )
                     continue
                 }
             }
@@ -1069,7 +1619,7 @@ actor SkipOrchestrator {
             // precision contract.
             //
             // playhead-gtt9.23: route markOnly windows into the suggest
-            // tier so the user can see them and tap-to-skip. The skip
+            // tier so the user can see them and answer Yes to skip. The skip
             // path remains untouched — `suggestWindows` is stored
             // separately from `windows` and is never evaluated by
             // `evaluateAndPush()`. The only effect is one banner emission
@@ -1130,15 +1680,44 @@ actor SkipOrchestrator {
             // through to the standard managed path (the non-fusion
             // producer contract).
             let decodedGate = adWindow.eligibilityGate.flatMap { SkipEligibilityGate(rawValue: $0) }
+            let incomingState =
+                SkipDecisionState(rawValue: adWindow.decisionState)
+                ?? .candidate
+            let incomingManaged = ManagedWindow(
+                adWindow: adWindow,
+                decisionState: incomingState,
+                snappedStart: adWindow.startTime,
+                snappedEnd: adWindow.endTime,
+                idempotencyKey: idempotencyKey(
+                    assetId: assetId,
+                    windowId: adWindow.id
+                ),
+                cueActive: false
+            )
+            if existingState == .applied,
+               decodedGate == nil || decodedGate == .eligible,
+               let existing = windows[adWindow.id] {
+                if bannerMaterialRevisionToken(for: existing)
+                    == bannerMaterialRevisionToken(for: incomingManaged) {
+                    retireSuggestedWindowIfPresent(windowId: adWindow.id)
+                    continue
+                }
+                // A same-ID producer value is terminal only for its exact
+                // material revision. Retire the old card/cue ownership before
+                // installing the replacement so late Yes/No actions fail their
+                // material token while the newest revision receives a fresh
+                // presentation.
+                _ = retireAllNonRevertedWindowStateIfPresent(
+                    windowId: adWindow.id
+                )
+            }
             if decodedGate == .markOnly {
+                retireManagedWindowIfPresent(windowId: adWindow.id)
                 logger.debug(
                     "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — surfacing as suggest tier"
                 )
-                if !suggestBanneredWindowIds.contains(adWindow.id),
-                   !banneredWindowIds.contains(adWindow.id) {
-                    suggestBanneredWindowIds.insert(adWindow.id)
-                    suggestWindows[adWindow.id] = adWindow
-                    emitSuggestBanner(for: adWindow)
+                if !banneredWindowIds.contains(adWindow.id) {
+                    registerSuggestedWindow(adWindow)
                 }
                 continue
             }
@@ -1172,21 +1751,8 @@ actor SkipOrchestrator {
                 logger.debug(
                     "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=\(decoded.rawValue, privacy: .public) — blocked, not adding to active windows"
                 )
-                continue
-            }
-
-            // playhead-rfu-sad: tap-then-flip race guard. The user
-            // already accepted this id via the suggest banner — a
-            // promoted UUID-keyed managed window is authoritative for
-            // the span. A late-arriving non-markOnly ingest with the
-            // SAME original id must NOT register a second `windows[id]`
-            // entry: that would emit a duplicate auto-skip banner and a
-            // duplicate `auto_skip_fired` audit event for one user
-            // skip. The promoted entry has already fired (or will fire)
-            // through evaluateAndPush.
-            if recentlyAcceptedSuggestIds.contains(adWindow.id) {
-                logger.debug(
-                    "AdWindow \(adWindow.id, privacy: .public) ignored — already promoted via acceptSuggestedSkip"
+                retireAllNonRevertedWindowStateIfPresent(
+                    windowId: adWindow.id
                 )
                 continue
             }
@@ -1200,14 +1766,11 @@ actor SkipOrchestrator {
             // `acceptSuggestedSkip` and synthesize a duplicate managed
             // window via a fresh `UUID().uuidString` (see
             // `acceptSuggestedSkip`'s `promotedId`).
-            if suggestWindows[adWindow.id] != nil {
-                suggestWindows.removeValue(forKey: adWindow.id)
+            if retireSuggestedWindowIfPresent(windowId: adWindow.id) {
                 logger.debug(
                     "AdWindow \(adWindow.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
                 )
             }
-
-            let incomingState = SkipDecisionState(rawValue: adWindow.decisionState) ?? .candidate
 
             // Build or update the managed window.
             let key = idempotencyKey(assetId: assetId, windowId: adWindow.id)
@@ -1260,12 +1823,15 @@ actor SkipOrchestrator {
         guard !ids.isEmpty else { return }
 
         for id in ids {
-            guard let existing = windows[id] else { continue }
-            if existing.decisionState == .applied || existing.decisionState == .reverted {
+            if provisionallyResolvingSuggestWindowIds.contains(id) {
+                bufferedSuggestProducerUpdates[id] = .retired
                 continue
             }
-            windows.removeValue(forKey: id)
-            banneredWindowIds.remove(id)
+            // Producer retirement invalidates every non-reverted
+            // representation, including an already-applied cue and its
+            // completed-action banner. Keeping an applied window here would
+            // leave it armed for a later seek after the producer withdrew it.
+            retireAllNonRevertedWindowStateIfPresent(windowId: id)
         }
 
         evaluateAndPush()
@@ -1284,15 +1850,38 @@ actor SkipOrchestrator {
         for result in results {
             guard result.analysisAssetId == assetId else { continue }
 
+            if provisionallyResolvingSuggestWindowIds.contains(result.id) {
+                bufferedSuggestProducerUpdates[result.id] =
+                    .decisionResult(result)
+                continue
+            }
+
+            // Mirror `receiveAdWindows`: explicit Yes/No is terminal for the
+            // producer ID before fusion eligibility can reinterpret it.
+            if hasTerminalSuggestResolution(result.id) {
+                logger.debug(
+                    "AdDecisionResult \(result.id, privacy: .public) ignored — suggestion already resolved by the user"
+                )
+                continue
+            }
+
             let existingState = windows[result.id]?.decisionState
 
-            // Never process a window that was already applied or reverted.
-            if existingState == .applied || existingState == .reverted { continue }
+            // A user-reverted window is terminal. Applied windows remain
+            // terminal only while the newest fusion decision stays eligible;
+            // blocked updates below must disarm them.
+            if existingState == .reverted {
+                retireSuggestedWindowIfPresent(windowId: result.id)
+                continue
+            }
 
             // Blocked gate: never add blocked results to the active window set.
             guard result.eligibilityGate == .eligible else {
                 logger.debug(
                     "AdDecisionResult \(result.id, privacy: .public) gate=blocked — not adding to active windows"
+                )
+                retireAllNonRevertedWindowStateIfPresent(
+                    windowId: result.id
                 )
                 continue
             }
@@ -1313,20 +1902,11 @@ actor SkipOrchestrator {
                     logger.info(
                         "AdDecisionResult \(result.id, privacy: .public) rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
                     )
+                    retireAllNonRevertedWindowStateIfPresent(
+                        windowId: result.id
+                    )
                     continue
                 }
-            }
-
-            // playhead-rfu-sad: tap-then-flip race guard, fusion path.
-            // Mirrors the guard in `receiveAdWindows` so a fusion-shared
-            // id that promotes from blocked/markOnly to eligible AFTER
-            // the user has already accepted the suggest banner doesn't
-            // register a second managed window.
-            if recentlyAcceptedSuggestIds.contains(result.id) {
-                logger.debug(
-                    "AdDecisionResult \(result.id, privacy: .public) ignored — already promoted via acceptSuggestedSkip"
-                )
-                continue
             }
 
             // playhead-rfu-sad: symmetric gate-flip clear. If a fusion
@@ -1335,8 +1915,7 @@ actor SkipOrchestrator {
             // suggest bookkeeping so a still-visible banner can't
             // re-fire `acceptSuggestedSkip` against a now-managed
             // window. Mirrors the clear in `receiveAdWindows`.
-            if suggestWindows[result.id] != nil {
-                suggestWindows.removeValue(forKey: result.id)
+            if retireSuggestedWindowIfPresent(windowId: result.id) {
                 logger.debug(
                     "AdDecisionResult \(result.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
                 )
@@ -1389,6 +1968,17 @@ actor SkipOrchestrator {
                 idempotencyKey: key,
                 cueActive: false
             )
+            if existingState == .applied,
+               let existing = windows[result.id] {
+                if bannerMaterialRevisionToken(for: existing)
+                    == bannerMaterialRevisionToken(for: managed) {
+                    retireSuggestedWindowIfPresent(windowId: result.id)
+                    continue
+                }
+                _ = retireAllNonRevertedWindowStateIfPresent(
+                    windowId: result.id
+                )
+            }
             windows[result.id] = managed
         }
 
@@ -1424,9 +2014,118 @@ actor SkipOrchestrator {
         // Just suppress firing new ones until stability returns.
     }
 
+    /// Captures the active episode transaction for a deferred user action.
+    /// Episode identity alone is insufficient because replaying the same
+    /// canonical episode advances the lifecycle without changing its ID.
+    func episodeLifecycleGenerationSnapshot() -> UInt64 {
+        episodeLifecycleGeneration
+    }
+
+    /// Records a seek only while the episode transaction captured by the
+    /// caller is still active. This closes the actor-hop race where a banner
+    /// action passed the runtime's episode check, then arrived here after
+    /// `endEpisode`/`beginEpisode` installed a replacement lifecycle.
+    @discardableResult
+    func recordUserSeek(
+        to time: TimeInterval,
+        ifEpisodeLifecycleGeneration expectedGeneration: UInt64,
+        userSeekOperationGeneration operationGeneration: UInt64? = nil
+    ) async -> Bool {
+        guard episodeLifecycleGeneration == expectedGeneration else {
+            return false
+        }
+        if let operationGeneration {
+            guard operationGeneration
+                    >= latestUserSeekOperationGeneration
+            else {
+                return false
+            }
+            latestUserSeekOperationGeneration = operationGeneration
+        }
+        #if DEBUG
+        await userSeekEffectHookForTesting?()
+        #endif
+        guard episodeLifecycleGeneration == expectedGeneration,
+              operationGeneration == nil
+                || latestUserSeekOperationGeneration
+                    == operationGeneration
+        else {
+            return false
+        }
+        recordUserSeek(to: time)
+        return true
+    }
+
+    #if DEBUG
+    func _setUserSeekEffectHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) {
+        userSeekEffectHookForTesting = hook
+    }
+
+    func _currentPlayheadTimeForTesting() -> TimeInterval {
+        currentPlayheadTime
+    }
+    #endif
+
+    /// Immediately retires only the in-memory cue for a banner Listen action.
+    /// Durable state and the weak trust signal remain owned by
+    /// `AdDetectionService.recordListenRewind`, avoiding duplicate feedback.
+    @discardableResult
+    func retireLiveSkipForListen(
+        windowId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64
+    ) -> Bool {
+        guard activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration
+        else {
+            return false
+        }
+        if pendingListenRewindWindowIds.contains(windowId) {
+            return true
+        }
+        guard var managed = windows[windowId],
+              managed.decisionState != .reverted,
+              managed.decisionState != .suppressed
+        else {
+            return false
+        }
+
+        managed.decisionState = .reverted
+        managed.cueActive = false
+        windows[windowId] = managed
+        pendingListenRewindWindowIds.insert(windowId)
+        logDecision(
+            managed: managed,
+            decision: .reverted,
+            reason: "User tapped Listen (live cue retirement)"
+        )
+        evaluateAndPush()
+        return true
+    }
+
+    /// Marks the durable Listen receipt complete. The in-memory window remains
+    /// reverted; only the retry reservation is released.
+    func completeLiveSkipRetirementForListen(
+        windowId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64
+    ) {
+        guard activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration
+        else {
+            return
+        }
+        pendingListenRewindWindowIds.remove(windowId)
+    }
+
     /// Record that the user tapped "Listen" to revert a skip.
     /// Also signals the trust engine (if wired) as a false-skip.
     func recordListenRevert(windowId: String, podcastId: String? = nil) async {
+        let sourceLifecycleGeneration = episodeLifecycleGeneration
         guard var managed = windows[windowId] else { return }
         guard managed.decisionState != .reverted,
               managed.decisionState != .suppressed else { return }
@@ -1454,6 +2153,9 @@ actor SkipOrchestrator {
         // Signal the trust engine about the false skip.
         if let podcastId, let trustService {
             await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        }
+        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+            return
         }
 
         // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
@@ -1503,6 +2205,7 @@ actor SkipOrchestrator {
     /// suggest tier is the user-facing surface for borderline ads, so it must
     /// honor user vetoes the same way the auto-skip surface does.
     func revertByTimeRange(start: Double, end: Double, podcastId: String?) async {
+        let sourceLifecycleGeneration = episodeLifecycleGeneration
         var revertedAny = false
         // Cycle 1 M2: track whether the gesture actually vetoed a managed
         // auto-skip window vs. only a suggest-tier banner. The R6 comment
@@ -1532,6 +2235,7 @@ actor SkipOrchestrator {
             managed.decisionState = .reverted
             managed.cueActive = false
             windows[id] = managed
+            emitBannerRetirement(windowId: id)
             revertedAny = true
             revertedManagedAny = true
             if assetIdForVeto == nil {
@@ -1552,6 +2256,9 @@ actor SkipOrchestrator {
                 )
             } catch {
                 logger.warning("Failed to persist revert for \(id): \(error.localizedDescription)")
+            }
+            guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+                return
             }
         }
 
@@ -1578,10 +2285,13 @@ actor SkipOrchestrator {
             }
 
         for (id, suggested) in suggestRevertTargets {
+            emitBannerRetirement(windowId: id)
             suggestWindows.removeValue(forKey: id)
-            // Also clear from the bannered set so a future ingest with the
-            // same id doesn't immediately re-emit the suggest banner.
-            suggestBanneredWindowIds.remove(id)
+            // Keep the presentation gate closed so a late in-session ingest
+            // of the original markOnly object cannot recreate a suggestion
+            // the user has already vetoed.
+            suggestBanneredWindowIds.insert(id)
+            vetoedSuggestWindowIds.insert(id)
             revertedAny = true
             if assetIdForVeto == nil {
                 assetIdForVeto = suggested.analysisAssetId
@@ -1598,6 +2308,9 @@ actor SkipOrchestrator {
                 )
             } catch {
                 logger.warning("Failed to persist suggest-tier revert for \(id): \(error.localizedDescription)")
+            }
+            guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+                return
             }
         }
 
@@ -1637,6 +2350,9 @@ actor SkipOrchestrator {
                 } else {
                     await trustService.recordWeakFalseSkipSignal(podcastId: podcastId)
                 }
+                guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+                    return
+                }
             }
 
             // playhead-xsdz.11: feed the per-show threshold controller a
@@ -1653,56 +2369,310 @@ actor SkipOrchestrator {
         }
     }
 
+    /// Persist Yes on an already-applied automatic skip. This is deliberately
+    /// not an aggregate-only acknowledgement: the exact asset/window/span
+    /// receipt is committed before the banner may count or dismiss it.
+    @discardableResult
+    func confirmAutoSkippedBanner(
+        windowId: String,
+        analysisAssetId expectedAssetId: String?,
+        startTime expectedStartTime: Double,
+        endTime expectedEndTime: Double,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64?,
+        ifWindowMaterialRevisionToken expectedMaterialToken: String?
+    ) async -> Bool {
+        guard let expectedAssetId,
+              let expectedEpisodeId,
+              let expectedPlaybackGeneration,
+              let expectedMaterialToken,
+              activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration,
+              let managed = windows[windowId],
+              managed.adWindow.analysisAssetId == expectedAssetId,
+              managed.decisionState == .applied,
+              managed.snappedStart == expectedStartTime,
+              managed.snappedEnd == expectedEndTime,
+              bannerMaterialRevisionToken(for: managed)
+                == expectedMaterialToken
+        else {
+            return false
+        }
+
+        let receipt = CorrectionEvent(
+            analysisAssetId: expectedAssetId,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: expectedAssetId,
+                startTime: expectedStartTime,
+                endTime: expectedEndTime
+            ).serialized,
+            source: .bannerAutoSkipConfirmed,
+            podcastId: activePodcastId,
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(
+                adWindowId: windowId,
+                explicitFeedbackDetectionProjection:
+                    ExplicitFeedbackDetectionProjection(managed.adWindow),
+                exactFeedbackSpan: ExactFeedbackSpan(
+                    startTime: expectedStartTime,
+                    endTime: expectedEndTime
+                )
+            )
+        )
+        do {
+            if let barrier = feedbackPersistenceBarrierForTesting {
+                await barrier()
+            }
+            guard let wasNewlyInserted =
+                    try await store.persistConfirmedAutoSkip(
+                        windowId: windowId,
+                        analysisAssetId: expectedAssetId,
+                        expectedEpisodeId: expectedEpisodeId,
+                        expectedStartTime: expectedStartTime,
+                        expectedEndTime: expectedEndTime,
+                        expectedProducerRevision: managed.adWindow,
+                        expectedMaterialToken: expectedMaterialToken,
+                        correction: receipt
+                    )
+            else {
+                return false
+            }
+            schedulePostCommitCorrectionLearning(
+                receipt,
+                wasNewlyInserted: wasNewlyInserted
+            )
+            return true
+        } catch {
+            // Operational only: never log the answer, asset/window identity,
+            // span, timestamp, or persistence error text.
+            logger.warning("Banner feedback persistence failed")
+            return false
+        }
+    }
+
+    /// Persist No only for the exact applied auto-skip material displayed by
+    /// the caller. All card-owned identities are mandatory; generic
+    /// `revertWindow` remains available for non-banner correction surfaces.
+    @discardableResult
+    func denyAutoSkippedBanner(
+        windowId: String,
+        analysisAssetId expectedAssetId: String?,
+        startTime expectedStartTime: Double,
+        endTime expectedEndTime: Double,
+        podcastId: String?,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64?,
+        ifWindowMaterialRevisionToken expectedMaterialToken: String?
+    ) async -> Bool {
+        guard let expectedAssetId,
+              let expectedEpisodeId,
+              let expectedPlaybackGeneration,
+              let expectedMaterialToken,
+              activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration,
+              let requestedManaged = windows[windowId],
+              requestedManaged.adWindow.analysisAssetId == expectedAssetId,
+              requestedManaged.decisionState == .applied,
+              requestedManaged.snappedStart == expectedStartTime,
+              requestedManaged.snappedEnd == expectedEndTime,
+              bannerMaterialRevisionToken(for: requestedManaged)
+                == expectedMaterialToken
+        else {
+            return false
+        }
+
+        let sourceEpisodeId = activeEpisodeId
+        let sourceLifecycleGeneration = episodeLifecycleGeneration
+        let correction: CorrectionEvent
+        do {
+            correction = try makeManualCorrectionVetoEvent(
+                startTime: expectedStartTime,
+                endTime: expectedEndTime,
+                assetId: expectedAssetId,
+                podcastId: podcastId,
+                source: .bannerAutoSkipDenied,
+                windowId: windowId,
+                detectionProjection:
+                    ExplicitFeedbackDetectionProjection(
+                        requestedManaged.adWindow
+                    )
+            )
+            guard let wasNewlyInserted =
+                    try await store.persistDeniedAutoSkip(
+                        windowId: windowId,
+                        analysisAssetId: expectedAssetId,
+                        expectedEpisodeId: expectedEpisodeId,
+                        expectedStartTime: expectedStartTime,
+                        expectedEndTime: expectedEndTime,
+                        expectedProducerRevision:
+                            requestedManaged.adWindow,
+                        expectedMaterialToken: expectedMaterialToken,
+                        correction: correction
+                    )
+            else {
+                return false
+            }
+            schedulePostCommitCorrectionLearning(
+                correction,
+                wasNewlyInserted: wasNewlyInserted
+            )
+        } catch {
+            logger.warning("Banner feedback persistence failed")
+            return false
+        }
+
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: podcastId
+        )
+        if let podcastId {
+            if let handler = falseSkipSignalHandlerForTesting {
+                Task {
+                    await handler(podcastId)
+                }
+            } else if let trustService {
+                Task {
+                    await trustService.recordFalseSkipSignal(
+                        podcastId: podcastId,
+                        privacy: .explicitBannerFeedback
+                    )
+                }
+            }
+        }
+
+        guard activeEpisodeId == sourceEpisodeId,
+              episodeLifecycleGeneration == sourceLifecycleGeneration
+        else {
+            return true
+        }
+        guard var managed = windows[windowId],
+              bannerMaterialRevisionToken(for: managed)
+                == expectedMaterialToken,
+              managed.decisionState == .applied
+        else {
+            return true
+        }
+        managed.decisionState = .reverted
+        managed.cueActive = false
+        windows[windowId] = managed
+        evaluateAndPush()
+        return true
+    }
+
     /// Revert a specific window by ID using the manualVeto source.
     /// Same as recordListenRevert but uses .manualVeto correction source
     /// and does not imply a playback rewind.
-    func revertWindow(windowId: String, podcastId: String? = nil) async {
-        guard var managed = windows[windowId] else { return }
-        guard managed.decisionState != .reverted,
-              managed.decisionState != .suppressed else { return }
+    @discardableResult
+    func revertWindow(windowId: String, podcastId: String? = nil) async -> Bool {
+        await revertWindow(
+            windowId: windowId,
+            podcastId: podcastId,
+            ifCurrentEpisodeId: activeEpisodeId
+        )
+    }
+
+    /// Episode-bound generic form used by deferred non-banner correction
+    /// surfaces. The outer UI guard is not sufficient because this actor can
+    /// be re-entered while its store and trust calls suspend.
+    @discardableResult
+    func revertWindow(
+        windowId: String,
+        podcastId: String? = nil,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil
+    ) async -> Bool {
+        guard activeEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || activePlaybackLifecycleGeneration
+                    == expectedPlaybackGeneration
+        else {
+            return false
+        }
+        let sourceEpisodeId = activeEpisodeId
+        let sourceLifecycleGeneration = episodeLifecycleGeneration
+        guard let requestedManaged = windows[windowId] else { return false }
+        guard requestedManaged.decisionState != .reverted,
+              requestedManaged.decisionState != .suppressed else { return false }
+
+        // Commit the generic correction and authoritative row retirement
+        // together. A failed row mutation must not leave behind a correction
+        // that the calling surface still presents as retryable.
+        do {
+            let correction = try makeManualCorrectionVetoEvent(
+                startTime: requestedManaged.snappedStart,
+                endTime: requestedManaged.snappedEnd,
+                assetId: requestedManaged.adWindow.analysisAssetId,
+                podcastId: podcastId,
+                source: .manualVeto,
+                windowId: windowId,
+                detectionProjection:
+                    ExplicitFeedbackDetectionProjection(
+                        requestedManaged.adWindow
+                    )
+            )
+            let wasNewlyInserted = try await store.persistRevertedAdWindow(
+                windowId: windowId,
+                analysisAssetId: requestedManaged.adWindow.analysisAssetId,
+                correction: correction
+            )
+            schedulePostCommitCorrectionLearning(
+                correction,
+                wasNewlyInserted: wasNewlyInserted
+            )
+        } catch {
+            logger.warning("Manual veto persistence failed")
+            return false
+        }
+
+        logDecision(
+            managed: requestedManaged,
+            decision: .reverted,
+            reason: "User correction: not an ad"
+        )
+
+        // These calibration effects belong to the captured source show. Start
+        // them before checking live lifecycle identity so an episode switch
+        // cannot silently discard valid old-episode feedback.
+        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+        if let podcastId {
+            if let handler = falseSkipSignalHandlerForTesting {
+                Task {
+                    await handler(podcastId)
+                }
+            } else if let trustService {
+                Task {
+                    await trustService.recordFalseSkipSignal(
+                        podcastId: podcastId
+                    )
+                }
+            }
+        }
+
+        guard activeEpisodeId == sourceEpisodeId,
+              episodeLifecycleGeneration == sourceLifecycleGeneration else {
+            // The old episode's row was durably corrected while the actor was
+            // suspended. Its UI has already retired, so no replacement state
+            // may be mutated.
+            return true
+        }
+        guard var managed = windows[windowId],
+              managed.decisionState != .reverted,
+              managed.decisionState != .suppressed else {
+            return true
+        }
 
         managed.decisionState = .reverted
         managed.cueActive = false
         windows[windowId] = managed
 
-        logDecision(
-            managed: managed,
-            decision: .reverted,
-            reason: "User correction: not an ad (banner)"
-        )
-
-        // Persist decision state change.
-        do {
-            try await store.updateAdWindowDecision(
-                id: windowId,
-                decisionState: SkipDecisionState.reverted.rawValue
-            )
-        } catch {
-            logger.warning("Failed to persist revert for \(windowId): \(error.localizedDescription)")
-        }
-
-        // Signal the trust engine about the false skip.
-        if let podcastId, let trustService {
-            await trustService.recordFalseSkipSignal(podcastId: podcastId)
-        }
-
-        // Persist a manualVeto CorrectionEvent with precise time scope.
-        // playhead-zskc: use the managed window's snapped start/end so the
-        // correction carries per-window precision rather than whole-episode.
-        persistManualCorrectionVeto(
-            startTime: managed.snappedStart,
-            endTime: managed.snappedEnd,
-            assetId: managed.adWindow.analysisAssetId,
-            podcastId: podcastId,
-            source: .manualVeto
-        )
-
-        // playhead-xsdz.11: a manual "not an ad" veto of a managed auto-skip
-        // window is a confirmed FALSE POSITIVE — RAISE this show's threshold.
-        // No-op when no controller store is wired (flag-OFF production default).
-        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-
+        // The durable revert above is the primary user action. Republish cues
+        // immediately so playback cannot enter a stale range while secondary
+        // calibration storage suspends.
         evaluateAndPush()
+
+        return true
     }
 
     // MARK: - Correction persistence helper (playhead-zskc)
@@ -1711,21 +2681,11 @@ actor SkipOrchestrator {
     /// injected correction store. Centralises the three manual-veto call
     /// sites (`recordListenRevert`, `revertByTimeRange`, `revertWindow`) so
     /// actor-isolated capture ritual and nil-store guard live in one place.
-    /// playhead-rfu-sad: LRU bookkeeping for the tap-then-flip race
-    /// guard. Insert if not already present, evict the oldest id when
-    /// the bounded set is full. The set is small enough that a linear
-    /// scan is cheaper than maintaining a parallel hash for membership.
+    /// playhead-rfu-sad: episode-scoped bookkeeping for the tap-then-flip
+    /// race guard. Accepted producer IDs remain terminal until the lifecycle
+    /// is replaced or ended.
     private func rememberAcceptedSuggestId(_ id: String) {
-        if let existing = recentlyAcceptedSuggestIds.firstIndex(of: id) {
-            // Move-to-front: refresh recency.
-            recentlyAcceptedSuggestIds.remove(at: existing)
-        }
-        recentlyAcceptedSuggestIds.append(id)
-        if recentlyAcceptedSuggestIds.count > recentlyAcceptedSuggestCapacity {
-            recentlyAcceptedSuggestIds.removeFirst(
-                recentlyAcceptedSuggestIds.count - recentlyAcceptedSuggestCapacity
-            )
-        }
+        recentlyAcceptedSuggestIds.insert(id)
     }
 
     private func persistManualCorrectionVeto(
@@ -1745,6 +2705,70 @@ actor SkipOrchestrator {
                 assetId: assetId,
                 podcastId: pid,
                 source: source
+            )
+        }
+    }
+
+    /// Builds an exact-span correction for generic vetoes and explicit banner
+    /// responses. The owning AnalysisStore transaction appends it together
+    /// with the authoritative AdWindow mutation; post-commit derived learning
+    /// is notified separately without appending again.
+    private func makeManualCorrectionVetoEvent(
+        startTime: Double,
+        endTime: Double,
+        assetId: String,
+        podcastId: String?,
+        source: CorrectionSource,
+        windowId: String? = nil,
+        additionalWindowIds: [String]? = nil,
+        detectionProjection:
+            ExplicitFeedbackDetectionProjection? = nil
+    ) throws -> CorrectionEvent {
+        guard correctionStore != nil else {
+            throw SkipOrchestratorFeedbackError.correctionStoreUnavailable
+        }
+        guard startTime.isFinite, endTime.isFinite else {
+            throw SkipOrchestratorFeedbackError.invalidCorrectionRange
+        }
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: min(startTime, endTime),
+            endTime: max(startTime, endTime)
+        )
+        return CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: scope.serialized,
+            source: source,
+            podcastId: podcastId,
+            correctionType: source.kind.correctionType,
+            targetRefs: windowId.map {
+                CorrectionTargetRefs(
+                    adWindowId: $0,
+                    adWindowIds: additionalWindowIds,
+                    explicitFeedbackDetectionProjection:
+                        detectionProjection,
+                    exactFeedbackSpan: ExactFeedbackSpan(
+                        startTime: min(startTime, endTime),
+                        endTime: max(startTime, endTime)
+                    )
+                )
+            }
+        )
+    }
+
+    /// Derived learning must never extend the primary banner transaction.
+    /// The correction and authoritative AdWindow mutation are already
+    /// committed atomically when this is called; materialization is
+    /// idempotent and may safely finish after the user-visible action.
+    private func schedulePostCommitCorrectionLearning(
+        _ correction: CorrectionEvent,
+        wasNewlyInserted: Bool
+    ) {
+        guard let correctionStore else { return }
+        Task {
+            await correctionStore.correctionDidPersistAtomically(
+                correction,
+                wasNewlyInserted: wasNewlyInserted
             )
         }
     }
@@ -1810,6 +2834,38 @@ actor SkipOrchestrator {
         recordThresholdControlSignal(.miss, podcastId: podcastId)
     }
 
+    private func recoverFailedProvisionalSuggestion(
+        windowId: String,
+        fallback: AdWindow,
+        sourceEpisodeId: String?,
+        sourceLifecycleGeneration: UInt64
+    ) async {
+        // A same-ID suggestion may already be resolving in a replacement
+        // episode. Never clear that lifecycle's provisional reservation or
+        // buffered producer value from an older transaction's completion.
+        guard activeEpisodeId == sourceEpisodeId,
+              episodeLifecycleGeneration == sourceLifecycleGeneration else {
+            return
+        }
+        provisionallyResolvingSuggestWindowIds.remove(windowId)
+        let buffered = bufferedSuggestProducerUpdates.removeValue(
+            forKey: windowId
+        )
+
+        switch buffered {
+        case .adWindow(let latest):
+            await receiveAdWindows([latest])
+        case .decisionResult(let latest):
+            await receiveAdDecisionResults([latest])
+        case .retired:
+            emitBannerRetirement(windowId: windowId)
+        case nil:
+            if suggestWindows[windowId] == nil {
+                suggestWindows[windowId] = fallback
+            }
+        }
+    }
+
     /// playhead-gtt9.23: User tapped "Skip" on a suggest-tier banner.
     /// Promotes the markOnly window into the active skip path with a
     /// user-confirmed confidence so the existing skip-cue machinery handles
@@ -1819,9 +2875,45 @@ actor SkipOrchestrator {
     /// future threshold tuning needs.
     ///
     /// No-op when the window is not in the suggest set (e.g. already
-    /// auto-skipped, dismissed, or never registered as markOnly).
-    func acceptSuggestedSkip(windowId: String) async {
-        guard let suggested = suggestWindows.removeValue(forKey: windowId) else { return }
+    /// auto-skipped, declined, or never registered as markOnly).
+    @discardableResult
+    func acceptSuggestedSkip(windowId: String) async -> Bool {
+        await acceptSuggestedSkip(
+            windowId: windowId,
+            ifCurrentEpisodeId: activeEpisodeId
+        )
+    }
+
+    /// Episode-bound form used by deferred banner actions. Every attribution
+    /// value is captured before the first suspension; `beginEpisode` may
+    /// otherwise replace the actor's active podcast while trust persistence is
+    /// in flight.
+    @discardableResult
+    func acceptSuggestedSkip(
+        windowId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil,
+        ifSuggestionRevisionToken expectedRevisionToken: String? = nil
+    ) async -> Bool {
+        guard let expectedEpisodeId,
+              activeEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || activePlaybackLifecycleGeneration
+                    == expectedPlaybackGeneration,
+              let sourceMaterialToken =
+                suggestRevisionTokensByWindowId[windowId],
+              expectedRevisionToken == nil
+                || sourceMaterialToken == expectedRevisionToken
+        else {
+            return false
+        }
+        let sourceEpisodeId = activeEpisodeId
+        let sourceLifecycleGeneration = episodeLifecycleGeneration
+        let sourcePodcastId = activePodcastId
+        guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
+            return false
+        }
+        provisionallyResolvingSuggestWindowIds.insert(windowId)
 
         // playhead-rfu-sad: remember this id was promoted via tap so a
         // late-arriving ingest with the same id and a cleared gate
@@ -1830,9 +2922,11 @@ actor SkipOrchestrator {
         // check in `receiveAdWindows`.
         rememberAcceptedSuggestId(windowId)
 
-        // Build a fresh confirmed AdWindow with the suggest window's span and
-        // confidence pinned to 1.0. We deliberately do not reuse the original
-        // markOnly window's id — its eligibilityGate would block it again.
+        // Build a fresh durable applied AdWindow with the suggest window's span
+        // and confidence pinned to 1.0. The in-memory wrapper starts confirmed
+        // so the explicit user-skip path owns the applied transition and cue.
+        // We deliberately do not reuse the original markOnly window's id — its
+        // eligibilityGate would block it again.
         let promotedId = UUID().uuidString
         let assetId = suggested.analysisAssetId
         let promoted = AdWindow(
@@ -1842,7 +2936,7 @@ actor SkipOrchestrator {
             endTime: suggested.endTime,
             confidence: 1.0,
             boundaryState: "userConfirmedSuggested",
-            decisionState: AdDecisionState.confirmed.rawValue,
+            decisionState: AdDecisionState.applied.rawValue,
             detectorVersion: suggested.detectorVersion,
             advertiser: suggested.advertiser,
             product: suggested.product,
@@ -1852,7 +2946,7 @@ actor SkipOrchestrator {
             metadataSource: suggested.metadataSource,
             metadataConfidence: suggested.metadataConfidence,
             metadataPromptVersion: suggested.metadataPromptVersion,
-            wasSkipped: false,
+            wasSkipped: true,
             userDismissedBanner: false
         )
 
@@ -1865,74 +2959,183 @@ actor SkipOrchestrator {
             idempotencyKey: key,
             cueActive: false
         )
-        windows[promotedId] = managed
-
-        logDecision(
-            managed: managed,
-            decision: .confirmed,
-            reason: "User accepted suggested skip"
-        )
-
-        // Calibration signal: record a `.falseNegative` veto on the
-        // suggest window's span. Same correction surface the
-        // "Hearing an ad" button uses, so the existing trust pipeline
-        // (Bug 4b: FN drops trust by `falseSignalPenalty`, mirroring FP)
-        // picks it up unchanged.
-        persistManualCorrectionVeto(
-            startTime: suggested.startTime,
-            endTime: suggested.endTime,
-            assetId: assetId,
-            podcastId: activePodcastId,
-            source: .falseNegative
-        )
-
-        if let podcastId = activePodcastId, let trustService {
-            await trustService.recordFalseNegativeSignal(podcastId: podcastId)
+        // The persisted row is authoritative across reloads. Reserve the
+        // producer ID above, but do not install a cue, emit calibration, count
+        // the response, or dismiss its card until the original-row retirement
+        // and promoted-row insert commit together.
+        do {
+            let correction = try makeManualCorrectionVetoEvent(
+                startTime: suggested.startTime,
+                endTime: suggested.endTime,
+                assetId: assetId,
+                podcastId: sourcePodcastId,
+                source: .bannerSuggestionConfirmed,
+                windowId: promotedId,
+                additionalWindowIds: [windowId, promotedId],
+                detectionProjection:
+                    ExplicitFeedbackDetectionProjection(suggested)
+            )
+            if let barrier = feedbackPersistenceBarrierForTesting {
+                await barrier()
+            }
+            guard let wasNewlyInserted =
+                    try await store.persistAcceptedSuggestionIfCurrent(
+                        originalWindowId: windowId,
+                        originalAnalysisAssetId: assetId,
+                        expectedEpisodeId: expectedEpisodeId,
+                        expectedStartTime: suggested.startTime,
+                        expectedEndTime: suggested.endTime,
+                        expectedProducerRevision: suggested,
+                        expectedMaterialToken: sourceMaterialToken,
+                        promotedWindow: promoted,
+                        correction: correction
+                    )
+            else {
+                throw SkipOrchestratorFeedbackError
+                    .staleDurableMaterial
+            }
+            schedulePostCommitCorrectionLearning(
+                correction,
+                wasNewlyInserted: wasNewlyInserted
+            )
+        } catch {
+            logger.warning("Banner feedback persistence failed")
+            // Release the tap-then-flip reservation and restore the exact
+            // revision only while its source lifecycle is still current. A
+            // producer update that arrived during the store hop owns the ID
+            // and must never be overwritten by this failed attempt.
+            if activeEpisodeId == sourceEpisodeId,
+               episodeLifecycleGeneration == sourceLifecycleGeneration {
+                recentlyAcceptedSuggestIds.remove(windowId)
+            }
+            await recoverFailedProvisionalSuggestion(
+                windowId: windowId,
+                fallback: suggested,
+                sourceEpisodeId: sourceEpisodeId,
+                sourceLifecycleGeneration: sourceLifecycleGeneration
+            )
+            return false
         }
 
-        // playhead-xsdz.11: accepting a suggested skip we did NOT auto-skip is a
-        // MISS signal ("this WAS an ad") — LOWER this show's auto-skip threshold
-        // (be more aggressive). This is the cleanest miss-side gesture that
-        // reaches the orchestrator; a literal "scrubbed through undetected
-        // content" signal does not exist at this layer. No-op when no controller
-        // store is wired (flag-OFF production default).
-        recordThresholdControlMiss(podcastId: activePodcastId)
+        let sourceLifecycleIsCurrent =
+            activeEpisodeId == sourceEpisodeId
+            && episodeLifecycleGeneration == sourceLifecycleGeneration
+        if sourceLifecycleIsCurrent {
+            provisionallyResolvingSuggestWindowIds.remove(windowId)
+            bufferedSuggestProducerUpdates.removeValue(forKey: windowId)
+        }
 
-        evaluateAndPush()
+        // Calibration belongs to the captured source show even if playback
+        // moved to another episode during persistence.
+        if let podcastId = sourcePodcastId {
+            if let handler = falseNegativeSignalHandlerForTesting {
+                Task {
+                    await handler(podcastId)
+                }
+            } else if let trustService {
+                Task {
+                    await trustService.recordFalseNegativeSignal(
+                        podcastId: podcastId,
+                        privacy: .explicitBannerFeedback
+                    )
+                }
+            }
+        }
+        recordThresholdControlMiss(podcastId: sourcePodcastId)
+
+        guard sourceLifecycleIsCurrent else {
+            return true
+        }
+
+        windows[promotedId] = managed
+        // The suggest card already presented this span and collected the
+        // explicit Yes. Applying its promoted UUID must not immediately emit
+        // a second feedback card for the same user decision.
+        // Cycle-27 T-3 production-writer site (4 of 4): accepted suggest
+        // presentation already collected the response.
+        banneredWindowIds.insert(promotedId)
+
+        applyManualSkip(
+            windowId: promotedId,
+            isExplicitBannerFeedback: true
+        )
+
+        return true
     }
 
     /// playhead-gtt9.23 / playhead-lc7z: User's suggest-tier banner exited
-    /// without a "Skip" tap. Two exit reasons, two behaviors:
+    /// without a Yes response. Two semantic exit categories, two behaviors:
     ///
-    ///   • `userDismissed == false` (auto-fade timeout, the historical
-    ///     default): a soft "leave it alone" signal. The suggest window is
-    ///     dropped from the in-memory set so its cue is gone from the UI,
-    ///     but NO veto is recorded and NO trust signal fires. The user
-    ///     ignoring a banner for 12 s is too weak to mint a hard negative —
-    ///     they may simply not have looked. This preserves the pre-lc7z
-    ///     conservative reading.
+    ///   • `isExplicitDenial == false` (neutral x dismissal or auto-fade
+    ///     timeout): no feedback signal. The suggest window is dropped from
+    ///     the in-memory set so its cue is gone from the UI, but NO veto is
+    ///     recorded and NO trust signal fires. This preserves the conservative
+    ///     reading for exits that do not answer the feedback question.
     ///
-    ///   • `userDismissed == true` (the user tapped the dismiss "✕"): an
-    ///     explicit "no, that isn't an ad." This is exactly the hard-negative
+    ///   • `isExplicitDenial == true` (the user answered No): an explicit
+    ///     "that isn't an ad." This is exactly the hard-negative
     ///     the correction→retrain flywheel (xsdz.69 brand-as-editorial,
     ///     xsdz.70 native ads) was being starved of. We persist a
     ///     `.falsePositive` CorrectionEvent over the window's span, stamp
     ///     `userDismissedBanner = 1` on the row, and flip its persisted
     ///     `decisionState` to `.reverted` so a relaunch/replay never
-    ///     resurfaces the banner the user already waved off. No trust /
+    ///     resurfaces the banner the user explicitly denied. No trust /
     ///     threshold signal is fired here — this seam is capture-only; the
     ///     runtime-calibration surfaces stay owned by the explicit
     ///     revert paths (`revertByTimeRange` / `revertWindow`).
-    func declineSuggestedSkip(windowId: String, userDismissed: Bool = false) async {
-        guard let suggested = suggestWindows.removeValue(forKey: windowId) else { return }
+    @discardableResult
+    func declineSuggestedSkip(
+        windowId: String,
+        isExplicitDenial: Bool = false
+    ) async -> Bool {
+        await declineSuggestedSkip(
+            windowId: windowId,
+            isExplicitDenial: isExplicitDenial,
+            ifCurrentEpisodeId: activeEpisodeId
+        )
+    }
 
-        guard userDismissed else {
-            // Auto-fade / silent decline — unchanged pre-lc7z behavior.
-            logger.debug("Suggest banner faded without action for window \(windowId, privacy: .public)")
-            return
+    /// Episode-bound form used by deferred banner actions. Persisted row
+    /// updates continue to target the captured source window if an episode
+    /// transition interleaves, but no live state or attribution is read from
+    /// the replacement episode.
+    @discardableResult
+    func declineSuggestedSkip(
+        windowId: String,
+        isExplicitDenial: Bool = false,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil,
+        ifSuggestionRevisionToken expectedRevisionToken: String? = nil
+    ) async -> Bool {
+        guard let expectedEpisodeId,
+              activeEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || activePlaybackLifecycleGeneration
+                    == expectedPlaybackGeneration,
+              let sourceMaterialToken =
+                suggestRevisionTokensByWindowId[windowId],
+              expectedRevisionToken == nil
+                || sourceMaterialToken == expectedRevisionToken
+        else {
+            return false
+        }
+        let sourceEpisodeId = activeEpisodeId
+        let sourceLifecycleGeneration = episodeLifecycleGeneration
+        let sourcePodcastId = activePodcastId
+        guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
+            return false
         }
 
-        // Explicit user dismissal. Deliberately KEEP the id in
+        guard isExplicitDenial else {
+            // Neutral x / auto-fade — no explicit feedback.
+            logger.debug("Suggest banner exited without feedback")
+            return true
+        }
+
+        provisionallyResolvingSuggestWindowIds.insert(windowId)
+        vetoedSuggestWindowIds.insert(windowId)
+
+        // Explicit No response. Deliberately KEEP the id in
         // `suggestBanneredWindowIds`: presence there is what suppresses a
         // re-emit if the same markOnly id is re-delivered in-session (e.g. a
         // final-pass backfill push) — the `receiveAdWindows` guard treats a
@@ -1940,39 +3143,78 @@ actor SkipOrchestrator {
         // the very banner the user just waved off. The window is already out
         // of `suggestWindows` (removed above); the row is flipped to
         // `.reverted` below to cover cross-launch replay.
-        logger.info("User dismissed suggest banner (false positive) for window \(windowId, privacy: .public)")
-
         // Persist `userDismissedBanner = 1` and flip the row to `.reverted`
         // so the vetoed suggestion does not resurface on the next launch.
         do {
-            try await store.updateAdWindowUserDismissedBanner(id: windowId, userDismissedBanner: true)
-            try await store.updateAdWindowDecision(
-                id: windowId,
-                decisionState: SkipDecisionState.reverted.rawValue
+            let correction = try makeSuggestDenialCorrection(
+                window: suggested,
+                podcastId: sourcePodcastId
+            )
+            if let barrier = feedbackPersistenceBarrierForTesting {
+                await barrier()
+            }
+            guard let wasNewlyInserted =
+                    try await store.persistDeclinedSuggestionIfCurrent(
+                        windowId: windowId,
+                        analysisAssetId: suggested.analysisAssetId,
+                        expectedEpisodeId: expectedEpisodeId,
+                        expectedStartTime: suggested.startTime,
+                        expectedEndTime: suggested.endTime,
+                        expectedProducerRevision: suggested,
+                        expectedMaterialToken: sourceMaterialToken,
+                        correction: correction
+                    )
+            else {
+                throw SkipOrchestratorFeedbackError
+                    .staleDurableMaterial
+            }
+            schedulePostCommitCorrectionLearning(
+                correction,
+                wasNewlyInserted: wasNewlyInserted
             )
         } catch {
-            logger.warning("Failed to persist suggest dismissal for \(windowId): \(error.localizedDescription)")
+            logger.warning("Banner feedback persistence failed")
+            // The UI has not finalized its receipt yet. Restore the current
+            // revision so the still-visible card can retry instead of claiming
+            // a durable denial that was never written.
+            if activeEpisodeId == sourceEpisodeId,
+               episodeLifecycleGeneration == sourceLifecycleGeneration {
+                vetoedSuggestWindowIds.remove(windowId)
+            }
+            await recoverFailedProvisionalSuggestion(
+                windowId: windowId,
+                fallback: suggested,
+                sourceEpisodeId: sourceEpisodeId,
+                sourceLifecycleGeneration: sourceLifecycleGeneration
+            )
+            return false
         }
 
-        // Persist the false-positive correction (with causal attribution and
-        // target refs) through the same store path false-negatives use.
-        persistSuggestDismissalCorrection(window: suggested)
-
+        guard activeEpisodeId == sourceEpisodeId,
+              episodeLifecycleGeneration == sourceLifecycleGeneration else {
+            return true
+        }
+        provisionallyResolvingSuggestWindowIds.remove(windowId)
+        bufferedSuggestProducerUpdates.removeValue(forKey: windowId)
         evaluateAndPush()
+        return true
     }
 
-    /// playhead-lc7z: persist a `.falsePositive` CorrectionEvent for a
-    /// user-dismissed suggest banner. Unlike `persistManualCorrectionVeto`
+    /// playhead-lc7z: build the `.falsePositive` CorrectionEvent for a
+    /// explicitly denied suggest banner. Unlike `persistManualCorrectionVeto`
     /// (which routes through `recordVeto(startTime:…)` and cannot carry
     /// attribution across the gesture boundary) this builds a fully-formed
     /// event so `causalSource` and `targetRefs` land on the row — the
-    /// hard-negative miner needs both. Fire-and-forget; a lost write just
-    /// means one fewer hard negative, never a broken gesture. No-op when no
-    /// correction store is wired.
-    private func persistSuggestDismissalCorrection(window: AdWindow) {
-        guard let correctionStore else { return }
+    /// hard-negative miner needs both. The caller commits it atomically with
+    /// the AdWindow denial. Returns nil when no correction store is wired.
+    private func makeSuggestDenialCorrection(
+        window: AdWindow,
+        podcastId: String?
+    ) throws -> CorrectionEvent {
+        guard correctionStore != nil else {
+            throw SkipOrchestratorFeedbackError.correctionStoreUnavailable
+        }
         let assetId = window.analysisAssetId
-        let podcastId = activePodcastId
         let scope = CorrectionScope.exactTimeSpan(
             assetId: assetId,
             startTime: window.startTime,
@@ -1986,7 +3228,7 @@ actor SkipOrchestrator {
         let causalSource = Self.causalSource(forMetadataSource: window.metadataSource)
         // Carry the brand (when present) so brand-as-editorial hard-negative
         // mining can key on it, plus the show id for show-level attribution.
-        // The dismissed time span itself is carried by the scope above.
+        // The denied time span itself is carried by the scope above.
         let normalizedSponsor: String? = window.advertiser
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .flatMap { $0.isEmpty ? nil : $0 }
@@ -1994,24 +3236,25 @@ actor SkipOrchestrator {
             domain: podcastId,
             sponsorEntity: normalizedSponsor
         )
-        let event = CorrectionEvent(
+        return CorrectionEvent(
             analysisAssetId: assetId,
             scope: scope.serialized,
-            source: .manualVeto,
+            source: .bannerSuggestionDenied,
             podcastId: podcastId,
             correctionType: .falsePositive,
             causalSource: causalSource,
-            targetRefs: targetRefs
+            targetRefs: CorrectionTargetRefs(
+                adWindowId: window.id,
+                explicitFeedbackDetectionProjection:
+                    ExplicitFeedbackDetectionProjection(window),
+                exactFeedbackSpan: ExactFeedbackSpan(
+                    startTime: window.startTime,
+                    endTime: window.endTime
+                ),
+                domain: targetRefs.domain,
+                sponsorEntity: targetRefs.sponsorEntity
+            )
         )
-        let store = correctionStore
-        Task {
-            do {
-                try await store.record(event)
-            } catch {
-                // Non-fatal: a lost correction just means one fewer hard
-                // negative for the retrain flywheel. Playback is unaffected.
-            }
-        }
     }
 
     /// playhead-lc7z: map an `AdWindow.metadataSource` producer tag to the
@@ -2033,7 +3276,10 @@ actor SkipOrchestrator {
 
     /// User tapped "Skip Ad" in manual mode. Promotes a confirmed window
     /// to applied and fires the skip cue.
-    func applyManualSkip(windowId: String) async {
+    func applyManualSkip(
+        windowId: String,
+        isExplicitBannerFeedback: Bool = false
+    ) {
         guard var managed = windows[windowId] else { return }
         guard managed.decisionState == .confirmed else { return }
 
@@ -2046,11 +3292,13 @@ actor SkipOrchestrator {
         managed.cueActive = true
         windows[windowId] = managed
 
-        logDecision(
-            managed: managed,
-            decision: .applied,
-            reason: "Manual skip by user"
-        )
+        if !isExplicitBannerFeedback {
+            logDecision(
+                managed: managed,
+                decision: .applied,
+                reason: "Manual skip by user"
+            )
+        }
 
         // playhead-rfu-sad: emit `auto_skip_fired` for the manual-skip path
         // too. The ol05 audit log treats every applied window as a real
@@ -2066,21 +3314,34 @@ actor SkipOrchestrator {
         // delivered in shadow mode (e.g. test harness, dogfood
         // toggle) doesn't pollute the audit log with a real skip
         // event that never produced a real user-facing skip.
-        if activeSkipMode != .shadow {
+        if activeSkipMode != .shadow && !isExplicitBannerFeedback {
             emitAutoSkipFiredAuditEvent(for: managed)
         }
 
         // Persist.
         let id = managed.adWindow.id
+        let analysisAssetId = managed.adWindow.analysisAssetId
+        let expectedProducerRevision = managed.adWindow
+        let appliedPersistenceBarrier =
+            appliedPersistenceBarrierForTesting
         Task { [store, logger] in
             do {
-                try await store.updateAdWindowDecision(
-                    id: id,
-                    decisionState: SkipDecisionState.applied.rawValue
+                if let appliedPersistenceBarrier {
+                    await appliedPersistenceBarrier()
+                }
+                _ = try await store.persistAppliedAdWindowIfEligible(
+                    windowId: id,
+                    analysisAssetId: analysisAssetId,
+                    expectedProducerRevision: expectedProducerRevision
                 )
-                try await store.updateAdWindowWasSkipped(id: id, wasSkipped: true)
             } catch {
-                logger.warning("Failed to persist manual skip for \(id): \(error.localizedDescription)")
+                if isExplicitBannerFeedback {
+                    logger.warning("Banner feedback follow-up failed")
+                } else {
+                    logger.warning(
+                        "Failed to persist manual skip for \(id): \(error.localizedDescription)"
+                    )
+                }
             }
         }
 
@@ -2125,6 +3386,13 @@ actor SkipOrchestrator {
         Set(suggestWindows.keys)
     }
 
+    /// Snapshot of suggestions whose banner delivery was acknowledged by the
+    /// active host. Used by lifecycle tests to prove a stale observer cannot
+    /// suppress replay in a replacement transaction.
+    func acknowledgedSuggestWindowIDs() -> Set<String> {
+        suggestBanneredWindowIds
+    }
+
     /// Snapshot of window IDs for which `emitBannerItem` actually
     /// reached the yield-to-subscriber path this episode. The set is
     /// populated ONLY by emission to active subscribers, never by
@@ -2148,11 +3416,12 @@ actor SkipOrchestrator {
     /// on `emittedAutoSkipBannerWindowIds` for *why* this set exists
     /// instead of a snapshot of `banneredWindowIds`. The 4 production
     /// writers of `banneredWindowIds` are enumerated in `emitBannerItem`'s
-    /// comment; of those, only `beginEpisode`'s preload pre-population
-    /// inserts WITHOUT a corresponding `emitBannerItem` call, so it is
-    /// the unique source of gate-snapshot ambiguity: a `banneredWindowIds`
+    /// comment; of those, `beginEpisode`'s preload pre-population and the
+    /// accepted-suggestion suppression insert WITHOUT a corresponding
+    /// `emitBannerItem` call. A `banneredWindowIds`
     /// snapshot cannot distinguish "preload pre-populated this id" from
-    /// "eval-loop emitted then inserted." This emission set is populated
+    /// "an existing card already handled this id" from "eval-loop emitted
+    /// then inserted." This emission set is populated
     /// only by `emitBannerItem` and only after the subscriber-gate, so
     /// its absence/presence is unambiguous emission evidence regardless
     /// of preload state.
@@ -2196,8 +3465,11 @@ actor SkipOrchestrator {
                 windows[id] = managed
             }
 
-            // Emit a banner the first time a window reaches .confirmed or .applied.
-            if (decision == .confirmed || decision == .applied),
+            // Auto-tier copy promises that playback actually skipped this
+            // span. A `.confirmed` decision in shadow/manual mode (or an
+            // edge-padding veto) has not skipped anything and must not surface
+            // as "Skipped …".
+            if decision == .applied,
                !banneredWindowIds.contains(managed.adWindow.id) {
                 // Cycle-27 T-3 production-writer site (3 of 4): evaluateAndPush promotion branch.
                 banneredWindowIds.insert(managed.adWindow.id)
@@ -2359,14 +3631,8 @@ actor SkipOrchestrator {
             // user-initiated skip always passes (paddedCueSpan returns
             // the snapped span unchanged).
             //
-            // KNOWN GATE-2 SURFACING GAP (dormant while the flag is OFF):
-            // the `.confirmed` state emits the `.autoSkipped`-tier banner
-            // ("Skipped …" copy, post-skip affordances) even though no
-            // skip will fire for this span. Honest copy/affordances for
-            // vetoed spans (suggest-style "Skip?" or a manual-skip
-            // button — `applyManualSkip` accepts `.confirmed` windows)
-            // belong to the Gate-2 blocker set ("wraj surfacing + veto
-            // masks"); do not flip the flag before that lands.
+            // A demoted `.confirmed` state remains silent: auto-tier copy is
+            // reserved for `.applied`, and no skip will fire for this span.
             if paddedCueSpan(for: managed) == nil {
                 let decision = SkipDecisionState.confirmed
                 logDecision(
@@ -2392,13 +3658,20 @@ actor SkipOrchestrator {
 
         // Persist to SQLite (fire-and-forget from the actor).
         let windowId = managed.adWindow.id
+        let analysisAssetId = managed.adWindow.analysisAssetId
+        let expectedProducerRevision = managed.adWindow
+        let appliedPersistenceBarrier =
+            appliedPersistenceBarrierForTesting
         Task { [store, logger] in
             do {
-                try await store.updateAdWindowDecision(
-                    id: windowId,
-                    decisionState: SkipDecisionState.applied.rawValue
+                if let appliedPersistenceBarrier {
+                    await appliedPersistenceBarrier()
+                }
+                _ = try await store.persistAppliedAdWindowIfEligible(
+                    windowId: windowId,
+                    analysisAssetId: analysisAssetId,
+                    expectedProducerRevision: expectedProducerRevision
                 )
-                try await store.updateAdWindowWasSkipped(id: windowId, wasSkipped: true)
             } catch {
                 logger.warning("Failed to persist skip state for \(windowId): \(error.localizedDescription)")
             }
@@ -2485,15 +3758,6 @@ actor SkipOrchestrator {
         // covering the cue range is selected as the underlying detection
         // reference (lookup is a single linear scan; cue lists are tiny).
         let sortedRanges = ranges.sorted { $0.start < $1.start }
-        for (i, range) in sortedRanges.enumerated() {
-            let underlyingEnd = nearestAdWindowEnd(forCueStart: range.start, cueEnd: range.end)
-            let nextDistance: Double = i + 1 < sortedRanges.count
-                ? sortedRanges[i + 1].start - range.end
-                : -1.0
-            logger.info(
-                "pushMergedCues: cueStart=\(range.start, privacy: .public) cueEnd=\(range.end, privacy: .public) adWindowEnd=\(underlyingEnd, privacy: .public) distanceToNextCue=\(nextDistance, privacy: .public)"
-            )
-        }
 
         // Defensive: clamp to non-negative so a future misconfigured caller
         // can't invert the cushion (skip-end before ad-end).
@@ -2542,9 +3806,15 @@ actor SkipOrchestrator {
     ///
     /// Called from PlayheadRuntime when the user taps "Hearing an ad" or marks
     /// transcript chunks as an ad.
-    func injectUserMarkedAd(start: Double, end: Double, analysisAssetId: String) {
+    func injectUserMarkedAd(
+        start: Double,
+        end: Double,
+        analysisAssetId: String,
+        windowId: String = UUID().uuidString
+    ) {
+        guard activeAssetId == analysisAssetId else { return }
+
         // Synthesize an AdWindow for the user-marked region.
-        let windowId = UUID().uuidString
         let adWindow = AdWindow(
             id: windowId,
             analysisAssetId: analysisAssetId,
@@ -2573,15 +3843,9 @@ actor SkipOrchestrator {
         )
         windows[windowId] = managed
 
-        // Emit banner before evaluateAndPush so listeners see the banner
-        // even in shadow/manual mode where evaluateAndPush may not promote
-        // to .applied.
-        if !banneredWindowIds.contains(windowId) {
-            // Cycle-27 T-3 production-writer site (4 of 4): injectUserMarkedAd manual entry point.
-            banneredWindowIds.insert(windowId)
-            emitBannerItem(for: managed)
-        }
-
+        // Only `evaluateAndPush` may emit the auto tier, after the window
+        // reaches `.applied`. Shadow/manual modes deliberately keep this
+        // `.confirmed` window silent because no skip occurred.
         evaluateAndPush()
     }
 

@@ -49,9 +49,9 @@ struct CorpusExportResult: Sendable, Equatable {
     /// playhead-q45f.1: Number of `listen_rewind` rows emitted (one
     /// JSONL line per persisted user listen-rewind tap).
     let listenRewindCount: Int
-    /// Absolute path of the sibling `decision-log.jsonl` written by narL,
-    /// if it exists in the same Documents directory — exposed so the
-    /// caller can build a combined bundle.
+    /// Reserved compatibility field for a future response-independent
+    /// decision-log projection. Live `decision-log.jsonl` is mutable and may
+    /// contain post-feedback state, so exports currently always return nil.
     let decisionLogManifestURL: URL?
     /// Absolute path of the `shadow-decisions.jsonl` written alongside the
     /// corpus export by ``ShadowDecisionsExporter``. `nil` only if the
@@ -86,6 +86,15 @@ protocol CorpusExportSource: ShadowDecisionsExportSource {
     /// readers).
     func fetchAdWindows(assetId: String) async throws -> [AdWindow]
     func loadCorrectionEvents(analysisAssetId: String) async throws -> [CorrectionEvent]
+    /// Central response-independent egress projection. Production loads the
+    /// frozen pre-feedback baseline when explicit receipts exist.
+    func fetchResponseIndependentAdWindows(
+        analysisAssetId: String
+    ) async throws -> [AdWindow]?
+    /// Complete response-independent public shape for one asset.
+    func fetchResponseIndependentAssetEgressProjection(
+        analysisAssetId: String
+    ) async throws -> ResponseIndependentAssetEgressProjection?
     /// Look up the `podcastId` recorded for an episode in the
     /// `analysis_jobs` table, or `nil` when no job row exists for the
     /// episode. Used by the exporter so asset records carry the podcastId
@@ -99,12 +108,71 @@ protocol CorpusExportSource: ShadowDecisionsExportSource {
     /// (cold-start before trust-scoring has materialized one). Mocks can
     /// return `nil` to exercise the missing-title JSONL path.
     func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile?
-    /// playhead-q45f.1: pull the persisted listen-rewind events scoped to
-    /// the asset's ad_windows so the exporter can emit one
+    /// Pull persisted listen-rewind events by their durable asset owner so
+    /// the exporter can emit one
     /// `listen_rewind` JSONL line per recorded user tap. The q45f
     /// counterfactual gate consumes these via the FrozenTrace
     /// `listenRewindEvents` field.
     func fetchListenRewinds(forAssetId assetId: String) async throws -> [AdListenRewindRow]
+}
+
+extension CorpusExportSource {
+    /// Compatibility implementation for in-memory test sources. Explicit
+    /// feedback has no durable baseline in these sources and therefore fails
+    /// closed; unanswered fixtures retain their existing behavior.
+    func fetchResponseIndependentAdWindows(
+        analysisAssetId: String
+    ) async throws -> [AdWindow]? {
+        let corrections = try await loadCorrectionEvents(
+            analysisAssetId: analysisAssetId
+        )
+        let windows = try await fetchAdWindows(
+            assetId: analysisAssetId
+        )
+        return ExplicitBannerFeedbackPrivacy
+            .responseIndependentProjection(
+                windows: windows,
+                corrections: corrections
+            )
+    }
+
+    func fetchResponseIndependentAssetEgressProjection(
+        analysisAssetId: String
+    ) async throws -> ResponseIndependentAssetEgressProjection? {
+        guard let windows =
+                try await fetchResponseIndependentAdWindows(
+                    analysisAssetId: analysisAssetId
+                ),
+              let decodedSpans =
+                ExplicitBannerFeedbackPrivacy.canonicalDecodedSpans(
+                    try await fetchDecodedSpans(
+                        assetId: analysisAssetId
+                    ),
+                    expectedAssetId: analysisAssetId
+                ),
+              let listenRewinds =
+                ExplicitBannerFeedbackPrivacy.canonicalListenRewinds(
+                    try await fetchListenRewinds(
+                        forAssetId: analysisAssetId
+                    ),
+                    expectedAssetId: analysisAssetId,
+                    expectedWindowIDs: Set(windows.map(\.id))
+                ),
+              let asset = (try await fetchAllAssets()).first(where: {
+                  $0.id == analysisAssetId
+              })
+        else {
+            return nil
+        }
+        return ResponseIndependentAssetEgressProjection(
+            windows: windows,
+            decodedSpans: decodedSpans,
+            listenRewinds: listenRewinds,
+            confirmedAdCoverageEndTime:
+                asset.confirmedAdCoverageEndTime
+        )
+    }
+
 }
 
 extension AnalysisStore: CorpusExportSource {
@@ -118,6 +186,23 @@ extension AnalysisStore: CorpusExportSource {
     nonisolated func fetchPodcastProfile(podcastId: String) async throws -> PodcastProfile? {
         try await fetchProfile(podcastId: podcastId)
     }
+
+    nonisolated func fetchResponseIndependentAdWindows(
+        analysisAssetId: String
+    ) async throws -> [AdWindow]? {
+        try await responseIndependentAdWindows(
+            analysisAssetId: analysisAssetId
+        )
+    }
+
+    nonisolated func fetchResponseIndependentAssetEgressProjection(
+        analysisAssetId: String
+    ) async throws -> ResponseIndependentAssetEgressProjection? {
+        try await responseIndependentAssetEgressProjection(
+            analysisAssetId: analysisAssetId
+        )
+    }
+
 }
 
 // MARK: - CorpusExportDedupMemo
@@ -235,7 +320,9 @@ enum CorpusExporter {
         podcastId: String? = nil,
         podcastTitle: String? = nil,
         detectorVersion: String = AdDetectionConfig.default.detectorVersion,
-        buildCommitSHA: String = BuildInfo.commitSHA
+        buildCommitSHA: String = BuildInfo.commitSHA,
+        responseIndependentConfirmedAdCoverageEndTime: Double? = nil,
+        useResponseIndependentConfirmedAdCoverage: Bool = false
     ) throws -> Data {
         // playhead-i9dj: emit the human-readable identifiers so the
         // exported corpus is legible standalone. Both fields are
@@ -261,7 +348,12 @@ enum CorpusExporter {
             "episodeDurationSec": asset.episodeDurationSec as Any? ?? NSNull(),
             "featureCoverageEndTime": asset.featureCoverageEndTime as Any? ?? NSNull(),
             "fastTranscriptCoverageEndTime": asset.fastTranscriptCoverageEndTime as Any? ?? NSNull(),
-            "confirmedAdCoverageEndTime": asset.confirmedAdCoverageEndTime as Any? ?? NSNull(),
+            "confirmedAdCoverageEndTime":
+                (
+                    useResponseIndependentConfirmedAdCoverage
+                    ? responseIndependentConfirmedAdCoverageEndTime
+                    : asset.confirmedAdCoverageEndTime
+                ) as Any? ?? NSNull(),
             "terminalReason": asset.terminalReason as Any? ?? NSNull(),
             // gtt9.21: provenance — empty string is NOT used here (we
             // always have a real value from AdDetectionConfig.default
@@ -305,7 +397,10 @@ enum CorpusExporter {
     /// (`catalogStoreMatchSimilarity >= 0.80 / total ad_windows with non-
     /// null value`) — the only way to measure how tightly the
     /// correction loop closes on real corpora today.
-    static func adWindowLine(_ window: AdWindow) throws -> Data {
+    static func adWindowLine(
+        _ window: AdWindow,
+        redactingExplicitBannerFeedback: Bool = false
+    ) throws -> Data {
         let obj: [String: Any] = [
             "type": "ad_window",
             "schemaVersion": schemaVersion,
@@ -314,15 +409,30 @@ enum CorpusExporter {
             "startTime": window.startTime,
             "endTime": window.endTime,
             "confidence": window.confidence,
-            "boundaryState": window.boundaryState,
-            "decisionState": window.decisionState,
+            "boundaryState": redactingExplicitBannerFeedback
+                ? NSNull() : window.boundaryState,
+            "decisionState": redactingExplicitBannerFeedback
+                ? NSNull() : window.decisionState,
             "detectorVersion": window.detectorVersion,
+            // Detection diagnostics remain exportable even when explicit
+            // banner feedback makes the response state private. These fields
+            // describe what the detector observed; they do not encode the
+            // user's answer.
+            "advertiser": window.advertiser as Any? ?? NSNull(),
+            "product": window.product as Any? ?? NSNull(),
+            "adDescription": window.adDescription as Any? ?? NSNull(),
+            "evidenceText": window.evidenceText as Any? ?? NSNull(),
+            "evidenceStartTime":
+                window.evidenceStartTime as Any? ?? NSNull(),
             "metadataSource": window.metadataSource,
             "metadataConfidence": window.metadataConfidence as Any? ?? NSNull(),
             "evidenceSources": window.evidenceSources as Any? ?? NSNull(),
             "eligibilityGate": window.eligibilityGate as Any? ?? NSNull(),
-            "wasSkipped": window.wasSkipped,
-            "userDismissedBanner": window.userDismissedBanner,
+            "wasSkipped": redactingExplicitBannerFeedback
+                ? NSNull() : window.wasSkipped,
+            // Keep per-window banner responses out of the export.
+            // Do not expose the new explicit response through this redundant
+            // per-window diagnostic field; telemetry consumes only aggregates.
             // playhead-epfk: the field this whole bead exists to surface.
             // Explicit JSON `null` when the catalog store wasn't wired or
             // no fingerprint was queryable; `0.0` when the store ran but
@@ -334,15 +444,13 @@ enum CorpusExporter {
     }
 
     /// playhead-q45f.1: serialize an `AdListenRewindRow` as a single
-    /// JSONL line body. The exporter caller threads the source asset's
-    /// id through `analysisAssetId` so the NarlEvalCorpusBuilder can
-    /// scope these events to the FrozenTrace fixture they belong to
-    /// without having to re-resolve the JOIN.
-    static func listenRewindLine(_ row: AdListenRewindRow, analysisAssetId: String) throws -> Data {
+    /// JSONL line body. Asset identity comes from the durable event row, never
+    /// from a current window-ID join or caller-supplied attribution.
+    static func listenRewindLine(_ row: AdListenRewindRow) throws -> Data {
         let obj: [String: Any] = [
             "type": "listen_rewind",
             "schemaVersion": schemaVersion,
-            "analysisAssetId": analysisAssetId,
+            "analysisAssetId": row.analysisAssetId,
             "windowId": row.windowId,
             "podcastId": row.podcastId,
             "time": row.time,
@@ -359,6 +467,12 @@ enum CorpusExporter {
     /// hammered the button 4 times" from "user submitted once" without
     /// needing access to the raw event log.
     static func correctionLine(_ event: CorrectionEvent) throws -> Data? {
+        // Explicit Yes/No receipts are on-device state, not diagnostics.
+        // Callers also filter before this serializer so privacy suppression is
+        // not counted or logged as a corrupt row.
+        guard !event.isPrivateExplicitFeedbackReceipt else {
+            return nil
+        }
         // Reject rows whose scope cannot be deserialized — corrupt persisted
         // input that would confuse downstream replay tools. We still let the
         // rest of the export proceed.
@@ -489,6 +603,24 @@ enum CorpusExporter {
         // never grows unbounded across runs.
         var podcastTitleCache: [String: String?] = [:]
         for asset in assets {
+            // Load corrections first because their private window join keys
+            // identify exactly which feedback-derived AdWindow state fields
+            // must be redacted below. The correction rows themselves are
+            // withheld entirely.
+            let rawEvents: [CorrectionEvent]
+            let correctionLookupSucceeded: Bool
+            do {
+                rawEvents = try await store.loadCorrectionEvents(
+                    analysisAssetId: asset.id
+                )
+                correctionLookupSucceeded = true
+            } catch {
+                logger.warning(
+                    "export: correction lookup failed — withholding window state for this asset"
+                )
+                rawEvents = []
+                correctionLookupSucceeded = false
+            }
             // Look up podcastId by episodeId. A failing lookup is non-fatal:
             // downstream tooling reads podcastId as optional (HIGH-3 allows
             // explicit null) so we log and emit null rather than abort.
@@ -527,24 +659,40 @@ enum CorpusExporter {
                 podcastTitle = nil
             }
 
+            let egressProjection:
+                ResponseIndependentAssetEgressProjection?
+            if correctionLookupSucceeded {
+                do {
+                    egressProjection =
+                        try await store
+                        .fetchResponseIndependentAssetEgressProjection(
+                            analysisAssetId: asset.id
+                        )
+                } catch {
+                    logger.warning(
+                        "export: response-independent asset projection failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — withholding private-sensitive asset fields"
+                    )
+                    egressProjection = nil
+                }
+            } else {
+                egressProjection = nil
+            }
+
             // asset record
-            let assetData = try assetLine(asset, podcastId: podcastId, podcastTitle: podcastTitle)
+            let assetData = try assetLine(
+                asset,
+                podcastId: podcastId,
+                podcastTitle: podcastTitle,
+                responseIndependentConfirmedAdCoverageEndTime:
+                    egressProjection?
+                    .confirmedAdCoverageEndTime,
+                useResponseIndependentConfirmedAdCoverage: true
+            )
             try write(line: assetData, to: handle, hasher: &hasher)
             assetCount += 1
 
             // decision (DecodedSpan) records for this asset
-            let spans: [DecodedSpan]
-            do {
-                spans = try await store.fetchDecodedSpans(assetId: asset.id)
-            } catch {
-                // Log and continue: a transient SQL failure on one asset must
-                // not abort the whole export. Downstream tooling can detect
-                // the gap because other assets' records still serialize.
-                logger.warning(
-                    "export: fetchDecodedSpans failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 decisions for this asset"
-                )
-                spans = []
-            }
+            let spans = egressProjection?.decodedSpans ?? []
             for span in spans {
                 let spanData = try spanLine(span)
                 try write(line: spanData, to: handle, hasher: &hasher)
@@ -558,51 +706,25 @@ enum CorpusExporter {
             // bad asset must not abort the entire export. Empty arrays
             // simply emit zero ad_window lines for that asset, which
             // downstream tooling treats as "no fusion windows persisted."
-            let adWindows: [AdWindow]
-            do {
-                adWindows = try await store.fetchAdWindows(assetId: asset.id)
-            } catch {
-                logger.warning(
-                    "export: fetchAdWindows failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 ad_window rows for this asset"
-                )
-                adWindows = []
-            }
-            for window in adWindows {
+            let projectedWindows = egressProjection?.windows ?? []
+            for window in projectedWindows {
                 let windowData = try adWindowLine(window)
                 try write(line: windowData, to: handle, hasher: &hasher)
                 adWindowCount += 1
             }
 
-            // playhead-q45f.1: listen_rewind records for this asset.
-            // The fetch JOINs through `ad_windows.analysisAssetId` so the
-            // result is already scoped. Lookup failure is non-fatal —
-            // matches the per-asset tolerance pattern above. Empty array
-            // simply emits zero `listen_rewind` lines for the asset.
-            let listenRewinds: [AdListenRewindRow]
-            do {
-                listenRewinds = try await store.fetchListenRewinds(forAssetId: asset.id)
-            } catch {
-                logger.warning(
-                    "export: fetchListenRewinds failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 listen_rewind rows for this asset"
-                )
-                listenRewinds = []
-            }
+            // Listen rewinds are part of the same authenticated asset-wide
+            // projection as windows and decoded spans. Never perform a second
+            // post-marker lookup by a reusable window ID.
+            let listenRewinds =
+                egressProjection?.listenRewinds ?? []
             for row in listenRewinds {
-                let rowData = try listenRewindLine(row, analysisAssetId: asset.id)
+                let rowData = try listenRewindLine(row)
                 try write(line: rowData, to: handle, hasher: &hasher)
                 listenRewindCount += 1
             }
 
             // correction records for this asset
-            let rawEvents: [CorrectionEvent]
-            do {
-                rawEvents = try await store.loadCorrectionEvents(analysisAssetId: asset.id)
-            } catch {
-                logger.warning(
-                    "export: loadCorrectionEvents failed for asset=\(asset.id, privacy: .public) error=\(String(describing: error), privacy: .public) — emitting 0 corrections for this asset"
-                )
-                rawEvents = []
-            }
             // playhead-hygc.1.6: distinct-by-default. The default
             // `.distinctSemantic` mode collapses pre-v23 duplicate
             // rows so downstream learning / metrics see one vote per
@@ -613,14 +735,20 @@ enum CorpusExporter {
             // returns survivor fields unchanged. The `.rawEvents`
             // mode bypasses the collapse for debugging the dedupe
             // pipeline.
+            let publicRawEvents = rawEvents.filter {
+                !$0.isPrivateExplicitFeedbackReceipt
+            }
             let events: [CorrectionEvent]
             switch correctionMode {
             case .distinctSemantic:
-                events = distinctSemanticCorrections(rawEvents).distinct
+                events =
+                    distinctSemanticCorrections(publicRawEvents)
+                    .distinct
             case .rawEvents:
-                events = rawEvents
+                events = publicRawEvents
             }
             for event in events {
+                guard !event.isPrivateExplicitFeedbackReceipt else { continue }
                 guard let data = try correctionLine(event) else {
                     skippedCorrectionCount += 1
                     // Scope strings can contain user-authored substrings (e.g.
@@ -669,14 +797,10 @@ enum CorpusExporter {
             resolvedFileURL = fileURL
         }
 
-        // Optional narL pairing: if decision-log.jsonl exists in the same
-        // Documents directory, surface it so the caller can drag both files
-        // out in a single Finder operation. We do NOT copy or concatenate —
-        // two files, one timestamped corpus bundle.
-        let siblingDecisionLog = documentsURL.appendingPathComponent("decision-log.jsonl")
-        let decisionLogManifestURL = fm.fileExists(atPath: siblingDecisionLog.path)
-            ? siblingDecisionLog
-            : nil
+        // Live `decision-log.jsonl` is mutable independently of this export.
+        // Do not pair it until a response-independent frozen projection exists.
+        // The local file is intentionally left untouched.
+        let decisionLogManifestURL: URL? = nil
 
         // playhead-narl.2 shadow sidecar: always write
         // `shadow-decisions.jsonl` alongside the corpus bundle so the

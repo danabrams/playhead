@@ -1110,9 +1110,8 @@ private extension SettingsView {
             // Documents/ so it lands in the file-sharing-visible directory
             // (UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace —
             // dev builds only). Unlike the text-export ShareLink above,
-            // this one is retrieved via Files.app or Finder and is
-            // designed to compose with narL's decision-log.jsonl into a
-            // single corpus bundle.
+            // this one is retrieved via Files.app or Finder. The live,
+            // mutable decision log is deliberately excluded.
             Button {
                 Task { await generateCorpusExport() }
             } label: {
@@ -1145,11 +1144,6 @@ private extension SettingsView {
                             : ""))
                         .font(AppTypography.caption)
                         .foregroundStyle(AppColors.textTertiary)
-                    if let manifest = result.decisionLogManifestURL {
-                        Text("paired with \(manifest.lastPathComponent)")
-                            .font(AppTypography.caption)
-                            .foregroundStyle(AppColors.textTertiary)
-                    }
                     if let shadow = result.shadowManifestURL {
                         Text("shadow sidecar: \(shadow.lastPathComponent) (\(result.shadowRowCount) rows)")
                             .font(AppTypography.caption)

@@ -808,6 +808,10 @@ struct MigrationLadderTests {
         let loaded = try await store.loadTrainingExamples(forAsset: "asset-post-rebuild")
         try #require(loaded.count == 1)
         #expect(loaded[0].decisionCohortJSON == nil)
+        #expect(
+            loaded[0].privacyClassification == .onDeviceLocal,
+            "v33 must classify pre-provenance rows as generic on-device learning"
+        )
 
         // The pre-rebuild row was destroyed by the v17 drop+recreate.
         // Confirm the broken-v16 asset still exists (FK target preserved
@@ -815,5 +819,358 @@ struct MigrationLadderTests {
         // rows are gone.
         let lostRows = try await store.loadTrainingExamples(forAsset: "asset-broken-v16")
         #expect(lostRows.isEmpty, "pre-fix v16 rows are unrecoverable by design")
+    }
+
+    @Test("R29: direct v32 fixture applies v33 privacy then creates v34 baseline schema")
+    func directV32AppliesV33ThenV34() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.execForTesting("""
+            DROP TABLE explicit_feedback_egress_baselines;
+            DROP TABLE training_examples;
+            CREATE TABLE training_examples (
+                id TEXT PRIMARY KEY
+            );
+            INSERT INTO training_examples(id) VALUES ('v32-row');
+            UPDATE _meta SET value = '32' WHERE key = 'schema_version';
+            """)
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(
+            try await store.schemaVersion()
+                == AnalysisStore.currentSchemaVersion
+        )
+        #expect(
+            try probeColumnExists(
+                in: dir,
+                table: "training_examples",
+                column: "privacyClassification"
+            ),
+            "The direct v32 fixture must execute the v33 ALTER"
+        )
+        #expect(
+            try probeRowCount(in: dir, table: "training_examples") == 1,
+            "The v33 additive migration must preserve existing rows"
+        )
+        #expect(
+            try probeTableExists(
+                in: dir,
+                table: "explicit_feedback_egress_baselines"
+            )
+        )
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "explicit_feedback_egress_baselines",
+            column: "projectionState"
+        ))
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "explicit_feedback_egress_baselines",
+            column: "decodedSpanCount"
+        ))
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "explicit_feedback_egress_baselines",
+            column: "listenRewindCount"
+        ))
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "explicit_feedback_egress_baselines",
+            column: "payloadJSON"
+        ))
+    }
+
+    @Test(
+        "R31: v34 quarantines unowned legacy rewinds across window-ID reuse"
+    )
+    func v34QuarantinesLegacyRewindsAndPersistsNewOwnership()
+        async throws
+    {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let bootstrap = try AnalysisStore(directory: dir)
+        try await bootstrap.migrate()
+        let assetA = makeSkipTestAnalysisAsset(
+            id: "rewind-owner-a",
+            episodeId: "rewind-episode-a"
+        )
+        let assetB = makeSkipTestAnalysisAsset(
+            id: "rewind-owner-b",
+            episodeId: "rewind-episode-b"
+        )
+        let reusedID = "legacy-reused-window"
+        try await bootstrap.insertAsset(assetA)
+        try await bootstrap.insertAsset(assetB)
+        try await bootstrap.insertAdWindow(
+            makeSkipTestAdWindow(
+                id: reusedID,
+                assetId: assetA.id
+            )
+        )
+        try await bootstrap.execForTesting("""
+            INSERT INTO ad_listen_rewinds
+                (windowId, podcastId, time, createdAt)
+            VALUES
+                ('\(reusedID)', 'legacy-a-podcast', 60, 1700000400);
+            DELETE FROM ad_windows WHERE id = '\(reusedID)';
+            """)
+        try await bootstrap.insertAdWindow(
+            makeSkipTestAdWindow(
+                id: reusedID,
+                assetId: assetB.id
+            )
+        )
+
+        // Rewind the current unshipped schema to an exact v33 shape. The
+        // legacy row intentionally has no durable owner.
+        if try probeColumnExists(
+            in: dir,
+            table: "ad_listen_rewinds",
+            column: "analysisAssetId"
+        ) {
+            try await bootstrap.execForTesting("""
+                DROP INDEX IF EXISTS
+                    idx_ad_listen_rewinds_asset_time;
+                ALTER TABLE ad_listen_rewinds
+                    DROP COLUMN analysisAssetId;
+                """)
+        }
+        try await bootstrap.execForTesting("""
+            DROP TABLE explicit_feedback_egress_baselines;
+            UPDATE _meta SET value = '33'
+            WHERE key = 'schema_version';
+            """)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "ad_listen_rewinds",
+            column: "analysisAssetId"
+        ))
+        #expect(try probeIndexExists(
+            in: dir,
+            indexName: "idx_ad_listen_rewinds_asset_time"
+        ))
+        #expect(
+            try await reopened.fetchListenRewinds(
+                forAssetId: assetB.id
+            ).isEmpty,
+            "A legacy orphan must not become B-owned through its reused window ID"
+        )
+
+        var db: OpaquePointer?
+        #expect(
+            sqlite3_open_v2(
+                reopened.databaseURL.path,
+                &db,
+                SQLITE_OPEN_READONLY,
+                nil
+            ) == SQLITE_OK
+        )
+        defer {
+            if let db {
+                sqlite3_close_v2(db)
+            }
+        }
+        var ownerStmt: OpaquePointer?
+        #expect(
+            sqlite3_prepare_v2(
+                db,
+                """
+                SELECT analysisAssetId
+                FROM ad_listen_rewinds
+                WHERE podcastId = 'legacy-a-podcast'
+                """,
+                -1,
+                &ownerStmt,
+                nil
+            ) == SQLITE_OK
+        )
+        defer { sqlite3_finalize(ownerStmt) }
+        #expect(sqlite3_step(ownerStmt) == SQLITE_ROW)
+        #expect(
+            sqlite3_column_type(ownerStmt, 0) == SQLITE_NULL,
+            "v34 must quarantine, not infer, legacy ownership"
+        )
+
+        try await reopened.insertListenRewind(
+            windowId: reusedID,
+            analysisAssetId: assetB.id,
+            podcastId: "owned-b-podcast",
+            time: 60,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_500)
+        )
+        let ownedB = try await reopened.fetchListenRewinds(
+            forAssetId: assetB.id
+        )
+        #expect(ownedB.count == 1)
+        #expect(ownedB.first?.analysisAssetId == assetB.id)
+        #expect(ownedB.first?.podcastId == "owned-b-podcast")
+    }
+
+    @Test("R29: v33 to v34 reopens, preserves rows, and never synthesizes historical baseline")
+    func directV33CreatesWithheldMarkerAndPreservesRows()
+        async throws
+    {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let bootstrap = try AnalysisStore(directory: dir)
+        try await bootstrap.migrate()
+        let asset = makeSkipTestAnalysisAsset(
+            id: "asset-v33-baseline",
+            episodeId: "episode-v33-baseline"
+        )
+        let window = makeSkipTestAdWindow(
+            id: "window-v33-baseline",
+            assetId: asset.id,
+            startTime: 10,
+            endTime: 20
+        )
+        try await bootstrap.insertAsset(asset)
+        try await bootstrap.insertAdWindow(window)
+        let source = CorrectionSource.bannerAutoSkipDenied
+        _ = try await bootstrap.appendCorrectionEvent(
+            CorrectionEvent(
+                id: "historical-explicit-receipt",
+                analysisAssetId: asset.id,
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: asset.id,
+                    startTime: window.startTime,
+                    endTime: window.endTime
+                ).serialized,
+                source: source,
+                correctionType: source.kind.correctionType,
+                targetRefs: CorrectionTargetRefs(
+                    adWindowId: window.id,
+                    adWindowIds: [window.id],
+                    explicitFeedbackDetectionProjection:
+                        ExplicitFeedbackDetectionProjection(window),
+                    exactFeedbackSpan: ExactFeedbackSpan(
+                        startTime: window.startTime,
+                        endTime: window.endTime
+                    )
+                )
+            )
+        )
+        try await bootstrap.execForTesting("""
+            DROP TABLE explicit_feedback_egress_baselines;
+            UPDATE _meta SET value = '33' WHERE key = 'schema_version';
+            """)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+
+        #expect(
+            try await reopened.schemaVersion()
+                == AnalysisStore.currentSchemaVersion
+        )
+        #expect(
+            try probeTableExists(
+                in: dir,
+                table: "explicit_feedback_egress_baselines"
+            )
+        )
+        #expect(
+            try probeRowCount(
+                in: dir,
+                table: "explicit_feedback_egress_baselines"
+            ) == 1,
+            "Migration must authenticate a fail-closed tombstone without inventing a projection"
+        )
+        #expect(try await reopened.fetchAsset(id: asset.id) != nil)
+        #expect(
+            try await reopened.fetchAdWindows(assetId: asset.id).map(\.id)
+                == [window.id]
+        )
+        #expect(
+            try await reopened.loadCorrectionEvents(
+                analysisAssetId: asset.id
+            ).map(\.id) == ["historical-explicit-receipt"]
+        )
+        let historicalProjection =
+            try await reopened.responseIndependentAdWindows(
+                analysisAssetId: asset.id
+            )
+        #expect(
+            historicalProjection?.count == nil,
+            "Historical explicit receipts without a baseline must fail closed"
+        )
+
+        let laterSource = CorrectionSource.bannerAutoSkipConfirmed
+        let laterReceipt = CorrectionEvent(
+            id: "post-migration-explicit-receipt",
+            analysisAssetId: asset.id,
+            scope: CorrectionScope.exactTimeSpan(
+                assetId: asset.id,
+                startTime: window.startTime,
+                endTime: window.endTime
+            ).serialized,
+            source: laterSource,
+            correctionType: laterSource.kind.correctionType,
+            targetRefs: CorrectionTargetRefs(
+                adWindowId: window.id,
+                adWindowIds: [window.id],
+                explicitFeedbackDetectionProjection:
+                    ExplicitFeedbackDetectionProjection(window),
+                exactFeedbackSpan: ExactFeedbackSpan(
+                    startTime: window.startTime,
+                    endTime: window.endTime
+                )
+            )
+        )
+        #expect(
+            try await reopened.persistConfirmedAutoSkip(
+                windowId: window.id,
+                analysisAssetId: asset.id,
+                expectedEpisodeId: asset.episodeId,
+                expectedStartTime: window.startTime,
+                expectedEndTime: window.endTime,
+                expectedProducerRevision: window,
+                expectedMaterialToken:
+                    AdWindowMaterialIdentity.autoSkipToken(
+                        window: window,
+                        displayedStart: window.startTime,
+                        displayedEnd: window.endTime
+                    ),
+                correction: laterReceipt
+            ) == true,
+            "Upgraded assets must keep teaching locally"
+        )
+        #expect(
+            try await reopened.loadCorrectionEvents(
+                analysisAssetId: asset.id
+            ).count == 2
+        )
+        #expect(
+            try await reopened.fetchAdWindow(id: window.id)?
+                .decisionState == AdDecisionState.applied.rawValue
+        )
+        let stillWithheld =
+            try await reopened.responseIndependentAdWindows(
+                analysisAssetId: asset.id
+            )
+        #expect(
+            stillWithheld?.count == nil,
+            "A later response cannot synthesize missing history"
+        )
+        #expect(
+            try probeRowCount(
+                in: dir,
+                table: "explicit_feedback_egress_baselines"
+            ) == 1
+        )
     }
 }

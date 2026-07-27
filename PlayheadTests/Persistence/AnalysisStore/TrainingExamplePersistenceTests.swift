@@ -46,7 +46,9 @@ struct TrainingExamplePersistenceTests {
         createdAt: Double = 1_700_000_000.0,
         textSnapshot: String? = nil,
         userAction: String? = nil,
-        eligibilityGate: String? = nil
+        eligibilityGate: String? = nil,
+        privacyClassification:
+            TrainingExamplePrivacyClassification = .onDeviceLocal
     ) -> TrainingExample {
         TrainingExample(
             id: id,
@@ -69,7 +71,8 @@ struct TrainingExamplePersistenceTests {
             scanCohortJSON: "{\"prompt\":\"v1\"}",
             decisionCohortJSON: "{\"fusion\":\"v1\"}",
             transcriptQuality: "good",
-            createdAt: createdAt
+            createdAt: createdAt,
+            privacyClassification: privacyClassification
         )
     }
 
@@ -111,6 +114,32 @@ struct TrainingExamplePersistenceTests {
         let loaded = try await store.loadTrainingExamples(forAsset: asset.id)
         try #require(loaded.count == 1)
         #expect(loaded[0] == example)
+    }
+
+    @Test("explicit-feedback privacy provenance persists losslessly")
+    func explicitFeedbackPrivacyRoundTrips() async throws {
+        let store = try await makeTestStore()
+        let asset = makeAsset(id: "asset-private-training")
+        try await store.insertAsset(asset)
+        let example = makeExample(
+            id: "te-private-training",
+            analysisAssetId: asset.id,
+            userAction: "reverted",
+            privacyClassification:
+                .localPrivateExplicitFeedback
+        )
+
+        try await store.createTrainingExample(example)
+        let loaded = try #require(
+            try await store.loadTrainingExamples(
+                forAsset: asset.id
+            ).first
+        )
+        #expect(
+            loaded.privacyClassification
+                == .localPrivateExplicitFeedback
+        )
+        #expect(!loaded.privacyClassification.permitsEgress)
     }
 
     /// cycle-3 L4: focused round-trip for `decisionCohortJSON == nil`.

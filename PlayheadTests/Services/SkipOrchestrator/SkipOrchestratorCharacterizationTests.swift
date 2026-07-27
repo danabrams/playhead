@@ -813,8 +813,8 @@ struct SkipOrchestratorAdDecisionContractTests {
 @Suite("SkipOrchestrator Banner Item Stream")
 struct SkipOrchestratorBannerItemStreamTests {
 
-    @Test("Confirmed window in shadow mode emits a banner item")
-    func confirmedWindowEmitsBanner() async throws {
+    @Test("Confirmed window in shadow mode does not claim an auto-skip")
+    func confirmedShadowWindowDoesNotEmitAutoSkippedBanner() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let orchestrator = SkipOrchestrator(store: store)
@@ -836,7 +836,8 @@ struct SkipOrchestratorBannerItemStreamTests {
         )
         await orchestrator.receiveAdWindows([window])
 
-        // Collect one item from the stream with a bounded timeout.
+        // Collect with a bounded timeout. Shadow mode is log-only, so an
+        // auto-tier card would falsely claim playback skipped this span.
         let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
                 return item
@@ -848,11 +849,12 @@ struct SkipOrchestratorBannerItemStreamTests {
         collectTask.cancel()
         let received = await collectTask.value
 
-        let item = try #require(received, "Expected a banner item for a confirmed window")
-        #expect(item.windowId == "ad-banner-1")
-        #expect(item.adStartTime == 60)
-        #expect(item.adEndTime == 120)
-        #expect(item.podcastId == "podcast-1")
+        #expect(
+            received == nil,
+            "A confirmed shadow window did not skip and must not render the completed-action auto tier"
+        )
+        let emitted = await orchestrator.emittedAutoSkipBannersSnapshot()
+        #expect(!emitted.contains("ad-banner-1"))
     }
 
     @Test("Applied window in auto mode emits a banner item")
@@ -868,7 +870,7 @@ struct SkipOrchestratorBannerItemStreamTests {
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
-            podcastId: "podcast-2"
+            podcastId: "podcast-1"
         )
 
         let stream = await orchestrator.bannerItemStream()
@@ -896,14 +898,22 @@ struct SkipOrchestratorBannerItemStreamTests {
         #expect(item.windowId == "ad-banner-auto")
         #expect(item.adStartTime == 60)
         #expect(item.adEndTime == 120)
-        #expect(item.podcastId == "podcast-2")
+        #expect(item.podcastId == "podcast-1")
     }
 
     @Test("Banner is emitted only once per window across repeated evaluations")
     func bannerEmittedOnlyOnce() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -1225,11 +1235,17 @@ struct SkipOrchestratorSuggestTierTests {
         )
     }
 
-    @Test("acceptSuggestedSkip promotes window to confirmed and clears suggest state")
+    @Test("acceptSuggestedSkip immediately applies the promoted window")
     func acceptSuggestedSkipConfirmsWindow() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -1237,32 +1253,61 @@ struct SkipOrchestratorSuggestTierTests {
         )
 
         let window = makeMarkOnlyAdWindow(id: "ad-suggest-accept")
+        try await store.insertAdWindow(window)
         await orchestrator.receiveAdWindows([window])
 
         // Pre-condition: not yet in the confirmed set.
         let confirmedBefore = await orchestrator.confirmedWindows()
         #expect(!confirmedBefore.contains { $0.id == "ad-suggest-accept" })
 
-        await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-accept")
+        let accepted = await orchestrator.acceptSuggestedSkip(
+            windowId: "ad-suggest-accept"
+        )
+        #expect(accepted)
 
-        // Post-condition: a confirmed window covering the same span now
-        // exists. The orchestrator allocates a fresh promoted-window id so
-        // the eligibilityGate stamp on the original markOnly window can't
-        // re-block it; we match by span rather than id.
-        let confirmedAfter = await orchestrator.confirmedWindows()
-        let match = confirmedAfter.first {
-            $0.startTime == window.startTime && $0.endTime == window.endTime
+        // Post-condition: the explicit Yes is itself the skip command, so the
+        // fresh UUID-keyed promotion must already be applied rather than left
+        // in the confirmed/manual-action set. The durable row is the
+        // authoritative assertion: explicit feedback must not be copied into
+        // the detailed decision log.
+        let persisted = try await store.fetchAdWindows(assetId: "asset-1")
+        let appliedOnSpan = persisted.filter {
+            $0.decisionState == AdDecisionState.applied.rawValue
+                && $0.startTime == window.startTime
+                && $0.endTime == window.endTime
         }
-        let promoted = try #require(match,
-            "acceptSuggestedSkip must promote the suggest window into the confirmed set")
-        #expect(promoted.confidence == 1.0,
-            "User-confirmed skip should pin confidence to 1.0; got \(promoted.confidence)")
+        let promoted = try #require(
+            appliedOnSpan.count == 1 ? appliedOnSpan[0] : nil,
+            "acceptSuggestedSkip must durably apply exactly one promoted window"
+        )
+        #expect(promoted.id != window.id)
+        #expect(promoted.confidence == 1.0)
+
+        let decisionLog = await orchestrator.getDecisionLog()
+        let detailedFeedbackEntries = decisionLog.filter {
+            $0.decision == .applied
+                && $0.snappedStart == window.startTime
+                && $0.snappedEnd == window.endTime
+        }
+        #expect(
+            detailedFeedbackEntries.isEmpty,
+            "Suggest Yes must not copy its exact span into the decision log"
+        )
+        let confirmedAfter = await orchestrator.confirmedWindows()
+        #expect(
+            confirmedAfter.allSatisfy {
+                $0.startTime != window.startTime || $0.endTime != window.endTime
+            },
+            "The accepted suggestion must not wait for a second manual action"
+        )
     }
 
     @Test("acceptSuggestedSkip is a no-op when window is unknown")
     func acceptSuggestedSkipUnknownIsNoOp() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1354,7 +1399,9 @@ struct SkipOrchestratorSuggestTierTests {
         // synthesize a duplicate managed window via a fresh
         // `UUID().uuidString` and silently corrupt state.
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
         let trustService = try await makeSkipTestTrustService(
             mode: "manual",
             trustScore: 0.6,
@@ -1436,7 +1483,10 @@ struct SkipOrchestratorSuggestTierTests {
         }
 
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.9,
@@ -1445,6 +1495,7 @@ struct SkipOrchestratorSuggestTierTests {
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
+            correctionStore: correctionStore,
             invariantLogger: invariantLogger,
             episodeIdHasher: hasher
         )
@@ -1468,6 +1519,7 @@ struct SkipOrchestratorSuggestTierTests {
 
         // 1. markOnly arrives → suggest banner emitted, suggestWindows populated.
         let markOnly = makeMarkOnlyAdWindow(id: "ad-tap-flip", startTime: 30, endTime: 60)
+        try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
 
         // 2. User taps the suggest banner — promotes under a fresh UUID.
@@ -1511,41 +1563,41 @@ struct SkipOrchestratorSuggestTierTests {
         #expect(!activeIDs.contains("ad-tap-flip"),
             "Late non-markOnly ingest with the same id must NOT register a second managed window after acceptSuggestedSkip")
 
+        let persisted = try await store.fetchAdWindows(assetId: "asset-1")
+        let appliedOnSpan = persisted.filter {
+            $0.decisionState == AdDecisionState.applied.rawValue
+                && $0.id != markOnly.id
+                && $0.startTime == markOnly.startTime
+                && $0.endTime == markOnly.endTime
+        }
+        #expect(appliedOnSpan.count == 1,
+            "Exactly one durable applied row should land on the span; got \(appliedOnSpan.count)")
+
         let log = await orchestrator.getDecisionLog()
-        let appliedOnSpan = log.filter {
+        let detailedFeedbackEntries = log.filter {
             $0.decision == .applied
                 && $0.snappedStart == markOnly.startTime
                 && $0.snappedEnd == markOnly.endTime
         }
-        #expect(appliedOnSpan.count == 1,
-            "Exactly one applied decision should land on the span (one user skip → one decision); got \(appliedOnSpan.count)")
+        #expect(
+            detailedFeedbackEntries.isEmpty,
+            "Suggest Yes must not copy its exact span into the decision log"
+        )
 
-        // Banner stream: at most one `.autoSkipped` banner for the
-        // promoted window. (A `.suggest` banner from the initial
-        // markOnly delivery is allowed and expected.)
+        // The suggest card already asked for and received the user's answer.
+        // Applying the promoted window must not ask the same question again
+        // through a follow-up `.autoSkipped` card.
         let autoSkippedBanners = receivedBanners.filter { $0.tier == .autoSkipped }
-        #expect(autoSkippedBanners.count == 1,
-            "Exactly one auto-skip banner should fire for the promoted window; got \(autoSkippedBanners.count)")
+        #expect(autoSkippedBanners.isEmpty,
+            "No duplicate auto-skip banner should follow suggest Yes; got \(autoSkippedBanners.count)")
 
-        // Audit log: exactly one `auto_skip_fired` event. Drain the
-        // logger's serial queue before reading.
+        // The exact explicit-feedback span must not enter the invariant audit
+        // log either. With no unrelated event in this fixture, no session file
+        // should be created at all.
         invariantLogger.flushForTesting()
-        let sessionURL = try #require(invariantLogger.currentSessionFileURL)
-        var autoSkipEntries: [SurfaceStateTransitionEntry] = []
-        for _ in 0..<10 {
-            let data = try Data(contentsOf: sessionURL)
-            let lines = String(decoding: data, as: UTF8.self)
-                .split(separator: "\n", omittingEmptySubsequences: true)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            let entries = try lines.map {
-                try decoder.decode(SurfaceStateTransitionEntry.self, from: Data($0.utf8))
-            }
-            autoSkipEntries = entries.filter { $0.eventType == .autoSkipFired }
-            if !autoSkipEntries.isEmpty { break }
-            invariantLogger.flushForTesting()
-        }
-        #expect(autoSkipEntries.count == 1,
-            "Exactly one auto_skip_fired audit event should fire for the user-tapped skip; got \(autoSkipEntries.count)")
+        #expect(
+            invariantLogger.currentSessionFileURL == nil,
+            "Suggest Yes must not create an exact-span audit event"
+        )
     }
 }

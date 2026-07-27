@@ -472,6 +472,31 @@ struct AdDetectionConfig: Sendable {
     /// (both can shadow at once, to their OWN observers).
     let rediffSlotShadowEnabled: Bool
 
+    /// playhead-xsdz.62: master flag for counting a BYTE-EXACT rediff slot as a
+    /// distinct corroborating evidence KIND in the fusion corroboration quorum.
+    /// Threaded verbatim into `FusionWeightConfig.rediffConfirmedKindEnabled`.
+    /// When `true`, `BackfillEvidenceFusion.buildLedger()` appends a single
+    /// weight-0 `.rediffConfirmed` ledger entry for any span whose WIDTH is owned
+    /// by the byte-exact rediff oracle (`.rediffSlot` provenance ==
+    /// `DecodedSpan.carriesRediffByteExactWidth`). That deterministic kind counts
+    /// toward the `distinctKinds.count` quorum in the three `DecisionMapper`
+    /// corroboration gates, so a rediff-confirmed DAI ad + one other corroborating
+    /// kind reaches eligibility WITHOUT an FM vote — FM absent/uncertain (the
+    /// xsdz.63 finding on produced-DAI ads carrying URLs/"sponsored by") no longer
+    /// blocks a byte-exact-rediff-confirmed insertion. Adds NO score mass (the
+    /// entry is weight-0) and NEVER sets a span's width (that stays the rediff
+    /// ownership pass). Acoustic splice (`.spliceSlot`) is not byte-exact and
+    /// never emits this kind.
+    ///
+    /// Default OFF: this is an ELIGIBILITY-affecting change, so it ships OFF and
+    /// flips after a corpus A/B — the same measurement-gated discipline as its
+    /// siblings (`certaintyTieredSkipEnabled`, `userCorrectionReadSideEnabled`).
+    /// With OFF the constructed `FusionWeightConfig` is byte-identical to today
+    /// and no `.rediffConfirmed` entry is ever emitted. (Also inert in real
+    /// production regardless of the flag until a `RediffBSideProvider` is wired,
+    /// since no span carries `.rediffSlot` without it.)
+    let rediffConfirmedKindEnabled: Bool
+
     /// playhead-dsbc (Phase B1): master flag for the distilled specialist
     /// classifier's SHADOW pass. When `true` AND a
     /// `LiveSpecialistShadowDispatcher` with a non-nil
@@ -794,6 +819,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: Bool = false,
         rediffSlotOwnershipEnabled: Bool = true,
         rediffSlotShadowEnabled: Bool = false,
+        rediffConfirmedKindEnabled: Bool = false,
         specialistShadowEnabled: Bool = false,
         specialistScanEnabled: Bool = false,
         specialistMarkComposeEnabled: Bool = false,
@@ -867,6 +893,7 @@ struct AdDetectionConfig: Sendable {
         self.spliceSlotShadowEnabled = spliceSlotShadowEnabled
         self.rediffSlotOwnershipEnabled = rediffSlotOwnershipEnabled
         self.rediffSlotShadowEnabled = rediffSlotShadowEnabled
+        self.rediffConfirmedKindEnabled = rediffConfirmedKindEnabled
         self.specialistShadowEnabled = specialistShadowEnabled
         self.specialistScanEnabled = specialistScanEnabled
         self.specialistMarkComposeEnabled = specialistMarkComposeEnabled
@@ -928,6 +955,7 @@ struct AdDetectionConfig: Sendable {
         spliceSlotShadowEnabled: false,
         rediffSlotOwnershipEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — rediff width marks, presence 97.8% gold-audited; the mark-only rung of the xsdz.36 ladder
         rediffSlotShadowEnabled: false,
+        rediffConfirmedKindEnabled: false,  // playhead-xsdz.62: byte-exact rediff counts as a corroborating KIND; ships OFF (eligibility-affecting), flip after corpus A/B like certaintyTieredSkipEnabled. Byte-identical + inert until flipped.
         specialistShadowEnabled: false,  // playhead-dsbc (Phase B1): specialist-shadow plumbing ships OFF and fully inert; live runtime is phone-gated Phase B2
         specialistScanEnabled: false,  // playhead-b6jq (PR 4): host-read scan phase ships OFF and fully inert (persist-only, acts on nothing); PR 5 consumes the rows
         specialistMarkComposeEnabled: false,  // playhead-b6jq (PR 5): mark-compose ships OFF and fully inert (zero ad_windows writes, byte-identical); flip after corpus A/B
@@ -1218,6 +1246,21 @@ protocol AdDetectionProviding: Sendable {
         episodeDuration: Double,
         sessionId: String?
     ) async throws
+
+    /// playhead-xsdz.36.4 DAY-0 byte-exact mint: byte-align the PINNED played
+    /// A-side (resolved read-only from the asset row) against the k-way day-0
+    /// B-copies and persist a MARK-ONLY banner for every byte-EXACT,
+    /// ≥2-persona-robust divergent slot — the FIRST-LISTEN marking path that
+    /// needs NO persisted transcript/analysis. Returns the number of marks
+    /// minted. The default is a no-op (`0`) so test/stub conformers that never
+    /// run a day-0 mint compile unchanged; `AdDetectionService` overrides it.
+    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int
+}
+
+extension AdDetectionProviding {
+    /// Default no-op: a conformer without a byte-exact day-0 mint path returns 0
+    /// (mints nothing). `AdDetectionService` provides the real implementation.
+    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int { 0 }
 }
 
 extension AdDetectionProviding {
@@ -1558,6 +1601,12 @@ actor AdDetectionService {
     /// in `PlayheadRuntime` always installs a real service before the
     /// first user tap.
     private(set) var trustScoringService: TrustScoringService?
+#if DEBUG
+    private var postUserMarkCommitHandlerForTesting:
+        (@Sendable () async -> Void)?
+    private var listenRewindTrustHandlerForTesting:
+        (@Sendable (String) async -> Void)?
+#endif
 
     /// playhead-z3ch: Provider for feed-description metadata. `runBackfill`
     /// queries it once per asset and synthesizes `.metadata` ledger entries
@@ -2189,6 +2238,18 @@ actor AdDetectionService {
     }
 
     #if DEBUG
+    func _setPostUserMarkCommitHandlerForTesting(
+        _ handler: (@Sendable () async -> Void)?
+    ) {
+        postUserMarkCommitHandlerForTesting = handler
+    }
+
+    func _setListenRewindTrustHandlerForTesting(
+        _ handler: (@Sendable (String) async -> Void)?
+    ) {
+        listenRewindTrustHandlerForTesting = handler
+    }
+
     /// playhead-8em9 (narL): Test seam for installing a decision logger
     /// post-init. Production wires the logger via `init(decisionLogger:)`
     /// to avoid a Task-install race; this setter exists only for tests that
@@ -2714,13 +2775,14 @@ actor AdDetectionService {
     /// Persist a user-marked ad region as an AdWindow and CorrectionEvent.
     /// Called from PlayheadRuntime when the user reports hearing an ad that
     /// the detector missed (false negative correction).
+    @discardableResult
     func recordUserMarkedAd(
         analysisAssetId: String,
         startTime: Double,
         endTime: Double,
-        podcastId: String?
-    ) async {
-        let windowId = UUID().uuidString
+        podcastId: String?,
+        windowId: String = UUID().uuidString
+    ) async -> Bool {
         let adWindow = AdWindow(
             id: windowId,
             analysisAssetId: analysisAssetId,
@@ -2734,74 +2796,159 @@ actor AdDetectionService {
             evidenceText: nil, evidenceStartTime: startTime,
             metadataSource: "userCorrection",
             metadataConfidence: nil, metadataPromptVersion: nil,
-            wasSkipped: false, userDismissedBanner: false
+            wasSkipped: false, userDismissedBanner: false,
+            // playhead-527u (product-owner AC): a user's manual ad mark is the
+            // highest-certainty "this IS an ad" signal we have, so the region is
+            // AUTO-SKIP-ELIGIBLE, not merely banner/markOnly. Stamp the gate
+            // `.eligible` at write time as the EXPLICIT, honest semantic.
+            //
+            // Reviewer-527u correction (MUST-RESOLVE #1): the reload path does
+            // NOT require this stamp to auto-skip. `beginEpisode` preloads
+            // `ad_windows` (confidence 1.0, `.confirmed` ⇒ preload-eligible) into
+            // `receiveAdWindows`, whose gate filter drops ONLY recognised
+            // NON-eligible cases (`.markOnly` → suggest tier; `.blocked*` /
+            // `.cappedByFMSuppression` → dropped). Both `nil` AND `.eligible`
+            // fall THROUGH to the managed path, and `evaluateWindow` never re-
+            // checks the gate — so in `.auto` mode a userMarked row auto-skips
+            // regardless of gate. userMarked rows never traverse the stricter
+            // `receiveAdDecisionResults` eligible-only filter (that path carries
+            // `AdDecisionResult`s, not persisted `AdWindow`s). Consequently a
+            // PRE-EXISTING dogfood mark persisted before 527u with `gate == nil`
+            // ALSO auto-skips on reload (proven by `UserAddedMarkSurvivesBackfill
+            // Tests` MR1) — no migration is needed. The explicit stamp is
+            // belt-and-suspenders: it is the correct value, is self-documenting,
+            // and is robust to any future tightening of the `receiveAdWindows`
+            // guard that would drop `nil`. It only auto-skips WHERE the mode
+            // already auto-skips (`.auto`); in `.manual`/`.shadow`,
+            // `evaluateWindow` returns `.confirmed` (log-only, no skip) — identical
+            // to the `nil` behaviour. The re-derived fusion window over the same
+            // region is deduped away in `reconcileBackfillWindows`, so this row is
+            // the single surfaced window for the marked ad. Only THIS definitive
+            // user-marked region is promoted; ordinary re-derived / FM host-read
+            // windows keep the certainty-tiered gate they were minted with.
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
 
+        let correctionScope = CorrectionScope.exactTimeSpan(
+            assetId: analysisAssetId,
+            startTime: min(startTime, endTime),
+            endTime: max(startTime, endTime)
+        )
+        let correction = CorrectionEvent(
+            analysisAssetId: analysisAssetId,
+            scope: correctionScope.serialized,
+            source: .falseNegative,
+            podcastId: podcastId,
+            correctionType: .falseNegative
+        )
+
+        let didPersistWindow: Bool
         do {
-            try await store.insertAdWindow(adWindow)
+            try await store.persistUserMarkedAd(
+                window: adWindow,
+                correction: correction
+            )
+            didPersistWindow = true
         } catch {
-            logger.warning("Failed to persist user-marked ad window: \(error.localizedDescription)")
+            logger.warning(
+                "Failed to atomically persist user-marked ad window and correction: \(error.localizedDescription)"
+            )
+            didPersistWindow = false
         }
 
-        // Record a false-negative correction event for the trust/learning pipeline.
-        // playhead-zskc: the caller (NowPlayingViewModel.reportHearingAd) has
-        // already run BoundaryExpander, so `startTime` and `endTime` represent
-        // the real ad boundaries. Persist them as `.exactTimeSpan` rather than
-        // collapsing to the coarse `exactSpan:0:Int.max` whole-episode veto.
-        //
-        // This path does NOT call `recordFalseNegative`: that API is for
-        // contexts where we only have a single reported time and must
-        // synthesize a ±15s window + AdWindow. Here the AdWindow is already
-        // persisted above and the boundaries came from real features.
-        if let correctionStore {
-            await correctionStore.recordVeto(
+        // The false-negative correction is committed in the same SQLite
+        // transaction as the AdWindow above. Do not route this gesture through
+        // the non-throwing `recordVeto` convenience API: a window-only success
+        // would acknowledge feedback that the learning system never received.
+        guard didPersistWindow else { return false }
+
+        // Training materialization and catalog ingress are derived,
+        // idempotent work. The atomic user-facing receipt above is already
+        // durable; never hold the live cue/timeline injection behind these
+        // secondary SQLite/catalog actor hops.
+#if DEBUG
+        if let handler = postUserMarkCommitHandlerForTesting {
+            Task {
+                await handler()
+            }
+        } else {
+            scheduleUserMarkedAdDerivedWork(
+                analysisAssetId: analysisAssetId,
                 startTime: startTime,
                 endTime: endTime,
-                assetId: analysisAssetId,
-                podcastId: podcastId,
-                source: .falseNegative
+                podcastId: podcastId
             )
         }
+#else
+        scheduleUserMarkedAdDerivedWork(
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            podcastId: podcastId
+        )
+#endif
+        return true
+    }
 
-        // playhead-gtt9.17: catalog ingress on user-confirmed ad. A user
-        // marking a span as ad is the strongest possible label — higher
-        // confidence than an autoSkipEligible fusion decision. Fingerprint
-        // the user-marked span's overlapping feature windows and insert so
-        // subsequent episodes of the same show match on this creative.
-        //
-        // Absent feature windows (e.g. a podcast whose audio never ran
-        // through feature extraction) yields an empty slice → zero
-        // fingerprint → skipped by `AdCatalogStore.insert` guard. Silent
-        // on any SQLite failure; a correction-path catalog miss is
-        // strictly a missed precision opportunity, not a correctness bug.
-        if let adCatalogStore {
-            let featureWindows: [FeatureWindow]
-            do {
-                featureWindows = try await store.fetchFeatureWindows(
-                    assetId: analysisAssetId,
-                    from: startTime,
-                    to: endTime
-                )
-            } catch {
-                logger.warning("recordUserMarkedAd: fetchFeatureWindows failed (skipping catalog insert): \(error.localizedDescription, privacy: .public)")
-                return
-            }
-            let fingerprint = AcousticFingerprint.fromFeatureWindows(featureWindows)
-            guard !fingerprint.isZero else { return }
-            do {
-                _ = try await adCatalogStore.insert(
-                    showId: podcastId,
-                    episodePosition: .unknown,
-                    durationSec: max(0, endTime - startTime),
-                    acousticFingerprint: fingerprint,
-                    transcriptSnippet: nil,
-                    sponsorTokens: nil,
-                    originalConfidence: 1.0
-                )
-                logger.debug("recordUserMarkedAd: inserted catalog entry for user-marked ad on asset \(analysisAssetId, privacy: .public)")
-            } catch {
-                logger.warning("recordUserMarkedAd: catalog insert failed: \(error.localizedDescription, privacy: .public)")
-            }
+    private func scheduleUserMarkedAdDerivedWork(
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        podcastId: String?
+    ) {
+        Task {
+            await performUserMarkedAdDerivedWork(
+                analysisAssetId: analysisAssetId,
+                startTime: startTime,
+                endTime: endTime,
+                podcastId: podcastId
+            )
+        }
+    }
+
+    private func performUserMarkedAdDerivedWork(
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        podcastId: String?
+    ) async {
+        // The atomic store path intentionally bypasses
+        // `PersistentUserCorrectionStore.record`, whose optional ingestor
+        // normally refreshes derived training examples after an append.
+        await materializeTrainingExamples(forAsset: analysisAssetId)
+
+        // A user-confirmed span is the strongest catalog label. Missing
+        // feature windows or catalog failures are secondary precision misses,
+        // never failures of the already-committed user action.
+        guard let adCatalogStore else { return }
+        let featureWindows: [FeatureWindow]
+        do {
+            featureWindows = try await store.fetchFeatureWindows(
+                assetId: analysisAssetId,
+                from: startTime,
+                to: endTime
+            )
+        } catch {
+            logger.warning("recordUserMarkedAd: fetchFeatureWindows failed (skipping catalog insert): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        let fingerprint = AcousticFingerprint.fromFeatureWindows(
+            featureWindows
+        )
+        guard !fingerprint.isZero else { return }
+        do {
+            _ = try await adCatalogStore.insert(
+                showId: podcastId,
+                episodePosition: .unknown,
+                durationSec: max(0, endTime - startTime),
+                acousticFingerprint: fingerprint,
+                transcriptSnippet: nil,
+                sponsorTokens: nil,
+                originalConfidence: 1.0
+            )
+            logger.debug("recordUserMarkedAd: inserted catalog entry for user-marked ad on asset \(analysisAssetId, privacy: .public)")
+        } catch {
+            logger.warning("recordUserMarkedAd: catalog insert failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -3901,7 +4048,11 @@ actor AdDetectionService {
         let fusionConfig = FusionWeightConfig(
             certaintyTieredEnabled: config.certaintyTieredSkipEnabled,
             hostReadConfidenceFloor: config.hostReadConfidenceFloor,
-            postRollGuardSeconds: config.postRollGuardSeconds
+            postRollGuardSeconds: config.postRollGuardSeconds,
+            // playhead-xsdz.62: thread the byte-exact rediff-confirmed KIND flag.
+            // OFF by default, so with no config change `buildLedger` emits no
+            // `.rediffConfirmed` entry and the fusion output is byte-identical.
+            rediffConfirmedKindEnabled: config.rediffConfirmedKindEnabled
         )
         // transcriptQuality is the same for every span (derived from the full atom array),
         // so compute it once outside the loop rather than redundantly per span.
@@ -4683,8 +4834,19 @@ actor AdDetectionService {
             // demotion only fires when the current gate is structurally
             // weaker than `.blockedByPolicy` (severity < 2 — i.e.
             // `.eligible`, `.markOnly`, or `.cappedByFMSuppression`).
+            //
+            // playhead-pzy2: byte-exact rediff certainty is EXEMPT — the
+            // demotion-path mirror of the self-promo exemption below. A span whose
+            // width the rediff differ owns (`.rediffSlot`) is a 100%-deterministic
+            // DAI divergence (the origin served different ad bytes), so it stays an
+            // ad even when it sits inside a creator "content" chapter that only
+            // makes it LOOK editorial — deterministic certainty outranks the
+            // chapter-label clue. Splice-AGNOSTIC (`.spliceSlot` is acoustic width,
+            // not exempt); FM / lexical-only spans stay demotable, so the exemption
+            // cannot leak to any non-deterministic span.
             if creatorChapterFusionEnabled,
                decision.eligibilityGate.severity < SkipEligibilityGate.blockedByPolicy.severity,
+               !refinedSpan.carriesRediffByteExactWidth,
                CreatorChapterSuppressionEvaluator.shouldSuppress(
                    span: refinedSpan,
                    chapters: assetChapterEvidence
@@ -4730,9 +4892,21 @@ actor AdDetectionService {
             // `selfPromoBank` to nil, so the `let` binding short-circuits before
             // `PromoSuppressor` is ever consulted — a zero-cost no-op that is
             // byte-identical to pre-fl4j for episodes the bead doesn't apply to.
+            //
+            // playhead-pzy2: byte-exact rediff certainty is EXEMPT. A span whose
+            // width the rediff differ owns (`.rediffSlot`) is a 100%-deterministic
+            // DAI divergence — the origin literally served different ad bytes — so
+            // it stays an ad regardless of a low-certainty self-promo lexical clue
+            // (a phrase that only "sounds like" the show promoting itself must not
+            // demote a proven ad). This mirrors the same edges' existing exemptions
+            // from the boundary refiners (`isWidthOwnership` bypass) and the
+            // pre-roll start clamp. Splice-AGNOSTIC: `.spliceSlot` (acoustic width)
+            // is NOT exempt, and FM / lexical-only spans stay fully demotable — the
+            // exemption cannot leak to any non-deterministic span.
             if config.selfPromoSuppressionEnabled,
                let selfPromoBank,
                decision.eligibilityGate.severity < SkipEligibilityGate.markOnly.severity,
+               !refinedSpan.carriesRediffByteExactWidth,
                PromoSuppressor.shouldSuppress(
                    span: refinedSpan,
                    transcriptWords: selfPromoWords,
@@ -5550,8 +5724,8 @@ actor AdDetectionService {
             // can't resurrect them; this call also drops them from the live
             // in-memory window set so a superseded hot false-positive stops
             // auto-skipping in-session. Safe to deliver the full set:
-            // `retireAdWindows` no-ops unknown ids and refuses to drop
-            // `.applied` / `.reverted` rows. Unconditional on
+            // `retireAdWindows` no-ops unknown ids and preserves only
+            // user-terminal `.reverted` rows. Unconditional on
             // `fusionDecisionResults` — a clean backfill (no ads) still retires
             // a rejected hot candidate.
             if !retiredHotPathWindowIDs.isEmpty {
@@ -6440,6 +6614,21 @@ actor AdDetectionService {
             .filter { $0.correctionMask == .userVetoed }
             .map { TimeRange(start: $0.startTime, end: $0.endTime) }
 
+        // playhead-527u §confirmed gate: user-CONFIRMED (added) regions are SACRED
+        // WIDTH. The rediff oracle must neither RESHAPE a confirmed span nor NEWLY
+        // ENCLOSE (absorb) a confirmed region into another span's slot. Two mirrors
+        // of the veto path achieve this:
+        //   (a) fold the confirmed ranges into the newly-enclosed gate
+        //       (`protectedRanges`) so NO other span's slot can widen over a
+        //       confirmed region → `.vetoNewlyEnclosed` → status-quo (no absorb);
+        //   (b) strip the slot from a confirmed span's OWN candidate below so it
+        //       resolves to `.noSlot` → carried at minted width (no reshape) and
+        //       can never itself be an absorber.
+        let confirmedRanges: [TimeRange] = atomEvidence
+            .filter { $0.correctionMask == .userConfirmed }
+            .map { TimeRange(start: $0.startTime, end: $0.endTime) }
+        let protectedRanges = vetoedRanges + confirmedRanges
+
         // Phase 1: resolve per-span rediff slots (bank-agnostic — resolution does
         // not depend on the bank verdicts, only slot-token gathering does).
         let allFalse = [Bool](repeating: false, count: decodedSpans.count)
@@ -6447,7 +6636,7 @@ actor AdDetectionService {
             decodedSpans: decodedSpans,
             atomEvidence: atomEvidence,
             playedSlots: playedSlots,
-            vetoedRanges: vetoedRanges,
+            vetoedRanges: protectedRanges,
             coreBankMatch: allFalse,
             slotBankMatch: allFalse
         )
@@ -6464,10 +6653,18 @@ actor AdDetectionService {
 
         // Phase 3: candidates with the real verdicts → the shared disposition engine.
         let candidates: [SpliceSlotCandidate] = decodedSpans.indices.map { i in
-            SpliceSlotCandidate(
+            // playhead-527u (b): a confirmed span keeps status-quo width — strip
+            // its slot so it resolves to `.noSlot` (never reshaped, never an
+            // absorber). `.vetoNewlyEnclosed` on `protectedRanges` already blocks
+            // other slots from absorbing it.
+            let core = TimeRange(
+                start: decodedSpans[i].startTime, end: decodedSpans[i].endTime
+            )
+            let confirmedProtected = confirmedRanges.contains { $0.intersects(core) }
+            return SpliceSlotCandidate(
                 mintedInterval: bundle.candidates[i].mintedInterval,
-                slot: bundle.candidates[i].slot,
-                slotIntersectsAtoms: bundle.candidates[i].slotIntersectsAtoms,
+                slot: confirmedProtected ? nil : bundle.candidates[i].slot,
+                slotIntersectsAtoms: confirmedProtected ? true : bundle.candidates[i].slotIntersectsAtoms,
                 coreBankMatch: coreMatch[i],
                 slotBankMatch: slotMatch[i]
             )
@@ -6501,46 +6698,81 @@ actor AdDetectionService {
         asset: AnalysisAsset,
         analysisAssetId: String
     ) async -> [RediffSlotOwnership.PlayedSlot]? {
-        guard let bSideURL = await provider.refetchedBSideFileURL(assetId: analysisAssetId) else {
-            return nil
-        }
+        // playhead-xsdz.36.2 (k-way): ALL staged B-sides (the K distinct-persona
+        // re-fetches). A single-B provider yields one URL — exactly today's one
+        // alignment. Empty → no byte signal → chroma fallback.
+        let bSideURLs = await provider.refetchedBSideFileURLs(assetId: analysisAssetId)
+        guard !bSideURLs.isEmpty else { return nil }
         guard let aSideURL = Self.byteDifferASideURL(sourceURL: asset.sourceURL) else {
             logger.info(
                 "[xsdz.57] byte differ unavailable asset=\(analysisAssetId, privacy: .public): no anchored A-side file — falling back to chroma"
             )
             return nil
         }
-        guard Self.isAnchoredRegularFile(bSideURL) else {
-            logger.info(
-                "[xsdz.57] byte differ unavailable asset=\(analysisAssetId, privacy: .public): B-side URL is not an anchored regular file — falling back to chroma"
-            )
-            return nil
-        }
         let aData: Data
-        let bData: Data
         do {
             aData = try Data(contentsOf: aSideURL, options: .mappedIfSafe)
-            bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
         } catch {
             logger.warning(
-                "[xsdz.57] byte differ read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription) — falling back to chroma"
+                "[xsdz.57] byte differ A-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription) — falling back to chroma"
             )
             return nil
         }
-        let alignment = RediffByteAligner.align(aData: aData, bData: bData)
-        let outcome = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
-        switch outcome {
-        case .accepted(let acceptance):
+
+        // Align A vs EACH B-side; collect the accepted per-B played-slot lists.
+        // A per-B miss (unanchored file, unreadable bytes, or a byte-gate
+        // rejection — no runs / non-monotonic / re-encode CDN) is SKIPPED, not
+        // fatal: another persona's B may still diverge on the same pod
+        // (playhead-xsdz.36.2). If EVERY B misses, the whole byte path yields
+        // nothing → chroma fallback exactly as pre-xsdz.57.
+        var perBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
+        for bSideURL in bSideURLs {
+            guard Self.isAnchoredRegularFile(bSideURL) else {
+                logger.info(
+                    "[xsdz.57] byte differ skip asset=\(analysisAssetId, privacy: .public): B-side URL is not an anchored regular file"
+                )
+                continue
+            }
+            let bData: Data
+            do {
+                bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
+            } catch {
+                logger.warning(
+                    "[xsdz.57] byte differ B-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)"
+                )
+                continue
+            }
+            let alignment = RediffByteAligner.align(aData: aData, bData: bData)
+            let outcome = RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+            switch outcome {
+            case .accepted(let acceptance):
+                logger.info(
+                    "[xsdz.57] byte differ accepted asset=\(analysisAssetId, privacy: .public) slots=\(acceptance.playedSlots.count) runsChained=\(acceptance.runsChained) chainedFractionB=\(String(format: "%.3f", acceptance.chainedFractionB), privacy: .public)"
+                )
+                perBSideSlots.append(acceptance.playedSlots)
+            case .rejectedNoChainedRuns, .rejectedNonMonotonic, .rejectedLowChainedFraction:
+                logger.info(
+                    "[xsdz.57] byte differ rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public)"
+                )
+                continue
+            }
+        }
+        guard !perBSideSlots.isEmpty else {
             logger.info(
-                "[xsdz.57] byte differ accepted asset=\(analysisAssetId, privacy: .public) slots=\(acceptance.playedSlots.count) runsChained=\(acceptance.runsChained) chainedFractionB=\(String(format: "%.3f", acceptance.chainedFractionB), privacy: .public)"
-            )
-            return acceptance.playedSlots
-        case .rejectedNoChainedRuns, .rejectedNonMonotonic, .rejectedLowChainedFraction:
-            logger.info(
-                "[xsdz.57] byte differ rejected asset=\(analysisAssetId, privacy: .public): \(String(describing: outcome), privacy: .public) — falling back to chroma"
+                "[xsdz.36.2] byte differ: no B-side aligned (\(bSideURLs.count) tried) asset=\(analysisAssetId, privacy: .public) — falling back to chroma"
             )
             return nil
         }
+        // UNION the divergent regions across the K diffs. K=1 returns the single
+        // list unchanged (byte-identical to xsdz.57); K≥2 recovers pods a single
+        // pair misses.
+        let unioned = RediffSlotOwnership.unionedPlayedSlots(perBSideSlots)
+        if perBSideSlots.count > 1 {
+            logger.info(
+                "[xsdz.36.2] k-way union asset=\(analysisAssetId, privacy: .public) diffs=\(perBSideSlots.count) unionSlots=\(unioned.count)"
+            )
+        }
+        return unioned
     }
 
     /// The played-copy (A-side) file for the byte differ, derived from the
@@ -6603,8 +6835,18 @@ actor AdDetectionService {
             )
         }
 
+        // playhead-527u: defense-in-depth — never DELETE a user-correction span's
+        // persisted row here, even if some future disposition path let its id
+        // reach `supersededIds`. `SpliceSlotRewriter` already excludes them, so
+        // this normally subtracts nothing.
+        let userCorrectionIds = Set(
+            decodedSpans
+                .filter { $0.anchorProvenance.contains(where: \.isUserCorrection) }
+                .map(\.id)
+        )
+        let idsToDelete = rewrite.supersededIds.filter { !userCorrectionIds.contains($0) }
         do {
-            try await store.deleteDecodedSpans(ids: rewrite.supersededIds)
+            try await store.deleteDecodedSpans(ids: idsToDelete)
             if !rewrite.finalSpans.isEmpty {
                 try await store.upsertDecodedSpans(rewrite.finalSpans)
             }
@@ -7416,7 +7658,7 @@ actor AdDetectionService {
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
-        // detectOnly/logOnly: always confirmed (banner shown; data preserved for Phase 7).
+        // detectOnly/logOnly: always confirmed (no applied-skip banner; data preserved for Phase 7).
         // suppress: always suppressed (never shown to user).
         let decisionState: AdDecisionState
         switch policyAction {
@@ -7504,7 +7746,13 @@ actor AdDetectionService {
     static let reconcileProtectedBoundaryStates: Set<String> = [
         "correctionReplay",
         "userMarked",
-        "userConfirmedSuggested"
+        "userConfirmedSuggested",
+        // playhead-xsdz.36.4: day-0 byte-exact rediff marks are DETERMINISTIC
+        // ground truth for the user's own stitch — a later analysis run's
+        // transcript/FM fusion would not re-emit them, so they must NOT be
+        // reconciled away (literal mirrors `dayZeroRediffByteExactBoundaryState`;
+        // pinned by `RediffActivationWiringTests.dayZeroMarksAreReconcileProtected`).
+        "dayZeroRediffByteExact"
     ]
 
     /// playhead-ud4n: the *reconcilable invariant* (correctness backbone). A
@@ -7519,6 +7767,26 @@ actor AdDetectionService {
     /// Every reconcilable row absent from the authoritative backfill output is
     /// retired. Factored `static` over its inputs so it is directly
     /// unit-testable without an actor hop or a live pipeline.
+    /// playhead-527u: merge possibly-overlapping `[start, end)` ranges into a
+    /// disjoint, sorted set. Used by `reconcileBackfillWindows`' dominance
+    /// dedupe so a covered-duration sum cannot double-count a span covered by
+    /// two overlapping user marks (which would inflate the dominance fraction
+    /// past 1.0 and over-drop). Degenerate/inverted ranges are dropped.
+    static func mergedTimeRanges(
+        _ ranges: [(start: Double, end: Double)]
+    ) -> [(start: Double, end: Double)] {
+        let sorted = ranges.filter { $0.end > $0.start }.sorted { $0.start < $1.start }
+        var merged: [(start: Double, end: Double)] = []
+        for r in sorted {
+            if let last = merged.last, r.start <= last.end {
+                merged[merged.count - 1].end = Swift.max(last.end, r.end)
+            } else {
+                merged.append(r)
+            }
+        }
+        return merged
+    }
+
     static func isReconcilableBackfillWindow(
         _ window: AdWindow,
         detectorVersion: String
@@ -7554,6 +7822,72 @@ actor AdDetectionService {
                 protectedIDs.insert(row.id)
             }
         }
+        // playhead-527u: user-mark DOMINANCE dedupe (prevents the force-anchor
+        // DOUBLE window WITHOUT retiring a genuinely-distinct overlapping ad).
+        // A user's EXPLICIT mark (`recordUserMarkedAd` → `boundaryState ==
+        // userMarked`) is the definitive, AUTO-SKIP-ELIGIBLE ground truth for
+        // its region (its row is stamped `eligibilityGate == .eligible`) and
+        // surfaces as its own window. The 527u confirm mask force-anchors that
+        // region, so backfill re-derives a decoded span over it that fuses into
+        // a NEW `acousticRefined` fusion window. Content-addressed on span
+        // ordinals, that window has a DIFFERENT id than the userMarked row's
+        // UUID, so the id-collision guard below does NOT catch it — left alone
+        // it co-exists with the userMarked row, producing a DOUBLE window over
+        // one ad. Drop ONLY the REDUNDANT re-derived window — the one the user
+        // mark reciprocally DOMINATES (`markDominates` below) — so the eligible
+        // userMarked row is the single surfaced window for that ad and the skip
+        // uses the USER'S boundaries. A distinct/wider ad that merely overlaps
+        // the marked span, OR a small distinct ad sitting mostly inside a larger
+        // mark, is NOT dominated and is KEPT: a blanket overlap-drop would
+        // silently retire a legitimate auto-skip-eligible detection (a
+        // precision/coverage LOSS).
+        // This is the backfill mirror of the hot-path `correctionReplayCandidates`
+        // overlap-skip; the re-emitted DECODED span (transcript-overlay /
+        // summarizer ad-presence) is untouched — only the redundant AdWindow is
+        // suppressed.
+        let userMarkedRanges = Self.mergedTimeRanges(
+            existing
+                .filter { $0.boundaryState == "userMarked" }
+                .map { (start: $0.startTime, end: $0.endTime) }
+        )
+        // playhead-527u (reviewer 527u): RECIPROCAL dominance — the window must be
+        // "this marked ad re-detected", which requires BOTH:
+        //   (a) the user-mark UNION covers ≥half the window — the window is mostly
+        //       marked ground, NOT a distinct WIDER ad that merely overlaps an
+        //       edge (guards the R3 wide-ad-survives case); AND
+        //   (b) the window covers ≥half of at least ONE single mark — it spans the
+        //       mark rather than sitting mostly-inside it. Without (b) a SMALL
+        //       DISTINCT ad lying mostly under a LARGE mark (e.g. mark [35,55],
+        //       ad [48,58] → 70% of the ad is inside the mark, so (a) alone drops
+        //       it and loses the skip of [55,58]) would be wrongly retired. The
+        //       force-anchored re-detection always covers the WHOLE mark (every
+        //       confirmed atom is anchored), so (b) holds for the true double;
+        //       a sliver-overlap distinct ad covers only a fraction of the mark,
+        //       so (b) fails and it is KEPT (precision/coverage preserved).
+        func markDominates(_ w: AdWindow) -> Bool {
+            let width = w.endTime - w.startTime
+            guard width > 0 else { return false }
+            let covered = userMarkedRanges.reduce(0.0) { acc, r in
+                acc + Swift.max(0, Swift.min(w.endTime, r.end) - Swift.max(w.startTime, r.start))
+            }
+            guard covered / width >= 0.5 else { return false }  // (a)
+            return userMarkedRanges.contains { r in            // (b)
+                let markWidth = r.end - r.start
+                guard markWidth > 0 else { return false }
+                let overlap = Swift.max(
+                    0, Swift.min(w.endTime, r.end) - Swift.max(w.startTime, r.start)
+                )
+                return overlap / markWidth >= 0.5
+            }
+        }
+        // Ids of the redundant re-derived windows the user mark dominates.
+        // Excluded from `newIDs` below so that a copy persisted by a PRE-fix run
+        // (same content-addressed id, now reconcilable) is RETIRED via the
+        // set-difference rather than silently protected from retirement by its
+        // own new-but-dropped id.
+        let userMarkOverlapDroppedIDs = Set(
+            fusionWindows.filter(markDominates).map(\.id)
+        )
         // Terminal-collision guard: content-addressed ids are keyed on span
         // ordinals only (not decisionState), so re-detecting a span the user
         // already auto-skipped (`.applied`) or listened-through (`.reverted`)
@@ -7564,11 +7898,15 @@ actor AdDetectionService {
         // the same precedence the orchestrator applies (it refuses to reprocess
         // `.applied` / `.reverted`). Preserves the "terminal history preserved"
         // AC even on an ad-signal rerun, not just a clean one.
-        let windowsToPersist = fusionWindows.filter { !protectedIDs.contains($0.id) }
-        let newIDs = Set(fusionWindows.map(\.id))
+        let windowsToPersist = fusionWindows.filter {
+            !protectedIDs.contains($0.id) && !userMarkOverlapDroppedIDs.contains($0.id)
+        }
         // Pure set-difference: every reconcilable existing row NOT re-produced by
         // this backfill is retired. A reconcilable row re-produced under the same
         // id is replaced in-place (idempotent), so it is excluded from retire.
+        // A user-mark-overlap-dropped id is treated as NOT re-produced (removed
+        // from `newIDs`) so any stale persisted copy of it is retired.
+        let newIDs = Set(fusionWindows.map(\.id)).subtracting(userMarkOverlapDroppedIDs)
         let retiredIDs = reconcilableIDs.subtracting(newIDs)
         return (windowsToPersist, retiredIDs)
     }
@@ -7641,22 +7979,43 @@ actor AdDetectionService {
     /// `runPhase5ProjectorPhase` — resolve the veto mask identically and the
     /// flag branch is directly unit-testable (T4).
     ///
-    /// Flag-off OR no store ⇒ `NoCorrectionMaskProvider()` ⇒ the pipeline output
-    /// is byte-identical to pre-xsdz.34 (preserves the async-install race window
-    /// note at the `correctionStore` wiring: until the store lands there are no
-    /// masks — the safe default). Flag-on WITH a store ⇒ a
-    /// `StoreBackedCorrectionMaskProvider` over the asset's active
-    /// `.falsePositive` scopes (boost/`.falseNegative` excluded by the store
-    /// query, guardrail 1).
+    /// No store ⇒ `NoCorrectionMaskProvider()` (preserves the async-install race
+    /// window note at the `correctionStore` wiring: until the store lands there
+    /// are no masks — the safe default).
+    ///
+    /// Direction split (playhead-527u):
+    ///   • `.falsePositive` VETO masks stay gated by `enabled`
+    ///     (`userCorrectionReadSideEnabled`) — the suppress-direction A/B
+    ///     (xsdz.36). Unchanged.
+    ///   • `.falseNegative` CONFIRM masks are ALWAYS applied when a store is
+    ///     present. Preserving a user's ADDED mark is trust-critical, has no
+    ///     recall/precision downside (it only re-anchors a region the user
+    ///     explicitly said IS an ad), and only touches assets the user actually
+    ///     corrected — so it must not ride the veto A/B flag.
+    ///
+    /// A non-corrected asset yields BOTH sets empty ⇒ `NoCorrectionMaskProvider`
+    /// ⇒ byte-identical to pre-527u (guardrail: no change to non-corrected
+    /// episodes' analysis). Flag-off + only a veto ⇒ veto excluded, confirm empty
+    /// ⇒ `NoCorrectionMaskProvider` (preserves the xsdz.34 flag-off identity).
     static func makeCorrectionMaskProvider(
         enabled: Bool,
         store: (any UserCorrectionStore)?,
         analysisAssetId: String,
         atoms: [TranscriptAtom]
     ) async -> any CorrectionMaskProvider {
-        guard enabled, let store else { return NoCorrectionMaskProvider() }
-        let scopes = await store.activeFalsePositiveScopes(for: analysisAssetId)
-        return StoreBackedCorrectionMaskProvider(fromScopes: scopes, atoms: atoms)
+        guard let store else { return NoCorrectionMaskProvider() }
+        let confirmedScopes = await store.activeFalseNegativeScopes(for: analysisAssetId)
+        let vetoScopes = enabled
+            ? await store.activeFalsePositiveScopes(for: analysisAssetId)
+            : []
+        guard !confirmedScopes.isEmpty || !vetoScopes.isEmpty else {
+            return NoCorrectionMaskProvider()
+        }
+        return StoreBackedCorrectionMaskProvider(
+            fromVetoScopes: vetoScopes,
+            confirmedScopes: confirmedScopes,
+            atoms: atoms
+        )
     }
 
     // MARK: - Phase 5 Projector Phase (playhead-4my.5)
@@ -8266,48 +8625,33 @@ actor AdDetectionService {
     /// `falseSignalPenalty = 0.10` to reflect that weaker confidence, while
     /// still letting repeated rewinds accumulate into a mode demotion.
     ///
-    /// Side effects on every call:
-    ///   1. Flip `AdWindowDecision` to `.reverted`.
-    ///   2. Append a row to `ad_listen_rewinds` (q45f.1 event log) keyed
-    ///      to `window.startTime`. Skipped if the window lookup fails.
-    ///   3. Delegate to `trustScoringService?.recordWeakFalseSkipSignal`
-    ///      for the atomic profile mutation + demotion evaluation. Optional
-    ///      chaining lets legacy test factories (no trust service injected)
-    ///      still get steps 1 & 2.
+    /// Side effects on every accepted call:
+    ///   1. Atomically flip `AdWindowDecision` to `.reverted` and append a
+    ///      row to `ad_listen_rewinds`, keyed to `window.startTime`.
+    ///      A missing window or insert failure rejects and rolls back the
+    ///      whole receipt so the banner can remain retryable.
+    ///   2. Only after that receipt commits, delegate to
+    ///      `trustScoringService?.recordWeakFalseSkipSignal` for the atomic
+    ///      profile mutation + demotion evaluation. Optional chaining lets
+    ///      legacy test factories still get the durable correction.
     ///
     /// Do NOT re-introduce an inline profile mutation here — the
     /// `testRecordListenRewindBodyRoutesThroughTrustScoringService`
     /// canary blocks that regression at source-inspection time.
     func recordListenRewind(
         windowId: String,
+        analysisAssetId: String,
         podcastId: String
     ) async throws {
-        // Revert the window (user tapped "Listen" to play through).
-        try await store.updateAdWindowDecision(
-            id: windowId,
-            decisionState: AdDecisionState.reverted.rawValue
+        // The decision flip and append-only event are one durable receipt.
+        // Propagate any failure so the banner remains retryable; accepting a
+        // partial write would consume the user's only correction surface.
+        try await store.persistListenRewind(
+            windowId: windowId,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            createdAt: Date()
         )
-
-        // playhead-q45f.1: append an event row to `ad_listen_rewinds`
-        // so the q45f counterfactual gate's frozen-trace replay can see
-        // *that* the user rewound, in addition to the indirect signal
-        // already encoded in `AdWindowDecision.reverted`. The row's
-        // `time` is the source window's `startTime` — the position the
-        // banner's "Listen" tap rewinds the player to, mirroring
-        // `seek(to: item.adStartTime)` in `NowPlayingViewModel`. Done
-        // before the profile mutation so a missing-profile early
-        // return still leaves the event in the log (q45f's gate cares
-        // about the *event*, not the trust-score side-effect).
-        if let window = try await store.fetchAdWindow(id: windowId) {
-            try await store.insertListenRewind(
-                windowId: windowId,
-                podcastId: podcastId,
-                time: window.startTime,
-                createdAt: Date()
-            )
-        } else {
-            logger.warning("recordListenRewind: no ad_window for id=\(windowId); skipping event log")
-        }
 
         // playhead-q45f: route the trust-score side-effect through
         // `TrustScoringService.recordWeakFalseSkipSignal`. The pre-q45f
@@ -8323,7 +8667,29 @@ actor AdDetectionService {
         // without injecting a trust service) still get the decision
         // flip + event log row. Production wiring in `PlayheadRuntime`
         // always installs a real service before the first user tap.
-        await trustScoringService?.recordWeakFalseSkipSignal(podcastId: podcastId)
+        // Trust calibration is downstream of the durable receipt and must not
+        // hold the UI's claimed Listen action open.
+#if DEBUG
+        if let handler = listenRewindTrustHandlerForTesting {
+            Task {
+                await handler(podcastId)
+            }
+        } else if let trustScoringService {
+            Task {
+                await trustScoringService.recordWeakFalseSkipSignal(
+                    podcastId: podcastId
+                )
+            }
+        }
+#else
+        if let trustScoringService {
+            Task {
+                await trustScoringService.recordWeakFalseSkipSignal(
+                    podcastId: podcastId
+                )
+            }
+        }
+#endif
 
         logger.info("Recorded listen-rewind for window \(windowId), podcast \(podcastId)")
     }
@@ -8622,6 +8988,12 @@ actor AdDetectionService {
                     // `decisionState` to `.reverted` (filtered out below
                     // by `currentHotPathCandidateWindows`).
                     window.boundaryState != Self.correctionReplayBoundaryState
+                        // playhead-xsdz.36.4: day-0 byte-exact marks are
+                        // deterministic ground truth the algorithmic detector
+                        // does NOT re-emit; like correction-replay rows they must
+                        // never be retired by the algorithmic-absence path (only
+                        // by an explicit user veto → `.reverted`, filtered above).
+                        && window.boundaryState != Self.dayZeroRediffByteExactBoundaryState
                         && window.endTime > replayEnvelope.lowerBound
                         && window.startTime < replayEnvelope.upperBound
                 }
@@ -9105,21 +9477,61 @@ actor AdDetectionService {
         }
     }
 
+    /// playhead-xsdz.69: a sponsor BRAND — a matched sponsor entity or a bare
+    /// sponsor-lexicon hit — is ATTENTION, not a verdict. Promoting it to a span
+    /// requires a co-occurring CONFIRMING ad-cue (a disclosure frame like
+    /// "brought to you by", a URL, a promo code, or an FM-positive). A bare brand
+    /// mention with none of those is editorial talk ("the Red Bull team won"),
+    /// not an ad read. Set to `false` to restore the pre-xsdz.69 behavior where a
+    /// bare brand promotes unconditionally.
+    static let sponsorRequiresConfirmingAdCue = true
+
+    /// True when the hypothesis carries a confirming ad-cue beyond the mere brand
+    /// name — a disclosure frame, URL, promo code, or FM-positive anchor. Shared
+    /// by the sponsor-promotion gate (and reused by the backfill / candidate
+    /// paths) so the "does this brand hit look like an actual ad?" test is
+    /// single-sourced. Real ad reads carry a cue; bare editorial brand-talk does
+    /// not (playhead-xsdz.69).
+    static func hypothesisHasConfirmingAdCue(_ hypothesis: SpanHypothesis) -> Bool {
+        let anchors = [hypothesis.seedAnchor] + hypothesis.supportingAnchors
+            + (hypothesis.closingAnchor.map { [$0] } ?? [])
+        return anchors.contains { anchor in
+            switch anchor.anchorType {
+            case .disclosure, .url, .promoCode, .fmPositive:
+                return true
+            case .sponsorLexicon, .transitionMarker:
+                return false
+            }
+        }
+    }
+
     private func shouldPromoteHotPathHypothesis(_ hypothesis: SpanHypothesis) -> Bool {
         let additionalEvidenceCount = hypothesis.supportingAnchors.count
             + hypothesis.bodyEvidence.count
             + (hypothesis.closingAnchor == nil ? 0 : 1)
         guard additionalEvidenceCount > 0 else { return false }
 
+        // playhead-xsdz.69: sponsor identity (matched entity) promotes only with
+        // a co-occurring confirming ad-cue — this kills the editorial brand-as-
+        // sponsor false positive (e.g. sports teams named after their sponsors)
+        // while real ad reads still fire. Truly-bare host-reads are the
+        // specialist's job (the durable disposer).
         if hypothesis.sponsorEntity != nil {
-            return true
+            return Self.sponsorRequiresConfirmingAdCue
+                ? Self.hypothesisHasConfirmingAdCue(hypothesis)
+                : true
         }
 
         let anchors = [hypothesis.seedAnchor] + hypothesis.supportingAnchors
+        let hasConfirmingCue = Self.hypothesisHasConfirmingAdCue(hypothesis)
         return anchors.contains { anchor in
             switch anchor.anchorType {
-            case .disclosure, .sponsorLexicon, .fmPositive:
+            case .disclosure, .fmPositive:
                 return true
+            case .sponsorLexicon:
+                // A bare sponsor-lexicon brand hit is attention-only; it needs a
+                // confirming cue to promote (playhead-xsdz.69).
+                return Self.sponsorRequiresConfirmingAdCue ? hasConfirmingCue : true
             case .url, .promoCode, .transitionMarker:
                 return false
             }
@@ -9789,13 +10201,22 @@ actor AdDetectionService {
             logger.warning("correctionReplayCandidates: loadCorrectionEvents failed: \(error.localizedDescription, privacy: .public)")
             return []
         }
-        guard !events.isEmpty else { return [] }
+        // Explicit banner receipts are private acknowledgements of an
+        // already-materialized detection row. They must never enter the
+        // correction-replay synthesizer: treating either Yes route as a
+        // generic false negative would create a fresh random-ID window and
+        // leak the answer into diagnostics/sharing on the next hot-path run.
+        let replayEvents = events.filter {
+            !$0.isPrivateExplicitFeedbackReceipt
+        }
+        guard !replayEvents.isEmpty else { return [] }
 
         // Build the set of `.exactTimeSpan` ranges that have a
         // `.falsePositive` correction. These mask `.falseNegative`
         // ranges they fully cover so a vetoed span is never re-emitted.
         var falsePositiveRanges: [(start: Double, end: Double)] = []
-        for event in events where event.correctionType == .falsePositive {
+        for event in replayEvents
+            where event.correctionType == .falsePositive {
             guard let scope = CorrectionScope.deserialize(event.scope) else { continue }
             guard case .exactTimeSpan(_, let s, let e) = scope else { continue }
             falsePositiveRanges.append((s, e))
@@ -9804,7 +10225,8 @@ actor AdDetectionService {
         // Collect unique `.falseNegative` `.exactTimeSpan` ranges.
         var falseNegativeRanges: [(start: Double, end: Double)] = []
         var seen: Set<String> = []
-        for event in events where event.correctionType == .falseNegative {
+        for event in replayEvents
+            where event.correctionType == .falseNegative {
             guard let scope = CorrectionScope.deserialize(event.scope) else { continue }
             guard case .exactTimeSpan(_, let s, let e) = scope else { continue }
             // Defensive: reject non-finite or zero-duration spans.
@@ -9883,6 +10305,192 @@ actor AdDetectionService {
             emitted.append(row)
         }
         return emitted
+    }
+
+    // MARK: - Day-0 byte-exact rediff mint (playhead-xsdz.36.4)
+
+    /// `boundaryState` literal stamped on AdWindows minted by the DAY-0
+    /// byte-exact rediff path — clear provenance so dogfood/NARL telemetry can
+    /// attribute a first-listen mark to the deterministic day-0 byte differ
+    /// (distinct from the lagged `.rediffSlot` decoded-span width marks and from
+    /// `correctionReplay`). Internal (not private) so the reconcile/export
+    /// protection axis tests can pin it against the literals those sites use.
+    ///
+    /// PROTECTED like a user mark: day-0 byte-exact marks are DETERMINISTIC
+    /// ground truth for the user's OWN played stitch, so they must PERSIST across
+    /// a later analysis run whose transcript/FM fusion would not re-emit them.
+    /// The literal "dayZeroRediffByteExact" is therefore also listed in
+    /// `reconcileProtectedBoundaryStates` (backfill), excluded in
+    /// `hotPathCandidateIDs` (hot-path retirement), and recognized as
+    /// local-only in `CrossUserSharing.isLocalOnlyBoundaryState` (so it is never
+    /// exported and never aborts a cross-user snapshot). Retirable ONLY by an
+    /// explicit user veto (`decisionState = .reverted`).
+    static let dayZeroRediffByteExactBoundaryState: String = "dayZeroRediffByteExact"
+
+    /// `metadataSource` stamp mirroring `dayZeroRediffByteExactBoundaryState` so
+    /// the mark's source is recorded on the row.
+    static let dayZeroRediffByteExactMetadataSource: String = "rediffDayZeroByteExact"
+
+    /// playhead-xsdz.36.4 — the DAY-0 byte-exact rediff mint: the FIRST-LISTEN
+    /// marking path. Resolves the PINNED played A-side from the asset row (wrj8
+    /// read-only mmap), byte-aligns it against each k-way B-copy, UNIONs the
+    /// byte-EXACT divergent slots across personas, and persists each as a
+    /// MARK-ONLY AdWindow banner. Returns the number of marks minted.
+    ///
+    /// WHY THIS BYPASSES PRESENCE-GATING (the narrow, guarded exception): every
+    /// other rediff mark is presence-gated — a rediff slot only sets the WIDTH of
+    /// a decoded span whose PRESENCE a transcript/FM core already established
+    /// (`computeRediffSlotPass` guards on `!decodedSpans.isEmpty`, and
+    /// `RediffSlotOwnership.candidates` widens EXISTING spans). On a true first
+    /// listen no such core exists yet. But a byte-EXACT divergent region between
+    /// the played A-side and a re-fetched B-side IS a dynamically-inserted ad
+    /// segment, sample-accurately, with DETERMINISTIC certainty — a stronger
+    /// signal than the transcript/FM core it would otherwise wait on. So a
+    /// byte-exact day-0 slot is its OWN presence core. This is deliberately NARROW:
+    ///   • BYTE-EXACT ONLY — the chroma differ / `refetchedBSideMono16kHz` is
+    ///     never consulted here; a diff that falls back to chroma mints nothing.
+    ///   • UNION (quorum = 1) — `RediffSlotOwnership.unionedPlayedSlots` mints a
+    ///     slot ANY one persona's byte-exact diff reveals (the SAME lagged-path
+    ///     primitive). The per-persona byte gate is the precision guard; a ≥2
+    ///     AGREEMENT quorum was tried and REMOVED (playhead-wybg) — on client-
+    ///     PINNED shows only ONE persona diverges (the rest COLLIDE, byte-
+    ///     identical), so requiring agreement dropped real ads. Staging ≥2
+    ///     distinct-persona B-copies is the COLLISION-RECOVERY floor, not agreement.
+    ///   • Every false-widening guard still applies (`gateAndDiffBytes`:
+    ///     min-run-bytes, re-encode/`chainedFraction` reject, min-ad-width;
+    ///     then fragment-merge + duration-cap). playhead-9s6q FIX A: day-0 opts
+    ///     into non-monotonic SEGMENT recovery (flag `nonMonotonicSegmentRecovery
+    ///     Enabled`, default OFF) — a non-monotonic multi-break fetch is
+    ///     segment-recovered (each guard re-applied over the segmented coverage)
+    ///     rather than discarded; the lagged path keeps the strict reject.
+    ///   • MARK-ONLY — `eligibilityGate = .markOnly`, edges left `.unanchored`;
+    ///     a rare FP is only a wrong banner, never eaten content. Auto-skip held.
+    /// It does NOT change presence-gating for the lagged path, the chroma differ,
+    /// or any non-day-0 flow.
+    ///
+    /// NEVER-PERSIST-B (wrj8/xsdz.28): the B bytes are read (mmap) only inside
+    /// this call; the caller (`RediffRefetchService`) still deletes every B-copy.
+    /// The persisted marks are A-time scalars only. The A-side file is READ-ONLY.
+    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int {
+        // Day-0 requires ≥2 distinct-persona B-copies for COLLISION RECOVERY: on
+        // a client-pinned show a single re-fetch can collide (byte-identical → no
+        // divergence), so staging ≥2 gives a divergence a chance. NOT an agreement
+        // quorum — the mint UNIONs whatever diverges (playhead-wybg).
+        guard bSideURLs.count >= RediffSlotOwnership.dayZeroMinKWayBCopies else {
+            logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): \(bSideURLs.count) B-side(s) < \(RediffSlotOwnership.dayZeroMinKWayBCopies) distinct-persona B-copies for collision recovery")
+            return 0
+        }
+        // The asset row supplies the PINNED A-side (wrj8: read-only played file).
+        let asset: AnalysisAsset
+        do {
+            guard let fetched = try await store.fetchAsset(id: analysisAssetId) else {
+                logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): no asset row")
+                return 0
+            }
+            asset = fetched
+        } catch {
+            logger.warning("[xsdz.36.4] day-0 mint fetchAsset failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return 0
+        }
+        guard let aSideURL = Self.byteDifferASideURL(sourceURL: asset.sourceURL) else {
+            logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): no anchored A-side file")
+            return 0
+        }
+        let aData: Data
+        do {
+            aData = try Data(contentsOf: aSideURL, options: .mappedIfSafe)
+        } catch {
+            logger.warning("[xsdz.36.4] day-0 mint A-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return 0
+        }
+
+        // BYTE-EXACT per-persona diffs ONLY. A B whose byte gate rejects (no
+        // chained runs / non-monotonic / re-encode CDN) is a chroma-fallback
+        // TRIGGER for the lagged pass — but day-0 mints NOTHING from it: it
+        // simply does not contribute a per-persona slot list to the union.
+        var perBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
+        for bSideURL in bSideURLs {
+            guard Self.isAnchoredRegularFile(bSideURL) else { continue }
+            let bData: Data
+            do {
+                bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
+            } catch {
+                logger.warning("[xsdz.36.4] day-0 mint B-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+                continue
+            }
+            let alignment = RediffByteAligner.align(aData: aData, bData: bData)
+            // playhead-9s6q FIX A: the day-0 mint OPTS IN to non-monotonic segment
+            // recovery (flag default OFF) so a Fresh Air-class multi-break fetch
+            // whose chain went non-monotonic yields its divergent ad slots instead
+            // of nothing. Every precision guard still applies per segment.
+            guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+                alignment: alignment,
+                recoverNonMonotonicSegments: RediffActivation.nonMonotonicSegmentRecoveryEnabled
+            ) else {
+                continue
+            }
+            perBSideSlots.append(acceptance.playedSlots)
+        }
+
+        // UNION the byte-EXACT divergent slots across personas (false-widening
+        // guards already applied per-list by `gateAndDiffBytes`). Quorum = 1: a
+        // slot mints if ANY persona diverged on it — the SAME lagged-path union
+        // primitive, so a client-pinned show where only one persona diverges
+        // still mints (playhead-wybg). Overlapping same-slot detections collapse.
+        let unioned = RediffSlotOwnership.unionedPlayedSlots(perBSideSlots)
+        guard !unioned.isEmpty else {
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): \(perBSideSlots.count) byte-exact diff(s), no divergent slot — nothing minted")
+            return 0
+        }
+
+        // Idempotency: skip any minted slot overlapping an existing AdWindow
+        // (any decisionState, incl. a user-vetoed `.reverted` row) so a repeat
+        // day-0 fire — or a day-0 run after some analysis already marked — never
+        // double-banners or resurfaces a veto (mirrors correction-replay).
+        let existing = (try? await store.fetchAdWindows(assetId: analysisAssetId)) ?? []
+        var windows: [AdWindow] = []
+        for slot in unioned {
+            let overlapsExisting = existing.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
+            let overlapsEmitted = windows.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
+            if overlapsExisting || overlapsEmitted { continue }
+            windows.append(AdWindow(
+                id: UUID().uuidString,
+                analysisAssetId: analysisAssetId,
+                startTime: slot.startSeconds,
+                endTime: slot.endSeconds,
+                confidence: 1.0,   // deterministic byte-exact certainty
+                boundaryState: Self.dayZeroRediffByteExactBoundaryState,
+                decisionState: AdDecisionState.candidate.rawValue,
+                detectorVersion: config.detectorVersion,
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: slot.startSeconds,
+                metadataSource: Self.dayZeroRediffByteExactMetadataSource,
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false,
+                evidenceSources: nil,
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+                catalogStoreMatchSimilarity: nil
+                // startEdgeAnchor / endEdgeAnchor default to `.unanchored`:
+                // mark-only, NOT auto-skip-eligible (a separate gated step).
+            ))
+        }
+        guard !windows.isEmpty else {
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): all \(unioned.count) unioned slot(s) already covered by existing AdWindows — nothing minted")
+            return 0
+        }
+        do {
+            try await store.upsertHotPathAdWindows(windows, existingIDs: [], retiredIDs: [])
+        } catch {
+            logger.warning("[xsdz.36.4] day-0 mint persist failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return 0
+        }
+        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) mark-only banner(s) asset=\(analysisAssetId, privacy: .public)")
+        return windows.count
     }
 
     private func boundarySingletonPromotedSegments(

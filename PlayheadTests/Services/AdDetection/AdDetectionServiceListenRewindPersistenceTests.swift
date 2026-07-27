@@ -11,6 +11,36 @@ import Foundation
 import Testing
 @testable import Playhead
 
+private actor ListenTrustGate {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func hold() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 @Suite("AdDetectionService.recordListenRewind — persistence (playhead-q45f.1)")
 struct AdDetectionServiceListenRewindPersistenceTests {
 
@@ -95,7 +125,11 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         ))
 
         let service = makeService(store: store)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
         let rows = try await store.fetchListenRewinds(forAssetId: assetId)
         #expect(rows.count == 1)
@@ -130,22 +164,33 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         ))
 
         let service = makeService(store: store)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
         let rows = try await store.fetchListenRewinds(forAssetId: assetId)
         #expect(rows.count == 3, "each tap is a distinct event; expected 3 rows, got \(rows.count)")
     }
 
-    @Test("rewind on a missing-window id persists no event row (warning logged, profile still updates via TrustScoringService)")
-    func missingWindowDoesNotPersistEvent() async throws {
+    @Test("rewind on a missing-window id is rejected without a trust mutation")
+    func missingWindowRejectsAction() async throws {
         // Defensive contract: if the supplied windowId has no corresponding
         // ad_window row (e.g. raced with a coverage rebuild that dropped
-        // the row, or a stale UI state), recordListenRewind must NOT insert
-        // an event with a fabricated time. Execution continues so the
-        // profile-side trust signal still fires through the rerouted
-        // TrustScoringService path (playhead-q45f).
+        // the row, or a stale UI state), recordListenRewind must reject the
+        // action. The banner then remains retryable and no trust penalty can
+        // be minted without the durable correction receipt.
         let (store, dir) = try await makeTestStoreWithDirectory()
         let assetId = "asset-rewind-noWindow"
         let podcastId = "pod-rewind-noWindow"
@@ -168,14 +213,20 @@ struct AdDetectionServiceListenRewindPersistenceTests {
             title: nil
         ))
 
-        // playhead-q45f: inject a TrustScoringService so the profile-
-        // side trust signal still fires through the reroute path. The
-        // pre-q45f assertion (`recentFalseSkipSignals > 0` from the
-        // inline closure) now becomes a contract on the rerouted call.
         let trust = TrustScoringService(store: store)
         let service = makeService(store: store)
         await service.setTrustScoringService(trust)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        var rejected = false
+        do {
+            try await service.recordListenRewind(
+                windowId: windowId,
+                analysisAssetId: assetId,
+                podcastId: podcastId
+            )
+        } catch {
+            rejected = true
+        }
+        #expect(rejected)
 
         // The asset-scoped accessor JOINs through `ad_windows`, so a
         // missing window would surface as empty regardless. To pin the
@@ -189,10 +240,115 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         let rows = try await store.fetchListenRewinds(forAssetId: assetId)
         #expect(rows.isEmpty)
 
-        // Profile mutation still ran via TrustScoringService.recordWeakFalseSkipSignal.
         let profile = try await store.fetchProfile(podcastId: podcastId)
-        #expect(profile?.recentFalseSkipSignals ?? 0 > 0,
-                "profile-side trust signal must still update even when window lookup fails")
+        #expect(profile?.recentFalseSkipSignals == 0,
+                "a rejected persistence receipt must not penalize trust")
+    }
+
+    @Test("stale Listen receipt cannot mutate a replacement asset's same-ID row")
+    func listenReceiptIsAssetScoped() async throws {
+        let store = try await makeTestStore()
+        let sourceAssetId = "asset-rewind-source"
+        let replacementAssetId = "asset-rewind-replacement"
+        let podcastId = "pod-rewind-scope"
+        let reusedWindowId = "win-rewind-reused"
+
+        try await store.insertAsset(makeAsset(id: sourceAssetId))
+        try await store.insertAsset(makeAsset(id: replacementAssetId))
+        try await store.insertAdWindow(
+            makeAdWindow(
+                id: reusedWindowId,
+                assetId: sourceAssetId,
+                startTime: 12
+            )
+        )
+        try await store.insertOrReplaceAdWindow(
+            makeAdWindow(
+                id: reusedWindowId,
+                assetId: replacementAssetId,
+                startTime: 212
+            )
+        )
+
+        let service = makeService(store: store)
+        var rejected = false
+        do {
+            try await service.recordListenRewind(
+                windowId: reusedWindowId,
+                analysisAssetId: sourceAssetId,
+                podcastId: podcastId
+            )
+        } catch {
+            rejected = true
+        }
+
+        #expect(rejected)
+        let replacement = try #require(
+            try await store.fetchAdWindow(id: reusedWindowId)
+        )
+        #expect(replacement.analysisAssetId == replacementAssetId)
+        #expect(replacement.decisionState == AdDecisionState.applied.rawValue)
+        #expect(
+            try await store.fetchListenRewinds(
+                forAssetId: replacementAssetId
+            ).isEmpty
+        )
+    }
+
+    @Test("event insertion failure rolls back the decision and a retry commits both")
+    func decisionAndEventAreAtomicAndRetryable() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-rewind-atomic"
+        let podcastId = "pod-rewind-atomic"
+        let windowId = "win-rewind-atomic"
+
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(
+            makeAdWindow(id: windowId, assetId: assetId, startTime: 33)
+        )
+        try await store.execForTesting("""
+            CREATE TRIGGER fail_listen_rewind_insert
+            BEFORE INSERT ON ad_listen_rewinds
+            BEGIN
+                SELECT RAISE(ABORT, 'injected listen rewind failure');
+            END
+            """)
+
+        let service = makeService(store: store)
+        var rejected = false
+        do {
+            try await service.recordListenRewind(
+                windowId: windowId,
+                analysisAssetId: assetId,
+                podcastId: podcastId
+            )
+        } catch {
+            rejected = true
+        }
+        #expect(rejected)
+        #expect(
+            try await store.fetchAdWindow(id: windowId)?.decisionState
+                == AdDecisionState.applied.rawValue,
+            "the decision flip must roll back when its event receipt fails"
+        )
+        #expect(try await store.fetchListenRewinds(forAssetId: assetId).isEmpty)
+
+        try await store.execForTesting(
+            "DROP TRIGGER fail_listen_rewind_insert"
+        )
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+
+        #expect(
+            try await store.fetchAdWindow(id: windowId)?.decisionState
+                == AdDecisionState.reverted.rawValue
+        )
+        #expect(
+            try await store.fetchListenRewinds(forAssetId: assetId).count == 1
+        )
     }
 
     @Test("rewind on a missing-profile podcast still persists an event row")
@@ -212,11 +368,54 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         try await store.insertAdWindow(makeAdWindow(id: windowId, assetId: assetId, startTime: 45.0))
 
         let service = makeService(store: store)
-        try await service.recordListenRewind(windowId: windowId, podcastId: podcastId)
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
 
         let rows = try await store.fetchListenRewinds(forAssetId: assetId)
         #expect(rows.count == 1,
                 "missing-profile rewind must still persist an event row for q45f gate replay")
         #expect(rows.first?.time == 45.0)
+    }
+
+    @Test(
+        "post-commit Listen trust calibration does not gate completion",
+        .timeLimit(.minutes(1))
+    )
+    func listenTrustCalibrationIsNonBlocking() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-rewind-nonblocking"
+        let podcastId = "pod-rewind-nonblocking"
+        let windowId = "win-rewind-nonblocking"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(
+            makeAdWindow(id: windowId, assetId: assetId, startTime: 22)
+        )
+        let service = makeService(store: store)
+        let trustGate = ListenTrustGate()
+        await service._setListenRewindTrustHandlerForTesting { _ in
+            await trustGate.hold()
+        }
+        let primaryResultGate = ListenTrustGate()
+        let response = Task {
+            try await service.recordListenRewind(
+                windowId: windowId,
+                analysisAssetId: assetId,
+                podcastId: podcastId
+            )
+            await primaryResultGate.hold()
+        }
+
+        await trustGate.waitUntilStarted()
+        await primaryResultGate.waitUntilStarted()
+        #expect(
+            try await store.fetchListenRewinds(forAssetId: assetId).count == 1,
+            "The durable Listen receipt must exist while trust is held"
+        )
+        await trustGate.release()
+        await primaryResultGate.release()
+        try await response.value
     }
 }

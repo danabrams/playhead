@@ -284,10 +284,31 @@ actor PodcastDiscoveryService {
             )
 
             if let ep = existingByGUID[parsedEp.guid] {
-                // Update existing episode metadata (title, duration, etc.)
+                // Update existing episode metadata (title, etc.)
                 ep.title = parsedEp.title
-                ep.duration = parsedEp.duration
                 ep.publishedAt = parsedEp.pubDate
+                // playhead-wrj8 (#5): do NOT overwrite a downloaded
+                // episode's DURATION on refresh — the persisted value
+                // matches the artifact the user already played and marked
+                // against; a shorter re-declared `<itunes:duration>` from a
+                // rotated DAI stitch must not swap under it. The audio FILE
+                // itself is already immutable at the file layer (playback
+                // and analysis resolve it by episode-id-keyed completeness
+                // pin, never from `audioURL`), so it CANNOT be rotated by a
+                // feed refresh regardless of this field.
+                //
+                // We DELIBERATELY still refresh `audioURL` even when
+                // downloaded: it is only ever read on the streaming path,
+                // which is reached solely when NO complete artifact exists
+                // (e.g. after LRU eviction). Freezing it would strand an
+                // evicted episode on a stale, possibly-expired enclosure
+                // token. Refreshing it lets an evicted episode re-stream
+                // cleanly while the pin still guarantees a present file is
+                // never rotated.
+                let isPinned = ep.downloadState == .downloaded || ep.cachedAudioURL != nil
+                if !isPinned {
+                    ep.duration = parsedEp.duration
+                }
                 if let url = parsedEp.enclosureURL {
                     ep.audioURL = url
                 }

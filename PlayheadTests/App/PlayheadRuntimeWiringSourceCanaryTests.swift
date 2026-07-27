@@ -86,6 +86,62 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// playhead-xsdz.36.4: the day-0 rediff kickoff must be FIRE-AND-FORGET so
+    /// starting playback is never blocked or delayed by the ~54 MB × K second
+    /// fetch. Two structural guarantees, neither reachable through a full
+    /// `PlayheadRuntime` init in a unit test:
+    ///   • `kickOffDayZeroRediff` is a SYNCHRONOUS helper (no `async`) that runs
+    ///     the trigger inside a `Task.detached` — off the MainActor hot path;
+    ///   • neither `playEpisode` call site awaits the kickoff.
+    /// A regression that makes the helper `async` (so `playEpisode` awaits it) or
+    /// drops the `Task.detached` would let a stalled fetch wedge playback start.
+    func testDayZeroRediffKickoffIsFireAndForget() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+
+        guard let defRange = source.range(of: "private func kickOffDayZeroRediff(") else {
+            XCTFail("`kickOffDayZeroRediff` not found in PlayheadRuntime.swift — the day-0 play-time trigger wiring is missing.")
+            return
+        }
+
+        // The signature (def → first `{`) must not be `async`: a synchronous
+        // kickoff returns immediately to `playEpisode`.
+        guard let bodyBrace = source.range(of: "{", range: defRange.upperBound..<source.endIndex) else {
+            XCTFail("Could not locate the `kickOffDayZeroRediff` body brace.")
+            return
+        }
+        let signature = source[defRange.upperBound..<bodyBrace.lowerBound]
+        XCTAssertFalse(
+            signature.contains("async"),
+            "kickOffDayZeroRediff must be a synchronous fire-and-forget kickoff (never `async`) so playEpisode is not blocked by the day-0 fetch."
+        )
+
+        // Its body must run the trigger on a DETACHED task, and await
+        // `triggerIfEligible` INSIDE that task (never in playEpisode).
+        guard let detachedRange = source.range(
+            of: "Task.detached",
+            range: defRange.upperBound..<source.endIndex
+        ) else {
+            XCTFail("kickOffDayZeroRediff must run the day-0 trigger in a `Task.detached` — off the playback hot path.")
+            return
+        }
+        XCTAssertNotNil(
+            source.range(of: "triggerIfEligible", range: detachedRange.upperBound..<source.endIndex),
+            "The detached day-0 task must await `triggerIfEligible`."
+        )
+
+        // Neither call site may await the kickoff.
+        XCTAssertNil(
+            source.range(of: "await kickOffDayZeroRediff"),
+            "The day-0 kickoff must be fire-and-forget — never awaited (found `await kickOffDayZeroRediff`)."
+        )
+        XCTAssertNil(
+            source.range(of: "await self.kickOffDayZeroRediff"),
+            "The day-0 kickoff must be fire-and-forget — never awaited (found `await self.kickOffDayZeroRediff`)."
+        )
+    }
+
     /// All six lazy-init loggers (FoundationModelsFeedbackStore,
     /// SurfaceStatusInvariantLogger, DecisionLogger, AssetLifecycleLogger,
     /// BGTaskTelemetryLogger — playhead-jncn audit items #4/#8/#10/#15/#17 —
@@ -430,6 +486,54 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
                 """
             )
         }
+    }
+
+    /// Replacement playback must synchronously retire the prior episode before
+    /// any AVPlayer load. Asset resolution happens after playback begins and
+    /// can return nil, so the later `SkipOrchestrator.beginEpisode` handoff is
+    /// not a safe clearing boundary.
+    func testReplacementClearsPriorEpisodeBeforeLoadingAudio() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        guard let playBody = SwiftSourceInspector.firstBody(
+            in: stripped,
+            after: "private func performPlayEpisode("
+        ) else {
+            XCTFail("Could not locate performPlayEpisode body.")
+            return
+        }
+        guard let clearRange = playBody.range(
+            of: "clearPriorEpisodePlaybackStateBeforeReplacement("
+        ) else {
+            XCTFail(
+                "performPlayEpisode must clear prior episode state before loading replacement audio."
+            )
+            return
+        }
+        guard let firstLoadRange = playBody.range(of: "playbackService.load") else {
+            XCTFail("Could not locate replacement PlaybackService load call.")
+            return
+        }
+        XCTAssertLessThan(
+            clearRange.lowerBound,
+            firstLoadRange.lowerBound,
+            "old cues must be disarmed before either streaming or local replacement audio can play"
+        )
+
+        guard let clearBody = SwiftSourceInspector.firstBody(
+            in: stripped,
+            after: "private func clearPriorEpisodePlaybackStateBeforeReplacement("
+        ) else {
+            XCTFail("Could not locate replacement-boundary clear helper.")
+            return
+        }
+        XCTAssertTrue(clearBody.contains("skipOrchestrator.endEpisode()"))
+        XCTAssertTrue(clearBody.contains("playbackService.setSkipCues([])"))
+        XCTAssertTrue(clearBody.contains("silenceCompressionCoordinator.updateSkipRanges([])"))
+        XCTAssertTrue(clearBody.contains("silenceCompressionCoordinator.endEpisode()"))
     }
 
     /// skeptical-review-cycle-12 T-4: pin the two
@@ -798,6 +902,111 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             re-evaluates `ScanCohort.production()` defeats the purpose of \
             cohort-capture-once (cycle 3 H3-c3 / cycle 4 C1-c4).
             """
+        )
+    }
+
+    /// playhead-xsdz.45 (Unit 1): the production rediff sweep must fetch under
+    /// the DEFAULT (AppleCoreMedia-iPhone) persona. The persona lives on the
+    /// two URLSession seam conformers (`URLSessionRangedAudioSampler` /
+    /// `URLSessionFullEpisodeFetcher`), which `RediffRefetchService` takes as
+    /// injected dependencies — the service has no persona of its own, so the
+    /// ONLY place production's persona choice is expressed is this construction
+    /// site in `PlayheadRuntime.swift`. The seam-level tests prove
+    /// "a seam built with `.default` stamps AppleCoreMedia-iPhone", but only
+    /// this canary pins that PRODUCTION actually passes `.default`.
+    ///
+    /// A regression that drops the argument (`URLSessionRangedAudioSampler()`)
+    /// or changes it to `nil`/another persona reverts the sweep to the
+    /// system-default UA — a same-context double-fetch AdsWizz/ART19 pin to a
+    /// byte-identical fill (nothing to diff) — and no seam-level test would
+    /// notice. Stripped of comments/strings so the canary anchors on real code,
+    /// not this doc comment.
+    func testRediffSweepFetchesUnderDefaultPersona() throws {
+        let source = SwiftSourceInspector.strippingCommentsAndStrings(
+            try SwiftSourceInspector.loadSource(
+                repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+            )
+        )
+
+        for seam in ["URLSessionRangedAudioSampler(persona: .default)",
+                     "URLSessionFullEpisodeFetcher(persona: .default)"] {
+            XCTAssertTrue(
+                source.contains(seam),
+                """
+                PlayheadRuntime.swift no longer constructs `\(seam)`. The production \
+                rediff sweep must fetch its pre-check + B-side under the default \
+                (AppleCoreMedia-iPhone) persona so per-client-pinning DAI stacks \
+                (AdsWizz/ART19) return a divergent fill to byte-align. A bare \
+                `()` or a nil/other persona reverts to the system-default UA and \
+                silently defeats rotation. Re-add `persona: .default` or update \
+                this canary if the seam was intentionally renamed.
+                """
+            )
+        }
+    }
+
+    func testUserMarkLiveInjectionRevalidatesPlaybackAfterPersistence() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let signature = "ifCurrentAnalysisAssetId expectedAssetId: String"
+        guard let body = SwiftSourceInspector.firstBody(
+            in: source,
+            after: signature
+        ) else {
+            XCTFail("Could not locate PlayheadRuntime.injectUserMarkedAd")
+            return
+        }
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
+
+        guard let initialGuard = stripped.range(
+            of: "guard currentAnalysisAssetId == expectedAssetId"
+        ),
+        let persist = stripped.range(
+            of: "adDetectionService.recordUserMarkedAd"
+        ),
+        let guardRange = stripped.range(
+            of: "guard currentAnalysisAssetId == expectedAssetId",
+            range: persist.upperBound..<stripped.endIndex
+        ),
+        let injection = stripped.range(
+            of: "skipOrchestrator.injectUserMarkedAd",
+            range: guardRange.upperBound..<stripped.endIndex
+        ) else {
+            XCTFail(
+                "User-mark persistence must be followed by a playback identity guard before live injection"
+            )
+            return
+        }
+
+        XCTAssertLessThan(initialGuard.lowerBound, persist.lowerBound)
+        let guardedSlice = stripped[guardRange.lowerBound..<injection.lowerBound]
+        XCTAssertTrue(guardedSlice.contains("currentEpisodeId == expectedEpisodeId"))
+        XCTAssertTrue(guardedSlice.contains("playEpisodeGeneration == expectedGeneration"))
+    }
+
+    func testPlaybackUsesDownloadManagerCanonicalCacheURL() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let body = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: source,
+                after: "private func performPlayEpisode("
+            )
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
+
+        XCTAssertTrue(
+            stripped.contains(
+                "downloadManager.cachedFileURL(for: episodeId)"
+            )
+        )
+        XCTAssertTrue(stripped.contains("localURL = cached"))
+        XCTAssertTrue(stripped.contains("episode.cachedAudioURL = cached"))
+        XCTAssertFalse(
+            stripped.contains("localURL = pinned"),
+            "SwiftData's cached URL is a mirror, not an authority that may bypass manager hash/path selection"
         )
     }
 }

@@ -264,6 +264,62 @@ final class CorrectionDedupeTests: XCTestCase {
             "Times >3x the bucket apart must produce distinct identities")
     }
 
+    func testExplicitReceiptIdentityPreservesSubMillisecondSpanBits() throws {
+        let assetId = "asset-explicit-lossless"
+        let firstStart = 60.12340
+        let secondStart = 60.12341
+        let end = 75.98760
+        let firstScope = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: firstStart,
+            endTime: end
+        )
+        let secondScope = CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: secondStart,
+            endTime: end
+        )
+        XCTAssertEqual(
+            firstScope.serialized,
+            secondScope.serialized,
+            "Legacy scope text intentionally remains millisecond-quantized"
+        )
+
+        func receipt(startTime: Double) -> CorrectionEvent {
+            CorrectionEvent(
+                analysisAssetId: assetId,
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: assetId,
+                    startTime: startTime,
+                    endTime: end
+                ).serialized,
+                source: .bannerAutoSkipConfirmed,
+                correctionType: .falseNegative,
+                targetRefs: CorrectionTargetRefs(
+                    adWindowId: "window-lossless",
+                    exactFeedbackSpan: ExactFeedbackSpan(
+                        startTime: startTime,
+                        endTime: end
+                    )
+                )
+            )
+        }
+
+        let first = receipt(startTime: firstStart)
+        let second = receipt(startTime: secondStart)
+        XCTAssertNotEqual(
+            try XCTUnwrap(first.explicitReceiptIdentityKey),
+            try XCTUnwrap(second.explicitReceiptIdentityKey),
+            "Private explicit receipt identity must not collapse distinct raw spans"
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(first.targetRefs?.exactFeedbackSpan).matches(
+                startTime: firstStart,
+                endTime: end
+            )
+        )
+    }
+
     // MARK: - (d) FP and FN do not collapse on identical span
 
     func testFalsePositiveAndFalseNegativeDoNotCollapseOnSameSpan() async throws {

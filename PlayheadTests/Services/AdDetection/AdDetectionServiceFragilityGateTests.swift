@@ -81,6 +81,11 @@ struct AdDetectionServiceFragilityGateTests {
             // playhead-xsdz.13: cross-show syndication reuses the `.catalog`
             // detail (a reference-match corroborator carrying a count).
             return .catalog(entryCount: 3)
+        case .rediffConfirmed:
+            // playhead-xsdz.62: byte-exact rediff reuses the `.fingerprint`
+            // detail (a deterministic reference-match), matching what
+            // `buildLedger` emits.
+            return .fingerprint(matchCount: 1, averageSimilarity: 1.0)
         case .audit, .operational:
             // Observability-only rows are filtered out before scoring; the
             // detail shape is irrelevant. Use a benign classifier payload.

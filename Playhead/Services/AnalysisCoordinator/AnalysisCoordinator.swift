@@ -191,6 +191,14 @@ enum PlaybackEvent: Sendable {
 /// services. Runs as a Swift actor with explicit handoff boundaries.
 actor AnalysisCoordinator {
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisCoordinator")
+    /// Newest runtime seek admitted to the scrub side effect. The runtime's
+    /// episode fence is necessary but not sufficient when two seeks overlap
+    /// inside one playback lifecycle.
+    private var latestUserSeekOperationGeneration: UInt64 = 0
+    #if DEBUG
+    private var userSeekEffectHookForTesting:
+        (@Sendable () async -> Void)?
+    #endif
 
     // MARK: - Dependencies
 
@@ -998,6 +1006,46 @@ actor AnalysisCoordinator {
             return nil
         }
     }
+
+    /// Latest-wins scrub admission used by PlayheadRuntime's user-seek
+    /// transaction. The operation token is checked again after the testable
+    /// suspension boundary so an older actor continuation cannot overwrite the
+    /// snapshot or reprioritization emitted by a newer seek.
+    @discardableResult
+    func handleUserSeekPlaybackEvent(
+        to time: TimeInterval,
+        rate: Float,
+        operationGeneration: UInt64
+    ) async -> Bool {
+        guard operationGeneration
+                >= latestUserSeekOperationGeneration
+        else {
+            return false
+        }
+        latestUserSeekOperationGeneration = operationGeneration
+        #if DEBUG
+        await userSeekEffectHookForTesting?()
+        #endif
+        guard latestUserSeekOperationGeneration
+                == operationGeneration
+        else {
+            return false
+        }
+        handleScrub(to: time, rate: rate)
+        return true
+    }
+
+    #if DEBUG
+    func _setUserSeekEffectHookForTesting(
+        _ hook: (@Sendable () async -> Void)?
+    ) {
+        userSeekEffectHookForTesting = hook
+    }
+
+    func _latestPlayheadTimeForTesting() -> TimeInterval? {
+        latestSnapshot?.playheadTime
+    }
+    #endif
 
     // MARK: - Play Started
 

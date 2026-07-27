@@ -262,6 +262,13 @@ struct TrainingExampleMaterializer: Sendable {
             if decisionWasSkipEligible { return "eligibleNotSkipped" }
             return nil
         }()
+        let privacyClassification:
+            TrainingExamplePrivacyClassification =
+            corrections.contains {
+                $0.isPrivateExplicitFeedbackReceipt
+            }
+            ? .localPrivateExplicitFeedback
+            : .onDeviceLocal
 
         // cycle-2 L-B: prefer the per-span FM-emitted `commercialIntent` /
         // `ownership` strings (carried in `EvidencePayload.commercialIntent`
@@ -317,7 +324,8 @@ struct TrainingExampleMaterializer: Sendable {
             // Empty string was indistinguishable from a buggy serializer.
             decisionCohortJSON: decision?.decisionCohortJSON,
             transcriptQuality: scan.transcriptQuality.rawValue,
-            createdAt: now
+            createdAt: now,
+            privacyClassification: privacyClassification
         )
     }
 
