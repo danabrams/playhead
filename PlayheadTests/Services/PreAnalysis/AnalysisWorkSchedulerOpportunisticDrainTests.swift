@@ -302,6 +302,98 @@ struct AnalysisWorkSchedulerOpportunisticDrainTests {
         #expect(onAdmits == true,
                 "Flag ON admits on the identical snapshot — the ONLY difference is the flag")
     }
+
+    // MARK: - playhead-0sro: a stale watermark silently nullifies glo9
+
+    /// `admissionBlocksDeferred()` is the gtt9.14 (scenePhase,
+    /// playbackContext) matrix and reads NO coverage. The coverage signal
+    /// that decides whether that block is RELAXED is condition 5 of
+    /// `opportunisticDrainRelaxationApplies` —
+    /// `activeEpisodeHotPathCaughtUp()` — and it reads the RAW persisted
+    /// column `AnalysisAsset.fastTranscriptCoverageEndTime`, with no
+    /// read-time reconciliation against `transcript_chunks`.
+    ///
+    /// So the playhead-0sro stale watermark reaches it directly: on an
+    /// effectively-complete episode whose watermark is frozen at 60 s,
+    /// `transcribedAhead = max(0, 60 − playhead)` is 0 for any playhead
+    /// past a minute, which is permanently below the 120 s runway. The
+    /// relaxation can then NEVER fire for that episode — the glo9 backlog
+    /// drain shipped in #285 is silently dead for the whole listening
+    /// session — and the yqax catch-up trigger simultaneously fires
+    /// forever on an episode that has nothing left to transcribe.
+    ///
+    /// This test pins both symptoms and their repair.
+    @Test("stale watermark blocks the glo9 drain on a complete episode; reconciliation restores it")
+    func testStaleWatermarkBlocksDrainUntilReconciled() async throws {
+        // THEMOVE shape: fast transcript covering 3575.88 s of a
+        // 3578.10 s episode, behind a watermark frozen at 60 s.
+        let fx = try await makeFixture(
+            flagOn: true,
+            fastTranscriptCoverageEndTime: 60,
+            episodeDurationSec: 3578.10
+        )
+        var chunks: [TranscriptChunk] = []
+        var start = 0.0
+        var index = 0
+        while start < 3540 {
+            chunks.append(makeFastChunk(assetId: fx.asset.id, index: index, start: start, end: start + 30))
+            start += 30
+            index += 1
+        }
+        chunks.append(makeFastChunk(assetId: fx.asset.id, index: index, start: 3540, end: 3575.88))
+        try await fx.store.insertTranscriptChunks(chunks)
+
+        // Every OTHER glo9 gate condition holds: flag ON, foreground
+        // playing, charging, nominal. Only the coverage signal is stale.
+        await enterForegroundPlaying(fx, playhead: 1000)
+
+        #expect(!FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 60,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ), "precondition: the seeded state is the bead's stale-watermark defect")
+
+        let staleAdmits = await fx.scheduler.wouldAdmitDeferredWorkForTesting()
+        #expect(staleAdmits == false,
+                "the stale watermark makes activeEpisodeHotPathCaughtUp() false, permanently nullifying the glo9 drain on a complete episode")
+        let staleCatchup = await fx.scheduler.currentCatchupOpportunityForTesting()
+        #expect(staleCatchup != nil,
+                "the same stale watermark also keeps the yqax catch-up trigger firing on an episode with nothing left to transcribe")
+
+        // Repair persisted state exactly as the V37 migration / resume /
+        // finalization reconcile does — no re-transcription involved.
+        #expect(try await fx.store.reconcileFastTranscriptCoverage(id: fx.asset.id) == 3575.88)
+
+        let repairedAdmits = await fx.scheduler.wouldAdmitDeferredWorkForTesting()
+        #expect(repairedAdmits == true,
+                "with the watermark reconciled to real chunk coverage the hot path is 2575 s ahead of the playhead — the glo9 drain must admit")
+        let repairedCatchup = await fx.scheduler.currentCatchupOpportunityForTesting()
+        #expect(repairedCatchup == nil,
+                "and the redundant catch-up escalation must stop")
+    }
+
+    /// Builds a `pass='fast'` chunk row for the active episode's asset.
+    private func makeFastChunk(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "\(assetId)-c\(index)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "\(assetId)-fp\(index)",
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "segment \(index)",
+            normalizedText: "segment \(index)",
+            pass: "fast",
+            modelVersion: "test-asr",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+    }
 }
 
 #endif
