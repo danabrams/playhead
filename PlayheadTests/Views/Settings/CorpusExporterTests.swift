@@ -85,6 +85,105 @@ struct CorpusExporterTests {
         #expect(correctionJSON["type"] as? String == "correction")
     }
 
+    @Test("additive catalog provenance remains decodable by a legacy v1 reader")
+    func catalogProvenanceIsBackwardCompatibleV1Extension() throws {
+        struct LegacyV1AdWindow: Decodable {
+            let type: String
+            let schemaVersion: Int
+            let id: String
+            let analysisAssetId: String
+            let startTime: Double
+            let endTime: Double
+            let confidence: Double
+        }
+        let window = AdWindow(
+            id: "legacy-reader-window",
+            analysisAssetId: "legacy-reader-asset",
+            startTime: 10,
+            endTime: 40,
+            confidence: 0.95,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "test",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: nil,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            catalogStoreMatchSimilarity: 0.93,
+            catalogFingerprintVersion:
+                CatalogFingerprintVersion.currentCatalog.rawValue,
+            catalogMatchedEntryId:
+                "00000000-0000-0000-0000-000000000001",
+            catalogMatchedShowId: "show-legacy-reader",
+            catalogMatchedLearningSource:
+                CatalogLearningSource.userMarkedAd.rawValue,
+            catalogMatchedLearningLifecycle:
+                CatalogLearningLifecycle.explicitConfirmation.rawValue
+        )
+
+        let decoded = try JSONDecoder().decode(
+            LegacyV1AdWindow.self,
+            from: CorpusExporter.adWindowLine(window)
+        )
+
+        #expect(decoded.type == "ad_window")
+        #expect(decoded.schemaVersion == 1)
+        #expect(decoded.id == window.id)
+        #expect(decoded.analysisAssetId == window.analysisAssetId)
+        #expect(decoded.startTime == window.startTime)
+        #expect(decoded.endTime == window.endTime)
+        #expect(decoded.confidence == window.confidence)
+
+        let json = try decodeJSONObject(
+            from: CorpusExporter.adWindowLine(window)
+        )
+        #expect(
+            json["catalogFingerprintVersion"] as? Int
+                == CatalogFingerprintVersion.currentCatalog.rawValue
+        )
+        #expect(json["catalogMatchedEntryId"] is NSNull)
+        let encodedLine = try #require(
+            String(
+                data: CorpusExporter.adWindowLine(window),
+                encoding: .utf8
+            )
+        )
+        #expect(
+            !encodedLine.contains(try #require(window.catalogMatchedEntryId)),
+            "a private catalog-row UUID must not cross the corpus boundary"
+        )
+        #expect(
+            json["catalogMatchedShowId"] as? String
+                == window.catalogMatchedShowId
+        )
+        #expect(
+            json["catalogMatchedLearningSource"] as? String
+                == window.catalogMatchedLearningSource
+        )
+        #expect(
+            json["catalogMatchedLearningLifecycle"] as? String
+                == window.catalogMatchedLearningLifecycle
+        )
+
+        // Catalog payloads are deliberately device-local. The corpus receives
+        // match audit metadata only—not a replayable fingerprint or lexical
+        // material copied from AdCatalogStore.
+        for forbiddenKey in [
+            "fingerprintBlob",
+            "acousticFingerprint",
+            "transcriptSnippet",
+            "sponsorTokens",
+        ] {
+            #expect(!json.keys.contains(forbiddenKey))
+        }
+    }
+
     @Test("feedback-targeted ad-window export redacts only response-derived state")
     func adWindowExportRedactsFeedbackState() throws {
         let window = AdWindow(

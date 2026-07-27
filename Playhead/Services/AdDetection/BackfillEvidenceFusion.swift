@@ -1001,7 +1001,7 @@ struct DecisionMapper: Sendable {
     // MARK: - Private
 
     private var scoringLedger: [EvidenceLedgerEntry] {
-        ledger.filter { !$0.source.isObservabilityOnly }
+        ledger.filter(\.contributesToAutomaticDecision)
     }
 
     /// Calibration from proposalConfidence to skipConfidence via the active profile.

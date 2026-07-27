@@ -1859,6 +1859,7 @@ struct BackfillJobRunnerTests {
             (.invalidScanCohortJSON("x"), true),
             (.invalidStateTransition(jobId: "j", fromStatus: nil, toStatus: "running"), false),
             (.evidenceEventBodyMismatch(id: "x"), true),
+            (.staleAdWindowRevision(id: "window"), false),
             // playhead-4my.10.1 L5: encoder failures while persisting a
             // training example are permanent — the row will fail again on
             // identical input.
@@ -1879,6 +1880,7 @@ struct BackfillJobRunnerTests {
                  .invalidScanCohortJSON,
                  .invalidStateTransition,
                  .evidenceEventBodyMismatch,
+                 .staleAdWindowRevision,
                  .encodingFailure:
                 continue
             }
@@ -1892,7 +1894,7 @@ struct BackfillJobRunnerTests {
                 "isPermanent(\(error)) expected \(expected) got \(actual)"
             )
         }
-        #expect(cases.count == 13)
+        #expect(cases.count == 14)
     }
 
     @Test("bd-1tl: caseName covers every AnalysisStoreError case with a stable token")

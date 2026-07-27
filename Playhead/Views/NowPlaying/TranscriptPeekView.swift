@@ -23,10 +23,6 @@ struct TranscriptPeekView: View {
     /// so previews/tests that don't supply it are unaffected.
     var episodeDuration: TimeInterval = 0
 
-    /// Phase 5 (u4d): User correction store for "This isn't an ad" gesture.
-    /// Defaults to no-op; Phase 7 injects a real store via PlayheadRuntime.
-    var correctionStore: any UserCorrectionStore = NoOpUserCorrectionStore()
-
     /// Trust scoring service for recording false negative signals.
     /// Injected from PlayheadRuntime at the call site.
     var trustService: TrustScoringService?
@@ -35,11 +31,12 @@ struct TranscriptPeekView: View {
     var podcastId: String?
 
     /// Callback to revert ad windows for a decoded span (gpi: "not an ad" flow).
-    var onRevertAdWindows: ((DecodedSpan) async -> Void)?
+    var onRevertAdWindows: ((DecodedSpan) async -> Bool)?
 
-    /// Runtime reference for injecting user-marked ad corrections.
-    /// Optional so existing callers (previews, tests) don't need to provide it.
-    var runtime: PlayheadRuntime?
+    /// Playback-context-bound writer for positive user corrections. `false`
+    /// means the captured episode was replaced or persistence failed, so no
+    /// trust signal may be recorded for the attempted mark.
+    var onMarkAd: ((Double, Double) async -> Bool)?
 
     /// Phase 5 (u4d): Which decoded span's popover is currently showing.
     @State private var selectedDecodedSpan: DecodedSpan? = nil
@@ -68,6 +65,17 @@ struct TranscriptPeekView: View {
 
     /// Confirmation alert for submitting not-ad chunks.
     @State private var showNotAdConfirmation = false
+    /// Prevents duplicate positive correction submissions and keeps their
+    /// captured selections available until the durable callback succeeds.
+    @State private var isSubmittingMarkAdCorrection = false
+    /// Prevents duplicate taps while the orchestrator-owned correction
+    /// transaction is suspended. The selected rows remain intact until that
+    /// transaction succeeds so transient persistence failures are retryable.
+    @State private var isSubmittingNotAdCorrection = false
+
+    private var isSubmittingCorrection: Bool {
+        isSubmittingMarkAdCorrection || isSubmittingNotAdCorrection
+    }
 
     /// Audio envelopes represented by the current canonical projection.
     /// Watching this set lets polling retire selections whose rows were
@@ -120,7 +128,6 @@ struct TranscriptPeekView: View {
                 if let pending = pendingTailSpan {
                     submitUntranscribedTailMark(span: pending)
                 }
-                pendingTailSpan = nil
             }
         } message: {
             Text("The untranscribed section from here to the end of the episode will be reported as an ad.")
@@ -233,11 +240,11 @@ private extension TranscriptPeekView {
             }
             Button("Dismiss ad", role: .destructive) {
                 submitNotAdChunks()
-                isNotAdMarkingMode = false
             }
         } message: {
             Text("\(notAdMarkedChunkSelections.count) sentence\(notAdMarkedChunkSelections.count == 1 ? "" : "s") will be marked as not an ad. Any overlapping ad detections will be dismissed.")
         }
+        .disabled(isSubmittingCorrection)
     }
 
     var markModeToggle: some View {
@@ -289,11 +296,11 @@ private extension TranscriptPeekView {
             }
             Button("Report missed ad", role: .destructive) {
                 submitMarkedChunks()
-                isMarkingMode = false
             }
         } message: {
             Text("\(markedChunkSelections.count) sentence\(markedChunkSelections.count == 1 ? "" : "s") will be reported as a missed ad.")
         }
+        .disabled(isSubmittingCorrection)
     }
 
     var liveIndicator: some View {
@@ -393,6 +400,7 @@ private extension TranscriptPeekView {
             }
             .buttonStyle(.plain)
             .frame(minHeight: 44)
+            .disabled(isSubmittingCorrection)
         }
         .background(AppColors.surface)
         .accessibilityElement(children: .combine)
@@ -437,7 +445,8 @@ private extension TranscriptPeekView {
             .popover(item: $selectedDecodedSpan) { span in
                 AdRegionPopover(
                     span: span,
-                    correctionStore: correctionStore,
+                    onRevertAdWindows:
+                        onRevertAdWindows ?? { _ in false },
                     onDismiss: { selectedDecodedSpan = nil }
                 )
             }
@@ -540,6 +549,12 @@ private extension TranscriptPeekView {
         .background(isHighlighted ? AppColors.accentSubtle : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture {
+            // Keep the exact submitted selection immutable until the
+            // orchestrator-owned transaction completes. Otherwise a user
+            // could toggle rows while SQLite is suspended and either lose
+            // retry state on failure or have a successful commit clear a
+            // newer, unrelated selection.
+            guard !isSubmittingCorrection else { return }
             if isMarkingMode {
                 // Toggle selection in mark-ad mode
                 if markedChunkSelections.contains(selection) {
@@ -645,12 +660,15 @@ private extension TranscriptPeekView {
     /// immediate skip + UI update + persistence. The chunks already carry
     /// startTime/endTime, so no BoundaryExpander is needed.
     func submitMarkedChunks() {
-        guard !markedChunkSelections.isEmpty else { return }
+        guard !isSubmittingCorrection,
+              !markedChunkSelections.isEmpty,
+              let markAd = onMarkAd else {
+            return
+        }
 
-        // Clear selection immediately to prevent duplicate submissions
-        // if the alert action fires more than once.
+        // Capture the exact submitted rows but retain them until the durable
+        // callback succeeds so transient failure remains retryable.
         let selectedChunks = markedChunkSelections
-        markedChunkSelections = []
 
         guard let selectedRange = peekViewModel.selectedChunkTimeRange(
             selections: selectedChunks
@@ -662,16 +680,18 @@ private extension TranscriptPeekView {
 
         let trustSvc = trustService
         let pid = podcastId
-        let runtimeRef = runtime
-        Task {
-            // Inject the user-marked ad region for immediate skip + persistence.
-            // PlayheadRuntime.injectUserMarkedAd handles both the orchestrator
-            // injection and the AdWindow + CorrectionEvent persistence.
-            if let runtimeRef {
-                await runtimeRef.injectUserMarkedAd(start: startTime, end: endTime)
-            }
+        isSubmittingMarkAdCorrection = true
+        Task { @MainActor in
+            defer { isSubmittingMarkAdCorrection = false }
+            // The callback owns both persistence and live injection under the
+            // immutable playback context captured when the sheet opened.
+            guard await markAd(startTime, endTime) else { return }
 
-            // Feed false-negative signal to TrustService (mirrors reportHearingAd).
+            markedChunkSelections = []
+            isMarkingMode = false
+
+            // Trust follows the durable receipt; a stale/failed write must not
+            // affect a show's score.
             if let pid, let trustSvc {
                 await trustSvc.recordFalseNegativeSignal(podcastId: pid)
             }
@@ -680,37 +700,57 @@ private extension TranscriptPeekView {
 
     /// Submit a coverage-free mark for the untranscribed post-roll/tail
     /// (playhead-m1l9). Mirrors `submitMarkedChunks`' downstream calls —
-    /// `injectUserMarkedAd` for immediate skip + AdWindow/CorrectionEvent
-    /// persistence, plus the false-negative trust signal — but sources the
-    /// span from the playhead-to-episode-end seed rather than existing chunks,
-    /// so a tail with NO transcript chunks can still be marked.
+    /// the bound callback commits the AdWindow/CorrectionEvent and live
+    /// injection before the false-negative trust signal — but sources the span
+    /// from the playhead-to-episode-end seed rather than existing chunks, so a
+    /// tail with NO transcript chunks can still be marked.
     func submitUntranscribedTailMark(span: (start: Double, end: Double)) {
         let startTime = span.start
         let endTime = span.end
-        guard endTime > startTime else { return }
+        guard !isSubmittingCorrection,
+              startTime.isFinite,
+              endTime.isFinite,
+              startTime >= 0,
+              endTime > startTime,
+              let markAd = onMarkAd else {
+            return
+        }
 
         let trustSvc = trustService
         let pid = podcastId
-        let runtimeRef = runtime
-        Task {
-            if let runtimeRef {
-                await runtimeRef.injectUserMarkedAd(start: startTime, end: endTime)
+        isSubmittingMarkAdCorrection = true
+        Task { @MainActor in
+            defer { isSubmittingMarkAdCorrection = false }
+            guard await markAd(startTime, endTime) else {
+                // Preserve the captured range and put the exact failed action
+                // back in front of the user instead of silently losing it as
+                // playback advances.
+                showTailMarkConfirmation = true
+                return
             }
+            pendingTailSpan = nil
             if let pid, let trustSvc {
                 await trustSvc.recordFalseNegativeSignal(podcastId: pid)
             }
         }
     }
 
-    /// Submit the not-ad marked chunks as a manual veto correction.
-    /// Records a .manualVeto CorrectionEvent and calls onRevertAdWindows
-    /// with a synthetic DecodedSpan covering the selected time range.
+    /// Submit the not-ad marked chunks through the orchestrator-owned
+    /// correction transaction, using a synthetic DecodedSpan to carry the
+    /// exact captured asset and range.
     func submitNotAdChunks() {
-        guard !notAdMarkedChunkSelections.isEmpty else { return }
+        guard !isSubmittingCorrection,
+              !notAdMarkedChunkSelections.isEmpty,
+              let revertCallback = onRevertAdWindows
+        else {
+            return
+        }
 
-        // Capture and clear selection immediately.
+        // Capture the exact selection submitted, but keep it visible until the
+        // durable row+correction transaction succeeds. Clearing before the
+        // callback made transient SQLite failures indistinguishable from
+        // success and forced the user to reconstruct the selection.
         let selectedChunks = notAdMarkedChunkSelections
-        notAdMarkedChunkSelections = []
 
         guard let selectedRange = peekViewModel.selectedChunkTimeRange(
             selections: selectedChunks
@@ -740,36 +780,15 @@ private extension TranscriptPeekView {
             anchorProvenance: []
         )
 
-        let pid = podcastId
-        let revertCallback = onRevertAdWindows
-        let store = correctionStore
-        Task {
-            // playhead-zskc: persist with precise time scope rather than the
-            // coarse DecodedSpan path. recordVeto writes a single
-            // `.exactTimeSpan` CorrectionEvent, giving us per-window metric
-            // precision without the `exactSpan:0:Int.max` whole-episode fallback.
-            await store.recordVeto(
-                startTime: startTime,
-                endTime: endTime,
-                assetId: assetId,
-                podcastId: pid,
-                source: .manualVeto
-            )
-
-            // Revert overlapping ad windows via the orchestrator callback.
-            // Cycle 2 M2: the orchestrator's `revertByTimeRange` now records
-            // the trust signal itself (weak for suggest-tier-only reverts,
-            // full for managed reverts) — see SkipOrchestrator.swift's M2
-            // routing. Previously this site fired an unconditional
-            // full-magnitude signal AFTER the callback, double-counting the
-            // penalty (2x for managed reverts) and making the M2 weak/strong
-            // split asymmetric (0.05 + 0.10 = 0.15 instead of 0.05 for a
-            // suggest-only veto). Removed the duplicate call here so the
-            // orchestrator is the single source of truth for trust signaling
-            // from this surface.
-            if let revertCallback {
-                await revertCallback(syntheticSpan)
-            }
+        isSubmittingNotAdCorrection = true
+        Task { @MainActor in
+            defer { isSubmittingNotAdCorrection = false }
+            // The callback owns the single SQLite transaction covering both
+            // the CorrectionEvent and every exact AdWindow revision. Only a
+            // committed action may clear the user's retry state.
+            guard await revertCallback(syntheticSpan) else { return }
+            notAdMarkedChunkSelections = []
+            isNotAdMarkingMode = false
         }
     }
 

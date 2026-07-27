@@ -3,16 +3,14 @@
 
 import Foundation
 
-/// One cached ad-span entry. Keyed on `(showId, fingerprint)`. The values
-/// reused on a hit are `(boundaryStart, boundaryEnd, confidence)` —
-/// every other field on a real ad-window decision (transcript text,
-/// classifier rationale, FM annotations) is intentionally NOT cached.
-/// V1 reuses ONLY the boundary + confidence so:
+/// One cached ad-span entry. Keyed on `(showId, fingerprint)`. Historical
+/// absolute source boundaries and confidence remain persisted for audit, but
+/// are not replayed into another episode's decision. Every other field on a
+/// real ad-window decision (transcript text, classifier rationale, FM
+/// annotations) is intentionally NOT cached, so:
 ///   1. We don't store user-content-derived data that could outlive a
 ///      cache invalidation.
-///   2. The cache hit path doesn't have to reconstruct a full
-///      ClassifierResult — it only has to give the runner enough to
-///      skip the classifier round-trip.
+///   2. A cache match cannot become a lossy parallel decision producer.
 struct RepeatedAdCacheEntry: Sendable, Hashable {
     let showId: String
     let fingerprint: RepeatedAdFingerprint
@@ -20,6 +18,16 @@ struct RepeatedAdCacheEntry: Sendable, Hashable {
     let boundaryEnd: Double
     let confidence: Double
     let lastSeenAt: Date
+    /// Confirmation provenance. Legacy rows are preserved but quarantined
+    /// from lookup as `.legacyUnconfirmed`.
+    let learningSource: CatalogLearningSource
+    let learningLifecycle: CatalogLearningLifecycle
+    let sourceAssetId: String?
+    let sourceWindowId: String?
+    /// Opaque identity of the writer that produced this persisted revision.
+    /// Material equality is insufficient for stale-writer cleanup because two
+    /// legitimate writes can carry byte-identical timestamps and boundaries.
+    let producerRevision: String
 
     init(
         showId: String,
@@ -27,7 +35,12 @@ struct RepeatedAdCacheEntry: Sendable, Hashable {
         boundaryStart: Double,
         boundaryEnd: Double,
         confidence: Double,
-        lastSeenAt: Date
+        lastSeenAt: Date,
+        learningSource: CatalogLearningSource = .legacyUnconfirmed,
+        learningLifecycle: CatalogLearningLifecycle = .legacyUnconfirmed,
+        sourceAssetId: String? = nil,
+        sourceWindowId: String? = nil,
+        producerRevision: String = UUID().uuidString
     ) {
         self.showId = showId
         self.fingerprint = fingerprint
@@ -35,6 +48,11 @@ struct RepeatedAdCacheEntry: Sendable, Hashable {
         self.boundaryEnd = boundaryEnd
         self.confidence = confidence
         self.lastSeenAt = lastSeenAt
+        self.learningSource = learningSource
+        self.learningLifecycle = learningLifecycle
+        self.sourceAssetId = sourceAssetId
+        self.sourceWindowId = sourceWindowId
+        self.producerRevision = producerRevision
     }
 }
 

@@ -82,8 +82,10 @@ struct ExactFeedbackSpan: Sendable, Codable, Equatable {
     let endTimeBitPattern: UInt64
 
     init(startTime: Double, endTime: Double) {
-        startTimeBitPattern = startTime.bitPattern
-        endTimeBitPattern = endTime.bitPattern
+        startTimeBitPattern =
+            RecurrenceMaterialIdentity.canonicalTimeBitPattern(startTime)
+        endTimeBitPattern =
+            RecurrenceMaterialIdentity.canonicalTimeBitPattern(endTime)
     }
 
     var startTime: Double {
@@ -95,8 +97,10 @@ struct ExactFeedbackSpan: Sendable, Codable, Equatable {
     }
 
     func matches(startTime: Double, endTime: Double) -> Bool {
-        startTimeBitPattern == startTime.bitPattern
-            && endTimeBitPattern == endTime.bitPattern
+        RecurrenceMaterialIdentity.canonicalTimeBitPattern(self.startTime)
+            == RecurrenceMaterialIdentity.canonicalTimeBitPattern(startTime)
+            && RecurrenceMaterialIdentity.canonicalTimeBitPattern(self.endTime)
+                == RecurrenceMaterialIdentity.canonicalTimeBitPattern(endTime)
     }
 }
 
@@ -171,12 +175,15 @@ struct CorrectionTargetRefs: Sendable, Codable, Equatable {
     /// identifiers or an empty union.
     var canonicalExplicitAdWindowIDs: [String]? {
         let plural = adWindowIds ?? []
-        guard plural.allSatisfy({ !$0.isEmpty }),
+        guard plural.allSatisfy({
+                  RecurrenceMaterialIdentity.canonicalIdentifier($0) != nil
+              }),
               Set(plural).count == plural.count
         else {
             return nil
         }
-        if let adWindowId, adWindowId.isEmpty {
+        if let adWindowId,
+           RecurrenceMaterialIdentity.canonicalIdentifier(adWindowId) == nil {
             return nil
         }
         var ids = Set(plural)
@@ -216,6 +223,11 @@ struct ExplicitFeedbackDetectionProjection:
     let evidenceSources: String?
     let eligibilityGate: String?
     let catalogStoreMatchSimilarity: Double?
+    let catalogFingerprintVersion: Int?
+    let catalogMatchedEntryId: String?
+    let catalogMatchedShowId: String?
+    let catalogMatchedLearningSource: String?
+    let catalogMatchedLearningLifecycle: String?
     let startEdgeAnchor: String
     let endEdgeAnchor: String
 
@@ -242,6 +254,12 @@ struct ExplicitFeedbackDetectionProjection:
         eligibilityGate = window.eligibilityGate
         catalogStoreMatchSimilarity =
             window.catalogStoreMatchSimilarity
+        catalogFingerprintVersion = window.catalogFingerprintVersion
+        catalogMatchedEntryId = window.catalogMatchedEntryId
+        catalogMatchedShowId = window.catalogMatchedShowId
+        catalogMatchedLearningSource = window.catalogMatchedLearningSource
+        catalogMatchedLearningLifecycle =
+            window.catalogMatchedLearningLifecycle
         startEdgeAnchor = window.startEdgeAnchor
         endEdgeAnchor = window.endEdgeAnchor
     }
@@ -270,6 +288,12 @@ struct ExplicitFeedbackDetectionProjection:
             eligibilityGate: eligibilityGate,
             catalogStoreMatchSimilarity:
                 catalogStoreMatchSimilarity,
+            catalogFingerprintVersion: catalogFingerprintVersion,
+            catalogMatchedEntryId: catalogMatchedEntryId,
+            catalogMatchedShowId: catalogMatchedShowId,
+            catalogMatchedLearningSource: catalogMatchedLearningSource,
+            catalogMatchedLearningLifecycle:
+                catalogMatchedLearningLifecycle,
             startEdgeAnchor: startEdgeAnchor,
             endEdgeAnchor: endEdgeAnchor
         )
@@ -649,6 +673,13 @@ enum ExplicitBannerFeedbackPrivacy {
             eligibilityGate: window.eligibilityGate,
             catalogStoreMatchSimilarity:
                 window.catalogStoreMatchSimilarity,
+            catalogFingerprintVersion: window.catalogFingerprintVersion,
+            catalogMatchedEntryId: window.catalogMatchedEntryId,
+            catalogMatchedShowId: window.catalogMatchedShowId,
+            catalogMatchedLearningSource:
+                window.catalogMatchedLearningSource,
+            catalogMatchedLearningLifecycle:
+                window.catalogMatchedLearningLifecycle,
             startEdgeAnchor: window.startEdgeAnchor,
             endEdgeAnchor: window.endEdgeAnchor
         )
@@ -709,6 +740,11 @@ enum AdWindowMaterialIdentity {
             encoded(window.evidenceSources),
             encoded(window.eligibilityGate),
             encoded(window.catalogStoreMatchSimilarity),
+            encoded(window.catalogFingerprintVersion.map(String.init)),
+            encoded(window.catalogMatchedEntryId),
+            encoded(window.catalogMatchedShowId),
+            encoded(window.catalogMatchedLearningSource),
+            encoded(window.catalogMatchedLearningLifecycle),
             encoded(window.startEdgeAnchor),
             encoded(window.endEdgeAnchor),
         ].joined(separator: "|")
@@ -723,7 +759,7 @@ enum AdWindowMaterialIdentity {
     }
 
     private static func encoded(_ value: Double) -> String {
-        String(value.bitPattern)
+        String(RecurrenceMaterialIdentity.canonicalTimeBitPattern(value))
     }
 
     private static func encoded(_ value: Double?) -> String {
@@ -762,7 +798,9 @@ enum CausalInference {
         provenance: [AnchorRef],
         ledgerEntries: [EvidenceLedgerEntry]
     ) -> CausalSource {
-        let scoringLedger = ledgerEntries.filter { !$0.source.isObservabilityOnly }
+        let scoringLedger = ledgerEntries.filter(
+            \.contributesToAutomaticDecision
+        )
         // If we have scoring ledger entries, use weight-based inference.
         if !scoringLedger.isEmpty {
             // Accumulate total weight per source type.

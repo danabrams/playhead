@@ -7,8 +7,8 @@
 //   - `EvidenceCatalogBuilder` extracts sponsor tokens / promo codes /
 //     URLs from the *current* episode's transcript (in-pipeline).
 //   - `AdCatalogStore` matches an acoustic fingerprint against the
-//     cross-episode SQLite store accumulated from prior auto-skips
-//     and user corrections (correction-loop signal).
+//     cross-episode SQLite store accumulated from consumed skips and explicit
+//     user confirmations (correction-loop signal).
 //
 // Both emit `EvidenceLedgerEntry(source: .catalog, ...)` and there is
 // no way to disentangle them downstream — until we stamp a
@@ -263,7 +263,15 @@ struct AdCatalogStoreMatchTelemetryTests {
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false,
-            catalogStoreMatchSimilarity: 0.91
+            catalogStoreMatchSimilarity: 0.91,
+            catalogFingerprintVersion:
+                CatalogFingerprintVersion.relativeFeatureSummaryV2.rawValue,
+            catalogMatchedEntryId: "11111111-1111-1111-1111-111111111111",
+            catalogMatchedShowId: "show-epfk",
+            catalogMatchedLearningSource:
+                CatalogLearningSource.consumedAutoSkip.rawValue,
+            catalogMatchedLearningLifecycle:
+                CatalogLearningLifecycle.consumed.rawValue
         )
         // Window with NIL similarity (catalog store wasn't wired).
         let unmatched = AdWindow(
@@ -315,6 +323,23 @@ struct AdCatalogStoreMatchTelemetryTests {
         #expect(matchedJSON["analysisAssetId"] as? String == asset.id)
         #expect(matchedJSON["catalogStoreMatchSimilarity"] as? Double == 0.91,
                 "matched window must carry catalogStoreMatchSimilarity=0.91; got \(String(describing: matchedJSON["catalogStoreMatchSimilarity"]))")
+        #expect(
+            matchedJSON["catalogFingerprintVersion"] as? Int
+                == CatalogFingerprintVersion.relativeFeatureSummaryV2.rawValue
+        )
+        #expect(
+            matchedJSON["catalogMatchedEntryId"] is NSNull,
+            "corpus export must not leak the device-local catalog UUID"
+        )
+        #expect(matchedJSON["catalogMatchedShowId"] as? String == "show-epfk")
+        #expect(
+            matchedJSON["catalogMatchedLearningSource"] as? String
+                == CatalogLearningSource.consumedAutoSkip.rawValue
+        )
+        #expect(
+            matchedJSON["catalogMatchedLearningLifecycle"] as? String
+                == CatalogLearningLifecycle.consumed.rawValue
+        )
 
         // Locate the unmatched row and assert NULL.
         guard let unmatchedJSON = adWindowJSONs.first(where: { ($0["id"] as? String) == "win-nil" }) else {
@@ -325,6 +350,11 @@ struct AdCatalogStoreMatchTelemetryTests {
                 "the catalogStoreMatchSimilarity key must be present even when nil so eval can distinguish 'not wired' from 'omitted by old schema'")
         #expect(unmatchedJSON["catalogStoreMatchSimilarity"] is NSNull,
                 "nil catalogStoreMatchSimilarity must serialize as JSON null; got \(String(describing: unmatchedJSON["catalogStoreMatchSimilarity"]))")
+        #expect(unmatchedJSON["catalogFingerprintVersion"] is NSNull)
+        #expect(unmatchedJSON["catalogMatchedEntryId"] is NSNull)
+        #expect(unmatchedJSON["catalogMatchedShowId"] is NSNull)
+        #expect(unmatchedJSON["catalogMatchedLearningSource"] is NSNull)
+        #expect(unmatchedJSON["catalogMatchedLearningLifecycle"] is NSNull)
     }
 
     // MARK: - 4. Replay regression
@@ -351,8 +381,34 @@ struct AdCatalogStoreMatchTelemetryTests {
             podcastId: "show-epfk",
             episodeDuration: 200.0
         )
-        try #require(try await catalogStore.count() >= 1,
-                     "precondition: ep1 must seed the catalog so ep2 can match")
+        #expect(try await catalogStore.count() == 0)
+        let sourceWindow = try #require(
+            try await storeA.fetchAdWindows(assetId: assetA)
+                .max(by: { $0.confidence < $1.confidence })
+        )
+        let sourceFeatures = try await storeA.fetchFeatureWindows(
+            assetId: assetA,
+            from: sourceWindow.startTime,
+            to: sourceWindow.endTime
+        )
+        let sourceFingerprint = AcousticFingerprint.fromFeatureWindows(
+            sourceFeatures
+        )
+        let sourceEntry = try #require(
+            try await catalogStore.insert(
+                showId: "show-epfk",
+                episodePosition: .unknown,
+                durationSec: sourceWindow.endTime - sourceWindow.startTime,
+                acousticFingerprint: sourceFingerprint,
+                originalConfidence: sourceWindow.confidence,
+                learningSource: .confirmedSuggestion,
+                learningLifecycle: .explicitConfirmation,
+                sourceAssetId: sourceWindow.analysisAssetId,
+                sourceWindowId: sourceWindow.id,
+                sourceStartTime: sourceWindow.startTime,
+                sourceEndTime: sourceWindow.endTime
+            )
+        )
 
         // Episode 2: same fingerprint pattern → cross-episode match.
         let storeB = try await makeTestStore()
@@ -387,11 +443,72 @@ struct AdCatalogStoreMatchTelemetryTests {
         // Allow tiny float-precision drift between the Float seam and
         // the Double persistence column; both must round to the same
         // value at 5 decimal places, which is far tighter than NARL's
-        // 0.80 floor / 0.20 cap headroom.
+        // 0.90 floor / 0.10 cap headroom.
         let seamAsDouble = Double(seamSimilarity)
         let drift = abs(seamAsDouble - persistedTop)
         #expect(drift < 1e-5,
                 "the test seam (\(seamAsDouble)) and the persisted AdWindow.catalogStoreMatchSimilarity (\(persistedTop)) must agree within 1e-5; drift=\(drift). If they diverge, the corpus export is measuring something different from what the in-pipeline gate sees.")
+        let persistedMatch = try #require(
+            persistedWindows.first {
+                $0.catalogStoreMatchSimilarity == persistedTop
+            }
+        )
+        #expect(
+            persistedMatch.catalogFingerprintVersion
+                == CatalogFingerprintVersion.relativeFeatureSummaryV2.rawValue
+        )
+        #expect(persistedMatch.catalogMatchedEntryId == sourceEntry.id.uuidString)
+        #expect(persistedMatch.catalogMatchedShowId == "show-epfk")
+        #expect(
+            persistedMatch.catalogMatchedLearningSource
+                == CatalogLearningSource.confirmedSuggestion.rawValue
+        )
+        #expect(
+            persistedMatch.catalogMatchedLearningLifecycle
+                == CatalogLearningLifecycle.explicitConfirmation.rawValue
+        )
+    }
+
+    @Test("backfill records catalog telemetry as unavailable without an exact canonical show")
+    func missingShowDoesNotBecomeObservedCatalogMiss() async throws {
+        for (suffix, podcastId) in [
+            ("blank", " \n\t"),
+            ("noncanonical", " show-epfk "),
+        ] {
+            let store = try await makeTestStore()
+            let assetId = "asset-epfk-missing-show-\(suffix)"
+            try await store.insertAsset(makeAsset(id: assetId))
+            try await store.insertFeatureWindows(
+                syntheticAdWindows(assetId: assetId)
+            )
+            let catalogStore = try AdCatalogStore(
+                directoryURL: makeTempDir(
+                    prefix: "epfk-missing-show-\(suffix)"
+                )
+            )
+            let service = makeService(
+                store: store,
+                catalogStore: catalogStore
+            )
+
+            try await service.runBackfill(
+                chunks: lexicalAdChunks(assetId: assetId),
+                analysisAssetId: assetId,
+                podcastId: podcastId,
+                episodeDuration: 200
+            )
+
+            let windows = try await store.fetchAdWindows(assetId: assetId)
+            #expect(!windows.isEmpty)
+            #expect(
+                windows.allSatisfy {
+                    $0.catalogStoreMatchSimilarity == nil
+                },
+                "missing canonical show identity must be unavailable, not a shared 0"
+            )
+            #expect(windows.allSatisfy { $0.catalogMatchedShowId == nil })
+            #expect(windows.allSatisfy { $0.catalogMatchedEntryId == nil })
+        }
     }
 
     // MARK: - Test scaffolding (parallels AdCatalogWiringTests)

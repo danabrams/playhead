@@ -93,6 +93,34 @@ private actor ControlledSeekSequence {
     }
 }
 
+@Suite("PlaybackService seek validation")
+struct PlaybackServiceSeekValidationTests {
+    @Test(
+        "Invalid absolute seeks fail closed without publishing state",
+        arguments: [Double.nan, .infinity, -.infinity, -0.001]
+    )
+    func invalidAbsoluteSeek(_ target: Double) async {
+        let service = await PlaybackService(
+            audioSession: FakeAudioSessionProvider(),
+            nowPlayingInfo: FakeNowPlayingInfoProvider(),
+            notificationCenter: NotificationCenter()
+        )
+        await service._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 17,
+                duration: 100,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+
+        #expect(!(await service.seek(to: target)))
+        #expect(await service.snapshot().currentTime == 17)
+        await service.tearDown()
+    }
+}
+
 private actor ItemSeekRecorder {
     private var callCount = 0
 

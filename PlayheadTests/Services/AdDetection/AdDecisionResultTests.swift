@@ -31,6 +31,89 @@ struct AdDecisionResultTests {
         )
     }
 
+    @Test("live handoff envelope adopts the exact final persisted revision")
+    func liveHandoffUsesFinalPersistedMaterial() {
+        let finalRevision = makeSkipTestAdWindow(
+            id: "final-revision",
+            assetId: "asset-final",
+            startTime: 0,
+            endTime: 31,
+            confidence: 0.88,
+            startEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        let preClamp = AdDecisionResult(
+            id: finalRevision.id,
+            analysisAssetId: finalRevision.analysisAssetId,
+            startTime: 4,
+            endTime: 30,
+            skipConfidence: 0.91,
+            eligibilityGate: .eligible,
+            recomputationRevision: 1
+        )
+
+        let handedOff = preClamp.withProducerRevision(finalRevision)
+
+        #expect(handedOff.startTime == finalRevision.startTime)
+        #expect(handedOff.endTime == finalRevision.endTime)
+        #expect(handedOff.skipConfidence == finalRevision.confidence)
+        #expect(
+            handedOff.producerRevision?.startEdgeAnchor
+                == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+        )
+        #expect(
+            handedOff.producerRevision?.endEdgeAnchor
+                == AutoSkipEdgeAnchor.stingerSnapped.rawValue
+        )
+    }
+
+    @Test("decision explanation excludes learned catalog automatic authority")
+    func explanationExcludesFingerprintCatalogAuthority() {
+        let classifier = EvidenceLedgerEntry(
+            source: .classifier,
+            weight: 0.3,
+            detail: .classifier(score: 1)
+        )
+        let learnedCatalog = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: 0.2,
+            detail: .catalog(entryCount: 1),
+            subSource: .fingerprintStore
+        )
+        let transcriptCatalog = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: 0.2,
+            detail: .catalog(entryCount: 1),
+            subSource: .transcriptCatalog
+        )
+        let decision = DecisionResult(
+            proposalConfidence: 0.3,
+            skipConfidence: 0.3,
+            eligibilityGate: .markOnly
+        )
+
+        let learnedExplanation = DecisionExplanation.build(
+            ledger: [classifier, learnedCatalog],
+            decision: decision,
+            policyAction: .detectOnly,
+            config: FusionWeightConfig(),
+            skipThreshold: 0.8
+        )
+        let transcriptExplanation = DecisionExplanation.build(
+            ledger: [classifier, transcriptCatalog],
+            decision: decision,
+            policyAction: .detectOnly,
+            config: FusionWeightConfig(),
+            skipThreshold: 0.8
+        )
+
+        #expect(learnedExplanation.contributingFamilies == ["classifier"])
+        #expect(transcriptExplanation.contributingFamilies.count == 2)
+        #expect(transcriptExplanation.contributingFamilies.contains("classifier"))
+        #expect(transcriptExplanation.contributingFamilies.contains("catalog"))
+    }
+
     @Test("saveDecisionResultArtifact + loadDecisionResultArtifact round-trip")
     func roundTrip() async throws {
         let store = try await makeStore()

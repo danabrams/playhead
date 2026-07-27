@@ -81,8 +81,8 @@ struct RepeatedAdCacheConfig: Sendable, Hashable {
         precondition(hammingDistanceThreshold >= 0 && hammingDistanceThreshold <= RepeatedAdFingerprint.bitWidth)
         precondition(perShowCap >= 1)
         precondition(globalCap >= 1)
-        precondition(entryMaxAge > 0)
-        precondition(autoDisableWindow > 0)
+        precondition(entryMaxAge.isFinite && entryMaxAge > 0)
+        precondition(autoDisableWindow.isFinite && autoDisableWindow > 0)
         precondition(autoDisableHitRateFloor >= 0 && autoDisableHitRateFloor <= 1)
         precondition(autoDisableMinSamples >= 1)
         self.storeConfidenceThreshold = storeConfidenceThreshold
@@ -129,4 +129,44 @@ enum RepeatedAdCacheFeatureFlag {
     /// kill-switch is on. The user toggling the switch off-then-on resets
     /// this key.
     static let autoDisabledKey = "b3_repeated_ad_cache_auto_disabled"
+
+    /// Apply one observed user intent, then reconcile any newer value that
+    /// arrived while durable cache cleanup was suspended. The persisted
+    /// auto-disable marker is cleared only after a still-current re-enable
+    /// actually succeeds.
+    ///
+    /// Returns the latest intent applied so an observer can advance its
+    /// coalescing cursor without replaying an already-reconciled notification.
+    static func reconcileUserIntent(
+        _ observedIntent: Bool,
+        cache: RepeatedAdCacheService,
+        currentIntent: @Sendable () -> Bool,
+        clearAutoDisabled: @Sendable () -> Void
+    ) async -> Bool {
+        var intent = observedIntent
+        while true {
+            await cache.setEnabled(intent)
+
+            let latest = currentIntent()
+            if latest != intent {
+                intent = latest
+                continue
+            }
+
+            if intent {
+                // `setEnabled(true)` may fail closed when either durable clear
+                // fails. Preserve the auto-disable marker so a relaunch cannot
+                // turn that failed cleanup into an enabled cache.
+                guard await cache.isEnabled() else { return intent }
+
+                let confirmedLatest = currentIntent()
+                if confirmedLatest != intent {
+                    intent = confirmedLatest
+                    continue
+                }
+                clearAutoDisabled()
+            }
+            return intent
+        }
+    }
 }

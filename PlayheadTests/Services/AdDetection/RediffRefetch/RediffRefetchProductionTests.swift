@@ -74,7 +74,7 @@ private final class SpyAdDetection: AdDetectionProviding, @unchecked Sendable {
     var onRevalidate: (@Sendable () async -> Void)?
     private(set) var revalidateCalls: [RevalidateCall] = []
 
-    func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double) async throws -> [AdWindow] { [] }
+    func runHotPath(chunks: [TranscriptChunk], analysisAssetId: String, episodeDuration: Double, podcastId: String?) async throws -> [AdWindow] { [] }
     func runBackfill(chunks: [TranscriptChunk], analysisAssetId: String, podcastId: String, episodeDuration: Double, sessionId: String?) async throws {}
     func revalidateFromFeatures(analysisAssetId: String, podcastId: String, episodeDuration: Double, sessionId: String?) async throws {
         revalidateCalls.append(RevalidateCall(assetId: analysisAssetId, podcastId: podcastId, episodeDuration: episodeDuration))
@@ -96,7 +96,7 @@ struct RediffRefetchStateV28MigrationTests {
         // columns) → 30 (playhead-gy2s analysis_jobs reject-advisory columns) →
         // 31 (playhead-b6jq specialist_scan_results); the V28
         // rediff_refetch_state tables probed below are unchanged.
-        #expect(AnalysisStore.currentSchemaVersion == 34)
+        #expect(AnalysisStore.currentSchemaVersion == 36)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

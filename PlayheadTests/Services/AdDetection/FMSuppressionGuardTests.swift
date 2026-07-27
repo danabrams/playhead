@@ -228,6 +228,39 @@ struct FMSuppressionGuardTests {
         #expect(!result.isTriggered, "catalog entry should block suppression")
     }
 
+    @Test("Learned fingerprint catalog cannot block FM noAds suppression")
+    func fingerprintCatalogDoesNotBlockSuppression() {
+        let learnedCatalog = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: 0.20,
+            detail: .catalog(entryCount: 1),
+            subSource: .fingerprintStore
+        )
+        let transcriptCatalog = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: 0.20,
+            detail: .catalog(entryCount: 1),
+            subSource: .transcriptCatalog
+        )
+
+        let learnedResult = FMSuppressionGuard(
+            overlappingFMResults: twoModerateNoAdsWindows(),
+            ledger: makeWeakLedger() + [learnedCatalog],
+            anchorProvenance: []
+        ).evaluate()
+        let transcriptResult = FMSuppressionGuard(
+            overlappingFMResults: twoModerateNoAdsWindows(),
+            ledger: makeWeakLedger() + [transcriptCatalog],
+            anchorProvenance: []
+        ).evaluate()
+
+        #expect(learnedResult.isTriggered)
+        #expect(
+            !transcriptResult.isTriggered,
+            "current-episode transcript catalog remains a strong anchor"
+        )
+    }
+
     @Test("Suppression does NOT trigger when evidenceCatalog anchor provenance present")
     func evidenceCatalogProvenanceBlocksSuppression() {
         let provenance: [AnchorRef] = [
@@ -579,7 +612,7 @@ struct CappedByFMSuppressionGateTests {
                 "classificationTrust must be forwarded, not reset to default")
     }
 
-    @Test("subSource is preserved across suppression downweighting (playhead-rfu-sad)")
+    @Test("subSource and diagnostic-only weight survive targeted suppression")
     func subSourcePreservedThroughSuppression() {
         // Catalog entries can carry a `subSource` disambiguator
         // (`.transcriptCatalog` vs `.fingerprintStore`). Before
@@ -610,13 +643,17 @@ struct CappedByFMSuppressionGateTests {
 
         #expect(result.applied)
         #expect(result.suppressedLedger.count == 2)
-        // Both entries are weak (.catalog) → both should be downweighted,
-        // and both should keep their distinct subSource labels.
+        // Current-episode transcript catalog evidence participates in the
+        // automatic decision and is therefore downweighted. A learned
+        // fingerprint-store match is diagnostic-only: suppression must not
+        // mutate its persisted/replay weight as though it were decision mass.
+        // Both rows must keep their distinct subSource labels.
+        #expect(result.downweightedCount == 1)
         #expect(result.suppressedLedger[0].subSource == .transcriptCatalog,
                 "transcriptCatalog subSource must round-trip through suppression")
         #expect(result.suppressedLedger[1].subSource == .fingerprintStore,
                 "fingerprintStore subSource must round-trip through suppression")
         #expect(abs(result.suppressedLedger[0].weight - 0.20 * 0.3) < 0.001)
-        #expect(abs(result.suppressedLedger[1].weight - 0.18 * 0.3) < 0.001)
+        #expect(abs(result.suppressedLedger[1].weight - 0.18) < 0.001)
     }
 }

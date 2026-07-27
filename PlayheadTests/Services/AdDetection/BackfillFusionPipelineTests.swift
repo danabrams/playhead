@@ -410,7 +410,15 @@ struct BackfillFusionSkipOrchestratorTests {
             endTime: 120,
             skipConfidence: 0.82,
             eligibilityGate: .eligible,
-            recomputationRevision: 1
+            recomputationRevision: 1,
+            producerRevision: makeSkipTestAdWindow(
+                id: "result-eligible",
+                assetId: "asset-skip-1",
+                startTime: 60,
+                endTime: 120,
+                confidence: 0.82,
+                eligibilityGate: SkipEligibilityGate.eligible.rawValue
+            )
         )
 
         await orchestrator.receiveAdDecisionResults([result])

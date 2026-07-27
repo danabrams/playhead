@@ -326,6 +326,42 @@ struct AdDetectionServiceFragilityGateTests {
                 "audit/operational rows must not change the fragility geometry")
     }
 
+    @Test("Learned fingerprint catalog never changes fragility geometry")
+    func fingerprintCatalogRowsExcluded() {
+        let config = makeConfig(enabled: true)
+        let baseline = [entry(.fm, 0.45)]
+        let learnedCatalog = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: 0.20,
+            detail: .catalog(entryCount: 1),
+            subSource: .fingerprintStore
+        )
+        let transcriptCatalog = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: 0.20,
+            detail: .catalog(entryCount: 1),
+            subSource: .transcriptCatalog
+        )
+        let baselineScore = config.fragilityScore(
+            proposalConfidence: 0.81,
+            promotionTrack: .standard,
+            ledger: baseline
+        )
+        let learnedScore = config.fragilityScore(
+            proposalConfidence: 0.81,
+            promotionTrack: .standard,
+            ledger: baseline + [learnedCatalog]
+        )
+        let transcriptScore = config.fragilityScore(
+            proposalConfidence: 0.81,
+            promotionTrack: .standard,
+            ledger: baseline + [transcriptCatalog]
+        )
+
+        #expect(learnedScore == baselineScore)
+        #expect(transcriptScore != baselineScore)
+    }
+
     @Test("Edge: same-family entries (acoustic + musicBed + breakAlignment) count as depth 1")
     func sameFamilyEntriesCollapseToOneDepth() {
         let config = makeConfig(enabled: true)

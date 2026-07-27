@@ -16,42 +16,62 @@ struct AutoSkipPrecisionGateTests {
     // MARK: - Helpers
 
     private func makeInput(
+        analysisAssetId: String = "asset-gate-test",
         segmentStartTime: Double = 100,
         segmentEndTime: Double = 160,
         segmentScore: Double,
         episodeDuration: Double = 3600,
         overlappingFeatureWindows: [FeatureWindow] = [],
         lexicalCategories: Set<LexicalPatternCategory> = [],
-        userCorrectionBoostFactor: Double = 1.0
+        userCorrectionBoostFactor: Double = 1.0,
+        catalogMatchSimilarity: Float = 0
     ) -> AutoSkipPrecisionGateInput {
         AutoSkipPrecisionGateInput(
+            analysisAssetId: analysisAssetId,
             segmentStartTime: segmentStartTime,
             segmentEndTime: segmentEndTime,
             segmentScore: segmentScore,
             episodeDuration: episodeDuration,
             overlappingFeatureWindows: overlappingFeatureWindows,
             lexicalCategories: lexicalCategories,
-            userCorrectionBoostFactor: userCorrectionBoostFactor
+            userCorrectionBoostFactor: userCorrectionBoostFactor,
+            catalogMatchSimilarity: catalogMatchSimilarity
         )
     }
 
     private func featureWindow(
+        assetId: String = "asset-gate-test",
         startTime: Double,
         endTime: Double,
-        musicBedLevel: MusicBedLevel
+        musicBedLevel: MusicBedLevel,
+        rms: Double = 0.3,
+        spectralFlux: Double = 0.2,
+        musicProbability: Double? = nil,
+        speakerChangeProxyScore: Double = 0,
+        musicBedChangeScore: Double = 0,
+        musicBedOnsetScore: Double = 0,
+        musicBedOffsetScore: Double = 0,
+        pauseProbability: Double = 0.1,
+        featureVersion: Int =
+            FeatureExtractionConfig.default.featureVersion
     ) -> FeatureWindow {
         FeatureWindow(
-            analysisAssetId: "asset-gate-test",
+            analysisAssetId: assetId,
             startTime: startTime,
             endTime: endTime,
-            rms: 0.3,
-            spectralFlux: 0.2,
-            musicProbability: musicBedLevel == .none ? 0.0 : 0.8,
+            rms: rms,
+            spectralFlux: spectralFlux,
+            musicProbability: musicProbability
+                ?? (musicBedLevel == .none ? 0.0 : 0.8),
+            speakerChangeProxyScore: speakerChangeProxyScore,
+            musicBedChangeScore: musicBedChangeScore,
+            musicBedOnsetScore: musicBedOnsetScore,
+            musicBedOffsetScore: musicBedOffsetScore,
             musicBedLevel: musicBedLevel,
-            pauseProbability: 0.1,
+            pauseProbability: pauseProbability,
             speakerClusterId: 1,
             jingleHash: nil,
-            featureVersion: 1
+            featureVersion: featureVersion
         )
     }
 
@@ -207,6 +227,45 @@ struct AutoSkipPrecisionGateTests {
         #expect(signals.contains(.userConfirmedLocalPattern))
     }
 
+    @Test("catalog evidence is observable but cannot independently admit auto-skip")
+    func catalogOnlyEvidenceRemainsDiagnostic() {
+        let input = makeInput(
+            segmentStartTime: 1500,
+            segmentEndTime: 1560,
+            segmentScore: 0.90,
+            episodeDuration: 3000,
+            catalogMatchSimilarity: AdCatalogStore.defaultSimilarityFloor
+        )
+
+        #expect(
+            AutoSkipPrecisionGate.collectSafetySignals(for: input)
+                == [.catalogMatch]
+        )
+        #expect(
+            AutoSkipPrecisionGate.classify(input: input)
+                == .uiCandidate(reason: .noSafetySignals)
+        )
+    }
+
+    @Test("catalog evidence remains diagnostic beside an independent corroborator")
+    func catalogEvidenceIsReportedAlongsideDecisionSignal() {
+        let input = makeInput(
+            segmentStartTime: 1500,
+            segmentEndTime: 1560,
+            segmentScore: 0.90,
+            episodeDuration: 3000,
+            lexicalCategories: [.sponsor],
+            catalogMatchSimilarity: AdCatalogStore.defaultSimilarityFloor
+        )
+
+        #expect(
+            AutoSkipPrecisionGate.classify(input: input)
+                == .autoSkipEligible(
+                    firedSignals: [.strongLexicalAdPhrase, .catalogMatch]
+                )
+        )
+    }
+
     // MARK: - Signal unit tests
 
     @Test("strongLexicalAdPhrase fires on sponsor, promoCode, urlCTA, purchaseLanguage but not transitionMarker alone")
@@ -250,6 +309,7 @@ struct AutoSkipPrecisionGateTests {
             featureWindow(startTime: t, endTime: t + 2, musicBedLevel: .foreground)
         }
         #expect(AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+            analysisAssetId: "asset-gate-test",
             featureWindows: enough,
             segmentStart: 100, segmentEnd: 160,
             minCoverage: 0.20))
@@ -260,6 +320,7 @@ struct AutoSkipPrecisionGateTests {
             featureWindow(startTime: 102, endTime: 104, musicBedLevel: .background)
         ]
         #expect(AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+            analysisAssetId: "asset-gate-test",
             featureWindows: tooLittle,
             segmentStart: 100, segmentEnd: 160,
             minCoverage: 0.20) == false)
@@ -271,18 +332,299 @@ struct AutoSkipPrecisionGateTests {
         ]
         // 1 s / 60 s = 1.67% — below 20%.
         #expect(AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+            analysisAssetId: "asset-gate-test",
             featureWindows: straddle,
             segmentStart: 100, segmentEnd: 160,
             minCoverage: 0.20) == false)
     }
 
+    @Test("overlapping or malformed feature windows cannot create acoustic authority")
+    func acousticCoverageRejectsOverlappingOrMalformedIntervals() {
+        // Seven heavily overlapping 2 s windows cover only [100, 102.6].
+        // Summing each row independently would claim 14 s and clear the
+        // 12 s floor even though the union covers just 2.6 s.
+        let overlapping = (0..<7).map { index in
+            let start = 100 + Double(index) * 0.1
+            return featureWindow(
+                startTime: start,
+                endTime: start + 2,
+                musicBedLevel: .background
+            )
+        }
+        #expect(
+            AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+                analysisAssetId: "asset-gate-test",
+                featureWindows: overlapping,
+                segmentStart: 100,
+                segmentEnd: 160,
+                minCoverage: 0.20
+            ) == false
+        )
+
+        // Even when the overlapping cohort's union exceeds the 12 s floor,
+        // it is malformed persisted material and must fail closed. A mere
+        // interval-union implementation would incorrectly fire here.
+        let wideOverlapping = (0..<14).map { index in
+            let start = 100 + Double(index)
+            return featureWindow(
+                startTime: start,
+                endTime: start + 2,
+                musicBedLevel: .background
+            )
+        }
+        #expect(
+            !AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+                analysisAssetId: "asset-gate-test",
+                featureWindows: wideOverlapping,
+                segmentStart: 100,
+                segmentEnd: 160,
+                minCoverage: 0.20
+            )
+        )
+
+        // A corrupt unbounded row must be ignored rather than clipped to the
+        // whole segment and treated as independent acoustic authority.
+        let malformed = [
+            featureWindow(
+                startTime: -.infinity,
+                endTime: .infinity,
+                musicBedLevel: .foreground
+            ),
+            featureWindow(
+                startTime: -10,
+                endTime: 2,
+                musicBedLevel: .foreground
+            ),
+            featureWindow(
+                startTime: 100,
+                endTime: 160,
+                musicBedLevel: .foreground
+            )
+        ]
+        #expect(
+            AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+                analysisAssetId: "asset-gate-test",
+                featureWindows: malformed,
+                segmentStart: 100,
+                segmentEnd: 160,
+                minCoverage: 0.20
+            ) == false
+        )
+
+        let incompatibleVersion = stride(
+            from: 100.0,
+            to: 114.0,
+            by: 2.0
+        ).map {
+            featureWindow(
+                startTime: $0,
+                endTime: $0 + 2,
+                musicBedLevel: .foreground,
+                featureVersion:
+                    FeatureExtractionConfig.default.featureVersion + 1
+            )
+        }
+        #expect(
+            !AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+                analysisAssetId: "asset-gate-test",
+                featureWindows: incompatibleVersion,
+                segmentStart: 100,
+                segmentEnd: 160,
+                minCoverage: 0.20
+            )
+        )
+
+        let mixedAssets = stride(
+            from: 100.0,
+            to: 114.0,
+            by: 2.0
+        ).enumerated().map { index, start in
+            featureWindow(
+                assetId: index.isMultiple(of: 2)
+                    ? "asset-a" : "asset-b",
+                startTime: start,
+                endTime: start + 2,
+                musicBedLevel: .foreground
+            )
+        }
+        #expect(
+            !AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+                analysisAssetId: "asset-gate-test",
+                featureWindows: mixedAssets,
+                segmentStart: 100,
+                segmentEnd: 160,
+                minCoverage: 0.20
+            )
+        )
+    }
+
+    @Test("any malformed feature row invalidates acoustic automatic authority")
+    func acousticCoverageRejectsMalformedNonMusicRows() {
+        let validMusic = stride(
+            from: 100.0,
+            to: 114.0,
+            by: 2.0
+        ).map {
+            featureWindow(
+                startTime: $0,
+                endTime: $0 + 2,
+                musicBedLevel: .background
+            )
+        }
+        let maximumDuration =
+            MusicDetectionConfig.supportedWindowDurations.max() ?? 0
+        let malformedRows: [(String, FeatureWindow)] = [
+            (
+                "noncanonical asset",
+                featureWindow(
+                    assetId: " asset-gate-test ",
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none
+                )
+            ),
+            (
+                "embedded-NUL asset",
+                featureWindow(
+                    assetId: "asset-gate-test\u{0}other",
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none
+                )
+            ),
+            (
+                "non-finite geometry",
+                featureWindow(
+                    startTime: .nan,
+                    endTime: 202,
+                    musicBedLevel: .none
+                )
+            ),
+            (
+                "unsupported duration",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 200 + maximumDuration + 1,
+                    musicBedLevel: .none
+                )
+            ),
+            (
+                "undeclared in-range duration",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 203,
+                    musicBedLevel: .none
+                )
+            ),
+            (
+                "non-finite energy",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none,
+                    rms: .nan
+                )
+            ),
+            (
+                "negative flux",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none,
+                    spectralFlux: -0.1
+                )
+            ),
+            (
+                "out-of-domain music probability",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none,
+                    musicProbability: 1.1
+                )
+            ),
+            (
+                "non-finite change score",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none,
+                    speakerChangeProxyScore: .infinity
+                )
+            ),
+            (
+                "negative onset score",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none,
+                    musicBedOnsetScore: -0.1
+                )
+            ),
+            (
+                "out-of-domain pause probability",
+                featureWindow(
+                    startTime: 200,
+                    endTime: 202,
+                    musicBedLevel: .none,
+                    pauseProbability: 1.1
+                )
+            ),
+        ]
+
+        for (label, malformedRow) in malformedRows {
+            #expect(
+                !AutoSkipPrecisionGate.isSustainedAcousticAdSignature(
+                    analysisAssetId: "asset-gate-test",
+                    featureWindows: validMusic + [malformedRow],
+                    segmentStart: 100,
+                    segmentEnd: 160,
+                    minCoverage: 0.20
+                ),
+                "\(label) must invalidate the entire acoustic evidence cohort"
+            )
+        }
+    }
+
+    @Test("homogeneous feature material from a different asset cannot authorize")
+    func acousticCoverageRejectsForeignAssetMaterial() {
+        let foreignMusic = stride(
+            from: 100.0,
+            to: 114.0,
+            by: 2.0
+        ).map {
+            featureWindow(
+                assetId: "asset-foreign",
+                startTime: $0,
+                endTime: $0 + 2,
+                musicBedLevel: .background
+            )
+        }
+        let input = makeInput(
+            analysisAssetId: "asset-gate-test",
+            segmentStartTime: 100,
+            segmentEndTime: 160,
+            segmentScore: 0.9,
+            episodeDuration: 600,
+            overlappingFeatureWindows: foreignMusic
+        )
+
+        #expect(
+            AutoSkipPrecisionGate.classify(input: input)
+                == .uiCandidate(reason: .noSafetySignals)
+        )
+        #expect(
+            !AutoSkipPrecisionGate.collectSafetySignals(for: input)
+                .contains(.sustainedAcousticAdSignature)
+        )
+    }
+
     // MARK: - Boundary / edge-case tests (I2, I4)
 
-    /// I2: zero-duration input must not crash and must classify as
-    /// `uiCandidate(.durationImplausible)` when the score clears the
-    /// auto-skip threshold (score gate passes but duration check rejects).
-    /// We use start == end to enforce duration == 0.
-    @Test("zero-duration window does not crash; classifies as durationImplausible when score clears autoSkipThreshold")
+    /// I2: zero-duration input is malformed decision material, not merely an
+    /// implausible-but-displayable proposal. It must fail closed before score
+    /// or marker admission so no zero-width cue can enter persistence/replay.
+    @Test("zero-duration window does not crash and fails closed")
     func zeroDurationWindowClassification() {
         let input = makeInput(
             segmentStartTime: 100,
@@ -291,8 +633,10 @@ struct AutoSkipPrecisionGateTests {
             lexicalCategories: [.sponsor]
         )
         let result = AutoSkipPrecisionGate.classify(input: input)
-        #expect(result == .uiCandidate(reason: .durationImplausible),
-                "zero-duration window should be demoted to durationImplausible; got \(result)")
+        #expect(
+            result == .detectionOnly,
+            "zero-duration window must be rejected as malformed; got \(result)"
+        )
     }
 
     /// I4: exact boundary — `segmentScore == autoSkipThreshold` (0.55) must
@@ -315,6 +659,149 @@ struct AutoSkipPrecisionGateTests {
         }
     }
 
+    @Test("non-finite decision numerics fail closed")
+    func nonFiniteDecisionNumericsFailClosed() {
+        for input in [
+            makeInput(
+                segmentScore: .nan,
+                lexicalCategories: [.sponsor]
+            ),
+            makeInput(
+                segmentStartTime: .infinity,
+                segmentScore: 0.9,
+                lexicalCategories: [.sponsor]
+            ),
+            makeInput(
+                segmentScore: 0.9,
+                episodeDuration: .nan,
+                lexicalCategories: [.sponsor]
+            ),
+        ] {
+            #expect(
+                AutoSkipPrecisionGate.classify(input: input)
+                    == .detectionOnly
+            )
+        }
+    }
+
+    @Test("out-of-domain score and episode geometry fail closed")
+    func outOfDomainDecisionInputsFailClosed() {
+        for input in [
+            makeInput(
+                segmentScore: 1.01,
+                lexicalCategories: [.sponsor]
+            ),
+            makeInput(
+                segmentStartTime: -30,
+                segmentEndTime: 30,
+                segmentScore: 0.9,
+                lexicalCategories: [.sponsor]
+            ),
+            makeInput(
+                segmentStartTime: 3_570,
+                segmentEndTime: 3_630,
+                segmentScore: 0.9,
+                episodeDuration: 3_600,
+                lexicalCategories: [.sponsor]
+            ),
+            makeInput(
+                segmentStartTime: 160,
+                segmentEndTime: 100,
+                segmentScore: 0.9,
+                lexicalCategories: [.sponsor]
+            ),
+            makeInput(
+                segmentStartTime: 100,
+                segmentEndTime: 100,
+                segmentScore: 0.9,
+                lexicalCategories: [.sponsor]
+            ),
+        ] {
+            #expect(
+                AutoSkipPrecisionGate.classify(input: input)
+                    == .detectionOnly
+            )
+        }
+    }
+
+    @Test("zero-valued acoustic or duration floors cannot create automatic authority")
+    func zeroValuedAuthorityFloorsFailClosed() {
+        let input = makeInput(
+            segmentStartTime: 1_500,
+            segmentEndTime: 1_560,
+            segmentScore: 0.9,
+            episodeDuration: 3_000
+        )
+        let zeroAcousticFloor = AutoSkipPrecisionGateConfig(
+            uiCandidateThreshold: 0.4,
+            autoSkipThreshold: 0.55,
+            typicalAdDuration: 30...90,
+            minMusicBedCoverage: 0,
+            slotFraction: 0.1
+        )
+        #expect(
+            AutoSkipPrecisionGate.classify(
+                input: input,
+                config: zeroAcousticFloor
+            ) == .detectionOnly
+        )
+
+        let zeroDurationFloor = AutoSkipPrecisionGateConfig(
+            uiCandidateThreshold: 0.4,
+            autoSkipThreshold: 0.55,
+            typicalAdDuration: 0...90,
+            minMusicBedCoverage: 0.2,
+            slotFraction: 0.1
+        )
+        let zeroDurationInput = makeInput(
+            segmentStartTime: 100,
+            segmentEndTime: 100,
+            segmentScore: 0.9,
+            lexicalCategories: [.sponsor]
+        )
+        #expect(
+            AutoSkipPrecisionGate.classify(
+                input: zeroDurationInput,
+                config: zeroDurationFloor
+            ) == .detectionOnly
+        )
+    }
+
+    @Test("non-finite optional signals do not fire")
+    func nonFiniteOptionalSignalsDoNotFire() {
+        let input = AutoSkipPrecisionGateInput(
+            analysisAssetId: "asset-gate-test",
+            segmentStartTime: 100,
+            segmentEndTime: 160,
+            segmentScore: 0.9,
+            episodeDuration: 3_600,
+            overlappingFeatureWindows: [],
+            lexicalCategories: [],
+            userCorrectionBoostFactor: .infinity,
+            catalogMatchSimilarity: .infinity
+        )
+        let signals = AutoSkipPrecisionGate.collectSafetySignals(for: input)
+        #expect(!signals.contains(.userConfirmedLocalPattern))
+        #expect(!signals.contains(.catalogMatch))
+    }
+
+    @Test("out-of-domain user-correction boosts fail closed")
+    func outOfDomainUserCorrectionBoostDoesNotAuthorize() {
+        let input = makeInput(
+            segmentStartTime: 1500,
+            segmentEndTime: 1560,
+            segmentScore: 0.90,
+            episodeDuration: 3000,
+            userCorrectionBoostFactor: 2.000_001
+        )
+        let signals = AutoSkipPrecisionGate.collectSafetySignals(for: input)
+        #expect(!signals.contains(.userConfirmedLocalPattern))
+        #expect(
+            AutoSkipPrecisionGate.classify(input: input)
+                == .uiCandidate(reason: .noSafetySignals)
+        )
+    }
+
     @Test("collectSafetySignals returns all firing signals simultaneously")
     func collectSafetySignalsComposite() {
         let features: [FeatureWindow] = stride(from: 0.0, to: 60.0, by: 2.0).map { t in
@@ -335,6 +822,6 @@ struct AutoSkipPrecisionGateTests {
         #expect(signals.contains(.metadataSlotPrior))
         #expect(signals.contains(.userConfirmedLocalPattern))
         #expect(signals.contains(.catalogMatch) == false,
-                "catalogMatch is reserved for gtt9.13; must not fire here")
+                "the default zero score must not claim a catalog match")
     }
 }

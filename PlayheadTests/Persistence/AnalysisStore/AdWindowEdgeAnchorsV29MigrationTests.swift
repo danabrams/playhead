@@ -4,8 +4,9 @@
 // plus the AdWindow insert/fetch round-trip that carries them.
 //
 // Coverage targets:
-//   1. Fresh-DB migrate() reaches head (v29) with both columns present.
-//   2. `currentSchemaVersion` is exactly 29 (drift guard).
+//   1. Fresh-DB migrate() reaches the current schema head with both columns
+//      present.
+//   2. `currentSchemaVersion` includes V29 and all later migrations.
 //   3. A v28-shaped `ad_windows` (no anchor columns) upgrades in place: the
 //      columns are added, an existing pre-hdgk row survives with its other
 //      fields intact and its anchors defaulted to 'unanchored' (no data loss).
@@ -58,7 +59,7 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         // Drift guard: head moved 29 → 30 (playhead-gy2s analysis_jobs
         // reject-advisory columns) → 31 (playhead-b6jq specialist_scan_results);
         // the edge-anchor columns probed below are unchanged.
-        #expect(AnalysisStore.currentSchemaVersion == 34)
+        #expect(AnalysisStore.currentSchemaVersion == 36)
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }

@@ -41,9 +41,8 @@
 // Scope guardrails
 // ----------------
 // This file MUST NOT:
-//   - invent new safety signals. gtt9.12 (acoustic refinement) and
-//     gtt9.13 (catalog/fingerprint) will introduce richer ones. This file
-//     consumes signals that already exist in the codebase today.
+//   - invent uncalibrated safety signals. This file consumes signals supplied
+//     by existing lexical, acoustic, correction, metadata, and catalog layers.
 //   - calibrate thresholds on real data. gtt9.3 owns calibration. The
 //     starting values (uiCandidate=0.40, autoSkip=0.55) are documented in
 //     `AdDetectionConfig` and are NOT re-tuned here.
@@ -60,18 +59,21 @@
 //   • sustainedAcousticAdSignature   ← FeatureWindow.musicBedLevel
 //   • metadataSlotPrior              ← segment position / episodeDuration
 //   • userConfirmedLocalPattern      ← UserCorrectionStore.correctionBoostFactor
-//   • catalogMatch                   ← reserved; wired by gtt9.13, not here
+//   • catalogMatch                   ← version-compatible AdCatalogStore match
 //
-// All five are available in the pipeline TODAY without changes to their
-// source modules.
+// Catalog evidence is diagnostic-only: it is returned in the fired-signal set
+// for observability, but cannot be the decision-bearing signal that admits an
+// automatic skip. The other four signals are available as independent
+// corroborators in the pipeline today.
 
 import Foundation
 
 // MARK: - SafetySignal
 
 /// One of the safety signals that a high-score segment can exhibit. Any
-/// non-empty set of these signals (per-segment) admits the segment to the
-/// auto-skip path, provided the confidence and duration gates also pass.
+/// non-catalog signal can admit the segment to the auto-skip path, provided
+/// the confidence and duration gates also pass. `.catalogMatch` remains in the
+/// set only as diagnostic context and never supplies automatic authority.
 ///
 /// Conservative composition: each signal is independently produced by a
 /// different pipeline layer, so one firing is strong corroboration that
@@ -102,10 +104,9 @@ enum SafetySignal: String, Sendable, Hashable, CaseIterable {
     /// engaged with ads on this episode before" signal.
     case userConfirmedLocalPattern
 
-    /// Reserved for gtt9.13: AdCopyFingerprintMatcher catalog match. NOT
-    /// produced by this gate today. Included in the enum so gtt9.13 can
-    /// add its emission without an enum churn that would force re-testing
-    /// unrelated call sites.
+    /// A version-compatible, exact-show AdCatalogStore match at or above the
+    /// calibrated catalog floor. The service layer still requires a strong
+    /// non-catalog corroborator before automatic admission.
     case catalogMatch
 }
 
@@ -123,8 +124,9 @@ enum AutoSkipClassification: Sendable, Equatable {
     /// `eligibilityGate = "markOnly"`.
     case uiCandidate(reason: MarkOnlyReason)
 
-    /// Score ≥ `autoSkipThreshold`, duration plausible, and ≥1 safety
-    /// signal fired. Caller persists an AdWindow with
+    /// Score ≥ `autoSkipThreshold`, duration plausible, and ≥1
+    /// decision-bearing (non-catalog) safety signal fired. Caller persists an
+    /// AdWindow with
     /// `eligibilityGate = "autoSkip"` (the literal raw value emitted by
     /// `AdDetectionService.precisionGateLabel`, NOT a
     /// `SkipEligibilityGate` enum case); the orchestrator may auto-skip.
@@ -196,22 +198,22 @@ struct AutoSkipPrecisionGateConfig: Sendable, Equatable {
     /// or last 10% of the episode."
     let slotFraction: Double
 
-    /// playhead-gtt9.13: Minimum `catalogMatchSimilarity` to fire
-    /// `SafetySignal.catalogMatch`. 0.80 matches the default floor used
-    /// by `AdCatalogStore.matches(...)` but is configurable here so
-    /// calibration (gtt9.3) can tune gate sensitivity independently of
-    /// the store's retrieval threshold.
+    /// playhead-gtt9.13 / playhead-o4qr: Minimum compatible
+    /// `catalogMatchSimilarity` to fire `SafetySignal.catalogMatch`. It
+    /// defaults to the empirically calibrated catalog admission floor and is
+    /// independently configurable for controlled gate experiments.
     let catalogMatchSignalFloor: Float
 
-    /// Canonical defaults. Not tuned on real data — gtt9.3 will
-    /// calibrate.
+    /// Canonical defaults. The classifier thresholds retain their existing
+    /// values; the catalog signal floor is calibrated separately against the
+    /// committed device fixture.
     static let `default` = AutoSkipPrecisionGateConfig(
         uiCandidateThreshold: 0.40,
         autoSkipThreshold: 0.55,
         typicalAdDuration: GlobalPriorDefaults.standard.typicalAdDuration,
         minMusicBedCoverage: 0.20,
         slotFraction: 0.10,
-        catalogMatchSignalFloor: 0.80
+        catalogMatchSignalFloor: AdCatalogStore.defaultSimilarityFloor
     )
 
     init(
@@ -220,7 +222,7 @@ struct AutoSkipPrecisionGateConfig: Sendable, Equatable {
         typicalAdDuration: ClosedRange<TimeInterval>,
         minMusicBedCoverage: Double,
         slotFraction: Double,
-        catalogMatchSignalFloor: Float = 0.80
+        catalogMatchSignalFloor: Float = AdCatalogStore.defaultSimilarityFloor
     ) {
         self.uiCandidateThreshold = uiCandidateThreshold
         self.autoSkipThreshold = autoSkipThreshold
@@ -237,6 +239,9 @@ struct AutoSkipPrecisionGateConfig: Sendable, Equatable {
 /// safety signals. Callers on the aggregator path and the single-window
 /// path both build one of these; the gate is path-agnostic.
 struct AutoSkipPrecisionGateInput: Sendable {
+    /// Exact analysis asset that owns both the segment and every acoustic
+    /// feature row supplied below.
+    let analysisAssetId: String
     let segmentStartTime: Double
     let segmentEndTime: Double
     /// The score that drives the threshold comparison. For aggregator
@@ -264,6 +269,7 @@ struct AutoSkipPrecisionGateInput: Sendable {
     let catalogMatchSimilarity: Float
 
     init(
+        analysisAssetId: String,
         segmentStartTime: Double,
         segmentEndTime: Double,
         segmentScore: Double,
@@ -273,6 +279,7 @@ struct AutoSkipPrecisionGateInput: Sendable {
         userCorrectionBoostFactor: Double,
         catalogMatchSimilarity: Float = 0
     ) {
+        self.analysisAssetId = analysisAssetId
         self.segmentStartTime = segmentStartTime
         self.segmentEndTime = segmentEndTime
         self.segmentScore = segmentScore
@@ -301,6 +308,37 @@ enum AutoSkipPrecisionGate {
         input: AutoSkipPrecisionGateInput,
         config: AutoSkipPrecisionGateConfig = .default
     ) -> AutoSkipClassification {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(
+                  input.analysisAssetId
+              ) != nil,
+              input.segmentStartTime.isFinite,
+              input.segmentEndTime.isFinite,
+              input.segmentScore.isFinite,
+              input.episodeDuration.isFinite,
+              input.segmentStartTime >= 0,
+              input.segmentEndTime > input.segmentStartTime,
+              input.episodeDuration >= 0,
+              input.episodeDuration == 0
+                || input.segmentEndTime <= input.episodeDuration,
+              (0...1).contains(input.segmentScore),
+              config.uiCandidateThreshold.isFinite,
+              config.autoSkipThreshold.isFinite,
+              config.typicalAdDuration.lowerBound.isFinite,
+              config.typicalAdDuration.upperBound.isFinite,
+              config.minMusicBedCoverage.isFinite,
+              config.slotFraction.isFinite,
+              config.catalogMatchSignalFloor.isFinite,
+              (0...1).contains(config.uiCandidateThreshold),
+              (0...1).contains(config.autoSkipThreshold),
+              config.uiCandidateThreshold <= config.autoSkipThreshold,
+              config.typicalAdDuration.lowerBound > 0,
+              config.minMusicBedCoverage > 0,
+              config.minMusicBedCoverage <= 1,
+              config.slotFraction > 0,
+              config.slotFraction <= 0.5,
+              (0...1).contains(config.catalogMatchSignalFloor) else {
+            return .detectionOnly
+        }
         // Layer 1: detection-only gate.
         if input.segmentScore < config.uiCandidateThreshold {
             return .detectionOnly
@@ -318,9 +356,12 @@ enum AutoSkipPrecisionGate {
             return .uiCandidate(reason: .durationImplausible)
         }
 
-        // Layer 4: safety-signal conjunction.
+        // Layer 4: safety-signal conjunction. Learned catalog evidence is
+        // diagnostic-only, so it is preserved in the returned signal set but
+        // removed when deciding whether any independent corroborator fired.
         let signals = collectSafetySignals(for: input, config: config)
-        if signals.isEmpty {
+        let decisionBearingSignals = signals.subtracting([.catalogMatch])
+        if decisionBearingSignals.isEmpty {
             return .uiCandidate(reason: .noSafetySignals)
         }
 
@@ -341,6 +382,7 @@ enum AutoSkipPrecisionGate {
         }
 
         if isSustainedAcousticAdSignature(
+            analysisAssetId: input.analysisAssetId,
             featureWindows: input.overlappingFeatureWindows,
             segmentStart: input.segmentStartTime,
             segmentEnd: input.segmentEndTime,
@@ -357,12 +399,16 @@ enum AutoSkipPrecisionGate {
             fired.insert(.metadataSlotPrior)
         }
 
-        if input.userCorrectionBoostFactor > 1.0 {
+        if input.userCorrectionBoostFactor.isFinite,
+           input.userCorrectionBoostFactor > 1.0,
+           input.userCorrectionBoostFactor <= 2.0 {
             fired.insert(.userConfirmedLocalPattern)
         }
 
         // playhead-gtt9.13: catalog-match signal.
-        if input.catalogMatchSimilarity >= config.catalogMatchSignalFloor {
+        if input.catalogMatchSimilarity.isFinite,
+           (0...1).contains(input.catalogMatchSimilarity),
+           input.catalogMatchSimilarity >= config.catalogMatchSignalFloor {
             fired.insert(.catalogMatch)
         }
 
@@ -391,27 +437,111 @@ enum AutoSkipPrecisionGate {
     /// boundaries: counts only the intersected extent, not the full
     /// feature-window span.
     static func isSustainedAcousticAdSignature(
+        analysisAssetId: String,
         featureWindows: [FeatureWindow],
         segmentStart: Double,
         segmentEnd: Double,
         minCoverage: Double
     ) -> Bool {
-        let segmentDuration = max(0, segmentEnd - segmentStart)
-        guard segmentDuration > 0 else { return false }
-
-        var musicSeconds: Double = 0
-        for fw in featureWindows {
+        guard segmentStart.isFinite,
+              segmentEnd.isFinite,
+              minCoverage.isFinite,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  analysisAssetId
+              ) != nil,
+              segmentStart >= 0,
+              segmentEnd > segmentStart,
+              minCoverage > 0,
+              minCoverage <= 1 else {
+            return false
+        }
+        let segmentDuration = segmentEnd - segmentStart
+        guard !featureWindows.isEmpty,
+              featureWindows.allSatisfy({ window in
+                  window.analysisAssetId == analysisAssetId
+                      && window.featureVersion
+                        == FeatureExtractionConfig.default.featureVersion
+                      && window.startTime.isFinite
+                      && window.endTime.isFinite
+                      && window.startTime >= 0
+                      && window.endTime > window.startTime
+                      && MusicDetectionConfig.supportedWindowDurations
+                          .contains { duration in
+                              abs(
+                                  (window.endTime - window.startTime)
+                                      - duration
+                              ) <= 0.001
+                          }
+                      && [window.rms, window.spectralFlux].allSatisfy {
+                          $0.isFinite && $0 >= 0
+                      }
+                      && [
+                          window.musicProbability,
+                          window.speakerChangeProxyScore,
+                          window.musicBedChangeScore,
+                          window.musicBedOnsetScore,
+                          window.musicBedOffsetScore,
+                          window.pauseProbability,
+                      ].allSatisfy {
+                          $0.isFinite && (0...1).contains($0)
+                      }
+              }) else {
+            return false
+        }
+        let featureIntervals = featureWindows
+            .map { (start: $0.startTime, end: $0.endTime) }
+            .sorted {
+                if $0.start != $1.start {
+                    return $0.start < $1.start
+                }
+                return $0.end < $1.end
+            }
+        guard zip(
+            featureIntervals,
+            featureIntervals.dropFirst()
+        ).allSatisfy({ pair in
+            pair.0.end <= pair.1.start
+        }) else {
+            // Production extraction emits a non-overlapping cohort. Duplicate
+            // or overlapping persisted rows are malformed material, not
+            // additional acoustic observations, and must not mint independent
+            // automatic authority.
+            return false
+        }
+        let musicIntervals = featureWindows.compactMap {
+            fw -> (start: Double, end: Double)? in
             switch fw.musicBedLevel {
             case .background, .foreground:
                 let lo = max(fw.startTime, segmentStart)
                 let hi = min(fw.endTime, segmentEnd)
-                if hi > lo {
-                    musicSeconds += (hi - lo)
-                }
+                return hi > lo ? (lo, hi) : nil
             case .none:
-                break
+                return nil
             }
         }
+        .sorted {
+            if $0.start != $1.start {
+                return $0.start < $1.start
+            }
+            return $0.end < $1.end
+        }
+        guard let first = musicIntervals.first else { return false }
+
+        // Clip at the segment edges and measure wall time. The interval union
+        // remains defensive against future changes to the cohort contract.
+        var musicSeconds: Double = 0
+        var currentStart = first.start
+        var currentEnd = first.end
+        for interval in musicIntervals.dropFirst() {
+            if interval.start <= currentEnd {
+                currentEnd = max(currentEnd, interval.end)
+            } else {
+                musicSeconds += currentEnd - currentStart
+                currentStart = interval.start
+                currentEnd = interval.end
+            }
+        }
+        musicSeconds += currentEnd - currentStart
 
         return (musicSeconds / segmentDuration) >= minCoverage
     }
@@ -426,7 +556,12 @@ enum AutoSkipPrecisionGate {
         episodeDuration: Double,
         slotFraction: Double
     ) -> Bool {
-        guard episodeDuration > 0,
+        guard segmentCenter.isFinite,
+              episodeDuration.isFinite,
+              slotFraction.isFinite,
+              episodeDuration > 0,
+              segmentCenter >= 0,
+              segmentCenter <= episodeDuration,
               slotFraction > 0,
               slotFraction <= 0.5
         else { return false }

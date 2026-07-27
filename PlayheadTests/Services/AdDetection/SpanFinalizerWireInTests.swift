@@ -83,6 +83,252 @@ struct SpanFinalizerWireInTests {
         #expect(omitted.spanFinalizerEnabled == false, "init default must match .default")
     }
 
+    @Test("finalized geometry re-resolves catalog evidence and removes a stale fingerprint row")
+    func finalizedGeometryRefreshesCatalogEvidence() async throws {
+        let assetId = "asset-p56a-catalog-refresh"
+        let showId = "show-p56a-catalog-refresh"
+        let originalSpan = DecodedSpan(
+            id: "span-p56a-catalog-refresh",
+            assetId: assetId,
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 9,
+            startTime: 0,
+            endTime: 20,
+            anchorProvenance: []
+        )
+        let rewrittenSpan = DecodedSpan(
+            id: originalSpan.id,
+            assetId: assetId,
+            firstAtomOrdinal: originalSpan.firstAtomOrdinal,
+            lastAtomOrdinal: originalSpan.lastAtomOrdinal,
+            startTime: 40,
+            endTime: 60,
+            anchorProvenance: []
+        )
+        let features = (0..<10).map { index in
+            FeatureWindow(
+                analysisAssetId: assetId,
+                startTime: Double(index) * 2,
+                endTime: Double(index + 1) * 2,
+                rms: 0.35 + Double(index) * 0.02,
+                spectralFlux: 0.10 + Double(index) * 0.01,
+                musicProbability: 0.05,
+                musicBedLevel: .none,
+                pauseProbability: 0.05,
+                speakerClusterId: index % 2,
+                jingleHash: nil,
+                featureVersion: 5
+            )
+        }
+        let fingerprint = AcousticFingerprint.fromFeatureWindows(features)
+        try #require(!fingerprint.isZero)
+        let catalog = try AdCatalogStore(
+            directoryURL: makeTempDir(prefix: "p56a-catalog-refresh")
+        )
+        _ = try await catalog.insert(
+            showId: showId,
+            episodePosition: .unknown,
+            durationSec: 20,
+            acousticFingerprint: fingerprint,
+            transcriptSnippet: nil,
+            sponsorTokens: nil,
+            originalConfidence: 0.95,
+            learningSource: .userMarkedAd,
+            learningLifecycle: .explicitConfirmation,
+            sourceAssetId: assetId,
+            sourceWindowId: "seed-p56a",
+            sourceStartTime: 0,
+            sourceEndTime: 20
+        )
+
+        let originalEvidence =
+            await AdDetectionService.resolveCatalogSpanEvidence(
+                span: originalSpan,
+                featureWindows: features,
+                catalogStore: catalog,
+                showId: showId
+            )
+        try #require(originalEvidence.wasEvaluated)
+        try #require(originalEvidence.topMatch != nil)
+        #expect(
+            originalEvidence.topSimilarity
+                >= AdCatalogStore.defaultSimilarityFloor
+        )
+
+        let transcriptCatalog = EvidenceLedgerEntry(
+            source: .catalog,
+            weight: 0.05,
+            detail: .catalog(entryCount: 2),
+            subSource: .transcriptCatalog
+        )
+        let withFreshMatch =
+            AdDetectionService.replacingFingerprintStoreCatalogEvidence(
+                in: [transcriptCatalog],
+                with: originalEvidence,
+                catalogCap: FusionWeightConfig().catalogCap
+            )
+        #expect(
+            withFreshMatch.filter {
+                $0.source == .catalog
+                    && $0.subSource == .fingerprintStore
+            }.count == 1
+        )
+
+        let rewrittenEvidence =
+            await AdDetectionService.resolveCatalogSpanEvidence(
+                span: rewrittenSpan,
+                featureWindows: features,
+                catalogStore: catalog,
+                showId: showId
+            )
+        #expect(!rewrittenEvidence.wasEvaluated)
+        #expect(rewrittenEvidence.topSimilarity == 0)
+        #expect(rewrittenEvidence.topMatch == nil)
+
+        let withoutStaleMatch =
+            AdDetectionService.replacingFingerprintStoreCatalogEvidence(
+                in: withFreshMatch,
+                with: rewrittenEvidence,
+                catalogCap: FusionWeightConfig().catalogCap
+            )
+        #expect(withoutStaleMatch.count == 1)
+        #expect(withoutStaleMatch[0].subSource == .transcriptCatalog)
+    }
+
+    @Test(
+        "catalog span resolution uses the persistence-reproducible feature population"
+    )
+    func catalogResolutionExcludesEdgeStraddlingFeatures() async throws {
+        let assetId = "asset-p56a-catalog-edge-population"
+        let showId = "show-p56a-catalog-edge-population"
+        let span = DecodedSpan(
+            id: "span-p56a-catalog-edge-population",
+            assetId: assetId,
+            firstAtomOrdinal: 0,
+            lastAtomOrdinal: 1,
+            startTime: 1,
+            endTime: 5,
+            anchorProvenance: []
+        )
+        func feature(
+            start: Double,
+            end: Double,
+            high: Bool
+        ) -> FeatureWindow {
+            FeatureWindow(
+                analysisAssetId: assetId,
+                startTime: start,
+                endTime: end,
+                rms: high ? 0.92 : 0.02,
+                spectralFlux: high ? 0.86 : 0.01,
+                musicProbability: high ? 0.94 : 0.01,
+                speakerChangeProxyScore: high ? 0.88 : 0.01,
+                musicBedChangeScore: high ? 0.84 : 0,
+                musicBedOnsetScore: high ? 0.82 : 0,
+                musicBedOffsetScore: high ? 0.80 : 0,
+                musicBedLevel: high ? .foreground : .none,
+                pauseProbability: high ? 0.03 : 0.95,
+                speakerClusterId: high ? 7 : 1,
+                jingleHash: nil,
+                featureVersion: 5
+            )
+        }
+        let contained = [
+            feature(start: 2, end: 3, high: true),
+            feature(start: 3, end: 4, high: true),
+        ]
+        let allFeatures = [
+            feature(start: 0, end: 2, high: false),
+            contained[0],
+            contained[1],
+            feature(start: 4, end: 6, high: false),
+        ]
+        let learnedFingerprint =
+            AcousticFingerprint.fromFeatureWindows(contained)
+        let contaminatedFingerprint =
+            AcousticFingerprint.fromFeatureWindows(allFeatures)
+        try #require(!learnedFingerprint.isZero)
+        try #require(
+            AcousticFingerprint.similarity(
+                learnedFingerprint,
+                contaminatedFingerprint
+            ) < AdCatalogStore.defaultSimilarityFloor,
+            "fixture must fail if edge-straddling rows contaminate the span"
+        )
+
+        let catalog = try AdCatalogStore(
+            directoryURL: makeTempDir(
+                prefix: "p56a-catalog-edge-population"
+            )
+        )
+        _ = try await catalog.insert(
+            showId: showId,
+            episodePosition: .unknown,
+            durationSec: span.duration,
+            acousticFingerprint: learnedFingerprint,
+            originalConfidence: 0.99,
+            learningSource: .userMarkedAd,
+            learningLifecycle: .explicitConfirmation,
+            sourceAssetId: "seed-asset",
+            sourceWindowId: "seed-window",
+            sourceStartTime: span.startTime,
+            sourceEndTime: span.endTime
+        )
+
+        let resolved =
+            await AdDetectionService.resolveCatalogSpanEvidence(
+                span: span,
+                featureWindows: allFeatures,
+                catalogStore: catalog,
+                showId: showId
+            )
+
+        #expect(resolved.wasEvaluated)
+        #expect(resolved.topMatch != nil)
+        #expect(
+            resolved.topSimilarity
+                >= AdCatalogStore.defaultSimilarityFloor
+        )
+
+        let mismatchedAssetSpan = DecodedSpan(
+            id: "span-p56a-catalog-wrong-asset",
+            assetId: "different-asset",
+            firstAtomOrdinal: span.firstAtomOrdinal,
+            lastAtomOrdinal: span.lastAtomOrdinal,
+            startTime: span.startTime,
+            endTime: span.endTime,
+            anchorProvenance: []
+        )
+        let mismatchedAssetEvidence =
+            await AdDetectionService.resolveCatalogSpanEvidence(
+                span: mismatchedAssetSpan,
+                featureWindows: allFeatures,
+                catalogStore: catalog,
+                showId: showId
+            )
+        #expect(!mismatchedAssetEvidence.wasEvaluated)
+        #expect(mismatchedAssetEvidence.topMatch == nil)
+
+        let invalidGeometrySpan = DecodedSpan(
+            id: "span-p56a-catalog-invalid-geometry",
+            assetId: assetId,
+            firstAtomOrdinal: span.firstAtomOrdinal,
+            lastAtomOrdinal: span.lastAtomOrdinal,
+            startTime: contained[0].startTime,
+            endTime: .infinity,
+            anchorProvenance: []
+        )
+        let invalidGeometryEvidence =
+            await AdDetectionService.resolveCatalogSpanEvidence(
+                span: invalidGeometrySpan,
+                featureWindows: contained,
+                catalogStore: catalog,
+                showId: showId
+            )
+        #expect(!invalidGeometryEvidence.wasEvaluated)
+        #expect(invalidGeometryEvidence.topMatch == nil)
+    }
+
     // MARK: - (b) Flag-OFF byte-identity
 
     /// Replicates the `BackfillFusionPipelineTests` ad-signal chunks shape
@@ -431,12 +677,9 @@ struct SpanFinalizerWireInTests {
 
     /// playhead-p56a R2 review: pins the SpanFinalizer split-path contract
     /// that the wire-in inherits when a >180s candidate is split into two
-    /// halves. Both halves carry the SAME `DecodedSpan.id` (split-span
-    /// preserves the parent id), and BOTH carry the `splitAboveMaxDuration`
-    /// constraint in their individual `constraintTrace`. The wire-in's
-    /// rebuild loop appends BOTH to `pendingDecisions` and concatenates
-    /// the two halves' constraint traces into a single
-    /// `lastSpanFinalizerConstraintsBySpanId[parentId]` entry.
+    /// halves. Both retain the parent as `sourceSpanId`, receive distinct,
+    /// deterministic emitted span/window identities, and carry the
+    /// `splitAboveMaxDuration` constraint independently.
     ///
     /// Why this test exists: R1 deferred Finding #6 ("split path not
     /// exercised in fast-tests") on the rationale that the >180s path is
@@ -447,13 +690,13 @@ struct SpanFinalizerWireInTests {
     /// depends on (append, not replace) so any future SpanFinalizer
     /// refactor that broke the id-preserving split would surface here
     /// before landing on a real episode.
-    @Test("SpanFinalizer split: >180s candidate produces two finalized spans sharing the parent id, each tagged splitAboveMaxDuration")
-    func spanFinalizerSplitPreservesParentIdAndTagsBothHalves() {
+    @Test("SpanFinalizer split: >180s candidate produces stable collision-free child identities")
+    func spanFinalizerSplitMintsStableChildIdentities() {
         // Single candidate spanning 0..220s — above the 180s
         // `DecoderConstants.maxDurationSeconds` ceiling. Expect: two
         // finalized spans at [0, 180] and [180, 220], both with
-        // `span.id == originalId`, both with `.splitAboveMaxDuration` in
-        // their individual traces.
+        // distinct emitted ids, both with `.splitAboveMaxDuration` in their
+        // individual traces.
         let assetId = "asset-p56a-split"
         let originalId = DecodedSpan.makeId(
             assetId: assetId,
@@ -490,20 +733,27 @@ struct SpanFinalizerWireInTests {
 
         // Two finalized halves.
         #expect(result.count == 2, "expected split into 2 halves; got \(result.count)")
-        // Both halves share the parent id (this is the contract the
-        // wire-in's `pendingByOriginalId` lookup depends on).
-        #expect(result[0].span.id == originalId, "first half must inherit parent id")
-        #expect(result[1].span.id == originalId, "second half must inherit parent id")
+        #expect(result[0].sourceSpanId == originalId)
+        #expect(result[1].sourceSpanId == originalId)
+        #expect(result[0].span.id != result[1].span.id)
+        #expect(result[0].span.id == "\(originalId)#split-0")
+        #expect(
+            result[1].span.id == originalId,
+            "the historically persisted final child retains the legacy id"
+        )
         // Bounds: [0, 180] and [180, 220].
         #expect(result[0].span.startTime == 0.0)
         #expect(result[0].span.endTime == 180.0)
         #expect(result[1].span.startTime == 180.0)
         #expect(result[1].span.endTime == 220.0)
-        // Each half independently carries the split constraint in its
-        // own `constraintTrace` — confirming the wire-in's
-        // `traceById[id] = traceById[id] + new` accumulation will
-        // concatenate two `.splitAboveMaxDuration` entries on the
-        // shared parent-id key.
+        #expect(
+            result[0].decision.eligibilityGate == .markOnly
+                && result[1].decision.eligibilityGate == .markOnly,
+            "split children are new exact material and must not inherit automatic eligibility"
+        )
+        // Each half independently carries the split constraint in its own
+        // trace and maps to a distinct durable fusion identity despite
+        // retaining identical source atom ordinals.
         #expect(
             result[0].constraintTrace.contains(.splitAboveMaxDuration),
             "first half missing splitAboveMaxDuration; got \(result[0].constraintTrace)"
@@ -516,37 +766,50 @@ struct SpanFinalizerWireInTests {
         // .unknown)` translation the wire-in uses).
         #expect(result[0].constraintTrace.contains(.policyOverrideApplied))
         #expect(result[1].constraintTrace.contains(.policyOverrideApplied))
+
+        let fusionIDs = result.map {
+            BackfillJobRunner.makeFusionWindowId(
+                analysisAssetId: assetId,
+                detectorVersion: "detector-v1",
+                spanStartOrdinal: $0.span.firstAtomOrdinal,
+                spanEndOrdinal: $0.span.lastAtomOrdinal,
+                splitDiscriminator:
+                    $0.span.id == $0.sourceSpanId ? nil : $0.span.id
+            )
+        }
+        #expect(Set(fusionIDs).count == result.count)
+        #expect(
+            fusionIDs.last
+                == BackfillJobRunner.makeFusionWindowId(
+                    analysisAssetId: assetId,
+                    detectorVersion: "detector-v1",
+                    spanStartOrdinal:
+                        result[result.count - 1].span.firstAtomOrdinal,
+                    spanEndOrdinal:
+                        result[result.count - 1].span.lastAtomOrdinal
+                ),
+            "the final child must remain fenced by the deployed legacy ID"
+        )
+
+        let rerun = finalizer.finalize(candidates)
+        #expect(rerun.map(\.span.id) == result.map(\.span.id))
     }
 
-    /// playhead-p56a R2 review: pins the documented LIMITATION of the
-    /// wire-in's merge path — when constraint #2 (`mergedWithAdjacent`)
-    /// collapses two pending records into a single finalized span, the
-    /// merged-away record's `ledger`, `effectiveLedger`, `spanFingerprint`,
-    /// `spanFeatureWindows`, and `spanTopCatalogSimilarity` context is
-    /// dropped, because the rebuild loop keys by `pendingByOriginalId[
-    /// span.span.id]` and the surviving WorkingSpan carries only the
-    /// earlier `prev.spanId`. This test does not assert a fix — fixing
-    /// requires a merge-context policy decision (union the ledgers? take
-    /// the higher-confidence side's fingerprint?) outside the p56a wire-
-    /// in scope. Instead, it locks the contract so the OFF default's
-    /// byte-identity is preserved (no merge fires when the flag is off)
-    /// and surfaces the data-loss expectation for the downstream
-    /// bd-4xqf measurement run.
+    /// When constraint #2 (`mergedWithAdjacent`) collapses two pending records,
+    /// the emitted span keeps the earlier identity for terminal/correction
+    /// fences while `sourceSpanIds` retains the complete ordered cohort. The
+    /// wire-in uses that cohort to combine both non-catalog evidence ledgers and
+    /// re-fingerprints acoustic-catalog evidence over the finalized geometry.
     ///
     /// This is paired with `flagOnDoesNotRegressOnCleanFixture` — that
     /// test asserts `countOn <= countOff` (so a merge correctly REDUCES
     /// the row count); this test asserts that the surviving row carries
     /// `prev`'s id, not `curr`'s.
-    @Test("SpanFinalizer merge: surviving finalized span inherits the FIRST candidate's id; SECOND candidate's id is absent from output")
-    func spanFinalizerMergeKeepsFirstCandidateIdAndDropsSecond() {
+    @Test("SpanFinalizer merge keeps the fenced output id and audits both source ids")
+    func spanFinalizerMergeKeepsFencedIdentityAndCompleteSourceCohort() {
         // Same shape as `wireInTranslationTripsMergeConstraint` but with
-        // a stronger contract: the surviving span carries `prev.id`, not
-        // `curr.id`. This is the basis of the merge-data-loss limitation
-        // the wire-in's rebuild loop inherits — `pendingByOriginalId[
-        // curr.id]` is never referenced, so `curr`'s ledger/fingerprint/
-        // feature-window context is dropped from emission. Downstream
-        // bd-4xqf measurement should account for this when comparing
-        // ON-arm catalog/repeated-ad-cache rows against the OFF baseline.
+        // the complete identity contract: the surviving output carries
+        // `prev.id`, not `curr.id`, while the source cohort carries both.
         let assetId = "asset-p56a-merge-id"
         let firstId = DecodedSpan.makeId(
             assetId: assetId,
@@ -605,16 +868,19 @@ struct SpanFinalizerWireInTests {
 
         // One survivor.
         #expect(result.count == 1, "expected merge to one survivor; got \(result.count)")
-        // Survivor carries `prev.id`, not `curr.id` — this is the
-        // contract the wire-in's `pendingByOriginalId[span.span.id]`
-        // lookup depends on (resolves to `prev`'s pending record).
+        // Survivor carries `prev.id`, not `curr.id`, preserving deployed
+        // terminal/correction fences.
         #expect(
             result[0].span.id == firstId,
             "merge survivor must inherit first candidate's id (got \(result[0].span.id))"
         )
         #expect(
             result[0].span.id != secondId,
-            "merge survivor must NOT inherit second candidate's id — would corrupt `pendingByOriginalId` lookup"
+            "merge survivor must not replace the deployed first identity"
+        )
+        #expect(
+            result[0].sourceSpanIds == [firstId, secondId],
+            "wire-in must be able to recover both pending evidence ledgers"
         )
     }
 }

@@ -59,7 +59,8 @@ struct SkipOrchestratorBlockedGateGuardTests {
         id: String,
         gateRaw: String,
         startTime: Double = 60,
-        endTime: Double = 120
+        endTime: Double = 120,
+        decisionState: String = AdDecisionState.confirmed.rawValue
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -68,7 +69,7 @@ struct SkipOrchestratorBlockedGateGuardTests {
             endTime: endTime,
             confidence: 0.85,
             boundaryState: "acousticRefined",
-            decisionState: "confirmed",
+            decisionState: decisionState,
             detectorVersion: "fusion-v1",
             advertiser: nil,
             product: nil,
@@ -201,6 +202,99 @@ struct SkipOrchestratorBlockedGateGuardTests {
             appliedOrConfirmed.isEmpty,
             "[\(gateRaw)] blocked-gate window must NOT produce applied/confirmed decisions; got \(appliedOrConfirmed)"
         )
+    }
+
+    @Test(
+        "malformed eligibilityGate revisions fail closed and disarm the same ID",
+        arguments: [
+            (label: "empty", gateRaw: ""),
+            (label: "unknown", gateRaw: "futureGateName"),
+            (label: "padded-legacy-literal", gateRaw: " autoSkip "),
+        ]
+    )
+    func malformedGateRevisionFailsClosed(
+        label: String,
+        gateRaw: String
+    ) async throws {
+        #expect(SkipEligibilityGate(rawValue: gateRaw) == nil)
+        #expect(gateRaw != "autoSkip")
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let windowId = "ad-malformed-\(label)"
+        let valid = makeBlockedGateAdWindow(
+            id: windowId,
+            gateRaw: SkipEligibilityGate.eligible.rawValue
+        )
+        await orchestrator.receiveAdWindows([valid])
+        let activeBefore = await orchestrator.activeWindowIDs()
+        #expect(
+            activeBefore.contains(windowId),
+            "precondition: valid material must be active"
+        )
+
+        let malformed = makeBlockedGateAdWindow(
+            id: windowId,
+            gateRaw: gateRaw
+        )
+        await orchestrator.receiveAdWindows([malformed])
+
+        let activeAfter = await orchestrator.activeWindowIDs()
+        let suggestedAfter = await orchestrator.activeSuggestWindowIDs()
+        let confirmedAfter = await orchestrator.confirmedWindows()
+        #expect(!activeAfter.contains(windowId))
+        #expect(!suggestedAfter.contains(windowId))
+        #expect(!confirmedAfter.contains { $0.id == windowId })
+    }
+
+    @Test(
+        "malformed decisionState revisions fail closed and disarm the same ID",
+        arguments: ["", "futureDecisionState"]
+    )
+    func malformedDecisionStateRevisionFailsClosed(
+        decisionState: String
+    ) async throws {
+        #expect(SkipDecisionState(rawValue: decisionState) == nil)
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let windowId = "ad-malformed-decision-\(decisionState.isEmpty ? "empty" : "unknown")"
+        let valid = makeBlockedGateAdWindow(
+            id: windowId,
+            gateRaw: SkipEligibilityGate.eligible.rawValue
+        )
+        await orchestrator.receiveAdWindows([valid])
+        let activeBefore = await orchestrator.activeWindowIDs()
+        #expect(
+            activeBefore.contains(windowId),
+            "precondition: valid material must be active"
+        )
+
+        let malformed = makeBlockedGateAdWindow(
+            id: windowId,
+            gateRaw: SkipEligibilityGate.eligible.rawValue,
+            decisionState: decisionState
+        )
+        await orchestrator.receiveAdWindows([malformed])
+
+        let activeAfter = await orchestrator.activeWindowIDs()
+        let suggestedAfter = await orchestrator.activeSuggestWindowIDs()
+        #expect(!activeAfter.contains(windowId))
+        #expect(!suggestedAfter.contains(windowId))
     }
 
     /// Negative control: the canonical eligible enum case MUST flow

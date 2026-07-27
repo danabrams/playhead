@@ -60,7 +60,12 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         )
     }
 
-    private func makeAdWindow(id: String, assetId: String, startTime: Double) -> AdWindow {
+    private func makeAdWindow(
+        id: String,
+        assetId: String,
+        startTime: Double,
+        catalogMatchedShowId: String? = nil
+    ) -> AdWindow {
         AdWindow(
             id: id,
             analysisAssetId: assetId,
@@ -79,11 +84,15 @@ struct AdDetectionServiceListenRewindPersistenceTests {
             metadataConfidence: nil,
             metadataPromptVersion: nil,
             wasSkipped: true,
-            userDismissedBanner: false
+            userDismissedBanner: false,
+            catalogMatchedShowId: catalogMatchedShowId
         )
     }
 
-    private func makeService(store: AnalysisStore) -> AdDetectionService {
+    private func makeService(
+        store: AnalysisStore,
+        repeatedAdCache: RepeatedAdCacheService? = nil
+    ) -> AdDetectionService {
         AdDetectionService(
             store: store,
             classifier: RuleBasedClassifier(),
@@ -95,7 +104,8 @@ struct AdDetectionServiceListenRewindPersistenceTests {
                 hotPathLookahead: 90.0,
                 detectorVersion: "detection-v1",
                 fmBackfillMode: .off
-            )
+            ),
+            repeatedAdCache: repeatedAdCache
         )
     }
 
@@ -137,6 +147,271 @@ struct AdDetectionServiceListenRewindPersistenceTests {
         #expect(rows.first?.podcastId == podcastId)
         #expect(rows.first?.time == startTime,
                 "time field must mirror the source ad_window's startTime, got \(rows.first?.time ?? -1)")
+    }
+
+    @Test("Listen correction revokes matching repeated-ad cache evidence")
+    func recordListenRewindRevokesRepeatedAdCache() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-rewind-repeated-cache"
+        let podcastId = "pod-rewind-repeated-cache"
+        let windowId = "win-rewind-repeated-cache"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(
+            makeAdWindow(id: windowId, assetId: assetId, startTime: 10)
+        )
+        var featureWindows: [FeatureWindow] = []
+        for index in 0..<15 {
+            featureWindows.append(FeatureWindow(
+                analysisAssetId: assetId,
+                startTime: 10 + Double(index) * 2,
+                endTime: 12 + Double(index) * 2,
+                rms: 0.2 + Double(index) * 0.01,
+                spectralFlux: 0.05 + Double(index % 4) * 0.02,
+                musicProbability: Double(index % 3) * 0.1,
+                pauseProbability: 0.02,
+                speakerClusterId: index % 2,
+                jingleHash: nil,
+                featureVersion: 5
+            ))
+        }
+        try await store.insertFeatureWindows(featureWindows)
+        let fingerprint = RepeatedAdFingerprint.from(
+            featureWindows: featureWindows
+        )
+        try #require(!fingerprint.isZero)
+        let repeatedStorage = InMemoryRepeatedAdCacheStorage()
+        let repeatedCache = RepeatedAdCacheService(
+            storage: repeatedStorage
+        )
+        _ = try await repeatedCache.store(
+            showId: podcastId,
+            fingerprint: fingerprint,
+            boundaryStart: 10,
+            boundaryEnd: 40,
+            confidence: 0.95,
+            learningSource: .consumedAutoSkip,
+            learningLifecycle: .consumed,
+            sourceAssetId: "older-asset",
+            sourceWindowId: "older-window"
+        )
+        let service = makeService(
+            store: store,
+            repeatedAdCache: repeatedCache
+        )
+
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+
+        let outcome = try await repeatedCache.lookup(
+            showId: podcastId,
+            fingerprint: fingerprint
+        )
+        if case .hit = outcome {
+            Issue.record("Listen correction must revoke recurrence evidence")
+        }
+    }
+
+    @Test("Listen correction tombstones its exact source without feature material")
+    func recordListenRewindRevokesExactSourceWithoutFingerprint() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-rewind-exact-source"
+        let podcastId = "pod-rewind-exact-source"
+        let windowId = "win-rewind-exact-source"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(
+            makeAdWindow(id: windowId, assetId: assetId, startTime: 10)
+        )
+
+        let repeatedStorage = InMemoryRepeatedAdCacheStorage()
+        let repeatedCache = RepeatedAdCacheService(storage: repeatedStorage)
+        #expect(try await repeatedCache.store(
+            showId: podcastId,
+            fingerprint: RepeatedAdFingerprint(bits: 0x1234),
+            boundaryStart: 10,
+            boundaryEnd: 40,
+            confidence: 0.95,
+            learningSource: .consumedAutoSkip,
+            learningLifecycle: .consumed,
+            sourceAssetId: assetId,
+            sourceWindowId: windowId
+        ))
+        let service = makeService(
+            store: store,
+            repeatedAdCache: repeatedCache
+        )
+
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+
+        #expect(try await repeatedStorage.totalCount() == 0)
+        #expect(!(try await repeatedCache.store(
+            showId: podcastId,
+            fingerprint: RepeatedAdFingerprint(bits: 0x1234),
+            boundaryStart: 10,
+            boundaryEnd: 40,
+            confidence: 0.95,
+            learningSource: .consumedAutoSkip,
+            learningLifecycle: .consumed,
+            sourceAssetId: assetId,
+            sourceWindowId: windowId
+        )))
+    }
+
+    @Test(
+        "recurrence revocation failure leaves Listen correction retryable and retry commits both"
+    )
+    func recordListenRewindRetriesAfterRevocationFailure() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-rewind-revocation-retry"
+        let podcastId = "pod-rewind-revocation-retry"
+        let windowId = "win-rewind-revocation-retry"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(
+            makeAdWindow(id: windowId, assetId: assetId, startTime: 10)
+        )
+
+        let storage = AnalysisStoreRepeatedAdCacheStorage(store: store)
+        let repeatedCache = RepeatedAdCacheService(storage: storage)
+        #expect(try await repeatedCache.store(
+            showId: podcastId,
+            fingerprint: RepeatedAdFingerprint(bits: 0x5151),
+            boundaryStart: 10,
+            boundaryEnd: 40,
+            confidence: 0.95,
+            learningSource: .consumedAutoSkip,
+            learningLifecycle: .consumed,
+            sourceAssetId: assetId,
+            sourceWindowId: windowId
+        ))
+        let service = makeService(
+            store: store,
+            repeatedAdCache: repeatedCache
+        )
+        try await store.execForTesting("""
+            CREATE TRIGGER fail_listen_recurrence_revocation
+            BEFORE INSERT ON repeated_ad_cache_revocations
+            BEGIN
+                SELECT RAISE(ABORT, 'injected recurrence revocation failure');
+            END
+            """)
+
+        await #expect(throws: AnalysisStoreError.self) {
+            try await service.recordListenRewind(
+                windowId: windowId,
+                analysisAssetId: assetId,
+                podcastId: podcastId
+            )
+        }
+        #expect(
+            try await store.fetchAdWindow(id: windowId)?.decisionState
+                == AdDecisionState.applied.rawValue,
+            "a failed recurrence store must not consume the retryable banner"
+        )
+        #expect(
+            try await store.fetchListenRewinds(forAssetId: assetId).isEmpty
+        )
+        #expect(try await storage.totalCount() == 1)
+
+        try await store.execForTesting(
+            "DROP TRIGGER fail_listen_recurrence_revocation"
+        )
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+
+        #expect(
+            try await store.fetchAdWindow(id: windowId)?.decisionState
+                == AdDecisionState.reverted.rawValue
+        )
+        #expect(
+            try await store.fetchListenRewinds(forAssetId: assetId).count == 1
+        )
+        #expect(try await storage.totalCount() == 0)
+    }
+
+    @Test("Listen correction ignores a stale matched-show diagnostic")
+    func recordListenRewindUsesRequestShowForRevocation() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-rewind-show-scope"
+        let podcastId = "pod-rewind-current-show"
+        let staleShowId = "pod-rewind-stale-show"
+        let windowId = "win-rewind-show-scope"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertAdWindow(
+            makeAdWindow(
+                id: windowId,
+                assetId: assetId,
+                startTime: 10,
+                catalogMatchedShowId: staleShowId
+            )
+        )
+        var featureWindows: [FeatureWindow] = []
+        for index in 0..<15 {
+            featureWindows.append(FeatureWindow(
+                analysisAssetId: assetId,
+                startTime: 10 + Double(index) * 2,
+                endTime: 12 + Double(index) * 2,
+                rms: 0.2 + Double(index) * 0.01,
+                spectralFlux: 0.05 + Double(index % 4) * 0.02,
+                musicProbability: Double(index % 3) * 0.1,
+                pauseProbability: 0.02,
+                speakerClusterId: index % 2,
+                jingleHash: nil,
+                featureVersion: 5
+            ))
+        }
+        try await store.insertFeatureWindows(featureWindows)
+        let fingerprint = RepeatedAdFingerprint.from(
+            featureWindows: featureWindows
+        )
+        try #require(!fingerprint.isZero)
+        let repeatedStorage = InMemoryRepeatedAdCacheStorage()
+        let repeatedCache = RepeatedAdCacheService(storage: repeatedStorage)
+        for showId in [podcastId, staleShowId] {
+            #expect(try await repeatedCache.store(
+                showId: showId,
+                fingerprint: fingerprint,
+                boundaryStart: 10,
+                boundaryEnd: 40,
+                confidence: 0.95,
+                learningSource: .consumedAutoSkip,
+                learningLifecycle: .consumed,
+                sourceAssetId: "\(showId)-asset",
+                sourceWindowId: "\(showId)-window"
+            ))
+        }
+        let service = makeService(
+            store: store,
+            repeatedAdCache: repeatedCache
+        )
+
+        try await service.recordListenRewind(
+            windowId: windowId,
+            analysisAssetId: assetId,
+            podcastId: podcastId
+        )
+
+        if case .hit = try await repeatedCache.lookup(
+            showId: podcastId,
+            fingerprint: fingerprint
+        ) {
+            Issue.record("the corrected request show must be revoked")
+        }
+        guard case .hit = try await repeatedCache.lookup(
+            showId: staleShowId,
+            fingerprint: fingerprint
+        ) else {
+            Issue.record("a stale matched-show field must not redirect revocation")
+            return
+        }
     }
 
     @Test("repeated rewinds on the same window persist as distinct rows")
@@ -292,6 +567,52 @@ struct AdDetectionServiceListenRewindPersistenceTests {
             try await store.fetchListenRewinds(
                 forAssetId: replacementAssetId
             ).isEmpty
+        )
+    }
+
+    @Test("stale Listen receipt cannot mutate a same-asset same-ID replacement")
+    func listenReceiptIsExactProducerScoped() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-rewind-producer"
+        let podcastId = "pod-rewind-producer"
+        let windowId = "win-rewind-producer"
+
+        try await store.insertAsset(makeAsset(id: assetId))
+        let original = makeAdWindow(
+            id: windowId,
+            assetId: assetId,
+            startTime: 12
+        )
+        let replacement = makeAdWindow(
+            id: windowId,
+            assetId: assetId,
+            startTime: 212
+        )
+        try await store.insertAdWindow(original)
+        try await store.insertOrReplaceAdWindow(replacement)
+
+        let service = makeService(store: store)
+        await #expect(throws: AnalysisStoreError.self) {
+            try await service.recordListenRewind(
+                windowId: windowId,
+                analysisAssetId: assetId,
+                podcastId: podcastId,
+                expectedProducerRevision: original
+            )
+        }
+
+        let retained = try #require(
+            try await store.fetchAdWindow(id: windowId)
+        )
+        #expect(
+            AdWindowMaterialIdentity.sameProducerRevision(
+                retained,
+                replacement
+            )
+        )
+        #expect(retained.decisionState == AdDecisionState.applied.rawValue)
+        #expect(
+            try await store.fetchListenRewinds(forAssetId: assetId).isEmpty
         )
     }
 

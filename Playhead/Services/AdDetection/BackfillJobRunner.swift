@@ -2487,24 +2487,28 @@ actor BackfillJobRunner {
     /// playhead-ud4n: content-addressed id for a backfill fusion `AdWindow`
     /// (Design B). Reuses the R7-Fix11 canonical-hash helper so an identical
     /// rerun — same asset, detector version, and span ordinals — yields an
-    /// identical id. That makes `AnalysisStore.reconcileBackfillAdWindows`'s
-    /// INSERT-OR-REPLACE a true no-op and the reconcile set-difference retire
-    /// nothing: idempotency by construction, no UUID churn, and
-    /// `decision_events.windowId` stays stable across reruns. `analysisAssetId`
-    /// participates in the canonical string so the id is globally unique across
-    /// assets (the same ordinals in two episodes never collide); the `fusion-`
-    /// prefix keeps provenance legible beside the hot path's `UUID` ids and the
-    /// imported `shared-` ids, and lets the reconcilable predicate reason about
-    /// origin.
+    /// identical id. `splitDiscriminator` is absent for ordinary spans and the
+    /// historically surviving final split, preserving their pre-finalizer
+    /// durable IDs. Earlier split children add a deterministic discriminator
+    /// because they inherit the parent's atom ordinals. That makes
+    /// `AnalysisStore.reconcileBackfillAdWindows` idempotent without letting an
+    /// upgrade churn existing IDs or bypass terminal correction receipts.
+    /// `analysisAssetId` participates in the canonical string so the id is
+    /// globally unique across assets; the `fusion-` prefix keeps provenance
+    /// legible beside hot-path UUIDs and imported `shared-` ids.
     nonisolated static func makeFusionWindowId(
         analysisAssetId: String,
         detectorVersion: String,
         spanStartOrdinal: Int,
-        spanEndOrdinal: Int
+        spanEndOrdinal: Int,
+        splitDiscriminator: String? = nil
     ) -> String {
-        let canonical =
+        var canonical =
             "asset=\(analysisAssetId)|version=\(detectorVersion)|" +
             "start=\(spanStartOrdinal)|end=\(spanEndOrdinal)"
+        if let splitDiscriminator {
+            canonical += "|split=\(splitDiscriminator)"
+        }
         return hashedId(prefix: "fusion", canonical: canonical)
     }
 
@@ -2580,6 +2584,7 @@ actor BackfillJobRunner {
         case .invalidRow: return "invalidRow"
         case .invalidEvidenceEvent: return "invalidEvidenceEvent"
         case .invalidScanCohortJSON: return "invalidScanCohortJSON"
+        case .staleAdWindowRevision: return "staleAdWindowRevision"
         case .invalidStateTransition: return "invalidStateTransition"
         case .evidenceEventBodyMismatch: return "evidenceEventBodyMismatch"
         case .encodingFailure: return "encodingFailure"
@@ -2600,7 +2605,8 @@ actor BackfillJobRunner {
         case .insertFailed(let message):
             return message.hasPrefix("payloadTooLarge:")
         case .openFailed, .migrationFailed, .queryFailed,
-             .notFound, .duplicateJobId, .invalidStateTransition:
+             .notFound, .duplicateJobId, .invalidStateTransition,
+             .staleAdWindowRevision:
             return false
         }
     }

@@ -300,10 +300,10 @@ struct SpliceSlotDecisionDelta: Sendable, Equatable, Codable {
 /// "distinctKinds" definitions and the `.audioForensics` suppression so the
 /// dogfood-capture arms are unambiguous. Ledger mass and distinct-kind counts
 /// use the SAME scoring filter the fusion / fragility geometry use
-/// (`!isObservabilityOnly && weight > 0`).
+/// (`contributesToAutomaticDecision && weight > 0`).
 enum SpliceSlotDecisionDeltaComputer {
 
-    /// Sum of strictly-positive, scoring (non-observability) entry weights.
+    /// Sum of strictly-positive automatic-decision entry weights.
     static func ledgerMass(_ ledger: [EvidenceLedgerEntry]) -> Double {
         scoring(ledger).map(\.weight).reduce(0, +)
     }
@@ -342,7 +342,9 @@ enum SpliceSlotDecisionDeltaComputer {
     }
 
     private static func scoring(_ ledger: [EvidenceLedgerEntry]) -> [EvidenceLedgerEntry] {
-        ledger.filter { !$0.source.isObservabilityOnly && $0.weight > 0 }
+        ledger.filter {
+            $0.contributesToAutomaticDecision && $0.weight > 0
+        }
     }
 }
 

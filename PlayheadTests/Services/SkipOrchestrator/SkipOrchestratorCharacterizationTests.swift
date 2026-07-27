@@ -57,16 +57,29 @@ private func makePendingAdDecisionResult(
     endTime: Double = 120,
     skipConfidence: Double,
     eligibilityGate: AdDecisionEligibilityGate,
-    recomputationRevision: Int = 1
+    recomputationRevision: Int = 1,
+    includeProducerRevision: Bool = true
 ) -> AdDecisionResult {
-    AdDecisionResult(
+    let producerRevision =
+        eligibilityGate == .eligible && includeProducerRevision
+        ? makeSkipTestAdWindow(
+            id: id,
+            assetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            confidence: skipConfidence,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        : nil
+    return AdDecisionResult(
         id: id,
         analysisAssetId: analysisAssetId,
         startTime: startTime,
         endTime: endTime,
         skipConfidence: skipConfidence,
         eligibilityGate: eligibilityGate,
-        recomputationRevision: recomputationRevision
+        recomputationRevision: recomputationRevision,
+        producerRevision: producerRevision
     )
 }
 
@@ -198,6 +211,85 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         let log = await orchestrator.getDecisionLog()
         let applied = log.filter { $0.decision == .applied }
         #expect(applied.isEmpty)
+    }
+
+    @Test("Non-finite seeks fail closed without changing playhead state")
+    func nonFiniteSeeksFailClosed() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1"
+        )
+        await orchestrator.updatePlayheadTime(12)
+
+        await orchestrator.recordUserSeek(to: .nan)
+        #expect(await orchestrator._currentPlayheadTimeForTesting() == 12)
+
+        let generation =
+            await orchestrator.episodeLifecycleGenerationSnapshot()
+        let accepted = await orchestrator.recordUserSeek(
+            to: .infinity,
+            ifEpisodeLifecycleGeneration: generation
+        )
+        #expect(!accepted)
+        await orchestrator.recordUserSeek(to: -1)
+        #expect(await orchestrator._currentPlayheadTimeForTesting() == 12)
+        #expect(
+            !(await orchestrator.recordUserSeek(
+                to: -0.001,
+                ifEpisodeLifecycleGeneration: generation
+            ))
+        )
+        #expect(await orchestrator._currentPlayheadTimeForTesting() == 12)
+    }
+
+    @Test("Invalid same-ID runtime material disarms an existing cue")
+    func invalidSameIDReplacementFailsClosed() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        let valid = makeSkipTestAdWindow(
+            id: "same-id-invalid-replacement",
+            startTime: 60,
+            endTime: 90,
+            confidence: 0.9,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([valid])
+        #expect(
+            await orchestrator.activeWindowIDs()
+                .contains(valid.id)
+        )
+
+        let invalid = makeSkipTestAdWindow(
+            id: valid.id,
+            startTime: 60,
+            endTime: 90,
+            confidence: .nan,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([invalid])
+
+        #expect(
+            !(await orchestrator.activeWindowIDs())
+                .contains(valid.id)
+        )
     }
 
     @Test("Listen revert sets state to reverted")
@@ -468,9 +560,8 @@ struct SkipOrchestratorCorrectionStoreTests {
         let analysisStore = try await makeTestStore()
         try await analysisStore.insertAsset(makeSkipTestAnalysisAsset())
 
-        // playhead-vsot round 3: event-driven veto-write signal replaces
-        // the 5 s pollUntil deadline (same fire-and-forget-write class as
-        // the download harvest; see SignalingCorrectionStore).
+        // Await post-commit learning notification instead of polling SQLite
+        // after the atomic correction transaction.
         let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
         let vetoRecorded = TestEventCounter()
         let signalingStore = SignalingCorrectionStore(
@@ -509,7 +600,7 @@ struct SkipOrchestratorCorrectionStoreTests {
             podcastId: "podcast-1"
         )
 
-        // Event-driven: resumes when the veto write lands. No deadline.
+        // Event-driven: resumes when post-commit notification lands.
         await vetoRecorded.wait(for: 1)
 
         let events = try await correctionStore.activeCorrections(for: "asset-1")
@@ -638,6 +729,87 @@ struct SkipOrchestratorAdDecisionContractTests {
         } else {
             Issue.record("Expected an applied decision record for eligible-enter")
         }
+    }
+
+    @Test("Eligible decision without an exact persisted producer revision fails closed")
+    func eligibleDecisionWithoutProducerRevisionFailsClosed() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        let missingRevision = makePendingAdDecisionResult(
+            id: "eligible-missing-producer",
+            skipConfidence: 0.99,
+            eligibilityGate: .eligible,
+            includeProducerRevision: false
+        )
+
+        await orchestrator.receiveAdDecisionResults([missingRevision])
+
+        #expect(
+            !(await orchestrator.activeWindowIDs())
+                .contains(missingRevision.id)
+        )
+        #expect(
+            !(await orchestrator.activeSuggestWindowIDs())
+                .contains(missingRevision.id)
+        )
+        #expect(
+            await orchestrator.getDecisionLog().allSatisfy {
+                $0.adWindowId != missingRevision.id
+                    || $0.decision != .applied
+            }
+        )
+    }
+
+    @Test("Eligible decision with non-finite confidence fails closed")
+    func eligibleDecisionWithNonFiniteConfidenceFailsClosed() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        let invalid = makePendingAdDecisionResult(
+            id: "eligible-infinite-confidence",
+            skipConfidence: .infinity,
+            eligibilityGate: .eligible
+        )
+
+        await orchestrator.receiveAdDecisionResults([invalid])
+
+        #expect(
+            !(await orchestrator.activeWindowIDs())
+                .contains(invalid.id)
+        )
+        #expect(
+            await orchestrator.getDecisionLog().allSatisfy {
+                $0.adWindowId != invalid.id
+                    || $0.decision != .applied
+            }
+        )
     }
 
     @Test("Decision recomputation stays stable for unchanged spans")
@@ -1029,7 +1201,8 @@ struct SkipOrchestratorSuggestTierTests {
     private func makeMarkOnlyAdWindow(
         id: String = "ad-suggest-1",
         startTime: Double = 60,
-        endTime: Double = 120
+        endTime: Double = 120,
+        evidenceSources: String? = nil
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -1050,7 +1223,7 @@ struct SkipOrchestratorSuggestTierTests {
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false,
-            evidenceSources: nil,
+            evidenceSources: evidenceSources,
             eligibilityGate: "markOnly"
         )
     }
@@ -1130,56 +1303,22 @@ struct SkipOrchestratorSuggestTierTests {
             "markOnly window must not produce applied/confirmed decisions; got \(appliedOrConfirmed)")
     }
 
-    // C27 cycle-2/3 missing test: positive control for the L3 fix in
-    // `SkipOrchestrator.receiveAdWindows`. The fix decodes
-    // `AdWindow.eligibilityGate` through `SkipEligibilityGate(rawValue:)`
-    // and routes only `.markOnly` to the suggest tier. Every other value
-    // (nil, empty string, the producer-specific "autoSkip" literal, and
-    // unknown raw values) decodes to a non-`.markOnly` result and must
-    // fall through to the standard managed-window path. A future
-    // regression that stringly-treats one of these as a suggest-tier
-    // marker would silently drop high-confidence ads out of the
-    // auto-skip path.
-    //
-    // Cycle-3 L-1: parameterized over the non-`.markOnly` raw-value
-    // space the L3 decode is supposed to handle. The fusion-path
-    // blocked `SkipEligibilityGate` cases (`.blockedByPolicy` etc.) are
-    // deliberately NOT included here — the symmetric blocked-gate guard
-    // in `receiveAdWindows` (playhead-bq70) drops them BEFORE the
-    // standard managed path, so they are exercised by the dedicated
-    // blocked-gate suite (`SkipOrchestratorBlockedGateGuardTests`)
-    // rather than this fall-through suite. The values here all decode
-    // to nil (nil-stamp, "" stamp, "autoSkip", unknown future label) or
-    // to `.eligible` (the canonical eligible enum case), and must
-    // therefore continue to flow through to the standard managed path.
-    //
-    // Cycle-4 L-1: `"eligible"` (the legitimate
-    // `SkipEligibilityGate.eligible.rawValue`) is included as the
-    // canonical "valid non-markOnly enum case" — a future producer
-    // change that emitted `"eligible"` in place of `"autoSkip"` (e.g. to
-    // align the precision-gate label with the enum) MUST still flow
-    // through the standard managed path; this parameter pins that.
-    //
-    // Cycle-6 missing test: pin the "unknown raw value" arm explicitly.
-    // The L3 decode comment asserts that ANY non-`.markOnly` raw value
-    // (including unknown future values) falls through. The other
-    // parameter cases all happen to map to known shapes (nil → nil,
-    // "" → nil, "autoSkip" → nil, "eligible" → .eligible). A
-    // gibberish-but-non-empty value is the case that exercises the
-    // `SkipEligibilityGate(rawValue:)` returning nil for an unknown
-    // future label, which then `flatMap` collapses to nil and falls
-    // through the `decodedGate == .markOnly` guard.
+    // Positive controls for every supported automatic stamp on the AdWindow
+    // path: legacy nil, the precision-gate `"autoSkip"` literal, and the
+    // canonical fusion `.eligible` raw value. Unknown/blank non-nil values are
+    // malformed persistence and are covered by the fail-closed gate suite.
     @Test(
-        "non-markOnly eligibilityGate values fall through to standard managed path, NOT suggest tier",
+        "supported automatic eligibilityGate values enter the managed path",
         arguments: [
-            (label: "nil-stamp",                 gate: String?.none),
-            (label: "empty-string-stamp",         gate: String?.some("")),
-            (label: "autoSkip-stamp",             gate: String?.some("autoSkip")),
-            (label: "eligible-stamp",             gate: String?.some("eligible")),
-            (label: "unknown-future-value-stamp", gate: String?.some("futureGateName"))
+            (label: "nil-stamp", gate: String?.none),
+            (label: "autoSkip-stamp", gate: String?.some("autoSkip")),
+            (label: "eligible-stamp", gate: String?.some("eligible")),
         ]
     )
-    func nonMarkOnlyGateEntersStandardSkipPath(label: String, gate: String?) async throws {
+    func supportedAutomaticGateEntersStandardSkipPath(
+        label: String,
+        gate: String?
+    ) async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let orchestrator = SkipOrchestrator(store: store)
@@ -1217,23 +1356,7 @@ struct SkipOrchestratorSuggestTierTests {
             eligibilityGate: gate
         )
 
-        // Subscribe to the banner stream BEFORE delivery so a (wrongly
-        // emitted) suggest-tier banner can't slip through unnoticed.
-        let stream = await orchestrator.bannerItemStream()
-        let collectTask = Task<[AdSkipBannerItem], Never> {
-            var items: [AdSkipBannerItem] = []
-            for await item in stream {
-                items.append(item)
-            }
-            return items
-        }
-
         await orchestrator.receiveAdWindows([window])
-
-        // Allow any banner-stream yields to drain.
-        try await Task.sleep(for: .milliseconds(100))
-        collectTask.cancel()
-        let receivedBanners = await collectTask.value
 
         // Positive: the window IS in the standard managed path.
         let confirmed = await orchestrator.confirmedWindows()
@@ -1242,11 +1365,12 @@ struct SkipOrchestratorSuggestTierTests {
             "[\(label)] eligibilityGate=\(String(describing: gate)) must enter standard confirmed-windows path; got \(confirmed.map(\.id))"
         )
 
-        // Negative: NO suggest-tier banner emitted.
-        let suggestBanners = receivedBanners.filter { $0.tier == .suggest }
+        // Negative: no suggest-tier state was registered. This actor snapshot
+        // is synchronous with ingestion and needs no timing assumptions.
+        let suggestWindowIDs = await orchestrator.activeSuggestWindowIDs()
         #expect(
-            suggestBanners.isEmpty,
-            "[\(label)] eligibilityGate=\(String(describing: gate)) must NOT emit a suggest-tier banner; got \(suggestBanners)"
+            !suggestWindowIDs.contains(windowId),
+            "[\(label)] eligibilityGate=\(String(describing: gate)) must NOT enter the suggest tier; got \(suggestWindowIDs)"
         )
     }
 
@@ -1267,7 +1391,10 @@ struct SkipOrchestratorSuggestTierTests {
             podcastId: "podcast-1"
         )
 
-        let window = makeMarkOnlyAdWindow(id: "ad-suggest-accept")
+        let window = makeMarkOnlyAdWindow(
+            id: "ad-suggest-accept",
+            evidenceSources: "classifier,catalog"
+        )
         try await store.insertAdWindow(window)
         await orchestrator.receiveAdWindows([window])
 
@@ -1297,6 +1424,7 @@ struct SkipOrchestratorSuggestTierTests {
         )
         #expect(promoted.id != window.id)
         #expect(promoted.confidence == 1.0)
+        #expect(promoted.evidenceSources == window.evidenceSources)
 
         let decisionLog = await orchestrator.getDecisionLog()
         let detailedFeedbackEntries = decisionLog.filter {
@@ -1315,6 +1443,79 @@ struct SkipOrchestratorSuggestTierTests {
             },
             "The accepted suggestion must not wait for a second manual action"
         )
+    }
+
+    @Test("accepted suggestion clears untrusted catalog provenance")
+    func acceptedSuggestionClearsUntrustedCatalogProvenance() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        let suggested = AdWindow(
+            id: "ad-suggest-untrusted-catalog",
+            analysisAssetId: "asset-1",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.45,
+            boundaryState: "lexical",
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "detection-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: 60,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: "classifier,catalog",
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            catalogStoreMatchSimilarity: 0.99,
+            catalogFingerprintVersion:
+                CatalogFingerprintVersion.currentCatalog.rawValue,
+            catalogMatchedEntryId: UUID().uuidString,
+            catalogMatchedShowId: "different-show",
+            catalogMatchedLearningSource:
+                CatalogLearningSource.userMarkedAd.rawValue,
+            catalogMatchedLearningLifecycle:
+                CatalogLearningLifecycle.explicitConfirmation.rawValue
+        )
+        try await store.insertAdWindow(suggested)
+        await orchestrator.receiveAdWindows([suggested])
+
+        #expect(
+            await orchestrator.acceptSuggestedSkip(
+                windowId: suggested.id
+            )
+        )
+
+        let promoted = try #require(
+            try await store.fetchAdWindows(assetId: "asset-1")
+                .first {
+                    $0.id != suggested.id
+                        && $0.startTime == suggested.startTime
+                        && $0.endTime == suggested.endTime
+                }
+        )
+        #expect(!promoted.claimsCatalogMatch)
+        #expect(promoted.catalogStoreMatchSimilarity == nil)
+        #expect(promoted.catalogFingerprintVersion == nil)
+        #expect(promoted.catalogMatchedEntryId == nil)
+        #expect(promoted.catalogMatchedShowId == nil)
+        #expect(promoted.catalogMatchedLearningSource == nil)
+        #expect(promoted.catalogMatchedLearningLifecycle == nil)
     }
 
     @Test("acceptSuggestedSkip is a no-op when window is unknown")

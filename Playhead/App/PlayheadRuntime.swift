@@ -370,6 +370,8 @@ final class PlayheadRuntime {
     private var scrubSeekEffectCountForTesting = 0
     @ObservationIgnored
     private var persistenceSeekEffectCountForTesting = 0
+    @ObservationIgnored
+    private var userMarkPersistenceAttemptCountForTesting = 0
     #endif
     @ObservationIgnored
     private let playbackLifecycleMutex = PlaybackLifecycleMutex()
@@ -1135,6 +1137,55 @@ final class PlayheadRuntime {
             perShowThresholdControllerStore = nil
         }
 
+        // playhead-o4qr: construct the on-device catalog before the
+        // orchestrator so authoritative skip-consumption/confirmation and
+        // correction paths share the same store as detection.
+        let adCatalogStore: AdCatalogStore?
+        do {
+            let dir = try AdCatalogStore.defaultDirectory()
+            adCatalogStore = try AdCatalogStore(directoryURL: dir)
+        } catch {
+            Logger(subsystem: "com.playhead", category: "Runtime")
+                .warning("AdCatalogStore init failed — catalog disabled: \(error.localizedDescription, privacy: .public)")
+            adCatalogStore = nil
+        }
+
+        // playhead-43ed / playhead-o4qr: build the per-show recurrence
+        // service before SkipOrchestrator so both durable recurrence stores
+        // share the same authoritative consumed/confirmation lifecycle.
+        let repeatedAdCacheStorage = AnalysisStoreRepeatedAdCacheStorage(
+            store: analysisStore
+        )
+        let repeatedAdCacheKillSwitchOn: Bool = {
+            // UserDefaults returns `false` for an unregistered key — but
+            // bead §6 ships the cache ON by default. Distinguish "never
+            // set" from "explicitly off" with `object(forKey:)`.
+            let key = RepeatedAdCacheFeatureFlag.userDefaultsKey
+            if let value = UserDefaults.standard.object(forKey: key) as? Bool {
+                return value
+            }
+            return RepeatedAdCacheFeatureFlag.defaultValue
+        }()
+        let repeatedAdCacheAutoDisabled = UserDefaults.standard
+            .bool(forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey)
+        let repeatedAdCacheFlagOn =
+            repeatedAdCacheKillSwitchOn && !repeatedAdCacheAutoDisabled
+        let repeatedAdCache = RepeatedAdCacheService(
+            config: .production,
+            storage: repeatedAdCacheStorage,
+            initiallyEnabled: repeatedAdCacheFlagOn,
+            onAutoDisable: { _, _ in
+                // Persist the auto-disable so it survives a launch
+                // (bead §4 implied persistence). The user can clear it
+                // by toggling the kill-switch off-then-on (the observer
+                // below resets the key on a kill-switch flip).
+                UserDefaults.standard.set(
+                    true,
+                    forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey
+                )
+            }
+        )
+
         // Phase 6.5 (playhead-4my.16): skipOrchestrator is constructed before
         // adDetectionService so it can be injected for step-17 forwarding.
         // The orchestrator is otherwise wired identically to before this change.
@@ -1148,6 +1199,8 @@ final class PlayheadRuntime {
             store: analysisStore,
             trustService: trustService,
             correctionStore: correctionStore,
+            adCatalogStore: adCatalogStore,
+            repeatedAdCache: repeatedAdCache,
             invariantLogger: surfaceStatusLogger,
             episodeIdHasher: surfaceStatusHasher,
             inventoryFilter: .production()
@@ -1204,67 +1257,6 @@ final class PlayheadRuntime {
         #else
         preBuiltShadowGateLogger = nil
         #endif
-
-        // playhead-gtt9.17: on-device ad catalog. Opened synchronously at
-        // startup so the first `runBackfill` observes an initialized store.
-        // A failure to open (e.g. read-only disk) falls back to `nil`,
-        // which degrades to the pre-gtt9.17 behavior: no catalog ingress,
-        // no catalog egress, no runtime crash. We log the failure so
-        // diagnostics can surface the regression rather than silently
-        // losing the feature.
-        let adCatalogStore: AdCatalogStore?
-        do {
-            let dir = try AdCatalogStore.defaultDirectory()
-            adCatalogStore = try AdCatalogStore(directoryURL: dir)
-        } catch {
-            Logger(subsystem: "com.playhead", category: "Runtime")
-                .warning("AdCatalogStore init failed — catalog disabled: \(error.localizedDescription, privacy: .public)")
-            adCatalogStore = nil
-        }
-
-        // playhead-43ed (B3): build the per-show RepeatedAdCache service
-        // backed by AnalysisStore. Honors the user kill-switch via
-        // `RepeatedAdCacheFeatureFlag.userDefaultsKey`. When the flag is
-        // off (UserDefaults `false`), we still construct the service so
-        // toggling on at runtime works without restarting; we just hand
-        // it `initiallyEnabled: false` so every `store`/`lookup` is a
-        // no-op until the user flips the switch.
-        //
-        // Auto-disable persistence (bead §4): the service notifies its
-        // `onAutoDisable` closure when the rolling-window guard trips.
-        // We persist that into a companion UserDefaults key so the next
-        // launch starts the service disabled, even though the user-facing
-        // kill-switch is still ON. The user toggling the kill-switch off-
-        // then-on resets the auto-disable key (handled in the observer
-        // task below).
-        let repeatedAdCacheStorage = AnalysisStoreRepeatedAdCacheStorage(
-            store: analysisStore
-        )
-        let repeatedAdCacheKillSwitchOn: Bool = {
-            // UserDefaults returns `false` for an unregistered key — but
-            // bead §6 ships the cache ON by default. Distinguish "never
-            // set" from "explicitly off" with `object(forKey:)`.
-            let key = RepeatedAdCacheFeatureFlag.userDefaultsKey
-            if let value = UserDefaults.standard.object(forKey: key) as? Bool {
-                return value
-            }
-            return RepeatedAdCacheFeatureFlag.defaultValue
-        }()
-        let repeatedAdCacheAutoDisabled = UserDefaults.standard
-            .bool(forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey)
-        let repeatedAdCacheFlagOn = repeatedAdCacheKillSwitchOn && !repeatedAdCacheAutoDisabled
-        let repeatedAdCache = RepeatedAdCacheService(
-            config: .production,
-            storage: repeatedAdCacheStorage,
-            initiallyEnabled: repeatedAdCacheFlagOn,
-            onAutoDisable: { _, _ in
-                // Persist the auto-disable so it survives a launch
-                // (bead §4 implied persistence). The user can clear it
-                // by toggling the kill-switch off-then-on (the observer
-                // below resets the key on a kill-switch flip).
-                UserDefaults.standard.set(true, forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey)
-            }
-        )
 
         // Cycle 1 H2: bootstrap the approved-cohort registry by explicitly
         // approving the current production cohort at `.full`. This activates
@@ -1347,8 +1339,9 @@ final class PlayheadRuntime {
             // Phase 6.5 (playhead-4my.16): forward eligible fusion decisions
             // to the orchestrator after each backfill run (step 17).
             skipOrchestrator: skipOrchestrator,
-            // playhead-gtt9.17: on-device catalog for catalog ingress
-            // (autoSkipEligible → insert) and egress (fingerprint → match).
+            // playhead-gtt9.17: on-device catalog egress
+            // (fingerprint → match). Authoritative ingress is owned by the
+            // orchestrator after consumption or explicit confirmation.
             adCatalogStore: adCatalogStore,
             // playhead-xsdz.9: hard-negative bank for the cross-episode memory
             // READ path (suppression). `nil` in the flag-OFF production default
@@ -1373,9 +1366,9 @@ final class PlayheadRuntime {
             // byte-identical to pre-xsdz.11.
             perShowThresholdControllerStore: perShowThresholdControllerStore,
             decisionLogger: preBuiltDecisionLogger,
-            // playhead-43ed (B3): per-show RepeatedAdCache. Lookup runs
-            // before the classifier in the hot path; store runs after a
-            // backfill verdict gates to autoSkipEligible.
+            // playhead-43ed (B3): per-show RepeatedAdCache. Lookup measures
+            // recurrence alongside the current classifier; authoritative
+            // storage occurs only after consumption or explicit confirmation.
             repeatedAdCache: repeatedAdCache,
             // Cycle 2 C1: pass the bootstrapped registry into the service.
             // The cycle-1 edit constructed `bootstrapRegistry` but failed to
@@ -2006,15 +1999,25 @@ final class PlayheadRuntime {
                     return RepeatedAdCacheFeatureFlag.defaultValue
                 }()
                 if current != lastSeenKillSwitch {
-                    lastSeenKillSwitch = current
-                    if current {
-                        // Re-enabling clears the persistent auto-disable
-                        // so a future launch respects the user's choice.
-                        UserDefaults.standard.removeObject(
-                            forKey: RepeatedAdCacheFeatureFlag.autoDisabledKey
+                    lastSeenKillSwitch =
+                        await RepeatedAdCacheFeatureFlag.reconcileUserIntent(
+                            current,
+                            cache: repeatedAdCache,
+                            currentIntent: {
+                                if let value = UserDefaults.standard.object(
+                                    forKey: key
+                                ) as? Bool {
+                                    return value
+                                }
+                                return RepeatedAdCacheFeatureFlag.defaultValue
+                            },
+                            clearAutoDisabled: {
+                                UserDefaults.standard.removeObject(
+                                    forKey: RepeatedAdCacheFeatureFlag
+                                        .autoDisabledKey
+                                )
+                            }
                         )
-                    }
-                    await repeatedAdCache.setEnabled(current)
                 }
             }
         }
@@ -2911,6 +2914,10 @@ final class PlayheadRuntime {
 
     func _committedUserSeekCountForTesting() -> Int {
         committedUserSeekCountForTesting
+    }
+
+    func _userMarkPersistenceAttemptCountForTesting() -> Int {
+        userMarkPersistenceAttemptCountForTesting
     }
 
     func _userSeekDownstreamCountsForTesting() -> (
@@ -4083,16 +4090,26 @@ final class PlayheadRuntime {
     }
 
     @discardableResult
-    func recordListenRewind(
+    private func recordListenRewind(
         windowId: String,
         analysisAssetId: String,
-        podcastId: String
+        podcastId: String,
+        expectedProducerRevision: AdWindow? = nil
     ) async -> Bool {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(windowId) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  analysisAssetId
+              ) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(podcastId) != nil
+        else {
+            return false
+        }
         do {
             try await adDetectionService.recordListenRewind(
                 windowId: windowId,
                 analysisAssetId: analysisAssetId,
-                podcastId: podcastId
+                podcastId: podcastId,
+                expectedProducerRevision: expectedProducerRevision
             )
             return true
         } catch {
@@ -4197,7 +4214,9 @@ final class PlayheadRuntime {
 
     @discardableResult
     func seek(to seconds: TimeInterval) async -> Bool {
-        guard !isShutdown else { return false }
+        guard !isShutdown, seconds.isFinite, seconds >= 0 else {
+            return false
+        }
         let seekGeneration = beginUserSeekOperation()
         let episodeId = currentEpisodeId
         let playbackGeneration = playEpisodeGeneration
@@ -4228,7 +4247,9 @@ final class PlayheadRuntime {
         ifCurrentEpisodeId expectedEpisodeId: String?,
         ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil
     ) async -> Bool {
-        guard !isShutdown else { return false }
+        guard !isShutdown, seconds.isFinite, seconds >= 0 else {
+            return false
+        }
         let seekGeneration = beginUserSeekOperation()
         let sourceLifecycleGeneration =
             expectedPlaybackGeneration ?? playEpisodeGeneration
@@ -4267,7 +4288,9 @@ final class PlayheadRuntime {
             itemGeneration: UInt64
         )
     ) async -> Bool {
-        guard isCurrentUserSeekOperation(
+        guard seconds.isFinite,
+              seconds >= 0,
+              isCurrentUserSeekOperation(
             expectedSeekGeneration,
             episodeId: expectedEpisodeId,
             playbackGeneration: expectedPlaybackGeneration
@@ -4424,33 +4447,57 @@ final class PlayheadRuntime {
     func listenRewind(
         windowId: String,
         podcastId: String,
+        analysisAssetId expectedAnalysisAssetId: String?,
         to startTime: TimeInterval,
         bannerEndTime: TimeInterval,
         ifCurrentEpisodeId expectedEpisodeId: String?,
-        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64,
+        ifWindowMaterialRevisionToken expectedMaterialRevisionToken: String
     ) async -> Bool {
-        guard currentEpisodeId == expectedEpisodeId,
+        guard let expectedAnalysisAssetId,
+              RecurrenceMaterialIdentity.canonicalIdentifier(windowId) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  expectedAnalysisAssetId
+              ) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(podcastId) != nil,
+              expectedEpisodeId == nil
+                || RecurrenceMaterialIdentity.canonicalIdentifier(
+                    expectedEpisodeId
+                ) != nil,
+              currentAnalysisAssetId == expectedAnalysisAssetId,
+              hasExactCurrentPodcastIdentity(podcastId),
               playEpisodeGeneration == expectedPlaybackGeneration,
-              let sourceAnalysisAssetId = currentAnalysisAssetId
+              currentEpisodeId == expectedEpisodeId
         else {
             return false
         }
+        let sourceAnalysisAssetId = expectedAnalysisAssetId
         let transportContext =
             await playbackService.snapshotWithItemGeneration()
         guard currentEpisodeId == expectedEpisodeId,
+              currentAnalysisAssetId == sourceAnalysisAssetId,
+              currentPodcastId == podcastId,
               playEpisodeGeneration == expectedPlaybackGeneration
         else {
             return false
         }
-        let didRetireLiveCue =
-            await skipOrchestrator.retireLiveSkipForListen(
+        let expectedProducerRevision =
+            await skipOrchestrator.retireLiveSkipRevisionForListen(
                 windowId: windowId,
+                analysisAssetId: sourceAnalysisAssetId,
+                startTime: startTime,
+                endTime: bannerEndTime,
+                podcastId: podcastId,
                 ifCurrentEpisodeId: expectedEpisodeId,
                 ifPlaybackLifecycleGeneration:
-                    expectedPlaybackGeneration
+                    expectedPlaybackGeneration,
+                ifWindowMaterialRevisionToken:
+                    expectedMaterialRevisionToken
             )
-        guard didRetireLiveCue,
+        guard let expectedProducerRevision,
               currentEpisodeId == expectedEpisodeId,
+              currentAnalysisAssetId == sourceAnalysisAssetId,
+              currentPodcastId == podcastId,
               playEpisodeGeneration == expectedPlaybackGeneration
         else {
             return false
@@ -4463,6 +4510,8 @@ final class PlayheadRuntime {
         )
         guard didDisarmExpectedItem,
               currentEpisodeId == expectedEpisodeId,
+              currentAnalysisAssetId == sourceAnalysisAssetId,
+              currentPodcastId == podcastId,
               playEpisodeGeneration == expectedPlaybackGeneration
         else {
             return false
@@ -4483,7 +4532,8 @@ final class PlayheadRuntime {
             ifCurrentAnalysisAssetId: sourceAnalysisAssetId,
             ifCurrentEpisodeId: expectedEpisodeId,
             ifPlaybackLifecycleGeneration:
-                expectedPlaybackGeneration
+                expectedPlaybackGeneration,
+            expectedProducerRevision: expectedProducerRevision
         )
         guard persisted else { return false }
         await skipOrchestrator.completeLiveSkipRetirementForListen(
@@ -4503,20 +4553,31 @@ final class PlayheadRuntime {
         podcastId: String,
         ifCurrentAnalysisAssetId expectedAnalysisAssetId: String,
         ifCurrentEpisodeId expectedEpisodeId: String?,
-        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil,
+        expectedProducerRevision: AdWindow? = nil
     ) async -> Bool {
         guard analysisAssetId == expectedAnalysisAssetId,
+              RecurrenceMaterialIdentity.canonicalIdentifier(windowId) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(
+                  expectedAnalysisAssetId
+              ) != nil,
+              expectedEpisodeId == nil
+                || RecurrenceMaterialIdentity.canonicalIdentifier(
+                    expectedEpisodeId
+                ) != nil,
               currentAnalysisAssetId == expectedAnalysisAssetId,
               currentEpisodeId == expectedEpisodeId,
               expectedPlaybackGeneration == nil
-                || playEpisodeGeneration == expectedPlaybackGeneration
+                || playEpisodeGeneration == expectedPlaybackGeneration,
+              hasExactCurrentPodcastIdentity(podcastId)
         else {
             return false
         }
         return await recordListenRewind(
             windowId: windowId,
             analysisAssetId: expectedAnalysisAssetId,
-            podcastId: podcastId
+            podcastId: podcastId,
+            expectedProducerRevision: expectedProducerRevision
         )
     }
 
@@ -4540,25 +4601,50 @@ final class PlayheadRuntime {
 
     // MARK: - User Correction: Mark as Ad
 
+    /// Playback-bound transcript veto. The sheet captures this complete
+    /// identity when it is presented; old-sheet actions cannot be retargeted
+    /// to whatever episode happens to be current when the async callback runs.
+    @discardableResult
+    func revertAdWindows(
+        span: DecodedSpan,
+        ifCurrentAnalysisAssetId expectedAssetId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedGeneration: UInt64,
+        podcastId: String?
+    ) async -> Bool {
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(
+                  expectedAssetId
+              ) != nil,
+              expectedEpisodeId == nil
+                || RecurrenceMaterialIdentity.canonicalIdentifier(
+                    expectedEpisodeId
+                ) != nil,
+              RecurrenceMaterialIdentity.canonicalIdentifier(span.id) != nil,
+              span.assetId == expectedAssetId,
+              currentAnalysisAssetId == expectedAssetId,
+              currentEpisodeId == expectedEpisodeId,
+              playEpisodeGeneration == expectedGeneration,
+              hasExactCurrentPodcastIdentity(podcastId)
+        else {
+            return false
+        }
+        return await skipOrchestrator.revertByTimeRange(
+            start: span.startTime,
+            end: span.endTime,
+            analysisAssetId: expectedAssetId,
+            podcastId: podcastId,
+            ifCurrentEpisodeId: expectedEpisodeId,
+            ifPlaybackLifecycleGeneration: expectedGeneration,
+            correctionSpan: span
+        )
+    }
+
     /// Inject a user-marked ad region for immediate skip + persistence.
-    /// Called from NowPlayingViewModel (hearing-an-ad button) and
-    /// TranscriptPeekView (transcript chunk selection).
+    /// Called from playback-context-bound correction callbacks.
     ///
     /// 1. Persists the AdWindow and CorrectionEvent under one generated ID.
     /// 2. Injects that same durable window identity into SkipOrchestrator for
     ///    immediate cues, banner feedback, and timeline markers.
-    func injectUserMarkedAd(start: Double, end: Double) async {
-        guard let assetId = currentAnalysisAssetId else { return }
-        _ = await injectUserMarkedAd(
-            start: start,
-            end: end,
-            ifCurrentAnalysisAssetId: assetId,
-            ifCurrentEpisodeId: currentEpisodeId,
-            ifPlaybackLifecycleGeneration: playEpisodeGeneration,
-            podcastId: currentPodcastId
-        )
-    }
-
     /// Playback-bound form for user gestures whose boundary expansion suspends
     /// before persistence begins. The caller captures this complete context at
     /// tap time so an autoplay transition cannot write episode A's span into
@@ -4573,9 +4659,17 @@ final class PlayheadRuntime {
         ifPlaybackLifecycleGeneration expectedGeneration: UInt64,
         podcastId: String?
     ) async -> Bool {
-        guard currentAnalysisAssetId == expectedAssetId,
+        guard RecurrenceMaterialIdentity.canonicalIdentifier(
+                  expectedAssetId
+              ) != nil,
+              expectedEpisodeId == nil
+                || RecurrenceMaterialIdentity.canonicalIdentifier(
+                    expectedEpisodeId
+                ) != nil,
+              currentAnalysisAssetId == expectedAssetId,
               currentEpisodeId == expectedEpisodeId,
-              playEpisodeGeneration == expectedGeneration
+              playEpisodeGeneration == expectedGeneration,
+              hasExactCurrentPodcastIdentity(podcastId)
         else {
             return false
         }
@@ -4584,6 +4678,9 @@ final class PlayheadRuntime {
         // Persist before publishing a live cue/banner. The orchestrator and
         // store must share one identity so later Yes/No feedback mutates the
         // exact durable row represented by the card.
+        #if DEBUG
+        userMarkPersistenceAttemptCountForTesting += 1
+        #endif
         let persisted = await adDetectionService.recordUserMarkedAd(
             analysisAssetId: expectedAssetId,
             startTime: start,
@@ -4594,7 +4691,8 @@ final class PlayheadRuntime {
         guard persisted else { return false }
         guard currentAnalysisAssetId == expectedAssetId,
               currentEpisodeId == expectedEpisodeId,
-              playEpisodeGeneration == expectedGeneration else {
+              playEpisodeGeneration == expectedGeneration,
+              hasExactCurrentPodcastIdentity(podcastId) else {
             return true
         }
 
@@ -4605,6 +4703,26 @@ final class PlayheadRuntime {
             windowId: windowId
         )
         return true
+    }
+
+    /// Playback-bound writes may be showless only when the active playback is
+    /// also showless. Any present identifier must already be canonical and
+    /// must exactly match the active show captured by the runtime.
+    private func hasExactCurrentPodcastIdentity(
+        _ requestedPodcastId: String?
+    ) -> Bool {
+        switch (currentPodcastId, requestedPodcastId) {
+        case (nil, nil):
+            return true
+        case let (active?, requested?):
+            return RecurrenceMaterialIdentity.canonicalIdentifier(active)
+                    != nil
+                && RecurrenceMaterialIdentity.canonicalIdentifier(requested)
+                    != nil
+                && requested == active
+        default:
+            return false
+        }
     }
 
     func setShowSkipMode(_ mode: SkipMode, orchestrator: SkipOrchestrator) async {

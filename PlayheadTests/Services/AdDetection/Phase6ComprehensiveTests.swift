@@ -987,7 +987,15 @@ struct Phase6AdDecisionHysteresisTests {
             endTime: endTime,
             skipConfidence: skipConfidence,
             eligibilityGate: .eligible,
-            recomputationRevision: 1
+            recomputationRevision: 1,
+            producerRevision: makeSkipTestAdWindow(
+                id: id,
+                assetId: "asset-hysteresis",
+                startTime: startTime,
+                endTime: endTime,
+                confidence: skipConfidence,
+                eligibilityGate: SkipEligibilityGate.eligible.rawValue
+            )
         )
     }
 

@@ -392,7 +392,8 @@ func makeSkipTestAdWindow(
     decisionState: String = "confirmed",
     evidenceText: String? = "brought to you by",
     startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
-    endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue
+    endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
+    eligibilityGate: String? = nil
 ) -> AdWindow {
     AdWindow(
         id: id,
@@ -413,6 +414,7 @@ func makeSkipTestAdWindow(
         metadataPromptVersion: nil,
         wasSkipped: false,
         userDismissedBanner: false,
+        eligibilityGate: eligibilityGate,
         startEdgeAnchor: startEdgeAnchor,
         endEdgeAnchor: endEdgeAnchor
     )
@@ -533,6 +535,101 @@ func awaitControllerSampleCount(
     _ = try await pollControllerSampleCount(store, show: show, expected: expected)
     try await drainControllerWrites(store, orchestrator)
     return await store.state(forShow: show)
+}
+
+/// Show id used ONLY as a trust write barrier, never asserted on directly.
+/// Seed it alongside the show under test: `recordFalseSkipSignal` never
+/// lazy-creates, and a barrier whose write is a no-op is a weaker barrier.
+let trustWriteBarrierShow = "o4qr-trust-write-barrier"
+
+/// Flush any per-show TRUST penalty the gesture under test may have issued,
+/// WITHOUT a wall-clock guess. The trust twin of ``drainControllerWrites``.
+///
+/// playhead-o4qr: this exists because the obvious alternative does not work.
+/// Watching `falseSkipSignalHandlerForTesting` and calling
+/// ``drainOrchestratorEffects`` SURVIVED mutation-battery entry O02 — the drain
+/// orders only the FIRST segment of the gesture's `Task`, and with a handler
+/// installed that segment merely reaches `await handler(…)`; the recording
+/// happens in a later one, after the negative assertion has already read an
+/// empty box.
+///
+/// Going through the store instead makes the same first-segment guarantee
+/// sufficient: for the unhandled path the gesture's task does
+/// `Task { await trustService.recordFalseSkipSignal(…) }`, so its first segment
+/// ENQUEUES on the `TrustScoringService` actor. A write of our own issued after
+/// the drain queues behind it, and `recordFalseSkipSignal` awaits its own store
+/// update, so by the time this returns any earlier penalty has committed.
+///
+/// Same honest limits as ``drainControllerWrites(_:_:)``: same-priority FIFO on
+/// the default actor executor is an implementation property, not a language
+/// guarantee, and only tasks the gesture created synchronously are ordered.
+func drainTrustWrites(
+    _ service: TrustScoringService,
+    _ trustStore: AnalysisStore,
+    _ orchestrator: SkipOrchestrator
+) async throws {
+    await drainOrchestratorEffects(orchestrator)
+    await service.recordFalseSkipSignal(podcastId: trustWriteBarrierShow)
+    // Fail loudly if the barrier itself is dead, rather than letting a silent
+    // no-op turn every caller's negative assertion into a vacuous one.
+    let barrier = try await trustStore.fetchProfile(podcastId: trustWriteBarrierShow)
+    guard let barrier, barrier.recentFalseSkipSignals > 0 else {
+        throw TestEffectTimeout(
+            effect: "trust write barrier for \"\(trustWriteBarrierShow)\"",
+            expected: 1,
+            observed: barrier?.recentFalseSkipSignals ?? 0
+        )
+    }
+}
+
+/// Wait for a show's trust penalties to reach `expected`, then re-read behind
+/// ``drainTrustWrites`` so the caller's `== expected` assertion bounds the
+/// count from ABOVE as well as below. The trust twin of
+/// ``awaitControllerSampleCount(_:orchestrator:show:expected:)``.
+///
+/// playhead-o4qr: the poll is not belt-and-braces, it is load-bearing, and it
+/// was added after measuring. `revertWindow` issues its penalty from an
+/// unstructured `Task`, and that task was observed NOT to have reached the
+/// trust actor 11 ms and several orchestrator round-trips after the gesture
+/// returned — so `drainTrustWrites` alone read a profile that was still 0 and
+/// the assertion failed on the UNMUTATED tree. Polling for the positive
+/// control first gives the fire-and-forget write the real time it needs;
+/// the barrier then closes the window above it.
+func awaitTrustFalseSkipSignals(
+    _ trustStore: AnalysisStore,
+    service: TrustScoringService,
+    orchestrator: SkipOrchestrator,
+    show: String,
+    expected: Int
+) async throws -> PodcastProfile {
+    var observed = 0
+    var landed = false
+    for _ in 0..<200 { // up to ~10s, only consumed when the write is dead
+        if let profile = try await trustStore.fetchProfile(podcastId: show) {
+            observed = profile.recentFalseSkipSignals
+            if observed >= expected {
+                landed = true
+                break
+            }
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    guard landed else {
+        throw TestEffectTimeout(
+            effect: "trust false-skip signals for show \"\(show)\"",
+            expected: expected,
+            observed: observed
+        )
+    }
+    try await drainTrustWrites(service, trustStore, orchestrator)
+    guard let final = try await trustStore.fetchProfile(podcastId: show) else {
+        throw TestEffectTimeout(
+            effect: "trust profile for show \"\(show)\" after the barrier",
+            expected: expected,
+            observed: 0
+        )
+    }
+    return final
 }
 
 /// Row count for "this seam must record NOTHING" assertions, read behind the

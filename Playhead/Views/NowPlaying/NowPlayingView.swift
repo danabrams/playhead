@@ -12,6 +12,19 @@ private struct BannerPlaybackContext: Equatable {
     let playbackLifecycleGeneration: UInt64
 }
 
+/// Immutable ownership captured when the transcript sheet is presented.
+/// SwiftUI may recompute sheet content while it remains mounted, so values
+/// read directly from `runtime` inside the sheet closure are not a lifecycle
+/// token: a same-asset replay could silently replace them with the new
+/// episode generation.
+private struct TranscriptPeekPresentationContext: Identifiable, Equatable {
+    let id = UUID()
+    let analysisAssetId: String
+    let episodeId: String?
+    let podcastId: String?
+    let playbackLifecycleGeneration: UInt64
+}
+
 /// Maps banner-tier answers onto the production correction seams without
 /// teaching the reusable banner view about `PlayheadRuntime`.
 ///
@@ -143,7 +156,8 @@ struct NowPlayingView: View {
     @State private var viewModel: NowPlayingViewModel
     private let bannerFeedbackActions: BannerFeedbackProductionActions
     @State private var bannerQueue: AdBannerQueue
-    @State private var showTranscriptPeek = false
+    @State private var transcriptPeekContext:
+        TranscriptPeekPresentationContext?
     /// playhead-05i: drives the "Up Next" sheet presentation. The
     /// sheet hosts a `QueueView` whose VM reads the same
     /// `PlaybackQueueService` injected at App scene scope.
@@ -362,7 +376,7 @@ struct NowPlayingView: View {
                 isPresentationVisible:
                     !showQueueSheet
                     && !showActivitySheet
-                    && !showTranscriptPeek,
+                    && transcriptPeekContext == nil,
                 isItemCurrent: { item in
                     item.episodeId == runtime.currentEpisodeId
                         && item.playbackLifecycleGeneration
@@ -462,6 +476,11 @@ struct NowPlayingView: View {
         .onChange(of: bannerPlaybackContext) {
             previousContext,
             currentContext in
+            // A transcript selection belongs to the playback transaction that
+            // presented it. Close the sheet on episode or same-episode replay
+            // instead of allowing its @State model to survive with newly
+            // recomputed callback identities.
+            transcriptPeekContext = nil
             // Now Playing remains mounted across autoplay/queue advancement.
             // Retire banners at both episode and same-episode replacement
             // boundaries so an old presentation cannot act on new state.
@@ -546,39 +565,57 @@ struct NowPlayingView: View {
             .presentationDragIndicator(.visible)
             .presentationBackground(AppColors.surface)
         }
-        .sheet(isPresented: $showTranscriptPeek) {
-            if let assetId = analysisAssetId {
-                TranscriptPeekView(
-                    peekViewModel: TranscriptPeekViewModel(
-                        analysisAssetId: assetId,
-                        dataSource: LiveTranscriptPeekDataSource(
-                            store: runtime.analysisStore
-                        )
-                    ),
-                    currentTime: viewModel.currentTime,
-                    // playhead-m1l9: episode duration seeds the coverage-free
-                    // "mark the untranscribed post-roll/tail" affordance.
-                    episodeDuration: viewModel.duration,
-                    // Phase 7.2: inject the persistent correction store so the
-                    // "This isn't an ad" gesture writes through to SQLite.
-                    correctionStore: runtime.correctionStore,
-                    trustService: runtime.trustService,
-                    podcastId: runtime.currentPodcastId,
-                    // Phase 9.1: wire the orchestrator revert so "not an ad"
-                    // removes skip cues and timeline markers immediately.
-                    onRevertAdWindows: { span in
-                        await runtime.skipOrchestrator.revertByTimeRange(
-                            start: span.startTime,
-                            end: span.endTime,
-                            podcastId: runtime.currentPodcastId
-                        )
-                    },
-                    runtime: runtime
-                )
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(AppColors.surface)
-            }
+        .sheet(item: $transcriptPeekContext) { sourceContext in
+            TranscriptPeekView(
+                peekViewModel: TranscriptPeekViewModel(
+                    analysisAssetId: sourceContext.analysisAssetId,
+                    dataSource: LiveTranscriptPeekDataSource(
+                        store: runtime.analysisStore
+                    )
+                ),
+                currentTime: viewModel.currentTime,
+                // playhead-m1l9: episode duration seeds the coverage-free
+                // "mark the untranscribed post-roll/tail" affordance.
+                episodeDuration: viewModel.duration,
+                trustService: runtime.trustService,
+                podcastId: sourceContext.podcastId,
+                // The callback is the sole correction writer. It atomically
+                // persists the exact producer rows and correction before the
+                // popover/sheet may report success.
+                onRevertAdWindows: { span in
+                    guard span.assetId
+                            == sourceContext.analysisAssetId
+                    else {
+                        return false
+                    }
+                    return await runtime.revertAdWindows(
+                        span: span,
+                        ifCurrentAnalysisAssetId:
+                            sourceContext.analysisAssetId,
+                        ifCurrentEpisodeId:
+                            sourceContext.episodeId,
+                        ifPlaybackLifecycleGeneration:
+                            sourceContext.playbackLifecycleGeneration,
+                        podcastId: sourceContext.podcastId
+                    )
+                },
+                onMarkAd: { startTime, endTime in
+                    await runtime.injectUserMarkedAd(
+                        start: startTime,
+                        end: endTime,
+                        ifCurrentAnalysisAssetId:
+                            sourceContext.analysisAssetId,
+                        ifCurrentEpisodeId:
+                            sourceContext.episodeId,
+                        ifPlaybackLifecycleGeneration:
+                            sourceContext.playbackLifecycleGeneration,
+                        podcastId: sourceContext.podcastId
+                    )
+                }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(AppColors.surface)
         }
     }
 }
@@ -633,9 +670,16 @@ private extension NowPlayingView {
                 .accessibilityHint("Opens the playback queue")
 
                 // Transcript peek — visible when analysis is available
-                if analysisAssetId != nil {
+                if let assetId = analysisAssetId {
                     Button {
-                        showTranscriptPeek = true
+                        transcriptPeekContext =
+                            TranscriptPeekPresentationContext(
+                                analysisAssetId: assetId,
+                                episodeId: runtime.currentEpisodeId,
+                                podcastId: runtime.currentPodcastId,
+                                playbackLifecycleGeneration:
+                                    runtime.playEpisodeGeneration
+                            )
                     } label: {
                         Image(systemName: "text.quote")
                             .font(.system(size: 18, weight: .medium))

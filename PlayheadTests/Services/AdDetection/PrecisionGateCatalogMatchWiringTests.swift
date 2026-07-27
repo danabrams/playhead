@@ -8,15 +8,15 @@
 // `AutoSkipPrecisionGateInput` without ever setting
 // `catalogMatchSimilarity`. The field defaults to 0, which means
 // `SafetySignal.catalogMatch` (wired in playhead-gtt9.13) can never
-// fire from the hot path — catalog evidence is silently dropped on the
-// floor before the gate sees it. Empty `AdCatalogStore` masks the bug
-// today, but a populated catalog with a real fingerprint match should
-// admit a borderline (no-other-signal) window to auto-skip.
+// fire from the hot path — catalog provenance is silently dropped before
+// the gate sees it. A populated catalog must preserve that provenance while
+// remaining suggest-only unless current-episode strong evidence independently
+// corroborates the candidate.
 //
 // These tests drive `AdDetectionService.runHotPath` end-to-end with
 // an `AdCatalogStore` that already contains a matching fingerprint,
-// then assert the persisted `AdWindow.eligibilityGate` reflects
-// catalog-corroborated auto-skip vs. mark-only as expected.
+// then assert the persisted `AdWindow.eligibilityGate` remains conservative
+// while the complete match provenance survives.
 
 import Foundation
 import Testing
@@ -119,19 +119,72 @@ struct PrecisionGateCatalogMatchWiringTests {
         )
     }
 
+    private func storedCandidate(
+        id: String,
+        assetId: String,
+        start: Double,
+        end: Double,
+        evidenceText: String,
+        eligibilityGate: String? = SkipEligibilityGate.eligible.rawValue,
+        catalogMatch: Bool = false,
+        descriptiveMetadata: Bool = false,
+        evidenceStartTime: Double = 1500,
+        startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
+        endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: assetId,
+            startTime: start,
+            endTime: end,
+            confidence: 0.95,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "2m2i-test",
+            advertiser: descriptiveMetadata ? "Stale advertiser" : nil,
+            product: descriptiveMetadata ? "Stale product" : nil,
+            adDescription: descriptiveMetadata
+                ? "Stale description"
+                : nil,
+            evidenceText: evidenceText,
+            evidenceStartTime: evidenceStartTime,
+            metadataSource: descriptiveMetadata ? "old-extractor" : "fusion-v1",
+            metadataConfidence: descriptiveMetadata ? 0.88 : 0.95,
+            metadataPromptVersion: descriptiveMetadata ? "7" : nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: catalogMatch ? "[\"catalog\"]" : nil,
+            eligibilityGate: eligibilityGate,
+            catalogStoreMatchSimilarity: catalogMatch ? 0.99 : nil,
+            catalogFingerprintVersion: catalogMatch
+                ? CatalogFingerprintVersion.currentCatalog.rawValue
+                : nil,
+            catalogMatchedEntryId: catalogMatch
+                ? "11111111-1111-1111-1111-111111111111"
+                : nil,
+            catalogMatchedShowId: catalogMatch ? "show-2m2i" : nil,
+            catalogMatchedLearningSource: catalogMatch
+                ? CatalogLearningSource.userMarkedAd.rawValue
+                : nil,
+            catalogMatchedLearningLifecycle: catalogMatch
+                ? CatalogLearningLifecycle.explicitConfirmation.rawValue
+                : nil,
+            startEdgeAnchor: startEdgeAnchor.rawValue,
+            endEdgeAnchor: endEdgeAnchor.rawValue
+        )
+    }
+
     /// Pre-seed the catalog with a fingerprint computed from this asset's
-    /// own ad-band feature windows. Because `AdCatalogStore.matches`
-    /// considers `show_id IS NULL` entries globally, we deliberately
-    /// store with `showId: nil` — the hot path doesn't have a podcastId
-    /// in scope and queries with a nil show, which still hits global
-    /// rows. Returns the seeded fingerprint for later assertion.
+    /// own ad-band feature windows for one exact show. Hot-path matching must
+    /// carry that show identity; nil/blank identifiers fail closed.
     @discardableResult
     private func seedCatalogFromFeatureBand(
         catalog: AdCatalogStore,
         store: AnalysisStore,
         assetId: String,
         adStart: Double,
-        adEnd: Double
+        adEnd: Double,
+        showId: String = "show-2m2i"
     ) async throws -> AcousticFingerprint {
         let bandFeatures = try await store.fetchFeatureWindows(
             assetId: assetId,
@@ -142,18 +195,24 @@ struct PrecisionGateCatalogMatchWiringTests {
         #expect(!fingerprint.isZero,
                 "precondition: ad-band features must produce a non-zero fingerprint or this test cannot prove anything")
         _ = try await catalog.insert(
-            showId: nil,
+            showId: showId,
             episodePosition: .unknown,
             durationSec: adEnd - adStart,
             acousticFingerprint: fingerprint,
             transcriptSnippet: nil,
             sponsorTokens: nil,
-            originalConfidence: 0.95
+            originalConfidence: 0.95,
+            learningSource: .userMarkedAd,
+            learningLifecycle: .explicitConfirmation,
+            sourceAssetId: assetId,
+            sourceWindowId: "seed-\(assetId)",
+            sourceStartTime: adStart,
+            sourceEndTime: adEnd
         )
         return fingerprint
     }
 
-    // MARK: - 1. RED → GREEN: catalog match admits borderline window to autoSkip
+    // MARK: - 1. Catalog match is provenance, not sole auto-skip authority
 
     /// The single-window hot path drives a 0.85-confidence chunk through
     /// classifier + precision gate. The chunk text uses ONLY weak
@@ -163,14 +222,12 @@ struct PrecisionGateCatalogMatchWiringTests {
     ///   - metadataSlotPrior       does NOT fire (mid-episode)
     ///   - userConfirmedLocalPattern  does NOT fire (no correctionStore)
     ///
-    /// Without the catalog signal this window demotes to `markOnly`
-    /// (which is precisely what `Bug8MarkOnlyForensicTests.class C`
-    /// pins). The fix wires a non-zero `catalogMatchSimilarity` into
-    /// the gate input so `SafetySignal.catalogMatch` fires and admits
-    /// auto-skip. WITHOUT the fix, this test FAILS because
-    /// `precisionGateLabel` drops the catalog field on the floor.
-    @Test("hot path single-window: pre-seeded catalog fingerprint admits a no-other-signal 0.85 window to eligibilityGate=autoSkip")
-    func catalogMatchAdmitsNoOtherSignalWindowToAutoSkip() async throws {
+    /// The pure precision gate still reports `catalogMatch` for diagnostics,
+    /// but the runtime admission policy requires an independent strong signal.
+    /// This prevents an erroneous learned row from promoting an otherwise
+    /// mixed/unanchored span by itself while retaining full match provenance.
+    @Test("hot path single-window: catalog-only evidence remains markOnly while preserving provenance")
+    func catalogMatchAloneDoesNotAdmitAutoSkip() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-2m2i-catalog-admits"
         try await store.insertAsset(makeAsset(id: assetId))
@@ -210,8 +267,9 @@ struct PrecisionGateCatalogMatchWiringTests {
         // Mid-episode chunk with only transitionMarker hits. Mirrors the
         // `singleHighConfidenceWindowWithoutSafetySignalsStaysMarkOnly`
         // test's lexical setup, which on an EMPTY catalog produces
-        // markOnly. Adding a populated catalog match must flip the
-        // outcome to autoSkip — that is the wiring the bead enables.
+        // markOnly. Adding a populated catalog match must preserve that
+        // conservative disposition because catalog evidence is learned data,
+        // not an independent confirmation of this episode's boundaries.
         let normalized = "anyway back to the show without further ado"
         let chunk = TranscriptChunk(
             id: "chunk-2m2i-admit",
@@ -231,20 +289,345 @@ struct PrecisionGateCatalogMatchWiringTests {
         _ = try await service.runHotPath(
             chunks: [chunk],
             analysisAssetId: assetId,
-            episodeDuration: duration
+            episodeDuration: duration,
+            podcastId: "show-2m2i"
         )
 
         let persisted = try await store.fetchAdWindows(assetId: assetId)
         try #require(persisted.count == 1,
                      "exactly one AdWindow expected from the single-window path; got \(persisted.count)")
-        #expect(persisted.first?.eligibilityGate == "autoSkip",
-                "with catalog match and otherwise-no signals, the precision gate must admit autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
+        #expect(persisted.first?.eligibilityGate == "markOnly",
+                "catalog evidence alone must not admit autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
+        #expect(
+            persisted.first?.catalogFingerprintVersion
+                == CatalogFingerprintVersion.relativeFeatureSummaryV2.rawValue
+        )
+        #expect(persisted.first?.catalogMatchedEntryId != nil)
+        #expect(persisted.first?.catalogMatchedShowId == "show-2m2i")
+        #expect(
+            persisted.first?.catalogMatchedLearningSource
+                == CatalogLearningSource.userMarkedAd.rawValue
+        )
+        #expect(
+            persisted.first?.catalogMatchedLearningLifecycle
+                == CatalogLearningLifecycle.explicitConfirmation.rawValue
+        )
+        #expect(
+            (persisted.first?.catalogStoreMatchSimilarity ?? 0)
+                >= Double(AdCatalogStore.defaultSimilarityFloor)
+        )
+    }
+
+    @Test("hot-path same-ID geometry replacement uses fresh gate, catalog provenance, and anchors")
+    func changedGeometryDoesNotInheritExistingAuthority() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-2m2i-reconcile-authority"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 3600
+        let adStart: Double = 1500
+        let adEnd: Double = 1560
+        try await insertFingerprintableFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration,
+            adStart: adStart,
+            adEnd: adEnd
+        )
+
+        let normalized = "anyway back to the show without further ado"
+        let existing = storedCandidate(
+            id: "stable-hot-path-id",
+            assetId: assetId,
+            start: 1400,
+            end: 1600,
+            evidenceText: normalized,
+            catalogMatch: true,
+            descriptiveMetadata: true,
+            evidenceStartTime: adStart,
+            startEdgeAnchor: .rediffByteExact,
+            endEdgeAnchor: .stingerSnapped
+        )
+        try await store.insertAdWindow(existing)
+
+        let service = makeService(
+            store: store,
+            classifier: SlotScoringClassifier2m2i(
+                scoresByStartTime: [:],
+                defaultScore: 0.10,
+                chunkScore: 0.85
+            ),
+            adCatalogStore: nil
+        )
+        let chunk = TranscriptChunk(
+            id: "chunk-2m2i-reconcile-authority",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-2m2i-reconcile-authority",
+            chunkIndex: 0,
+            startTime: adStart,
+            endTime: adEnd,
+            text: normalized,
+            normalizedText: normalized,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
+        let emitted = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            podcastId: "show-2m2i"
+        )
+        let replacement = try #require(emitted.first)
+        let persisted = try #require(
+            try await store.fetchAdWindow(id: existing.id)
+        )
+
+        #expect(replacement.id == existing.id)
+        #expect(
+            replacement.startTime != existing.startTime
+                || replacement.endTime != existing.endTime,
+            "fixture must exercise a material geometry replacement"
+        )
+        for window in [replacement, persisted] {
+            #expect(window.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+            #expect(window.evidenceSources == nil)
+            #expect(window.catalogStoreMatchSimilarity == nil)
+            #expect(window.catalogFingerprintVersion == nil)
+            #expect(window.catalogMatchedEntryId == nil)
+            #expect(window.catalogMatchedShowId == nil)
+            #expect(window.catalogMatchedLearningSource == nil)
+            #expect(window.catalogMatchedLearningLifecycle == nil)
+            #expect(window.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
+            #expect(window.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
+            #expect(window.advertiser == nil)
+            #expect(window.product == nil)
+            #expect(window.adDescription == nil)
+            #expect(window.evidenceStartTime == adStart)
+            #expect(window.metadataSource == "none")
+            #expect(window.metadataConfidence == nil)
+            #expect(window.metadataPromptVersion == nil)
+        }
+    }
+
+    @Test("same-geometry replay cannot retain a stale automatic catalog gate")
+    func sameGeometryRefreshesCatalogAuthority() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-2m2i-reconcile-same-geometry"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 3600
+        let adStart: Double = 1500
+        let adEnd: Double = 1560
+        try await insertFingerprintableFeatureGrid(
+            store: store,
+            assetId: assetId,
+            duration: duration,
+            adStart: adStart,
+            adEnd: adEnd
+        )
+        let service = makeService(
+            store: store,
+            classifier: SlotScoringClassifier2m2i(
+                scoresByStartTime: [:],
+                defaultScore: 0.10,
+                chunkScore: 0.85
+            ),
+            adCatalogStore: nil
+        )
+        let normalized = "anyway back to the show without further ado"
+        let chunk = TranscriptChunk(
+            id: "chunk-2m2i-reconcile-same-geometry",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-2m2i-reconcile-same-geometry",
+            chunkIndex: 0,
+            startTime: adStart,
+            endTime: adEnd,
+            text: normalized,
+            normalizedText: normalized,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
+        let firstRun = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            podcastId: "show-2m2i"
+        )
+        let freshMarkOnly = try #require(firstRun.first)
+        #expect(
+            freshMarkOnly.eligibilityGate
+                == SkipEligibilityGate.markOnly.rawValue
+        )
+
+        // Simulate the persisted output of an earlier run whose device-local
+        // catalog row supplied the automatic gate, then make that catalog
+        // unavailable without changing the detected geometry.
+        let staleAutomatic = storedCandidate(
+            id: freshMarkOnly.id,
+            assetId: assetId,
+            start: freshMarkOnly.startTime,
+            end: freshMarkOnly.endTime,
+            evidenceText: normalized,
+            eligibilityGate: "autoSkip",
+            catalogMatch: true,
+            startEdgeAnchor: .rediffByteExact,
+            endEdgeAnchor: .stingerSnapped
+        )
+        try await store.insertOrReplaceAdWindow(staleAutomatic)
+
+        let secondRun = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: duration,
+            podcastId: "show-2m2i"
+        )
+        let emitted = try #require(secondRun.first)
+        let persisted = try #require(
+            try await store.fetchAdWindow(id: staleAutomatic.id)
+        )
+
+        #expect(emitted.id == staleAutomatic.id)
+        #expect(emitted.startTime == staleAutomatic.startTime)
+        #expect(emitted.endTime == staleAutomatic.endTime)
+        for window in [emitted, persisted] {
+            #expect(
+                window.eligibilityGate
+                    == SkipEligibilityGate.markOnly.rawValue
+            )
+            #expect(window.evidenceSources == nil)
+            #expect(window.catalogStoreMatchSimilarity == nil)
+            #expect(window.catalogFingerprintVersion == nil)
+            #expect(window.catalogMatchedEntryId == nil)
+            #expect(window.catalogMatchedShowId == nil)
+            #expect(window.catalogMatchedLearningSource == nil)
+            #expect(window.catalogMatchedLearningLifecycle == nil)
+            // Geometry stayed exact, so independent physical-edge provenance
+            // may survive even though learned decision authority may not.
+            #expect(
+                window.startEdgeAnchor
+                    == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            )
+            #expect(
+                window.endEdgeAnchor
+                    == AutoSkipEdgeAnchor.stingerSnapped.rawValue
+            )
+        }
+    }
+
+    @Test("hot-path geometry treats signed zero as the persisted span")
+    func signedZeroGeometryPreservesConservativeAuthorityIdentity() {
+        let persisted = storedCandidate(
+            id: "signed-zero-persisted",
+            assetId: "asset-signed-zero-reconciliation",
+            start: 0.0,
+            end: 60,
+            evidenceText: "sponsor message",
+            eligibilityGate:
+                SkipEligibilityGate.blockedByUserCorrection.rawValue
+        )
+        let replayed = storedCandidate(
+            id: "signed-zero-replayed",
+            assetId: "asset-signed-zero-reconciliation",
+            start: -0.0,
+            end: 60,
+            evidenceText: "sponsor message",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        let changed = storedCandidate(
+            id: "signed-zero-changed",
+            assetId: "asset-signed-zero-reconciliation",
+            start: -0.0,
+            end: 61,
+            evidenceText: "sponsor message",
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+
+        #expect(
+            AdDetectionService.hasSameHotPathGeometry(persisted, replayed),
+            "a signed-zero replay must retain the persisted conservative gate"
+        )
+        #expect(
+            !AdDetectionService.hasSameHotPathGeometry(persisted, changed),
+            "materially changed bounds must still use fresh authority"
+        )
+    }
+
+    @Test("hot-path reconcile transaction rejects a stale update or retirement atomically")
+    func staleExpectedRevisionRollsBackWholeReconcile() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-2m2i-reconcile-cas"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let updateOriginal = storedCandidate(
+            id: "candidate-to-update",
+            assetId: assetId,
+            start: 10,
+            end: 40,
+            evidenceText: "update original"
+        )
+        let retireOriginal = storedCandidate(
+            id: "candidate-to-retire",
+            assetId: assetId,
+            start: 100,
+            end: 130,
+            evidenceText: "retire original"
+        )
+        try await store.insertAdWindows([updateOriginal, retireOriginal])
+
+        let updateReplacement = storedCandidate(
+            id: updateOriginal.id,
+            assetId: assetId,
+            start: 12,
+            end: 42,
+            evidenceText: "fresh update"
+        )
+        let retireReplacement = storedCandidate(
+            id: retireOriginal.id,
+            assetId: assetId,
+            start: 200,
+            end: 240,
+            evidenceText: "same-ID replacement must survive"
+        )
+        try await store.insertOrReplaceAdWindow(retireReplacement)
+
+        await #expect(
+            throws: AnalysisStoreError.staleAdWindowRevision(
+                id: retireOriginal.id
+            )
+        ) {
+            try await store.upsertHotPathAdWindows(
+                [updateReplacement],
+                existingIDs: [updateOriginal.id],
+                retiredIDs: [retireOriginal.id],
+                expectedProducerRevisions: [
+                    updateOriginal.id: updateOriginal,
+                    retireOriginal.id: retireOriginal,
+                ]
+            )
+        }
+
+        let updateAfter = try #require(
+            try await store.fetchAdWindow(id: updateOriginal.id)
+        )
+        let retireAfter = try #require(
+            try await store.fetchAdWindow(id: retireOriginal.id)
+        )
+        #expect(updateAfter.startTime == updateOriginal.startTime)
+        #expect(updateAfter.endTime == updateOriginal.endTime)
+        #expect(updateAfter.evidenceText == updateOriginal.evidenceText)
+        #expect(retireAfter.startTime == retireReplacement.startTime)
+        #expect(retireAfter.endTime == retireReplacement.endTime)
+        #expect(retireAfter.evidenceText == retireReplacement.evidenceText)
     }
 
     // MARK: - 2. EDGE: catalog match BELOW the floor → behavior unchanged
 
     /// A populated catalog whose top match for this span sits below
-    /// `AutoSkipPrecisionGateConfig.catalogMatchSignalFloor` (0.80) must
+    /// `AutoSkipPrecisionGateConfig.catalogMatchSignalFloor` (0.90) must
     /// NOT fire `SafetySignal.catalogMatch` — the gate's signal floor is
     /// the precision rail, and a sub-floor match is no admission ticket.
     /// The window stays at markOnly (the same outcome as no catalog at
@@ -278,7 +661,7 @@ struct PrecisionGateCatalogMatchWiringTests {
         // Seed the catalog with a fingerprint from a STRUCTURALLY
         // DIFFERENT asset — a uniform low-RMS speech grid produces a
         // distinct fingerprint vs. the ad-band cluster shape used by
-        // `assetId`. Match similarity will land far below the 0.80 floor.
+        // `assetId`. Match similarity will land far below the 0.90 floor.
         let fingerprintAsset = "asset-2m2i-below-floor-noise"
         try await store.insertAsset(makeAsset(id: fingerprintAsset))
         var noiseWindows: [FeatureWindow] = []
@@ -310,13 +693,19 @@ struct PrecisionGateCatalogMatchWiringTests {
         let catalogDir = try makeTempDir(prefix: "2m2i-catalog-below-floor")
         let catalog = try AdCatalogStore(directoryURL: catalogDir)
         _ = try await catalog.insert(
-            showId: nil,
+            showId: "show-2m2i",
             episodePosition: .unknown,
             durationSec: 60,
             acousticFingerprint: noiseFingerprint,
             transcriptSnippet: nil,
             sponsorTokens: nil,
-            originalConfidence: 0.95
+            originalConfidence: 0.95,
+            learningSource: .userMarkedAd,
+            learningLifecycle: .explicitConfirmation,
+            sourceAssetId: fingerprintAsset,
+            sourceWindowId: "seed-\(fingerprintAsset)",
+            sourceStartTime: 0,
+            sourceEndTime: 60
         )
 
         let classifier = SlotScoringClassifier2m2i(
@@ -349,14 +738,94 @@ struct PrecisionGateCatalogMatchWiringTests {
         _ = try await service.runHotPath(
             chunks: [chunk],
             analysisAssetId: assetId,
-            episodeDuration: duration
+            episodeDuration: duration,
+            podcastId: "show-2m2i"
         )
 
         let persisted = try await store.fetchAdWindows(assetId: assetId)
         try #require(persisted.count == 1,
                      "exactly one AdWindow expected from the single-window path; got \(persisted.count)")
         #expect(persisted.first?.eligibilityGate == "markOnly",
-                "catalog match below the 0.80 signal floor must NOT promote to autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
+                "catalog match below the 0.90 signal floor must NOT promote to autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
+        #expect(
+            persisted.first?.catalogStoreMatchSimilarity == 0,
+            "a completed exact-show catalog miss must persist 0 rather than masquerading as an unavailable query"
+        )
+        #expect(persisted.first?.catalogMatchedEntryId == nil)
+        #expect(persisted.first?.catalogMatchedShowId == nil)
+    }
+
+    @Test("hot path fails closed for missing and noncanonical show identifiers")
+    func missingShowIdentityDoesNotMatchCatalog() async throws {
+        for (suffix, showId) in [
+            ("nil", nil),
+            ("blank", " \n\t"),
+            ("noncanonical", " show-2m2i "),
+        ] as [(String, String?)] {
+            let store = try await makeTestStore()
+            let assetId = "asset-2m2i-missing-show-\(suffix)"
+            try await store.insertAsset(makeAsset(id: assetId))
+            let duration: Double = 600
+            let adStart: Double = 250
+            let adEnd: Double = 310
+            try await insertFingerprintableFeatureGrid(
+                store: store,
+                assetId: assetId,
+                duration: duration,
+                adStart: adStart,
+                adEnd: adEnd
+            )
+            let catalog = try AdCatalogStore(
+                directoryURL: makeTempDir(prefix: "2m2i-\(suffix)")
+            )
+            try await seedCatalogFromFeatureBand(
+                catalog: catalog,
+                store: store,
+                assetId: assetId,
+                adStart: adStart,
+                adEnd: adEnd
+            )
+            let service = makeService(
+                store: store,
+                classifier: SlotScoringClassifier2m2i(
+                    scoresByStartTime: [:],
+                    defaultScore: 0.10,
+                    chunkScore: 0.85
+                ),
+                adCatalogStore: catalog
+            )
+            let normalized = "anyway back to the show without further ado"
+            let chunk = TranscriptChunk(
+                id: "chunk-\(suffix)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(suffix)",
+                chunkIndex: 0,
+                startTime: adStart,
+                endTime: adEnd,
+                text: normalized,
+                normalizedText: normalized,
+                pass: "final",
+                modelVersion: "test-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+            _ = try await service.runHotPath(
+                chunks: [chunk],
+                analysisAssetId: assetId,
+                episodeDuration: duration,
+                podcastId: showId
+            )
+            let persisted = try #require(
+                try await store.fetchAdWindows(assetId: assetId).first
+            )
+            #expect(persisted.eligibilityGate == "markOnly")
+            #expect(persisted.catalogStoreMatchSimilarity == nil)
+            #expect(persisted.catalogFingerprintVersion == nil)
+            #expect(persisted.catalogMatchedEntryId == nil)
+            #expect(persisted.catalogMatchedShowId == nil)
+            #expect(persisted.catalogMatchedLearningSource == nil)
+            #expect(persisted.catalogMatchedLearningLifecycle == nil)
+        }
     }
 
     // MARK: - 3. EDGE: nil AdCatalogStore → behavior unchanged (today's path)
@@ -413,7 +882,8 @@ struct PrecisionGateCatalogMatchWiringTests {
         _ = try await service.runHotPath(
             chunks: [chunk],
             analysisAssetId: assetId,
-            episodeDuration: duration
+            episodeDuration: duration,
+            podcastId: "show-2m2i"
         )
 
         let persisted = try await store.fetchAdWindows(assetId: assetId)

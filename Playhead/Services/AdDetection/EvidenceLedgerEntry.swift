@@ -157,8 +157,9 @@ enum EvidenceSubSource: String, Sendable, Codable, Equatable, Hashable, CaseIter
 /// A single capped, trust-scaled contribution from one evidence source.
 ///
 /// Multiple entries from the same source are allowed (e.g. multiple FM windows).
-/// `BackfillEvidenceFusion` accumulates these; `DecisionMapper` sums `weight` into
-/// `proposalConfidence`.
+/// `BackfillEvidenceFusion` accumulates these; `DecisionMapper` sums the
+/// automatic-decision subset into `proposalConfidence` while retaining
+/// diagnostic-only rows for replay.
 struct EvidenceLedgerEntry: Sendable {
     /// Which evidence source produced this entry.
     let source: EvidenceSourceType
@@ -180,6 +181,18 @@ struct EvidenceLedgerEntry: Sendable {
     /// adding the field is purely additive: existing constructors compile
     /// unchanged and the JSONL schema gains an optional key.
     let subSource: EvidenceSubSource?
+
+    /// Whether this row may affect an automatic decision. Learned
+    /// fingerprint-catalog matches remain in the ledger for provenance and
+    /// replay, but they are not current-episode presence or boundary proof and
+    /// therefore cannot add score, satisfy quorum, or suppress a demotion.
+    var contributesToAutomaticDecision: Bool {
+        guard !source.isObservabilityOnly else { return false }
+        return !(
+            source == .catalog
+                && subSource == .fingerprintStore
+        )
+    }
 
     init(
         source: EvidenceSourceType,

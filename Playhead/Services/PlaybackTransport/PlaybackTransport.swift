@@ -683,7 +683,9 @@ final class PlaybackService: NSObject, Sendable {
     /// Seek to an absolute position in seconds.
     @discardableResult
     func seek(to seconds: TimeInterval) async -> Bool {
-        guard !isTornDown else { return false }
+        guard !isTornDown, seconds.isFinite, seconds >= 0 else {
+            return false
+        }
         // Preserve the transport's deterministic state-seam contract when no
         // AVPlayer item is installed. Playback reliability tests and preview
         // callers intentionally drive the state machine without decoded
@@ -710,6 +712,8 @@ final class PlaybackService: NSObject, Sendable {
         ifCurrentItemGeneration expectedGeneration: UInt64
     ) async -> Bool {
         guard !isTornDown,
+              seconds.isFinite,
+              seconds >= 0,
               playerItemGeneration == expectedGeneration,
               let item = player.currentItem,
               playerItem === item else {

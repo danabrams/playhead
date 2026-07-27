@@ -620,4 +620,110 @@ struct AutoSkipEdgePaddingWiringTests {
         let activeIds = await orchestrator.activeWindowIDs()
         #expect(!activeIds.contains("ad-markonly"), "markOnly span must not enter the managed skip set")
     }
+
+    @Test("same-ID AdWindow replacement cannot inherit prior trusted anchors")
+    func adWindowReplacementRefreshesAnchorOwnership() async throws {
+        let orchestrator = try await Self.makeAutoOrchestrator()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setEdgePaddingEnabled(true)
+        await orchestrator.setActiveSkipMode(.manual)
+
+        let anchored = makeSkipTestAdWindow(
+            id: "round3-anchor-replacement",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            decisionState: "confirmed",
+            startEdgeAnchor:
+                AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+            endEdgeAnchor:
+                AutoSkipEdgeAnchor.rediffByteExact.rawValue
+        )
+        let unanchoredReplacement = makeSkipTestAdWindow(
+            id: anchored.id,
+            startTime: 180,
+            endTime: 240,
+            confidence: 0.91,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([anchored])
+        await orchestrator.receiveAdWindows([unanchoredReplacement])
+        await orchestrator.setActiveSkipMode(.auto)
+
+        #expect(
+            pushedCues.isEmpty,
+            "the unanchored producer revision must not borrow the old row's rediff anchors"
+        )
+    }
+
+    @Test("same-ID decision replacement cannot inherit prior trusted anchors")
+    func decisionReplacementRefreshesAnchorOwnership() async throws {
+        let orchestrator = try await Self.makeAutoOrchestrator()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.setEdgePaddingEnabled(true)
+        await orchestrator.setActiveSkipMode(.manual)
+
+        let anchored = makeSkipTestAdWindow(
+            id: "round3-decision-anchor-replacement",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            startEdgeAnchor:
+                AutoSkipEdgeAnchor.stingerSnapped.rawValue,
+            endEdgeAnchor:
+                AutoSkipEdgeAnchor.stingerSnapped.rawValue,
+            eligibilityGate:
+                SkipEligibilityGate.eligible.rawValue
+        )
+        let replacement = makeSkipTestAdWindow(
+            id: anchored.id,
+            startTime: 180,
+            endTime: 240,
+            confidence: 0.91,
+            eligibilityGate:
+                SkipEligibilityGate.eligible.rawValue
+        )
+        await orchestrator.receiveAdDecisionResults([
+            AdDecisionResult(
+                id: anchored.id,
+                analysisAssetId: anchored.analysisAssetId,
+                startTime: anchored.startTime,
+                endTime: anchored.endTime,
+                skipConfidence: anchored.confidence,
+                eligibilityGate: .eligible,
+                recomputationRevision: 1,
+                producerRevision: anchored
+            )
+        ])
+        await orchestrator.receiveAdDecisionResults([
+            AdDecisionResult(
+                id: replacement.id,
+                analysisAssetId: replacement.analysisAssetId,
+                startTime: replacement.startTime,
+                endTime: replacement.endTime,
+                skipConfidence: replacement.confidence,
+                eligibilityGate: .eligible,
+                recomputationRevision: 2,
+                producerRevision: replacement
+            )
+        ])
+        await orchestrator.setActiveSkipMode(.auto)
+
+        #expect(
+            pushedCues.isEmpty,
+            "the unanchored decision revision must not borrow stale stinger anchors"
+        )
+    }
 }

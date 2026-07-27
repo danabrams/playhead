@@ -75,16 +75,96 @@
 # LAST GREEN END-TO-END RUN
 #   2026-07-27 — 26/26 KILLED, 0 survivors, 0 errors, exit 0.
 #   10 builds (1 baseline + 9 batches), 17m21s wall clock.
-# Recorded so a later reader can tell "never run since it was written" apart
-# from "run and passing". If you change the source under it, re-run and update
-# this — a stale line here is worse than no line.
+# That run predates the playhead-o4qr merge and NO LONGER DESCRIBES THIS FILE.
 #
-# PARTIAL SINCE THEN
-#   2026-07-27 — playhead-ugy4 added S01–S05 (batches 10–12) and two suites to
-#   FOCUSED_SUITES. Those three batches were run and are 5/5 KILLED; M01–N07
-#   were NOT re-run against the widened suite list. The line above therefore
-#   still describes the last WHOLE-battery run. Next whole-battery run: fold
-#   both lines into one.
+# STATUS AFTER THE playhead-o4qr MERGE (2026-07-27)
+#   The battery is 26 mutations, not 31: five entries were relocated to the
+#   KNOWN GAP block (see the MERGE NOTE above `MUTATIONS`). All 26 anchors are
+#   dry-run verified to apply exactly once against the merged source.
+#
+#   Batches 1–7 were re-run: 15 mutations, 14 KILLED, 1 SURVIVED (M17).
+#
+#   M17 SURVIVED and the survivor is REAL, but it is an unpinned rail rather
+#   than a live defect, so read the next paragraph before "fixing" anything.
+#   Production attribution is correct by construction: both seams pass the
+#   `sourceShowId` captured at gesture time into `makeManualCorrectionVetoEvent`
+#   and never read `activePodcastId`. What changed is the OBSERVATION POINT. On
+#   main the receipt was written by `persistManualCorrectionVeto` AFTER the
+#   revert barrier, so parking there and swapping episodes made a
+#   live-attributed receipt visible. o4qr mints the event and commits it inside
+#   the atomic transaction BEFORE that barrier (SkipOrchestrator.swift: mint,
+#   then `persistRevertedAdWindowsIfCurrent`, then the barrier), so by the time
+#   the race test can replace the episode the receipt is already durable and
+#   `activePodcastId` still equals `sourceShowId`. The mutation is inert.
+#
+#   Pinning it again needs a barrier at the suspension that CAN corrupt the
+#   attribution — the `await revokeRecurrenceEvidence` that precedes the mint —
+#   not the one that precedes the live-state guard. One barrier cannot pin both
+#   under this structure, because the durable write now sits above the effects:
+#   the current placement is what makes M07/M12/M14/M15/M16 killable. Adding a
+#   second, pre-mint barrier is the fix; it is a new test seam, deliberately not
+#   done as part of a merge.
+#
+#   Batches 8–12 were NOT re-run, for two different reasons, and BOTH must be
+#   cleared before this file can claim a whole-battery green again:
+#     • batches 8 and 9 contain N06 and N07, whose only victim
+#       (`anonymousRevertRecordsNoControllerSample`) is currently RED — o4qr's
+#       `exactFeedbackShowIdentity` refuses a revert whose show id is nil or
+#       empty while the episode has one, which is the contract collision the
+#       merge report flags for decision. Running them now would credit both
+#       mutations off a pre-existing failure, which is precisely the
+#       miscrediting the baseline exists to prevent.
+#     • batches 10–12 (S01–S05) are the suggest-tier rails; untouched by the
+#       merge resolution and simply not re-run, for build budget.
+#
+#   The baseline is likewise BLOCKED until that red test is resolved: it refuses
+#   to start while any focused-suite test is already failing. Batches 1–7 were
+#   therefore run with PLAYHEAD_MB_SKIP_BASELINE=1, which is sound only because
+#   none of them names the red test. Do not extend that shortcut to 8/9.
+#
+# THE CONTRACT COLLISION IS RESOLVED (playhead-o4qr, 2026-07-27)
+#   Dan's decision: ACCEPT THE RECEIPT, REFUSE THE LEARNING. A correction whose
+#   show identity is unusable (nil, empty, non-canonical, or disagreeing with
+#   the live episode) still commits its durable receipt and still returns true;
+#   what it withholds is every show-KEYED effect — trust penalty, hard-negative
+#   bank, per-show threshold controller, show-scoped recurrence revocation.
+#
+#   Consequences for this file, all already applied below:
+#     • `T_ANON_SILENT` was RETITLED. The test grew three more clauses, so its
+#       @Test display name changed; the constant had to follow or N06/N07 and
+#       the new O-series would all be silently un-creditable.
+#     • Batches 8 and 9 are UNBLOCKED — their victim is green again, so N06 and
+#       N07 can finally be credited honestly rather than off a red test.
+#     • Five new entries, O01–O05, pin the decision itself: three learning
+#       surfaces N07 cannot see (bank, trust, revocation scope) plus BOTH
+#       seams' receipt half. See the note above them for the batching.
+#     • Two pre-existing tests pinned the OLD refusal and were re-pointed:
+#       `revertWindowRemovesCue` (now O02's second victim) and
+#       `autoSkipNoWinsBlockedAppliedPersistenceRace`, whose show probe moved
+#       to `staleShowBannerNoKeepsReceiptAndRecordsNoLearning` (O05's victim).
+#     • N06's EDIT was rewritten (its expectation was not) — see the entry.
+#
+# RESULTS, 2026-07-27, after the decision landed
+#   Batches 8, 9, 13, 14, 15, 16 run — 12 mutations, 12 KILLED, 0 survivors.
+#   Batch 14 was run WITH the baseline (baseline green); the rest with
+#   PLAYHEAD_MB_SKIP_BASELINE=1 behind that same green baseline and an
+#   independent focused-suite pass (116/116).
+#
+#   Batches 1-7 and 10-12 were NOT re-run this session, for build budget. All
+#   31 anchors are `--dry-run` verified to apply exactly once against the
+#   current source, so the file is not silently rotten — but batches 1-7's last
+#   real verdicts (14 KILLED / M17 SURVIVED) predate the decision, and 10-12
+#   still have not been re-run since the merge. A whole-battery green cannot be
+#   claimed until they are.
+#
+#   Two survivors were found and BOTH were fixed at the source of the problem
+#   rather than by touching an expectation:
+#     • O02 survived because the test observing it watched
+#       `falseSkipSignalHandlerForTesting` behind `drainOrchestratorEffects`,
+#       which orders only the task's first segment. The probe was rebuilt on
+#       the trust store (`awaitTrustFalseSkipSignals`); O02 now KILLED.
+#     • N06 survived because its edit had become an equivalent mutant. The EDIT
+#       was rewritten to the shape the defect now takes; N06 now KILLED.
 
 set -uo pipefail
 
@@ -162,7 +242,12 @@ T_OWNERSHIP="explicit responses are refused when the card's episode does not own
 T_AUTOFADE="declineSuggestedSkip auto-fade (isExplicitDenial:false) records NO correction and leaves userDismissedBanner=0"
 T_CONFIRM_SILENT="Confirming an auto-skipped banner records no controller sample and no hard negative"
 T_SUGGESTONLY_SILENT="A suggest-tier-only revertByTimeRange records no controller sample"
-T_ANON_SILENT="An anonymous revert (no podcastId, or an empty one) records no controller sample"
+# playhead-o4qr renamed this test when it grew the other three learning
+# clauses. The name here is the DISPLAY name xcodebuild prints, so a stale
+# copy silently un-credits every mutation that names it (N06, N07, O01-O04).
+T_ANON_SILENT="An anonymous revert (no podcastId, or an empty one) keeps its receipt and records NO show-keyed learning"
+T_STALE_SHOW_NO="A banner No naming another show keeps its receipt and records NO show-keyed learning"
+T_REVERTWINDOW_VETO="revertWindow records a public manual veto and generic decision log"
 T_ACCEPT_RACE="A suggest Yes whose episode is replaced mid-flight calibrates the captured show"
 T_DENY_RACE="A banner No whose episode is replaced mid-flight calibrates the captured show"
 
@@ -180,15 +265,52 @@ T_STALE_IDENTITY="episode-bound suggest actions reject stale banner identities"
 T_FUSION_CLEARS_SUGGEST="Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)"
 T_DECLINE_NO_CONFIRM="declineSuggestedSkip drops the window without confirming it"
 
+# playhead-o4qr MERGE NOTE — READ BEFORE "FIXING" M01/M02/M03/M04/M06.
+#
+# Those five entries anchor on `revertByTimeRange`'s TWO mutating loops: a
+# managed loop and a suggest loop, each writing one row at a time with an
+# in-loop lifecycle guard between iterations, plus a work list built after the
+# first suspension. playhead-o4qr replaced that shape wholesale. The merged
+# seam now: snapshots BOTH work lists before any await, revokes recurrence
+# evidence, commits every row in ONE `persistRevertedAdWindowsIfCurrent`
+# transaction, and only then runs a single live pass gated on
+# `sourceLifecycleIsCurrent` that ALSO re-validates each entry against live
+# state and its producer revision.
+#
+# The defects these five describe are therefore not merely re-anchorable, they
+# are UNREPRESENTABLE — verified against the merged source, not assumed:
+#
+#   M01 (delete the managed in-loop guard) and M02 (the suggest one): there is
+#   no in-loop guard. Deleting the outer gate does not reproduce the defect
+#   either, because the live pass looks each id up in the CURRENT dictionary
+#   (`windows[id]` / `suggestWindows[id]`) and `continue`s when absent —
+#   `beginEpisode` has cleared it — so no stale entry can be re-inserted. The
+#   only observable effect left is `evaluateAndPush()`, which is M12's rail.
+#
+#   M03 / M04 (`break` -> `return`): both guards are gone, and a `return`
+#   placed before the effects is byte-for-byte the mutation M07 now applies.
+#   Keeping them would be two aliases of one rail, i.e. a fabricated rail.
+#
+#   M06 (drop the lifecycle gate on the suggest work list): the work list is
+#   built before the first suspension, so there is no post-await gate to drop.
+#
+# They are moved to the KNOWN GAP block below rather than deleted: their
+# `apply_mutation` arms are kept verbatim, so restoring any of them is a
+# one-line edit if the analysis above is ever shown wrong. They are NOT left in
+# `MUTATIONS` ERRORing, because a batch aborts on its first failed anchor —
+# leaving them there took nine OTHER mutations (M05 M07 M08 M09 M11 M12 M14 M18
+# M20) down with them in batches 1, 2 and 4, which is a strictly worse outcome
+# than a documented gap: it turns the whole script into a no-op.
+#
+# Whether these five contracts are now structurally guaranteed (the analysis
+# says yes) or merely unpinned is a COVERAGE decision for a human. The
+# behavioural rails themselves — the four `SkipOrchestratorRevertLifecycle`
+# race tests — are unchanged and pass; see the merge commit.
 MUTATIONS=(
-  "M01|1|ORCH|$T_MANAGED_RACE"
-  "M02|1|ORCH|$T_SUGGEST_RACE"
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
   "M11|1|ORCH|$T_LISTEN_FP"
 
-  "M03|2|ORCH|$T_MANAGED_RACE"
-  "M04|2|ORCH|$T_SUGGEST_RACE"
   "M12|2|ORCH|$T_LISTEN_RACE"
   "M09|2|ORCH|$T_REVERTWINDOW_FP"
   "M20|2|ORCH|$T_CONFIRM_SILENT"
@@ -200,7 +322,6 @@ MUTATIONS=(
   "M10|3|ORCH|$T_SUGGEST_NO_NOSTORE"
 
   "M14|4|ORCH|$T_LISTEN_RACE"
-  "M06|4|ORCH|$T_MANAGED_RACE"
   "M08|4|ORCH|$T_SUGGEST_RACE;$T_SUGGESTONLY_SILENT"
   "M18|4|STORE|$T_OWNERSHIP"
 
@@ -243,6 +364,31 @@ MUTATIONS=(
   # S03 is the decline-side twin of S02 and names the same test, so it needs
   # its own batch.
   "S03|12|ORCH|$T_STALE_IDENTITY"
+
+  # playhead-o4qr — ACCEPT THE RECEIPT, REFUSE THE LEARNING.
+  #
+  # Every one of these gets a batch to itself, and the reason is structural
+  # rather than timid: the decided contract is ONE test's subject, so all four
+  # redden `anonymousRevertRecordsNoControllerSample`. Two mutations that can
+  # redden the same test in one batch is a FALSE KILL — the script would credit
+  # both off a single failure — which the BATCHING note above rules out. Four
+  # builds is the honest price of pinning four distinct learning surfaces
+  # behind one contract.
+  #
+  # Note the division of labour with N07, which already mutates the CONTROLLER
+  # attribution in this seam: N07 covers the threshold controller, so these
+  # cover the three surfaces it cannot see.
+  "O01|13|ORCH|$T_ANON_SILENT"
+
+  # O05 rides in O02's batch for free: it edits a different seam
+  # (`denyAutoSkippedBanner`, not `revertWindow`) and its only victim is the
+  # deny-side test, which never calls `revertWindow`. Disjoint code, disjoint
+  # victims — the two conditions the BATCHING note requires.
+  "O02|14|ORCH|$T_ANON_SILENT;$T_REVERTWINDOW_VETO"
+  "O05|14|ORCH|$T_STALE_SHOW_NO"
+
+  "O03|15|ORCH|$T_ANON_SILENT"
+  "O04|16|ORCH|$T_ANON_SILENT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -298,6 +444,11 @@ describe_mutation() {
     S03) echo "declineSuggestedSkip: delete the active-episode guard on the episode-bound form" ;;
     S04) echo "receiveAdDecisionResults: delete the symmetric suggest clear on a same-id eligible result" ;;
     S05) echo "declineSuggestedSkip: read the suggest entry instead of removing it" ;;
+    O01) echo "ingestNegativeFingerprint: drop the anonymous-show refusal (a NULL-show hard negative every show reads back)" ;;
+    O02) echo "revertWindow: fall the trust penalty back to activePodcastId when the correction has no usable show" ;;
+    O03) echo "revertWindow: restore the outright refusal, so an anonymous correction loses its durable receipt" ;;
+    O04) echo "revertWindow: attribute recurrence REVOCATION to activePodcastId when the correction has no usable show" ;;
+    O05) echo "denyAutoSkippedBanner: restore the outright refusal, so a banner No naming another show loses its receipt" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -396,20 +547,13 @@ EOF
 
   M05)
     snippet OLD <<'EOF'
-            guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                return
-            }
-
-            evaluateAndPush()
+        let sourceLifecycleIsCurrent =
+            activeAssetId == expectedAssetId
 EOF
     snippet NEW <<'EOF'
-            if podcastId != nil, trustService != nil {
-                guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                    return
-                }
-            }
-
-            evaluateAndPush()
+        let sourceLifecycleIsCurrent =
+            sourceShowId == nil || trustService == nil ||
+            activeAssetId == expectedAssetId
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -434,25 +578,33 @@ EOF
 
   M07)
     snippet OLD <<'EOF'
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        // Retire live state only if the exact source lifecycle and producer
+        // revision still own the window after the durable transaction.
 EOF
     snippet NEW <<'EOF'
         guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            return
+            return false
         }
 
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        // Retire live state only if the exact source lifecycle and producer
+        // revision still own the window after the durable transaction.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M08)
     snippet OLD <<'EOF'
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-            }
+        if revertedManagedAny {
+            recordThresholdControlSignal(
+                .falsePositive,
+                podcastId: sourceShowId
+            )
+        }
 EOF
     snippet NEW <<'EOF'
-            recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -484,27 +636,35 @@ EOF
 
   M11)
     snippet OLD <<'EOF'
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     snippet NEW <<'EOF'
-        guard trustService != nil else { return }
+        guard trustService != nil else { return false }
 
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M12)
     snippet OLD <<'EOF'
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            // A replacement episode owns the live cue state now; the durable
-            // and calibration effects above were the old lifecycle's to write.
-            return
+            evaluateAndPush()
         }
 
-        // Remove the cue and re-push.
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     snippet NEW <<'EOF'
-        // Remove the cue and re-push.
+        }
+        evaluateAndPush()
+
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -513,42 +673,50 @@ EOF
     # the show CAPTURED at gesture time, never to whoever is live at effect
     # time.  Batched as one mutation because it is one defect with two sites.
     snippet OLD <<'EOF'
-        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            // A replacement episode owns the live cue state now; the durable
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
+        return true
 EOF
     snippet NEW <<'EOF'
-        recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
-
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            // A replacement episode owns the live cue state now; the durable
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: activePodcastId
+        )
+        return true
 EOF
     patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-            }
+        if revertedManagedAny {
+            recordThresholdControlSignal(
+                .falsePositive,
+                podcastId: sourceShowId
+            )
+        }
 EOF
     snippet NEW <<'EOF'
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
-            }
+        if revertedManagedAny {
+            recordThresholdControlSignal(
+                .falsePositive,
+                podcastId: activePodcastId
+            )
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M14)
     snippet OLD <<'EOF'
         ingestNegativeFingerprint(
-            text: managed.adWindow.evidenceText,
-            podcastId: podcastId
+            text: requestedManaged.adWindow.evidenceText,
+            podcastId: sourceShowId
         )
 EOF
     snippet NEW <<'EOF'
         if episodeLifecycleGeneration == sourceLifecycleGeneration {
             ingestNegativeFingerprint(
-                text: managed.adWindow.evidenceText,
-                podcastId: podcastId
+                text: requestedManaged.adWindow.evidenceText,
+                podcastId: sourceShowId
             )
         }
 EOF
@@ -556,27 +724,23 @@ EOF
 
   M15)
     snippet OLD <<'EOF'
-        // Signal the trust engine about the false skip.
-        if let podcastId, let trustService {
-            await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
         }
 EOF
     snippet NEW <<'EOF'
-        // Signal the trust engine about the false skip.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M16)
     snippet OLD <<'EOF'
-        // Signal the trust engine about the false skip.
-        if let podcastId, let trustService {
-            await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
         }
 EOF
     snippet NEW <<'EOF'
-        // Signal the trust engine about the false skip.
-        if let podcastId, let trustService {
-            await trustService.recordWeakFalseSkipSignal(podcastId: podcastId)
+        if let sourceShowId, let trustService {
+            await trustService.recordWeakFalseSkipSignal(podcastId: sourceShowId)
         }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -585,23 +749,21 @@ EOF
     # Same defect as M13 for the durable receipt rather than the controller
     # sample; two sites, one mutation.
     snippet OLD <<'EOF'
-            podcastId: podcastId,
-            source: .listenRevert
-EOF
-    snippet NEW <<'EOF'
-            podcastId: activePodcastId,
-            source: .listenRevert
-EOF
-    patch "$file" "$OLD" "$NEW" || return $?
-    snippet OLD <<'EOF'
-                    podcastId: podcastId,
-                    source: .manualVeto
-                )
+                    podcastId: sourceShowId,
+                    source: .listenRevert,
 EOF
     snippet NEW <<'EOF'
                     podcastId: activePodcastId,
-                    source: .manualVeto
-                )
+                    source: .listenRevert,
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+                    podcastId: sourceShowId,
+                    source: .manualVeto,
+EOF
+    snippet NEW <<'EOF'
+                    podcastId: activePodcastId,
+                    source: .manualVeto,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -637,16 +799,20 @@ EOF
 
   M20)
     snippet OLD <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             return true
 EOF
     snippet NEW <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             recordThresholdControlSignal(
                 .falsePositive,
@@ -658,23 +824,25 @@ EOF
 
   N02)
     snippet OLD <<'EOF'
+        } catch {
+            logger.warning("Banner feedback persistence failed")
+            return false
+        }
+
         recordThresholdControlSignal(
-            .falsePositive,
-            podcastId: podcastId
-        )
-        if let podcastId {
 EOF
     snippet NEW <<'EOF'
+        } catch {
+            logger.warning("Banner feedback persistence failed")
+            return false
+        }
+
         guard activeEpisodeId == sourceEpisodeId,
               episodeLifecycleGeneration == sourceLifecycleGeneration
         else {
             return true
         }
         recordThresholdControlSignal(
-            .falsePositive,
-            podcastId: podcastId
-        )
-        if let podcastId {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -696,16 +864,20 @@ EOF
 
   N04)
     snippet OLD <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             return true
 EOF
     snippet NEW <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             ingestNegativeFingerprint(
                 text: managed.adWindow.evidenceText,
@@ -725,18 +897,39 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   N06)
-    # BOTH sites, because the empty-show-id contract is enforced twice —
+    # BOTH sites, because the unattributed-show contract is enforced twice —
     # `recordThresholdControlSignal` refuses to call, and
     # `PerShowThresholdControllerStore.record` refuses to write. Deleting
     # either one alone is an EQUIVALENT MUTANT that no test can kill (verified:
     # each half survives on its own). What a test CAN rail is the contract, so
     # that is what this mutation removes. `$file` is the orchestrator; the
     # store is patched by absolute key below.
+    #
+    # playhead-o4qr — THE EDIT WAS REWRITTEN, THE EXPECTATION WAS NOT. The
+    # previous edit weakened the guard from `let podcastId, !podcastId.isEmpty`
+    # to `let podcastId`, i.e. it removed only the EMPTY clause. That reproduced
+    # a real defect while `revertWindow` passed the caller's raw show id
+    # through; it no longer does. `exactFeedbackShowIdentity` canonicalizes an
+    # empty request to nil upstream, so `""` can no longer reach this method at
+    # all and the old edit became an equivalent mutant — it SURVIVED batch 8 on
+    # 2026-07-27, correctly.
+    #
+    # The defect the entry has always DESCRIBED — "every unattributed
+    # correction would pile into that one shared bucket" — is still live, and
+    # this is the shape it now takes: fold the nil case into `""` and let the
+    # store accept it. Same contract, same expectation, reachable edit.
+    #
+    # The `perShowThresholdControllerStore` line is here for UNIQUENESS: the
+    # nil/empty refusal is written twice in this file now, because
+    # `ingestNegativeFingerprint` grew a deliberately identical guard when the
+    # hard-negative bank joined the per-show learning surfaces.
     snippet OLD <<'EOF'
+        guard let store = perShowThresholdControllerStore else { return }
         guard let podcastId, !podcastId.isEmpty else { return }
 EOF
     snippet NEW <<'EOF'
-        guard let podcastId else { return }
+        guard let store = perShowThresholdControllerStore else { return }
+        let podcastId = podcastId ?? ""
 EOF
     patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
@@ -751,11 +944,17 @@ EOF
   N07)
     snippet OLD <<'EOF'
         // cannot silently discard valid old-episode feedback.
-        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
 EOF
     snippet NEW <<'EOF'
         // cannot silently discard valid old-episode feedback.
-        recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: activePodcastId
+        )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -842,6 +1041,121 @@ EOF
         }
 
         guard isExplicitDenial else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. REFUSE THE LEARNING, surface 1 of 3 (the controller is
+  # N07's). The bank is per-show, and a nil/empty show writes a NULL-show row
+  # that `loadEntries(forShow:includeGlobal:)` hands back to EVERY show — so
+  # deleting this one guard turns a single unattributable correction into a
+  # library-wide suppression. Only `recordListenRevert` reaches the bank, which
+  # is why the victim test drives that seam as well as `revertWindow`.
+  O01)
+    snippet OLD <<'EOF'
+        guard let podcastId, !podcastId.isEmpty else { return }
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. REFUSE THE LEARNING, surface 2 of 3: the per-show trust
+  # penalty. The fallback shape is the tempting one — "we know what show is
+  # playing, use it" — and it is exactly the global/null-show contamination the
+  # bead exists to prevent: the live show gets penalised on the strength of a
+  # gesture that never named it. Anchored below N07's `recordThresholdControl`
+  # site, so this must NOT share a batch with N07.
+  O02)
+    snippet OLD <<'EOF'
+        // cannot silently discard valid old-episode feedback.
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
+        if let sourceShowId {
+EOF
+    snippet NEW <<'EOF'
+        // cannot silently discard valid old-episode feedback.
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
+        if let sourceShowId = sourceShowId ?? activePodcastId {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. ACCEPT THE RECEIPT — the other half of the decision, and the
+  # one a reader is most likely to "restore" on the grounds that refusing looks
+  # safer. It is not: it silently discards what the listener said. This is
+  # byte-for-byte the pre-decision o4qr shape.
+  O03)
+    snippet OLD <<'EOF'
+        let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
+        guard activeEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || activePlaybackLifecycleGeneration
+                    == expectedPlaybackGeneration
+        else {
+            return false
+        }
+        let sourceEpisodeId = activeEpisodeId
+EOF
+    snippet NEW <<'EOF'
+        let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
+        guard activeEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || activePlaybackLifecycleGeneration
+                    == expectedPlaybackGeneration,
+              validatedShow.isValid
+        else {
+            return false
+        }
+        let sourceEpisodeId = activeEpisodeId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. REFUSE THE LEARNING, surface 3 of 3: show-scoped recurrence
+  # revocation. `revokeRecurrenceEvidence` is deliberately still CALLED for an
+  # anonymous correction — its in-memory retraction is what stops a delayed
+  # learner reopening the vetoed span — and what makes that safe is that a nil
+  # show leaves both stores on their show-free exact-source branches. Handing
+  # it `activePodcastId` re-arms the show-scoped branch and lets an
+  # unattributable gesture retract this show's creative evidence.
+  O04)
+    snippet OLD <<'EOF'
+                for: requestedManaged.adWindow,
+                showId: sourceShowId,
+                source: .manualVeto
+EOF
+    snippet NEW <<'EOF'
+                for: requestedManaged.adWindow,
+                showId: activePodcastId,
+                source: .manualVeto
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. The deny-side twin of O03: ACCEPT THE RECEIPT at the one
+  # correction seam that has a shipped production caller (the banner No).
+  # The `requestedManaged` line is load-bearing for UNIQUENESS, not for the
+  # defect: `confirmAutoSkippedBanner` opens with a byte-identical guard prefix
+  # and binds `managed` instead, so a shorter anchor matches twice and the
+  # patcher (correctly) refuses.
+  O05)
+    snippet OLD <<'EOF'
+              let expectedMaterialToken,
+              activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration,
+              let requestedManaged = windows[windowId],
+EOF
+    snippet NEW <<'EOF'
+              let expectedMaterialToken,
+              validatedShow.isValid,
+              activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration,
+              let requestedManaged = windows[windowId],
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

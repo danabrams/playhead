@@ -30,7 +30,8 @@
 // helper (NOT reimplemented). The observer then derives the descriptive
 // component terms (`maxSingleEntryWeight`, `distinctEvidenceFamilyDepth`,
 // `margin`) from that same ledger using the SAME public taxonomy the formula
-// uses (`EvidenceSourceType.isObservabilityOnly`, strictly-positive `weight`,
+// uses (`EvidenceLedgerEntry.contributesToAutomaticDecision`,
+// strictly-positive `weight`,
 // `SourceEvidenceFamily.for`). Keeping that derivation off the production hot
 // path (it only runs when an observer is injected, i.e. in tests) preserves the
 // "only change is the nil-default observer" constraint while still surfacing the
@@ -115,11 +116,12 @@ actor FragilityDiagnosticObserver {
         fragilityScore: Double,
         ledger: [EvidenceLedgerEntry]
     ) {
-        // Scoring entries with strictly-positive weight. Observability-only
-        // rows never enter fusion and must not count toward concentration or
-        // depth — IDENTICAL filter to `AdDetectionConfig.fragilityScore`.
+        // Automatic-decision entries with strictly-positive weight.
+        // Observability and learned fingerprint-catalog rows never enter
+        // fusion and must not count toward concentration or depth — identical
+        // to `AdDetectionConfig.fragilityScore`.
         let scoringEntries = ledger.filter {
-            !$0.source.isObservabilityOnly && $0.weight > 0
+            $0.contributesToAutomaticDecision && $0.weight > 0
         }
         let maxSingleEntryWeight = scoringEntries.map(\.weight).max() ?? 0.0
         let distinctFamilies = Set(scoringEntries.map { SourceEvidenceFamily.for($0.source) })

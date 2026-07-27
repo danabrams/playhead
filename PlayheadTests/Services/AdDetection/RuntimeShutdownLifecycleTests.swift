@@ -660,6 +660,109 @@ struct RuntimeShutdownLifecycleTests {
             )),
             "episode A's expanded boundary must never persist or inject into episode B"
         )
+        #expect(
+            !(await runtime.injectUserMarkedAd(
+                start: 10,
+                end: 40,
+                ifCurrentAnalysisAssetId: "asset-b",
+                ifCurrentEpisodeId: "episode-b",
+                ifPlaybackLifecycleGeneration: generationB,
+                podcastId: "podcast-a"
+            )),
+            "current asset/lifecycle material must not be written under a stale show"
+        )
+        #expect(
+            runtime._userMarkPersistenceAttemptCountForTesting() == 0,
+            "a mismatched show must fail before any durable write is attempted"
+        )
+
+        let generationC = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-c",
+            episodeId: "episode-c",
+            podcastId: "podcast-c\u{0}other"
+        )
+        #expect(
+            !(await runtime.injectUserMarkedAd(
+                start: 10,
+                end: 40,
+                ifCurrentAnalysisAssetId: "asset-c",
+                ifCurrentEpisodeId: "episode-c",
+                ifPlaybackLifecycleGeneration: generationC,
+                podcastId: "podcast-c\u{0}other"
+            )),
+            "matching malformed show identities must not reach persistence"
+        )
+        #expect(runtime._userMarkPersistenceAttemptCountForTesting() == 0)
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test("episode-bound Listen rejects a different current podcast")
+    func listenRewindRejectsMismatchedPodcast() async throws {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        try await runtime.analysisStore.migrate()
+        let runId = UUID().uuidString
+        let assetId = "asset-listen-show-scope-\(runId)"
+        let windowId = "window-listen-show-scope-\(runId)"
+        let episodeId = "episode-listen-show-scope-\(runId)"
+        try await runtime.analysisStore.insertAsset(makeTestAsset(id: assetId))
+        let window = makeSkipTestAdWindow(
+            id: windowId,
+            assetId: assetId,
+            startTime: 10,
+            endTime: 40,
+            confidence: 1,
+            decisionState: AdDecisionState.applied.rawValue
+        )
+        try await runtime.analysisStore.insertAdWindow(window)
+        let generation = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: assetId,
+            episodeId: episodeId,
+            podcastId: "podcast-current"
+        )
+
+        #expect(
+            !(await runtime.recordListenRewind(
+                windowId: windowId,
+                analysisAssetId: assetId,
+                podcastId: "podcast-other",
+                ifCurrentAnalysisAssetId: assetId,
+                ifCurrentEpisodeId: episodeId,
+                ifPlaybackLifecycleGeneration: generation,
+                expectedProducerRevision: window
+            ))
+        )
+        #expect(
+            try await runtime.analysisStore.fetchAdWindow(id: windowId)?
+                .decisionState == AdDecisionState.applied.rawValue
+        )
+        await runtime.shutdown()
+    }
+
+    @MainActor
+    @Test("invalid runtime seeks do not mutate the transport state seam")
+    func invalidRuntimeSeeksFailClosed() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        _ = runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "asset-a",
+            episodeId: "episode-a",
+            podcastId: "podcast-a"
+        )
+        await runtime.playbackService._testingInjectState(
+            PlaybackState(
+                status: .playing,
+                currentTime: 23,
+                duration: 200,
+                rate: 1,
+                playbackSpeed: 1
+            )
+        )
+
+        #expect(!(await runtime.seek(to: .nan)))
+        #expect(!(await runtime.seek(to: .infinity)))
+        #expect(!(await runtime.seek(to: -1)))
+        #expect(await runtime.playbackService.snapshot().currentTime == 23)
+        #expect(runtime._committedUserSeekCountForTesting() == 0)
         await runtime.shutdown()
     }
 
