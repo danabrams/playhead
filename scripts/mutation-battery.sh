@@ -180,6 +180,42 @@ T_STALE_IDENTITY="episode-bound suggest actions reject stale banner identities"
 T_FUSION_CLEARS_SUGGEST="Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)"
 T_DECLINE_NO_CONFIRM="declineSuggestedSkip drops the window without confirming it"
 
+# playhead-o4qr MERGE NOTE — READ BEFORE "FIXING" M01/M02/M03/M04/M06.
+#
+# Those five entries anchor on `revertByTimeRange`'s TWO mutating loops: a
+# managed loop and a suggest loop, each writing one row at a time with an
+# in-loop lifecycle guard between iterations, plus a work list built after the
+# first suspension. playhead-o4qr replaced that shape wholesale. The merged
+# seam now: snapshots BOTH work lists before any await, revokes recurrence
+# evidence, commits every row in ONE `persistRevertedAdWindowsIfCurrent`
+# transaction, and only then runs a single live pass gated on
+# `sourceLifecycleIsCurrent` that ALSO re-validates each entry against live
+# state and its producer revision.
+#
+# The defects these five describe are therefore not merely re-anchorable, they
+# are UNREPRESENTABLE — verified against the merged source, not assumed:
+#
+#   M01 (delete the managed in-loop guard) and M02 (the suggest one): there is
+#   no in-loop guard. Deleting the outer gate does not reproduce the defect
+#   either, because the live pass looks each id up in the CURRENT dictionary
+#   (`windows[id]` / `suggestWindows[id]`) and `continue`s when absent —
+#   `beginEpisode` has cleared it — so no stale entry can be re-inserted. The
+#   only observable effect left is `evaluateAndPush()`, which is M12's rail.
+#
+#   M03 / M04 (`break` -> `return`): both guards are gone, and a `return`
+#   placed before the effects is byte-for-byte the mutation M07 now applies.
+#   Keeping them would be two aliases of one rail, i.e. a fabricated rail.
+#
+#   M06 (drop the lifecycle gate on the suggest work list): the work list is
+#   built before the first suspension, so there is no post-await gate to drop.
+#
+# They are left here, anchored to the pre-merge text and therefore ERRORing, on
+# purpose: silently deleting five i08e rails to make this script green is
+# exactly the "relax it until it passes" move the header forbids, and whether
+# the underlying contracts are now structurally guaranteed (the analysis above
+# says yes) or merely unpinned is a COVERAGE decision that belongs to a human.
+# The behavioural rails themselves — the four `SkipOrchestratorRevertLifecycle`
+# race tests — are unchanged and pass; see the merge commit.
 MUTATIONS=(
   "M01|1|ORCH|$T_MANAGED_RACE"
   "M02|1|ORCH|$T_SUGGEST_RACE"
@@ -396,20 +432,13 @@ EOF
 
   M05)
     snippet OLD <<'EOF'
-            guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                return
-            }
-
-            evaluateAndPush()
+        let sourceLifecycleIsCurrent =
+            activeAssetId == expectedAssetId
 EOF
     snippet NEW <<'EOF'
-            if podcastId != nil, trustService != nil {
-                guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                    return
-                }
-            }
-
-            evaluateAndPush()
+        let sourceLifecycleIsCurrent =
+            sourceShowId == nil || trustService == nil ||
+            activeAssetId == expectedAssetId
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -434,25 +463,33 @@ EOF
 
   M07)
     snippet OLD <<'EOF'
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        // Retire live state only if the exact source lifecycle and producer
+        // revision still own the window after the durable transaction.
 EOF
     snippet NEW <<'EOF'
         guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            return
+            return false
         }
 
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        // Retire live state only if the exact source lifecycle and producer
+        // revision still own the window after the durable transaction.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M08)
     snippet OLD <<'EOF'
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-            }
+        if revertedManagedAny {
+            recordThresholdControlSignal(
+                .falsePositive,
+                podcastId: sourceShowId
+            )
+        }
 EOF
     snippet NEW <<'EOF'
-            recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -484,27 +521,35 @@ EOF
 
   M11)
     snippet OLD <<'EOF'
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     snippet NEW <<'EOF'
-        guard trustService != nil else { return }
+        guard trustService != nil else { return false }
 
-        // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M12)
     snippet OLD <<'EOF'
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            // A replacement episode owns the live cue state now; the durable
-            // and calibration effects above were the old lifecycle's to write.
-            return
+            evaluateAndPush()
         }
 
-        // Remove the cue and re-push.
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     snippet NEW <<'EOF'
-        // Remove the cue and re-push.
+        }
+        evaluateAndPush()
+
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -513,42 +558,50 @@ EOF
     # the show CAPTURED at gesture time, never to whoever is live at effect
     # time.  Batched as one mutation because it is one defect with two sites.
     snippet OLD <<'EOF'
-        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            // A replacement episode owns the live cue state now; the durable
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
+        return true
 EOF
     snippet NEW <<'EOF'
-        recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
-
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            // A replacement episode owns the live cue state now; the durable
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: activePodcastId
+        )
+        return true
 EOF
     patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-            }
+        if revertedManagedAny {
+            recordThresholdControlSignal(
+                .falsePositive,
+                podcastId: sourceShowId
+            )
+        }
 EOF
     snippet NEW <<'EOF'
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
-            }
+        if revertedManagedAny {
+            recordThresholdControlSignal(
+                .falsePositive,
+                podcastId: activePodcastId
+            )
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M14)
     snippet OLD <<'EOF'
         ingestNegativeFingerprint(
-            text: managed.adWindow.evidenceText,
-            podcastId: podcastId
+            text: requestedManaged.adWindow.evidenceText,
+            podcastId: sourceShowId
         )
 EOF
     snippet NEW <<'EOF'
         if episodeLifecycleGeneration == sourceLifecycleGeneration {
             ingestNegativeFingerprint(
-                text: managed.adWindow.evidenceText,
-                podcastId: podcastId
+                text: requestedManaged.adWindow.evidenceText,
+                podcastId: sourceShowId
             )
         }
 EOF
@@ -556,27 +609,23 @@ EOF
 
   M15)
     snippet OLD <<'EOF'
-        // Signal the trust engine about the false skip.
-        if let podcastId, let trustService {
-            await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
         }
 EOF
     snippet NEW <<'EOF'
-        // Signal the trust engine about the false skip.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   M16)
     snippet OLD <<'EOF'
-        // Signal the trust engine about the false skip.
-        if let podcastId, let trustService {
-            await trustService.recordFalseSkipSignal(podcastId: podcastId)
+        if let sourceShowId, let trustService {
+            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
         }
 EOF
     snippet NEW <<'EOF'
-        // Signal the trust engine about the false skip.
-        if let podcastId, let trustService {
-            await trustService.recordWeakFalseSkipSignal(podcastId: podcastId)
+        if let sourceShowId, let trustService {
+            await trustService.recordWeakFalseSkipSignal(podcastId: sourceShowId)
         }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -585,23 +634,21 @@ EOF
     # Same defect as M13 for the durable receipt rather than the controller
     # sample; two sites, one mutation.
     snippet OLD <<'EOF'
-            podcastId: podcastId,
-            source: .listenRevert
-EOF
-    snippet NEW <<'EOF'
-            podcastId: activePodcastId,
-            source: .listenRevert
-EOF
-    patch "$file" "$OLD" "$NEW" || return $?
-    snippet OLD <<'EOF'
-                    podcastId: podcastId,
-                    source: .manualVeto
-                )
+                    podcastId: sourceShowId,
+                    source: .listenRevert,
 EOF
     snippet NEW <<'EOF'
                     podcastId: activePodcastId,
-                    source: .manualVeto
-                )
+                    source: .listenRevert,
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+                    podcastId: sourceShowId,
+                    source: .manualVeto,
+EOF
+    snippet NEW <<'EOF'
+                    podcastId: activePodcastId,
+                    source: .manualVeto,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -637,16 +684,20 @@ EOF
 
   M20)
     snippet OLD <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             return true
 EOF
     snippet NEW <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             recordThresholdControlSignal(
                 .falsePositive,
@@ -658,23 +709,25 @@ EOF
 
   N02)
     snippet OLD <<'EOF'
+        } catch {
+            logger.warning("Banner feedback persistence failed")
+            return false
+        }
+
         recordThresholdControlSignal(
-            .falsePositive,
-            podcastId: podcastId
-        )
-        if let podcastId {
 EOF
     snippet NEW <<'EOF'
+        } catch {
+            logger.warning("Banner feedback persistence failed")
+            return false
+        }
+
         guard activeEpisodeId == sourceEpisodeId,
               episodeLifecycleGeneration == sourceLifecycleGeneration
         else {
             return true
         }
         recordThresholdControlSignal(
-            .falsePositive,
-            podcastId: podcastId
-        )
-        if let podcastId {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -696,16 +749,20 @@ EOF
 
   N04)
     snippet OLD <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             return true
 EOF
     snippet NEW <<'EOF'
-            schedulePostCommitCorrectionLearning(
-                receipt,
-                wasNewlyInserted: wasNewlyInserted
+            scheduleConfirmedRecurrenceLearning(
+                for: managed.adWindow,
+                showId: sourcePodcastId,
+                source: .confirmedAutoSkipBanner,
+                lifecycle: .explicitConfirmation
             )
             ingestNegativeFingerprint(
                 text: managed.adWindow.evidenceText,
@@ -751,11 +808,17 @@ EOF
   N07)
     snippet OLD <<'EOF'
         // cannot silently discard valid old-episode feedback.
-        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
 EOF
     snippet NEW <<'EOF'
         // cannot silently discard valid old-episode feedback.
-        recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: activePodcastId
+        )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
