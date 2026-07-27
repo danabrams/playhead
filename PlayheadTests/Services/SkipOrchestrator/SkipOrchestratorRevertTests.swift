@@ -3834,7 +3834,15 @@ struct SkipOrchestratorRevertTests {
     @Test("blocked and inventory-rejected AdWindows retire stale suggestions")
     func adWindowInvalidationsRetireSuggestionsAndRejectStaleYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // The asset must be OWNED by the episode this test plays, and every
+        // suggestion must have its durable row, or `acceptSuggestedSkip`
+        // aborts inside `persistAcceptedSuggestionIfCurrent` (episode
+        // ownership / missing row) before the retirement contract is
+        // consulted — and the "must not promote" assertions below become
+        // unfalsifiable. See playhead-ugy4.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             inventoryFilter: InventorySanityFilter(isEnabled: true)
@@ -3853,6 +3861,7 @@ struct SkipOrchestratorRevertTests {
         let blockedSuggestion = makeSuggestWindow(
             id: "ad-window-blocked-after-suggest"
         )
+        try await store.insertAdWindow(blockedSuggestion)
         await orchestrator.receiveAdWindows([blockedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected blocked-path suggestion presentation")
@@ -3877,6 +3886,7 @@ struct SkipOrchestratorRevertTests {
         let rejectedSuggestion = makeSuggestWindow(
             id: "ad-window-rejected-after-suggest"
         )
+        try await store.insertAdWindow(rejectedSuggestion)
         await orchestrator.receiveAdWindows([rejectedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected inventory-path suggestion presentation")
@@ -3926,7 +3936,11 @@ struct SkipOrchestratorRevertTests {
     @Test("blocked and inventory-rejected decisions retire stale suggestions")
     func decisionInvalidationsRetireSuggestionsAndRejectStaleYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Asset ownership + durable suggestion rows: see the note on
+        // `adWindowInvalidationsRetireSuggestionsAndRejectStaleYes`.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             inventoryFilter: InventorySanityFilter(isEnabled: true)
@@ -3945,6 +3959,7 @@ struct SkipOrchestratorRevertTests {
         let blockedSuggestion = makeSuggestWindow(
             id: "decision-blocked-after-suggest"
         )
+        try await store.insertAdWindow(blockedSuggestion)
         await orchestrator.receiveAdWindows([blockedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected blocked-decision suggestion presentation")
@@ -3974,6 +3989,7 @@ struct SkipOrchestratorRevertTests {
         let rejectedSuggestion = makeSuggestWindow(
             id: "decision-rejected-after-suggest"
         )
+        try await store.insertAdWindow(rejectedSuggestion)
         await orchestrator.receiveAdWindows([rejectedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected rejected-decision suggestion presentation")
@@ -4025,7 +4041,11 @@ struct SkipOrchestratorRevertTests {
     @Test("explicit window retirement also invalidates a suggestion")
     func explicitRetirementRejectsStaleSuggestionYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Asset ownership + durable suggestion row: see the note on
+        // `adWindowInvalidationsRetireSuggestionsAndRejectStaleYes`.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
@@ -4044,6 +4064,7 @@ struct SkipOrchestratorRevertTests {
         let suggestion = makeSuggestWindow(
             id: "explicitly-retired-suggestion"
         )
+        try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected explicit-retirement presentation")
@@ -4109,7 +4130,11 @@ struct SkipOrchestratorRevertTests {
     @Test("late inventory context retires a newly-invalid suggestion")
     func lateInventoryContextRejectsStaleSuggestionYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Asset ownership + durable suggestion row: see the note on
+        // `adWindowInvalidationsRetireSuggestionsAndRejectStaleYes`.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             inventoryFilter: InventorySanityFilter(isEnabled: true)
@@ -4127,6 +4152,7 @@ struct SkipOrchestratorRevertTests {
         let suggestion = makeSuggestWindow(
             id: "late-inventory-rejected-suggestion"
         )
+        try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected pre-context suggestion presentation")
@@ -5832,7 +5858,19 @@ struct SkipOrchestratorRevertTests {
     @Test("episode-bound suggest actions reject stale banner identities")
     func episodeBoundSuggestActionsRejectStaleIdentity() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // playhead-ugy4: `asset-1` is durably OWNED by "episode-stale" while
+        // the orchestrator plays it under the identity "episode-current".
+        // The disagreement is deliberate. The durable ownership check inside
+        // `persistAcceptedSuggestionIfCurrent` /
+        // `persistDeclinedSuggestionIfCurrent` keys on the ASSET's episode,
+        // so this fixture makes it ACCEPT the stale card — leaving the
+        // orchestrator's own `activeEpisodeId == expectedEpisodeId` guard,
+        // the guard this test names, as the only thing that can reject it.
+        // With the asset owned by the ACTIVE episode both guards refuse, and
+        // deleting the orchestrator one changes nothing observable.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-stale")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -5841,24 +5879,58 @@ struct SkipOrchestratorRevertTests {
         )
         let acceptCandidate = makeSuggestWindow(id: "suggest-stale-accept")
         let declineCandidate = makeSuggestWindow(id: "suggest-stale-decline")
+        try await store.insertAdWindow(acceptCandidate)
+        try await store.insertAdWindow(declineCandidate)
         await orchestrator.receiveAdWindows([
             acceptCandidate,
             declineCandidate
         ])
 
-        await orchestrator.acceptSuggestedSkip(
-            windowId: acceptCandidate.id,
-            ifCurrentEpisodeId: "episode-stale"
+        #expect(
+            !(await orchestrator.acceptSuggestedSkip(
+                windowId: acceptCandidate.id,
+                ifCurrentEpisodeId: "episode-stale"
+            )),
+            "a Yes stamped with a stale episode identity must be refused"
         )
-        await orchestrator.declineSuggestedSkip(
-            windowId: declineCandidate.id,
-            isExplicitDenial: true,
-            ifCurrentEpisodeId: "episode-stale"
+        #expect(
+            !(await orchestrator.declineSuggestedSkip(
+                windowId: declineCandidate.id,
+                isExplicitDenial: true,
+                ifCurrentEpisodeId: "episode-stale"
+            )),
+            "a No stamped with a stale episode identity must be refused"
         )
 
         let remaining = await orchestrator.activeSuggestWindowIDs()
         #expect(remaining.contains(acceptCandidate.id))
         #expect(remaining.contains(declineCandidate.id))
+
+        // `recoverFailedProvisionalSuggestion` restores the entry of an
+        // action that RAN and then failed, so `remaining` alone cannot tell
+        // "refused before acting" from "acted and rolled back". The
+        // assertions below can only hold if neither action ever ran: a
+        // promotion installs a UUID-keyed managed window, and an explicit
+        // denial stamps the durable row.
+        #expect(
+            (await orchestrator.activeWindowIDs()).isEmpty,
+            "a stale Yes must not promote a managed window"
+        )
+        let rows = try await store.fetchAdWindows(assetId: "asset-1")
+        #expect(
+            rows.count == 2,
+            "a stale Yes must not insert a promoted row; got \(rows.count)"
+        )
+        for row in rows {
+            #expect(
+                row.decisionState == AdDecisionState.candidate.rawValue,
+                "\(row.id) must keep its candidate state; got \(row.decisionState)"
+            )
+            #expect(
+                !row.userDismissedBanner,
+                "\(row.id) must not be stamped as explicitly dismissed"
+            )
+        }
     }
 
     @Test("explicit suggest No persists a falsePositive correction and sets userDismissedBanner=1")
