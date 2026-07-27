@@ -307,9 +307,7 @@ struct SkipOrchestratorThresholdControlTests {
     @Test("Accepting a suggested (not-auto-skipped) ad records a MISS signal (integral −1)")
     func acceptSuggestedSkipRecordsMiss() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(
-            makeSkipTestAnalysisAsset(episodeId: "asset-1")
-        )
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
