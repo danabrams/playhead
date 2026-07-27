@@ -150,7 +150,7 @@ MUTATIONS=(
   "N02|8|ORCH|$T_DENY_RACE"
   "N03|8|ORCH|$T_ACCEPT_RACE"
   "N04|8|ORCH|$T_CONFIRM_SILENT"
-  "N06|8|CTRL|$T_ANON_SILENT"
+  "N06|8|ORCH|$T_ANON_SILENT"
 
   "N05|9|ORCH|$T_ACCEPT_RACE"
   "N07|9|ORCH|$T_ANON_SILENT"
@@ -202,7 +202,7 @@ describe_mutation() {
     N03) echo "acceptSuggestedSkip: discard the MISS sample when the episode was replaced mid-flight" ;;
     N04) echo "confirmAutoSkippedBanner: ingest a hard negative (agreement must not pollute the bank)" ;;
     N05) echo "acceptSuggestedSkip: MISS attributed to activePodcastId instead of the captured show" ;;
-    N06) echo "PerShowThresholdControllerStore: accept an empty show id as a real show" ;;
+    N06) echo "drop the empty-show-id refusal at BOTH sites (orchestrator + controller store)" ;;
     N07) echo "revertWindow: controller sample attributed to activePodcastId instead of the captured show" ;;
     *)   echo "(no description)" ;;
   esac
@@ -624,11 +624,20 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   N06)
-    # Targets PerShowThresholdControllerStore, not the orchestrator. The
-    # orchestrator's own `!podcastId.isEmpty` clause is belt-and-braces: the
-    # store rejects an empty id too, so deleting the orchestrator's copy is an
-    # EQUIVALENT MUTANT that no test can kill. The store's guard is the one
-    # that actually enforces "an empty show id lands nowhere".
+    # BOTH sites, because the empty-show-id contract is enforced twice —
+    # `recordThresholdControlSignal` refuses to call, and
+    # `PerShowThresholdControllerStore.record` refuses to write. Deleting
+    # either one alone is an EQUIVALENT MUTANT that no test can kill (verified:
+    # each half survives on its own). What a test CAN rail is the contract, so
+    # that is what this mutation removes. `$file` is the orchestrator; the
+    # store is patched by absolute key below.
+    snippet OLD <<'EOF'
+        guard let podcastId, !podcastId.isEmpty else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard let podcastId else { return }
+EOF
+    patch "$file" "$OLD" "$NEW"
     snippet OLD <<'EOF'
         guard !podcastId.isEmpty else {
             throw PerShowThresholdControllerStoreError.writeFailed("empty podcastId")
@@ -636,7 +645,7 @@ EOF
 EOF
     snippet NEW <<'EOF'
 EOF
-    patch "$file" "$OLD" "$NEW" ;;
+    patch "$CTRL" "$OLD" "$NEW" ;;
 
   N07)
     snippet OLD <<'EOF'
