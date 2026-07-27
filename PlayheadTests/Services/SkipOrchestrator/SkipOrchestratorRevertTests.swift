@@ -469,26 +469,34 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         // suggest-tier case below uses two. With only one, deleting the in-loop
         // guard outright is behaviourally invisible (the loop ends anyway) and
         // this test cannot tell a guard that `break`s from no guard at all.
+        //
+        // The spans are deliberately LONG (90s and 195s) rather than merely
+        // over `minimumSpanSeconds` (15s). `evaluateWindow` has exactly one
+        // span-sensitive demotion — `span < minimumSpanSeconds` and
+        // `confidence < shortSpanOverrideConfidence` ⇒ `.suppressed` — and the
+        // revert loop `continue`s past suppressed entries, so a fixture sized
+        // just over today's threshold silently drops back to ONE effective
+        // iteration the day either constant is retuned, re-opening exactly the
+        // vacuity this pair exists to close. Sizing them 6x and 13x clear of
+        // the threshold removes that coupling instead of documenting it: no
+        // plausible retune of `minimumSpanSeconds` or
+        // `shortSpanOverrideConfidence` can demote either window.
+        // (`activeWindowIDs()` below is dictionary membership only — it is a
+        // spelling check on the fixture, NOT evidence that both entries are
+        // walkable, so it cannot be the thing that guards this.)
         let managedA = makeSkipTestAdWindow(
-            id: "ad-range-a", startTime: 60, endTime: 90,
+            id: "ad-range-a", startTime: 10, endTime: 100,
             confidence: 0.85, decisionState: "confirmed"
         )
-        // Both spans are kept comfortably above `minimumSpanSeconds` (15s).
-        // A short span is only skippable when `confidence >=
-        // shortSpanOverrideConfidence`, which is ALSO 0.85 — so a 0.85/10s
-        // fixture survives `evaluateWindow` only on the strictness of `<`, and
-        // any tuning of either constant would silently demote it to
-        // `.suppressed`. The loop `continue`s past suppressed entries, which
-        // would put this test back to one effective iteration and re-open
-        // exactly the vacuity it exists to close.
         let managedB = makeSkipTestAdWindow(
-            id: "ad-range-b", startTime: 95, endTime: 115,
+            id: "ad-range-b", startTime: 105, endTime: 300,
             confidence: 0.85, decisionState: "confirmed"
         )
         try await store.insertAdWindow(managedA)
         try await store.insertAdWindow(managedB)
         await orchestrator.receiveAdWindows([managedA, managedB])
-        // Fixture self-check: the loop must really have two entries to walk.
+        // Fixture self-check: both ids really did land in the managed
+        // dictionary the loop iterates.
         #expect(await orchestrator.activeWindowIDs() == ["ad-range-a", "ad-range-b"])
 
         let gate = ControlledAsyncGate()
