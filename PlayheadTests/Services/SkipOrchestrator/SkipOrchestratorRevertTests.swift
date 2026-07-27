@@ -91,6 +91,83 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         }
     }
 
+    /// playhead-i08e: the lifecycle guard above protects LIVE state only.
+    /// A revert's durable receipt, hard-negative ingest, and threshold-control
+    /// sample belong to the show captured at gesture time and are all
+    /// fire-and-forget over pre-suspension values, so they must be issued
+    /// BEFORE the guard (and before the suspending trust hop). Ordering them
+    /// after it — which is how `recordListenRevert` and `revertByTimeRange`
+    /// read between 5c1a167e and playhead-i08e — silently discards a valid
+    /// old-episode correction AFTER that same gesture's trust penalty has
+    /// already landed, leaving trust and corrections permanently out of step.
+    ///
+    /// Source-level because the race needs an episode switch to interleave
+    /// with an AnalysisStore/TrustScoringService suspension, and neither seam
+    /// exposes a persistence barrier to make that deterministic.
+    func testRevertCalibrationEffectsPrecedeLifecycleGuardAndTrustHop() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/SkipOrchestrator/SkipOrchestrator.swift"
+        )
+
+        guard let listenRevert = SwiftSourceInspector.firstBody(
+            in: source,
+            after: "func recordListenRevert("
+        ).map(SwiftSourceInspector.strippingComments) else {
+            XCTFail("Could not locate the recordListenRevert body")
+            return
+        }
+        guard let listenReceipt = listenRevert.range(of: "persistManualCorrectionVeto("),
+              let listenNegative = listenRevert.range(of: "ingestNegativeFingerprint("),
+              let listenController = listenRevert.range(of: "recordThresholdControlSignal("),
+              let listenGuard = listenRevert.range(
+                of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration"
+              )
+        else {
+            XCTFail(
+                "recordListenRevert must keep its receipt, hard-negative ingest, controller write, and lifecycle guard"
+            )
+            return
+        }
+        for (label, effect) in [
+            ("the manualVeto receipt", listenReceipt),
+            ("the hard-negative ingest", listenNegative),
+            ("the threshold-control sample", listenController),
+        ] {
+            XCTAssertLessThan(
+                effect.lowerBound,
+                listenGuard.lowerBound,
+                "recordListenRevert must issue \(label) before its live-lifecycle guard"
+            )
+        }
+
+        guard let timeRangeRevert = SwiftSourceInspector.firstBody(
+            in: source,
+            after: "func revertByTimeRange("
+        ).map(SwiftSourceInspector.strippingComments) else {
+            XCTFail("Could not locate the revertByTimeRange body")
+            return
+        }
+        guard let rangeReceipt = timeRangeRevert.range(of: "persistManualCorrectionVeto("),
+              let rangeController = timeRangeRevert.range(of: "recordThresholdControlSignal("),
+              let rangeTrust = timeRangeRevert.range(of: "await trustService.recordFalseSkipSignal(")
+        else {
+            XCTFail(
+                "revertByTimeRange must keep its receipt, controller write, and full-magnitude trust signal"
+            )
+            return
+        }
+        XCTAssertLessThan(
+            rangeReceipt.lowerBound,
+            rangeTrust.lowerBound,
+            "revertByTimeRange must write its receipt before the trust hop suspends"
+        )
+        XCTAssertLessThan(
+            rangeController.lowerBound,
+            rangeTrust.lowerBound,
+            "revertByTimeRange must record its threshold-control sample before the trust hop suspends"
+        )
+    }
+
     /// Exact feedback receipts belong only in the durable correction store.
     /// Pin every explicit route against accidentally reusing the diagnostic
     /// decision logger or interpolating receipt fields into OSLog.

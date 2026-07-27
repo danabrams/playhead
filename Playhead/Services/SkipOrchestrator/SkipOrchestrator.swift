@@ -18,7 +18,6 @@ import OSLog
 
 private enum SkipOrchestratorFeedbackError: Error {
     case invalidCorrectionRange
-    case correctionStoreUnavailable
     case staleDurableMaterial
 }
 
@@ -2154,9 +2153,15 @@ actor SkipOrchestrator {
         if let podcastId, let trustService {
             await trustService.recordFalseSkipSignal(podcastId: podcastId)
         }
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            return
-        }
+
+        // playhead-i08e: the capture and calibration effects below belong to
+        // the CAPTURED source show. Each is fire-and-forget over values read
+        // before the first suspension, so an episode switch that landed during
+        // the store/trust hops must not discard them — by that point this
+        // gesture's trust penalty has ALREADY been applied, so dropping the
+        // matching receipt/hard-negative/controller sample would leave trust
+        // and corrections permanently out of step. `revertWindow` states the
+        // same policy; only live cue state below is lifecycle-scoped.
 
         // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
         // with window-precise time scope (fire-and-forget). AdWindow does not
@@ -2186,6 +2191,12 @@ actor SkipOrchestrator {
         // conservative). No-op when no controller store is wired (flag-OFF
         // production default).
         recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+
+        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+            // A replacement episode owns the live cue state now; the durable
+            // and calibration effects above were the old lifecycle's to write.
+            return
+        }
 
         // Remove the cue and re-push.
         evaluateAndPush()
@@ -2331,6 +2342,22 @@ actor SkipOrchestrator {
                 )
             }
 
+            // playhead-xsdz.11: feed the per-show threshold controller a
+            // FALSE-POSITIVE signal ONLY when a MANAGED auto-skip window was
+            // reverted — that is the "listened through an auto-skip" event the
+            // bead names. A suggest-tier-only revert never altered playback, so
+            // it is too weak to RAISE the auto-skip threshold (mirrors the
+            // full-vs-weak trust-signal routing below). No-op when no store is
+            // wired (flag-OFF production default).
+            //
+            // playhead-i08e: recorded BEFORE the trust hop suspends. Like the
+            // receipt above it is a fire-and-forget write for the captured
+            // source show, so an episode switch landing during that await must
+            // not drop it after the matching trust penalty has been applied.
+            if revertedManagedAny {
+                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+            }
+
             // Signal trust engine once per user correction, not per window.
             //
             // Cycle 1 M2 (was playhead-hygc.1.8 R6): route by which surface
@@ -2355,16 +2382,6 @@ actor SkipOrchestrator {
                 }
             }
 
-            // playhead-xsdz.11: feed the per-show threshold controller a
-            // FALSE-POSITIVE signal ONLY when a MANAGED auto-skip window was
-            // reverted — that is the "listened through an auto-skip" event the
-            // bead names. A suggest-tier-only revert never altered playback, so
-            // it is too weak to RAISE the auto-skip threshold (mirrors the
-            // full-vs-weak trust-signal routing above). No-op when no store is
-            // wired (flag-OFF production default).
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-            }
             evaluateAndPush()
         }
     }
@@ -2713,6 +2730,15 @@ actor SkipOrchestrator {
     /// responses. The owning AnalysisStore transaction appends it together
     /// with the authoritative AdWindow mutation; post-commit derived learning
     /// is notified separately without appending again.
+    ///
+    /// playhead-i08e: deliberately does NOT require `correctionStore`. The
+    /// receipt is made durable by the AnalysisStore transaction that commits
+    /// it with the AdWindow mutation — `correctionStore` only receives the
+    /// post-commit derived-learning notification, and that hop already
+    /// no-ops when unwired (`schedulePostCommitCorrectionLearning`). Throwing
+    /// on an unwired optional learning dependency aborted the whole gesture,
+    /// silently killing both the user's correction and the calibration
+    /// signals (trust + per-show threshold controller) that follow it.
     private func makeManualCorrectionVetoEvent(
         startTime: Double,
         endTime: Double,
@@ -2724,9 +2750,6 @@ actor SkipOrchestrator {
         detectionProjection:
             ExplicitFeedbackDetectionProjection? = nil
     ) throws -> CorrectionEvent {
-        guard correctionStore != nil else {
-            throw SkipOrchestratorFeedbackError.correctionStoreUnavailable
-        }
         guard startTime.isFinite, endTime.isFinite else {
             throw SkipOrchestratorFeedbackError.invalidCorrectionRange
         }
@@ -3146,7 +3169,7 @@ actor SkipOrchestrator {
         // Persist `userDismissedBanner = 1` and flip the row to `.reverted`
         // so the vetoed suggestion does not resurface on the next launch.
         do {
-            let correction = try makeSuggestDenialCorrection(
+            let correction = makeSuggestDenialCorrection(
                 window: suggested,
                 podcastId: sourcePodcastId
             )
@@ -3206,14 +3229,16 @@ actor SkipOrchestrator {
     /// attribution across the gesture boundary) this builds a fully-formed
     /// event so `causalSource` and `targetRefs` land on the row — the
     /// hard-negative miner needs both. The caller commits it atomically with
-    /// the AdWindow denial. Returns nil when no correction store is wired.
+    /// the AdWindow denial.
+    ///
+    /// playhead-i08e: as with `makeManualCorrectionVetoEvent`, a wired
+    /// `correctionStore` is not a precondition — the receipt's durability is
+    /// owned by the AnalysisStore transaction, not by the derived-learning
+    /// listener.
     private func makeSuggestDenialCorrection(
         window: AdWindow,
         podcastId: String?
-    ) throws -> CorrectionEvent {
-        guard correctionStore != nil else {
-            throw SkipOrchestratorFeedbackError.correctionStoreUnavailable
-        }
+    ) -> CorrectionEvent {
         let assetId = window.analysisAssetId
         let scope = CorrectionScope.exactTimeSpan(
             assetId: assetId,
