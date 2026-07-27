@@ -75,16 +75,30 @@
 # LAST GREEN END-TO-END RUN
 #   2026-07-27 — 26/26 KILLED, 0 survivors, 0 errors, exit 0.
 #   10 builds (1 baseline + 9 batches), 17m21s wall clock.
-# Recorded so a later reader can tell "never run since it was written" apart
-# from "run and passing". If you change the source under it, re-run and update
-# this — a stale line here is worse than no line.
+# That run predates the playhead-o4qr merge and NO LONGER DESCRIBES THIS FILE.
 #
-# PARTIAL SINCE THEN
-#   2026-07-27 — playhead-ugy4 added S01–S05 (batches 10–12) and two suites to
-#   FOCUSED_SUITES. Those three batches were run and are 5/5 KILLED; M01–N07
-#   were NOT re-run against the widened suite list. The line above therefore
-#   still describes the last WHOLE-battery run. Next whole-battery run: fold
-#   both lines into one.
+# STATUS AFTER THE playhead-o4qr MERGE (2026-07-27)
+#   The battery is 26 mutations, not 31: five entries were relocated to the
+#   KNOWN GAP block (see the MERGE NOTE above `MUTATIONS`). All 26 anchors are
+#   dry-run verified to apply exactly once against the merged source.
+#
+#   Batches 1–7 were re-run and are 19/19 KILLED. Batches 8–12 were NOT re-run,
+#   for two different reasons, and BOTH must be cleared before this file can
+#   claim a whole-battery green again:
+#     • batches 8 and 9 contain N06 and N07, whose only victim
+#       (`anonymousRevertRecordsNoControllerSample`) is currently RED — o4qr's
+#       `exactFeedbackShowIdentity` refuses a revert whose show id is nil or
+#       empty while the episode has one, which is the contract collision the
+#       merge report flags for decision. Running them now would credit both
+#       mutations off a pre-existing failure, which is precisely the
+#       miscrediting the baseline exists to prevent.
+#     • batches 10–12 (S01–S05) are the suggest-tier rails; untouched by the
+#       merge resolution and simply not re-run, for build budget.
+#
+#   The baseline is likewise BLOCKED until that red test is resolved: it refuses
+#   to start while any focused-suite test is already failing. Batches 1–7 were
+#   therefore run with PLAYHEAD_MB_SKIP_BASELINE=1, which is sound only because
+#   none of them names the red test. Do not extend that shortcut to 8/9.
 
 set -uo pipefail
 
@@ -209,22 +223,23 @@ T_DECLINE_NO_CONFIRM="declineSuggestedSkip drops the window without confirming i
 #   M06 (drop the lifecycle gate on the suggest work list): the work list is
 #   built before the first suspension, so there is no post-await gate to drop.
 #
-# They are left here, anchored to the pre-merge text and therefore ERRORing, on
-# purpose: silently deleting five i08e rails to make this script green is
-# exactly the "relax it until it passes" move the header forbids, and whether
-# the underlying contracts are now structurally guaranteed (the analysis above
-# says yes) or merely unpinned is a COVERAGE decision that belongs to a human.
-# The behavioural rails themselves — the four `SkipOrchestratorRevertLifecycle`
+# They are moved to the KNOWN GAP block below rather than deleted: their
+# `apply_mutation` arms are kept verbatim, so restoring any of them is a
+# one-line edit if the analysis above is ever shown wrong. They are NOT left in
+# `MUTATIONS` ERRORing, because a batch aborts on its first failed anchor —
+# leaving them there took nine OTHER mutations (M05 M07 M08 M09 M11 M12 M14 M18
+# M20) down with them in batches 1, 2 and 4, which is a strictly worse outcome
+# than a documented gap: it turns the whole script into a no-op.
+#
+# Whether these five contracts are now structurally guaranteed (the analysis
+# says yes) or merely unpinned is a COVERAGE decision for a human. The
+# behavioural rails themselves — the four `SkipOrchestratorRevertLifecycle`
 # race tests — are unchanged and pass; see the merge commit.
 MUTATIONS=(
-  "M01|1|ORCH|$T_MANAGED_RACE"
-  "M02|1|ORCH|$T_SUGGEST_RACE"
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
   "M11|1|ORCH|$T_LISTEN_FP"
 
-  "M03|2|ORCH|$T_MANAGED_RACE"
-  "M04|2|ORCH|$T_SUGGEST_RACE"
   "M12|2|ORCH|$T_LISTEN_RACE"
   "M09|2|ORCH|$T_REVERTWINDOW_FP"
   "M20|2|ORCH|$T_CONFIRM_SILENT"
@@ -236,7 +251,6 @@ MUTATIONS=(
   "M10|3|ORCH|$T_SUGGEST_NO_NOSTORE"
 
   "M14|4|ORCH|$T_LISTEN_RACE"
-  "M06|4|ORCH|$T_MANAGED_RACE"
   "M08|4|ORCH|$T_SUGGEST_RACE;$T_SUGGESTONLY_SILENT"
   "M18|4|STORE|$T_OWNERSHIP"
 
