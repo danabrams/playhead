@@ -341,10 +341,11 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         let negativeBank = try NegativeFingerprintBank(
             directoryURL: try makeTempDir(prefix: "i08e-revert-race-bank")
         )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
-            correctionStore: PersistentUserCorrectionStore(store: store)
+            correctionStore: correctionStore
         )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setNegativeFingerprintBank(negativeBank)
@@ -391,12 +392,18 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         #expect(state.integral == 1, "a Listen revert is a FALSE-POSITIVE signal → integral +1")
 
         let receipts = try await awaitCorrectionReceipts(
-            store, assetId: "asset-1", expected: 1
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
         )
         #expect(receipts.count == 1, "the captured show's receipt must still commit")
         #expect(receipts.first?.source == .listenRevert)
 
-        let negatives = try await awaitNegativeBankEntries(negativeBank, expected: 1)
+        let negatives = try await awaitNegativeBankEntries(
+            negativeBank, orchestrator: orchestrator, expected: 1
+        )
         #expect(negatives.count == 1, "the confirmed-FP hard negative must still be ingested")
         #expect(
             negatives.first?.showId == "podcast-1",
@@ -452,10 +459,11 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             mode: "auto", trustScore: 0.9, observations: 10
         )
         let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
-            correctionStore: PersistentUserCorrectionStore(store: store)
+            correctionStore: correctionStore
         )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         let cuePushes = SkipCuePushCounter()
@@ -534,7 +542,11 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         #expect(state.integral == 1, "a managed-window revert is a FALSE-POSITIVE signal → integral +1")
 
         let receipts = try await awaitCorrectionReceipts(
-            store, assetId: "asset-1", expected: 1
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
         )
         #expect(receipts.count == 1, "the captured show's receipt must still commit")
         #expect(receipts.first?.source == .manualVeto)
@@ -621,9 +633,10 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
         try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
         // No trustService and no correction-store-side show attribution.
+        let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
-            correctionStore: PersistentUserCorrectionStore(store: store)
+            correctionStore: correctionStore
         )
         let cuePushes = SkipCuePushCounter()
         await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
@@ -659,7 +672,11 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
 
         // The gesture is still owed to the captured episode even unattributed.
         let receipts = try await awaitCorrectionReceipts(
-            store, assetId: "asset-1", expected: 1
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
         )
         #expect(receipts.count == 1, "an anonymous revert still commits its receipt")
         #expect(receipts.first?.source == .manualVeto)
@@ -696,10 +713,11 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             mode: "auto", trustScore: 0.9, observations: 10
         )
         let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
-            correctionStore: PersistentUserCorrectionStore(store: store)
+            correctionStore: correctionStore
         )
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         let cuePushes = SkipCuePushCounter()
@@ -759,7 +777,11 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         await gesture.value
 
         let receipts = try await awaitCorrectionReceipts(
-            store, assetId: "asset-1", expected: 1
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
         )
         #expect(receipts.count == 1, "the captured show's receipt must still commit")
         #expect(receipts.first?.source == .manualVeto)

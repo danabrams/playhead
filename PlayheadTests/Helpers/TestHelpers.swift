@@ -548,43 +548,109 @@ func controllerRowsExcludingBarrier(
     return try await store.count() - 1
 }
 
-/// Poll the durable correction receipts for an asset. `persistManualCorrectionVeto`
-/// writes them through an unstructured `Task` as well.
+/// Order every fire-and-forget effect the gesture ALREADY issued ahead of the
+/// caller's next read, without a wall-clock guess.
+///
+/// `persistManualCorrectionVeto` and `ingestNegativeFingerprint` both do
+/// `Task { await <collaborator>.<write>(…) }` from the orchestrator's executor
+/// (`Task {}` inherits actor context and nothing on either path is
+/// `Task.detached`). Enqueuing one job of our own on that same executor and
+/// awaiting it therefore runs strictly after each of those tasks' FIRST
+/// segment — the segment that enqueues the write on the collaborator — so a
+/// read issued afterwards is queued behind them.
+///
+/// Same two honest limits as ``drainControllerWrites(_:_:)``: same-priority
+/// FIFO on the default actor executor is an implementation property rather than
+/// a language guarantee, and it orders only tasks the gesture created
+/// synchronously.
+func drainOrchestratorEffects(_ orchestrator: SkipOrchestrator) async {
+    _ = await orchestrator.activeWindowIDs()
+}
+
+/// Wait for the seam's receipts, then re-read behind a barrier so callers'
+/// `count == expected` assertions bound the count from ABOVE as well as below.
+///
+/// The barrier is here for the same reason it is on the controller side:
+/// polling `>= expected` is satisfied by the FIRST write, so a gesture that
+/// issued TWO receipts — e.g. the `didLoseLifecycle` restructure the KNOWN GAP
+/// in `revertByTimeRange` recommends, if it minted one per loop instead of one
+/// per gesture — can land its second just after the poll returns and the
+/// exactness assertion passes unobserved.
+///
+/// Honest calibration of how much this buys, since the file already carries one
+/// over-claimed "verified by mutation" note: minting a second receipt over a
+/// DIFFERENT span reddens all four callers with or without this barrier on a
+/// quiescent machine — the second write simply wins the race in practice. What
+/// the barrier removes is the dependence on winning it, which is the same thing
+/// ``awaitControllerSampleCount(_:orchestrator:show:expected:)`` was given a
+/// barrier for. (A second receipt over the SAME span is not observable at all
+/// and needs no barrier: `appendCorrectionEvent` dedupes on
+/// `analysisAssetId + effectiveCorrectionType + normalizedScopeKey +
+/// correctionIdentityKey`, so production collapses it by construction.)
+///
+/// Two hops, because `persistManualCorrectionVeto` writes through the
+/// correction store rather than straight to the AnalysisStore. Draining the
+/// orchestrator gets each pending task as far as `correctionStore.recordVeto`;
+/// awaiting any correction-store read that itself hits the AnalysisStore
+/// (`correctionPassthroughFactor` does, unconditionally) then queues behind
+/// their appends, so the final load sees all of them.
 func awaitCorrectionReceipts(
     _ store: AnalysisStore,
+    orchestrator: SkipOrchestrator,
+    correctionStore: PersistentUserCorrectionStore,
     assetId: String,
     expected: Int
 ) async throws -> [CorrectionEvent] {
     var events: [CorrectionEvent] = []
+    var landed = false
     for _ in 0..<200 {
         events = try await store.loadCorrectionEvents(analysisAssetId: assetId)
-        if events.count >= expected { return events }
+        if events.count >= expected {
+            landed = true
+            break
+        }
         try await Task.sleep(nanoseconds: 50_000_000)
     }
-    throw TestEffectTimeout(
-        effect: "durable correction receipts for asset \"\(assetId)\"",
-        expected: expected,
-        observed: events.count
-    )
+    guard landed else {
+        throw TestEffectTimeout(
+            effect: "durable correction receipts for asset \"\(assetId)\"",
+            expected: expected,
+            observed: events.count
+        )
+    }
+    await drainOrchestratorEffects(orchestrator)
+    _ = await correctionStore.correctionPassthroughFactor(for: assetId)
+    return try await store.loadCorrectionEvents(analysisAssetId: assetId)
 }
 
-/// Poll the hard-negative bank. `ingestNegativeFingerprint` is fire-and-forget
-/// through an unstructured `Task` like the other calibration effects.
+/// Wait for the hard-negative ingest, then re-read behind the same barrier so
+/// `count == expected` bounds from above too. `ingestNegativeFingerprint` is
+/// one hop (the task's first segment enqueues on the bank), so draining the
+/// orchestrator is sufficient here.
 func awaitNegativeBankEntries(
     _ bank: NegativeFingerprintBank,
+    orchestrator: SkipOrchestrator,
     expected: Int
 ) async throws -> [NegativeFingerprintEntry] {
     var entries: [NegativeFingerprintEntry] = []
+    var landed = false
     for _ in 0..<200 {
         entries = try await bank.allEntries()
-        if entries.count >= expected { return entries }
+        if entries.count >= expected {
+            landed = true
+            break
+        }
         try await Task.sleep(nanoseconds: 50_000_000)
     }
-    throw TestEffectTimeout(
-        effect: "hard-negative bank entries",
-        expected: expected,
-        observed: entries.count
-    )
+    guard landed else {
+        throw TestEffectTimeout(
+            effect: "hard-negative bank entries",
+            expected: expected,
+            observed: entries.count
+        )
+    }
+    await drainOrchestratorEffects(orchestrator)
+    return try await bank.allEntries()
 }
 
 /// A markOnly (suggest-tier) window: surfaced as a suggest banner, never

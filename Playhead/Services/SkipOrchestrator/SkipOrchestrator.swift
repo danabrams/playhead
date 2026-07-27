@@ -2659,9 +2659,14 @@ actor SkipOrchestrator {
         )
     }
 
-    /// Episode-bound generic form used by deferred non-banner correction
+    /// Episode-bound generic form intended for deferred non-banner correction
     /// surfaces. The outer UI guard is not sufficient because this actor can
     /// be re-entered while its store and trust calls suspend.
+    ///
+    /// playhead-i08e: "intended for", not "used by" — no production caller
+    /// exists yet. `NowPlayingView` has a closure parameter named
+    /// `revertWindow`, but the closure bound to it calls
+    /// `denyAutoSkippedBanner`. See the census above `declineSuggestedSkip`.
     @discardableResult
     func revertWindow(
         windowId: String,
@@ -3195,13 +3200,24 @@ actor SkipOrchestrator {
     ///   • FALSE-POSITIVE (raise) — every path that vetoes a MANAGED
     ///     (auto-skip-tier) window: `recordListenRevert`, `revertByTimeRange`
     ///     (only when `revertedManagedAny`), `revertWindow`, and
-    ///     `denyAutoSkippedBanner`. This is a census of SEAMS, not of shipped
-    ///     behaviour: `recordListenRevert` currently has no production caller
-    ///     (the banner Listen tap runs `retireLiveSkipForListen` plus
-    ///     `AdDetectionService.recordListenRewind`, neither of which
-    ///     calibrates), so it is reachable only from tests today. Wiring it is
-    ///     tracked separately — do not read this list as "what the controller
-    ///     is being fed in production".
+    ///     `denyAutoSkippedBanner`.
+    ///
+    ///     This is a census of SEAMS, not of shipped behaviour, and TWO of
+    ///     those four are reachable only from tests today:
+    ///       – `recordListenRevert` — the banner Listen tap runs
+    ///         `retireLiveSkipForListen` plus
+    ///         `AdDetectionService.recordListenRewind`, neither of which
+    ///         calibrates.
+    ///       – `revertWindow` — the only production reference is
+    ///         `NowPlayingView`'s closure PARAMETER of the same name
+    ///         (`BannerFeedbackProductionActions.revertWindow`), and the
+    ///         closure bound to it at the single construction site calls
+    ///         `denyAutoSkippedBanner`. The name is vestigial; nothing calls
+    ///         this method outside tests.
+    ///     Wiring either is tracked separately. What actually reaches the
+    ///     controller in production is `revertByTimeRange` (the transcript
+    ///     "This isn't an ad" gesture) and `denyAutoSkippedBanner` (the banner
+    ///     No) — do not read this list as "what the controller is being fed".
     ///   • MISS (lower) — `acceptSuggestedSkip`. This is the one SUGGEST-tier
     ///     gesture that calibrates: the user saying "this WAS an ad" about
     ///     something we did not auto-skip is a false negative, which is a

@@ -62,13 +62,31 @@ struct SkipOrchestratorThresholdControlTests {
     /// is exactly what production guarantees by passing the real episode id.
     private let episodeId = "ep-1"
 
+    /// playhead-i08e (eighth pass): this deliberately wires NO trust service.
+    ///
+    /// The bead's root cause was an early exit keyed on an optional DEPENDENCY
+    /// rather than on the lifecycle (`guard correctionStore != nil else
+    /// { throw }` above a seam's effects), so that shape deserves a rail at
+    /// every seam it killed. `revertByTimeRange` has one —
+    /// `anonymousTimeRangeRevertSurvivesEpisodeReplacement` wires neither a
+    /// trust service nor show attribution, so an early exit on either drops the
+    /// receipt it asserts. `recordListenRevert` had none: every test that
+    /// exercised it wired a trust service, so reintroducing the shape there
+    /// (`guard trustService != nil else { return }` above the calibration
+    /// effects) left the ENTIRE 8,548-test gate green. Verified by mutation
+    /// before and after: that edit now reddens this test and nothing else.
+    ///
+    /// The trust service is the only thing dropped, and dropping it costs no
+    /// coverage: `noControllerStoreLeavesRevertSeamsIntact` below still drives
+    /// this seam with one wired, and `listenRevertSurvivesEpisodeReplacement`
+    /// (SkipOrchestratorRevertTests) pins the same sample count and sign in the
+    /// trust-wired shape with the trust hop actually suspending.
     @Test("Listen revert of a managed auto-skip window records a FALSE-POSITIVE signal (integral +1)")
     func listenRevertRecordsFalsePositive() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
@@ -87,56 +105,9 @@ struct SkipOrchestratorThresholdControlTests {
         )
         #expect(state.sampleCount == 1, "one revert must record exactly one controller sample")
         #expect(state.integral == 1, "a Listen revert is a FALSE-POSITIVE signal → integral +1")
-        await controllerStore.close()
-    }
-
-    /// playhead-i08e (eighth pass): the same seam with its OPTIONAL
-    /// collaborators removed.
-    ///
-    /// This bead's root cause was an early exit keyed on an optional
-    /// DEPENDENCY rather than on the lifecycle — `guard correctionStore != nil
-    /// else { throw }` above a seam's effects — so the class deserves a rail at
-    /// every seam that revived. `revertByTimeRange` has one
-    /// (`anonymousTimeRangeRevertSurvivesEpisodeReplacement` wires neither a
-    /// trust service nor show attribution, so an early exit on either drops the
-    /// receipt it asserts). `recordListenRevert` had none: every other test of
-    /// it wires a trust service, so reintroducing the shape there — e.g.
-    /// `guard trustService != nil else { return }` above the calibration
-    /// effects — left every other test in this file and in
-    /// SkipOrchestratorRevertTests green. Verified by mutation: that edit
-    /// reddens this test and nothing else.
-    ///
-    /// The trust service is the discriminating variable, so it is the only
-    /// thing this drops relative to `listenRevertRecordsFalsePositive`.
-    @Test("A Listen revert with no trust service still records its FALSE-POSITIVE signal")
-    func listenRevertWithoutTrustServiceRecordsFalsePositive() async throws {
-        let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
-        // No trust service and no correction store: the controller store is the
-        // only optional collaborator this orchestrator has.
-        let orchestrator = SkipOrchestrator(store: store)
-        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
-        await orchestrator.setSkipCueHandler { _ in }
-        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
-
-        let ad = makeSkipTestAdWindow(id: "ad-fp-no-trust", startTime: 60, endTime: 120, confidence: 0.85, decisionState: "confirmed")
-        try await store.insertAdWindow(ad)
-        await orchestrator.receiveAdWindows([ad])
-
-        await orchestrator.recordListenRevert(windowId: "ad-fp-no-trust", podcastId: podcastId)
-
-        let state = try await awaitControllerSampleCount(
-            controllerStore,
-            orchestrator: orchestrator,
-            show: podcastId,
-            expected: 1
-        )
-        #expect(state.sampleCount == 1, "one revert must record exactly one controller sample")
-        #expect(state.integral == 1, "a Listen revert is a FALSE-POSITIVE signal → integral +1")
         // Positive control: the gesture ran to completion, so "recorded one
         // sample" cannot be satisfied by a seam that aborted somewhere else.
-        let row = try #require(try await store.fetchAdWindow(id: "ad-fp-no-trust"))
+        let row = try #require(try await store.fetchAdWindow(id: "ad-fp"))
         #expect(row.decisionState == AdDecisionState.reverted.rawValue)
         await controllerStore.close()
     }
