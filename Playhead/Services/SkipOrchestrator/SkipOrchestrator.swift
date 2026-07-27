@@ -2585,6 +2585,17 @@ actor SkipOrchestrator {
                         requestedManaged.adWindow
                     )
             )
+            // playhead-i08e: the same suspension `confirmAutoSkippedBanner`,
+            // `acceptSuggestedSkip` and `declineSuggestedSkip` already take.
+            // Without it this seam — one of only two that reach the threshold
+            // controller in a shipped build — had no way to be interleaved
+            // with an episode replacement, so the fact that its calibration
+            // runs BEFORE the ownership guard below (deliberately: the
+            // captured show is owed the feedback) could not be asserted.
+            // Production leaves the barrier nil.
+            if let barrier = feedbackPersistenceBarrierForTesting {
+                await barrier()
+            }
             guard let wasNewlyInserted =
                     try await store.persistDeniedAutoSkip(
                         windowId: windowId,

@@ -443,7 +443,14 @@ struct SkipOrchestratorThresholdControlTests {
     /// `noControllerStoreLeavesRevertSeamsIntact`: the store IS
     /// wired here, so a regression that fell back to `activePodcastId` — which
     /// `beginEpisode` set to a real value below — turns this red.
-    @Test("An anonymous revert (no podcastId) records no controller sample")
+    ///
+    /// playhead-i08e (tenth pass): that guard has TWO clauses and only the
+    /// `nil` one was covered. An EMPTY show id is not a show either — a row
+    /// keyed on `""` is per-show state that no episode can ever address, and
+    /// every unattributed correction would pile into that one shared bucket.
+    /// Mutation-verified: dropping `!podcastId.isEmpty` left the focused set
+    /// green before the second gesture below existed.
+    @Test("An anonymous revert (no podcastId, or an empty one) records no controller sample")
     func anonymousRevertRecordsNoControllerSample() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
@@ -457,13 +464,18 @@ struct SkipOrchestratorThresholdControlTests {
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
 
         let ad = makeSkipTestAdWindow(id: "ad-anon", startTime: 60, endTime: 120, confidence: 0.85, decisionState: "confirmed")
+        // A second window, vetoed under an EMPTY show id, so both clauses of
+        // the guard are exercised by the same negative assertion below.
+        let empty = makeSkipTestAdWindow(id: "ad-empty-show", startTime: 300, endTime: 360, confidence: 0.85, decisionState: "confirmed")
         try await store.insertAdWindow(ad)
-        await orchestrator.receiveAdWindows([ad])
+        try await store.insertAdWindow(empty)
+        await orchestrator.receiveAdWindows([ad, empty])
 
         #expect(await orchestrator.revertWindow(windowId: "ad-anon", podcastId: nil))
+        #expect(await orchestrator.revertWindow(windowId: "ad-empty-show", podcastId: ""))
         let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
-        #expect(receipts.count == 1, "the veto itself still commits its durable receipt")
-        #expect(receipts.first?.source == .manualVeto)
+        #expect(receipts.count == 2, "each veto still commits its own durable receipt")
+        #expect(receipts.allSatisfy { $0.source == .manualVeto })
 
         #expect(
             try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
@@ -476,14 +488,27 @@ struct SkipOrchestratorThresholdControlTests {
     /// skip was right is a TRUE positive, and the controller models only
     /// false-positive (raise) and miss (lower). Writing here would push the
     /// threshold on agreement.
-    @Test("Confirming an auto-skipped banner records no controller sample")
+    ///
+    /// playhead-i08e (tenth pass): the hard-negative bank is the SECOND
+    /// learning surface this seam must leave alone, and the only thing saying
+    /// so was the MEMORY-POLLUTION GUARD comment above
+    /// `ingestNegativeFingerprint` ("reached ONLY from reversion paths").
+    /// Mutation-verified: adding an ingest call to this seam left the focused
+    /// set green. It is the more expensive of the two mistakes — a confirmed
+    /// TRUE positive stored as a hard negative teaches the bank to suppress a
+    /// REAL ad whose copy repeats on the next episode.
+    @Test("Confirming an auto-skipped banner records no controller sample and no hard negative")
     func confirmAutoSkippedBannerRecordsNoControllerSample() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
         let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
+        let negativeBank = try NegativeFingerprintBank(
+            directoryURL: try makeTempDir(prefix: "i08e-confirm-bank")
+        )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setNegativeFingerprintBank(negativeBank)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -493,7 +518,16 @@ struct SkipOrchestratorThresholdControlTests {
         )
         let events = await orchestrator.bannerEventStream()
 
-        let ad = makeSkipTestAdWindow(id: "ad-confirm", startTime: 60, endTime: 120, confidence: 0.9, decisionState: "confirmed")
+        let ad = makeSkipTestAdWindow(
+            id: "ad-confirm",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            decisionState: "confirmed",
+            // Comfortably clear of the bank's 4-token floor, so "no entry"
+            // can never be satisfied by copy too short to be storable.
+            evidenceText: "this episode is brought to you by our sponsor"
+        )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
 
@@ -519,7 +553,17 @@ struct SkipOrchestratorThresholdControlTests {
             try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
             "agreeing with a skip is a true positive — it must not move the threshold"
         )
+        await drainOrchestratorEffects(orchestrator)
+        #expect(
+            try await negativeBank.allEntries().isEmpty,
+            """
+            Agreeing with a skip is a CONFIRMED TRUE positive. Ingesting its \
+            copy as a hard negative would suppress the same ad the next time \
+            it airs — the bank's write trigger is the reversion seams only.
+            """
+        )
         await controllerStore.close()
+        await negativeBank.close()
     }
 
     /// `declineSuggestedSkip` is capture-only for the mirror reason: the

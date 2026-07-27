@@ -74,6 +74,8 @@ export DEVELOPER_DIR
 
 ORCH="Playhead/Services/SkipOrchestrator/SkipOrchestrator.swift"
 STORE="Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
+CTRL="Playhead/Services/AdDetection/PerShowThresholdControllerStore.swift"
+MUTABLE_FILES=("$ORCH" "$STORE" "$CTRL")
 
 FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
@@ -104,8 +106,11 @@ T_REVERTWINDOW_FP="Manual 'not an ad' revertWindow records a FALSE-POSITIVE sign
 T_SUGGEST_NO_NOSTORE="Suggest-No persists its durable receipt with no correction store wired"
 T_OWNERSHIP="explicit responses are refused when the card's episode does not own the asset"
 T_AUTOFADE="declineSuggestedSkip auto-fade (isExplicitDenial:false) records NO correction and leaves userDismissedBanner=0"
-T_CONFIRM_SILENT="Confirming an auto-skipped banner records no controller sample"
+T_CONFIRM_SILENT="Confirming an auto-skipped banner records no controller sample and no hard negative"
 T_SUGGESTONLY_SILENT="A suggest-tier-only revertByTimeRange records no controller sample"
+T_ANON_SILENT="An anonymous revert (no podcastId, or an empty one) records no controller sample"
+T_ACCEPT_RACE="A suggest Yes whose episode is replaced mid-flight calibrates the captured show"
+T_DENY_RACE="A banner No whose episode is replaced mid-flight calibrates the captured show"
 
 MUTATIONS=(
   "M01|1|ORCH|$T_MANAGED_RACE"
@@ -137,7 +142,38 @@ MUTATIONS=(
   "M16|6|ORCH|$T_LISTEN_RACE"
 
   "M17|7|ORCH|$T_LISTEN_RACE;$T_MANAGED_RACE"
+
+  # Tenth pass. Every one of these SURVIVED when first probed: the four race
+  # tests above cover `recordListenRevert` and `revertByTimeRange`, and nothing
+  # covered the other two calibrating seams under the same interleave, the
+  # hard-negative bank's write-trigger census, or the empty-show-id clause.
+  "N02|8|ORCH|$T_DENY_RACE"
+  "N03|8|ORCH|$T_ACCEPT_RACE"
+  "N04|8|ORCH|$T_CONFIRM_SILENT"
+  "N06|8|CTRL|$T_ANON_SILENT"
+
+  "N05|9|ORCH|$T_ACCEPT_RACE"
+  "N07|9|ORCH|$T_ANON_SILENT"
 )
+
+# KNOWN GAP, deliberately NOT encoded above (an entry here would make this
+# script permanently red, which would train people to ignore it):
+#
+#   N01 — `revertWindow`: relocate its `recordThresholdControlSignal` and trust
+#   penalty BELOW the lifecycle guard, so a replacement landing during
+#   `store.persistRevertedAdWindow` discards feedback the CAPTURED show is
+#   owed — the exact defect the seam's own comment says the ordering prevents.
+#   Probed 2026-07-27; SURVIVED the focused set.
+#
+#   Every sibling seam now has this pinned (`recordListenRevert`,
+#   `revertByTimeRange`, `acceptSuggestedSkip`, `denyAutoSkippedBanner`).
+#   `revertWindow` is the one that cannot be interleaved today: it takes no
+#   `…PersistenceBarrierForTesting` suspension, and its only await is the store
+#   transaction. Closing it means one more production barrier take — worth
+#   doing when `revertWindow` acquires a production caller, which per the
+#   census above `declineSuggestedSkip` it does not have yet (the only
+#   reference is a `NowPlayingView` closure PARAMETER of the same name, bound
+#   to `denyAutoSkippedBanner`). Its show ATTRIBUTION is covered: see N07.
 
 # One-line description per mutation, for the report.
 describe_mutation() {
@@ -162,6 +198,12 @@ describe_mutation() {
     M18) echo "AnalysisStore.feedbackAssetMatches: always accept (neuters all 4 explicit-feedback transactions)" ;;
     M19) echo "declineSuggestedSkip: treat a passive auto-fade as an explicit denial" ;;
     M20) echo "confirmAutoSkippedBanner: start writing a controller sample (agreement must not calibrate)" ;;
+    N02) echo "denyAutoSkippedBanner: discard the calibration effects when the episode was replaced mid-flight" ;;
+    N03) echo "acceptSuggestedSkip: discard the MISS sample when the episode was replaced mid-flight" ;;
+    N04) echo "confirmAutoSkippedBanner: ingest a hard negative (agreement must not pollute the bank)" ;;
+    N05) echo "acceptSuggestedSkip: MISS attributed to activePodcastId instead of the captured show" ;;
+    N06) echo "PerShowThresholdControllerStore: accept an empty show id as a real show" ;;
+    N07) echo "revertWindow: controller sample attributed to activePodcastId instead of the captured show" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -513,6 +555,100 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  N02)
+    snippet OLD <<'EOF'
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: podcastId
+        )
+        if let podcastId {
+EOF
+    snippet NEW <<'EOF'
+        guard activeEpisodeId == sourceEpisodeId,
+              episodeLifecycleGeneration == sourceLifecycleGeneration
+        else {
+            return true
+        }
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: podcastId
+        )
+        if let podcastId {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  N03)
+    snippet OLD <<'EOF'
+        recordThresholdControlMiss(podcastId: sourcePodcastId)
+
+        guard sourceLifecycleIsCurrent else {
+            return true
+        }
+EOF
+    snippet NEW <<'EOF'
+        guard sourceLifecycleIsCurrent else {
+            return true
+        }
+        recordThresholdControlMiss(podcastId: sourcePodcastId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  N04)
+    snippet OLD <<'EOF'
+            schedulePostCommitCorrectionLearning(
+                receipt,
+                wasNewlyInserted: wasNewlyInserted
+            )
+            return true
+EOF
+    snippet NEW <<'EOF'
+            schedulePostCommitCorrectionLearning(
+                receipt,
+                wasNewlyInserted: wasNewlyInserted
+            )
+            ingestNegativeFingerprint(
+                text: managed.adWindow.evidenceText,
+                podcastId: activePodcastId
+            )
+            return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  N05)
+    snippet OLD <<'EOF'
+        recordThresholdControlMiss(podcastId: sourcePodcastId)
+EOF
+    snippet NEW <<'EOF'
+        recordThresholdControlMiss(podcastId: activePodcastId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  N06)
+    # Targets PerShowThresholdControllerStore, not the orchestrator. The
+    # orchestrator's own `!podcastId.isEmpty` clause is belt-and-braces: the
+    # store rejects an empty id too, so deleting the orchestrator's copy is an
+    # EQUIVALENT MUTANT that no test can kill. The store's guard is the one
+    # that actually enforces "an empty show id lands nowhere".
+    snippet OLD <<'EOF'
+        guard !podcastId.isEmpty else {
+            throw PerShowThresholdControllerStoreError.writeFailed("empty podcastId")
+        }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  N07)
+    snippet OLD <<'EOF'
+        // cannot silently discard valid old-episode feedback.
+        recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+EOF
+    snippet NEW <<'EOF'
+        // cannot silently discard valid old-episode feedback.
+        recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -528,6 +664,7 @@ rec_file()   {
   case "$(printf '%s' "$1" | cut -d'|' -f3)" in
     ORCH)  printf '%s' "$ORCH" ;;
     STORE) printf '%s' "$STORE" ;;
+    CTRL)  printf '%s' "$CTRL" ;;
     *)     printf '%s' "" ;;
   esac
 }
@@ -537,7 +674,7 @@ rec_expect() { printf '%s' "$1" | cut -d'|' -f4-; }
 # Safety: clean tree in, clean tree out
 # ---------------------------------------------------------------------------
 require_clean_tree() {
-  if [ -n "$(git status --porcelain -- "$ORCH" "$STORE")" ]; then
+  if [ -n "$(git status --porcelain -- "${MUTABLE_FILES[@]}")" ]; then
     cat >&2 <<'MSG'
 mutation-battery: the tree has uncommitted changes to a file this script
 mutates. It restores with `git checkout --`, which would DESTROY that work.
@@ -550,7 +687,7 @@ MSG
 hash_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 
 restore_sources() {
-  git checkout -- "$ORCH" "$STORE"
+  git checkout -- "${MUTABLE_FILES[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -569,7 +706,9 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     m = pat_named.match(line) or pat_plain.match(line)
     if m and m.group(1) not in seen:
         seen.append(m.group(1))
-print("\n".join(seen))
+# Deliberately not `print("\n".join(...))`: on an empty list that emits a bare
+# newline, which reads downstream as one nameless failure.
+sys.stdout.writelines(name + "\n" for name in seen)
 ' "$1"
 }
 
@@ -613,8 +752,11 @@ fi
 
 require_clean_tree
 
-ORCH_HASH_BEFORE="$(hash_of "$ORCH")"
-STORE_HASH_BEFORE="$(hash_of "$STORE")"
+HASHES_BEFORE=""
+for f in "${MUTABLE_FILES[@]}"; do
+  HASHES_BEFORE="$HASHES_BEFORE$(hash_of "$f")  $f
+"
+done
 
 # Selected records
 SELECTED=()
@@ -680,8 +822,8 @@ for b in "${BATCH_IDS[@]}"; do
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    git --no-pager diff --stat -- "$ORCH" "$STORE"
-    git --no-pager diff -U1 -- "$ORCH" "$STORE"
+    git --no-pager diff --stat -- "${MUTABLE_FILES[@]}"
+    git --no-pager diff -U1 -- "${MUTABLE_FILES[@]}"
     restore_sources
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|DRY-RUN|anchor applied" >>"$RESULTS"
@@ -744,15 +886,15 @@ done
 # Restoration must be byte-exact.
 # ---------------------------------------------------------------------------
 restore_sources
-ORCH_HASH_AFTER="$(hash_of "$ORCH")"
-STORE_HASH_AFTER="$(hash_of "$STORE")"
+HASHES_AFTER=""
+for f in "${MUTABLE_FILES[@]}"; do
+  HASHES_AFTER="$HASHES_AFTER$(hash_of "$f")  $f
+"
+done
 RESTORE_OK=1
-if [ "$ORCH_HASH_BEFORE" != "$ORCH_HASH_AFTER" ]; then
-  echo "mutation-battery: FATAL — $ORCH was NOT restored byte-exactly" >&2
-  RESTORE_OK=0
-fi
-if [ "$STORE_HASH_BEFORE" != "$STORE_HASH_AFTER" ]; then
-  echo "mutation-battery: FATAL — $STORE was NOT restored byte-exactly" >&2
+if [ "$HASHES_BEFORE" != "$HASHES_AFTER" ]; then
+  echo "mutation-battery: FATAL — a mutated file was NOT restored byte-exactly" >&2
+  printf 'before:\n%s\nafter:\n%s\n' "$HASHES_BEFORE" "$HASHES_AFTER" >&2
   RESTORE_OK=0
 fi
 
