@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.playhead.app.analysis.backfill</string>
+		<string>com.playhead.app.analysis.backfill.charged</string>
 		<string>com.playhead.app.analysis.continued</string>
 		<string>com.playhead.app.preanalysis.recovery</string>
 		<string>com.playhead.app.feed-refresh</string>

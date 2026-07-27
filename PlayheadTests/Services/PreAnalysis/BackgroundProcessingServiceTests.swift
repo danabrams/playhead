@@ -1210,6 +1210,45 @@ struct SchedulingTests {
         #expect(!backfillRequests.isEmpty,
                 "launch must submit a backfill task so a user who queues episodes and never plays/backgrounds still gets one")
     }
+
+    // playhead-i6oi: the overnight-stall fix. Alongside the battery-eligible
+    // request, submit a charger-class sibling (requiresExternalPower=true)
+    // that rides iOS's charger-maintenance discretionary class (fires
+    // overnight while charging) — the same class preAnalysisRecovery uses.
+    // The battery-budgeted class's device-activity / idle suppressors starved
+    // the plain identifier all night (the same-night A/B: recovery ran,
+    // backfill got zero).
+    @Test("scheduleBackfillIfNeeded submits BOTH a battery-eligible and a charger-class backfill request (playhead-i6oi)")
+    func scheduleBackfillSubmitsBatteryAndChargedVariants() async throws {
+        let (bps, _, scheduler, _) = makeBPS()
+
+        await bps.scheduleBackfillIfNeeded()
+
+        let battery = scheduler.submittedRequests.first {
+            $0.identifier == BackgroundTaskID.backfillProcessing
+        } as? BGProcessingTaskRequest
+        let charged = scheduler.submittedRequests.first {
+            $0.identifier == BackgroundTaskID.backfillProcessingCharged
+        } as? BGProcessingTaskRequest
+
+        #expect(battery != nil)
+        #expect(battery?.requiresExternalPower == false,
+                "the battery-eligible request must stay in the battery class so on-battery idle windows count")
+        #expect(charged != nil,
+                "a charger-class backfill sibling must be submitted so overnight-charging windows are reachable")
+        #expect(charged?.requiresExternalPower == true,
+                "the charged sibling must require external power to ride the charger-maintenance discretionary class")
+
+        // The playhead-txq3 pending guard applies per identifier: a second
+        // call re-submits neither variant.
+        await bps.scheduleBackfillIfNeeded()
+        #expect(scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.backfillProcessing
+        }.count == 1)
+        #expect(scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.backfillProcessingCharged
+        }.count == 1)
+    }
 }
 
 // MARK: - Lifecycle
