@@ -433,6 +433,9 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
     ///   • the in-loop guard must `break`, not `return` — a `return` abandons a
     ///     gesture whose row is already durably reverted, dropping the receipt
     ///     and the controller sample;
+    ///   • the in-loop guard must also still EXIST — `windows` is live state,
+    ///     so a loop that runs on re-inserts the OLD episode's entries into the
+    ///     dictionary `beginEpisode` has just cleared for the replacement;
     ///   • the suggest-tier work list must be gated on the captured lifecycle —
     ///     `suggestWindows` is live state, so building it after the loop broke
     ///     out collects and vetoes the REPLACEMENT episode's suggestions;
@@ -461,12 +464,22 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
         )
 
-        let managed = makeSkipTestAdWindow(
-            id: "ad-range", startTime: 60, endTime: 120,
+        // TWO managed windows, both inside the vetoed range, so the loop has a
+        // second iteration to be stopped before — the same reason the
+        // suggest-tier case below uses two. With only one, deleting the in-loop
+        // guard outright is behaviourally invisible (the loop ends anyway) and
+        // this test cannot tell a guard that `break`s from no guard at all.
+        let managedA = makeSkipTestAdWindow(
+            id: "ad-range-a", startTime: 60, endTime: 90,
             confidence: 0.85, decisionState: "confirmed"
         )
-        try await store.insertAdWindow(managed)
-        await orchestrator.receiveAdWindows([managed])
+        let managedB = makeSkipTestAdWindow(
+            id: "ad-range-b", startTime: 95, endTime: 105,
+            confidence: 0.85, decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(managedA)
+        try await store.insertAdWindow(managedB)
+        await orchestrator.receiveAdWindows([managedA, managedB])
 
         let gate = ControlledAsyncGate()
         await orchestrator._setRevertPersistenceBarrierForTesting {
@@ -513,8 +526,36 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             "the sample must land on the captured show only, never on the replacement"
         )
 
-        let revertedRow = try #require(try await store.fetchAdWindow(id: "ad-range"))
-        #expect(revertedRow.decisionState == AdDecisionState.reverted.rawValue)
+        // Positive control that the parked gesture really did durable work.
+        // `windows` is a Dictionary, so WHICH of the two the loop reached
+        // before the barrier is unspecified — assert over the pair rather than
+        // naming one. Deliberately silent about the other row: leaving it
+        // `confirmed` is this seam's documented KNOWN GAP, and pinning either
+        // answer here would redden the `didLoseLifecycle` restructure that
+        // closes it.
+        let rowA = try #require(try await store.fetchAdWindow(id: "ad-range-a"))
+        let rowB = try #require(try await store.fetchAdWindow(id: "ad-range-b"))
+        #expect(
+            [rowA, rowB].contains {
+                $0.decisionState == AdDecisionState.reverted.rawValue
+            },
+            "the window the loop had reached must still be durably reverted"
+        )
+
+        // The live-state half of the in-loop guard's contract. `beginEpisode`
+        // cleared `windows` for the replacement, so neither OLD id may be back
+        // in it: a loop that kept going re-inserts its snapshot's entries
+        // (`windows[id] = managed`) into the episode that owns them now.
+        let liveManagedIds = await orchestrator.activeWindowIDs()
+        #expect(
+            !liveManagedIds.contains("ad-range-a")
+                && !liveManagedIds.contains("ad-range-b"),
+            """
+            The replaced gesture re-inserted an OLD episode's managed window \
+            into the REPLACEMENT's live state. The managed loop must stop at \
+            its lifecycle guard, not merely avoid `return`ing from it.
+            """
+        )
 
         #expect(
             await orchestrator.activeSuggestWindowIDs().contains("sug-replacement"),
