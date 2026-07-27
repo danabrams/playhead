@@ -971,6 +971,12 @@ actor TranscriptEngineService {
     /// `.completed`, because a missing completion event strands the runner
     /// on its 5-minute timeout. The next resume reconcile repairs it.
     private func reconcileCoverageAtCompletion(analysisAssetId: String) async {
+        // playhead-5uvz.5: honor the stop gate here the same way
+        // `updateCoverage` does. A `stopTranscription` landing in the
+        // window between the loop's gate check and this call must not
+        // produce a coverage write for an asset the owning runner has
+        // already abandoned — even a truthful one.
+        guard !stoppedAssetIds.contains(analysisAssetId) else { return }
         do {
             try await store.reconcileFastTranscriptCoverage(id: analysisAssetId)
         } catch {

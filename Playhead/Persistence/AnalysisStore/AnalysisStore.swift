@@ -5286,17 +5286,22 @@ actor AnalysisStore {
     /// canonical `pass = 'fast'` chunk `MAX(endTime)` where the chunks reach
     /// further, and touches nothing else. Idempotent — re-running matches no
     /// rows. Runs inside `runSchemaMigration`'s enclosing transaction.
+    /// Version-gated, so this really is a ONE-TIME repair and not a
+    /// whole-table scan on every cold start. Ongoing correctness does not
+    /// depend on it: `advanceFastTranscriptCoverage` is monotonic, and
+    /// both pipeline entry points reconcile per-asset
+    /// (`AnalysisCoordinator.resolveSession`, `AnalysisJobRunner.run`) as
+    /// does transcription finalization.
     private func migrateFastTranscriptCoverageReconcileV37IfNeeded() throws {
         let startingVersion = try schemaVersion() ?? 1
+        guard startingVersion < 37 else { return }
         let repaired = try reconcileAllFastTranscriptCoverageWatermarks()
         if repaired > 0 {
             logger.notice(
                 "playhead-0sro: reconciled \(repaired, privacy: .public) stale fast-transcript coverage watermark(s) against persisted chunk coverage"
             )
         }
-        if startingVersion < 37 {
-            try setSchemaVersion(37)
-        }
+        try setSchemaVersion(37)
     }
 
     /// playhead-b6jq PR 4: canonical column list for `specialist_scan_results`.
@@ -8209,7 +8214,22 @@ actor AnalysisStore {
     /// A deliberate rewind (the "state says complete but 0 chunks exist"
     /// repair in `AnalysisCoordinator.resolveSession`) must call
     /// ``resetFastTranscriptCoverage(id:)`` — it cannot be expressed here.
-    func advanceFastTranscriptCoverage(id: String, endTime: Double) throws {
+    ///
+    /// Non-finite and negative `endTime` values are REJECTED rather than
+    /// persisted. Under a monotonic contract a poisoned high value is
+    /// permanent — the blind setter used to self-heal on the next shard —
+    /// so the guard is what keeps monotonicity safe. (`NaN` would bind as
+    /// NULL and silently no-op; `+Infinity` would stick forever.)
+    ///
+    /// - Returns: `true` when the watermark actually advanced.
+    @discardableResult
+    func advanceFastTranscriptCoverage(id: String, endTime: Double) throws -> Bool {
+        guard endTime.isFinite, endTime >= 0 else {
+            logger.warning(
+                "Rejected non-finite/negative fast-transcript coverage advance for asset \(id, privacy: .public)"
+            )
+            return false
+        }
         let sql = """
             UPDATE analysis_assets
             SET fastTranscriptCoverageEndTime = ?
@@ -8223,6 +8243,7 @@ actor AnalysisStore {
         bind(stmt, 2, id)
         bind(stmt, 3, endTime)
         try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
     }
 
     /// playhead-0sro: the ONLY sanctioned rewind of the fast-transcript
@@ -8257,8 +8278,17 @@ actor AnalysisStore {
     /// so a poisoned row cannot inflate the watermark — the same filter
     /// ``fetchCoverageSummariesByAssetIds(_:)`` applies.
     ///
-    /// - Returns: the watermark after reconciliation, or `nil` when no
-    ///   `analysis_assets` row exists for `id`.
+    /// After the write, the resulting state is checked against
+    /// ``FastTranscriptCoverageInvariant`` and any violation is logged.
+    /// That is the production consumer of the invariant's second half:
+    /// reconciliation cannot repair a watermark that over-claims REACH
+    /// PAST THE AUDIO (nothing may lower a watermark except the 0-chunk
+    /// reset), so the only honest response is to make it visible.
+    ///
+    /// - Returns: the asset's watermark after reconciliation. `nil` means
+    ///   "no value" — either the row does not exist OR it exists with a
+    ///   NULL watermark and no fast chunks to raise it from. Callers that
+    ///   must distinguish those should query the row directly.
     @discardableResult
     func reconcileFastTranscriptCoverage(id: String) throws -> Double? {
         let sql = """
@@ -8281,6 +8311,7 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
         try step(stmt, expecting: SQLITE_DONE)
+        try logFastTranscriptCoverageInvariantViolations(id: id)
         return try fetchFastTranscriptCoverageEndTime(id: id)
     }
 
@@ -8293,6 +8324,48 @@ actor AnalysisStore {
         bind(stmt, 1, id)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return optionalDouble(stmt, 0)
+    }
+
+    /// playhead-0sro: evaluate ``FastTranscriptCoverageInvariant`` for one
+    /// asset and log every violation. Called straight after a reconcile,
+    /// where "behind chunks" should now be impossible — so a report of it
+    /// means the reconcile itself failed — and where "past duration" is
+    /// the direction reconciliation deliberately cannot fix.
+    ///
+    /// One SELECT: the watermark, the canonical fast-chunk `MAX(endTime)`,
+    /// and the persisted duration, all from the same read.
+    private func logFastTranscriptCoverageInvariantViolations(id: String) throws {
+        let sql = """
+            SELECT a.fastTranscriptCoverageEndTime,
+                   a.episodeDurationSec,
+                   (SELECT MAX(c.endTime) FROM transcript_chunks c
+                    WHERE c.analysisAssetId = a.id
+                      AND c.pass = 'fast'
+                      AND c.endTime > c.startTime)
+            FROM analysis_assets a
+            WHERE a.id = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return }
+        let violations = FastTranscriptCoverageInvariant.violations(
+            watermarkSec: optionalDouble(stmt, 0),
+            chunkMaxEndSec: optionalDouble(stmt, 2),
+            episodeDurationSec: optionalDouble(stmt, 1)
+        )
+        for violation in violations {
+            switch violation {
+            case let .watermarkBehindChunks(watermarkSec, chunkMaxEndSec):
+                logger.warning(
+                    "playhead-0sro invariant: asset \(id, privacy: .public) watermark \(watermarkSec, privacy: .public)s still lags fast-chunk coverage \(chunkMaxEndSec, privacy: .public)s after reconcile"
+                )
+            case let .watermarkPastDuration(watermarkSec, episodeDurationSec):
+                logger.warning(
+                    "playhead-0sro invariant: asset \(id, privacy: .public) watermark \(watermarkSec, privacy: .public)s claims reach past episode duration \(episodeDurationSec, privacy: .public)s; reconciliation cannot lower a watermark"
+                )
+            }
+        }
     }
 
     /// playhead-0sro: MIGRATION / whole-table reconciliation. Raises every

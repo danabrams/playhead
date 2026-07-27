@@ -954,19 +954,26 @@ struct FastTranscriptCoverageInvariantTests {
     /// that would re-introduce the sd71 watermark-vs-union conflation.
     @Test("interior transcript gaps do not violate the reach invariant")
     func interiorGapsDoNotViolate() {
-        // Chunks: [0,600] and [3000,3575.88] — a 40-minute hole. The
-        // watermark correctly reports reach 3575.88.
-        #expect(FastTranscriptCoverageInvariant.holds(
-            watermarkSec: 3575.88,
-            chunkMaxEndSec: 3575.88,
-            episodeDurationSec: 3578.10
-        ))
-        // And the AREA measure stays independent and much smaller.
-        let area = AnalysisCoverageMath.unionedSeconds([
+        // A badly gapped transcript: [0,600] and [3000,3575.88], a
+        // 40-minute hole in the middle. Reach is still 3575.88, so the
+        // invariant must be satisfied — flagging this would re-introduce
+        // the sd71 watermark-vs-union conflation.
+        let gappy: [(start: Double, end: Double)] = [
             (start: 0, end: 600),
             (start: 3000, end: 3575.88)
-        ])
-        #expect(area < 1200)
+        ]
+        let chunkMaxEnd = gappy.map(\.end).max()
+        #expect(chunkMaxEnd == 3575.88)
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: chunkMaxEnd,
+            chunkMaxEndSec: chunkMaxEnd,
+            episodeDurationSec: 3578.10
+        ))
+        // The AREA measure is the one that must report the hole, and it
+        // is a different number entirely: 600 + 575.88.
+        let area = AnalysisCoverageMath.unionedSeconds(gappy)
+        #expect(abs(area - 1175.88) < 0.0001)
+        #expect(area / 3578.10 < 0.34, "a 33%-covered episode must not look complete by AREA")
     }
 
     /// A watermark ahead of the chunks is legitimate: the engine advances
@@ -1156,13 +1163,33 @@ struct FastTranscriptCoverageWatermarkTests {
         #expect(watermark != 60, "a full fast transcript must never report 60 s coverage")
     }
 
-    @Test("advance is a no-op for an equal value")
-    func advanceEqualIsNoOp() async throws {
+    /// The returned flag is what makes "no-op" observable — a blind
+    /// setter would report a write for all three of these calls.
+    @Test("advance reports whether the watermark actually moved")
+    func advanceReportsWhetherItMoved() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: "a-eq"))
-        try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 900)
-        try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 900)
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 900) == true)
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 900) == false,
+                "an equal value is not an advance")
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 60) == false,
+                "a lower value is not an advance")
         #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-eq") == 900)
+    }
+
+    /// Under a monotonic contract a poisoned high value is PERMANENT —
+    /// the old blind setter self-healed on the next shard write, this one
+    /// cannot. So non-finite and negative inputs must be rejected at the
+    /// door rather than persisted.
+    @Test("advance rejects non-finite and negative endTimes")
+    func advanceRejectsNonFiniteAndNegative() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-poison", fastTranscriptCoverageEndTime: 600))
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-poison", endTime: .infinity) == false)
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-poison", endTime: .nan) == false)
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-poison", endTime: -1) == false)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-poison") == 600,
+                "a poisoned watermark would be unrepairable — nothing may lower it")
     }
 
     @Test("advance never touches a different asset's row")
@@ -1261,12 +1288,24 @@ struct FastTranscriptCoverageWatermarkTests {
         #expect(try await store.reconcileFastTranscriptCoverage(id: "a-degen") == 300)
     }
 
-    @Test("reconcile is a no-op when no fast chunks exist, and nil for an unknown asset")
+    /// Both "row has no chunks to raise from" and "no row at all" are
+    /// handled; the second is asserted against the row's real absence
+    /// rather than against the reconcile return alone, because `nil` is
+    /// documented to mean "no value" in both cases.
+    @Test("reconcile is a no-op without fast chunks and tolerates an unknown asset")
     func reconcileNoOpAndUnknownAsset() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: "a-empty", fastTranscriptCoverageEndTime: 120))
         #expect(try await store.reconcileFastTranscriptCoverage(id: "a-empty") == 120)
+
+        // A row that exists but was never written keeps its NULL.
+        try await store.insertAsset(makeAsset(id: "a-nullwm", fastTranscriptCoverageEndTime: nil))
+        #expect(try await store.reconcileFastTranscriptCoverage(id: "a-nullwm") == nil)
+        #expect(try await store.fetchAsset(id: "a-nullwm") != nil)
+
+        // An absent row must not be created as a side effect.
         #expect(try await store.reconcileFastTranscriptCoverage(id: "a-missing") == nil)
+        #expect(try await store.fetchAsset(id: "a-missing") == nil)
     }
 
     // MARK: - Whole-table reconciliation (the migration body)
@@ -1424,6 +1463,31 @@ struct FastTranscriptCoverageV37MigrationTests {
         #expect(try await upgraded.fetchFastTranscriptCoverageEndTime(id: "m-ok") == 600)
     }
 
+    /// The migration is VERSION-GATED — a one-time repair, not a
+    /// whole-table scan on every cold start. This pins that, and by doing
+    /// so makes the `rewindSchemaVersion(in:to: 36)` in the upgrade test
+    /// above load-bearing rather than decorative. Ongoing correctness
+    /// comes from the monotonic advance plus the per-asset reconciles at
+    /// both pipeline entry points and at finalization, not from re-running
+    /// this sweep forever.
+    @Test("a DB already at v37 does not re-run the whole-table sweep on reopen")
+    func v37MigrationDoesNotRescanAtHead() async throws {
+        let (store, dir) = try await makeTestStoreWithDirectory()
+        try await store.insertAsset(makeAsset(id: "m-head", watermark: 60))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "m-head", index: 0, start: 0, end: 1800)
+        ])
+        // Deliberately NOT rewinding the schema version: the DB is at head.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+        #expect(try await reopened.fetchFastTranscriptCoverageEndTime(id: "m-head") == 60,
+                "the v37 step must be gated on schema version; a head DB must not pay for the sweep again")
+
+        // …and the per-asset reconcile is what repairs it from here on.
+        #expect(try await reopened.reconcileFastTranscriptCoverage(id: "m-head") == 1800)
+    }
+
     @Test("V37 migration is idempotent across reopens")
     func v37MigrationIsIdempotent() async throws {
         let (store, dir) = try await makeTestStoreWithDirectory()
@@ -1439,12 +1503,18 @@ struct FastTranscriptCoverageV37MigrationTests {
         let v1 = try await first.schemaVersion()
         #expect(try await first.fetchFastTranscriptCoverageEndTime(id: "m-idem") == 1800)
 
+        // `migrate()` is `ensureOpen()`, which short-circuits on an
+        // already-open handle — so re-running it on `first` would prove
+        // nothing. Construct a SECOND store over the same file (with the
+        // process-global migration cache cleared) so the ladder genuinely
+        // re-enters against a v37 database.
         AnalysisStore.resetMigratedPathsForTesting()
-        try await first.migrate()
-        let v2 = try await first.schemaVersion()
+        let second = try AnalysisStore(directory: dir)
+        try await second.migrate()
+        let v2 = try await second.schemaVersion()
 
         #expect(v1 == AnalysisStore.currentSchemaVersion)
         #expect(v2 == AnalysisStore.currentSchemaVersion)
-        #expect(try await first.fetchFastTranscriptCoverageEndTime(id: "m-idem") == 1800)
+        #expect(try await second.fetchFastTranscriptCoverageEndTime(id: "m-idem") == 1800)
     }
 }
