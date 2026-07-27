@@ -117,10 +117,15 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             repoRelativePath: "Playhead/Services/SkipOrchestrator/SkipOrchestrator.swift"
         )
 
+        // Strings are blanked as well as comments: every rail below greps for a
+        // CODE token (`return`, a lifecycle identifier), and a future log line
+        // that merely mentions one inside a literal must not redden the canary.
+        // `strippingCommentsAndStrings` is length-preserving, so `braceDepth`'s
+        // offset arithmetic is unaffected.
         guard let listenRevert = SwiftSourceInspector.firstBody(
             in: source,
             after: "func recordListenRevert("
-        ).map(SwiftSourceInspector.strippingComments) else {
+        ).map(SwiftSourceInspector.strippingCommentsAndStrings) else {
             XCTFail("Could not locate the recordListenRevert body")
             return
         }
@@ -207,7 +212,7 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         guard let timeRangeRevert = SwiftSourceInspector.firstBody(
             in: source,
             after: "func revertByTimeRange("
-        ).map(SwiftSourceInspector.strippingComments) else {
+        ).map(SwiftSourceInspector.strippingCommentsAndStrings) else {
             XCTFail("Could not locate the revertByTimeRange body")
             return
         }
@@ -262,16 +267,45 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             rangePush.lowerBound,
             "revertByTimeRange's final guard must gate evaluateAndPush()"
         )
+        // The structural landmarks of the function, in source order: the
+        // managed loop's persistence hop, its in-loop lifecycle guard, the
+        // suggest-tier work list, the loop that consumes it, and the effects
+        // block. Everything below is expressed against these, so a refactor
+        // that moves one reports as a single anchor-drift failure rather than a
+        // scatter of unrelated ones.
+        guard let rangeManagedPersist = timeRangeRevert.range(
+                of: "try await store.updateAdWindowDecision("
+              ),
+              let rangeManagedGuard = timeRangeRevert.range(
+                of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration"
+              ),
+              let rangeSuggestBuild = timeRangeRevert.range(of: "suggestWindows.compactMap"),
+              let rangeSuggestLoop = timeRangeRevert.range(
+                of: "for (id, suggested) in suggestRevertTargets"
+              ),
+              let rangeEffectsBlock = timeRangeRevert.range(of: "if revertedAny"),
+              rangeManagedPersist.upperBound < rangeManagedGuard.lowerBound,
+              rangeManagedGuard.upperBound < rangeSuggestBuild.lowerBound,
+              rangeSuggestBuild.upperBound < rangeSuggestLoop.lowerBound,
+              rangeSuggestLoop.upperBound < rangeEffectsBlock.lowerBound
+        else {
+            XCTFail(
+                """
+                revertByTimeRange no longer has the shape this canary scans — \
+                a managed-loop persistence hop, an in-loop lifecycle guard, a \
+                suggest-tier work list, its consuming loop, and an \
+                `if revertedAny` effects block, in that order. The canary's \
+                anchors have drifted; re-derive them rather than deleting rails.
+                """
+            )
+            return
+        }
         // `revertByTimeRange`'s effects are legitimately nested (inside
         // `if revertedAny`, then `if let assetId` / `if revertedManagedAny`),
         // so the depth check anchors on the block instead of the statements:
         // `if revertedAny` itself must be top-level, which rejects any wrapper
-        // opened ABOVE it, and the region scan below rejects any opened INSIDE
+        // opened ABOVE it, and the region scans below reject one opened INSIDE
         // it. Together those cover both sides of the anchor.
-        guard let rangeEffectsBlock = timeRangeRevert.range(of: "if revertedAny") else {
-            XCTFail("revertByTimeRange must keep its `if revertedAny` effects block")
-            return
-        }
         XCTAssertEqual(
             braceDepth(in: timeRangeRevert, at: rangeEffectsBlock.lowerBound),
             0,
@@ -293,30 +327,72 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             to: rangeFinalGuard.lowerBound,
             seam: "revertByTimeRange"
         )
-        // Anchored at the effects block, NOT at this seam's first suspension:
-        // the span between the loops contains the `suggestWindows.compactMap`
-        // closure, whose `return`s are closure exits rather than function
-        // exits, and a textual scan cannot tell the two apart. The loop span it
-        // gives up is already covered by the `break`-not-`return` regex below.
+        // `revertByTimeRange` is scanned for early exits in THREE pieces rather
+        // than one. A single region has to start below the
+        // `suggestWindows.compactMap` closure — a `return` there exits the
+        // closure, not the function, and a textual scan cannot tell them apart
+        // — and that concession left the entire pre-effects span unscanned.
+        //
+        // playhead-i08e (fifth pass): that span was not, in fact, covered by
+        // the `break`-not-`return` regex below, which only recognises the
+        // literal `guard episodeLifecycleGeneration == …` form. A top-level
+        //
+        //     guard activePodcastId == podcastId else { return }
+        //
+        // placed just above `if revertedAny` — the "harmonise with
+        // `revertWindow`/`denyAutoSkippedBanner`" refactor, spelled against a
+        // different field — dropped the receipt, the controller sample AND the
+        // trust penalty with every rail in this test green and every
+        // behavioural test green too (they all pass a `podcastId` equal to the
+        // active one). Verified by mutation before and after this split.
+        //
+        // The two added regions are closure-free by construction, so they need
+        // no depth filtering: the only closure in the function lies strictly
+        // between them.
+        assertNoEarlyExit(
+            in: timeRangeRevert,
+            from: rangeManagedPersist.upperBound,
+            to: rangeSuggestBuild.lowerBound,
+            seam: "revertByTimeRange (managed loop → suggest work list)"
+        )
+        assertNoEarlyExit(
+            in: timeRangeRevert,
+            from: rangeSuggestLoop.lowerBound,
+            to: rangeEffectsBlock.lowerBound,
+            seam: "revertByTimeRange (suggest loop → effects block)"
+        )
         assertNoEarlyExit(
             in: timeRangeRevert,
             from: rangeEffectsBlock.lowerBound,
             to: rangeFinalGuard.lowerBound,
-            seam: "revertByTimeRange"
+            seam: "revertByTimeRange (effects block → final guard)"
         )
 
-        // playhead-i08e: the in-loop lifecycle guards must `break`, never
-        // `return`. A `return` abandons a gesture whose windows are already
-        // durably reverted, leaving no receipt and no calibration for a
-        // correction the user really made — the same class of silent drop this
-        // canary exists to prevent.
+        // playhead-i08e: `revertByTimeRange` has exactly three lifecycle
+        // guards, and BOTH halves of that census are load-bearing.
         //
-        // The pattern is whitespace-tolerant so a swift-format reflow (e.g.
-        // `else` moved onto its own line) reads as the ordering change it is,
-        // not as a spurious count of 0.
+        //   • The two in-loop guards must `break`, never `return`. A `return`
+        //     abandons a gesture whose windows are already durably reverted,
+        //     leaving no receipt and no calibration for a correction the user
+        //     really made.
+        //   • Both must also still EXIST. Counting only the `return` form (as
+        //     this rail did through the fourth pass) let the SUGGEST loop's
+        //     guard be deleted outright with the count unchanged at 1 — after
+        //     which a lifecycle lost mid-loop keeps writing the OLD snapshot's
+        //     ids into `suggestBanneredWindowIds` / `vetoedSuggestWindowIds`,
+        //     which `beginEpisode` has just cleared for the replacement
+        //     episode, and emits retirements stamped with the NEW episode's
+        //     identity for OLD window ids. Mutation-verified as a live hole.
+        //
+        // `[^{}]*` rather than `\s*` before the keyword: requiring the keyword
+        // to be the first thing inside the brace made a plain diagnostic —
+        // `logger.debug(…)` above the `return` in the final guard — read as a
+        // count of 0 and fail with a message naming the opposite defect ("the
+        // in-loop guards must `break`"), sending the next author to the wrong
+        // place entirely. Also mutation-verified.
         XCTAssertEqual(
             SwiftSourceInspector.regexOccurrences(
-                of: #"guard\s+episodeLifecycleGeneration\s*==\s*sourceLifecycleGeneration\s+else\s*\{\s*return"#,
+                of: #"guard\s+episodeLifecycleGeneration\s*==\s*sourceLifecycleGeneration\s+else\s*\{[^{}]*\breturn\b"#,
                 in: timeRangeRevert
             ),
             1,
@@ -325,6 +401,21 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             final live-state gate). The in-loop guards must `break` so the \
             gesture's receipt and calibration signals still reach the captured \
             source show.
+            """
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"guard\s+episodeLifecycleGeneration\s*==\s*sourceLifecycleGeneration\s+else\s*\{[^{}]*\bbreak\b"#,
+                in: timeRangeRevert
+            ),
+            2,
+            """
+            revertByTimeRange must keep BOTH in-loop lifecycle guards — one in \
+            the managed loop, one in the suggest-tier loop — and both must \
+            `break`. Losing the suggest-tier one lets a gesture keep mutating \
+            live suggest state (`suggestWindows`, `suggestBanneredWindowIds`, \
+            `vetoedSuggestWindowIds`, banner retirements) after a replacement \
+            episode has taken ownership of it.
             """
         )
 
@@ -349,22 +440,9 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         //
         // The region runs from the end of the managed loop's in-loop guard to
         // the loop that consumes the work list, so it accepts every reasonable
-        // spelling of the gate — today's ternary, or an `if` / `guard` wrapper
-        // around the `compactMap` — and only rejects its absence.
-        guard let rangeSuggestLoop = timeRangeRevert.range(
-            of: "for (id, suggested) in suggestRevertTargets"
-        ) else {
-            XCTFail("revertByTimeRange must still build a suggest-tier work list before consuming it")
-            return
-        }
-        guard let rangeManagedGuard = timeRangeRevert.range(
-            of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration"
-        ), rangeManagedGuard.upperBound < rangeSuggestLoop.lowerBound else {
-            XCTFail(
-                "revertByTimeRange: the managed loop's in-loop lifecycle guard is missing or has moved below the suggest-tier pass — the canary's anchors have drifted"
-            )
-            return
-        }
+        // spelling of the gate — today's ternary, an `if` / `guard` wrapper
+        // around the `compactMap`, or a check inside the closure — and only
+        // rejects its absence. All three spellings verified.
         XCTAssertTrue(
             timeRangeRevert[rangeManagedGuard.upperBound..<rangeSuggestLoop.lowerBound]
                 .contains("episodeLifecycleGeneration == sourceLifecycleGeneration"),
@@ -442,9 +520,10 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
     /// `recordListenRevert` that is its first suspension: the preconditions
     /// above it (`guard var managed = windows[windowId] else { return }`) run
     /// before any await and so cannot be observing a lifecycle change, and
-    /// nothing below it legitimately returns early. `revertByTimeRange` has to
-    /// start lower, at its effects block, because the span between its loops
-    /// contains a `compactMap` closure.
+    /// nothing below it legitimately returns early. `revertByTimeRange` cannot
+    /// be covered by one region for that reason — the span between its loops
+    /// contains a `compactMap` closure — so it is scanned in three
+    /// closure-free pieces instead. See the call sites.
     private func assertNoEarlyExit(
         in body: String,
         from start: String.Index,
@@ -493,13 +572,28 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
     /// would restore the exact silent-drop bug this canary exists to prevent
     /// while every `XCTAssertLessThan` above still passed.
     ///
-    /// `sourceLifecycleGeneration` is the ONLY captured-generation identifier in
-    /// either seam, so a lifecycle re-check that NAMES it — `guard`, `if`,
-    /// ternary, or a `&&` folded into an existing condition — is rejected in
-    /// every spelling, not just the `guard` form. Re-checks that reach live
-    /// state by another route are covered by `braceDepth` (wrappers) and
-    /// `assertNoEarlyExit` (top-level exits) instead; no one of the three is
-    /// sufficient alone.
+    /// The scan is by IDENTIFIER, so a re-check is rejected in every spelling —
+    /// `guard`, `if`, ternary, or a clause folded into an existing condition —
+    /// not just the `guard` form.
+    ///
+    /// playhead-i08e (fifth pass): the forbidden set is the whole
+    /// lifecycle-identity family, not just `sourceLifecycleGeneration`. Pinning
+    /// the one identifier left an equivalent test against a DIFFERENT field
+    /// free to do the same damage, and folded into an existing condition it
+    /// evades `braceDepth` as well (the guarded call's nesting is unchanged):
+    ///
+    ///     if revertedManagedAny, activePodcastId == podcastId {
+    ///         recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+    ///     }
+    ///
+    /// After an episode switch `activePodcastId` is the replacement show, so
+    /// that drops the captured show's sample exactly as the original bug did —
+    /// mutation-verified green against every other rail here. None of these
+    /// identifiers appears in either scanned region today, and none has any
+    /// business there: every value those regions need was captured before the
+    /// first suspension. Re-checks that reach live state without naming any of
+    /// them are covered by `braceDepth` (wrappers) and `assertNoEarlyExit`
+    /// (top-level exits) instead; no one of the three is sufficient alone.
     ///
     /// The region bounds are load-bearing, and getting them wrong is how this
     /// assertion was defeated before: callers must anchor `start` ABOVE the
@@ -530,22 +624,37 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             return
         }
         let region = String(body[start..<end])
-        XCTAssertFalse(
-            region.contains("sourceLifecycleGeneration"),
-            """
-            \(seam) re-checks the captured lifecycle generation inside the \
-            region that must be unconditional — everything between the anchor \
-            above its durable/calibration effects and its live-state guard. \
-            Those effects are owed to the CAPTURED show unconditionally: \
-            gating any of them on the lifecycle still being current \
-            re-introduces the drop this canary guards (the trust penalty has \
-            already landed by then). Offending region:
-            \(region.trimmingCharacters(in: .whitespacesAndNewlines))
-            """,
-            file: file,
-            line: line
-        )
+        for token in Self.lifecycleIdentityTokens {
+            XCTAssertFalse(
+                region.contains(token),
+                """
+                \(seam) re-checks live episode identity (`\(token)`) inside the \
+                region that must be unconditional — everything between the \
+                anchor above its durable/calibration effects and its \
+                live-state guard. Those effects are owed to the CAPTURED show \
+                unconditionally: gating any of them on the episode still being \
+                current re-introduces the drop this canary guards (the trust \
+                penalty has already landed by then), and every value this \
+                region needs was captured before the first suspension. \
+                Offending region:
+                \(region.trimmingCharacters(in: .whitespacesAndNewlines))
+                """,
+                file: file,
+                line: line
+            )
+        }
     }
+
+    /// The live-episode-identity fields a seam must NOT consult between its
+    /// first suspension and its live-state guard. See
+    /// ``assertNoLifecycleRecheck(in:from:to:seam:file:line:)``.
+    private static let lifecycleIdentityTokens = [
+        "sourceLifecycleGeneration",
+        "episodeLifecycleGeneration",
+        "activeEpisodeId",
+        "activePodcastId",
+        "activeAssetId",
+    ]
 
     /// Exact feedback receipts belong only in the durable correction store.
     /// Pin every explicit route against accidentally reusing the diagnostic

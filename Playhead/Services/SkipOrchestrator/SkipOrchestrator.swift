@@ -3155,12 +3155,26 @@ actor SkipOrchestrator {
     ///     `userDismissedBanner = 1` on the row, and flip its persisted
     ///     `decisionState` to `.reverted` so a relaunch/replay never
     ///     resurfaces the banner the user explicitly denied. No trust /
-    ///     threshold signal is fired here — this seam is capture-only; the
-    ///     runtime-calibration surfaces stay owned by the paths that veto a
-    ///     MANAGED (auto-skip-tier) window: `recordListenRevert`,
-    ///     `revertByTimeRange` (only when `revertedManagedAny`),
-    ///     `revertWindow`, and `denyAutoSkippedBanner`. `confirmAutoSkippedBanner`
-    ///     is capture-only for the same reason this seam is.
+    ///     threshold signal is fired here — this seam is capture-only, because
+    ///     the algorithm only OFFERED a banner and never altered playback, so
+    ///     the disagreement is too weak to raise the auto-skip threshold.
+    ///
+    /// The full census of which seams DO calibrate the per-show threshold
+    /// controller, since the paragraph above is easy to read as exhaustive and
+    /// is not:
+    ///   • FALSE-POSITIVE (raise) — every path that vetoes a MANAGED
+    ///     (auto-skip-tier) window: `recordListenRevert`, `revertByTimeRange`
+    ///     (only when `revertedManagedAny`), `revertWindow`, and
+    ///     `denyAutoSkippedBanner`.
+    ///   • MISS (lower) — `acceptSuggestedSkip`. This is the one SUGGEST-tier
+    ///     gesture that calibrates: the user saying "this WAS an ad" about
+    ///     something we did not auto-skip is a false negative, which is a
+    ///     signal the controller models.
+    ///   • Capture-only — this seam, and `confirmAutoSkippedBanner`. Note the
+    ///     reasons differ: this one because a suggest-tier No never altered
+    ///     playback, `confirmAutoSkippedBanner` because agreement with a skip
+    ///     is a TRUE positive and the controller models only false positives
+    ///     (raise) and misses (lower), so there is no signal to fire.
     @discardableResult
     func declineSuggestedSkip(
         windowId: String,
