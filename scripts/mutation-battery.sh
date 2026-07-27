@@ -121,6 +121,27 @@
 #   to start while any focused-suite test is already failing. Batches 1–7 were
 #   therefore run with PLAYHEAD_MB_SKIP_BASELINE=1, which is sound only because
 #   none of them names the red test. Do not extend that shortcut to 8/9.
+#
+# THE CONTRACT COLLISION IS RESOLVED (playhead-o4qr, 2026-07-27)
+#   Dan's decision: ACCEPT THE RECEIPT, REFUSE THE LEARNING. A correction whose
+#   show identity is unusable (nil, empty, non-canonical, or disagreeing with
+#   the live episode) still commits its durable receipt and still returns true;
+#   what it withholds is every show-KEYED effect — trust penalty, hard-negative
+#   bank, per-show threshold controller, show-scoped recurrence revocation.
+#
+#   Consequences for this file, all already applied below:
+#     • `T_ANON_SILENT` was RETITLED. The test grew three more clauses, so its
+#       @Test display name changed; the constant had to follow or N06/N07 and
+#       the new O-series would all be silently un-creditable.
+#     • Batches 8 and 9 are UNBLOCKED — their victim is green again, so N06 and
+#       N07 can finally be credited honestly rather than off a red test.
+#     • Five new entries, O01–O05, pin the decision itself: three learning
+#       surfaces N07 cannot see (bank, trust, revocation scope) plus BOTH
+#       seams' receipt half. See the note above them for the batching.
+#     • Two pre-existing tests pinned the OLD refusal and were re-pointed:
+#       `revertWindowRemovesCue` (now O02's second victim) and
+#       `autoSkipNoWinsBlockedAppliedPersistenceRace`, whose show probe moved
+#       to `staleShowBannerNoKeepsReceiptAndRecordsNoLearning` (O05's victim).
 
 set -uo pipefail
 
@@ -198,7 +219,12 @@ T_OWNERSHIP="explicit responses are refused when the card's episode does not own
 T_AUTOFADE="declineSuggestedSkip auto-fade (isExplicitDenial:false) records NO correction and leaves userDismissedBanner=0"
 T_CONFIRM_SILENT="Confirming an auto-skipped banner records no controller sample and no hard negative"
 T_SUGGESTONLY_SILENT="A suggest-tier-only revertByTimeRange records no controller sample"
-T_ANON_SILENT="An anonymous revert (no podcastId, or an empty one) records no controller sample"
+# playhead-o4qr renamed this test when it grew the other three learning
+# clauses. The name here is the DISPLAY name xcodebuild prints, so a stale
+# copy silently un-credits every mutation that names it (N06, N07, O01-O04).
+T_ANON_SILENT="An anonymous revert (no podcastId, or an empty one) keeps its receipt and records NO show-keyed learning"
+T_STALE_SHOW_NO="A banner No naming another show keeps its receipt and records NO show-keyed learning"
+T_REVERTWINDOW_VETO="revertWindow records a public manual veto and generic decision log"
 T_ACCEPT_RACE="A suggest Yes whose episode is replaced mid-flight calibrates the captured show"
 T_DENY_RACE="A banner No whose episode is replaced mid-flight calibrates the captured show"
 
@@ -315,6 +341,31 @@ MUTATIONS=(
   # S03 is the decline-side twin of S02 and names the same test, so it needs
   # its own batch.
   "S03|12|ORCH|$T_STALE_IDENTITY"
+
+  # playhead-o4qr — ACCEPT THE RECEIPT, REFUSE THE LEARNING.
+  #
+  # Every one of these gets a batch to itself, and the reason is structural
+  # rather than timid: the decided contract is ONE test's subject, so all four
+  # redden `anonymousRevertRecordsNoControllerSample`. Two mutations that can
+  # redden the same test in one batch is a FALSE KILL — the script would credit
+  # both off a single failure — which the BATCHING note above rules out. Four
+  # builds is the honest price of pinning four distinct learning surfaces
+  # behind one contract.
+  #
+  # Note the division of labour with N07, which already mutates the CONTROLLER
+  # attribution in this seam: N07 covers the threshold controller, so these
+  # cover the three surfaces it cannot see.
+  "O01|13|ORCH|$T_ANON_SILENT"
+
+  # O05 rides in O02's batch for free: it edits a different seam
+  # (`denyAutoSkippedBanner`, not `revertWindow`) and its only victim is the
+  # deny-side test, which never calls `revertWindow`. Disjoint code, disjoint
+  # victims — the two conditions the BATCHING note requires.
+  "O02|14|ORCH|$T_ANON_SILENT;$T_REVERTWINDOW_VETO"
+  "O05|14|ORCH|$T_STALE_SHOW_NO"
+
+  "O03|15|ORCH|$T_ANON_SILENT"
+  "O04|16|ORCH|$T_ANON_SILENT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -370,6 +421,11 @@ describe_mutation() {
     S03) echo "declineSuggestedSkip: delete the active-episode guard on the episode-bound form" ;;
     S04) echo "receiveAdDecisionResults: delete the symmetric suggest clear on a same-id eligible result" ;;
     S05) echo "declineSuggestedSkip: read the suggest entry instead of removing it" ;;
+    O01) echo "ingestNegativeFingerprint: drop the anonymous-show refusal (a NULL-show hard negative every show reads back)" ;;
+    O02) echo "revertWindow: fall the trust penalty back to activePodcastId when the correction has no usable show" ;;
+    O03) echo "revertWindow: restore the outright refusal, so an anonymous correction loses its durable receipt" ;;
+    O04) echo "revertWindow: attribute recurrence REVOCATION to activePodcastId when the correction has no usable show" ;;
+    O05) echo "denyAutoSkippedBanner: restore the outright refusal, so a banner No naming another show loses its receipt" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -941,6 +997,121 @@ EOF
         }
 
         guard isExplicitDenial else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. REFUSE THE LEARNING, surface 1 of 3 (the controller is
+  # N07's). The bank is per-show, and a nil/empty show writes a NULL-show row
+  # that `loadEntries(forShow:includeGlobal:)` hands back to EVERY show — so
+  # deleting this one guard turns a single unattributable correction into a
+  # library-wide suppression. Only `recordListenRevert` reaches the bank, which
+  # is why the victim test drives that seam as well as `revertWindow`.
+  O01)
+    snippet OLD <<'EOF'
+        guard let podcastId, !podcastId.isEmpty else { return }
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. REFUSE THE LEARNING, surface 2 of 3: the per-show trust
+  # penalty. The fallback shape is the tempting one — "we know what show is
+  # playing, use it" — and it is exactly the global/null-show contamination the
+  # bead exists to prevent: the live show gets penalised on the strength of a
+  # gesture that never named it. Anchored below N07's `recordThresholdControl`
+  # site, so this must NOT share a batch with N07.
+  O02)
+    snippet OLD <<'EOF'
+        // cannot silently discard valid old-episode feedback.
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
+        if let sourceShowId {
+EOF
+    snippet NEW <<'EOF'
+        // cannot silently discard valid old-episode feedback.
+        recordThresholdControlSignal(
+            .falsePositive,
+            podcastId: sourceShowId
+        )
+        if let sourceShowId = sourceShowId ?? activePodcastId {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. ACCEPT THE RECEIPT — the other half of the decision, and the
+  # one a reader is most likely to "restore" on the grounds that refusing looks
+  # safer. It is not: it silently discards what the listener said. This is
+  # byte-for-byte the pre-decision o4qr shape.
+  O03)
+    snippet OLD <<'EOF'
+        let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
+        guard activeEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || activePlaybackLifecycleGeneration
+                    == expectedPlaybackGeneration
+        else {
+            return false
+        }
+        let sourceEpisodeId = activeEpisodeId
+EOF
+    snippet NEW <<'EOF'
+        let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
+        guard activeEpisodeId == expectedEpisodeId,
+              expectedPlaybackGeneration == nil
+                || activePlaybackLifecycleGeneration
+                    == expectedPlaybackGeneration,
+              validatedShow.isValid
+        else {
+            return false
+        }
+        let sourceEpisodeId = activeEpisodeId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. REFUSE THE LEARNING, surface 3 of 3: show-scoped recurrence
+  # revocation. `revokeRecurrenceEvidence` is deliberately still CALLED for an
+  # anonymous correction — its in-memory retraction is what stops a delayed
+  # learner reopening the vetoed span — and what makes that safe is that a nil
+  # show leaves both stores on their show-free exact-source branches. Handing
+  # it `activePodcastId` re-arms the show-scoped branch and lets an
+  # unattributable gesture retract this show's creative evidence.
+  O04)
+    snippet OLD <<'EOF'
+                for: requestedManaged.adWindow,
+                showId: sourceShowId,
+                source: .manualVeto
+EOF
+    snippet NEW <<'EOF'
+                for: requestedManaged.adWindow,
+                showId: activePodcastId,
+                source: .manualVeto
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-o4qr. The deny-side twin of O03: ACCEPT THE RECEIPT at the one
+  # correction seam that has a shipped production caller (the banner No).
+  # The `requestedManaged` line is load-bearing for UNIQUENESS, not for the
+  # defect: `confirmAutoSkippedBanner` opens with a byte-identical guard prefix
+  # and binds `managed` instead, so a shorter anchor matches twice and the
+  # patcher (correctly) refuses.
+  O05)
+    snippet OLD <<'EOF'
+              let expectedMaterialToken,
+              activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration,
+              let requestedManaged = windows[windowId],
+EOF
+    snippet NEW <<'EOF'
+              let expectedMaterialToken,
+              validatedShow.isValid,
+              activeEpisodeId == expectedEpisodeId,
+              activePlaybackLifecycleGeneration
+                == expectedPlaybackGeneration,
+              let requestedManaged = windows[windowId],
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
