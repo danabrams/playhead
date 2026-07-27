@@ -178,6 +178,8 @@ targets:
           - fetch
         BGTaskSchedulerPermittedIdentifiers:
           - com.playhead.app.analysis.backfill
+          # playhead-i6oi: charger-class backfill sibling (requiresExternalPower=true).
+          - com.playhead.app.analysis.backfill.charged
           - com.playhead.app.analysis.continued
           - com.playhead.app.preanalysis.recovery
           - com.playhead.app.feed-refresh

@@ -429,6 +429,969 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
     }
 }
 
+// MARK: - playhead-i08e: revert seams under mid-gesture episode replacement
+//
+// These replace a ~560-line SOURCE canary that scanned `SkipOrchestrator.swift`
+// for the ORDER and NESTING of the revert seams' statements. Do not go looking
+// for it in history on `main`: this bead BUILT that canary and then discarded
+// it (commits 5c592521 → 4de76d33 on `bead/playhead-i08e`), so the branch's
+// net diff shows only these tests. It was dropped rather than weakened, and
+// the reasoning is worth keeping because it applies to every rail of its kind:
+//
+//   • A textual rail can only reject the spellings someone thought of. Five
+//     consecutive review passes each found a fresh spelling that reproduced the
+//     bug with every existing rail green (a wrapper block, a top-level
+//     `guard activeEpisodeId == … else { return }`, a lifecycle clause folded
+//     into an existing condition, a check against a DIFFERENT live field, a
+//     deleted-but-not-`return`ing in-loop guard). There is always an evasion
+//     N+1, so the rail's strength was a function of review effort rather than
+//     of the invariant.
+//   • It also failed in the other direction: it pinned `revertByTimeRange`'s
+//     exact shape (an `if revertedAny` block, a `suggestWindows.compactMap`
+//     work list, exactly two `break` guards and one `return` guard), so the
+//     restructure that the seam's own KNOWN-GAP comment recommends — running
+//     both loops to completion under a `didLoseLifecycle` flag — would have
+//     reddened it wholesale while IMPROVING the behaviour it guards.
+//
+// The tests below assert the CONTRACT instead, by interleaving a real episode
+// replacement with the exact suspension the live-lifecycle guards were written
+// for. They are spelling-independent (any way of dropping the effects fails
+// them) and shape-independent (any restructure that preserves the behaviour
+// keeps them green).
+//
+// The interleave needs a suspension point inside the seams, which is what
+// `_setRevertPersistenceBarrierForTesting` provides — the fourth instance of a
+// pattern this file already relies on to test the banner seams' equivalent
+// races (`_setFeedbackPersistenceBarrierForTesting`,
+// `_setSuggestPersistenceBarrierForTesting`,
+// `_setAppliedPersistenceBarrierForTesting`; see
+// `staleAutoYesCannotCommitAfterMaterialReplacement` below). Production leaves
+// it nil, so the added production surface is one optional-closure check per
+// durable revert write.
+
+/// Counts skip-cue republications. The orchestrator's cue handler is a
+/// synchronous `@Sendable` closure, so it cannot read an actor; a lock-guarded
+/// counter is the smallest thing that can observe it.
+private final class SkipCuePushCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func record() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+@Suite("SkipOrchestrator revert seams survive mid-gesture episode replacement (playhead-i08e)")
+struct SkipOrchestratorRevertLifecycleRaceTests {
+
+    /// `recordListenRevert`: the whole seam in one interleave. The receipt and
+    /// the controller sample are owed to the CAPTURED show — by the time the
+    /// replacement lands, this gesture's full-magnitude trust penalty has
+    /// already been applied, so dropping them leaves trust and corrections
+    /// permanently out of step. Only the cue republication belongs to whoever
+    /// owns the episode now.
+    ///
+    /// Mutation-verified: moving the seam's lifecycle guard back above the
+    /// effects (its shape between 5c1a167e and playhead-i08e) fails this on the
+    /// controller-sample poll; moving only `ingestNegativeFingerprint` below
+    /// the guard fails it on the hard-negative poll; attributing the sample to
+    /// `activePodcastId` instead of the captured `podcastId` fails it on the
+    /// same poll (the replacement episode is a DIFFERENT show, which is what
+    /// makes "the captured show" an assertable claim here); deleting the
+    /// guard outright fails it on the cue-push count; deleting the trust
+    /// penalty, downgrading it to the weak listen-rewind variant, or
+    /// attributing it to `activePodcastId`, fails it on the trust profile; and
+    /// attributing the RECEIPT to `activePodcastId` fails it on the receipt's
+    /// own `podcastId` — those last four each survived the whole repo-wide
+    /// gate before the ninth pass added them.
+    @Test(
+        "A Listen revert whose episode is replaced mid-flight still calibrates the captured show",
+        .timeLimit(.minutes(1))
+    )
+    func listenRevertSurvivesEpisodeReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        // Own the trust store so the penalty is readable, and seed BOTH shows
+        // so "the replacement was not penalised" is a positive observation
+        // rather than a vacuous one — `recordFalseSkipSignal` never
+        // lazy-creates, so an unseeded show swallows a misrouted penalty.
+        let trustStore = try await makeTestStore()
+        for show in ["podcast-1", "podcast-2"] {
+            try await seedSkipTestTrustProfile(
+                in: trustStore, podcastId: show,
+                mode: "auto", trustScore: 0.9, observations: 10
+            )
+        }
+        let trustService = TrustScoringService(store: trustStore)
+        let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        // The hard-negative ingest is the third calibration effect the seam
+        // owes the captured show, and it is invisible unless a bank is wired.
+        let negativeBank = try NegativeFingerprintBank(
+            directoryURL: try makeTempDir(prefix: "i08e-revert-race-bank")
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setNegativeFingerprintBank(negativeBank)
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        let ad = makeSkipTestAdWindow(
+            id: "ad-race", startTime: 60, endTime: 120,
+            confidence: 0.85, decisionState: "confirmed",
+            // Comfortably above the bank's 4-token floor, so a short fixture
+            // string can never make the hard-negative assertion vacuous.
+            evidenceText: "this episode is brought to you by our sponsor"
+        )
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.recordListenRevert(
+                windowId: "ad-race", podcastId: "podcast-1"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        // A replacement episode takes ownership while the gesture is parked.
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        let state = try await awaitControllerSampleCount(
+            controllerStore, orchestrator: orchestrator, show: "podcast-1", expected: 1
+        )
+        #expect(state.sampleCount == 1, "one revert must record exactly one controller sample")
+        #expect(state.integral == 1, "a Listen revert is a FALSE-POSITIVE signal → integral +1")
+
+        let receipts = try await awaitCorrectionReceipts(
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
+        )
+        #expect(receipts.count == 1, "the captured show's receipt must still commit")
+        #expect(receipts.first?.source == .listenRevert)
+        #expect(
+            receipts.first?.podcastId == "podcast-1",
+            """
+            The receipt was stamped with the show that is live at effect time. \
+            Show attribution is what routes derived learning, so a receipt \
+            minted for the CAPTURED episode must not inherit the replacement's \
+            identity.
+            """
+        )
+
+        let negatives = try await awaitNegativeBankEntries(
+            negativeBank, orchestrator: orchestrator, expected: 1
+        )
+        #expect(negatives.count == 1, "the confirmed-FP hard negative must still be ingested")
+        #expect(
+            negatives.first?.showId == "podcast-1",
+            "the hard negative belongs to the CAPTURED show, not the replacement"
+        )
+
+        #expect(
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 1,
+            """
+            Exactly one show may carry controller state. A second row means the \
+            sample was attributed to the show that is live at effect time \
+            rather than the one captured at gesture time.
+            """
+        )
+
+        let row = try #require(try await store.fetchAdWindow(id: "ad-race"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+
+        // The seam's FOURTH effect, and the premise the three above rest on:
+        // the penalty is applied to the CAPTURED show before the replacement
+        // lands, which is precisely why dropping the receipt / hard negative /
+        // controller sample would leave trust and corrections out of step. It
+        // is awaited inside the gesture, so no poll is needed. Nothing else in
+        // the repo pinned it — deleting the trust call left the full gate green.
+        let penalised = try #require(
+            try await trustStore.fetchProfile(podcastId: "podcast-1")
+        )
+        #expect(
+            penalised.recentFalseSkipSignals == 1,
+            "the captured show must carry exactly one false-skip signal"
+        )
+        // MAGNITUDE, not merely direction. `recentFalseSkipSignals` and a
+        // downward trust nudge are common to `recordFalseSkipSignal` and
+        // `recordWeakFalseSkipSignal`, so `< 0.9` alone is satisfied by the
+        // weak listen-rewind variant — a live routing distinction this
+        // subsystem makes deliberately (see `revertByTimeRange`'s
+        // managed-vs-suggest split). A Listen revert of an auto-skip is the
+        // strong signal: the algorithm pre-committed and was wrong.
+        let expectedTrust = 0.9 - TrustScoringConfig.default.falseSignalPenalty
+        #expect(
+            abs(penalised.skipTrustScore - expectedTrust) < 1e-9,
+            """
+            expected the FULL-magnitude penalty \
+            (0.9 − \(TrustScoringConfig.default.falseSignalPenalty) = \
+            \(expectedTrust)), got \(penalised.skipTrustScore). The weak \
+            listen-rewind variant leaves \
+            \(0.9 - TrustScoringConfig.default.weakFalseSignalPenalty).
+            """
+        )
+        let untouched = try #require(
+            try await trustStore.fetchProfile(podcastId: "podcast-2")
+        )
+        #expect(
+            untouched.recentFalseSkipSignals == 0,
+            "the replacement show must not absorb the captured gesture's penalty"
+        )
+        #expect(
+            untouched.skipTrustScore >= 0.9,
+            "the replacement show's trust must not be decremented by a gesture that predates it"
+        )
+
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            """
+            The replaced gesture republished skip cues. LIVE cue state belongs \
+            to the episode that owns the orchestrator now, so the lifecycle \
+            guard must still gate evaluateAndPush().
+            """
+        )
+        await controllerStore.close()
+        await negativeBank.close()
+    }
+
+    /// `revertByTimeRange`, managed loop. One interleave pins four contracts
+    /// the discarded canary needed a separate regex rail for each of:
+    ///
+    ///   • the in-loop guard must `break`, not `return` — a `return` abandons a
+    ///     gesture whose row is already durably reverted, dropping the receipt
+    ///     and the controller sample;
+    ///   • the in-loop guard must also still EXIST — `windows` is live state,
+    ///     so a loop that runs on re-inserts the OLD episode's entries into the
+    ///     dictionary `beginEpisode` has just cleared for the replacement;
+    ///   • the suggest-tier work list must be gated on the captured lifecycle —
+    ///     `suggestWindows` is live state, so building it after the loop broke
+    ///     out collects and vetoes the REPLACEMENT episode's suggestions;
+    ///   • the final guard must still gate `evaluateAndPush()`.
+    @Test(
+        "A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone",
+        .timeLimit(.minutes(1))
+    )
+    func timeRangeRevertSurvivesEpisodeReplacementInManagedLoop() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        // TWO managed windows, both inside the vetoed range, so the loop has a
+        // second iteration to be stopped before — the same reason the
+        // suggest-tier case below uses two. With only one, deleting the in-loop
+        // guard outright is behaviourally invisible (the loop ends anyway) and
+        // this test cannot tell a guard that `break`s from no guard at all.
+        //
+        // The spans are deliberately LONG (90s and 195s) rather than merely
+        // over `minimumSpanSeconds` (15s), because the revert loop `continue`s
+        // past `.suppressed` entries: a fixture window that `evaluateWindow`
+        // demotes silently drops this pair back to ONE effective iteration and
+        // re-opens exactly the vacuity it exists to close.
+        //
+        // Span is not the only demotion route, though — `evaluateWindow` also
+        // suppresses a `.confirmed` window whose `confidence` falls under
+        // `stayThreshold`, so sizing the spans clear of `minimumSpanSeconds`
+        // moves the coupling to a confidence constant rather than removing it.
+        // The two self-checks after ingest are therefore what actually holds
+        // this together, and between them they cover both ways the loop can
+        // skip an entry (`SkipOrchestrator.revertByTimeRange`'s two `continue`s):
+        //   • `suppressedFixtureWindows` — a demotion, observed directly, so it
+        //     is indifferent to every threshold constant;
+        //   • `fixtureWindowsOverlapVetoRange` — the overlap predicate, which
+        //     `ad-range-b` clears by only 5s against the vetoed [70, 110]. An
+        //     edit to either bound or to B's start silently collapses this to
+        //     one effective iteration, and no threshold check can see that.
+        // (`activeWindowIDs()` is dictionary membership only — a spelling check
+        // on the fixture, not evidence that either entry is walkable.)
+        let managedA = makeSkipTestAdWindow(
+            id: "ad-range-a", startTime: 10, endTime: 100,
+            confidence: 0.85, decisionState: "confirmed"
+        )
+        let managedB = makeSkipTestAdWindow(
+            id: "ad-range-b", startTime: 105, endTime: 300,
+            confidence: 0.85, decisionState: "confirmed"
+        )
+        let vetoStart = 70.0
+        let vetoEnd = 110.0
+        try await store.insertAdWindow(managedA)
+        try await store.insertAdWindow(managedB)
+        await orchestrator.receiveAdWindows([managedA, managedB])
+        // Fixture self-check 1/3: both ids really did land in the managed
+        // dictionary the loop iterates.
+        let fixtureIds = Set([managedA.id, managedB.id])
+        #expect(await orchestrator.activeWindowIDs() == fixtureIds)
+        // 2/3: neither was demoted to `.suppressed` on ingest, which the revert
+        // loop `continue`s past. Reading the decision log observes the demotion
+        // directly, so this stays honest under any retune of
+        // `minimumSpanSeconds`, `shortSpanOverrideConfidence`, `enterThreshold`
+        // or `stayThreshold` — the whole point of a two-iteration fixture is
+        // that BOTH iterations exist.
+        let suppressedFixtureWindows = Set(
+            await orchestrator.getDecisionLog()
+                .filter {
+                    $0.decision == .suppressed
+                        && fixtureIds.contains($0.adWindowId)
+                }
+                .map(\.adWindowId)
+        )
+        #expect(
+            suppressedFixtureWindows.isEmpty,
+            """
+            \(suppressedFixtureWindows.sorted()) demoted to .suppressed on \
+            ingest, so the revert loop skips past it and this test silently \
+            drops back to ONE effective iteration — it can then no longer tell \
+            an in-loop lifecycle guard that `break`s from no guard at all.
+            """
+        )
+        // 3/3: both still satisfy the loop's OTHER `continue` — its overlap
+        // predicate. `ad-range-b` clears it by only 5s, so this mirrors the
+        // production condition rather than restating the numbers, and no
+        // threshold check would catch a fixture edit that broke it.
+        let nonOverlapping = [managedA, managedB].filter {
+            !($0.startTime < vetoEnd && $0.endTime > vetoStart)
+        }
+        #expect(
+            nonOverlapping.isEmpty,
+            """
+            \(nonOverlapping.map(\.id).sorted()) no longer overlaps the vetoed \
+            range [\(vetoStart), \(vetoEnd)], so the revert loop skips past it \
+            — same one-effective-iteration vacuity as a demotion, by a \
+            different route.
+            """
+        )
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            // Same bounds the self-check above validated the fixture against,
+            // so the two cannot drift apart.
+            await orchestrator.revertByTimeRange(
+                start: vetoStart, end: vetoEnd, podcastId: "podcast-1"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        // The replacement episode takes ownership and publishes a suggestion
+        // that overlaps the SAME time range the parked gesture is vetoing.
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        let replacementSuggestion = makeSkipTestMarkOnlyWindow(
+            id: "sug-replacement", assetId: "asset-2", startTime: 80, endTime: 100
+        )
+        try await store.insertAdWindow(replacementSuggestion)
+        await orchestrator.receiveAdWindows([replacementSuggestion])
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("sug-replacement"))
+
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        let state = try await awaitControllerSampleCount(
+            controllerStore, orchestrator: orchestrator, show: "podcast-1", expected: 1
+        )
+        #expect(state.sampleCount == 1, "one time-range revert must record exactly one controller sample")
+        #expect(state.integral == 1, "a managed-window revert is a FALSE-POSITIVE signal → integral +1")
+
+        let receipts = try await awaitCorrectionReceipts(
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
+        )
+        #expect(receipts.count == 1, "the captured show's receipt must still commit")
+        #expect(receipts.first?.source == .manualVeto)
+        #expect(
+            receipts.first?.podcastId == "podcast-1",
+            """
+            The receipt was stamped with the show that is live at effect time \
+            rather than the one captured at gesture time. The controller \
+            sample is already pinned to the captured show; the receipt's own \
+            attribution is what routes derived learning and must agree with it.
+            """
+        )
+
+        #expect(
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 1,
+            "the sample must land on the captured show only, never on the replacement"
+        )
+
+        // Positive control that the parked gesture really did durable work.
+        // `windows` is a Dictionary, so WHICH of the two the loop reached
+        // before the barrier is unspecified — assert over the pair rather than
+        // naming one. Deliberately silent about the other row: leaving it
+        // `confirmed` is this seam's documented KNOWN GAP, and pinning either
+        // answer here would redden the `didLoseLifecycle` restructure that
+        // closes it.
+        let rowA = try #require(try await store.fetchAdWindow(id: "ad-range-a"))
+        let rowB = try #require(try await store.fetchAdWindow(id: "ad-range-b"))
+        #expect(
+            [rowA, rowB].contains {
+                $0.decisionState == AdDecisionState.reverted.rawValue
+            },
+            "the window the loop had reached must still be durably reverted"
+        )
+
+        // The live-state half of the in-loop guard's contract. `beginEpisode`
+        // cleared `windows` for the replacement, so neither OLD id may be back
+        // in it: a loop that kept going re-inserts its snapshot's entries
+        // (`windows[id] = managed`) into the episode that owns them now.
+        let liveManagedIds = await orchestrator.activeWindowIDs()
+        #expect(
+            !liveManagedIds.contains("ad-range-a")
+                && !liveManagedIds.contains("ad-range-b"),
+            """
+            The replaced gesture re-inserted an OLD episode's managed window \
+            into the REPLACEMENT's live state. The managed loop must stop at \
+            its lifecycle guard, not merely avoid `return`ing from it.
+            """
+        )
+
+        #expect(
+            await orchestrator.activeSuggestWindowIDs().contains("sug-replacement"),
+            """
+            The replaced gesture vetoed the REPLACEMENT episode's suggestion. \
+            `suggestWindows` is live state, so the suggest-tier work list must \
+            be gated on the captured lifecycle.
+            """
+        )
+        let replacementRow = try #require(
+            try await store.fetchAdWindow(id: "sug-replacement")
+        )
+        #expect(
+            replacementRow.decisionState != AdDecisionState.reverted.rawValue,
+            "the replacement episode's suggestion must not be durably reverted either"
+        )
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            "the final lifecycle guard must still gate evaluateAndPush()"
+        )
+        await controllerStore.close()
+    }
+
+    /// `revertByTimeRange` with NO show attribution and NO trust service — the
+    /// one behavioural change playhead-i08e's guard relocation actually makes,
+    /// and the only configuration that can observe it.
+    ///
+    /// The guard this replaces sat INSIDE `if let podcastId, let trustService`,
+    /// so an anonymous revert fell straight through to `evaluateAndPush()` and
+    /// republished cues into an episode it no longer owned. Every other test in
+    /// this suite passes a podcastId AND wires a trust service, so moving the
+    /// guard back inside that branch leaves them all green.
+    ///
+    /// Dropping the trust service also makes this the one race test that fails
+    /// if an early exit keyed on an OPTIONAL DEPENDENCY (rather than on the
+    /// lifecycle) is introduced above the effects — e.g.
+    /// `guard trustService != nil else { return }` — which the deleted canary
+    /// rejected wholesale via `assertNoEarlyExit` and no other test now covers.
+    @Test(
+        "An anonymous time-range revert replaced mid-loop keeps its receipt and still gates cue republication",
+        .timeLimit(.minutes(1))
+    )
+    func anonymousTimeRangeRevertSurvivesEpisodeReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        // No trustService and no correction-store-side show attribution.
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: nil
+        )
+
+        let managed = makeSkipTestAdWindow(
+            id: "ad-anon-range", startTime: 60, endTime: 120,
+            confidence: 0.85, decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(managed)
+        await orchestrator.receiveAdWindows([managed])
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.revertByTimeRange(
+                start: 70, end: 110, podcastId: nil
+            )
+        }
+        await gate.waitUntilStarted()
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: nil
+        )
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        // The gesture is still owed to the captured episode even unattributed.
+        let receipts = try await awaitCorrectionReceipts(
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
+        )
+        #expect(receipts.count == 1, "an anonymous revert still commits its receipt")
+        #expect(receipts.first?.source == .manualVeto)
+        let row = try #require(try await store.fetchAdWindow(id: "ad-anon-range"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            """
+            An anonymous revert republished cues into the REPLACEMENT episode. \
+            The live-state guard must sit outside the podcastId/trustService \
+            branch so it holds for gestures that never reach the trust engine.
+            """
+        )
+    }
+
+    /// `revertByTimeRange`, suggest-tier loop. The mirror of the case above for
+    /// the loop the deleted canary reached only by counting `break` keywords:
+    /// the guard must exist (so the loop stops mutating live banner state for a
+    /// replacement episode) AND it must `break` (so the receipt still lands).
+    ///
+    /// A suggest-only gesture is also the negative arm of `revertedManagedAny`:
+    /// nothing was auto-skipped, so no controller sample may be recorded even
+    /// though the gesture completed.
+    @Test(
+        "A suggest-only revert whose episode is replaced mid-loop keeps its receipt and stops retiring banners",
+        .timeLimit(.minutes(1))
+    )
+    func timeRangeRevertSurvivesEpisodeReplacementInSuggestLoop() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        // Two suggest-tier windows so the loop has a second iteration to be
+        // stopped before. No managed windows at all, so the managed loop's
+        // body — and its copy of the barrier — is never entered.
+        let first = makeSkipTestMarkOnlyWindow(
+            id: "sug-a", assetId: "asset-1", startTime: 60, endTime: 90
+        )
+        let second = makeSkipTestMarkOnlyWindow(
+            id: "sug-b", assetId: "asset-1", startTime: 95, endTime: 118
+        )
+        try await store.insertAdWindow(first)
+        try await store.insertAdWindow(second)
+        await orchestrator.receiveAdWindows([first, second])
+        #expect(await orchestrator.activeSuggestWindowIDs() == ["sug-a", "sug-b"])
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.revertByTimeRange(
+                start: 50, end: 130, podcastId: "podcast-1"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        // A suggestion the replacement episode owns, well outside the parked
+        // gesture's range. It is the SENTINEL: retiring it on demand after the
+        // gesture finishes turns the negative assertion below into an ordering
+        // question on one continuation instead of a wall-clock guess, which
+        // would otherwise pass spuriously whenever a loaded machine delayed a
+        // straggler past the probe's deadline.
+        let sentinel = makeSkipTestMarkOnlyWindow(
+            id: "sug-sentinel", assetId: "asset-2", startTime: 200, endTime: 220
+        )
+        try await store.insertAdWindow(sentinel)
+        await orchestrator.receiveAdWindows([sentinel])
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("sug-sentinel"))
+
+        // Subscribe AFTER the switch so the probe sees only what the parked
+        // gesture emits once it resumes. The first iteration's retirement was
+        // emitted before the barrier and belongs to the old lifecycle.
+        let probe = BoundedStreamProbe(await orchestrator.bannerEventStream())
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        let receipts = try await awaitCorrectionReceipts(
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
+        )
+        #expect(receipts.count == 1, "the captured show's receipt must still commit")
+        #expect(receipts.first?.source == .manualVeto)
+
+        #expect(
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
+            "a suggest-only revert never altered playback — too weak to raise the threshold"
+        )
+
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            "the final lifecycle guard must still gate evaluateAndPush()"
+        )
+
+        // Retire the sentinel. Both it and any straggler the parked gesture
+        // emitted share one continuation, so FIFO makes the assertion exact:
+        // the first retirement to arrive must be the sentinel's.
+        await orchestrator.revertByTimeRange(
+            start: 195, end: 225, podcastId: "podcast-2"
+        )
+        var firstRetirement: AdBannerRetirement?
+        while let event = await probe.next() {
+            if case let .retireWindow(retirement) = event {
+                firstRetirement = retirement
+                break
+            }
+        }
+        let retired = try #require(
+            firstRetirement,
+            "the sentinel retirement never arrived — this test's own probe is broken"
+        )
+        #expect(
+            retired.windowId == "sug-sentinel",
+            """
+            The replaced gesture kept mutating live suggest state and retired \
+            "\(retired.windowId)" — an OLD window id stamped with the \
+            REPLACEMENT episode's identity. The suggest loop must stop at its \
+            lifecycle guard.
+            """
+        )
+        await controllerStore.close()
+    }
+
+    // MARK: - playhead-i08e (tenth pass): the other two calibrating seams
+    //
+    // The four tests above cover `recordListenRevert` and `revertByTimeRange`.
+    // The remaining seams that write to the per-show threshold controller —
+    // `acceptSuggestedSkip` (MISS) and `denyAutoSkippedBanner`
+    // (FALSE-POSITIVE) — make the SAME capture-vs-live claim in their own
+    // comments and had nothing pinning it. Both were probed by mutation and
+    // both survived the focused set:
+    //
+    //   • relocating either seam's controller write below its lifecycle guard;
+    //   • attributing `acceptSuggestedSkip`'s MISS to `activePodcastId`
+    //     instead of the `sourcePodcastId` captured before the first
+    //     suspension.
+    //
+    // `revertWindowPersistsSourceFeedbackAcrossEpisodeReplacement` and
+    // `suggestYesPersistsSourceFeedbackAcrossEpisodeReplacement` read like
+    // they would catch this and do not: both gate a FIRE-AND-FORGET hop (the
+    // post-commit derived-learning task, the trust task) and wait for the
+    // gesture to RETURN before replacing the episode, so at calibration time
+    // the original episode is still live. Only a barrier taken inside the
+    // seam's own body puts the replacement in the right place, which is why
+    // these two are here rather than bolted onto those.
+
+    /// `acceptSuggestedSkip` — the MISS side of the controller contract, and
+    /// the fourth of the four seams playhead-i08e revived. It reads its show
+    /// ONCE before the first suspension (`sourcePodcastId`) and fires the
+    /// signal above its lifecycle guard, because "Calibration belongs to the
+    /// captured source show even if playback moved to another episode during
+    /// persistence" — the seam's own words.
+    ///
+    /// A miss LOWERS a show's threshold, so a misrouted one makes an unrelated
+    /// show more aggressive on the strength of a gesture that was never about
+    /// it: the inverse of the false-positive misrouting the revert races pin.
+    @Test(
+        "A suggest Yes whose episode is replaced mid-flight calibrates the captured show",
+        .timeLimit(.minutes(1))
+    )
+    func suggestAcceptSurvivesEpisodeReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2")
+        )
+        let controllerStore = try makeTestControllerStore(
+            prefix: "i08e-accept-race"
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        let suggestion = makeSkipTestMarkOnlyWindow(id: "sug-accept-race")
+        try await store.insertAdWindow(suggestion)
+        await orchestrator.receiveAdWindows([suggestion])
+        #expect(
+            await orchestrator.activeSuggestWindowIDs().contains("sug-accept-race")
+        )
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setSuggestPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.acceptSuggestedSkip(
+                windowId: "sug-accept-race",
+                ifCurrentEpisodeId: "ep-1"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        await orchestrator._setSuggestPersistenceBarrierForTesting(nil)
+        await gate.release()
+        #expect(
+            await gesture.value,
+            "the captured episode still owns the asset, so the promotion commits"
+        )
+
+        let state = try await awaitControllerSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: "podcast-1",
+            expected: 1
+        )
+        #expect(
+            state.sampleCount == 1,
+            "one acceptance must record exactly one controller sample"
+        )
+        #expect(
+            state.integral == -1,
+            "accepting a suggested (missed) ad is a MISS signal → integral −1"
+        )
+        #expect(
+            try await controllerRowsExcludingBarrier(
+                controllerStore, orchestrator
+            ) == 1,
+            """
+            The MISS reached a second show. The show captured at gesture time \
+            owns this calibration; the replacement must not be tuned by a \
+            gesture that predates it.
+            """
+        )
+
+        // Positive control: the gesture really did its durable work, so "one
+        // sample" cannot be satisfied by a seam that aborted early.
+        let rows = try await store.fetchAdWindows(assetId: "asset-1")
+        #expect(
+            rows.first { $0.id == "sug-accept-race" }?.decisionState
+                == AdDecisionState.suppressed.rawValue,
+            "the accepted suggestion's original row must be retired"
+        )
+        #expect(
+            rows.contains {
+                $0.id != "sug-accept-race"
+                    && $0.wasSkipped
+                    && $0.decisionState == AdDecisionState.applied.rawValue
+            },
+            "the promoted applied row is this gesture's durable work"
+        )
+        await controllerStore.close()
+    }
+
+    /// `denyAutoSkippedBanner` — with `revertByTimeRange`, one of only two
+    /// calibrating seams a shipped build actually reaches (see the census
+    /// above `declineSuggestedSkip`), and the one whose ordering nothing
+    /// pinned.
+    ///
+    /// Its trust penalty is deliberately not asserted here: unlike
+    /// `recordListenRevert`'s, it is issued from an unstructured `Task` rather
+    /// than awaited inside the gesture, so pinning it would need a polling
+    /// helper of its own. The controller sample is enough to reject the
+    /// mutation this test exists for — moving the calibration below the
+    /// ownership guard moves BOTH effects together.
+    @Test(
+        "A banner No whose episode is replaced mid-flight calibrates the captured show",
+        .timeLimit(.minutes(1))
+    )
+    func denyAutoSkippedBannerSurvivesEpisodeReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2")
+        )
+        let controllerStore = try makeTestControllerStore(
+            prefix: "i08e-deny-race"
+        )
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 9
+        )
+        let probe = BoundedStreamProbe(await orchestrator.bannerEventStream())
+
+        let applied = makeSkipTestAdWindow(
+            id: "ad-deny-race",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            decisionState: AdDecisionState.applied.rawValue
+        )
+        try await store.insertAdWindow(applied)
+        await orchestrator.receiveAdWindows([applied])
+        guard case let .present(card) = await probe.next() else {
+            Issue.record("Expected an applied auto-skip card")
+            return
+        }
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setFeedbackPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.denyAutoSkippedBanner(
+                windowId: card.windowId,
+                analysisAssetId: card.analysisAssetId,
+                startTime: card.adStartTime,
+                endTime: card.adEndTime,
+                podcastId: card.podcastId,
+                ifCurrentEpisodeId: card.episodeId,
+                ifPlaybackLifecycleGeneration:
+                    card.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken:
+                    card.windowMaterialRevisionToken
+            )
+        }
+        await gate.waitUntilStarted()
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        await orchestrator._setFeedbackPersistenceBarrierForTesting(nil)
+        await gate.release()
+        #expect(
+            await gesture.value,
+            "the captured episode still owns the asset, so the No commits"
+        )
+
+        let state = try await awaitControllerSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: "podcast-1",
+            expected: 1
+        )
+        #expect(
+            state.sampleCount == 1,
+            "one denial must record exactly one controller sample"
+        )
+        #expect(
+            state.integral == 1,
+            "an explicit banner No is a FALSE-POSITIVE signal → integral +1"
+        )
+        #expect(
+            try await controllerRowsExcludingBarrier(
+                controllerStore, orchestrator
+            ) == 1,
+            """
+            The sample reached a second show. The card's own podcastId is the \
+            captured show's; a replacement episode must not inherit its \
+            calibration.
+            """
+        )
+
+        // Positive control: the durable No landed, so "one sample" cannot be
+        // satisfied by a gesture that bailed out at its ownership check. Same
+        // pair `autoSkipNoPersistsWithoutCorrectionStore` asserts — the denial
+        // retires the row while keeping the record that the skip DID fire.
+        let row = try #require(try await store.fetchAdWindow(id: "ad-deny-race"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+        #expect(row.wasSkipped, "the denied skip is still recorded as having fired")
+        let receipts = try await store.loadCorrectionEvents(
+            analysisAssetId: "asset-1"
+        )
+        #expect(receipts.count == 1, "the captured show's receipt must still commit")
+        #expect(receipts.first?.source == .bannerAutoSkipDenied)
+        await controllerStore.close()
+    }
+}
+
 /// Bounded stream reader for ordering tests. A missing event reports as `nil`
 /// after the deadline instead of parking the entire test process forever.
 private final class BoundedStreamProbe<Element: Sendable>: @unchecked Sendable {
@@ -1744,10 +2707,34 @@ struct SkipOrchestratorRevertTests {
         #expect(finalRow.wasSkipped)
     }
 
-    @Test("Auto-No rejects without a correction store and leaves the card-owned row untouched")
-    func autoSkipNoRequiresCorrectionStore() async throws {
+    // MARK: - playhead-i08e: an unwired correction store must NOT veto feedback
+    //
+    // `UserCorrectionStore` is the POST-COMMIT derived-learning listener
+    // (`schedulePostCommitCorrectionLearning`), not the durability owner — the
+    // receipt is appended inside the same AnalysisStore transaction as the
+    // AdWindow mutation. Between 5c1a167e and playhead-i08e the two correction
+    // BUILDERS opened with `guard correctionStore != nil else { throw }`, so an
+    // orchestrator without that optional listener aborted every explicit
+    // response at its first statement: no receipt, no row flip, no trust or
+    // threshold-control calibration. Production always injects the store
+    // (`PlayheadRuntime` line ~1150, non-optional), so the precondition bought
+    // nothing there while silently killing the gesture everywhere else.
+    //
+    // These three tests previously asserted the OPPOSITE contract ("rejects
+    // without a correction store"). They kept passing after the precondition
+    // was removed only because their fixture was incoherent: the asset row
+    // carried `episodeId: "ep-1"` (the `makeSkipTestAnalysisAsset` default)
+    // while `beginEpisode` declared `"episode-1"`, so `feedbackAssetMatches`
+    // rejected the write for an unrelated ownership reason. Both the contract
+    // and the fixture are corrected here — each seam now declares the real
+    // episode id, so the ONLY variable under test is the absent listener.
+
+    @Test("Auto-No persists its durable receipt with no correction store wired")
+    func autoSkipNoPersistsWithoutCorrectionStore() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1772,6 +2759,36 @@ struct SkipOrchestratorRevertTests {
         }
 
         #expect(
+            await orchestrator.denyAutoSkippedBanner(
+                windowId: item.windowId,
+                analysisAssetId: item.analysisAssetId,
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: item.podcastId,
+                ifCurrentEpisodeId: item.episodeId,
+                ifPlaybackLifecycleGeneration:
+                    item.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken:
+                    item.windowMaterialRevisionToken
+            ),
+            "an unwired derived-learning listener must not veto an explicit No"
+        )
+        let row = try #require(try await store.fetchAdWindow(id: applied.id))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+        #expect(row.wasSkipped, "the denied skip is still recorded as having fired")
+        let receipts = try await store.loadCorrectionEvents(
+            analysisAssetId: applied.analysisAssetId
+        )
+        #expect(receipts.count == 1, "the No must commit exactly one durable receipt")
+        #expect(receipts.first?.source == .bannerAutoSkipDenied)
+
+        // A denial retires the window in place rather than evicting it, so
+        // membership alone holds under BOTH the old rejection contract and this
+        // one and would prove nothing. Re-answering the same card is the
+        // discriminating check: the row is terminal now, so the retry must be
+        // refused and must not mint a second receipt.
+        #expect((await orchestrator.activeWindowIDs()).contains(applied.id))
+        #expect(
             !(await orchestrator.denyAutoSkippedBanner(
                 windowId: item.windowId,
                 analysisAssetId: item.analysisAssetId,
@@ -1783,22 +2800,22 @@ struct SkipOrchestratorRevertTests {
                     item.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
                     item.windowMaterialRevisionToken
-            ))
+            )),
+            "a re-answered card must not write a second receipt"
         )
-        let row = try #require(try await store.fetchAdWindow(id: applied.id))
-        #expect(row.decisionState == AdDecisionState.applied.rawValue)
         #expect(
             try await store.loadCorrectionEvents(
                 analysisAssetId: applied.analysisAssetId
-            ).isEmpty
+            ).count == 1
         )
-        #expect((await orchestrator.activeWindowIDs()).contains(applied.id))
     }
 
-    @Test("Suggest-Yes rejects without a correction store and restores the exact suggestion")
-    func suggestYesRequiresCorrectionStore() async throws {
+    @Test("Suggest-Yes persists its durable receipt with no correction store wired")
+    func suggestYesPersistsWithoutCorrectionStore() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1817,35 +2834,41 @@ struct SkipOrchestratorRevertTests {
         }
 
         #expect(
-            !(await orchestrator.acceptSuggestedSkip(
+            await orchestrator.acceptSuggestedSkip(
                 windowId: item.windowId,
                 ifCurrentEpisodeId: item.episodeId,
                 ifPlaybackLifecycleGeneration:
                     item.playbackLifecycleGeneration,
                 ifSuggestionRevisionToken:
                     item.suggestionRevisionToken
-            ))
+            ),
+            "an unwired derived-learning listener must not veto an explicit Yes"
         )
         let row = try #require(
             try await store.fetchAdWindow(id: suggestion.id)
         )
-        #expect(row.decisionState == suggestion.decisionState)
         #expect(
-            try await store.loadCorrectionEvents(
-                analysisAssetId: suggestion.analysisAssetId
-            ).isEmpty
+            row.decisionState == AdDecisionState.suppressed.rawValue,
+            "the original suggest row is retired in favour of the promoted window"
         )
+        let receipts = try await store.loadCorrectionEvents(
+            analysisAssetId: suggestion.analysisAssetId
+        )
+        #expect(receipts.count == 1, "the Yes must commit exactly one durable receipt")
+        #expect(receipts.first?.source == .bannerSuggestionConfirmed)
         #expect(
-            (await orchestrator.activeSuggestWindowIDs())
+            !(await orchestrator.activeSuggestWindowIDs())
                 .contains(suggestion.id)
         )
-        #expect((await orchestrator.activeWindowIDs()).isEmpty)
+        #expect(!(await orchestrator.activeWindowIDs()).isEmpty)
     }
 
-    @Test("Suggest-No rejects without a correction store and restores the exact suggestion")
-    func suggestNoRequiresCorrectionStore() async throws {
+    @Test("Suggest-No persists its durable receipt with no correction store wired")
+    func suggestNoPersistsWithoutCorrectionStore() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1864,7 +2887,7 @@ struct SkipOrchestratorRevertTests {
         }
 
         #expect(
-            !(await orchestrator.declineSuggestedSkip(
+            await orchestrator.declineSuggestedSkip(
                 windowId: item.windowId,
                 isExplicitDenial: true,
                 ifCurrentEpisodeId: item.episodeId,
@@ -1872,22 +2895,181 @@ struct SkipOrchestratorRevertTests {
                     item.playbackLifecycleGeneration,
                 ifSuggestionRevisionToken:
                     item.suggestionRevisionToken
-            ))
+            ),
+            "an unwired derived-learning listener must not veto an explicit No"
         )
         let row = try #require(
             try await store.fetchAdWindow(id: suggestion.id)
         )
-        #expect(row.decisionState == suggestion.decisionState)
-        #expect(!row.userDismissedBanner)
-        #expect(
-            try await store.loadCorrectionEvents(
-                analysisAssetId: suggestion.analysisAssetId
-            ).isEmpty
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+        #expect(row.userDismissedBanner)
+        let receipts = try await store.loadCorrectionEvents(
+            analysisAssetId: suggestion.analysisAssetId
         )
+        #expect(receipts.count == 1, "the No must commit exactly one durable receipt")
+        #expect(receipts.first?.source == .bannerSuggestionDenied)
         #expect(
-            (await orchestrator.activeSuggestWindowIDs())
+            !(await orchestrator.activeSuggestWindowIDs())
                 .contains(suggestion.id)
         )
+    }
+
+    /// playhead-i08e: the guard that ACTUALLY refuses an explicit response is
+    /// `AnalysisStore.feedbackAssetMatches` — the acting card's episode must own
+    /// the asset row. All FOUR explicit-feedback transactions share it
+    /// (`persistDeniedAutoSkip`, `persistConfirmedAutoSkip`,
+    /// `persistAcceptedSuggestionIfCurrent`,
+    /// `persistDeclinedSuggestionIfCurrent`) and each is asserted below, so
+    /// deleting the clause from any one of them fails here.
+    ///
+    /// This is pinned deliberately: the three tests above used to exercise this
+    /// rejection by ACCIDENT — their asset row carried the fixture's default
+    /// `episodeId` while `beginEpisode` declared another — which is what let
+    /// them keep passing under the name "rejects without a correction store"
+    /// after that precondition was deleted. Fixing those fixtures would have
+    /// left the ownership check with no coverage at this layer.
+    @Test("explicit responses are refused when the card's episode does not own the asset")
+    func explicitResponseRequiresAssetEpisodeOwnership() async throws {
+        let store = try await makeTestStore()
+        // The asset row belongs to "episode-owner"; the orchestrator (and so
+        // every card it emits) claims "episode-impostor".
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-owner")
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-impostor",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 204
+        )
+        let stream = await orchestrator.bannerEventStream()
+        let probe = BoundedStreamProbe(stream)
+        // Each seam gets its OWN window. Sharing one would let the first
+        // refusal make the row terminal, so a later seam would then be refused
+        // for a reason other than ownership and its assertion would stop
+        // discriminating.
+        let denyTarget = makeSkipTestAdWindow(
+            id: "foreign-episode-auto-no",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            decisionState: AdDecisionState.applied.rawValue
+        )
+        let confirmTarget = makeSkipTestAdWindow(
+            id: "foreign-episode-auto-yes",
+            startTime: 400,
+            endTime: 460,
+            confidence: 0.9,
+            decisionState: AdDecisionState.applied.rawValue
+        )
+        let acceptTarget = makeSuggestWindow(
+            id: "foreign-episode-suggest-yes",
+            startTime: 200,
+            endTime: 260
+        )
+        let declineTarget = makeSuggestWindow(
+            id: "foreign-episode-suggest-no",
+            startTime: 300,
+            endTime: 360
+        )
+        let all = [denyTarget, confirmTarget, acceptTarget, declineTarget]
+        for window in all {
+            try await store.insertAdWindow(window)
+        }
+        await orchestrator.receiveAdWindows(all)
+
+        // Several windows are ingested, so collect presentations until both
+        // auto-skip cards have arrived rather than assuming an emission order.
+        // Only an exhausted stream ends the loop: an event of some OTHER kind
+        // is skipped rather than treated as the end, so a retirement emitted
+        // between the two presentations cannot strand this at one card and
+        // fail the test for a reason unrelated to the contract it names.
+        var cards: [String: AdSkipBannerItem] = [:]
+        let autoSkipIds = Set([denyTarget.id, confirmTarget.id])
+        for _ in 0..<8 where !autoSkipIds.isSubset(of: Set(cards.keys)) {
+            guard let event = await probe.next() else { break }
+            if case let .present(candidate) = event {
+                cards[candidate.windowId] = candidate
+            }
+        }
+        guard let denyCard = cards[denyTarget.id],
+              let confirmCard = cards[confirmTarget.id]
+        else {
+            Issue.record("Expected an applied auto-skip card for both windows")
+            return
+        }
+
+        // 1/4 — persistDeniedAutoSkip.
+        #expect(
+            !(await orchestrator.denyAutoSkippedBanner(
+                windowId: denyCard.windowId,
+                analysisAssetId: denyCard.analysisAssetId,
+                startTime: denyCard.adStartTime,
+                endTime: denyCard.adEndTime,
+                podcastId: denyCard.podcastId,
+                ifCurrentEpisodeId: denyCard.episodeId,
+                ifPlaybackLifecycleGeneration:
+                    denyCard.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken:
+                    denyCard.windowMaterialRevisionToken
+            )),
+            "a card whose episode does not own the asset may not write a No receipt"
+        )
+        // 2/4 — persistConfirmedAutoSkip.
+        #expect(
+            !(await orchestrator.confirmAutoSkippedBanner(
+                windowId: confirmCard.windowId,
+                analysisAssetId: confirmCard.analysisAssetId,
+                startTime: confirmCard.adStartTime,
+                endTime: confirmCard.adEndTime,
+                ifCurrentEpisodeId: confirmCard.episodeId,
+                ifPlaybackLifecycleGeneration:
+                    confirmCard.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken:
+                    confirmCard.windowMaterialRevisionToken
+            )),
+            "a card whose episode does not own the asset may not write a Yes receipt"
+        )
+        // 3/4 — persistAcceptedSuggestionIfCurrent.
+        #expect(
+            !(await orchestrator.acceptSuggestedSkip(
+                windowId: acceptTarget.id,
+                ifCurrentEpisodeId: "episode-impostor"
+            )),
+            "a suggest Yes may not promote a window the episode does not own"
+        )
+        // 4/4 — persistDeclinedSuggestionIfCurrent.
+        #expect(
+            !(await orchestrator.declineSuggestedSkip(
+                windowId: declineTarget.id,
+                isExplicitDenial: true,
+                ifCurrentEpisodeId: "episode-impostor"
+            )),
+            "a suggest No may not veto a window the episode does not own"
+        )
+
+        // Every durable surface is untouched by all four refusals.
+        for expected in all {
+            let row = try #require(try await store.fetchAdWindow(id: expected.id))
+            #expect(
+                row.decisionState == expected.decisionState,
+                "\(expected.id) must keep its pre-response decision state"
+            )
+            #expect(!row.userDismissedBanner)
+        }
+        #expect(
+            try await store.loadCorrectionEvents(
+                analysisAssetId: denyTarget.analysisAssetId
+            ).isEmpty
+        )
+        // The rejected suggestions stay live for the surface that DOES own them.
+        let suggestIds = await orchestrator.activeSuggestWindowIDs()
+        #expect(suggestIds.contains(acceptTarget.id))
+        #expect(suggestIds.contains(declineTarget.id))
     }
 
     @Test("materially revised applied same-ID cards retire stale Yes and No ownership")
@@ -3421,7 +4603,15 @@ struct SkipOrchestratorRevertTests {
     @Test("blocked and inventory-rejected AdWindows retire stale suggestions")
     func adWindowInvalidationsRetireSuggestionsAndRejectStaleYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // The asset must be OWNED by the episode this test plays, and every
+        // suggestion must have its durable row, or `acceptSuggestedSkip`
+        // aborts inside `persistAcceptedSuggestionIfCurrent` (episode
+        // ownership / missing row) before the retirement contract is
+        // consulted — and the "must not promote" assertions below become
+        // unfalsifiable. See playhead-ugy4.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             inventoryFilter: InventorySanityFilter(isEnabled: true)
@@ -3440,6 +4630,7 @@ struct SkipOrchestratorRevertTests {
         let blockedSuggestion = makeSuggestWindow(
             id: "ad-window-blocked-after-suggest"
         )
+        try await store.insertAdWindow(blockedSuggestion)
         await orchestrator.receiveAdWindows([blockedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected blocked-path suggestion presentation")
@@ -3464,6 +4655,7 @@ struct SkipOrchestratorRevertTests {
         let rejectedSuggestion = makeSuggestWindow(
             id: "ad-window-rejected-after-suggest"
         )
+        try await store.insertAdWindow(rejectedSuggestion)
         await orchestrator.receiveAdWindows([rejectedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected inventory-path suggestion presentation")
@@ -3513,7 +4705,11 @@ struct SkipOrchestratorRevertTests {
     @Test("blocked and inventory-rejected decisions retire stale suggestions")
     func decisionInvalidationsRetireSuggestionsAndRejectStaleYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Asset ownership + durable suggestion rows: see the note on
+        // `adWindowInvalidationsRetireSuggestionsAndRejectStaleYes`.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             inventoryFilter: InventorySanityFilter(isEnabled: true)
@@ -3532,6 +4728,7 @@ struct SkipOrchestratorRevertTests {
         let blockedSuggestion = makeSuggestWindow(
             id: "decision-blocked-after-suggest"
         )
+        try await store.insertAdWindow(blockedSuggestion)
         await orchestrator.receiveAdWindows([blockedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected blocked-decision suggestion presentation")
@@ -3561,6 +4758,7 @@ struct SkipOrchestratorRevertTests {
         let rejectedSuggestion = makeSuggestWindow(
             id: "decision-rejected-after-suggest"
         )
+        try await store.insertAdWindow(rejectedSuggestion)
         await orchestrator.receiveAdWindows([rejectedSuggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected rejected-decision suggestion presentation")
@@ -3612,7 +4810,11 @@ struct SkipOrchestratorRevertTests {
     @Test("explicit window retirement also invalidates a suggestion")
     func explicitRetirementRejectsStaleSuggestionYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Asset ownership + durable suggestion row: see the note on
+        // `adWindowInvalidationsRetireSuggestionsAndRejectStaleYes`.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(
             store: store,
@@ -3631,6 +4833,7 @@ struct SkipOrchestratorRevertTests {
         let suggestion = makeSuggestWindow(
             id: "explicitly-retired-suggestion"
         )
+        try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected explicit-retirement presentation")
@@ -3696,7 +4899,11 @@ struct SkipOrchestratorRevertTests {
     @Test("late inventory context retires a newly-invalid suggestion")
     func lateInventoryContextRejectsStaleSuggestionYes() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // Asset ownership + durable suggestion row: see the note on
+        // `adWindowInvalidationsRetireSuggestionsAndRejectStaleYes`.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
             inventoryFilter: InventorySanityFilter(isEnabled: true)
@@ -3714,6 +4921,7 @@ struct SkipOrchestratorRevertTests {
         let suggestion = makeSuggestWindow(
             id: "late-inventory-rejected-suggestion"
         )
+        try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
         guard case .present = await probe.next() else {
             Issue.record("Expected pre-context suggestion presentation")
@@ -6085,7 +7293,28 @@ struct SkipOrchestratorRevertTests {
     @Test("episode-bound suggest actions reject stale banner identities")
     func episodeBoundSuggestActionsRejectStaleIdentity() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // playhead-ugy4: `asset-1` is durably OWNED by "episode-stale" while
+        // the orchestrator plays it under the identity "episode-current".
+        // The disagreement is deliberate. The durable ownership check inside
+        // `persistAcceptedSuggestionIfCurrent` /
+        // `persistDeclinedSuggestionIfCurrent` keys on the ASSET's episode,
+        // so this fixture makes it ACCEPT the stale card — leaving the
+        // orchestrator's own `activeEpisodeId == expectedEpisodeId` guard,
+        // the guard this test names, as the only thing that can reject it.
+        // With the asset owned by the ACTIVE episode both guards refuse, and
+        // deleting the orchestrator one changes nothing observable.
+        //
+        // Scope, so a later reader does not over-read this: what is pinned
+        // here is the refusal of a WRONGLY-STAMPED caller. It is not the
+        // episode-switch race — a real `beginEpisode` also clears
+        // `suggestRevisionTokensByWindowId`, so after a genuine switch the
+        // token lookup in the same guard chain refuses the stale tap on its
+        // own. The asset-ownership half of the pair is pinned separately by
+        // `explicitResponseRequiresAssetEpisodeOwnership`, which uses the
+        // inverse fixture; neither test can drift into covering the other.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-stale")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -6094,24 +7323,58 @@ struct SkipOrchestratorRevertTests {
         )
         let acceptCandidate = makeSuggestWindow(id: "suggest-stale-accept")
         let declineCandidate = makeSuggestWindow(id: "suggest-stale-decline")
+        try await store.insertAdWindow(acceptCandidate)
+        try await store.insertAdWindow(declineCandidate)
         await orchestrator.receiveAdWindows([
             acceptCandidate,
             declineCandidate
         ])
 
-        await orchestrator.acceptSuggestedSkip(
-            windowId: acceptCandidate.id,
-            ifCurrentEpisodeId: "episode-stale"
+        #expect(
+            !(await orchestrator.acceptSuggestedSkip(
+                windowId: acceptCandidate.id,
+                ifCurrentEpisodeId: "episode-stale"
+            )),
+            "a Yes stamped with a stale episode identity must be refused"
         )
-        await orchestrator.declineSuggestedSkip(
-            windowId: declineCandidate.id,
-            isExplicitDenial: true,
-            ifCurrentEpisodeId: "episode-stale"
+        #expect(
+            !(await orchestrator.declineSuggestedSkip(
+                windowId: declineCandidate.id,
+                isExplicitDenial: true,
+                ifCurrentEpisodeId: "episode-stale"
+            )),
+            "a No stamped with a stale episode identity must be refused"
         )
 
         let remaining = await orchestrator.activeSuggestWindowIDs()
         #expect(remaining.contains(acceptCandidate.id))
         #expect(remaining.contains(declineCandidate.id))
+
+        // `recoverFailedProvisionalSuggestion` restores the entry of an
+        // action that RAN and then failed, so `remaining` alone cannot tell
+        // "refused before acting" from "acted and rolled back". The
+        // assertions below can only hold if neither action ever ran: a
+        // promotion installs a UUID-keyed managed window, and an explicit
+        // denial stamps the durable row.
+        #expect(
+            (await orchestrator.activeWindowIDs()).isEmpty,
+            "a stale Yes must not promote a managed window"
+        )
+        let rows = try await store.fetchAdWindows(assetId: "asset-1")
+        #expect(
+            rows.count == 2,
+            "a stale Yes must not insert a promoted row; got \(rows.count)"
+        )
+        for row in rows {
+            #expect(
+                row.decisionState == AdDecisionState.candidate.rawValue,
+                "\(row.id) must keep its candidate state; got \(row.decisionState)"
+            )
+            #expect(
+                !row.userDismissedBanner,
+                "\(row.id) must not be stamped as explicitly dismissed"
+            )
+        }
     }
 
     @Test("explicit suggest No persists a falsePositive correction and sets userDismissedBanner=1")
@@ -6437,7 +7700,20 @@ struct SkipOrchestratorRevertTests {
     @Test("declineSuggestedSkip auto-fade (isExplicitDenial:false) records NO correction and leaves userDismissedBanner=0")
     func suggestAutoFadeRecordsNothing() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // playhead-i08e (third pass): the asset row must declare the SAME
+        // episode `beginEpisode` announces below, exactly as this test's
+        // explicit-denial sibling `suggestDenialPersistsFalsePositiveCorrection`
+        // already does. With the fixture's default `"ep-1"` against
+        // `beginEpisode(episodeId: "asset-1")`, `feedbackAssetMatches` refused
+        // `persistDeclinedSuggestionIfCurrent` on ownership grounds — so a
+        // regression that treated a passive auto-fade as an explicit denial
+        // would ALSO have written nothing, and all three negative assertions
+        // below would have held for a reason unrelated to the contract they
+        // name. Aligning the ids makes the persistence path genuinely
+        // reachable, so only `isExplicitDenial == false` keeps it silent.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
         let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(store: store, correctionStore: correctionStore)
         await orchestrator.beginEpisode(

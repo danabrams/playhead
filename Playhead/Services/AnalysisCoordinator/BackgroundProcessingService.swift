@@ -199,6 +199,15 @@ struct UIDeviceBatteryProvider: BatteryStateProviding {
 
 enum BackgroundTaskID {
     static let backfillProcessing = "com.playhead.app.analysis.backfill"
+    /// playhead-i6oi: charger-class sibling of `backfillProcessing`. Same
+    /// handler (`handleBackfillTask`), but submitted with
+    /// `requiresExternalPower = true` so it rides iOS's charger-maintenance
+    /// discretionary class (the one `preAnalysisRecovery` uses, which fires
+    /// overnight while charging) instead of the battery-budgeted class whose
+    /// device-activity / idle suppressors starved the plain identifier all
+    /// night. Submitted ALONGSIDE `backfillProcessing` so on-battery idle
+    /// windows still count.
+    static let backfillProcessingCharged = "com.playhead.app.analysis.backfill.charged"
     static let continuedProcessing = "com.playhead.app.analysis.continued"
     static let preAnalysisRecovery = "com.playhead.app.preanalysis.recovery"
 }
@@ -394,6 +403,11 @@ actor BackgroundProcessingService {
 
     /// Whether backfill is currently paused due to thermal/battery constraints.
     private var backfillPaused = false
+    /// playhead-txq3: reentrancy guard for `scheduleBackfillIfNeeded()`.
+    /// `pendingTaskRequestIdentifiers()` is a suspension point, so this
+    /// serializes concurrent callers to keep the check-then-submit atomic
+    /// on the actor (mirrors y5mk's `rescheduleInFlight` for feed refresh).
+    private var backfillRescheduleInFlight = false
 
     /// Whether all analysis is paused. Under C1, this gate is set only when
     /// `QualityProfile.schedulerPolicy.pauseAllWork` is true — today that is
@@ -589,6 +603,15 @@ actor BackgroundProcessingService {
             task.setTaskCompleted(success: false)
         }
 
+        // playhead-i6oi: charger-class backfill sibling — same fallback.
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged,
+            using: nil
+        ) { task in
+            logger.warning("Charged backfill task fired before service initialized")
+            task.setTaskCompleted(success: false)
+        }
+
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.continuedProcessing,
             using: nil
@@ -625,6 +648,21 @@ actor BackgroundProcessingService {
         }
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.backfillProcessing,
+            using: nil
+        ) { [weak self] task in
+            guard let self, let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let sendableTask = UncheckedSendableBox(processingTask)
+            Task { await self.handleBackfillTask(sendableTask.value) }
+        }
+
+        // playhead-i6oi: charger-class backfill sibling routes to the SAME
+        // handler. Whichever class iOS grants a window to (battery-idle or
+        // charger-maintenance), the identical backfill drain runs.
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged,
             using: nil
         ) { [weak self] task in
             guard let self, let processingTask = task as? BGProcessingTask else {
@@ -713,6 +751,16 @@ actor BackgroundProcessingService {
         logger.info("BackgroundProcessingService started")
         // Kick off the initial pre-analysis recovery schedule.
         schedulePreAnalysisRecovery()
+        // playhead-txq3: arm backfill at LAUNCH too. Previously backfill was
+        // only submitted on a `.background`/`playbackDidStop`/self-rearm
+        // transition, so a user who queues episodes and never backgrounds
+        // or presses play left iOS with no submitted backfill BGProcessingTask
+        // to wake for — the in-memory `AnalysisWorkScheduler.runLoop` only
+        // gets CPU until the process is suspended (~30s). Recovery was already
+        // armed here; backfill now is too. The pending guard in
+        // `scheduleBackfillIfNeeded()` keeps this from bulldozing a request
+        // an earlier session already submitted.
+        await scheduleBackfillIfNeeded()
     }
 
     /// Stop all observation and cancel pending work.
@@ -742,11 +790,11 @@ actor BackgroundProcessingService {
 
     /// Signal that audio playback has stopped. Deactivates hot-path analysis,
     /// and schedules background backfill if appropriate.
-    func playbackDidStop() {
+    func playbackDidStop() async {
         hotPathActive = false
         logger.info("Hot-path inactive")
 
-        scheduleBackfillIfNeeded()
+        await scheduleBackfillIfNeeded()
     }
 
     /// playhead-fuo6: submit a backfill BGProcessingTask whenever the
@@ -763,8 +811,9 @@ actor BackgroundProcessingService {
     ///
     /// Wiring it on every `.background` scenePhase transition is safe
     /// because:
-    ///   * `BGTaskScheduler.submit(_:)` deduplicates identical
-    ///     identifiers; iOS coalesces duplicate submissions.
+    ///   * `scheduleBackfillIfNeeded()` no-ops when a backfill request is
+    ///     already pending (playhead-txq3), so repeated `.background`
+    ///     transitions cannot age-reset the pending request's timing.
     ///   * The submitted request is identical to the one already used
     ///     by `playbackDidStop()` and the self-rearm path
     ///     (`requiresExternalPower=false`, `requiresNetworkConnectivity
@@ -775,9 +824,9 @@ actor BackgroundProcessingService {
     ///
     /// Called from `PlayheadApp.onChange(of: scenePhase)` on the main
     /// actor when the new phase is `.background`.
-    func appDidEnterBackground() {
+    func appDidEnterBackground() async {
         logger.info("App entered background -- submitting backfill task")
-        scheduleBackfillIfNeeded()
+        await scheduleBackfillIfNeeded()
     }
 
     /// Returns the recommended hot-path lookahead multiplier based on
@@ -805,12 +854,55 @@ actor BackgroundProcessingService {
     // MARK: - Background Task Scheduling
 
     /// Schedule a BGProcessingTask for deferred backfill.
-    func scheduleBackfillIfNeeded() {
-        let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.backfillProcessing)
-        request.requiresNetworkConnectivity = false
-        request.requiresExternalPower = false
+    ///
+    /// playhead-txq3: skip the submit when a backfill request is ALREADY
+    /// pending. The prior code re-submitted on every `.background`
+    /// transition, `playbackDidStop`, and self-rearm — and while
+    /// `BGTaskScheduler.submit(_:)` de-dups on identifier, each submit
+    /// AGE-RESETS the pending request's scheduling, so an evening of
+    /// app-use kept pushing the wake further out. This is the exact
+    /// "bulldozing" pattern y5mk fixed for feed refresh; mirror the guard
+    /// (`pendingTaskRequestIdentifiers()` check + a reentrancy flag).
+    func scheduleBackfillIfNeeded() async {
+        // Reentrancy guard — serialize concurrent callers around the
+        // suspension point so the check-then-submit stays atomic.
+        guard !backfillRescheduleInFlight else { return }
+        backfillRescheduleInFlight = true
+        defer { backfillRescheduleInFlight = false }
 
-        submitWithTelemetry(request, reason: nil)
+        let pendingIdentifiers = Set(await taskScheduler.pendingTaskRequestIdentifiers())
+
+        // Battery-eligible request — fires on on-battery idle windows.
+        if pendingIdentifiers.contains(BackgroundTaskID.backfillProcessing) {
+            logger.info("Backfill already pending — skipping duplicate submit (playhead-txq3)")
+        } else {
+            let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.backfillProcessing)
+            request.requiresNetworkConnectivity = false
+            request.requiresExternalPower = false
+            submitWithTelemetry(request, reason: nil)
+        }
+
+        // playhead-i6oi: ALSO submit the charger-class sibling
+        // (`requiresExternalPower = true`), which rides iOS's
+        // charger-maintenance discretionary class — the same class
+        // `preAnalysisRecovery` uses, which fires overnight while charging.
+        // The battery-budgeted class's device-activity / idle suppressors
+        // starved the plain identifier all night (the same-night A/B:
+        // recovery ran, backfill got zero). Submitting both means on-battery
+        // idle windows AND overnight-charging windows are reachable. Mirrors
+        // recovery's `earliestBeginDate` of 60s. The pending guard suppresses
+        // age-resetting re-submits (playhead-txq3), per identifier.
+        if pendingIdentifiers.contains(BackgroundTaskID.backfillProcessingCharged) {
+            logger.info("Charged backfill already pending — skipping duplicate submit (playhead-i6oi)")
+        } else {
+            let chargedRequest = BGProcessingTaskRequest(
+                identifier: BackgroundTaskID.backfillProcessingCharged
+            )
+            chargedRequest.requiresNetworkConnectivity = false
+            chargedRequest.requiresExternalPower = true
+            chargedRequest.earliestBeginDate = Date(timeIntervalSinceNow: 60)
+            submitWithTelemetry(chargedRequest, reason: "backfill-charged")
+        }
     }
 
     /// playhead-shpy: shared `BGTaskScheduler.submit` wrapper that emits
@@ -1006,7 +1098,7 @@ actor BackgroundProcessingService {
         }
 
         // Schedule the next occurrence.
-        scheduleBackfillIfNeeded()
+        await scheduleBackfillIfNeeded()
 
         let runLedger = self.runLedger
         let workTask = Task {
