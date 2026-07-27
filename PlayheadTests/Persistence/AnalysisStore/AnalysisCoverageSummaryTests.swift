@@ -13,6 +13,7 @@
 //     displayed percentage came from real artifacts or a stale watermark.
 
 import Foundation
+import SQLite3
 import Testing
 @testable import Playhead
 
@@ -858,5 +859,662 @@ struct DogfoodFixtureCoverageSummaryTests {
                 "expected chunk-derived coverage to clear 50 minutes; got \(summary.fastTranscriptCoverageEndSec ?? 0)s")
         #expect(summary.fastTranscriptCoveredSec == chunkMax.maxEndTimeSec)
         #expect(summary.fastTranscriptCoveredSource == .fastTranscriptChunks)
+    }
+}
+
+// MARK: - playhead-0sro: watermark monotonicity, reconciliation, invariant
+//
+// The read model above reconciles coverage AT READ TIME. playhead-0sro is
+// the other half: the persisted `analysis_assets.fastTranscriptCoverageEndTime`
+// column itself was going stale, and consumers that read the raw column —
+// the yqax catch-up trigger and, since #285, the glo9 opportunistic backlog
+// drain admission gate — have no read-time reconciliation to save them.
+//
+// Root cause pinned by `advanceRejectsRewindFromLaterShardOrder` below:
+// `TranscriptEngineService` wrote the end of the shard it finished LAST,
+// and `prioritizeShards` deliberately runs behind-the-playhead shards last
+// in DESCENDING start order, so a completed pass persisted the earliest
+// non-zero shard's end — exactly 60.0 s with the production 30 s shard.
+
+@Suite("FastTranscriptCoverageInvariant — watermark vs chunks vs duration (playhead-0sro)")
+struct FastTranscriptCoverageInvariantTests {
+
+    /// The THEMOVE phone asset from the bead, as persisted state: a fast
+    /// transcript covering 3575.88 s of a 3578.10 s episode behind a
+    /// watermark frozen at 60 s. This MUST be reported as a violation —
+    /// it is the entire premise of the bead.
+    @Test("stale THEMOVE watermark (60 s behind 3575.88 s of chunks) violates the invariant")
+    func staleThemoveWatermarkViolates() {
+        let violations = FastTranscriptCoverageInvariant.violations(
+            watermarkSec: 60,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        )
+        #expect(violations == [
+            .watermarkBehindChunks(watermarkSec: 60, chunkMaxEndSec: 3575.88)
+        ])
+        #expect(!FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 60,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ))
+    }
+
+    /// The repaired form of the same asset: watermark at the chunk reach,
+    /// a hair under the episode duration. Healthy.
+    @Test("reconciled THEMOVE watermark satisfies the invariant")
+    func reconciledThemoveWatermarkHolds() {
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 3575.88,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ))
+    }
+
+    /// TOLERATED GAP 1 — sub-second float/timestamp disagreement between
+    /// shard arithmetic and ASR segment ends is normal, not a defect.
+    @Test("sub-second lag behind chunks is tolerated")
+    func subSecondLagTolerated() {
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 1799.6,
+            chunkMaxEndSec: 1800.0,
+            episodeDurationSec: 1800.0
+        ))
+        // One tick past the tolerance is a violation — the boundary is
+        // real, not decorative.
+        #expect(!FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 1798.9,
+            chunkMaxEndSec: 1800.0,
+            episodeDurationSec: 1800.0
+        ))
+    }
+
+    /// TOLERATED GAP 2 — the watermark may exceed `episodeDurationSec` by
+    /// up to one shard: feed-declared vs measured duration routinely
+    /// disagree by seconds, and the shard-sum can land past a probe.
+    @Test("watermark within one shard past the duration is tolerated; beyond it is not")
+    func pastDurationToleranceBoundary() {
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 1820,
+            chunkMaxEndSec: 1820,
+            episodeDurationSec: 1800
+        ))
+        let violations = FastTranscriptCoverageInvariant.violations(
+            watermarkSec: 1900,
+            chunkMaxEndSec: 1900,
+            episodeDurationSec: 1800
+        )
+        #expect(violations == [
+            .watermarkPastDuration(watermarkSec: 1900, episodeDurationSec: 1800)
+        ])
+    }
+
+    /// The invariant is about REACH, not AREA. A transcript with a large
+    /// interior hole still has a legitimate high-water watermark; flagging
+    /// that would re-introduce the sd71 watermark-vs-union conflation.
+    @Test("interior transcript gaps do not violate the reach invariant")
+    func interiorGapsDoNotViolate() {
+        // A badly gapped transcript: [0,600] and [3000,3575.88], a
+        // 40-minute hole in the middle. Reach is still 3575.88, so the
+        // invariant must be satisfied — flagging this would re-introduce
+        // the sd71 watermark-vs-union conflation.
+        let gappy: [(start: Double, end: Double)] = [
+            (start: 0, end: 600),
+            (start: 3000, end: 3575.88)
+        ]
+        let chunkMaxEnd = gappy.map(\.end).max()
+        #expect(chunkMaxEnd == 3575.88)
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: chunkMaxEnd,
+            chunkMaxEndSec: chunkMaxEnd,
+            episodeDurationSec: 3578.10
+        ))
+        // The AREA measure is the one that must report the hole, and it
+        // is a different number entirely: 600 + 575.88.
+        let area = AnalysisCoverageMath.unionedSeconds(gappy)
+        #expect(abs(area - 1175.88) < 0.0001)
+        #expect(area / 3578.10 < 0.34, "a 33%-covered episode must not look complete by AREA")
+    }
+
+    /// A watermark ahead of the chunks is legitimate: the engine advances
+    /// coverage for a silent shard that produced no segments at all.
+    @Test("watermark ahead of chunk coverage is not a violation")
+    func watermarkAheadOfChunksIsFine() {
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 900,
+            chunkMaxEndSec: 600,
+            episodeDurationSec: 1800
+        ))
+    }
+
+    /// Both directions can be wrong at once; both must be reported.
+    @Test("both violations are reported together in a stable order")
+    func bothViolationsReported() {
+        let violations = FastTranscriptCoverageInvariant.violations(
+            watermarkSec: 5000,
+            chunkMaxEndSec: 6000,
+            episodeDurationSec: 1800
+        )
+        #expect(violations == [
+            .watermarkBehindChunks(watermarkSec: 5000, chunkMaxEndSec: 6000),
+            .watermarkPastDuration(watermarkSec: 5000, episodeDurationSec: 1800)
+        ])
+    }
+
+    /// Absent inputs are vacuously healthy — "never written" is not
+    /// "stale", and an unknown duration must not be compared against.
+    @Test("nil watermark / nil chunks / nil-or-zero duration are vacuously healthy")
+    func absentInputsAreVacuous() {
+        #expect(FastTranscriptCoverageInvariant.violations(
+            watermarkSec: nil,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ).isEmpty)
+        #expect(FastTranscriptCoverageInvariant.violations(
+            watermarkSec: 60,
+            chunkMaxEndSec: nil,
+            episodeDurationSec: nil
+        ).isEmpty)
+        // A zero / negative duration is "unknown", not "everything is
+        // past the end".
+        #expect(FastTranscriptCoverageInvariant.violations(
+            watermarkSec: 1800,
+            chunkMaxEndSec: 1800,
+            episodeDurationSec: 0
+        ).isEmpty)
+    }
+
+    /// Non-finite inputs must not produce unactionable violations.
+    @Test("non-finite inputs produce no violations")
+    func nonFiniteInputsProduceNoViolations() {
+        #expect(FastTranscriptCoverageInvariant.violations(
+            watermarkSec: .nan,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ).isEmpty)
+        #expect(FastTranscriptCoverageInvariant.violations(
+            watermarkSec: 60,
+            chunkMaxEndSec: .nan,
+            episodeDurationSec: .nan
+        ).isEmpty)
+    }
+
+    /// Tolerances are configurable; a caller demanding exactness gets it.
+    @Test("zero tolerances make the invariant exact")
+    func zeroTolerancesAreExact() {
+        let strict = FastTranscriptCoverageInvariant.Tolerances(
+            watermarkBehindChunksSec: 0,
+            watermarkPastDurationSec: 0
+        )
+        #expect(!FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 1799.9,
+            chunkMaxEndSec: 1800.0,
+            episodeDurationSec: 1800.0,
+            tolerances: strict
+        ))
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 1800.0,
+            chunkMaxEndSec: 1800.0,
+            episodeDurationSec: 1800.0,
+            tolerances: strict
+        ))
+    }
+}
+
+@Suite("AnalysisStore — fast-transcript watermark monotonicity + reconciliation (playhead-0sro)")
+struct FastTranscriptCoverageWatermarkTests {
+
+    private func makeAsset(
+        id: String,
+        episodeDurationSec: Double? = 3578.10,
+        fastTranscriptCoverageEndTime: Double? = nil
+    ) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///\(id).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "transcribing",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: episodeDurationSec
+        )
+    }
+
+    private func makeChunk(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        pass: String = "fast"
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "\(assetId)-c\(index)-\(pass)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "\(assetId)-fp\(index)-\(pass)",
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "segment \(index)",
+            normalizedText: "segment \(index)",
+            pass: pass,
+            modelVersion: "test-asr",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+    }
+
+    /// Full 30 s-shard chunk coverage of the THEMOVE episode, ending at
+    /// 3575.88 s. Deliberately built from many rows so `MAX(endTime)`
+    /// has to do real work.
+    private func themoveFastChunks(assetId: String) -> [TranscriptChunk] {
+        var chunks: [TranscriptChunk] = []
+        var start = 0.0
+        var index = 0
+        while start < 3540 {
+            chunks.append(makeChunk(assetId: assetId, index: index, start: start, end: start + 30))
+            start += 30
+            index += 1
+        }
+        chunks.append(makeChunk(assetId: assetId, index: index, start: 3540, end: 3575.88))
+        return chunks
+    }
+
+    // MARK: - Monotonic advance
+
+    @Test("advance writes through from a NULL watermark")
+    func advanceFromNull() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-null"))
+        try await store.advanceFastTranscriptCoverage(id: "a-null", endTime: 600)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-null") == 600)
+    }
+
+    /// THE ROOT-CAUSE REGRESSION. `TranscriptEngineService.prioritizeShards`
+    /// returns `shard0 + hotPath + coldAhead + behindWithoutShard0`, with the
+    /// behind-shards sorted DESCENDING — so a pass that reaches the end of
+    /// the episode finishes on the EARLIEST non-zero shard, whose end is
+    /// 60.0 s at the production 30 s shard duration. Under the old blind
+    /// `SET … = ?` that clobbered the true reach. Replayed here as the
+    /// exact write sequence.
+    @Test("advance rejects the rewind produced by playhead-relative shard order")
+    func advanceRejectsRewindFromLaterShardOrder() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-order"))
+
+        // Ahead-of-playhead shards climb to the end of the episode…
+        for end in stride(from: 1230.0, through: 3570.0, by: 30.0) {
+            try await store.advanceFastTranscriptCoverage(id: "a-order", endTime: end)
+        }
+        try await store.advanceFastTranscriptCoverage(id: "a-order", endTime: 3575.88)
+        // …then the behind-playhead tail runs, descending: 1200, 1170, …,
+        // 90, 60. Followed by the shard-0 backfill at 30.
+        for end in stride(from: 1200.0, through: 60.0, by: -30.0) {
+            try await store.advanceFastTranscriptCoverage(id: "a-order", endTime: end)
+        }
+        try await store.advanceFastTranscriptCoverage(id: "a-order", endTime: 30)
+
+        let watermark = try await store.fetchFastTranscriptCoverageEndTime(id: "a-order")
+        #expect(watermark == 3575.88, "watermark rewound to a behind-playhead shard end; got \(watermark ?? -1)")
+        #expect(watermark != 60, "a full fast transcript must never report 60 s coverage")
+    }
+
+    /// The returned flag is what makes "no-op" observable — a blind
+    /// setter would report a write for all three of these calls.
+    @Test("advance reports whether the watermark actually moved")
+    func advanceReportsWhetherItMoved() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-eq"))
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 900) == true)
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 900) == false,
+                "an equal value is not an advance")
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-eq", endTime: 60) == false,
+                "a lower value is not an advance")
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-eq") == 900)
+    }
+
+    /// Under a monotonic contract a poisoned high value is PERMANENT —
+    /// the old blind setter self-healed on the next shard write, this one
+    /// cannot. So non-finite and negative inputs must be rejected at the
+    /// door rather than persisted.
+    @Test("advance rejects non-finite and negative endTimes")
+    func advanceRejectsNonFiniteAndNegative() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-poison", fastTranscriptCoverageEndTime: 600))
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-poison", endTime: .infinity) == false)
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-poison", endTime: .nan) == false)
+        #expect(try await store.advanceFastTranscriptCoverage(id: "a-poison", endTime: -1) == false)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-poison") == 600,
+                "a poisoned watermark would be unrepairable — nothing may lower it")
+    }
+
+    @Test("advance never touches a different asset's row")
+    func advanceIsRowScoped() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-one"))
+        try await store.insertAsset(makeAsset(id: "a-two", fastTranscriptCoverageEndTime: 42))
+        try await store.advanceFastTranscriptCoverage(id: "a-one", endTime: 900)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-two") == 42)
+    }
+
+    // MARK: - The sanctioned rewind
+
+    /// The crash-repair path (`analysisState` late-stage but 0 chunks)
+    /// still has to be able to rewind — and must use the explicitly-named
+    /// method, because the monotonic advance would silently no-op.
+    @Test("reset rewinds to zero where advance(0) cannot")
+    func resetRewindsToZero() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-reset", fastTranscriptCoverageEndTime: 1800))
+
+        try await store.advanceFastTranscriptCoverage(id: "a-reset", endTime: 0)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-reset") == 1800,
+                "advance must not be usable as a rewind")
+
+        try await store.resetFastTranscriptCoverage(id: "a-reset")
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-reset") == 0)
+    }
+
+    // MARK: - Per-asset reconciliation
+
+    @Test("reconcile raises a stale watermark to canonical chunk coverage")
+    func reconcileRaisesStaleWatermark() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-stale", fastTranscriptCoverageEndTime: 60))
+        try await store.insertTranscriptChunks(themoveFastChunks(assetId: "a-stale"))
+
+        let reconciled = try await store.reconcileFastTranscriptCoverage(id: "a-stale")
+        #expect(reconciled == 3575.88)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "a-stale") == 3575.88)
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: reconciled,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ))
+    }
+
+    @Test("reconcile never lowers a watermark that runs ahead of the chunks")
+    func reconcileNeverLowers() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-ahead", fastTranscriptCoverageEndTime: 900))
+        // A silent shard advanced coverage to 900 with chunks only to 600.
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "a-ahead", index: 0, start: 0, end: 300),
+            makeChunk(assetId: "a-ahead", index: 1, start: 300, end: 600)
+        ])
+        #expect(try await store.reconcileFastTranscriptCoverage(id: "a-ahead") == 900)
+    }
+
+    /// MIXED FAST/FINAL. Final-pass chunks re-transcribe AdWindow ranges
+    /// and carry their own watermark column; they must not move the FAST
+    /// watermark, in either direction.
+    @Test("reconcile reads only pass='fast' chunks — final-pass chunks are ignored")
+    func reconcileIgnoresFinalPassChunks() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-mixed", fastTranscriptCoverageEndTime: 60))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "a-mixed", index: 0, start: 0, end: 300),
+            makeChunk(assetId: "a-mixed", index: 1, start: 300, end: 600),
+            // Final-pass re-transcription reaching much further.
+            makeChunk(assetId: "a-mixed", index: 2, start: 2400, end: 2700, pass: "final"),
+            makeChunk(assetId: "a-mixed", index: 3, start: 3000, end: 3300, pass: "final")
+        ])
+
+        #expect(try await store.reconcileFastTranscriptCoverage(id: "a-mixed") == 600)
+
+        // And the read model still separates the two passes correctly.
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-mixed"])
+        let summary = try #require(summaries["a-mixed"])
+        #expect(summary.fastTranscriptCoverageEndSec == 600)
+        #expect(summary.fastTranscriptCoverageEndSource == .fastTranscriptChunks)
+        #expect(summary.finalPassCoverageEndSec == 3300)
+        #expect(summary.finalPassCoverageEndSource == .finalPassChunks)
+    }
+
+    @Test("reconcile skips degenerate and inverted chunk rows")
+    func reconcileSkipsDegenerateRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-degen", fastTranscriptCoverageEndTime: 60))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "a-degen", index: 0, start: 0, end: 300),
+            // Zero-width and inverted rows must not inflate the watermark.
+            makeChunk(assetId: "a-degen", index: 1, start: 9000, end: 9000),
+            makeChunk(assetId: "a-degen", index: 2, start: 9999, end: 5000)
+        ])
+        #expect(try await store.reconcileFastTranscriptCoverage(id: "a-degen") == 300)
+    }
+
+    /// Both "row has no chunks to raise from" and "no row at all" are
+    /// handled; the second is asserted against the row's real absence
+    /// rather than against the reconcile return alone, because `nil` is
+    /// documented to mean "no value" in both cases.
+    @Test("reconcile is a no-op without fast chunks and tolerates an unknown asset")
+    func reconcileNoOpAndUnknownAsset() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-empty", fastTranscriptCoverageEndTime: 120))
+        #expect(try await store.reconcileFastTranscriptCoverage(id: "a-empty") == 120)
+
+        // A row that exists but was never written keeps its NULL.
+        try await store.insertAsset(makeAsset(id: "a-nullwm", fastTranscriptCoverageEndTime: nil))
+        #expect(try await store.reconcileFastTranscriptCoverage(id: "a-nullwm") == nil)
+        #expect(try await store.fetchAsset(id: "a-nullwm") != nil)
+
+        // An absent row must not be created as a side effect.
+        #expect(try await store.reconcileFastTranscriptCoverage(id: "a-missing") == nil)
+        #expect(try await store.fetchAsset(id: "a-missing") == nil)
+    }
+
+    // MARK: - Whole-table reconciliation (the migration body)
+
+    @Test("bulk reconcile repairs stale rows, leaves healthy rows alone, and is idempotent")
+    func bulkReconcileRepairsOnlyStaleRows() async throws {
+        let store = try await makeTestStore()
+        // Stale: chunks to 3575.88 behind a 60 s watermark.
+        try await store.insertAsset(makeAsset(id: "b-stale", fastTranscriptCoverageEndTime: 60))
+        try await store.insertTranscriptChunks(themoveFastChunks(assetId: "b-stale"))
+        // Stale with a NULL watermark (never written).
+        try await store.insertAsset(makeAsset(id: "b-null"))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "b-null", index: 0, start: 0, end: 1200)
+        ])
+        // Healthy: watermark already at the chunk reach.
+        try await store.insertAsset(makeAsset(id: "b-ok", fastTranscriptCoverageEndTime: 600))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "b-ok", index: 0, start: 0, end: 600)
+        ])
+        // Ahead of its chunks — must not be pulled back down.
+        try await store.insertAsset(makeAsset(id: "b-ahead", fastTranscriptCoverageEndTime: 1500))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "b-ahead", index: 0, start: 0, end: 600)
+        ])
+        // No chunks at all.
+        try await store.insertAsset(makeAsset(id: "b-bare", fastTranscriptCoverageEndTime: 90))
+
+        let repaired = try await store.reconcileAllFastTranscriptCoverageWatermarks()
+        #expect(repaired == 2)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "b-stale") == 3575.88)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "b-null") == 1200)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "b-ok") == 600)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "b-ahead") == 1500)
+        #expect(try await store.fetchFastTranscriptCoverageEndTime(id: "b-bare") == 90)
+
+        // Idempotent: a second sweep finds nothing left to do.
+        #expect(try await store.reconcileAllFastTranscriptCoverageWatermarks() == 0)
+    }
+}
+
+@Suite("AnalysisStore — V37 stale-watermark reconciliation migration (playhead-0sro)")
+struct FastTranscriptCoverageV37MigrationTests {
+
+    private func dbURL(_ dir: URL) -> URL {
+        dir.appendingPathComponent("analysis.sqlite")
+    }
+
+    /// Rewinds `_meta.schema_version` on the file at `dir` so a reopen
+    /// re-runs the V37 step. Mirrors the seeding style of the other
+    /// on-disk upgrade-path suites.
+    private func rewindSchemaVersion(in dir: URL, to version: Int) throws {
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL(dir).path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        defer { sqlite3_close_v2(db) }
+        let sql = "UPDATE _meta SET value = '\(version)' WHERE key = 'schema_version';"
+        #expect(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK)
+    }
+
+    private func makeAsset(id: String, watermark: Double?) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///\(id).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: watermark,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "complete",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 3578.10
+        )
+    }
+
+    private func makeChunk(assetId: String, index: Int, start: Double, end: Double) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "\(assetId)-c\(index)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "\(assetId)-fp\(index)",
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "segment \(index)",
+            normalizedText: "segment \(index)",
+            pass: "fast",
+            modelVersion: "test-asr",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+    }
+
+    @Test("fresh DB migrate() lands at v37")
+    func freshDbReachesV37() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(AnalysisStore.currentSchemaVersion == 37)
+    }
+
+    /// THE MIGRATION EVIDENCE. An asset already on disk — written by a
+    /// pre-0sro build, so its watermark is frozen at the 60 s shard
+    /// boundary while its fast transcript covers the whole episode — must
+    /// be repaired by simply reopening the store. Nothing re-transcribes
+    /// a finished episode, so without this the row stays broken forever.
+    @Test("v36 DB carrying a stale 60 s watermark is reconciled on reopen")
+    func staleWatermarkRepairedByV37Upgrade() async throws {
+        let (bootstrap, dir) = try await makeTestStoreWithDirectory()
+
+        // Seed the THEMOVE shape: full fast transcript to 3575.88 s of a
+        // 3578.10 s episode, behind a watermark stuck at 60 s.
+        try await bootstrap.insertAsset(makeAsset(id: "m-stale", watermark: 60))
+        var chunks: [TranscriptChunk] = []
+        var start = 0.0
+        var index = 0
+        while start < 3540 {
+            chunks.append(makeChunk(assetId: "m-stale", index: index, start: start, end: start + 30))
+            start += 30
+            index += 1
+        }
+        chunks.append(makeChunk(assetId: "m-stale", index: index, start: 3540, end: 3575.88))
+        try await bootstrap.insertTranscriptChunks(chunks)
+
+        // A second asset whose watermark is already honest — the migration
+        // must not disturb it.
+        try await bootstrap.insertAsset(makeAsset(id: "m-ok", watermark: 600))
+        try await bootstrap.insertTranscriptChunks([
+            makeChunk(assetId: "m-ok", index: 0, start: 0, end: 600)
+        ])
+
+        // The pre-migration state is exactly the bead's defect.
+        #expect(try await bootstrap.fetchFastTranscriptCoverageEndTime(id: "m-stale") == 60)
+        #expect(!FastTranscriptCoverageInvariant.holds(
+            watermarkSec: 60,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ))
+
+        try rewindSchemaVersion(in: dir, to: 36)
+
+        // Reopen: the v36 → v37 step repairs persisted state with no
+        // transcription, no playback, and no user action.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let upgraded = try AnalysisStore(directory: dir)
+        try await upgraded.migrate()
+
+        #expect(try await upgraded.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        let repaired = try await upgraded.fetchFastTranscriptCoverageEndTime(id: "m-stale")
+        #expect(repaired == 3575.88, "migration left the stale watermark at \(repaired ?? -1)")
+        #expect(FastTranscriptCoverageInvariant.holds(
+            watermarkSec: repaired,
+            chunkMaxEndSec: 3575.88,
+            episodeDurationSec: 3578.10
+        ))
+        #expect(try await upgraded.fetchFastTranscriptCoverageEndTime(id: "m-ok") == 600)
+    }
+
+    /// The migration is VERSION-GATED — a one-time repair, not a
+    /// whole-table scan on every cold start. This pins that, and by doing
+    /// so makes the `rewindSchemaVersion(in:to: 36)` in the upgrade test
+    /// above load-bearing rather than decorative. Ongoing correctness
+    /// comes from the monotonic advance plus the per-asset reconciles at
+    /// both pipeline entry points and at finalization, not from re-running
+    /// this sweep forever.
+    @Test("a DB already at v37 does not re-run the whole-table sweep on reopen")
+    func v37MigrationDoesNotRescanAtHead() async throws {
+        let (store, dir) = try await makeTestStoreWithDirectory()
+        try await store.insertAsset(makeAsset(id: "m-head", watermark: 60))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "m-head", index: 0, start: 0, end: 1800)
+        ])
+        // Deliberately NOT rewinding the schema version: the DB is at head.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+        #expect(try await reopened.fetchFastTranscriptCoverageEndTime(id: "m-head") == 60,
+                "the v37 step must be gated on schema version; a head DB must not pay for the sweep again")
+
+        // …and the per-asset reconcile is what repairs it from here on.
+        #expect(try await reopened.reconcileFastTranscriptCoverage(id: "m-head") == 1800)
+    }
+
+    @Test("V37 migration is idempotent across reopens")
+    func v37MigrationIsIdempotent() async throws {
+        let (store, dir) = try await makeTestStoreWithDirectory()
+        try await store.insertAsset(makeAsset(id: "m-idem", watermark: 60))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: "m-idem", index: 0, start: 0, end: 1800)
+        ])
+
+        try rewindSchemaVersion(in: dir, to: 36)
+        AnalysisStore.resetMigratedPathsForTesting()
+        let first = try AnalysisStore(directory: dir)
+        try await first.migrate()
+        let v1 = try await first.schemaVersion()
+        #expect(try await first.fetchFastTranscriptCoverageEndTime(id: "m-idem") == 1800)
+
+        // `migrate()` is `ensureOpen()`, which short-circuits on an
+        // already-open handle — so re-running it on `first` would prove
+        // nothing. Construct a SECOND store over the same file (with the
+        // process-global migration cache cleared) so the ladder genuinely
+        // re-enters against a v37 database.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let second = try AnalysisStore(directory: dir)
+        try await second.migrate()
+        let v2 = try await second.schemaVersion()
+
+        #expect(v1 == AnalysisStore.currentSchemaVersion)
+        #expect(v2 == AnalysisStore.currentSchemaVersion)
+        #expect(try await second.fetchFastTranscriptCoverageEndTime(id: "m-idem") == 1800)
     }
 }

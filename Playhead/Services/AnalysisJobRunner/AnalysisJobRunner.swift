@@ -185,6 +185,21 @@ actor AnalysisJobRunner {
         let assetId = request.analysisAssetId
         var shouldAttemptSharedImport = true
 
+        // playhead-0sro: RESUME reconcile for Pipeline B. The scheduler
+        // path never goes through `AnalysisCoordinator.resolveSession`, so
+        // it needs its own entry-point reconcile — every stage below (the
+        // M1 shard gate, the revalidation short-circuit's outcome, the
+        // returned `transcriptCoverageSec`) reads the raw watermark, and
+        // this run may be resuming an asset a previous run left describing
+        // less coverage than its persisted chunks prove. Raises only; a
+        // no-op when the two already agree. Best-effort — a failed repair
+        // must not fail the run.
+        do {
+            try await store.reconcileFastTranscriptCoverage(id: assetId)
+        } catch {
+            logger.warning("Coverage reconcile at job start failed for asset \(assetId): \(error.localizedDescription)")
+        }
+
         // playhead-zx6i — B4 fast revalidation short-circuit. Runs
         // BEFORE the preemption-coordinator registration / decode /
         // feature-extraction / transcription stages because the

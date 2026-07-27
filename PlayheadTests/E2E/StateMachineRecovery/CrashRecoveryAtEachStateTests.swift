@@ -365,7 +365,7 @@ struct CrashRecoveryAtEachStateTests {
             )
         }
         try await store.insertTranscriptChunks(chunks)
-        try await store.updateFastTranscriptCoverage(id: assetId, endTime: 600)
+        try await store.advanceFastTranscriptCoverage(id: assetId, endTime: 600)
 
         let chunksBefore = try await store.fetchTranscriptChunks(assetId: assetId).count
 
@@ -418,7 +418,7 @@ struct CrashRecoveryAtEachStateTests {
             )
         }
         try await store.insertTranscriptChunks(chunks)
-        try await store.updateFastTranscriptCoverage(id: assetId, endTime: 600)
+        try await store.advanceFastTranscriptCoverage(id: assetId, endTime: 600)
 
         let chunksBefore = try await store.fetchTranscriptChunks(assetId: assetId).count
 
