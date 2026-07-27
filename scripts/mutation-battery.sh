@@ -71,6 +71,13 @@
 #
 # Exits non-zero if any mutation survives, if the tree is dirty at start, if a
 # batch fails to build, or if restoration is not byte-exact.
+#
+# LAST GREEN END-TO-END RUN
+#   2026-07-27 — 26/26 KILLED, 0 survivors, 0 errors, exit 0.
+#   10 builds (1 baseline + 9 batches), 17m21s wall clock.
+# Recorded so a later reader can tell "never run since it was written" apart
+# from "run and passing". If you change the source under it, re-run and update
+# this — a stale line here is worse than no line.
 
 set -uo pipefail
 
