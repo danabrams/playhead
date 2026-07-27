@@ -448,8 +448,18 @@ struct SkipOrchestratorThresholdControlTests {
     /// `nil` one was covered. An EMPTY show id is not a show either — a row
     /// keyed on `""` is per-show state that no episode can ever address, and
     /// every unattributed correction would pile into that one shared bucket.
-    /// Mutation-verified: dropping `!podcastId.isEmpty` left the focused set
-    /// green before the second gesture below existed.
+    ///
+    /// What the second gesture below rails is the CONTRACT, not either clause
+    /// on its own, and the distinction matters to anyone tempted to simplify
+    /// one away. The refusal is written twice — `recordThresholdControlSignal`
+    /// declines to call, and `PerShowThresholdControllerStore.record` throws on
+    /// an empty id — and that throw is swallowed by the seam's own `catch`, so
+    /// removing either half ALONE leaves nothing observable for any test to
+    /// catch. Observed: the store-half-alone mutation SURVIVED the focused set
+    /// (that is why battery entry N06 now removes both). The
+    /// orchestrator-half-alone case is equivalent by the same swallowed-throw
+    /// argument rather than by a separate run. Both halves are load-bearing
+    /// only together, which is the shape this assertion is mutation-verified in.
     @Test("An anonymous revert (no podcastId, or an empty one) records no controller sample")
     func anonymousRevertRecordsNoControllerSample() async throws {
         let store = try await makeTestStore()

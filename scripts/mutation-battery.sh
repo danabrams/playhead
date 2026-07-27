@@ -41,6 +41,14 @@
 #      mutations that can redden the same test. When in doubt, give it a batch
 #      of its own — correctness first, build count second.
 #
+# BASELINE
+# --------
+# Every run starts with one UNMUTATED build of the focused suites and refuses to
+# continue if anything is already red — otherwise a pre-existing failure would
+# be miscredited as a kill for every mutation that names that test. That costs
+# one build; `PLAYHEAD_MB_SKIP_BASELINE=1` skips it when you have just run the
+# suites green by hand.
+#
 # BATCHING
 # --------
 # Mutations with disjoint expected-failure sets are applied together and told
@@ -66,7 +74,12 @@
 
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || {
+  echo "mutation-battery: cannot reach the repo root — refusing to run, because" >&2
+  echo "restore_sources would then 'git checkout --' in whatever repo the caller" >&2
+  echo "happens to be sitting in." >&2
+  exit 2
+}
 REPO_ROOT="$(pwd)"
 
 : "${DEVELOPER_DIR:=/Applications/Xcode-beta.app/Contents/Developer}"
@@ -83,16 +96,31 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorRevertLifecycleRaceTests
 )
 
-WORK="$(mktemp -d -t mutation-battery)"
+# Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
+# already sweeps at 3 days, so kept logs are reaped by the existing weekly cron
+# instead of accumulating on a box with documented disk pressure.
+WORK="$(mktemp -d /private/tmp/playhead-mutation-battery.XXXXXX)"
 KEEP_WORK=0
-cleanup_work() {
+# Armed only once `require_clean_tree` has proved every mutable file is
+# pristine; before that a `git checkout --` would destroy the caller's work.
+TREE_OWNED=0
+
+on_exit() {
+  if [ "$TREE_OWNED" -eq 1 ]; then
+    # INT/TERM land here too. Without this, Ctrl-C during a 2-minute
+    # xcodebuild leaves an injected defect — e.g. `feedbackAssetMatches`
+    # returning true, which neuters the episode-ownership check in all four
+    # explicit-feedback transactions — sitting in the working tree.
+    restore_sources
+  fi
   if [ "$KEEP_WORK" -eq 1 ]; then
     echo "mutation-battery: per-batch xcodebuild logs kept in $WORK" >&2
   else
     rm -rf "$WORK"
   fi
 }
-trap cleanup_work EXIT
+trap on_exit EXIT
+trap 'echo; echo "mutation-battery: interrupted — restoring sources" >&2; exit 130' INT TERM
 
 # ---------------------------------------------------------------------------
 # The battery.  NAME|BATCH|FILE_KEY|expected display names (';'-separated)
@@ -684,10 +712,19 @@ rec_expect() { printf '%s' "$1" | cut -d'|' -f4-; }
 # ---------------------------------------------------------------------------
 require_clean_tree() {
   if [ -n "$(git status --porcelain -- "${MUTABLE_FILES[@]}")" ]; then
-    cat >&2 <<'MSG'
+    cat >&2 <<MSG
 mutation-battery: the tree has uncommitted changes to a file this script
-mutates. It restores with `git checkout --`, which would DESTROY that work.
-Commit or stash first.
+mutates. It restores with \`git checkout --\`, which would DESTROY that work.
+
+$(git status --porcelain -- "${MUTABLE_FILES[@]}")
+
+If a previous battery run was INTERRUPTED, that diff is its injected mutation,
+not your work — check with \`git diff -- ${MUTABLE_FILES[*]}\` and discard it
+with \`git checkout -- ${MUTABLE_FILES[*]}\`. Do NOT commit or stash it: a
+committed mutation is a fabricated bug on the branch, and a stashed one comes
+back later.
+
+Otherwise commit your work first.
 MSG
     exit 2
   fi
@@ -705,6 +742,23 @@ restore_sources() {
 # Swift Testing prints `✘ Test "<display name>" failed after …` through
 # xcodebuild.  Function-name form (no display name) is handled too so a future
 # undecorated @Test is not silently invisible here.
+# `scripts/fast-gate.sh` retries once on a wedged simulator, and BOTH attempts
+# land in the same log. Attempt 1's casualties (tests that were mid-flight when
+# the sim died) would otherwise union with attempt 2's results and credit a
+# mutation as KILLED off an infrastructure artefact. Cut everything before the
+# retry banner so only the last attempt is read.
+last_attempt() {
+  python3 -c '
+import sys
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").readlines()
+cut = 0
+for i, line in enumerate(lines):
+    if "fast-gate: wedged simulator" in line:
+        cut = i + 1
+sys.stdout.writelines(lines[cut:])
+' "$1"
+}
+
 extract_failures() {
   python3 -c '
 import re, sys
@@ -760,6 +814,7 @@ if [ "$LIST_ONLY" -eq 1 ]; then
 fi
 
 require_clean_tree
+TREE_OWNED=1
 
 HASHES_BEFORE=""
 for f in "${MUTABLE_FILES[@]}"; do
@@ -801,6 +856,45 @@ START_TS="$(date +%s)"
 echo "mutation-battery: DEVELOPER_DIR=$DEVELOPER_DIR"
 echo "mutation-battery: ${#SELECTED[@]} mutation(s) in ${#BATCH_IDS[@]} batch(es)"
 echo
+
+# ---------------------------------------------------------------------------
+# Baseline. KILLED is decided by "the expected test appears in this batch's
+# failure list", so a test that is ALREADY red — an unrelated regression, or a
+# load flake expiring one of the polling budgets — would credit every mutation
+# that names it. `listenRevertSurvivesEpisodeReplacement` alone is the sole
+# expectation of five mutations and half of two more, so one such flake can
+# print "All mutations killed" and exit 0. That is the exact false
+# certification this tool exists to prevent, and it fails in the direction
+# that reads as success. One unmutated run closes it.
+#
+# Set PLAYHEAD_MB_SKIP_BASELINE=1 ONLY when you have just run the focused
+# suites green yourself; it trades a build for the guarantee above.
+# ---------------------------------------------------------------------------
+if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
+  echo "=== baseline: focused suites on UNMUTATED sources ==="
+  BASE_LOG="$WORK/baseline.log"
+  run_focused "$BASE_LOG"
+  BASE_RC=$?
+  BUILD_COUNT=$((BUILD_COUNT + 1))
+  last_attempt "$BASE_LOG" >"$BASE_LOG.last"
+  if ! grep -q "Test run with" "$BASE_LOG.last"; then
+    echo "mutation-battery: the baseline did not run tests (rc=$BASE_RC)" >&2
+    grep -m 20 -E "error:|BUILD FAILED|Killed: 9" "$BASE_LOG" >&2 || true
+    KEEP_WORK=1
+    exit 2
+  fi
+  extract_failures "$BASE_LOG.last" >"$WORK/baseline-failures.txt"
+  if [ -s "$WORK/baseline-failures.txt" ]; then
+    echo "mutation-battery: the focused suites are RED before any mutation." >&2
+    sed 's/^/    ✘ /' "$WORK/baseline-failures.txt" >&2
+    echo "Every mutation naming one of those tests would be credited KILLED for" >&2
+    echo "a reason that has nothing to do with the mutation. Fix the tree first." >&2
+    KEEP_WORK=1
+    exit 2
+  fi
+  echo "  baseline green"
+  echo
+fi
 
 for b in "${BATCH_IDS[@]}"; do
   MEMBERS=()
@@ -847,7 +941,8 @@ for b in "${BATCH_IDS[@]}"; do
   RC=$?
   BUILD_COUNT=$((BUILD_COUNT + 1))
 
-  if ! grep -q "Test run with" "$LOG"; then
+  last_attempt "$LOG" >"$LOG.last"
+  if ! grep -q "Test run with" "$LOG.last"; then
     echo "mutation-battery: batch $b did not run tests (build failure?), rc=$RC" >&2
     grep -m 20 -E "error:|BUILD FAILED|Killed: 9" "$LOG" >&2 || true
     restore_sources
@@ -859,7 +954,7 @@ for b in "${BATCH_IDS[@]}"; do
   fi
 
   FAILED_LIST="$WORK/failed-$b.txt"
-  extract_failures "$LOG" >"$FAILED_LIST"
+  extract_failures "$LOG.last" >"$FAILED_LIST"
   echo "  observed failures:"
   if [ -s "$FAILED_LIST" ]; then
     sed 's/^/    ✘ /' "$FAILED_LIST"
