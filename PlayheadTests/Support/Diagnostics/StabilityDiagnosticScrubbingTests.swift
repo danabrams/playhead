@@ -236,16 +236,34 @@ struct StabilityDiagnosticScrubbingTests {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/Support/Diagnostics/MetricKitDiagnosticProjector.swift"
         )
-        // Strip BOTH comments and string-literal CONTENTS, then look
-        // for the identifiers. The file documents these names in prose,
-        // which is the point — the canary must see code, not commentary.
-        let code = SwiftSourceInspector.strippingCommentsAndStrings(source)
+        // Strip comments only — string literals MUST survive. MetricKit
+        // keys are read via `metadata["…"]` subscripts, so the leaky
+        // names would appear as string literals, not as identifiers.
+        //
+        // This test previously used `strippingCommentsAndStrings`, which
+        // blanks literal contents and made it structurally incapable of
+        // failing. A mutation that made the projector read
+        // `exceptionReason?["composedMessage"]` was caught by five other
+        // tests and sailed past this one — which is how the hole was
+        // found. Do not "tighten" this back to the strings-stripped
+        // variant.
+        //
+        // The file documents these names in prose (deliberately), which
+        // is why comments still have to go.
+        let code = SwiftSourceInspector.strippingComments(source)
         for leaky in ["composedMessage", "formatString", "virtualMemoryRegionInfo"] {
             #expect(
                 !code.contains(leaky),
                 "projector code references the leaky MetricKit key '\(leaky)'"
             )
         }
+        // Vacuity guard: the same read against a name the projector DOES
+        // use must find it, proving the source text really is being
+        // searched.
+        #expect(
+            code.contains("exceptionName"),
+            "canary is vacuous — the projector source was not actually loaded"
+        )
     }
 
     // MARK: - Helpers
