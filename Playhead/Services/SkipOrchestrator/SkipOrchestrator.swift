@@ -2720,10 +2720,6 @@ actor SkipOrchestrator {
 
     // MARK: - Correction persistence helper (playhead-zskc)
 
-    /// Fire-and-forget a `.exactTimeSpan` CorrectionEvent through the
-    /// injected correction store. Centralises the three manual-veto call
-    /// sites (`recordListenRevert`, `revertByTimeRange`, `revertWindow`) so
-    /// actor-isolated capture ritual and nil-store guard live in one place.
     /// playhead-rfu-sad: episode-scoped bookkeeping for the tap-then-flip
     /// race guard. Accepted producer IDs remain terminal until the lifecycle
     /// is replaced or ended.
@@ -2731,6 +2727,15 @@ actor SkipOrchestrator {
         recentlyAcceptedSuggestIds.insert(id)
     }
 
+    /// Fire-and-forget a `.exactTimeSpan` CorrectionEvent through the
+    /// injected correction store. Centralises the two manual-veto call sites
+    /// (`recordListenRevert`, `revertByTimeRange`) so the actor-isolated
+    /// capture ritual and the nil-store guard live in one place.
+    ///
+    /// `revertWindow` deliberately does NOT route through here: it needs the
+    /// receipt committed ATOMICALLY with the row retirement, so it mints the
+    /// event via `makeManualCorrectionVetoEvent` and hands it to
+    /// `store.persistRevertedAdWindow`.
     private func persistManualCorrectionVeto(
         startTime: Double,
         endTime: Double,
@@ -3130,8 +3135,9 @@ actor SkipOrchestrator {
     ///     `decisionState` to `.reverted` so a relaunch/replay never
     ///     resurfaces the banner the user explicitly denied. No trust /
     ///     threshold signal is fired here — this seam is capture-only; the
-    ///     runtime-calibration surfaces stay owned by the explicit
-    ///     revert paths (`revertByTimeRange` / `revertWindow`).
+    ///     runtime-calibration surfaces stay owned by the paths that veto an
+    ///     auto-skip the algorithm actually committed to
+    ///     (`revertByTimeRange` / `revertWindow` / `denyAutoSkippedBanner`).
     @discardableResult
     func declineSuggestedSkip(
         windowId: String,
