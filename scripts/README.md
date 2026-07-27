@@ -33,6 +33,31 @@ The script keeps its archive and upload metadata under `build/testflight-*`
 and removes the temporary worktree automatically unless `--keep-worktree` or
 `PLAYHEAD_TESTFLIGHT_KEEP_WORKTREE=1` is used.
 
+## `render-app-icon.py`
+
+Regenerates the app icon (playhead-4hv) from the geometry constants at the
+top of the script — an Ink field with a single Copper playhead line at 1/3
+width. Requires only Python 3 and Pillow; the box has no SVG rasterizer, so
+`design/icon/playhead-icon.svg` is *emitted* from the same constants rather
+than being the thing that gets rasterized. That keeps the vector source of
+record from drifting away from the shipped PNG.
+
+```sh
+# Rewrite the asset catalog icon, the SVG, the per-size renders, the sheet
+python3 scripts/render-app-icon.py
+
+# Fail if the committed bytes no longer match the source geometry
+python3 scripts/render-app-icon.py --check
+
+# Print the per-size geometry + measured-pixel tables
+python3 scripts/render-app-icon.py --report
+```
+
+Output is byte-deterministic (the ICC header's wall-clock timestamp is
+zeroed), so `--check` is a real guard rather than a coin flip. Editing the
+PNGs by hand will be silently reverted by the next run — change the
+constants instead.
+
 ## `download-fixtures.sh`
 
 Verifies every fixture under `PlayheadTests/Fixtures/Corpus/Media/` against
