@@ -69,10 +69,65 @@ enum CausalSource: String, Sendable, Codable, CaseIterable, Equatable {
 
 // MARK: - CorrectionTargetRefs
 
+/// Lossless boundaries owned by an explicit banner-feedback receipt.
+///
+/// `CorrectionScope.exactTimeSpan` deliberately keeps its legacy
+/// millisecond text representation because generic correction dedupe absorbs
+/// small detector jitter. Banner transactions need a different invariant:
+/// the persisted receipt must identify the exact material the user answered.
+/// Storing the IEEE-754 bit patterns here preserves that identity without
+/// changing the public/generic scope format.
+struct ExactFeedbackSpan: Sendable, Codable, Equatable {
+    let startTimeBitPattern: UInt64
+    let endTimeBitPattern: UInt64
+
+    init(startTime: Double, endTime: Double) {
+        startTimeBitPattern = startTime.bitPattern
+        endTimeBitPattern = endTime.bitPattern
+    }
+
+    var startTime: Double {
+        Double(bitPattern: startTimeBitPattern)
+    }
+
+    var endTime: Double {
+        Double(bitPattern: endTimeBitPattern)
+    }
+
+    func matches(startTime: Double, endTime: Double) -> Bool {
+        startTimeBitPattern == startTime.bitPattern
+            && endTimeBitPattern == endTime.bitPattern
+    }
+}
+
 /// Optional references to specific evidence items involved in the corrected decision.
 ///
 /// JSON-encoded for SQLite storage in the `targetRefsJSON` column.
 struct CorrectionTargetRefs: Sendable, Codable, Equatable {
+    /// Ad-window identity owned by an on-device feedback receipt.
+    ///
+    /// Diagnostic exporters use this only as an internal redaction join key;
+    /// explicit banner receipts and this identifier never leave the device.
+    var adWindowId: String?
+    /// Every AdWindow row whose response-derived state was produced by the
+    /// same explicit feedback transaction.
+    ///
+    /// Suggest-Yes retires the original producer row and inserts a promoted
+    /// applied row. Export privacy must join against both identities; keeping
+    /// the legacy singular field above preserves migration compatibility for
+    /// already-persisted receipts.
+    var adWindowIds: [String]?
+    /// Response-independent producer row as it existed immediately before an
+    /// explicit banner answer. This is private on-device transaction state:
+    /// exporters consume it only to restore the detection projection and
+    /// never serialize the receipt or this payload.
+    var explicitFeedbackDetectionProjection:
+        ExplicitFeedbackDetectionProjection?
+    /// Exact displayed boundaries for an explicit feedback transaction.
+    ///
+    /// This field is private receipt state and follows the same no-egress
+    /// contract as `explicitFeedbackDetectionProjection`.
+    var exactFeedbackSpan: ExactFeedbackSpan?
     /// Atom ordinals that the correction targets.
     var atomIds: [Int]?
     /// Evidence reference identifiers (e.g. "[E0]", "[E3]").
@@ -83,6 +138,597 @@ struct CorrectionTargetRefs: Sendable, Codable, Equatable {
     var domain: String?
     /// Sponsor entity name if the error involved a specific sponsor.
     var sponsorEntity: String?
+
+    init(
+        adWindowId: String? = nil,
+        adWindowIds: [String]? = nil,
+        explicitFeedbackDetectionProjection:
+            ExplicitFeedbackDetectionProjection? = nil,
+        exactFeedbackSpan: ExactFeedbackSpan? = nil,
+        atomIds: [Int]? = nil,
+        evidenceRefs: [String]? = nil,
+        fingerprintId: String? = nil,
+        domain: String? = nil,
+        sponsorEntity: String? = nil
+    ) {
+        self.adWindowId = adWindowId
+        self.adWindowIds = adWindowIds
+        self.explicitFeedbackDetectionProjection =
+            explicitFeedbackDetectionProjection
+        self.exactFeedbackSpan = exactFeedbackSpan
+        self.atomIds = atomIds
+        self.evidenceRefs = evidenceRefs
+        self.fingerprintId = fingerprintId
+        self.domain = domain
+        self.sponsorEntity = sponsorEntity
+    }
+
+    /// Canonical exact ownership for an explicit banner receipt.
+    ///
+    /// The singular field may repeat one value from `adWindowIds` because that
+    /// is the backwards-compatible promoted-row marker used by Suggest-Yes.
+    /// Duplicate values *inside* the plural list are malformed, as are empty
+    /// identifiers or an empty union.
+    var canonicalExplicitAdWindowIDs: [String]? {
+        let plural = adWindowIds ?? []
+        guard plural.allSatisfy({ !$0.isEmpty }),
+              Set(plural).count == plural.count
+        else {
+            return nil
+        }
+        if let adWindowId, adWindowId.isEmpty {
+            return nil
+        }
+        var ids = Set(plural)
+        if let adWindowId {
+            ids.insert(adWindowId)
+        }
+        guard !ids.isEmpty else { return nil }
+        return ids.sorted()
+    }
+}
+
+/// A complete copy of one detector-produced row before a private answer
+/// mutates it. Keeping the original identity and diagnostics lets every
+/// outward projection remain byte/count/shape-equivalent to the unanswered
+/// state, including Suggest-Yes where persistence creates a promoted duplicate.
+struct ExplicitFeedbackDetectionProjection:
+    Sendable, Codable, Equatable
+{
+    let id: String
+    let analysisAssetId: String
+    let startTime: Double
+    let endTime: Double
+    let confidence: Double
+    let boundaryState: String
+    let decisionState: String
+    let detectorVersion: String
+    let advertiser: String?
+    let product: String?
+    let adDescription: String?
+    let evidenceText: String?
+    let evidenceStartTime: Double?
+    let metadataSource: String
+    let metadataConfidence: Double?
+    let metadataPromptVersion: String?
+    let wasSkipped: Bool
+    let userDismissedBanner: Bool
+    let evidenceSources: String?
+    let eligibilityGate: String?
+    let catalogStoreMatchSimilarity: Double?
+    let startEdgeAnchor: String
+    let endEdgeAnchor: String
+
+    init(_ window: AdWindow) {
+        id = window.id
+        analysisAssetId = window.analysisAssetId
+        startTime = window.startTime
+        endTime = window.endTime
+        confidence = window.confidence
+        boundaryState = window.boundaryState
+        decisionState = window.decisionState
+        detectorVersion = window.detectorVersion
+        advertiser = window.advertiser
+        product = window.product
+        adDescription = window.adDescription
+        evidenceText = window.evidenceText
+        evidenceStartTime = window.evidenceStartTime
+        metadataSource = window.metadataSource
+        metadataConfidence = window.metadataConfidence
+        metadataPromptVersion = window.metadataPromptVersion
+        wasSkipped = window.wasSkipped
+        userDismissedBanner = window.userDismissedBanner
+        evidenceSources = window.evidenceSources
+        eligibilityGate = window.eligibilityGate
+        catalogStoreMatchSimilarity =
+            window.catalogStoreMatchSimilarity
+        startEdgeAnchor = window.startEdgeAnchor
+        endEdgeAnchor = window.endEdgeAnchor
+    }
+
+    func adWindow() -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: analysisAssetId,
+            startTime: startTime,
+            endTime: endTime,
+            confidence: confidence,
+            boundaryState: boundaryState,
+            decisionState: decisionState,
+            detectorVersion: detectorVersion,
+            advertiser: advertiser,
+            product: product,
+            adDescription: adDescription,
+            evidenceText: evidenceText,
+            evidenceStartTime: evidenceStartTime,
+            metadataSource: metadataSource,
+            metadataConfidence: metadataConfidence,
+            metadataPromptVersion: metadataPromptVersion,
+            wasSkipped: wasSkipped,
+            userDismissedBanner: userDismissedBanner,
+            evidenceSources: evidenceSources,
+            eligibilityGate: eligibilityGate,
+            catalogStoreMatchSimilarity:
+                catalogStoreMatchSimilarity,
+            startEdgeAnchor: startEdgeAnchor,
+            endEdgeAnchor: endEdgeAnchor
+        )
+    }
+}
+
+/// Durable, local-only snapshot of the complete outward asset projection
+/// immediately before an asset's first explicit banner response.
+///
+/// This payload is deliberately asset-scoped rather than receipt-scoped:
+/// later private learning may create, remove, or replace unrelated rows, so
+/// reconstructing an unanswered export from the live table is not safe.
+struct ExplicitFeedbackListenRewindProjection:
+    Sendable, Codable, Equatable
+{
+    let analysisAssetId: String
+    let windowId: String
+    let podcastId: String
+    let time: Double
+    let createdAt: Double
+
+    init(_ row: AdListenRewindRow) {
+        analysisAssetId = row.analysisAssetId
+        windowId = row.windowId
+        podcastId = row.podcastId
+        time = row.time
+        createdAt = row.createdAt.timeIntervalSince1970
+    }
+
+    func row() -> AdListenRewindRow {
+        AdListenRewindRow(
+            analysisAssetId: analysisAssetId,
+            windowId: windowId,
+            podcastId: podcastId,
+            time: time,
+            createdAt: Date(timeIntervalSince1970: createdAt)
+        )
+    }
+}
+
+struct ExplicitFeedbackEgressBaselinePayload:
+    Sendable, Codable, Equatable
+{
+    enum ProjectionState: String, Sendable, Codable {
+        case captured
+        case withheld
+    }
+
+    static let currentSchemaVersion = 1
+
+    let schemaVersion: Int
+    let analysisAssetId: String
+    let projectionState: ProjectionState
+    let confirmedAdCoverageEndTime: Double?
+    let windows: [ExplicitFeedbackDetectionProjection]
+    let decodedSpans: [DecodedSpan]
+    let listenRewinds: [ExplicitFeedbackListenRewindProjection]
+
+    private init(
+        schemaVersion: Int,
+        analysisAssetId: String,
+        projectionState: ProjectionState,
+        confirmedAdCoverageEndTime: Double?,
+        windows: [ExplicitFeedbackDetectionProjection],
+        decodedSpans: [DecodedSpan],
+        listenRewinds: [ExplicitFeedbackListenRewindProjection]
+    ) {
+        self.schemaVersion = schemaVersion
+        self.analysisAssetId = analysisAssetId
+        self.projectionState = projectionState
+        self.confirmedAdCoverageEndTime =
+            confirmedAdCoverageEndTime
+        self.windows = windows
+        self.decodedSpans = decodedSpans
+        self.listenRewinds = listenRewinds
+    }
+
+    init(
+        analysisAssetId: String,
+        confirmedAdCoverageEndTime: Double?,
+        windows: [ExplicitFeedbackDetectionProjection],
+        decodedSpans: [DecodedSpan],
+        listenRewinds: [AdListenRewindRow]
+    ) {
+        schemaVersion = Self.currentSchemaVersion
+        self.analysisAssetId = analysisAssetId
+        projectionState = .captured
+        self.confirmedAdCoverageEndTime =
+            confirmedAdCoverageEndTime
+        self.windows = windows
+        self.decodedSpans = decodedSpans
+        self.listenRewinds = listenRewinds.map(
+            ExplicitFeedbackListenRewindProjection.init
+        )
+    }
+
+    static func withheld(
+        analysisAssetId: String
+    ) -> Self {
+        Self(
+            schemaVersion: currentSchemaVersion,
+            analysisAssetId: analysisAssetId,
+            projectionState: .withheld,
+            confirmedAdCoverageEndTime: nil,
+            windows: [],
+            decodedSpans: [],
+            listenRewinds: []
+        )
+    }
+}
+
+/// Central privacy projection for every outward detection-row surface.
+///
+/// Explicit receipts and baseline metadata never leave the device. Once an
+/// explicit receipt exists, the complete atomically captured pre-answer
+/// projection is the only permissible source. A missing or ambiguous baseline
+/// returns `nil`; callers must fail closed for that asset.
+enum ExplicitBannerFeedbackPrivacy {
+    /// Canonical complete public projection of a still-unanswered asset.
+    ///
+    /// Capture and no-feedback export share this path so the durable baseline
+    /// is byte/row/count equivalent to what the asset exposed immediately
+    /// before the first response.
+    static func unansweredProjection(
+        windows: [AdWindow]
+    ) -> [AdWindow]? {
+        var ids = Set<String>()
+        guard windows.allSatisfy({
+            validWindow($0)
+                && ids.insert($0.id).inserted
+        }) else {
+            return nil
+        }
+        return sorted(windows.map(detectionOnlyWindow))
+    }
+
+    /// Validates a decoded durable baseline and restores its canonical
+    /// AdWindow projection. Any malformed, cross-asset, duplicate, or
+    /// non-canonical payload fails closed.
+    static func validatedBaselineProjection(
+        _ payload: ExplicitFeedbackEgressBaselinePayload,
+        expectedAssetId: String
+    ) -> [AdWindow]? {
+        guard payload.schemaVersion
+                == ExplicitFeedbackEgressBaselinePayload
+                    .currentSchemaVersion,
+              payload.analysisAssetId == expectedAssetId,
+              payload.projectionState == .captured,
+              (
+                  payload.confirmedAdCoverageEndTime.map {
+                      $0.isFinite && $0 >= 0
+                  } ?? true
+              ),
+              !payload.windows.isEmpty
+        else {
+            return nil
+        }
+        let decoded = payload.windows.map { $0.adWindow() }
+        guard let canonical = unansweredProjection(windows: decoded),
+              canonical.allSatisfy({
+                  $0.analysisAssetId == expectedAssetId
+              }),
+              canonical.map(ExplicitFeedbackDetectionProjection.init)
+                == payload.windows
+        else {
+            return nil
+        }
+        return canonical
+    }
+
+    /// Validates and deterministically orders the decoded-span portion of an
+    /// authenticated asset-wide baseline.
+    static func canonicalDecodedSpans(
+        _ spans: [DecodedSpan],
+        expectedAssetId: String
+    ) -> [DecodedSpan]? {
+        var ids = Set<String>()
+        guard !expectedAssetId.isEmpty,
+              spans.allSatisfy({
+                  !$0.id.isEmpty
+                      && $0.assetId == expectedAssetId
+                      && $0.firstAtomOrdinal >= 0
+                      && $0.lastAtomOrdinal >= $0.firstAtomOrdinal
+                      && $0.startTime.isFinite
+                      && $0.endTime.isFinite
+                      && $0.endTime > $0.startTime
+                      && ids.insert($0.id).inserted
+              }),
+              (try? JSONEncoder().encode(spans)) != nil
+        else {
+            return nil
+        }
+        return spans.sorted {
+            if $0.startTime != $1.startTime {
+                return $0.startTime < $1.startTime
+            }
+            if $0.endTime != $1.endTime {
+                return $0.endTime < $1.endTime
+            }
+            return $0.id < $1.id
+        }
+    }
+
+    static func validatedBaselineDecodedSpans(
+        _ payload: ExplicitFeedbackEgressBaselinePayload,
+        expectedAssetId: String
+    ) -> [DecodedSpan]? {
+        guard payload.projectionState == .captured,
+              let canonical = canonicalDecodedSpans(
+                  payload.decodedSpans,
+                  expectedAssetId: expectedAssetId
+              ),
+              canonical == payload.decodedSpans
+        else {
+            return nil
+        }
+        return canonical
+    }
+
+    /// Validates rewind identity and values against the already canonical
+    /// frozen window set, then imposes a stable order independent of SQLite
+    /// row order.
+    static func canonicalListenRewinds(
+        _ rows: [AdListenRewindRow],
+        expectedAssetId: String,
+        expectedWindowIDs: Set<String>
+    ) -> [AdListenRewindRow]? {
+        guard !expectedAssetId.isEmpty,
+              !expectedWindowIDs.isEmpty || rows.isEmpty
+        else {
+            return nil
+        }
+        let projections = rows.map(
+            ExplicitFeedbackListenRewindProjection.init
+        )
+        guard projections.allSatisfy({
+            $0.analysisAssetId == expectedAssetId
+                && !$0.analysisAssetId.isEmpty
+                && !$0.windowId.isEmpty
+                && expectedWindowIDs.contains($0.windowId)
+                && !$0.podcastId.isEmpty
+                && $0.time.isFinite
+                && $0.time >= 0
+                && $0.createdAt.isFinite
+                && $0.createdAt >= 0
+                && ExplicitFeedbackListenRewindProjection($0.row())
+                    == $0
+        }) else {
+            return nil
+        }
+        return projections.sorted {
+            if $0.time != $1.time {
+                return $0.time < $1.time
+            }
+            if $0.createdAt != $1.createdAt {
+                return $0.createdAt < $1.createdAt
+            }
+            if $0.windowId != $1.windowId {
+                return $0.windowId < $1.windowId
+            }
+            if $0.podcastId != $1.podcastId {
+                return $0.podcastId < $1.podcastId
+            }
+            return $0.analysisAssetId < $1.analysisAssetId
+        }.map { $0.row() }
+    }
+
+    static func validatedBaselineListenRewinds(
+        _ payload: ExplicitFeedbackEgressBaselinePayload,
+        expectedAssetId: String,
+        expectedWindowIDs: Set<String>
+    ) -> [AdListenRewindRow]? {
+        let decoded = payload.listenRewinds.map { $0.row() }
+        guard payload.projectionState == .captured,
+              let canonical = canonicalListenRewinds(
+                  decoded,
+                  expectedAssetId: expectedAssetId,
+                  expectedWindowIDs: expectedWindowIDs
+              ),
+              canonical.map(
+                  ExplicitFeedbackListenRewindProjection.init
+              ) == payload.listenRewinds
+        else {
+            return nil
+        }
+        return canonical
+    }
+
+    static func responseIndependentProjection(
+        windows: [AdWindow],
+        corrections: [CorrectionEvent],
+        frozenBaseline: [AdWindow]? = nil
+    ) -> [AdWindow]? {
+        let explicitEvents = corrections.filter(
+            \.isPrivateExplicitFeedbackReceipt
+        )
+        if let frozenBaseline {
+            guard let expectedAssetId =
+                    frozenBaseline.first?.analysisAssetId,
+                  !expectedAssetId.isEmpty,
+                  frozenBaseline.allSatisfy({
+                      $0.analysisAssetId == expectedAssetId
+                  }),
+                  explicitEvents.allSatisfy({
+                      $0.analysisAssetId == expectedAssetId
+                  })
+            else {
+                return nil
+            }
+
+            // Baseline existence is an irreversible privacy marker. Even if
+            // receipts are later pruned or damaged, never fall back to live
+            // private-learning-contaminated rows.
+            return unansweredProjection(windows: frozenBaseline)
+        }
+
+        guard explicitEvents.isEmpty else { return nil }
+        return unansweredProjection(windows: windows)
+    }
+
+    private static func validWindow(_ window: AdWindow) -> Bool {
+        window.id.isEmpty == false
+            && window.analysisAssetId.isEmpty == false
+            && window.startTime.isFinite
+            && window.endTime.isFinite
+            && window.endTime > window.startTime
+            && window.confidence.isFinite
+            && (window.evidenceStartTime.map { $0.isFinite } ?? true)
+            && (window.metadataConfidence.map { $0.isFinite } ?? true)
+            && (window.catalogStoreMatchSimilarity.map { $0.isFinite }
+                ?? true)
+    }
+
+    private static func sorted(_ windows: [AdWindow]) -> [AdWindow] {
+        windows.sorted {
+            if $0.startTime != $1.startTime {
+                return $0.startTime < $1.startTime
+            }
+            if $0.endTime != $1.endTime {
+                return $0.endTime < $1.endTime
+            }
+            return $0.id < $1.id
+        }
+    }
+
+    /// Local playback/application fields are never detection diagnostics.
+    /// Normalizing them for every row makes a pre-answer export invariant to
+    /// the asynchronous applied-row write and gives all four answer routes the
+    /// same response-independent baseline.
+    private static func detectionOnlyWindow(_ window: AdWindow) -> AdWindow {
+        let decisionState =
+            window.decisionState == AdDecisionState.applied.rawValue
+                || window.decisionState
+                    == AdDecisionState.reverted.rawValue
+            ? AdDecisionState.confirmed.rawValue
+            : window.decisionState
+        return AdWindow(
+            id: window.id,
+            analysisAssetId: window.analysisAssetId,
+            startTime: window.startTime,
+            endTime: window.endTime,
+            confidence: window.confidence,
+            boundaryState: window.boundaryState,
+            decisionState: decisionState,
+            detectorVersion: window.detectorVersion,
+            advertiser: window.advertiser,
+            product: window.product,
+            adDescription: window.adDescription,
+            evidenceText: window.evidenceText,
+            evidenceStartTime: window.evidenceStartTime,
+            metadataSource: window.metadataSource,
+            metadataConfidence: window.metadataConfidence,
+            metadataPromptVersion: window.metadataPromptVersion,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: window.evidenceSources,
+            eligibilityGate: window.eligibilityGate,
+            catalogStoreMatchSimilarity:
+                window.catalogStoreMatchSimilarity,
+            startEdgeAnchor: window.startEdgeAnchor,
+            endEdgeAnchor: window.endEdgeAnchor
+        )
+    }
+}
+
+/// Deterministic material identity shared by banner emission and the durable
+/// store predicates. The store must be able to recompute the card token from
+/// the row it owns; an actor-only UUID cannot fence a same-ID replacement.
+enum AdWindowMaterialIdentity {
+    static func sameProducerRevision(
+        _ lhs: AdWindow,
+        _ rhs: AdWindow
+    ) -> Bool {
+        producerRevisionToken(lhs) == producerRevisionToken(rhs)
+    }
+
+    static func autoSkipToken(
+        window: AdWindow,
+        displayedStart: Double,
+        displayedEnd: Double
+    ) -> String {
+        [
+            producerRevisionToken(window),
+            encoded(displayedStart),
+            encoded(displayedEnd),
+        ].joined(separator: "|")
+    }
+
+    static func suggestionToken(_ window: AdWindow) -> String {
+        [
+            producerRevisionToken(window),
+            encoded(window.decisionState),
+            window.wasSkipped ? "1" : "0",
+            window.userDismissedBanner ? "1" : "0",
+        ].joined(separator: "|")
+    }
+
+    private static func producerRevisionToken(
+        _ window: AdWindow
+    ) -> String {
+        [
+            encoded(window.id),
+            encoded(window.analysisAssetId),
+            encoded(window.startTime),
+            encoded(window.endTime),
+            encoded(window.confidence),
+            encoded(window.boundaryState),
+            encoded(window.detectorVersion),
+            encoded(window.advertiser),
+            encoded(window.product),
+            encoded(window.adDescription),
+            encoded(window.evidenceText),
+            encoded(window.evidenceStartTime),
+            encoded(window.metadataSource),
+            encoded(window.metadataConfidence),
+            encoded(window.metadataPromptVersion),
+            encoded(window.evidenceSources),
+            encoded(window.eligibilityGate),
+            encoded(window.catalogStoreMatchSimilarity),
+            encoded(window.startEdgeAnchor),
+            encoded(window.endEdgeAnchor),
+        ].joined(separator: "|")
+    }
+
+    private static func encoded(_ value: String) -> String {
+        "\(value.utf8.count):\(value)"
+    }
+
+    private static func encoded(_ value: String?) -> String {
+        value.map(encoded) ?? "nil"
+    }
+
+    private static func encoded(_ value: Double) -> String {
+        String(value.bitPattern)
+    }
+
+    private static func encoded(_ value: Double?) -> String {
+        value.map(encoded) ?? "nil"
+    }
 }
 
 // MARK: - CorrectionAttribution
@@ -178,6 +824,7 @@ enum CausalInference {
         case .crossEpisodeMemory: return .fingerprint  // playhead-xsdz.9: cross-episode copy-alignment is a reference-match signal, same causal source as fingerprint
         case .rhetoricalGrammar: return .lexical  // playhead-xsdz.12: the rhetorical act-sequence grammar is a text-derived (transcript-prose) signal, same causal source as lexical
         case .crossShowSyndication: return .fingerprint  // playhead-xsdz.13: cross-show syndication is a cross-library reference-match signal, same causal source as fingerprint / crossEpisodeMemory
+        case .rediffConfirmed: return .fingerprint  // playhead-xsdz.62: byte-exact rediff confirmation is a deterministic cross-fetch reference-match, same causal source as fingerprint / crossEpisodeMemory / crossShowSyndication
         case .fusedScore:  return .foundationModel  // fused aggregate ≈ FM pipeline
         case .metadata:    return .lexical  // playhead-z3ch: metadata cues are lexical-family pre-seeds
         case .audit:       return .foundationModel  // Phase 11 audit metadata, not a skip signal

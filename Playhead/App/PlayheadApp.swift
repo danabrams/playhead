@@ -171,6 +171,16 @@ struct PlayheadApp: App {
                         modelContainer: modelContainer
                     )
 
+                    // playhead-dqfm: install the scarcity-aware backfill
+                    // ranking provider now that SwiftData is available, so the
+                    // reconciler's window-entry re-prioritization pass can bump
+                    // next-to-play episodes ahead of plain FIFO age when a
+                    // background window can't drain the whole backlog. Until
+                    // this runs the queue stays plain FIFO.
+                    await runtime.attachBacklogScarcityRanking(
+                        modelContainer: modelContainer
+                    )
+
                     runtime.setPlaybackPositionPersistenceHandler { trigger in
                         await Self.persistPlaybackPosition(
                             runtime: runtime,
@@ -600,7 +610,9 @@ struct PlayheadApp: App {
         modelContainer: ModelContainer,
         trigger: PlaybackPositionPersistenceTrigger
     ) async {
+        guard !Task.isCancelled else { return }
         guard let captured = await runtime.capturePlaybackPosition() else { return }
+        guard !Task.isCancelled else { return }
 
         let context = modelContainer.mainContext
         let episodeId = captured.episodeId
@@ -619,6 +631,7 @@ struct PlayheadApp: App {
             return
         }
 
+        guard !Task.isCancelled else { return }
         episode.playbackPosition = captured.position
         // playhead-cthe: the readiness anchor tracks the play-loop commit
         // point 1:1. Updating it here means a force-quit mid-playback
@@ -800,7 +813,7 @@ private struct RootView: View {
                         await runtimeRef.playEpisode(episode)
                     },
                     seek: { time in
-                        await runtimeRef.seek(to: time)
+                        _ = await runtimeRef.seek(to: time)
                     }
                 )
                 _ = await router.handle(url: url)

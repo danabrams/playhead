@@ -4,12 +4,12 @@
 // the reuse-key idempotency contract.
 //
 // Coverage targets:
-//   1. Fresh-DB migrate() reaches head (v31) with the table + index present.
-//   2. `currentSchemaVersion` is exactly 31 (drift guard).
+//   1. Fresh-DB migrate() reaches head with the V31 table + index present.
+//   2. `currentSchemaVersion` includes V31 and all later migrations.
 //   3. A v30-shaped DB (no specialist table) climbs through v31 in place, and
 //      a sibling row seeded before the upgrade survives (no data loss).
 //   4. The migration is idempotent across resetMigratedPathsForTesting.
-//   5. The isolated ladder (migrateOnlyForTesting) reaches v31.
+//   5. The isolated ladder (migrateOnlyForTesting) includes v31.
 //   6. Persistence round-trip: insert -> fetch preserves every field incl.
 //      probabilityOfAd / isAd / adClass=="hostRead" / modelVersion /
 //      detectorVersion.
@@ -98,8 +98,7 @@ struct SpecialistScanResultsV31MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Drift guard: head is exactly 31 for this bead.
-        #expect(AnalysisStore.currentSchemaVersion == 31)
+        #expect(AnalysisStore.currentSchemaVersion == 34)
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 
@@ -172,7 +171,7 @@ struct SpecialistScanResultsV31MigrationTests {
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 
-    @Test("isolated ladder (migrateOnlyForTesting) reaches v31")
+    @Test("isolated ladder (migrateOnlyForTesting) includes v31")
     func isolatedLadderReachesV31() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

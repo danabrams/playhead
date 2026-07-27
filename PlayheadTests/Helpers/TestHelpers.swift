@@ -310,7 +310,8 @@ func probeTableExists(in directory: URL, table: String) throws -> Bool {
 /// q45f.1: count rows in a table directly, bypassing any JOINs the
 /// public store accessor performs. Used to verify orphan-row contracts
 /// (e.g. that a missing-window listen-rewind does NOT insert into
-/// `ad_listen_rewinds`, regardless of whether the JOIN would surface it).
+/// `ad_listen_rewinds`, regardless of whether an outward ownership projection
+/// would surface it).
 /// Table name must be a literal in the test (not user input) — caller
 /// is expected to pass a known schema identifier.
 func probeRowCount(in directory: URL, table: String) throws -> Int {

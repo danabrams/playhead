@@ -32,16 +32,24 @@ enum DebugEpisodeExportService {
         podcastTitle: String,
         analysisAssetId: String,
         episodeId: String,
-        store: AnalysisStore
+        store: AnalysisStore,
+        exportedAt: Date = Date()
     ) async -> DebugEpisodeExport? {
         do {
             let asset = try await store.fetchAsset(id: analysisAssetId)
             let chunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
-            let adWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+            guard let egressProjection =
+                    try await store
+                    .responseIndependentAssetEgressProjection(
+                        analysisAssetId: analysisAssetId
+                    )
+            else {
+                return nil
+            }
 
             let maxTime = max(
                 chunks.last?.endTime ?? 0,
-                adWindows.last?.endTime ?? 0,
+                egressProjection.windows.last?.endTime ?? 0,
                 asset?.featureCoverageEndTime ?? 0
             )
 
@@ -58,8 +66,11 @@ enum DebugEpisodeExportService {
                 episodeId: episodeId,
                 asset: asset,
                 chunks: chunks,
-                adWindows: adWindows,
-                featureWindows: featureWindows
+                adWindows: egressProjection.windows,
+                responseIndependentConfirmedAdCoverageEndTime:
+                    egressProjection.confirmedAdCoverageEndTime,
+                featureWindows: featureWindows,
+                exportedAt: exportedAt
             )
 
             let safeTitle = episodeTitle
@@ -68,7 +79,7 @@ enum DebugEpisodeExportService {
                 .joined(separator: "_")
                 .prefix(40)
 
-            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let timestamp = ISO8601DateFormatter().string(from: exportedAt)
                 .replacingOccurrences(of: ":", with: "-")
 
             return DebugEpisodeExport(
@@ -82,7 +93,10 @@ enum DebugEpisodeExportService {
 
     /// Build a summary export across every analyzed episode in the store.
     /// Intended for batch eyeballing precision/recall across the user's library.
-    static func buildLibraryExport(store: AnalysisStore) async -> DebugEpisodeExport? {
+    static func buildLibraryExport(
+        store: AnalysisStore,
+        exportedAt: Date = Date()
+    ) async -> DebugEpisodeExport? {
         do {
             let assets = try await store.fetchAllAssets()
             guard !assets.isEmpty else {
@@ -92,16 +106,31 @@ enum DebugEpisodeExportService {
                 )
             }
 
-            var perAsset: [(AnalysisAsset, [TranscriptChunk], [AdWindow])] = []
+            var perAsset: [(
+                AnalysisAsset,
+                [TranscriptChunk],
+                [AdWindow]
+            )] = []
             for asset in assets {
                 let chunks = (try? await store.fetchTranscriptChunks(assetId: asset.id)) ?? []
-                let ads = (try? await store.fetchAdWindows(assetId: asset.id)) ?? []
-                perAsset.append((asset, chunks, ads))
+                let projectedAds =
+                    (try? await store
+                        .responseIndependentAssetEgressProjection(
+                        analysisAssetId: asset.id
+                    ))?.windows ?? []
+                perAsset.append((
+                    asset,
+                    chunks,
+                    projectedAds
+                ))
             }
 
-            let content = formatLibraryExport(perAsset: perAsset)
+            let content = formatLibraryExport(
+                perAsset: perAsset,
+                exportedAt: exportedAt
+            )
 
-            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let timestamp = ISO8601DateFormatter().string(from: exportedAt)
                 .replacingOccurrences(of: ":", with: "-")
 
             return DebugEpisodeExport(
@@ -123,14 +152,16 @@ enum DebugEpisodeExportService {
         asset: AnalysisAsset?,
         chunks: [TranscriptChunk],
         adWindows: [AdWindow],
-        featureWindows: [FeatureWindow]
+        responseIndependentConfirmedAdCoverageEndTime: Double?,
+        featureWindows: [FeatureWindow],
+        exportedAt: Date
     ) -> String {
         var out = ""
 
         // Header
         out += "PLAYHEAD DEBUG EXPORT\n"
         out += String(repeating: "=", count: 60) + "\n"
-        out += "Exported:      \(Date())\n"
+        out += "Exported:      \(exportedAt)\n"
         out += "Podcast:       \(podcastTitle)\n"
         out += "Episode:       \(episodeTitle)\n"
         out += "Episode ID:    \(episodeId)\n"
@@ -144,7 +175,9 @@ enum DebugEpisodeExportService {
             if let cov = asset.fastTranscriptCoverageEndTime {
                 out += "Fast cov:      \(formatTime(cov))\n"
             }
-            if let cov = asset.confirmedAdCoverageEndTime {
+            if let cov =
+                    responseIndependentConfirmedAdCoverageEndTime
+            {
                 out += "Confirmed cov: \(formatTime(cov))\n"
             }
         }
@@ -184,8 +217,9 @@ enum DebugEpisodeExportService {
                 if let evidence = w.evidenceText, !evidence.isEmpty {
                     out += "  Evidence:   \(evidence)\n"
                 }
-                if w.wasSkipped { out += "  (was skipped)\n" }
-                if w.userDismissedBanner { out += "  (user dismissed banner)\n" }
+                if w.wasSkipped {
+                    out += "  (was skipped)\n"
+                }
                 out += "\n"
             }
         }
@@ -262,14 +296,19 @@ enum DebugEpisodeExportService {
     // MARK: - Library-wide formatting
 
     private static func formatLibraryExport(
-        perAsset: [(AnalysisAsset, [TranscriptChunk], [AdWindow])]
+        perAsset: [(
+            AnalysisAsset,
+            [TranscriptChunk],
+            [AdWindow]
+        )],
+        exportedAt: Date
     ) -> String {
         var out = ""
 
         // Header
         out += "PLAYHEAD LIBRARY EXPORT\n"
         out += String(repeating: "=", count: 80) + "\n"
-        out += "Exported:         \(Date())\n"
+        out += "Exported:         \(exportedAt)\n"
         out += "Total episodes:   \(perAsset.count)\n"
 
         let totalChunks = perAsset.reduce(0) { $0 + $1.1.count }

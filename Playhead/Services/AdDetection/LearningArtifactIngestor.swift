@@ -89,8 +89,8 @@ actor LearningArtifactIngestor {
     /// In-process semantic-identity set. Used as a fast-path to surface
     /// `.deduped` outcomes for repeat ingests within the same process —
     /// the durable source of truth for "is this a new persist?" lives in
-    /// `AnalysisStore` (the v23 UNIQUE INDEX + `appendCorrectionEvent`'s
-    /// `Bool` return).
+    /// `AnalysisStore` (the v32 layered UNIQUE INDEX +
+    /// `appendCorrectionEvent`'s `Bool` return).
     ///
     /// Concurrency contract: the identity is reserved BEFORE any `await`
     /// inside `ingest`, so concurrent re-entries on the actor observe
@@ -160,15 +160,12 @@ actor LearningArtifactIngestor {
 
         // Use `effectiveCorrectionType` so the in-process identity key
         // agrees with the persistence-layer's identity tuple by construction
-        // (`AnalysisStore.appendCorrectionEvent` keys the v23 UNIQUE INDEX
-        // off `event.effectiveCorrectionType` via the same extension). A
-        // divergent inline derivation here would split legacy nil-typed
-        // rows into a different in-process bucket than the on-disk one.
-        let identityKey = Self.identityKey(
-            analysisAssetId: correction.analysisAssetId,
-            type: correction.effectiveCorrectionType,
-            scope: parsedScope
-        )
+        // (`AnalysisStore.appendCorrectionEvent` keys the v32 UNIQUE INDEX
+        // off `event.identity` via the same extension). A divergent inline
+        // derivation here would split legacy nil-typed rows or explicit
+        // receipt routes into a different in-process bucket than the
+        // on-disk one.
+        let identityKey = Self.identityKey(correction: correction)
         if seenIdentities.contains(identityKey) {
             counters.deduped += 1
             return LearningIngestionResult(
@@ -201,7 +198,7 @@ actor LearningArtifactIngestor {
         // every future attempt.
         let wasNewlyInserted: Bool
         do {
-            // Persist via the store's append path. The v23 UNIQUE INDEX
+            // Persist via the store's append path. The layered UNIQUE INDEX
             // upsert collapses any pre-existing duplicate row to one — so
             // appending the same identity twice across processes is safe.
             wasNewlyInserted = try await store.appendCorrectionEvent(correction)
@@ -289,6 +286,73 @@ actor LearningArtifactIngestor {
         )
     }
 
+    /// Runs the derived half of ingestion for an event that was committed by
+    /// a larger AnalysisStore transaction. This deliberately never calls
+    /// `appendCorrectionEvent`: the caller's `wasNewlyInserted` value came
+    /// from that same transaction and is the durable side-effect guard.
+    @discardableResult
+    func ingestAlreadyPersisted(
+        correction: CorrectionEvent,
+        wasNewlyInserted: Bool
+    ) async throws -> LearningIngestionResult {
+        counters.raw += 1
+        guard let parsedScope = CorrectionScope.deserialize(
+            correction.scope
+        ) else {
+            counters.skippedMalformed += 1
+            return LearningIngestionResult(
+                outcome: .skippedMalformed,
+                analysisAssetId: nil
+            )
+        }
+
+        let identityKey = Self.identityKey(correction: correction)
+        if seenIdentities.contains(identityKey) {
+            counters.deduped += 1
+            return LearningIngestionResult(
+                outcome: .deduped,
+                analysisAssetId: correction.analysisAssetId
+            )
+        }
+        seenIdentities.insert(identityKey)
+
+        do {
+            if wasNewlyInserted,
+               case .sponsorOnShow(
+                    let podcastId,
+                    let sponsor
+               ) = parsedScope {
+                let kind: CorrectionKind = correction.source?.kind
+                    ?? Self.kindFor(correction.effectiveCorrectionType)
+                try await applySponsorSideEffect(
+                    podcastId: podcastId,
+                    sponsor: sponsor,
+                    kind: kind
+                )
+            }
+            try await materializer.materialize(
+                forAsset: correction.analysisAssetId,
+                store: store
+            )
+        } catch {
+            seenIdentities.remove(identityKey)
+            throw error
+        }
+
+        if wasNewlyInserted {
+            counters.ingested += 1
+            return LearningIngestionResult(
+                outcome: .ingested,
+                analysisAssetId: correction.analysisAssetId
+            )
+        }
+        counters.deduped += 1
+        return LearningIngestionResult(
+            outcome: .deduped,
+            analysisAssetId: correction.analysisAssetId
+        )
+    }
+
     /// Snapshot of running diagnostics. Useful for the bead's acceptance
     /// criterion and for diagnostics exports.
     func diagnostics() -> LearningIngestionDiagnostics {
@@ -332,37 +396,27 @@ actor LearningArtifactIngestor {
     }
 
     private static func identityKey(
-        analysisAssetId: String,
-        type: CorrectionType,
-        scope: CorrectionScope
+        correction: CorrectionEvent
     ) -> String {
-        // Route through `CorrectionScope.normalizedIdentityKey` so the
-        // in-process `seenIdentities` set keys on EXACTLY the same
-        // canonicalization as the on-disk v23 UNIQUE INDEX
-        // (`appendCorrectionEvent` derives its `normalizedScopeKey`
-        // from this same property). Sharing the canonical form
-        // closes two failure modes that a divergent in-process
-        // canonicalization could open:
+        // Mirror all four columns of the durable correction identity tuple.
+        // Generic corrections retain the v23 empty discriminator and
+        // normalized-scope dedupe. Explicit banner receipts carry the v32
+        // route/window/lossless-span discriminator, so two different private
+        // receipts that share a rounded scope cannot suppress each other's
+        // post-commit materialization trigger.
         //
-        //   1. Time-bucket drift: two `.exactTimeSpan` corrections
-        //      at times 10.05 and 10.10 (50ms apart) collapse on
-        //      disk (same 100ms bucket) but would produce DIFFERENT
-        //      in-process keys under finer bucketing. Concurrent
-        //      re-entrants would then both pass the `contains` check
-        //      and both call `appendCorrectionEvent`; the persistence
-        //      layer still gates sponsor side effects via the Bool
-        //      return, but `submissionCount` would inflate beyond 1
-        //      for one user gesture — visible in NARL exports.
-        //
-        //   2. Casing divergence: a sponsor reported as "Squarespace"
-        //      and then "squarespace" would hash to ONE in-process
-        //      key under lowercasing but TWO on-disk identities
-        //      under case-preserving `serialized` form. The second
-        //      call would short-circuit to `.deduped` in-process and
-        //      never reach the persistence layer, silently dropping
-        //      a correction that would have legitimately written a
-        //      second row.
-        return "\(analysisAssetId)|\(type.rawValue)|\(scope.normalizedIdentityKey)"
+        // Length-prefix every component so a value containing the separator
+        // cannot alias a different tuple.
+        let identity = correction.identity
+        let components = [
+            identity.analysisAssetId,
+            identity.effectiveCorrectionType.rawValue,
+            identity.normalizedScopeKey,
+            identity.correctionIdentityKey,
+        ]
+        return components.map {
+            "\($0.utf8.count):\($0)"
+        }.joined(separator: "|")
     }
 
     private static func kindFor(_ type: CorrectionType) -> CorrectionKind {

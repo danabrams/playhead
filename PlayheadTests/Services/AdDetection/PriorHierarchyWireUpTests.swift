@@ -1304,18 +1304,21 @@ struct PriorHierarchyWireUpTests {
         )
 
         let drift = migrateColumns.subtracting(ladderColumns)
-        // Three direct podcast_profiles `addColumnIfNeeded` calls live in
+        // Five direct podcast_profiles `addColumnIfNeeded` calls live in
         // `migrate()` but not in `migrateOnlyForTesting()` (which only
         // mirrors the versioned ladder steps): `traitProfileJSON`
-        // (ef2.5.1), `adDurationStatsJSON` (playhead-084j), and
-        // `networkId` (playhead-spxs). The drift note in `migrate()`
-        // documents the latter two; the canary catches the older
-        // `traitProfileJSON` gap as well so the engineer renaming/adding
-        // a fourth column has to update *this* allow-list deliberately.
+        // (ef2.5.1), `adDurationStatsJSON` (playhead-084j), `networkId`
+        // (playhead-spxs), and `daiStitchNetwork` + `daiExpected`
+        // (playhead-xsdz.71). The drift notes in `migrate()` document
+        // these; the canary catches the older `traitProfileJSON` gap as
+        // well so the engineer renaming/adding a further column has to
+        // update *this* allow-list deliberately.
         let documentedDrift: Set<String> = [
             "traitProfileJSON",
             "adDurationStatsJSON",
-            "networkId"
+            "networkId",
+            "daiStitchNetwork",
+            "daiExpected"
         ]
 
         #expect(

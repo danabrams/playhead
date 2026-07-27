@@ -27,6 +27,13 @@ xcodebuild test -scheme Playhead -testPlan PlayheadFastTests \
 ```
 Skips XCTest interruption-cycle integration suites. Runs in ~3 minutes on simulator.
 
+**Self-healing gate wrapper (`scripts/fast-gate.sh`, playhead-qt8y/ekpn):** prefer the wrapper over the raw command — it bootstraps a fresh worktree (links the gitignored model from the main checkout + `xcodegen generate` when the scheme is missing the plan), caps concurrent compile jobs to survive the cold-build OOM, and auto-recovers a wedged sim (`Mach error -308`):
+```bash
+scripts/fast-gate.sh    # PlayheadFastTests, single-host; forwards -only-testing:... etc.
+# PLAYHEAD_PLAN=PlayheadIntegrationTests scripts/fast-gate.sh   # phase-close superset
+```
+⚠️ **Run gates ONE AT A TIME, and do NOT add `-parallel-testing-worker-count ≥2` on this box.** Two memory drivers matter here: (1) a fresh-worktree **cold build** compiles the whole project with parallel `swiftc` — heavy enough on its own to get xcodebuild **OOM-killed** (`Killed: 9`), which is why the wrapper caps `-jobs` (default 4, env `PLAYHEAD_BUILD_JOBS`); (2) running **two gates/builds at once** exhausts the 16 GB box → one is killed mid-suite (`** BUILD INTERRUPTED **`, signal 144) with **no test failure** — pure resource exhaustion. **Clone-based parallel testing is unavailable here** (playhead-ekpn): worker-count ≥2 makes Xcode spawn sim clones, and the clone helper resolves `simctl` via the *global* `xcode-select` (`/Library/Developer/CommandLineTools`, no `simctl`), so it dies with `xcrun: error: unable to find utility "simctl"` (exit 65, ~18s, zero tests run) — `DEVELOPER_DIR` fixes `xcodebuild` but not the clone helper (the 2026-07-16 gotcha; enabling real clone parallelism would need a global `xcode-select -s` change — sudo, system-wide, Dan's call). The gate runs **single-host**: XCTest serial + Swift Testing's cheap **in-process** concurrency (the ~8,300-test bulk stays fast). Serialization + the `-jobs` cap, not in-gate clone parallelism, are the memory guardrails. Deferred (a coverage tradeoff for Dan's call): PerfGate-ing the load-sensitive behavioral flake families (gy2s pipeline-stall / RouteChange / Interruption / PlaybackService audio-session / playhead-7h2 runtime-shutdown) out of the default gate — those test real behaviors, so moving them is a coverage decision, not done here.
+
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadIntegrationTests \

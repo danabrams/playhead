@@ -142,6 +142,24 @@ struct PreAnalysisConfig: Codable, Sendable {
     /// a fresh `AdDetectionService`.
     var creatorChapterFusionEnabled: Bool = false
 
+    /// playhead-glo9 feature flag: when `true`, the
+    /// `AnalysisWorkScheduler` relaxes the standard `(foreground,
+    /// playing)` block on deferred work so OTHER-episode Soon/Background
+    /// backlog can drain opportunistically DURING a foreground listening
+    /// session — the one time the app is reliably alive daily. The
+    /// relaxation is charging-only and additionally gated on
+    /// `QualityProfile == .nominal` and the active episode's hot path
+    /// being comfortably caught up (Dan's ratified gate, 2026-07-23); see
+    /// `AnalysisWorkScheduler.opportunisticDrainRelaxationApplies`.
+    ///
+    /// ACTIVATED `true` (playhead-glo9, Dan 2026-07-24). Opportunistic backlog
+    /// drain during playback is LIVE under the ratified CHARGING-ONLY gate
+    /// (charging + `.nominal` + active-episode hot-path ≥ 120 s ahead). When
+    /// those conditions aren't met the relaxation predicate short-circuits, so
+    /// admission stays byte-identical to pre-glo9 off-charge / under stress /
+    /// with the active hot path behind. Set to `false` to fully disable.
+    var opportunisticBacklogDrainDuringPlayback: Bool = true
+
     static let analysisVersion: Int = 1
 
     private static let key = "PreAnalysisConfig"
@@ -160,7 +178,8 @@ struct PreAnalysisConfig: Codable, Sendable {
         useAdaptiveDeviceProfile: Bool = true,
         b4RevalidationFromFeaturesEnabled: Bool = true,
         showCapabilityProfilesEnabled: Bool = false,
-        creatorChapterFusionEnabled: Bool = false
+        creatorChapterFusionEnabled: Bool = false,
+        opportunisticBacklogDrainDuringPlayback: Bool = true
     ) {
         self.isEnabled = isEnabled
         self.defaultT0DepthSeconds = defaultT0DepthSeconds
@@ -176,6 +195,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         self.b4RevalidationFromFeaturesEnabled = b4RevalidationFromFeaturesEnabled
         self.showCapabilityProfilesEnabled = showCapabilityProfilesEnabled
         self.creatorChapterFusionEnabled = creatorChapterFusionEnabled
+        self.opportunisticBacklogDrainDuringPlayback = opportunisticBacklogDrainDuringPlayback
     }
 
     // Custom decoder so configs persisted before 24cm (which lack the
@@ -224,6 +244,12 @@ struct PreAnalysisConfig: Codable, Sendable {
         // OFF on upgrade (rollback-friendly default; identical to 2hpn /
         // h6a6 rationale).
         self.creatorChapterFusionEnabled = try container.decodeIfPresent(Bool.self, forKey: .creatorChapterFusionEnabled) ?? false
+        // playhead-glo9: configs persisted before this bead omit the
+        // opportunistic-backlog-drain flag (playhead-glo9, ACTIVATED
+        // 2026-07-24): default `true` on upgrade so an existing persisted
+        // config lacking the key adopts the activated behavior. The
+        // charging-only admission gate still applies.
+        self.opportunisticBacklogDrainDuringPlayback = try container.decodeIfPresent(Bool.self, forKey: .opportunisticBacklogDrainDuringPlayback) ?? true
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -241,6 +267,7 @@ struct PreAnalysisConfig: Codable, Sendable {
         case b4RevalidationFromFeaturesEnabled
         case showCapabilityProfilesEnabled
         case creatorChapterFusionEnabled
+        case opportunisticBacklogDrainDuringPlayback
     }
 
     static func load() -> PreAnalysisConfig {

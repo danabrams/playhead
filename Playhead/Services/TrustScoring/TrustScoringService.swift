@@ -80,6 +80,19 @@ struct Demotion: Sendable {
     let to: SkipMode
 }
 
+enum TrustScoringSignalPrivacy: Sendable, Equatable {
+    case standard
+    case explicitBannerFeedback
+}
+
+/// Typed seam for proving which production TrustScoring log branch executed
+/// without scraping unified logging in tests.
+enum TrustScoringSignalLogEvent: Sendable, Equatable {
+    case standardFailure
+    case standardSuccess
+    case explicitFeedbackOperationFailed
+}
+
 // MARK: - TrustScoringService
 
 /// Evaluates and updates per-show trust, returning the effective skip mode
@@ -93,10 +106,18 @@ actor TrustScoringService {
 
     private let store: AnalysisStore
     private let config: TrustScoringConfig
+    private let signalLogObserver:
+        (@Sendable (TrustScoringSignalLogEvent) -> Void)?
 
-    init(store: AnalysisStore, config: TrustScoringConfig = .default) {
+    init(
+        store: AnalysisStore,
+        config: TrustScoringConfig = .default,
+        signalLogObserver:
+            (@Sendable (TrustScoringSignalLogEvent) -> Void)? = nil
+    ) {
         self.store = store
         self.config = config
+        self.signalLogObserver = signalLogObserver
     }
 
     // MARK: - Query
@@ -208,7 +229,10 @@ actor TrustScoringService {
 
     /// Record a false-skip signal (user tapped "Listen" or rewound after skip).
     /// Decrements trust and may trigger demotion.
-    func recordFalseSkipSignal(podcastId: String) async {
+    func recordFalseSkipSignal(
+        podcastId: String,
+        privacy: TrustScoringSignalPrivacy = .standard
+    ) async {
         // skeptical-review-cycle-1: atomic update inside AnalysisStore.
         // No lazy-create — a missing profile means the show has never
         // been observed and stubbing one would corrupt priors.
@@ -261,11 +285,19 @@ actor TrustScoringService {
                 }
             )
         } catch {
-            logger.warning("Failed to mutate profile for \(podcastId) after false-skip signal: \(error.localizedDescription)")
+            if privacy == .explicitBannerFeedback {
+                signalLogObserver?(.explicitFeedbackOperationFailed)
+                logger.warning("Banner feedback trust update failed")
+            } else {
+                signalLogObserver?(.standardFailure)
+                logger.warning("Failed to mutate profile for \(podcastId) after false-skip signal: \(error.localizedDescription)")
+            }
             return
         }
 
         guard let outcome else { return }
+        guard privacy != .explicitBannerFeedback else { return }
+        signalLogObserver?(.standardSuccess)
         let result = outcome.profile
         if let demoted = outcome.captured {
             logger.info("Demoted \(podcastId): \(demoted.from.rawValue) -> \(demoted.to.rawValue) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
@@ -426,7 +458,10 @@ actor TrustScoringService {
     /// errors. Mode and demotion counters are unaffected: only `recordFalseSkipSignal`
     /// (a false positive) feeds the demotion path, since auto-skipping
     /// non-ads is the dangerous failure mode.
-    func recordFalseNegativeSignal(podcastId: String) async {
+    func recordFalseNegativeSignal(
+        podcastId: String,
+        privacy: TrustScoringSignalPrivacy = .standard
+    ) async {
         // skeptical-review-cycle-1: atomic update; no lazy-create.
         let config = self.config
         let result: PodcastProfile?
@@ -461,10 +496,18 @@ actor TrustScoringService {
                 }
             )
         } catch {
-            logger.warning("Failed to mutate profile for \(podcastId) after false-negative signal: \(error.localizedDescription)")
+            if privacy == .explicitBannerFeedback {
+                signalLogObserver?(.explicitFeedbackOperationFailed)
+                logger.warning("Banner feedback trust update failed")
+            } else {
+                signalLogObserver?(.standardFailure)
+                logger.warning("Failed to mutate profile for \(podcastId) after false-negative signal: \(error.localizedDescription)")
+            }
             return
         }
         guard let result else { return }
+        guard privacy != .explicitBannerFeedback else { return }
+        signalLogObserver?(.standardSuccess)
         logger.info("False-negative signal for \(podcastId): trust=\(result.skipTrustScore, format: .fixed(precision: 2))")
     }
 

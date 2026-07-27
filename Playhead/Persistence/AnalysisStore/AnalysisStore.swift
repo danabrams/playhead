@@ -428,6 +428,13 @@ struct AdWindow: Sendable {
     }
 }
 
+struct ResponseIndependentAssetEgressProjection: Sendable {
+    let windows: [AdWindow]
+    let decodedSpans: [DecodedSpan]
+    let listenRewinds: [AdListenRewindRow]
+    let confirmedAdCoverageEndTime: Double?
+}
+
 // Bug 5 (skip-cues-deletion): the `SkipCue` model and `skip_cues` table
 // were deleted. `SkipOrchestrator.beginEpisode` now reads
 // confirmed-confidence `AdWindow` rows directly.
@@ -498,6 +505,19 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// watermark column when chunks are absent. `nil` when both are absent.
     let finalPassCoverageEndSec: Double?
     let finalPassCoverageEndSource: CoverageProvenance
+    /// playhead-sd71: gap-aware **analyzed-coverage AREA** — the
+    /// interval-unioned fast-transcript seconds that fall at or before the
+    /// analysis frontier (`max(featureCoverageEndSec, confirmedAdCoverageEndSec)`).
+    /// This is the honest "how much has actually been analyzed?" answer:
+    /// you cannot analyze audio you have not transcribed, so it is a subset
+    /// of ``fastTranscriptCoveredSec`` and is therefore mathematically
+    /// `<= fastTranscriptCoveredSec` by construction. Drives the AN pipeline
+    /// fraction, replacing the old high-water watermark that could overshoot
+    /// a gappy transcript (the "AN 100% / TX 39%" antipattern). `nil` when
+    /// the analysis frontier is unknown OR the transcript coverage is
+    /// unknown (mirrors ``fastTranscriptCoveredSec``'s nil semantics), so
+    /// AN renders as `--%` rather than a synthetic 0%.
+    let analysisCoveredSec: Double?
 }
 
 /// playhead-hygc.1.2: shared arithmetic for ``AnalysisCoverageSummary``.
@@ -544,6 +564,50 @@ enum AnalysisCoverageMath {
         }
         total += currentEnd - currentStart
         return total
+    }
+
+    /// playhead-sd71: gap-aware analyzed-coverage AREA. Clips each interval
+    /// to the closed window `[0, upperBound]` and returns the unioned
+    /// seconds of what remains — "of these intervals, how many de-overlapped
+    /// seconds fall at or before `upperBound` (and at or after zero)?".
+    ///
+    /// The load-bearing property: the result is always
+    /// `<= unionedSeconds(intervals)` for the same input, because every
+    /// clipped interval `[max(0, s), min(e, upperBound)]` is a subset of its
+    /// source `[s, e]`. Callers pass the transcript intervals and the
+    /// analysis frontier (watermark) so the AN pipeline metric measures the
+    /// analyzed AREA — a subset of the transcript union — and can never
+    /// exceed TX, unlike the raw frontier watermark which overshoots a
+    /// gappy transcript.
+    ///
+    /// Bounds handling mirrors ``unionedSeconds(_:)``'s finiteness contract:
+    /// non-finite interval endpoints are dropped. `upperBound <= 0` clips
+    /// everything away → `0`. A `+Infinity` `upperBound` means "no upper
+    /// clip" and returns the full ``unionedSeconds(_:)``; a `NaN` or
+    /// `-Infinity` `upperBound` is not a usable frontier → `0`.
+    static func unionedSecondsClipped(
+        _ intervals: [(start: Double, end: Double)],
+        upperBound: Double
+    ) -> Double {
+        guard upperBound.isFinite else {
+            return upperBound == .infinity ? unionedSeconds(intervals) : 0
+        }
+        guard upperBound > 0 else { return 0 }
+        let clipped = intervals.compactMap { interval -> (start: Double, end: Double)? in
+            // Drop non-finite / degenerate intervals before clipping so a
+            // poisoned endpoint cannot survive as a synthetic `[0, upperBound]`
+            // span after `max`/`min`.
+            guard interval.start.isFinite,
+                  interval.end.isFinite,
+                  interval.end > interval.start else {
+                return nil
+            }
+            let start = max(0, interval.start)
+            let end = min(interval.end, upperBound)
+            guard end > start else { return nil }
+            return (start: start, end: end)
+        }
+        return unionedSeconds(clipped)
     }
 }
 
@@ -598,6 +662,19 @@ struct PodcastProfile: Sendable {
     /// know the network (trust-scoring, etc.) does NOT clobber the
     /// previously-recorded value.
     let networkId: String?
+    /// playhead-xsdz.71 (Signal 1): the identified DAI-stitch network's
+    /// `DAIStitchNetwork.rawValue`, derived from the enclosure download's
+    /// redirect chain by `DAIStitchClassifier` (a DISTINCT classifier from the
+    /// editorial `networkId` above). `nil` until the first redirect chain is
+    /// observed for the show (and on pre-xsdz.71 rows). Written ONLY by the
+    /// column-specific `updateProfileDAIStitch` setter (never by
+    /// `upsertProfile`), so a profile rebuild preserves it. ADDITIVE-ONLY —
+    /// recorded but not yet consumed.
+    let daiStitchNetwork: String?
+    /// playhead-xsdz.71 (Signal 1): whether DAI is EXPECTED for the show (a
+    /// known DAI-stitch host appeared in the redirect chain). `nil` until
+    /// classified; set together with `daiStitchNetwork`.
+    let daiExpected: Bool?
 
     init(
         podcastId: String,
@@ -613,7 +690,9 @@ struct PodcastProfile: Sendable {
         traitProfileJSON: String? = nil,
         title: String? = nil,
         adDurationStatsJSON: String? = nil,
-        networkId: String? = nil
+        networkId: String? = nil,
+        daiStitchNetwork: String? = nil,
+        daiExpected: Bool? = nil
     ) {
         self.podcastId = podcastId
         self.sponsorLexicon = sponsorLexicon
@@ -629,6 +708,8 @@ struct PodcastProfile: Sendable {
         self.title = title
         self.adDurationStatsJSON = adDurationStatsJSON
         self.networkId = networkId
+        self.daiStitchNetwork = daiStitchNetwork
+        self.daiExpected = daiExpected
     }
 
     /// Convenience: decode the stored trait profile, falling back to
@@ -639,6 +720,20 @@ struct PodcastProfile: Sendable {
               let decoded = try? JSONDecoder().decode(ShowTraitProfile.self, from: data)
         else { return .unknown }
         return decoded
+    }
+
+    /// playhead-xsdz.71 (Signal 1): the persisted DAI-stitch classification for
+    /// this show, or `nil` when no redirect chain has been observed yet. The
+    /// read accessor for the recorded DAI-EXPECTED prior. `matchedHost` is a
+    /// diagnostics-only field that is not persisted, so it reads back as `nil`.
+    var daiStitchClassification: DAIStitchClassification? {
+        guard let raw = daiStitchNetwork,
+              let network = DAIStitchNetwork(rawValue: raw) else { return nil }
+        return DAIStitchClassification(
+            stitchNetwork: network,
+            daiExpected: daiExpected ?? false,
+            matchedHost: nil
+        )
     }
 }
 
@@ -882,12 +977,20 @@ enum AnalysisStoreError: Error, CustomStringConvertible, Equatable {
 /// `NowPlayingViewModel.handleListenRewind`); `createdAt` is wall-clock
 /// UNIX seconds for ordering and stale-row pruning.
 struct AdListenRewindRow: Sendable, Hashable {
+    let analysisAssetId: String
     let windowId: String
     let podcastId: String
     let time: Double
     let createdAt: Date
 
-    init(windowId: String, podcastId: String, time: Double, createdAt: Date) {
+    init(
+        analysisAssetId: String,
+        windowId: String,
+        podcastId: String,
+        time: Double,
+        createdAt: Date
+    ) {
+        self.analysisAssetId = analysisAssetId
         self.windowId = windowId
         self.podcastId = podcastId
         self.time = time
@@ -903,7 +1006,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 31
+    nonisolated static let currentSchemaVersion = 34
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1468,6 +1571,40 @@ actor AnalysisStore {
             // accept the larger index footprint), or add a separate
             // index over the NULL subset.
             try exec("CREATE INDEX IF NOT EXISTS idx_podcast_profiles_networkId ON podcast_profiles(networkId) WHERE networkId IS NOT NULL")
+            // playhead-xsdz.71 (Signal 1): `daiStitchNetwork` + `daiExpected`
+            // on podcast_profiles. Structural DAI prior derived from the
+            // enclosure download's redirect chain by `DAIStitchClassifier`
+            // (a DISTINCT classifier from the editorial `networkId` above):
+            // `daiStitchNetwork` is the identified ad-stitch network's
+            // `DAIStitchNetwork.rawValue`, `daiExpected` is 1/0. Both NULL on
+            // pre-xsdz.71 rows and until the first redirect chain is observed
+            // for the show; the column-specific setter
+            // `updateProfileDAIStitch` owns the writes (once-per-show, gated on
+            // `daiStitchNetwork IS NULL`). ADDITIVE-ONLY: recorded but not yet
+            // consumed by any detector/scorer/banner/rediff path.
+            //
+            // Deliberately NOT written by `upsertProfile` (unlike `networkId`):
+            // the two columns are absent from that statement's INSERT/SET
+            // lists, so a profile rebuild (trust-scoring / priors update)
+            // leaves them untouched — a simpler preservation than COALESCE.
+            //
+            // Drift note (mirrors the spxs note above): `migrateOnlyForTesting()`
+            // does NOT replay these two `addColumnIfNeeded` calls (nor the
+            // sibling `traitProfileJSON` / `adDurationStatsJSON` / `networkId`
+            // ones). The ladder-only seam is used exclusively by schema-version
+            // migration tests that never seed real `podcast_profiles` rows, so
+            // the gap is theoretical; a future ladder-only test that drives
+            // `updateProfileDAIStitch` / `fetchProfile` must replay all of them.
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "daiStitchNetwork",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "daiExpected",
+                definition: "INTEGER"
+            )
             // playhead-7mq: model/policy/feature-schema version columns on
             // the six tables whose row validity depends on model, policy,
             // or feature-schema versions. Foundation for B4 fast
@@ -1587,6 +1724,15 @@ actor AnalysisStore {
             // only, idempotent (CREATE TABLE IF NOT EXISTS). Bumps schema_version
             // to 31.
             try migrateSpecialistScanResultsV31IfNeeded()
+            // R27: keep explicit banner receipts distinct by route and exact
+            // AdWindow ownership while preserving generic v23 dedupe.
+            try migrateCorrectionReceiptIdentityV32IfNeeded()
+            // R28: durable local-only provenance for response-derived
+            // training labels.
+            try migrateTrainingExamplePrivacyV33IfNeeded()
+            // R29: freeze the complete response-independent AdWindow egress
+            // projection before the first explicit banner mutation.
+            try migrateExplicitFeedbackEgressBaselinesV34IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -1875,6 +2021,9 @@ actor AnalysisStore {
         // (CREATE TABLE IF NOT EXISTS + setSchemaVersion), so schema-version
         // tests lock at v31.
         try migrateSpecialistScanResultsV31IfNeeded()
+        try migrateCorrectionReceiptIdentityV32IfNeeded()
+        try migrateTrainingExamplePrivacyV33IfNeeded()
+        try migrateExplicitFeedbackEgressBaselinesV34IfNeeded()
     }
     #endif
 
@@ -3258,14 +3407,15 @@ actor AnalysisStore {
     /// Schema:
     ///
     ///   `ad_listen_rewinds`
-    ///     windowId  TEXT NOT NULL          — ad_windows.id (joined, no FK)
+    ///     windowId  TEXT NOT NULL          — historical ad_windows.id
     ///     podcastId TEXT NOT NULL          — denormalized for fast filters
     ///     time      REAL NOT NULL          — episode-time of the rewind tap
     ///     createdAt REAL NOT NULL          — UNIX seconds wall-clock
     ///
     /// Idempotent: `CREATE TABLE IF NOT EXISTS` is a no-op on existing
-    /// DBs. Index covers the `(windowId)` JOIN target and the
-    /// `(podcastId, time)` filter used by per-podcast replay paths.
+    /// DBs. The original indexes cover window-local diagnostics and the
+    /// `(podcastId, time)` filter used by per-podcast replay paths. V34 adds
+    /// durable nullable asset ownership for safe outward projection.
     private func migrateAdListenRewindsV22IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 22 else { return }
         try exec("""
@@ -4530,6 +4680,234 @@ actor AnalysisStore {
         try setSchemaVersion(31)
     }
 
+    /// R27 (v32): split correction-event identity into two layers.
+    ///
+    /// Generic corrections retain the exact v23 key by storing an empty
+    /// `correctionIdentityKey`. Private explicit banner receipts store a
+    /// canonical discriminator containing route, exact serialized scope, and
+    /// exact target-window ownership. This prevents a receipt from colliding
+    /// with a generic correction (or another explicit route/window) merely
+    /// because both occupy the same normalized 100ms span.
+    ///
+    /// Malformed legacy explicit rows are preserved one-for-one with a
+    /// deterministic row-ID fallback. They remain unreadable to the privacy
+    /// projector (which fails closed), but migration never deletes or merges
+    /// forensic state it cannot safely interpret.
+    private func migrateCorrectionReceiptIdentityV32IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 32 else { return }
+        guard try tableExists("correction_events") else {
+            try setSchemaVersion(32)
+            return
+        }
+
+        try addColumnIfNeeded(
+            table: "correction_events",
+            column: "correctionIdentityKey",
+            definition: "TEXT NOT NULL DEFAULT ''"
+        )
+
+        // The old index has the same public name but lacks the discriminator.
+        // Drop it before backfill so existing rows can be re-keyed atomically
+        // inside runSchemaMigration's surrounding transaction.
+        try exec("DROP INDEX IF EXISTS idx_correction_events_identity")
+
+        let select = try prepare("""
+            SELECT id, analysisAssetId, scope, createdAt, source, podcastId,
+                   correctionType, causalSource, targetRefsJSON
+            FROM correction_events
+            """)
+        defer { sqlite3_finalize(select) }
+
+        struct ReceiptIdentityBackfill {
+            let id: String
+            let key: String
+        }
+        var backfills: [ReceiptIdentityBackfill] = []
+        while true {
+            let result = sqlite3_step(select)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw AnalysisStoreError.queryFailed(
+                    String(cString: sqlite3_errmsg(db))
+                )
+            }
+            let id = text(select, 0)
+            let source = optionalText(select, 4)
+                .flatMap { CorrectionSource(rawValue: $0) }
+
+            var key = ""
+            if source?.isExplicitBannerFeedback == true {
+                let targetRefs: CorrectionTargetRefs? =
+                    optionalText(select, 8).flatMap { json in
+                        guard let data = json.data(using: .utf8) else {
+                            return nil
+                        }
+                        return try? JSONDecoder().decode(
+                            CorrectionTargetRefs.self,
+                            from: data
+                        )
+                    }
+                let event = CorrectionEvent(
+                    id: id,
+                    analysisAssetId: text(select, 1),
+                    scope: text(select, 2),
+                    createdAt: sqlite3_column_double(select, 3),
+                    source: source,
+                    podcastId: optionalText(select, 5),
+                    correctionType: optionalText(select, 6)
+                        .flatMap { CorrectionType(rawValue: $0) },
+                    causalSource: optionalText(select, 7)
+                        .flatMap { CausalSource(rawValue: $0) },
+                    targetRefs: targetRefs
+                )
+                key = event.explicitReceiptIdentityKey
+                    ?? [
+                        "legacy-malformed-explicit-v1",
+                        "\(id.utf8.count):\(id)",
+                    ].joined(separator: "|")
+            }
+            backfills.append(ReceiptIdentityBackfill(id: id, key: key))
+        }
+
+        let update = try prepare("""
+            UPDATE correction_events
+            SET correctionIdentityKey = ?
+            WHERE id = ?
+            """)
+        defer { sqlite3_finalize(update) }
+        for backfill in backfills {
+            sqlite3_reset(update)
+            sqlite3_clear_bindings(update)
+            bind(update, 1, backfill.key)
+            bind(update, 2, backfill.id)
+            try step(update, expecting: SQLITE_DONE)
+        }
+
+        try exec("""
+            CREATE UNIQUE INDEX idx_correction_events_identity
+            ON correction_events(
+                analysisAssetId,
+                effectiveCorrectionType,
+                normalizedScopeKey,
+                correctionIdentityKey
+            )
+            """)
+        try setSchemaVersion(32)
+    }
+
+    /// Adds explicit local-only privacy provenance to materialized training
+    /// examples. Existing rows pre-date explicit classification and therefore
+    /// receive the generic on-device default.
+    private func migrateTrainingExamplePrivacyV33IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 33 else { return }
+        if try tableExists("training_examples") {
+            try addColumnIfNeeded(
+                table: "training_examples",
+                column: "privacyClassification",
+                definition:
+                    "TEXT NOT NULL DEFAULT '\(TrainingExamplePrivacyClassification.onDeviceLocal.rawValue)'"
+            )
+        }
+        try setSchemaVersion(33)
+    }
+
+    /// Adds the local-only, asset-scoped snapshot used by every outward
+    /// response-independent AdWindow surface.
+    ///
+    /// Existing explicit receipts cannot be reconstructed, so migration writes
+    /// authenticated `.withheld` markers for their assets. That irreversible
+    /// marker survives later receipt pruning/damage without inventing a
+    /// pre-response projection.
+    private func migrateExplicitFeedbackEgressBaselinesV34IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 34 else { return }
+        if try tableExists("ad_listen_rewinds") {
+            // Legacy v22 rows carried only a reusable window ID. Their
+            // original asset owner cannot be reconstructed safely, so ALTER
+            // leaves them NULL and quarantined. Never backfill this column by
+            // joining to the current ad_windows owner.
+            try addColumnIfNeeded(
+                table: "ad_listen_rewinds",
+                column: "analysisAssetId",
+                definition: "TEXT"
+            )
+            try exec("""
+                CREATE INDEX IF NOT EXISTS
+                    idx_ad_listen_rewinds_asset_time
+                ON ad_listen_rewinds(
+                    analysisAssetId, time, createdAt,
+                    windowId, podcastId
+                )
+                WHERE analysisAssetId IS NOT NULL
+                """)
+        }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS explicit_feedback_egress_baselines (
+                analysisAssetId TEXT PRIMARY KEY
+                    REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                schemaVersion INTEGER NOT NULL,
+                projectionState TEXT NOT NULL
+                    CHECK(projectionState IN ('captured', 'withheld')),
+                windowCount INTEGER NOT NULL,
+                decodedSpanCount INTEGER NOT NULL,
+                listenRewindCount INTEGER NOT NULL,
+                payloadJSON TEXT NOT NULL,
+                payloadSHA256 TEXT NOT NULL,
+                capturedAt REAL NOT NULL
+            )
+            """)
+        if try tableExists("correction_events") {
+            let select = try prepare("""
+                SELECT DISTINCT analysisAssetId
+                FROM correction_events
+                WHERE correctionIdentityKey <> ''
+                   OR source IN (?, ?, ?, ?)
+                ORDER BY analysisAssetId
+                """)
+            defer { sqlite3_finalize(select) }
+            bind(
+                select,
+                1,
+                CorrectionSource.bannerAutoSkipConfirmed.rawValue
+            )
+            bind(
+                select,
+                2,
+                CorrectionSource.bannerAutoSkipDenied.rawValue
+            )
+            bind(
+                select,
+                3,
+                CorrectionSource.bannerSuggestionConfirmed.rawValue
+            )
+            bind(
+                select,
+                4,
+                CorrectionSource.bannerSuggestionDenied.rawValue
+            )
+            var historicalAssetIDs: [String] = []
+            while true {
+                let result = sqlite3_step(select)
+                if result == SQLITE_DONE { break }
+                guard result == SQLITE_ROW else {
+                    throw AnalysisStoreError.queryFailed(
+                        String(cString: sqlite3_errmsg(db))
+                    )
+                }
+                historicalAssetIDs.append(try requireText(select, 0))
+            }
+            for assetID in historicalAssetIDs {
+                try insertExplicitFeedbackEgressBaseline(
+                    analysisAssetId: assetID,
+                    projected: nil,
+                    decodedSpans: nil,
+                    listenRewinds: nil,
+                    confirmedAdCoverageEndTime: nil
+                )
+            }
+        }
+        try setSchemaVersion(34)
+    }
+
     /// playhead-b6jq PR 4: canonical column list for `specialist_scan_results`.
     /// Positional index mapping (see `readSpecialistScanResult`):
     ///   0  id                    7  modelVersion
@@ -5048,12 +5426,12 @@ actor AnalysisStore {
     // Replay needs the *event*, not the latest state, so this is a pure
     // append-only log keyed on (windowId, podcastId, time, createdAt).
     //
-    // Why no FK on windowId: the table is exporter-fed and may briefly
-    // outlive a window row in the rare race where an asset is deleted
-    // mid-export. The corpus exporter joins via `ad_windows.id` so the
-    // join is the authoritative scope filter — orphan rows are silently
-    // discarded by the JOIN. Time is stored as `REAL` UNIX-seconds, the
-    // same representation as every other timestamp in this schema.
+    // Why no FK on windowId: the event must survive detector retirement of
+    // its source window. V34 adds nullable `analysisAssetId`; every new write
+    // validates and persists that owner, while pre-v34 NULL rows remain local
+    // but quarantined from outward reads. Ownership is never inferred from a
+    // current window-ID join because detector IDs may be reused. Time is
+    // stored as `REAL` UNIX-seconds, matching other schema timestamps.
 
     /// playhead-q45f.1: append a listen-rewind event. Idempotent only by
     /// row identity — repeated taps on the same window persist as
@@ -5061,49 +5439,122 @@ actor AnalysisStore {
     /// rewind *frequency*, not just "ever rewound".
     func insertListenRewind(
         windowId: String,
+        analysisAssetId: String,
         podcastId: String,
         time: Double,
         createdAt: Date
     ) throws {
+        let createdAtSeconds = createdAt.timeIntervalSince1970
+        guard !windowId.isEmpty,
+              !analysisAssetId.isEmpty,
+              !podcastId.isEmpty,
+              time.isFinite,
+              time >= 0,
+              createdAtSeconds.isFinite,
+              createdAtSeconds >= 0,
+              let window = try fetchAdWindow(id: windowId),
+              window.analysisAssetId == analysisAssetId
+        else {
+            throw AnalysisStoreError.invalidRow(column: 0)
+        }
         let stmt = try prepare("""
-            INSERT INTO ad_listen_rewinds (windowId, podcastId, time, createdAt)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO ad_listen_rewinds
+                (analysisAssetId, windowId, podcastId, time, createdAt)
+            VALUES (?, ?, ?, ?, ?)
         """)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, windowId)
-        bind(stmt, 2, podcastId)
-        bind(stmt, 3, time)
-        bind(stmt, 4, createdAt.timeIntervalSince1970)
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, windowId)
+        bind(stmt, 3, podcastId)
+        bind(stmt, 4, time)
+        bind(stmt, 5, createdAtSeconds)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    /// playhead-q45f.1: fetch every listen-rewind event whose `windowId`
-    /// belongs to an ad_window on the given asset. Returned in
+    /// Atomically commits the durable portion of a banner Listen action. The
+    /// decision flip and append-only rewind event are one receipt: a failure
+    /// cannot leave the window reverted without the event that explains why.
+    func persistListenRewind(
+        windowId: String,
+        analysisAssetId: String,
+        podcastId: String,
+        createdAt: Date
+    ) throws {
+        try exec("BEGIN TRANSACTION")
+        do {
+            guard let window = try fetchAdWindow(id: windowId),
+                  window.analysisAssetId == analysisAssetId else {
+                throw AnalysisStoreError.notFound
+            }
+            try updateAdWindowDecision(
+                id: windowId,
+                analysisAssetId: analysisAssetId,
+                decisionState: AdDecisionState.reverted.rawValue
+            )
+            try insertListenRewind(
+                windowId: windowId,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId,
+                time: window.startTime,
+                createdAt: createdAt
+            )
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Fetch every provably owned listen-rewind event for the given asset.
+    /// Legacy rows whose owner is NULL remain quarantined; reusable window IDs
+    /// are never consulted for ownership. Returned in
     /// time-ascending order so consumers (the FrozenTrace export and the
     /// q45f gate replay) see events in episode-time sequence.
     func fetchListenRewinds(forAssetId assetId: String) throws -> [AdListenRewindRow] {
         let sql = """
-            SELECT lr.windowId, lr.podcastId, lr.time, lr.createdAt
-            FROM ad_listen_rewinds lr
-            JOIN ad_windows w ON w.id = lr.windowId
-            WHERE w.analysisAssetId = ?
-            ORDER BY lr.time ASC, lr.createdAt ASC
+            SELECT analysisAssetId, windowId, podcastId, time, createdAt
+            FROM ad_listen_rewinds
+            WHERE analysisAssetId = ?
+            ORDER BY time ASC, createdAt ASC, windowId ASC,
+                     podcastId ASC, rowid ASC
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
         var rows: [AdListenRewindRow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let win = try requireText(stmt, 0)
-            let pod = try requireText(stmt, 1)
-            let t = sqlite3_column_double(stmt, 2)
-            let created = sqlite3_column_double(stmt, 3)
-            rows.append(AdListenRewindRow(
-                windowId: win,
-                podcastId: pod,
-                time: t,
-                createdAt: Date(timeIntervalSince1970: created)
-            ))
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw AnalysisStoreError.queryFailed(
+                    String(cString: sqlite3_errmsg(db))
+                )
+            }
+            let owner = try requireText(stmt, 0)
+            let win = try requireText(stmt, 1)
+            let pod = try requireText(stmt, 2)
+            let t = sqlite3_column_double(stmt, 3)
+            let created = sqlite3_column_double(stmt, 4)
+            guard owner == assetId,
+                  !owner.isEmpty,
+                  !win.isEmpty,
+                  !pod.isEmpty,
+                  t.isFinite,
+                  t >= 0,
+                  created.isFinite,
+                  created >= 0
+            else {
+                throw AnalysisStoreError.invalidRow(column: 0)
+            }
+            rows.append(
+                AdListenRewindRow(
+                    analysisAssetId: owner,
+                    windowId: win,
+                    podcastId: pod,
+                    time: t,
+                    createdAt: Date(timeIntervalSince1970: created)
+                )
+            )
         }
         return rows
     }
@@ -5780,7 +6231,13 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, id)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let result = sqlite3_step(stmt)
+        if result == SQLITE_DONE { return nil }
+        guard result == SQLITE_ROW else {
+            throw AnalysisStoreError.queryFailed(
+                String(cString: sqlite3_errmsg(db))
+            )
+        }
         return readAsset(stmt)
     }
 
@@ -7192,6 +7649,43 @@ actor AnalysisStore {
             let featureSec = assetRow?.featureCoverageEndTime
             let confirmedAdSec = assetRow?.confirmedAdCoverageEndTime
 
+            // playhead-sd71: gap-aware analyzed-coverage AREA. The analysis
+            // frontier is the broad feature/confirmed-ad watermark; the
+            // analyzed area is the transcribed content lying at or before
+            // that frontier. Because it is a subset of the transcript union
+            // it can never exceed `fastTranscriptCoveredSec`, so the AN
+            // pipeline fraction derived from it can never exceed TX (the
+            // watermark-vs-union antipattern this bead fixes). `nil` when the
+            // frontier is unknown OR transcript coverage is unknown, matching
+            // `fastTranscriptCoveredSec`'s nil semantics.
+            let analysisFrontierSec: Double?
+            switch (featureSec, confirmedAdSec) {
+            case let (feature?, confirmed?): analysisFrontierSec = max(feature, confirmed)
+            case let (feature?, nil): analysisFrontierSec = feature
+            case let (nil, confirmed?): analysisFrontierSec = confirmed
+            case (nil, nil): analysisFrontierSec = nil
+            }
+            let analysisCoveredSec: Double?
+            if let frontier = analysisFrontierSec, let transcriptCovered = fastCoveredSec {
+                let transcriptIntervals: [(start: Double, end: Double)]
+                if chunkMaxEnd != nil {
+                    // Real chunk intervals: gap-aware clip to the frontier.
+                    transcriptIntervals = fastIntervals[id] ?? []
+                } else {
+                    // Watermark-only transcript (no chunk intervals): model
+                    // the covered region as one contiguous [0, watermark] span
+                    // so the clip degrades to
+                    // min(transcriptWatermark, analysisFrontier).
+                    transcriptIntervals = [(start: 0, end: transcriptCovered)]
+                }
+                analysisCoveredSec = AnalysisCoverageMath.unionedSecondsClipped(
+                    transcriptIntervals,
+                    upperBound: frontier
+                )
+            } else {
+                analysisCoveredSec = nil
+            }
+
             summaries[id] = AnalysisCoverageSummary(
                 assetId: id,
                 episodeDurationSec: assetRow?.episodeDurationSec,
@@ -7204,7 +7698,8 @@ actor AnalysisStore {
                 confirmedAdCoverageEndSec: confirmedAdSec,
                 confirmedAdCoverageEndSource: confirmedAdSec == nil ? .unknown : .assetWatermark,
                 finalPassCoverageEndSec: finalEndSec,
-                finalPassCoverageEndSource: finalEndSource
+                finalPassCoverageEndSource: finalEndSource,
+                analysisCoveredSec: analysisCoveredSec
             )
         }
         return summaries
@@ -7445,7 +7940,14 @@ actor AnalysisStore {
         let startAnchorIdx = columnIndex(stmt, name: "startEdgeAnchor")
         let endAnchorIdx = columnIndex(stmt, name: "endEdgeAnchor")
         var results: [AdWindow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw AnalysisStoreError.queryFailed(
+                    String(cString: sqlite3_errmsg(db))
+                )
+            }
             results.append(AdWindow(
                 id: text(stmt, 0),
                 analysisAssetId: text(stmt, 1),
@@ -7480,6 +7982,347 @@ actor AnalysisStore {
         return results
     }
 
+    /// Captures the complete public asset projection at the only safe
+    /// moment: after an exact feedback transaction has validated all durable
+    /// material, but before that transaction appends its first receipt or
+    /// mutates a row.
+    ///
+    /// The caller already owns a SQLite transaction. A baseline insert and
+    /// its first receipt therefore commit or roll back together. Once present,
+    /// the baseline is validated and reused; it is never overwritten.
+    private func captureExplicitFeedbackEgressBaselineIfNeeded(
+        analysisAssetId: String
+    ) throws {
+        if try loadExplicitFeedbackEgressBaseline(
+            analysisAssetId: analysisAssetId
+        ) != nil {
+            return
+        }
+
+        // Never invent history for an asset whose first explicit response
+        // predates this schema. Its actual pre-response full-asset projection
+        // cannot be reconstructed from current, privately learned rows.
+        let hasHistoricalExplicitReceipt = try loadCorrectionEvents(
+            analysisAssetId: analysisAssetId
+        ).contains {
+            $0.isPrivateExplicitFeedbackReceipt
+        }
+        if hasHistoricalExplicitReceipt {
+            // The pre-response public shape is unknowable. Persist a durable
+            // tombstone so later receipt pruning cannot reopen live egress.
+            try insertExplicitFeedbackEgressBaseline(
+                analysisAssetId: analysisAssetId,
+                projected: nil,
+                decodedSpans: nil,
+                listenRewinds: nil,
+                confirmedAdCoverageEndTime: nil
+            )
+            return
+        }
+
+        let current = try fetchAdWindows(assetId: analysisAssetId)
+        let currentDecodedSpans = try fetchDecodedSpans(
+            assetId: analysisAssetId
+        )
+        let currentListenRewinds = try fetchListenRewinds(
+            forAssetId: analysisAssetId
+        )
+        let projected: [AdWindow]?
+        let projectedDecodedSpans: [DecodedSpan]?
+        let projectedListenRewinds: [AdListenRewindRow]?
+        if !current.isEmpty,
+           current.allSatisfy({
+               $0.analysisAssetId == analysisAssetId
+           }) {
+            projected =
+                ExplicitBannerFeedbackPrivacy.unansweredProjection(
+                    windows: current
+                )
+        } else {
+            projected = nil
+        }
+        projectedDecodedSpans =
+            ExplicitBannerFeedbackPrivacy.canonicalDecodedSpans(
+                currentDecodedSpans,
+                expectedAssetId: analysisAssetId
+            )
+        projectedListenRewinds =
+            ExplicitBannerFeedbackPrivacy.canonicalListenRewinds(
+                currentListenRewinds,
+                expectedAssetId: analysisAssetId,
+                expectedWindowIDs: Set(projected?.map(\.id) ?? [])
+            )
+        let asset = try fetchAsset(id: analysisAssetId)
+        let canCapture =
+            projected != nil
+                && projectedDecodedSpans != nil
+                && projectedListenRewinds != nil
+                && asset != nil
+        try insertExplicitFeedbackEgressBaseline(
+            analysisAssetId: analysisAssetId,
+            projected: canCapture ? projected : nil,
+            decodedSpans:
+                canCapture ? projectedDecodedSpans : nil,
+            listenRewinds:
+                canCapture ? projectedListenRewinds : nil,
+            confirmedAdCoverageEndTime:
+                canCapture
+                ? asset?.confirmedAdCoverageEndTime : nil
+        )
+    }
+
+    private func insertExplicitFeedbackEgressBaseline(
+        analysisAssetId: String,
+        projected: [AdWindow]?,
+        decodedSpans: [DecodedSpan]?,
+        listenRewinds: [AdListenRewindRow]?,
+        confirmedAdCoverageEndTime: Double?
+    ) throws {
+        let payload: ExplicitFeedbackEgressBaselinePayload
+        if let projected,
+           let decodedSpans,
+           let listenRewinds,
+           confirmedAdCoverageEndTime.map({
+               $0.isFinite && $0 >= 0
+           }) ?? true
+        {
+            payload = ExplicitFeedbackEgressBaselinePayload(
+                analysisAssetId: analysisAssetId,
+                confirmedAdCoverageEndTime:
+                    confirmedAdCoverageEndTime,
+                windows: projected.map(
+                    ExplicitFeedbackDetectionProjection.init
+                ),
+                decodedSpans: decodedSpans,
+                listenRewinds: listenRewinds
+            )
+        } else {
+            payload = .withheld(
+                analysisAssetId: analysisAssetId
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(payload)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw AnalysisStoreError.encodingFailure(
+                "Explicit feedback egress baseline is not UTF-8"
+            )
+        }
+        let digest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        let insert = try prepare("""
+            INSERT INTO explicit_feedback_egress_baselines
+                (analysisAssetId, schemaVersion, projectionState,
+                 windowCount, decodedSpanCount, listenRewindCount,
+                 payloadJSON, payloadSHA256, capturedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(insert) }
+        bind(insert, 1, analysisAssetId)
+        bind(
+            insert,
+            2,
+            ExplicitFeedbackEgressBaselinePayload.currentSchemaVersion
+        )
+        bind(insert, 3, payload.projectionState.rawValue)
+        bind(insert, 4, payload.windows.count)
+        bind(insert, 5, payload.decodedSpans.count)
+        bind(insert, 6, payload.listenRewinds.count)
+        bind(insert, 7, json)
+        bind(insert, 8, digest)
+        bind(insert, 9, Date().timeIntervalSince1970)
+        try step(insert, expecting: SQLITE_DONE)
+        guard sqlite3_changes(db) == 1 else {
+            throw AnalysisStoreError.insertFailed(
+                "Explicit feedback egress baseline was not inserted"
+            )
+        }
+    }
+
+    /// Loads and fully authenticates one frozen baseline. SQL failures throw;
+    /// missing rows return nil; malformed rows throw so every transaction and
+    /// outward caller can fail closed rather than falling back to live state.
+    private enum LoadedExplicitFeedbackEgressBaseline {
+        case captured(ResponseIndependentAssetEgressProjection)
+        case withheld
+    }
+
+    private func loadExplicitFeedbackEgressBaseline(
+        analysisAssetId: String
+    ) throws -> LoadedExplicitFeedbackEgressBaseline? {
+        let stmt = try prepare("""
+            SELECT schemaVersion, projectionState, windowCount,
+                   decodedSpanCount, listenRewindCount, payloadJSON,
+                   payloadSHA256
+            FROM explicit_feedback_egress_baselines
+            WHERE analysisAssetId = ?
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        let result = sqlite3_step(stmt)
+        if result == SQLITE_DONE {
+            return nil
+        }
+        guard result == SQLITE_ROW else {
+            throw AnalysisStoreError.queryFailed(
+                String(cString: sqlite3_errmsg(db))
+            )
+        }
+
+        let schemaVersion = Int(sqlite3_column_int(stmt, 0))
+        let projectionState = try requireText(stmt, 1)
+        let windowCount = Int(sqlite3_column_int(stmt, 2))
+        let decodedSpanCount = Int(sqlite3_column_int(stmt, 3))
+        let listenRewindCount = Int(sqlite3_column_int(stmt, 4))
+        let json = try requireText(stmt, 5)
+        let storedDigest = try requireText(stmt, 6)
+        let data = Data(json.utf8)
+        let actualDigest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        guard storedDigest == actualDigest,
+              let payload = try? JSONDecoder().decode(
+                  ExplicitFeedbackEgressBaselinePayload.self,
+                  from: data
+              ),
+              schemaVersion
+                == ExplicitFeedbackEgressBaselinePayload
+                    .currentSchemaVersion,
+              payload.schemaVersion == schemaVersion,
+              payload.analysisAssetId == analysisAssetId,
+              payload.projectionState.rawValue == projectionState,
+              payload.windows.count == windowCount,
+              payload.decodedSpans.count == decodedSpanCount,
+              payload.listenRewinds.count == listenRewindCount
+        else {
+            throw AnalysisStoreError.invalidRow(column: 2)
+        }
+        switch payload.projectionState {
+        case .captured:
+            guard windowCount > 0,
+                  let projected =
+                    ExplicitBannerFeedbackPrivacy
+                    .validatedBaselineProjection(
+                        payload,
+                        expectedAssetId: analysisAssetId
+                    ),
+                  let decodedSpans =
+                    ExplicitBannerFeedbackPrivacy
+                    .validatedBaselineDecodedSpans(
+                        payload,
+                        expectedAssetId: analysisAssetId
+                    ),
+                  let listenRewinds =
+                    ExplicitBannerFeedbackPrivacy
+                    .validatedBaselineListenRewinds(
+                        payload,
+                        expectedAssetId: analysisAssetId,
+                        expectedWindowIDs: Set(projected.map(\.id))
+                    )
+            else {
+                throw AnalysisStoreError.invalidRow(column: 2)
+            }
+            return .captured(
+                ResponseIndependentAssetEgressProjection(
+                    windows: projected,
+                    decodedSpans: decodedSpans,
+                    listenRewinds: listenRewinds,
+                    confirmedAdCoverageEndTime:
+                        payload.confirmedAdCoverageEndTime
+                )
+            )
+        case .withheld:
+            guard windowCount == 0,
+                  decodedSpanCount == 0,
+                  listenRewindCount == 0,
+                  payload.windows.isEmpty,
+                  payload.decodedSpans.isEmpty,
+                  payload.listenRewinds.isEmpty,
+                  payload.confirmedAdCoverageEndTime == nil
+            else {
+                throw AnalysisStoreError.invalidRow(column: 2)
+            }
+            return .withheld
+        }
+    }
+
+    /// The sole read path for outward asset surfaces.
+    ///
+    /// An unanswered asset projects its current detector rows. Once any
+    /// explicit receipt exists, live rows are ignored completely and only the
+    /// atomically frozen pre-response baseline may leave the device.
+    func responseIndependentAssetEgressProjection(
+        analysisAssetId: String
+    ) throws -> ResponseIndependentAssetEgressProjection? {
+        let baseline = try loadExplicitFeedbackEgressBaseline(
+            analysisAssetId: analysisAssetId
+        )
+        if let baseline {
+            switch baseline {
+            case .captured(let projection):
+                return projection
+            case .withheld:
+                return nil
+            }
+        }
+        let corrections = try loadCorrectionEvents(
+            analysisAssetId: analysisAssetId
+        )
+        let hasExplicitFeedback = corrections.contains {
+            $0.isPrivateExplicitFeedbackReceipt
+        }
+        guard !hasExplicitFeedback else { return nil }
+        let current = try fetchAdWindows(assetId: analysisAssetId)
+        guard let projected =
+                ExplicitBannerFeedbackPrivacy
+                .responseIndependentProjection(
+                    windows: current,
+                    corrections: corrections
+                )
+        else {
+            return nil
+        }
+        guard let decodedSpans =
+                ExplicitBannerFeedbackPrivacy.canonicalDecodedSpans(
+                    try fetchDecodedSpans(assetId: analysisAssetId),
+                    expectedAssetId: analysisAssetId
+                ),
+              let listenRewinds =
+                ExplicitBannerFeedbackPrivacy.canonicalListenRewinds(
+                    try fetchListenRewinds(
+                        forAssetId: analysisAssetId
+                    ),
+                    expectedAssetId: analysisAssetId,
+                    expectedWindowIDs: Set(projected.map(\.id))
+                ),
+              let asset = try fetchAsset(id: analysisAssetId),
+              asset.confirmedAdCoverageEndTime.map({
+                  $0.isFinite && $0 >= 0
+              }) ?? true
+        else {
+            return nil
+        }
+        return ResponseIndependentAssetEgressProjection(
+            windows: projected,
+            decodedSpans: decodedSpans,
+            listenRewinds: listenRewinds,
+            confirmedAdCoverageEndTime:
+                asset.confirmedAdCoverageEndTime
+        )
+    }
+
+    func responseIndependentAdWindows(
+        analysisAssetId: String
+    ) throws -> [AdWindow]? {
+        try responseIndependentAssetEgressProjection(
+            analysisAssetId: analysisAssetId
+        )?.windows
+    }
+
     func updateAdWindowDecision(id: String, decisionState: String) throws {
         let sql = "UPDATE ad_windows SET decisionState = ? WHERE id = ?"
         let stmt = try prepare(sql)
@@ -7487,6 +8330,678 @@ actor AnalysisStore {
         bind(stmt, 1, decisionState)
         bind(stmt, 2, id)
         try step(stmt, expecting: SQLITE_DONE)
+        guard sqlite3_changes(db) > 0 else {
+            throw AnalysisStoreError.notFound
+        }
+    }
+
+    /// Episode/asset-scoped variant for deferred UI actions. Ad-window IDs are
+    /// producer-owned and may be reused after an episode replacement; a stale
+    /// action must not mutate the replacement asset's same-ID row.
+    private func updateAdWindowDecision(
+        id: String,
+        analysisAssetId: String,
+        decisionState: String
+    ) throws {
+        let sql = """
+            UPDATE ad_windows
+            SET decisionState = ?
+            WHERE id = ? AND analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, decisionState)
+        bind(stmt, 2, id)
+        bind(stmt, 3, analysisAssetId)
+        try step(stmt, expecting: SQLITE_DONE)
+        guard sqlite3_changes(db) > 0 else {
+            throw AnalysisStoreError.notFound
+        }
+    }
+
+    /// Atomically commits an explicit banner correction and the authoritative
+    /// AdWindow revert it explains. Returning the append result lets the
+    /// correction layer run post-commit learning side effects without
+    /// re-appending (and inflating `submissionCount`).
+    @discardableResult
+    func persistRevertedAdWindow(
+        windowId: String,
+        analysisAssetId: String,
+        correction: CorrectionEvent? = nil
+    ) throws -> Bool {
+        try exec("BEGIN TRANSACTION")
+        do {
+            let wasNewlyInserted = try correction.map {
+                try appendCorrectionEvent($0)
+            } ?? false
+            try updateAdWindowDecision(
+                id: windowId,
+                analysisAssetId: analysisAssetId,
+                decisionState: AdDecisionState.reverted.rawValue
+            )
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Atomically validates and records an explicit No for the exact applied
+    /// auto-skip revision displayed by the banner.
+    ///
+    /// The store actor is the durable serialization boundary: a producer may
+    /// replace a same-ID row after the card is emitted but before its action
+    /// reaches persistence. Returning nil means the displayed revision no
+    /// longer owns the row and neither the receipt nor revert was written.
+    func persistDeniedAutoSkip(
+        windowId: String,
+        analysisAssetId: String,
+        expectedEpisodeId: String,
+        expectedStartTime: Double,
+        expectedEndTime: Double,
+        expectedProducerRevision: AdWindow,
+        expectedMaterialToken: String,
+        correction: CorrectionEvent
+    ) throws -> Bool? {
+        try exec("BEGIN TRANSACTION")
+        do {
+            guard windowId == expectedProducerRevision.id,
+                  analysisAssetId
+                    == expectedProducerRevision.analysisAssetId,
+                  expectedStartTime.isFinite,
+                  expectedEndTime.isFinite,
+                  expectedEndTime > expectedStartTime,
+                  try feedbackAssetMatches(
+                    analysisAssetId: analysisAssetId,
+                    expectedEpisodeId: expectedEpisodeId
+                  ),
+                  let current = try fetchAdWindow(id: windowId),
+                  current.analysisAssetId == analysisAssetId,
+                  [
+                    AdDecisionState.candidate.rawValue,
+                    AdDecisionState.confirmed.rawValue,
+                    AdDecisionState.applied.rawValue,
+                  ].contains(current.decisionState),
+                  AdWindowMaterialIdentity.sameProducerRevision(
+                    current,
+                    expectedProducerRevision
+                  ),
+                  AdWindowMaterialIdentity.autoSkipToken(
+                    window: current,
+                    displayedStart: expectedStartTime,
+                    displayedEnd: expectedEndTime
+                  ) == expectedMaterialToken,
+                  Self.feedbackCorrectionMatches(
+                    correction,
+                    source: .bannerAutoSkipDenied,
+                    analysisAssetId: analysisAssetId,
+                    startTime: expectedStartTime,
+                    endTime: expectedEndTime,
+                    requiredTargetIDs: [windowId],
+                    expectedProjection:
+                        ExplicitFeedbackDetectionProjection(
+                            expectedProducerRevision
+                        )
+                  )
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+
+            try captureExplicitFeedbackEgressBaselineIfNeeded(
+                analysisAssetId: analysisAssetId
+            )
+            let wasNewlyInserted = try appendCorrectionEvent(correction)
+            guard try persistedExplicitCorrectionMatchesExpected(correction)
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            // The UI may answer while the fire-and-forget applied-state write
+            // is still queued behind this actor. Record that the displayed
+            // automatic skip did happen before making the row terminal. This
+            // gives privacy projection the same durable pre-response shape
+            // whether the late applied write ran before or after the tap; the
+            // terminal `reverted` state below makes that late write a no-op.
+            try markAdWindowAppliedForFeedback(
+                id: windowId,
+                analysisAssetId: analysisAssetId
+            )
+            try updateAdWindowDecision(
+                id: windowId,
+                analysisAssetId: analysisAssetId,
+                decisionState: AdDecisionState.reverted.rawValue
+            )
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Durable receipt fence for Yes on an already-applied automatic skip.
+    /// Returning nil means the displayed producer material no longer owns the
+    /// row; no receipt is appended.
+    func persistConfirmedAutoSkip(
+        windowId: String,
+        analysisAssetId: String,
+        expectedEpisodeId: String,
+        expectedStartTime: Double,
+        expectedEndTime: Double,
+        expectedProducerRevision: AdWindow,
+        expectedMaterialToken: String,
+        correction: CorrectionEvent
+    ) throws -> Bool? {
+        try exec("BEGIN TRANSACTION")
+        do {
+            guard windowId == expectedProducerRevision.id,
+                  analysisAssetId
+                    == expectedProducerRevision.analysisAssetId,
+                  expectedStartTime.isFinite,
+                  expectedEndTime.isFinite,
+                  expectedEndTime > expectedStartTime,
+                  try feedbackAssetMatches(
+                    analysisAssetId: analysisAssetId,
+                    expectedEpisodeId: expectedEpisodeId
+                  ),
+                  let current = try fetchAdWindow(id: windowId),
+                  current.analysisAssetId == analysisAssetId,
+                  [
+                    AdDecisionState.candidate.rawValue,
+                    AdDecisionState.confirmed.rawValue,
+                    AdDecisionState.applied.rawValue,
+                  ].contains(current.decisionState),
+                  AdWindowMaterialIdentity.sameProducerRevision(
+                    current,
+                    expectedProducerRevision
+                  ),
+                  AdWindowMaterialIdentity.autoSkipToken(
+                    window: current,
+                    displayedStart: expectedStartTime,
+                    displayedEnd: expectedEndTime
+                  ) == expectedMaterialToken,
+                  Self.feedbackCorrectionMatches(
+                    correction,
+                    source: .bannerAutoSkipConfirmed,
+                    analysisAssetId: analysisAssetId,
+                    startTime: expectedStartTime,
+                    endTime: expectedEndTime,
+                    requiredTargetIDs: [windowId],
+                    expectedProjection:
+                        ExplicitFeedbackDetectionProjection(
+                            expectedProducerRevision
+                        )
+                  )
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            try captureExplicitFeedbackEgressBaselineIfNeeded(
+                analysisAssetId: analysisAssetId
+            )
+            let wasNewlyInserted = try appendCorrectionEvent(correction)
+            guard try persistedExplicitCorrectionMatchesExpected(correction)
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            try markAdWindowAppliedForFeedback(
+                id: windowId,
+                analysisAssetId: analysisAssetId
+            )
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Atomically persists the two canonical records produced by one explicit
+    /// "Hearing an ad" gesture. Neither the high-certainty user window nor
+    /// its false-negative learning receipt may exist without the other.
+    func persistUserMarkedAd(
+        window: AdWindow,
+        correction: CorrectionEvent
+    ) throws {
+        try exec("BEGIN TRANSACTION")
+        do {
+            try insertAdWindow(window)
+            _ = try appendCorrectionEvent(correction)
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Atomically retires the original markOnly row and inserts the durable
+    /// applied row created by an explicit suggest Yes.
+    @discardableResult
+    func persistAcceptedSuggestion(
+        originalWindowId: String,
+        originalAnalysisAssetId: String,
+        promotedWindow: AdWindow,
+        correction: CorrectionEvent? = nil
+    ) throws -> Bool {
+        try exec("BEGIN TRANSACTION")
+        do {
+            let wasNewlyInserted = try correction.map {
+                try appendCorrectionEvent($0)
+            } ?? false
+            try updateAdWindowDecision(
+                id: originalWindowId,
+                analysisAssetId: originalAnalysisAssetId,
+                decisionState: AdDecisionState.suppressed.rawValue
+            )
+            try insertAdWindow(promotedWindow)
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Exact-material variant used by the banner action. The original row
+    /// retirement, promoted insert, and receipt append happen only if the
+    /// durable source row still matches the card after every suspension.
+    func persistAcceptedSuggestionIfCurrent(
+        originalWindowId: String,
+        originalAnalysisAssetId: String,
+        expectedEpisodeId: String,
+        expectedStartTime: Double,
+        expectedEndTime: Double,
+        expectedProducerRevision: AdWindow,
+        expectedMaterialToken: String,
+        promotedWindow: AdWindow,
+        correction: CorrectionEvent
+    ) throws -> Bool? {
+        try exec("BEGIN TRANSACTION")
+        do {
+            guard originalWindowId == expectedProducerRevision.id,
+                  originalAnalysisAssetId
+                    == expectedProducerRevision.analysisAssetId,
+                  expectedProducerRevision.startTime == expectedStartTime,
+                  expectedProducerRevision.endTime == expectedEndTime,
+                  try feedbackAssetMatches(
+                    analysisAssetId: originalAnalysisAssetId,
+                    expectedEpisodeId: expectedEpisodeId
+                  ),
+                  let current = try fetchAdWindow(id: originalWindowId),
+                  current.analysisAssetId == originalAnalysisAssetId,
+                  current.decisionState
+                    == expectedProducerRevision.decisionState,
+                  current.wasSkipped
+                    == expectedProducerRevision.wasSkipped,
+                  current.userDismissedBanner
+                    == expectedProducerRevision.userDismissedBanner,
+                  AdWindowMaterialIdentity.sameProducerRevision(
+                    current,
+                    expectedProducerRevision
+                  ),
+                  AdWindowMaterialIdentity.suggestionToken(current)
+                    == expectedMaterialToken,
+                  promotedWindow.analysisAssetId
+                    == originalAnalysisAssetId,
+                  promotedWindow.startTime == expectedStartTime,
+                  promotedWindow.endTime == expectedEndTime,
+                  Self.feedbackCorrectionMatches(
+                    correction,
+                    source: .bannerSuggestionConfirmed,
+                    analysisAssetId: originalAnalysisAssetId,
+                    startTime: expectedStartTime,
+                    endTime: expectedEndTime,
+                    requiredTargetIDs: [
+                        originalWindowId,
+                        promotedWindow.id,
+                    ],
+                    expectedProjection:
+                        ExplicitFeedbackDetectionProjection(
+                            expectedProducerRevision
+                        )
+                  )
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            try captureExplicitFeedbackEgressBaselineIfNeeded(
+                analysisAssetId: originalAnalysisAssetId
+            )
+            let wasNewlyInserted = try appendCorrectionEvent(correction)
+            guard try persistedExplicitCorrectionMatchesExpected(correction)
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            try updateAdWindowDecision(
+                id: originalWindowId,
+                analysisAssetId: originalAnalysisAssetId,
+                decisionState: AdDecisionState.suppressed.rawValue
+            )
+            try insertAdWindow(promotedWindow)
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Atomically records an explicit Suggest-No outcome. Both fields are
+    /// required for durable semantics: `decisionState = reverted` prevents the
+    /// suggestion from resurfacing after relaunch, while the compatibility
+    /// boolean records that this was an explicit response rather than a
+    /// neutral fade. A partial write must never expose one without the other.
+    @discardableResult
+    func persistDeclinedSuggestion(
+        windowId: String,
+        analysisAssetId: String,
+        correction: CorrectionEvent? = nil
+    ) throws -> Bool {
+        try exec("BEGIN TRANSACTION")
+        do {
+            let wasNewlyInserted = try correction.map {
+                try appendCorrectionEvent($0)
+            } ?? false
+            try updateAdWindowUserDismissedBanner(
+                id: windowId,
+                analysisAssetId: analysisAssetId,
+                userDismissedBanner: true
+            )
+            try updateAdWindowDecision(
+                id: windowId,
+                analysisAssetId: analysisAssetId,
+                decisionState: AdDecisionState.reverted.rawValue
+            )
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Exact-material Suggest-No transaction. A stale row returns nil before
+    /// either the private receipt or response-derived row state is written.
+    func persistDeclinedSuggestionIfCurrent(
+        windowId: String,
+        analysisAssetId: String,
+        expectedEpisodeId: String,
+        expectedStartTime: Double,
+        expectedEndTime: Double,
+        expectedProducerRevision: AdWindow,
+        expectedMaterialToken: String,
+        correction: CorrectionEvent
+    ) throws -> Bool? {
+        try exec("BEGIN TRANSACTION")
+        do {
+            guard windowId == expectedProducerRevision.id,
+                  analysisAssetId
+                    == expectedProducerRevision.analysisAssetId,
+                  expectedProducerRevision.startTime == expectedStartTime,
+                  expectedProducerRevision.endTime == expectedEndTime,
+                  try feedbackAssetMatches(
+                    analysisAssetId: analysisAssetId,
+                    expectedEpisodeId: expectedEpisodeId
+                  ),
+                  let current = try fetchAdWindow(id: windowId),
+                  current.analysisAssetId == analysisAssetId,
+                  current.decisionState
+                    == expectedProducerRevision.decisionState,
+                  current.wasSkipped
+                    == expectedProducerRevision.wasSkipped,
+                  current.userDismissedBanner
+                    == expectedProducerRevision.userDismissedBanner,
+                  AdWindowMaterialIdentity.sameProducerRevision(
+                    current,
+                    expectedProducerRevision
+                  ),
+                  AdWindowMaterialIdentity.suggestionToken(current)
+                    == expectedMaterialToken,
+                  Self.feedbackCorrectionMatches(
+                    correction,
+                    source: .bannerSuggestionDenied,
+                    analysisAssetId: analysisAssetId,
+                    startTime: expectedStartTime,
+                    endTime: expectedEndTime,
+                    requiredTargetIDs: [windowId],
+                    expectedProjection:
+                        ExplicitFeedbackDetectionProjection(
+                            expectedProducerRevision
+                        )
+                  )
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            try captureExplicitFeedbackEgressBaselineIfNeeded(
+                analysisAssetId: analysisAssetId
+            )
+            let wasNewlyInserted = try appendCorrectionEvent(correction)
+            guard try persistedExplicitCorrectionMatchesExpected(correction)
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            try updateAdWindowUserDismissedBanner(
+                id: windowId,
+                analysisAssetId: analysisAssetId,
+                userDismissedBanner: true
+            )
+            try updateAdWindowDecision(
+                id: windowId,
+                analysisAssetId: analysisAssetId,
+                decisionState: AdDecisionState.reverted.rawValue
+            )
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func feedbackAssetMatches(
+        analysisAssetId: String,
+        expectedEpisodeId: String
+    ) throws -> Bool {
+        guard !expectedEpisodeId.isEmpty,
+              let asset = try fetchAsset(id: analysisAssetId)
+        else {
+            return false
+        }
+        return asset.episodeId == expectedEpisodeId
+    }
+
+    private func markAdWindowAppliedForFeedback(
+        id: String,
+        analysisAssetId: String
+    ) throws {
+        let sql = """
+            UPDATE ad_windows
+            SET decisionState = ?, wasSkipped = 1
+            WHERE id = ? AND analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, AdDecisionState.applied.rawValue)
+        bind(stmt, 2, id)
+        bind(stmt, 3, analysisAssetId)
+        try step(stmt, expecting: SQLITE_DONE)
+        guard sqlite3_changes(db) > 0 else {
+            throw AnalysisStoreError.notFound
+        }
+    }
+
+    private static func feedbackCorrectionMatches(
+        _ correction: CorrectionEvent,
+        source: CorrectionSource,
+        analysisAssetId: String,
+        startTime: Double,
+        endTime: Double,
+        requiredTargetIDs: Set<String>,
+        expectedProjection: ExplicitFeedbackDetectionProjection
+    ) -> Bool {
+        guard correction.analysisAssetId == analysisAssetId,
+              correction.source == source,
+              correction.effectiveCorrectionType
+                == source.kind.correctionType,
+              let refs = correction.targetRefs,
+              let canonicalTargetIDs =
+                refs.canonicalExplicitAdWindowIDs,
+              refs.explicitFeedbackDetectionProjection
+                == expectedProjection,
+              let scope = CorrectionScope.deserialize(correction.scope),
+              case let .exactTimeSpan(assetId, storedStart, storedEnd)
+                = scope,
+              assetId == analysisAssetId,
+              correction.scope == CorrectionScope.exactTimeSpan(
+                assetId: analysisAssetId,
+                startTime: startTime,
+                endTime: endTime
+              ).serialized
+        else {
+            return false
+        }
+        if let exactSpan = refs.exactFeedbackSpan {
+            guard exactSpan.matches(
+                startTime: startTime,
+                endTime: endTime
+            ) else {
+                return false
+            }
+        } else {
+            // Legacy receipts did not retain sub-millisecond material. They
+            // remain valid only when the old scope round-trip is itself exact;
+            // ambiguous sub-millisecond receipts fail closed.
+            guard storedStart == startTime,
+                  storedEnd == endTime
+            else {
+                return false
+            }
+        }
+        return Set(canonicalTargetIDs) == requiredTargetIDs
+    }
+
+    /// Reload the row selected by the v32 semantic identity and require the
+    /// private receipt body to be exactly the one the atomic feedback action
+    /// validated before any AdWindow mutation commits.
+    ///
+    /// In particular, the explicit upsert never overwrites an existing
+    /// `targetRefsJSON` body. A same-route/same-target retry increments its
+    /// submission counter only when the stored projection is identical; a
+    /// corrupt/mismatched survivor makes this check return false and the
+    /// surrounding transaction rolls the audit bump back as well.
+    private func persistedExplicitCorrectionMatchesExpected(
+        _ expected: CorrectionEvent
+    ) throws -> Bool {
+        guard expected.source?.isExplicitBannerFeedback == true,
+              let identityKey = expected.explicitReceiptIdentityKey,
+              let expectedTargetRefs = expected.targetRefs
+        else {
+            return false
+        }
+        let normalizedScopeKey =
+            CorrectionScope.deserialize(expected.scope)?.normalizedIdentityKey
+            ?? expected.scope
+        let sql = """
+            SELECT analysisAssetId, scope, source, correctionType,
+                   targetRefsJSON, effectiveCorrectionType,
+                   normalizedScopeKey, correctionIdentityKey
+            FROM correction_events
+            WHERE analysisAssetId = ?
+              AND effectiveCorrectionType = ?
+              AND normalizedScopeKey = ?
+              AND correctionIdentityKey = ?
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, expected.analysisAssetId)
+        bind(stmt, 2, expected.effectiveCorrectionType.rawValue)
+        bind(stmt, 3, normalizedScopeKey)
+        bind(stmt, 4, identityKey)
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              text(stmt, 0) == expected.analysisAssetId,
+              text(stmt, 1) == expected.scope,
+              optionalText(stmt, 2) == expected.source?.rawValue,
+              optionalText(stmt, 3) == expected.correctionType?.rawValue,
+              text(stmt, 5) == expected.effectiveCorrectionType.rawValue,
+              text(stmt, 6) == normalizedScopeKey,
+              text(stmt, 7) == identityKey,
+              let refsJSON = optionalText(stmt, 4),
+              let refsData = refsJSON.data(using: .utf8),
+              let persistedTargetRefs = try? JSONDecoder().decode(
+                  CorrectionTargetRefs.self,
+                  from: refsData
+              ),
+              persistedTargetRefs == expectedTargetRefs
+        else {
+            return false
+        }
+        return true
+    }
+
+    /// Atomically promotes one persisted window only while both its durable
+    /// state and producer revision still permit the skip that scheduled this
+    /// write. SkipOrchestrator publishes cues synchronously and persists the
+    /// promotion in a child task. Before that task reaches this actor, a
+    /// No/Listen transaction can make the row terminal, or a reconcile can
+    /// replace a non-terminal same-ID row with materially revised producer
+    /// data. The store actor serializes the revision read and conditional
+    /// update, so neither case can promote the replacement revision.
+    ///
+    /// `decisionState`, `wasSkipped`, and `userDismissedBanner` are mutable
+    /// response fields rather than producer revision identity. All remaining
+    /// persisted producer fields participate in the fence.
+    @discardableResult
+    func persistAppliedAdWindowIfEligible(
+        windowId: String,
+        analysisAssetId: String,
+        expectedProducerRevision: AdWindow
+    ) throws -> Bool {
+        guard windowId == expectedProducerRevision.id,
+              analysisAssetId == expectedProducerRevision.analysisAssetId,
+              let current = try fetchAdWindow(id: windowId),
+              current.analysisAssetId == analysisAssetId,
+              Self.sameAdWindowProducerRevision(
+                current,
+                expectedProducerRevision
+              ),
+              [
+                AdDecisionState.candidate.rawValue,
+                AdDecisionState.confirmed.rawValue,
+                AdDecisionState.applied.rawValue,
+              ].contains(current.decisionState)
+        else {
+            return false
+        }
+
+        let sql = """
+            UPDATE ad_windows
+            SET decisionState = ?, wasSkipped = 1
+            WHERE id = ?
+              AND analysisAssetId = ?
+              AND decisionState = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, AdDecisionState.applied.rawValue)
+        bind(stmt, 2, windowId)
+        bind(stmt, 3, analysisAssetId)
+        bind(stmt, 4, current.decisionState)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    private static func sameAdWindowProducerRevision(
+        _ lhs: AdWindow,
+        _ rhs: AdWindow
+    ) -> Bool {
+        AdWindowMaterialIdentity.sameProducerRevision(lhs, rhs)
     }
 
     func updateAdWindowHotPathCandidate(_ ad: AdWindow) throws {
@@ -7702,12 +9217,11 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    /// playhead-lc7z: mark that the user explicitly dismissed the banner
-    /// surfaced for this window. Mirror of `updateAdWindowWasSkipped`.
-    /// The `userDismissedBanner` column previously had no writer — the
-    /// schema reserved it (v‑era migration) but nothing ever flipped it to
-    /// 1, so the correction→retrain flywheel could never see which windows
-    /// the user waved off. A no-op when `id` matches no row.
+    /// playhead-lc7z / playhead-jw63.1: mark that the user explicitly answered
+    /// No to the banner surfaced for this window. The legacy
+    /// `userDismissedBanner` schema name is retained for compatibility, but a
+    /// neutral x dismissal and passive auto-fade leave it false. Mirror of
+    /// `updateAdWindowWasSkipped`; a no-op when `id` matches no row.
     func updateAdWindowUserDismissedBanner(id: String, userDismissedBanner: Bool) throws {
         let sql = "UPDATE ad_windows SET userDismissedBanner = ? WHERE id = ?"
         let stmt = try prepare(sql)
@@ -7715,6 +9229,30 @@ actor AnalysisStore {
         bind(stmt, 1, userDismissedBanner ? 1 : 0)
         bind(stmt, 2, id)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Asset-scoped counterpart used by suspended Suggest-No transactions.
+    /// Throwing on a scope mismatch lets the surrounding transaction roll back
+    /// its correction append before it can affect a replacement episode.
+    private func updateAdWindowUserDismissedBanner(
+        id: String,
+        analysisAssetId: String,
+        userDismissedBanner: Bool
+    ) throws {
+        let sql = """
+            UPDATE ad_windows
+            SET userDismissedBanner = ?
+            WHERE id = ? AND analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, userDismissedBanner ? 1 : 0)
+        bind(stmt, 2, id)
+        bind(stmt, 3, analysisAssetId)
+        try step(stmt, expecting: SQLITE_DONE)
+        guard sqlite3_changes(db) > 0 else {
+            throw AnalysisStoreError.notFound
+        }
     }
 
     func updateConfirmedAdCoverage(id: String, endTime: Double) throws {
@@ -7936,11 +9474,12 @@ actor AnalysisStore {
         // decoder reads. `title` lands at index 11 — append-only.
         // playhead-084j: `adDurationStatsJSON` lands at index 12.
         // playhead-spxs: `networkId` lands at index 13.
+        // playhead-xsdz.71: `daiStitchNetwork` at 14, `daiExpected` at 15.
         let sql = """
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title, adDurationStatsJSON, networkId
+                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected
             FROM podcast_profiles WHERE podcastId = ?
             """
         let stmt = try prepare(sql)
@@ -7961,7 +9500,9 @@ actor AnalysisStore {
             traitProfileJSON: optionalText(stmt, 10),
             title: optionalText(stmt, 11),
             adDurationStatsJSON: optionalText(stmt, 12),
-            networkId: optionalText(stmt, 13)
+            networkId: optionalText(stmt, 13),
+            daiStitchNetwork: optionalText(stmt, 14),
+            daiExpected: optionalInt(stmt, 15).map { $0 != 0 }
         )
     }
 
@@ -7990,7 +9531,7 @@ actor AnalysisStore {
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title, adDurationStatsJSON, networkId
+                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected
             FROM podcast_profiles WHERE networkId = ?
             """
         let stmt = try prepare(sql)
@@ -8013,7 +9554,9 @@ actor AnalysisStore {
                     traitProfileJSON: optionalText(stmt, 10),
                     title: optionalText(stmt, 11),
                     adDurationStatsJSON: optionalText(stmt, 12),
-                    networkId: optionalText(stmt, 13)
+                    networkId: optionalText(stmt, 13),
+                    daiStitchNetwork: optionalText(stmt, 14),
+                    daiExpected: optionalInt(stmt, 15).map { $0 != 0 }
                 )
             )
         }
@@ -8045,6 +9588,44 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, title)
         bind(stmt, 2, podcastId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-xsdz.71 (Signal 1): persist the show-level DAI-stitch
+    /// classification (network + DAI-EXPECTED prior) derived from the enclosure
+    /// download's redirect chain. Column-specific setter that writes ONLY the
+    /// two columns it owns — `upsertProfile` never touches them, so a profile
+    /// rebuild (trust-scoring / priors update) preserves the classification.
+    ///
+    /// ONCE-PER-SHOW / IDEMPOTENT / NO-CREATE semantics, all enforced in one
+    /// statement:
+    ///   * `WHERE podcastId = ?` — a plain UPDATE, so a brand-new show whose
+    ///     `podcast_profiles` row does not exist yet is a benign no-op (mirrors
+    ///     `updateProfileTitle`). A later download, once the row exists, records
+    ///     it.
+    ///   * `AND daiStitchNetwork IS NULL` — the once-per-show gate: the first
+    ///     observation wins and later observations (which may see a truncated
+    ///     chain) cannot overwrite it. Re-recording is a cheap no-op.
+    ///
+    /// - Parameters:
+    ///   - podcastId: `podcast_profiles.podcastId` of the row to update.
+    ///   - daiStitchNetwork: `DAIStitchNetwork.rawValue` of the classification.
+    ///   - daiExpected: whether DAI is expected for the show (stored 1/0).
+    func updateProfileDAIStitch(
+        podcastId: String,
+        daiStitchNetwork: String,
+        daiExpected: Bool
+    ) throws {
+        let sql = """
+            UPDATE podcast_profiles
+            SET daiStitchNetwork = ?, daiExpected = ?
+            WHERE podcastId = ? AND daiStitchNetwork IS NULL
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, daiStitchNetwork)
+        bind(stmt, 2, daiExpected ? 1 : 0)
+        bind(stmt, 3, podcastId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -8412,6 +9993,103 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// Atomically removes scheduler artifacts owned by a cached download that
+    /// the user deleted. The journal subquery is evaluated before the job rows
+    /// are removed so only generations belonging to those jobs are retired;
+    /// unrelated historical episode journal entries remain intact.
+    @discardableResult
+    func deleteAnalysisJobsForRemovedDownload(
+        episodeId: String,
+        downloadId: String
+    ) throws -> Set<String> {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            let select = try prepare(
+                """
+                SELECT jobId
+                FROM analysis_jobs
+                WHERE episodeId = ? AND downloadId = ?
+                """
+            )
+            bind(select, 1, episodeId)
+            bind(select, 2, downloadId)
+            var jobIDs = Set<String>()
+            while sqlite3_step(select) == SQLITE_ROW {
+                jobIDs.insert(text(select, 0))
+            }
+            sqlite3_finalize(select)
+
+            let deleteJournal = try prepare(
+                """
+                DELETE FROM work_journal
+                WHERE episode_id = ?
+                  AND generation_id IN (
+                    SELECT generationID
+                    FROM analysis_jobs
+                    WHERE episodeId = ? AND downloadId = ?
+                  )
+                """
+            )
+            bind(deleteJournal, 1, episodeId)
+            bind(deleteJournal, 2, episodeId)
+            bind(deleteJournal, 3, downloadId)
+            try step(deleteJournal, expecting: SQLITE_DONE)
+            sqlite3_finalize(deleteJournal)
+
+            let deleteJobs = try prepare(
+                """
+                DELETE FROM analysis_jobs
+                WHERE episodeId = ? AND downloadId = ?
+                """
+            )
+            bind(deleteJobs, 1, episodeId)
+            bind(deleteJobs, 2, downloadId)
+            try step(deleteJobs, expecting: SQLITE_DONE)
+            sqlite3_finalize(deleteJobs)
+            try exec("COMMIT")
+            return jobIDs
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Deletes only the job generation minted by an enqueue that lost its
+    /// ownership race. Unlike the episode-wide cache-removal cleanup, this
+    /// must not touch a fresh re-download that may already be enqueuing.
+    func deleteRetiredAnalysisEnqueue(
+        jobId: String,
+        generationID: String
+    ) throws {
+        try exec("BEGIN IMMEDIATE")
+        do {
+            let deleteJournal = try prepare(
+                """
+                DELETE FROM work_journal
+                WHERE generation_id = ?
+                """
+            )
+            bind(deleteJournal, 1, generationID)
+            try step(deleteJournal, expecting: SQLITE_DONE)
+            sqlite3_finalize(deleteJournal)
+
+            let deleteJob = try prepare(
+                """
+                DELETE FROM analysis_jobs
+                WHERE jobId = ? AND generationID = ?
+                """
+            )
+            bind(deleteJob, 1, jobId)
+            bind(deleteJob, 2, generationID)
+            try step(deleteJob, expecting: SQLITE_DONE)
+            sqlite3_finalize(deleteJob)
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
     func fetchJob(byId jobId: String) throws -> AnalysisJob? {
         let sql = "SELECT * FROM analysis_jobs WHERE jobId = ?"
         let stmt = try prepare(sql)
@@ -8552,6 +10230,30 @@ actor AnalysisStore {
         bind(stmt, 3, lastErrorCode)
         bind(stmt, 4, Date().timeIntervalSince1970)
         bind(stmt, 5, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-dqfm: bump a still-`queued` job's `priority` for the
+    /// scarcity-aware backfill re-prioritization pass. Only `priority` +
+    /// `updatedAt` change — `state`, lease, coverage, `createdAt`,
+    /// `generationID`, and `schedulerEpoch` are all left untouched (this is a
+    /// selection nudge, NOT a lifecycle transition, so it must not disturb the
+    /// FIFO `createdAt` tiebreak, orphan-recovery routing, or the lease clock).
+    ///
+    /// Guarded on `state = 'queued'`: if the row was leased / started running
+    /// between the reconciler's read and this write, the UPDATE is a benign
+    /// 0-row no-op rather than re-ranking an in-flight job.
+    func updateJobPriority(jobId: String, priority: Int) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET priority = ?, updatedAt = ?
+            WHERE jobId = ? AND state = 'queued'
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, priority)
+        bind(stmt, 2, Date().timeIntervalSince1970)
+        bind(stmt, 3, jobId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -9838,6 +11540,16 @@ actor AnalysisStore {
         }
     }
 
+    /// Cancellation-aware journal admission used by revocable background
+    /// download finalization. The check executes after this actor admits the
+    /// caller, immediately before the synchronous SQLite transaction.
+    func appendWorkJournalEntryUnlessCancelled(
+        _ entry: WorkJournalEntry
+    ) throws {
+        try Task.checkCancellation()
+        try appendWorkJournalEntry(entry)
+    }
+
     /// Internal append that assumes an outer transaction is already
     /// open. Used by `acquireEpisodeLease` and `releaseEpisodeLease`.
     private func appendWorkJournalEntryLocked(
@@ -10755,6 +12467,71 @@ actor AnalysisStore {
     }
 
     #if DEBUG
+    /// Test seam for constructing post-response/corruption fixtures. The
+    /// caller must invoke this before inserting an explicit receipt or
+    /// mutating live rows, matching the production transaction boundary.
+    func captureExplicitFeedbackEgressBaselineForTesting(
+        analysisAssetId: String
+    ) throws {
+        try captureExplicitFeedbackEgressBaselineIfNeeded(
+            analysisAssetId: analysisAssetId
+        )
+    }
+
+    /// Test-only fixture seam for legacy post-response shapes whose real
+    /// unanswered rows are no longer present in the live table.
+    func seedExplicitFeedbackEgressBaselineForTesting(
+        analysisAssetId: String,
+        unansweredWindows: [AdWindow]
+    ) throws {
+        guard try loadExplicitFeedbackEgressBaseline(
+                    analysisAssetId: analysisAssetId
+              ) == nil,
+              !(try loadCorrectionEvents(
+                  analysisAssetId: analysisAssetId
+              )).contains(where: {
+                  $0.isPrivateExplicitFeedbackReceipt
+              }),
+              let projected =
+                ExplicitBannerFeedbackPrivacy.unansweredProjection(
+                    windows: unansweredWindows
+                ),
+              !projected.isEmpty,
+              projected.allSatisfy({
+                  $0.analysisAssetId == analysisAssetId
+              }),
+              let decodedSpans =
+                ExplicitBannerFeedbackPrivacy.canonicalDecodedSpans(
+                    try fetchDecodedSpans(assetId: analysisAssetId),
+                    expectedAssetId: analysisAssetId
+                ),
+              let listenRewinds =
+                ExplicitBannerFeedbackPrivacy.canonicalListenRewinds(
+                    try fetchListenRewinds(
+                        forAssetId: analysisAssetId
+                    ),
+                    expectedAssetId: analysisAssetId,
+                    expectedWindowIDs: Set(projected.map(\.id))
+                ),
+              let asset = try fetchAsset(id: analysisAssetId),
+              asset.confirmedAdCoverageEndTime.map({
+                  $0.isFinite && $0 >= 0
+              }) ?? true
+        else {
+            throw AnalysisStoreError.queryFailed(
+                "Invalid explicit feedback baseline test fixture"
+            )
+        }
+        try insertExplicitFeedbackEgressBaseline(
+            analysisAssetId: analysisAssetId,
+            projected: projected,
+            decodedSpans: decodedSpans,
+            listenRewinds: listenRewinds,
+            confirmedAdCoverageEndTime:
+                asset.confirmedAdCoverageEndTime
+        )
+    }
+
     /// bd-m8k test-only helper: drop the `podcast_planner_state` table from
     /// under the live connection so the next `migrate()` against this path
     /// has to recreate it. Used by the "DROP TABLE / re-migrate cycle is
@@ -11855,7 +13632,14 @@ actor AnalysisStore {
 
         let decoder = JSONDecoder()
         var results: [DecodedSpan] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw AnalysisStoreError.queryFailed(
+                    String(cString: sqlite3_errmsg(db))
+                )
+            }
             let id = text(stmt, 0)
             let aid = text(stmt, 1)
             let firstOrdinal = Int(sqlite3_column_int(stmt, 2))
@@ -12084,6 +13868,25 @@ actor AnalysisStore {
         let normalizedScopeKey: String =
             CorrectionScope.deserialize(event.scope)?.normalizedIdentityKey ?? event.scope
         let effectiveType: CorrectionType = event.effectiveCorrectionType
+        let correctionIdentityKey: String
+        if let persistedKey = event.persistedCorrectionIdentityKey {
+            correctionIdentityKey = persistedKey
+        } else if event.source?.isExplicitBannerFeedback == true {
+            guard let explicitKey = event.explicitReceiptIdentityKey else {
+                throw AnalysisStoreError.insertFailed(
+                    "Explicit banner correction is missing valid target-window ownership"
+                )
+            }
+            correctionIdentityKey = explicitKey
+        } else if !event.isPrivateExplicitFeedbackReceipt {
+            // Empty is the compatibility discriminator: all nonexplicit
+            // corrections retain the v23 three-column identity behavior.
+            correctionIdentityKey = ""
+        } else {
+            throw AnalysisStoreError.insertFailed(
+                "Private explicit correction is missing its durable identity"
+            )
+        }
 
         // playhead-hygc.1.7: probe presence BEFORE the upsert so we can
         // tell a fresh insert from a deduped audit-bump. The probe and
@@ -12097,13 +13900,25 @@ actor AnalysisStore {
             WHERE analysisAssetId = ?
               AND effectiveCorrectionType = ?
               AND normalizedScopeKey = ?
+              AND correctionIdentityKey = ?
             LIMIT 1
             """
         let probeStmt = try prepare(probeSQL)
         bind(probeStmt, 1, event.analysisAssetId)
         bind(probeStmt, 2, effectiveType.rawValue)
         bind(probeStmt, 3, normalizedScopeKey)
-        let alreadyPresent = sqlite3_step(probeStmt) == SQLITE_ROW
+        bind(probeStmt, 4, correctionIdentityKey)
+        let probeResult = sqlite3_step(probeStmt)
+        let alreadyPresent: Bool
+        if probeResult == SQLITE_ROW {
+            alreadyPresent = true
+        } else if probeResult == SQLITE_DONE {
+            alreadyPresent = false
+        } else {
+            let message = String(cString: sqlite3_errmsg(db))
+            sqlite3_finalize(probeStmt)
+            throw AnalysisStoreError.queryFailed(message)
+        }
         sqlite3_finalize(probeStmt)
 
         // `INSERT OR IGNORE` handles the PRIMARY KEY collision case
@@ -12119,9 +13934,15 @@ actor AnalysisStore {
             (id, analysisAssetId, scope, createdAt, source, podcastId,
              correctionType, causalSource, targetRefsJSON,
              firstSeenAt, lastSeenAt, submissionCount,
-             normalizedScopeKey, effectiveCorrectionType)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-            ON CONFLICT(analysisAssetId, effectiveCorrectionType, normalizedScopeKey)
+             normalizedScopeKey, effectiveCorrectionType,
+             correctionIdentityKey)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ON CONFLICT(
+                analysisAssetId,
+                effectiveCorrectionType,
+                normalizedScopeKey,
+                correctionIdentityKey
+            )
             DO UPDATE SET
                 lastSeenAt = MAX(correction_events.lastSeenAt, excluded.lastSeenAt),
                 submissionCount = correction_events.submissionCount + 1,
@@ -12129,11 +13950,23 @@ actor AnalysisStore {
                 -- the latest attribution wins. The original `id` /
                 -- `createdAt` / `firstSeenAt` are intentionally NOT
                 -- overwritten — they pin the first-observation provenance.
-                source = COALESCE(correction_events.source, excluded.source),
+                source = CASE
+                    WHEN excluded.correctionIdentityKey = ''
+                    THEN COALESCE(correction_events.source, excluded.source)
+                    ELSE correction_events.source
+                END,
                 podcastId = COALESCE(correction_events.podcastId, excluded.podcastId),
-                correctionType = COALESCE(correction_events.correctionType, excluded.correctionType),
+                correctionType = CASE
+                    WHEN excluded.correctionIdentityKey = ''
+                    THEN COALESCE(correction_events.correctionType, excluded.correctionType)
+                    ELSE correction_events.correctionType
+                END,
                 causalSource = COALESCE(excluded.causalSource, correction_events.causalSource),
-                targetRefsJSON = COALESCE(excluded.targetRefsJSON, correction_events.targetRefsJSON)
+                targetRefsJSON = CASE
+                    WHEN excluded.correctionIdentityKey = ''
+                    THEN COALESCE(excluded.targetRefsJSON, correction_events.targetRefsJSON)
+                    ELSE correction_events.targetRefsJSON
+                END
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -12146,16 +13979,35 @@ actor AnalysisStore {
         bind(stmt, 7, event.correctionType?.rawValue)
         bind(stmt, 8, event.causalSource?.rawValue)
         // Encode targetRefs to JSON if present.
-        let targetRefsJSON: String? = {
-            guard let refs = event.targetRefs else { return nil }
-            guard let data = try? JSONEncoder().encode(refs) else { return nil }
-            return String(data: data, encoding: .utf8)
-        }()
+        let targetRefsJSON: String?
+        if let refs = event.targetRefs {
+            do {
+                let data = try JSONEncoder().encode(refs)
+                guard let json = String(data: data, encoding: .utf8) else {
+                    throw AnalysisStoreError.encodingFailure(
+                        "CorrectionTargetRefs JSON was not UTF-8"
+                    )
+                }
+                targetRefsJSON = json
+            } catch let error as AnalysisStoreError {
+                throw error
+            } catch {
+                if event.isPrivateExplicitFeedbackReceipt {
+                    throw AnalysisStoreError.encodingFailure(
+                        "Explicit CorrectionTargetRefs: \(error)"
+                    )
+                }
+                targetRefsJSON = nil
+            }
+        } else {
+            targetRefsJSON = nil
+        }
         bind(stmt, 9, targetRefsJSON)
         bind(stmt, 10, event.createdAt)             // firstSeenAt
         bind(stmt, 11, event.createdAt)             // lastSeenAt
         bind(stmt, 12, normalizedScopeKey)
         bind(stmt, 13, effectiveType.rawValue)
+        bind(stmt, 14, correctionIdentityKey)
         try step(stmt, expecting: SQLITE_DONE)
         // `sqlite3_changes` is the durable signal that a row was
         // actually inserted or updated. Combined with the pre-upsert
@@ -12189,7 +14041,7 @@ actor AnalysisStore {
         let sql = """
             SELECT id, analysisAssetId, scope, createdAt, source, podcastId,
                    correctionType, causalSource, targetRefsJSON,
-                   submissionCount, lastSeenAt
+                   submissionCount, lastSeenAt, correctionIdentityKey
             FROM correction_events
             WHERE analysisAssetId = ?
             ORDER BY createdAt ASC
@@ -12199,7 +14051,14 @@ actor AnalysisStore {
         bind(stmt, 1, analysisAssetId)
 
         var results: [CorrectionEvent] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                throw AnalysisStoreError.queryFailed(
+                    String(cString: sqlite3_errmsg(db))
+                )
+            }
             let id = text(stmt, 0)
             let assetId = text(stmt, 1)
             let scope = text(stmt, 2)
@@ -12224,6 +14083,7 @@ actor AnalysisStore {
             let lastSeenAt: Double? = sqlite3_column_type(stmt, 10) == SQLITE_NULL
                 ? nil
                 : sqlite3_column_double(stmt, 10)
+            let correctionIdentityKey = optionalText(stmt, 11)
             results.append(CorrectionEvent(
                 id: id,
                 analysisAssetId: assetId,
@@ -12235,7 +14095,13 @@ actor AnalysisStore {
                 causalSource: causalSource,
                 targetRefs: targetRefs,
                 submissionCount: submissionCount,
-                lastSeenAt: lastSeenAt
+                lastSeenAt: lastSeenAt,
+                isPrivateExplicitFeedbackReceipt:
+                    source?.isExplicitBannerFeedback == true
+                    || correctionIdentityKey?.isEmpty == false,
+                persistedCorrectionIdentityKey:
+                    correctionIdentityKey?.isEmpty == false
+                    ? correctionIdentityKey : nil
             ))
         }
         return results
@@ -12284,7 +14150,8 @@ actor AnalysisStore {
         textSnapshot, bucket, commercialIntent, ownership,
         evidenceSourcesJSON, fmCertainty, classifierConfidence,
         userAction, eligibilityGate, scanCohortJSON,
-        decisionCohortJSON, transcriptQuality, createdAt
+        decisionCohortJSON, transcriptQuality, createdAt,
+        privacyClassification
         """
 
     /// Insert a single training example. Idempotent on `id` via
@@ -12365,7 +14232,7 @@ actor AnalysisStore {
         let sql = """
             INSERT OR REPLACE INTO training_examples
             (\(Self.trainingExampleColumns))
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -12402,6 +14269,7 @@ actor AnalysisStore {
         bind(stmt, 19, example.decisionCohortJSON)
         bind(stmt, 20, example.transcriptQuality)
         bind(stmt, 21, example.createdAt)
+        bind(stmt, 22, example.privacyClassification.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -12414,6 +14282,10 @@ actor AnalysisStore {
             guard let data = evidenceJSON.data(using: .utf8) else { return [] }
             return (try? JSONDecoder().decode([String].self, from: data)) ?? []
         }()
+        let privacyClassification =
+            optionalText(stmt, 21).flatMap {
+                TrainingExamplePrivacyClassification(rawValue: $0)
+            } ?? .onDeviceLocal
         return TrainingExample(
             id: text(stmt, 0),
             analysisAssetId: text(stmt, 1),
@@ -12435,7 +14307,8 @@ actor AnalysisStore {
             scanCohortJSON: text(stmt, 17),
             decisionCohortJSON: optionalText(stmt, 18),
             transcriptQuality: text(stmt, 19),
-            createdAt: sqlite3_column_double(stmt, 20)
+            createdAt: sqlite3_column_double(stmt, 20),
+            privacyClassification: privacyClassification
         )
     }
 
@@ -12536,56 +14409,128 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
-    /// Returns up to `limit` `analysisAssetId`s whose current asset row is
-    /// summary-eligible (transcript coverage ≥ `coverageFraction`) but for
-    /// which `episode_summaries` either has no row, has a stale
-    /// `schemaVersion`, or has a `transcriptVersion` that no longer matches
-    /// the live transcript fingerprint.
+    /// playhead-g4dk: interval-unioned seconds of `pass='fast'` transcript
+    /// actually present for `assetId`. Overlapping chunks count once, gaps
+    /// are excluded, and degenerate/inverted rows contribute nothing.
     ///
-    /// Coverage is computed as
-    ///     `fastTranscriptCoverageEndTime / episodeDurationSec`,
-    /// matching the runtime gate the coordinator uses.
+    /// Unlike the `fastTranscriptCoverageEndTime` watermark — a high-water
+    /// *reach* that overstates a gappy transcript — this is the "how much
+    /// fast text is real?" number the summary-eligibility gate compares
+    /// against. Returns 0 when no fast chunks exist: deliberately NO
+    /// watermark fallback, so a sparse-but-high-watermark asset (the g4dk
+    /// bug — a ~39%-real episode behind an 80% watermark) is gated out
+    /// rather than admitted on a stale reach.
+    private func fastTranscriptUnionSeconds(assetId: String) throws -> Double {
+        let sql = """
+            SELECT startTime, endTime
+            FROM transcript_chunks
+            WHERE pass = 'fast' AND analysisAssetId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var intervals: [(start: Double, end: Double)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let start = sqlite3_column_double(stmt, 0)
+            let end = sqlite3_column_double(stmt, 1)
+            guard end > start else { continue }
+            intervals.append((start: start, end: end))
+        }
+        return AnalysisCoverageMath.unionedSeconds(intervals)
+    }
+
+    /// Returns up to `limit` `analysisAssetId`s whose current asset row is
+    /// summary-eligible but for which `episode_summaries` either has no row
+    /// or carries a stale `schemaVersion`.
+    ///
+    /// Summary-eligibility (playhead-g4dk) has two gates:
+    ///   - **Real transcript coverage.** The unioned seconds of fast
+    ///     transcript actually present (``fastTranscriptUnionSeconds``)
+    ///     divided by `episodeDurationSec` must be ≥ `coverageFraction`.
+    ///     This replaces the old `fastTranscriptCoverageEndTime /
+    ///     episodeDurationSec` watermark gate, which admitted sparse
+    ///     transcripts whose high-water reach masked large gaps and got
+    ///     them summarized on a gappy, ad-contaminated transcript.
+    ///   - **Ad-detection completion.** `confirmedAdCoverageEndTime` is
+    ///     set (ad detection confirmed at least one span) OR the asset has
+    ///     reached ANY terminal-completion state (`complete`,
+    ///     `completeFull`, `completeFeatureOnly`,
+    ///     `completeTranscriptPartial`). Every `complete*` terminal is
+    ///     reached only by transitioning OUT of `.backfill`, i.e. after the
+    ///     ad pipeline has run over the transcribed range — so confirmed
+    ///     ad spans (if any) exist to exclude by the time we summarize.
+    ///     Still-in-progress states (queued/spooling/…/backfill) and the
+    ///     `failed*` terminals do NOT qualify: summarizing then would run on
+    ///     a pre-ad-detection transcript and leak a sponsor read.
+    ///
+    ///     Crucially this must be a *disjunction* of the confirmed-ad
+    ///     watermark and the completion state, NOT confirmed-ad alone: a
+    ///     no-ad episode never advances `confirmedAdCoverageEndTime` (it
+    ///     only tracks `max(nonSuppressedWindows.endTime)`), so gating on
+    ///     the watermark alone would permanently deny summaries to every
+    ///     ad-free episode — including the common `completeTranscriptPartial`
+    ///     band whose transcript reach lands in [coverageFraction, 0.95).
+    ///     (`completeFeatureOnly` is admitted for symmetry but is filtered
+    ///     out by the coverage gate anyway: its transcript reach is ~0.)
     ///
     /// Notes:
     ///   - Assets with a missing or zero `episodeDurationSec` are excluded
     ///     (we cannot compute coverage), even if a transcript exists.
     ///   - Assets in `analysisState = 'failed'` are excluded — the
     ///     backfill coordinator should not poke at known-failed rows.
-    ///   - The coordinator does the per-asset transcript-version probe;
-    ///     this query only filters out rows whose summary is at the
-    ///     current `currentSchemaVersion` AND has a non-null
-    ///     `transcriptVersion` matching the asset's row. Anything
-    ///     ambiguous (NULL transcriptVersion on either side) returns so
-    ///     the coordinator can decide.
+    ///   - SQL pre-filters cheaply on the watermark presence, completion,
+    ///     failure, and summary staleness; the exact interval-union
+    ///     coverage decision is refined in Swift, since SQLite has no
+    ///     interval union without an extension (the same Swift-side union
+    ///     ``fetchCoverageSummariesByAssetIds`` computes). Candidates are
+    ///     visited in `createdAt DESC` order and the first `limit` that
+    ///     clear the real coverage threshold are returned; because the
+    ///     coverage cut happens in Swift, `limit` is enforced by the loop
+    ///     rather than a SQL `LIMIT`.
     func fetchEpisodeSummaryBackfillCandidates(
         coverageFraction: Double,
         currentSchemaVersion: Int,
         limit: Int
     ) throws -> [String] {
+        guard limit > 0 else { return [] }
         let sql = """
-            SELECT a.id
+            SELECT a.id, a.episodeDurationSec
             FROM analysis_assets a
             LEFT JOIN episode_summaries s ON s.analysisAssetId = a.id
             WHERE a.episodeDurationSec IS NOT NULL
               AND a.episodeDurationSec > 0
               AND a.fastTranscriptCoverageEndTime IS NOT NULL
-              AND (a.fastTranscriptCoverageEndTime / a.episodeDurationSec) >= ?
               AND a.analysisState != 'failed'
+              AND (
+                    a.confirmedAdCoverageEndTime IS NOT NULL
+                 OR a.analysisState IN (
+                        'complete', 'completeFull',
+                        'completeFeatureOnly', 'completeTranscriptPartial'
+                    )
+              )
               AND (
                     s.analysisAssetId IS NULL
                  OR s.schemaVersion < ?
               )
             ORDER BY a.createdAt DESC
-            LIMIT ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, coverageFraction)
-        bind(stmt, 2, currentSchemaVersion)
-        bind(stmt, 3, limit)
+        bind(stmt, 1, currentSchemaVersion)
+
         var ids: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            ids.append(text(stmt, 0))
+            let id = text(stmt, 0)
+            guard let duration = optionalDouble(stmt, 1), duration > 0 else { continue }
+            // Refine the cheap SQL pre-filter with the real interval-union
+            // coverage — the deciding gate. Runs an independent prepared
+            // statement per candidate; the summary-staleness filter keeps
+            // the pre-filtered set small in steady state and the loop stops
+            // as soon as `limit` assets clear the threshold.
+            let coveredSec = try fastTranscriptUnionSeconds(assetId: id)
+            guard coveredSec / duration >= coverageFraction else { continue }
+            ids.append(id)
+            if ids.count >= limit { break }
         }
         return ids
     }

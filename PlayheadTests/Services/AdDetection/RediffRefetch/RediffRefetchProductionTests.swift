@@ -96,7 +96,7 @@ struct RediffRefetchStateV28MigrationTests {
         // columns) → 30 (playhead-gy2s analysis_jobs reject-advisory columns) →
         // 31 (playhead-b6jq specialist_scan_results); the V28
         // rediff_refetch_state tables probed below are unchanged.
-        #expect(AnalysisStore.currentSchemaVersion == 31)
+        #expect(AnalysisStore.currentSchemaVersion == 34)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())
@@ -388,6 +388,43 @@ struct RediffRefetchRecorderTests {
         #expect(totals.failedCount == 1)
         #expect(totals.parkedCount == 1)
     }
+
+    @Test("DAY-0 poisoning fix (xsdz.36.4): .dayZeroUnmarked accounts bandwidth but writes NO state; .dayZeroMarked resolves + accounts")
+    func dayZeroOutcomesPoisoningSafe() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1"))
+        try await store.insertAsset(makeAsset(id: "a2"))
+        let recorder = AnalysisStoreRediffRefetchRecorder(store: store, config: .production, now: { 999 })
+
+        // A no-mark day-0 run: bandwidth accounted, but NO rediff_refetch_state
+        // row — so `fetchRediffCandidateSeeds` (which excludes ONLY resolved
+        // assets) never permanently excludes it; the lagged sweep recovers it.
+        await recorder.recordOutcome(.dayZeroUnmarked(
+            assetId: "a1",
+            cost: RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: 108_000_000),
+            error: nil
+        ))
+        #expect(try await store.fetchRediffRefetchState(assetId: "a1") == nil,
+                "an unmarked day-0 run advances NO attempt state (poisoning-safe)")
+        var totals = try await store.fetchRediffBandwidthTotals()
+        #expect(totals.fullFetchBytesTotal == 108_000_000, "bytes are still accounted")
+        #expect(totals.rotatedCount == 0)
+
+        // A marked day-0 run: resolves the shared state (day-0 K≥3 supersets the
+        // lagged K=1 sweep) AND accounts bandwidth.
+        let resolvedState = RediffRefetchPolicy.markResolved(.initial, at: 200)
+        await recorder.recordOutcome(.dayZeroMarked(
+            assetId: "a2",
+            cost: RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: 162_000_000),
+            markCount: 2,
+            newState: resolvedState
+        ))
+        #expect(try await store.fetchRediffRefetchState(assetId: "a2")?.attemptState == resolvedState)
+        #expect(try await store.fetchRediffRefetchState(assetId: "a2")?.attemptState.resolved == true)
+        totals = try await store.fetchRediffBandwidthTotals()
+        #expect(totals.fullFetchBytesTotal == 108_000_000 + 162_000_000)
+        #expect(totals.rotatedCount == 1, "a marked day-0 counts as one rotation-equivalent")
+    }
 }
 
 // MARK: - Staging provider
@@ -426,6 +463,26 @@ struct RediffBSideStagingProviderTests {
 
         decoder.errorToThrow = NSError(domain: "decode", code: 1)
         #expect(await provider.refetchedBSideMono16kHz(assetId: "a1") == nil, "decode failure degrades to nil (status quo)")
+    }
+
+    @Test("k-way: stageAll exposes every URL via refetchedBSideFileURLs; single-URL accessors return the primary")
+    func kWayStageAllListSemantics() async {
+        let provider = RediffBSideStagingProvider(decoder: StubBSideDecoder(), durationProbe: { _ in nil })
+        let urls = [URL(fileURLWithPath: "/tmp/x0.mp3"), URL(fileURLWithPath: "/tmp/x1.mp3"), URL(fileURLWithPath: "/tmp/x2.mp3")]
+
+        await provider.stageAll(assetId: "a1", fileURLs: urls)
+        #expect(await provider.refetchedBSideFileURLs(assetId: "a1") == urls, "all K B-sides exposed")
+        #expect(await provider.refetchedBSideFileURL(assetId: "a1") == urls.first, "single-URL accessor returns the primary")
+        #expect(await provider.stagedCount == 1, "stagedCount is the asset count, not the file count")
+
+        await provider.unstage(assetId: "a1")
+        #expect(await provider.refetchedBSideFileURLs(assetId: "a1").isEmpty)
+        #expect(await provider.refetchedBSideFileURL(assetId: "a1") == nil)
+
+        // An empty stageAll unstages (defensive).
+        await provider.stageAll(assetId: "a1", fileURLs: urls)
+        await provider.stageAll(assetId: "a1", fileURLs: [])
+        #expect(await provider.stagedCount == 0)
     }
 
     @Test("the duration cap gates the PCM decode (cost bound), not the byte-path URL")
@@ -472,6 +529,33 @@ struct RevalidatingRediffBSideConsumerTests {
 
         #expect(spy.revalidateCalls == [SpyAdDetection.RevalidateCall(assetId: "a1", podcastId: "", episodeDuration: 280)])
         #expect(await staging.stagedCount == 0, "unstaged after consumption — no stale mapping")
+    }
+
+    @Test("k-way: stages ALL copies at once, revalidates ONCE, exposes every copy during the pass, unstages after")
+    func kWayStagesAllCopiesForOneRevalidation() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1", episodeId: "ep-1", duration: 280))
+        let staging = makeStaging()
+        let spy = SpyAdDetection()
+        let urls = [
+            URL(fileURLWithPath: "/tmp/b0.mp3"),
+            URL(fileURLWithPath: "/tmp/b1.mp3"),
+            URL(fileURLWithPath: "/tmp/b2.mp3"),
+        ]
+        let stagingForClosure = staging
+        spy.onRevalidate = { @Sendable in
+            let all = await stagingForClosure.refetchedBSideFileURLs(assetId: "a1")
+            #expect(all == urls, "all K B-sides must be staged while the pass runs")
+            let primary = await stagingForClosure.refetchedBSideFileURL(assetId: "a1")
+            #expect(primary == urls.first, "the single-URL accessor serves the primary during the pass")
+        }
+        let consumer = RevalidatingRediffBSideConsumer(staging: staging, store: store, adDetection: spy)
+
+        try await consumer.consumeRotatedBSides(assetId: "a1", fileURLs: urls)
+
+        #expect(spy.revalidateCalls == [SpyAdDetection.RevalidateCall(assetId: "a1", podcastId: "", episodeDuration: 280)],
+                "one revalidation for the whole batch")
+        #expect(await staging.stagedCount == 0, "unstaged after the batch — no stale mapping")
     }
 
     @Test("episode duration falls back to the A-side stream extent when the column is NULL")

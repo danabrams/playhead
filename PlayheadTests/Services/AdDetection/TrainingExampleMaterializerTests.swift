@@ -756,6 +756,166 @@ struct TrainingExampleMaterializerTests {
         #expect(loaded.isEmpty)
     }
 
+    @Test(
+        "all explicit banner routes remain local learning inputs with private provenance"
+    )
+    func explicitBannerRoutesMaterializeAsLocalPrivate() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let sources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+
+        for (index, source) in sources.enumerated() {
+            let start = Double(index * 20)
+            let end = start + 10
+            try await store.insertSemanticScanResult(
+                scanResult(
+                    id: "explicit-private-\(index)",
+                    firstOrdinal: index * 10,
+                    lastOrdinal: index * 10 + 9,
+                    startTime: start,
+                    endTime: end,
+                    disposition: .containsAd
+                )
+            )
+            let targetID = "explicit-target-\(index)"
+            _ = try await store.appendCorrectionEvent(
+                CorrectionEvent(
+                    id: "explicit-correction-\(index)",
+                    analysisAssetId: assetId,
+                    scope: CorrectionScope.exactTimeSpan(
+                        assetId: assetId,
+                        startTime: start,
+                        endTime: end
+                    ).serialized,
+                    source: source,
+                    correctionType: source.kind.correctionType,
+                    targetRefs: CorrectionTargetRefs(
+                        adWindowId: targetID,
+                        exactFeedbackSpan: ExactFeedbackSpan(
+                            startTime: start,
+                            endTime: end
+                        )
+                    )
+                )
+            )
+        }
+
+        let genericStart = 100.0
+        try await store.insertSemanticScanResult(
+            scanResult(
+                id: "generic-local-positive-control",
+                firstOrdinal: 100,
+                lastOrdinal: 109,
+                startTime: genericStart,
+                endTime: genericStart + 10,
+                disposition: .containsAd
+            )
+        )
+        _ = try await store.appendCorrectionEvent(
+            correctionEvent(
+                id: "generic-local-correction",
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: assetId,
+                    startTime: genericStart,
+                    endTime: genericStart + 10
+                ).serialized,
+                source: .listenRevert
+            )
+        )
+
+        try await TrainingExampleMaterializer().materialize(
+            forAsset: assetId,
+            store: store,
+            now: 1_700_000_100
+        )
+        let examples = try await store.loadTrainingExamples(
+            forAsset: assetId
+        )
+        let byID = Dictionary(
+            uniqueKeysWithValues: examples.map { ($0.id, $0) }
+        )
+        for index in sources.indices {
+            let example = try #require(
+                byID["te-explicit-private-\(index)"]
+            )
+            #expect(
+                example.privacyClassification
+                    == .localPrivateExplicitFeedback
+            )
+            #expect(!example.privacyClassification.permitsEgress)
+            #expect(example.userAction != nil)
+        }
+        let generic = try #require(
+            byID["te-generic-local-positive-control"]
+        )
+        #expect(
+            generic.privacyClassification == .onDeviceLocal
+        )
+        #expect(!generic.privacyClassification.permitsEgress)
+        #expect(generic.userAction == "reverted")
+    }
+
+    @Test(
+        "training-example storage has no production egress consumer"
+    )
+    func trainingExamplesRemainInsideLocalLearningBoundary()
+        throws {
+        var cursor = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+        while cursor.lastPathComponent != "PlayheadTests",
+              cursor.pathComponents.count > 1 {
+            cursor.deleteLastPathComponent()
+        }
+        let productionRoot = cursor.deletingLastPathComponent()
+            .appendingPathComponent("Playhead", isDirectory: true)
+        let allowed: Set<String> = [
+            "App/PlayheadRuntime.swift",
+            "Persistence/AnalysisStore/AnalysisStore.swift",
+            "Services/AdDetection/AdDetectionService.swift",
+            "Services/AdDetection/LearningArtifactIngestor.swift",
+            "Services/AdDetection/TrainingExample.swift",
+            "Services/AdDetection/TrainingExampleBucketer.swift",
+            "Services/AdDetection/TrainingExampleMaterializer.swift",
+        ]
+        let enumerator = try #require(
+            FileManager.default.enumerator(
+                at: productionRoot,
+                includingPropertiesForKeys: nil
+            )
+        )
+        var consumers = Set<String>()
+        while let url = enumerator.nextObject() as? URL {
+            guard url.pathExtension == "swift",
+                  let source = try? String(contentsOf: url),
+                  source.contains("TrainingExample")
+                    || source.contains("training_examples")
+                    || source.contains("loadTrainingExamples")
+            else {
+                continue
+            }
+            consumers.insert(
+                String(
+                    url.path.dropFirst(
+                        productionRoot.path.count + 1
+                    )
+                )
+            )
+        }
+        #expect(
+            consumers.isSubset(of: allowed),
+            """
+            Training examples are local-only. Export, diagnostics, sharing, \
+            analytics, network, sync, or logging consumers require an explicit \
+            privacy design; unexpected consumers: \(consumers.subtracting(allowed))
+            """
+        )
+    }
+
     // MARK: - C1: correction-scope parser uses real CorrectionScope.serialized
 
     @Test("C1: .exactTimeSpan correction localizes by time, not whole asset")

@@ -247,19 +247,6 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             return min(1.0, max(0.0, watermark / durationSec))
         }
 
-        func maxKnown(_ lhs: Double?, _ rhs: Double?) -> Double? {
-            switch (lhs, rhs) {
-            case let (lhs?, rhs?):
-                return max(lhs, rhs)
-            case let (lhs?, nil):
-                return lhs
-            case let (nil, rhs?):
-                return rhs
-            case (nil, nil):
-                return nil
-            }
-        }
-
         for episode in episodes {
             let episodeId = episode.canonicalEpisodeKey
 
@@ -319,11 +306,15 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                 summary?.fastTranscriptCoveredSec,
                 durationSec: durationSec
             )
-            let analysisWatermark = maxKnown(
-                summary?.featureCoverageEndSec,
-                summary?.confirmedAdCoverageEndSec
+            // playhead-sd71: AN is the gap-aware analyzed-coverage AREA
+            // (transcript union clipped to the analysis frontier), NOT the
+            // raw frontier watermark. `analysisCoveredSec` is a subset of
+            // `fastTranscriptCoveredSec`, so AN can never exceed TX — the
+            // "AN 100% / TX 39%" antipattern this bead removes.
+            let analysisFraction = fraction(
+                summary?.analysisCoveredSec,
+                durationSec: durationSec
             )
-            let analysisFraction = fraction(analysisWatermark, durationSec: durationSec)
             // Download fraction comes from the (already-snapshotted)
             // `DownloadManager` live-progress map. Completed cached
             // audio renders as 100%; without that fallback the transfer
@@ -502,7 +493,12 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             let featureCoverageEndSec = summary?.featureCoverageEndSec
             let confirmedAdCoverageEndSec = summary?.confirmedAdCoverageEndSec
             let analysisWatermark = maxKnown(featureCoverageEndSec, confirmedAdCoverageEndSec)
-            let analysisFraction = fraction(analysisWatermark, durationSec: durationSec)
+            // playhead-sd71: only the FRACTION changes — AN is now the
+            // gap-aware analyzed-coverage AREA (transcript union clipped to
+            // the analysis frontier), a subset of TX so it can never exceed
+            // it. The raw `analysisWatermark` stays exposed below in the
+            // `analysisWatermarkSec` wire field for debugging.
+            let analysisFraction = fraction(summary?.analysisCoveredSec, durationSec: durationSec)
             let fastTranscriptWatermarkSec = summary?.fastTranscriptCoverageEndSec
             let finalPassCoverageEndSec = summary?.finalPassCoverageEndSec
             let liveDownloadFraction = downloadFractions[episodeId].map(clampFraction)

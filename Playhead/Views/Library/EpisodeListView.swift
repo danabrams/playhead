@@ -816,7 +816,7 @@ private struct LibraryFullTranscriptHost: View {
             onSeek: { seekTime in
                 Task {
                     await runtime.playEpisode(episode)
-                    await runtime.seek(to: seekTime)
+                    _ = await runtime.seek(to: seekTime)
                 }
             },
             // playhead-m8v7: feed the share-quote feature with the

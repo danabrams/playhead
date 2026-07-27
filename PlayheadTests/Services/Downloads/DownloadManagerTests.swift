@@ -117,6 +117,35 @@ struct DownloadManagerCacheTests {
         #expect(cached == ["ep-cached"])
     }
 
+    @Test("cachedEpisodeIds matching withholds an incomplete managed file")
+    func cachedEpisodeIdsMatchingUsesCompletenessPin() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "ep-incomplete-batch"
+        let incompleteURL = await manager.completeFileURL(for: episodeId)
+        try Data(repeating: 0xA1, count: 40).write(to: incompleteURL)
+        #expect(
+            await manager.writePin(
+                AudioAssetPin(
+                    expectedBytes: 100,
+                    sha256: nil,
+                    sourceURL: nil,
+                    etag: nil
+                ),
+                for: episodeId
+            )
+        )
+
+        #expect(!(await manager.isCached(episodeId: episodeId)))
+        #expect(
+            await manager.cachedEpisodeIds(matching: [episodeId]).isEmpty,
+            "The batch cache surface must agree with the canonical completeness gate"
+        )
+    }
+
     @Test("removeCache deletes both partial and complete files")
     func removeCache() async throws {
         let dir = try makeTempDir()
@@ -124,6 +153,10 @@ struct DownloadManagerCacheTests {
 
         let manager = DownloadManager(cacheDirectory: dir)
         try await manager.bootstrap()
+        let transferId = await manager._beginStreamingTransferForTesting(
+            episodeId: "test-ep",
+            fileExtension: "mp3"
+        )
 
         let completeURL = await manager.completeFileURL(for: "test-ep")
         let partialURL = await manager.partialFileURL(for: "test-ep")
@@ -135,6 +168,14 @@ struct DownloadManagerCacheTests {
         let fm = FileManager.default
         #expect(!fm.fileExists(atPath: completeURL.path))
         #expect(!fm.fileExists(atPath: partialURL.path))
+        #expect(
+            !(await manager._finalizeStreamingTransferForTesting(
+                episodeId: "test-ep",
+                transferId: transferId,
+                bytesWritten: 8
+            )),
+            "Per-episode removal must revoke streaming ownership"
+        )
     }
 
     @Test("clearCache removes all cached files")
@@ -154,6 +195,215 @@ struct DownloadManagerCacheTests {
 
         let size = try await manager.currentCacheSize()
         #expect(size == 0)
+    }
+
+    @Test("clearCache revokes an active streaming writer before deletion")
+    func clearCacheCancelsActiveStreamingOwnership() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "clear-cache-active-stream"
+        let transferId = await manager._beginStreamingTransferForTesting(
+            episodeId: episodeId,
+            fileExtension: "mp3"
+        )
+        let audioURL = await manager.completeFileURL(for: episodeId)
+        let bytes = Data(repeating: 0x41, count: 128)
+        try bytes.write(to: audioURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64.max,
+                sha256: nil,
+                sourceURL: "https://example.com/episode.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+        let pinURL = await manager.pinFileURL(for: episodeId)
+
+        try await manager.clearCache()
+
+        #expect(!FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(!FileManager.default.fileExists(atPath: pinURL.path))
+        #expect(
+            !(await manager._finalizeStreamingTransferForTesting(
+                episodeId: episodeId,
+                transferId: transferId,
+                bytesWritten: Int64(bytes.count)
+            )),
+            "A cleared transfer must lose finalization ownership"
+        )
+    }
+
+    @Test("clearCache retains completeness pins when audio deletion fails")
+    func clearCacheDeletesAudioBeforePins() async throws {
+        enum InjectedFailure: Error {
+            case audioRemoval
+        }
+
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "clear-cache-fail-closed"
+        let audioURL = await manager.completeFileURL(for: episodeId)
+        let bytes = Data(repeating: 0x5A, count: 128)
+        try bytes.write(to: audioURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(bytes.count),
+                sha256: nil,
+                sourceURL: "https://example.com/episode.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+        let pinURL = await manager.pinFileURL(for: episodeId)
+
+        var didThrow = false
+        do {
+            try await manager._clearCacheForTesting { url in
+                if url.standardizedFileURL
+                    == audioURL.standardizedFileURL {
+                    throw InjectedFailure.audioRemoval
+                }
+                try FileManager.default.removeItem(at: url)
+            }
+        } catch {
+            didThrow = true
+        }
+
+        #expect(didThrow)
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(
+            FileManager.default.fileExists(atPath: pinURL.path),
+            "A failed audio deletion must stop before the shared completeness barrier is removed"
+        )
+    }
+
+    @Test("clearCache fails before deletion when any cache directory cannot be enumerated")
+    func clearCacheFailsClosedOnEnumerationError() async throws {
+        enum InjectedFailure: Error {
+            case resumeEnumeration
+        }
+
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "clear-cache-enumeration-failure"
+        let audioURL = await manager.completeFileURL(for: episodeId)
+        let bytes = Data(repeating: 0x6B, count: 128)
+        try bytes.write(to: audioURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(bytes.count),
+                sha256: nil,
+                sourceURL: "https://example.com/episode.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+        let pinURL = await manager.pinFileURL(for: episodeId)
+        let resumeDirectory = manager.resumeDataDirectory.standardizedFileURL
+
+        var didThrow = false
+        do {
+            try await manager._clearCacheForTesting(
+                enumerating: { directory in
+                    if directory.standardizedFileURL == resumeDirectory {
+                        throw InjectedFailure.resumeEnumeration
+                    }
+                    return try FileManager.default.contentsOfDirectory(
+                        at: directory,
+                        includingPropertiesForKeys: nil
+                    )
+                },
+                removing: { url in
+                    try FileManager.default.removeItem(at: url)
+                }
+            )
+        } catch {
+            didThrow = true
+        }
+
+        #expect(didThrow)
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(FileManager.default.fileExists(atPath: pinURL.path))
+        #expect(
+            await manager.servingURLIfComplete(for: episodeId) == audioURL
+        )
+    }
+
+    @Test("removeCache retires a staged background completion and its resume state")
+    func removeCachePreventsBackgroundResurrection() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "remove-cache-background-race"
+        let identity = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId
+        )
+        try await manager.persistResumeData(
+            episodeId: episodeId,
+            data: Data([0x01, 0x02])
+        )
+        let stagedURL = dir.appendingPathComponent("late-background.mp3")
+        try Data(repeating: 0x7C, count: 96).write(to: stagedURL)
+
+        try await manager.removeCache(for: episodeId)
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: stagedURL,
+            originalURL: URL(string: "https://example.com/episode.mp3"),
+            metadata: HTTPAssetMetadata(
+                etag: nil,
+                contentLength: 96,
+                lastModified: nil
+            ),
+            transferIdentity: identity
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: stagedURL.path))
+        #expect(await manager.servingURLIfComplete(for: episodeId) == nil)
+        #expect(try await manager.loadResumeData(episodeId: episodeId) == nil)
+    }
+
+    @Test("clearCache retires every staged background completion")
+    func clearCachePreventsBackgroundResurrection() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "clear-cache-background-race"
+        let identity = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId
+        )
+        let stagedURL = dir.appendingPathComponent("late-clear.mp3")
+        try Data(repeating: 0x8D, count: 64).write(to: stagedURL)
+
+        try await manager.clearCache()
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: stagedURL,
+            originalURL: URL(string: "https://example.com/episode.mp3"),
+            metadata: HTTPAssetMetadata(
+                etag: nil,
+                contentLength: 64,
+                lastModified: nil
+            ),
+            transferIdentity: identity
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: stagedURL.path))
+        #expect(await manager.servingURLIfComplete(for: episodeId) == nil)
     }
 }
 
@@ -577,5 +827,502 @@ struct DownloadManagerProgressSnapshotTests {
         #expect(snapshot.count == 2)
         #expect(snapshot[firstId] == 0.25)
         #expect(snapshot[secondId] == 0.75)
+    }
+}
+
+// MARK: - Immutable-artifact invariant (playhead-wrj8)
+
+/// The bytes PLAYED == ANALYZED == MARKED-AGAINST must be one immutable
+/// artifact for the life of a downloaded episode. On a DAI show the
+/// enclosure re-cuts a different ad stitch per request, so any path that
+/// silently overwrites / serves-a-partial rotates the audio the user marked
+/// ads against. These tests lock the completeness pin + overwrite refusal.
+@Suite("DownloadManager – immutable artifact (playhead-wrj8)")
+struct DownloadManagerImmutableArtifactTests {
+
+    @Test("routing URL suffixes are normalized to a discoverable audio extension")
+    func unsupportedSourceExtensionUsesDiscoverableCacheExtension() {
+        #expect(
+            DownloadManager.cacheExtension(
+                for: URL(string: "https://example.com/audio.php")!
+            ) == "mp3"
+        )
+        #expect(
+            DownloadManager.cacheExtension(
+                for: URL(string: "https://example.com/audio.M4A")!
+            ) == "m4a"
+        )
+        #expect(
+            DownloadManager.playbackContentType(
+                sourceURL: URL(string: "https://example.com/audio.php")!,
+                mimeType: nil
+            ) == "public.audio"
+        )
+        #expect(
+            DownloadManager.playbackContentType(
+                sourceURL: URL(string: "https://example.com/audio.php")!,
+                mimeType: "audio/mp4"
+            ) == "public.mpeg-4-audio"
+        )
+    }
+
+    @Test("background placement canonicalizes a routing URL suffix")
+    func backgroundPlacementCanonicalizesRoutingSuffix() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "ep-background-routing-suffix"
+        let stagedDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "PlayheadRoutingSuffix-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: stagedDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: stagedDirectory) }
+        let stagedURL = stagedDirectory.appendingPathComponent("audio.php")
+        let bytes = Data(repeating: 0xA8, count: 64)
+        try bytes.write(to: stagedURL)
+
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: stagedURL,
+            originalURL: URL(string: "https://example.com/route.php"),
+            metadata: HTTPAssetMetadata(
+                etag: nil,
+                contentLength: Int64(bytes.count),
+                lastModified: nil
+            )
+        )
+
+        let servedURL = try #require(
+            await manager.servingURLIfComplete(for: episodeId)
+        )
+        #expect(servedURL.pathExtension == "mp3")
+        #expect(try Data(contentsOf: servedURL) == bytes)
+        try await manager.removeCache(for: episodeId)
+        #expect(!FileManager.default.fileExists(atPath: servedURL.path))
+    }
+
+    @Test("A truncated (under-length) pinned file is NOT served as cached")
+    func truncatedFileWithheld() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-trunc"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        // Only 1000 of an expected 5000 bytes are on disk.
+        try Data(repeating: 0xC3, count: 1000).write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: 5000, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+
+        #expect(await manager.cachedFileURL(for: episodeId) == nil)
+        #expect(await manager.isCached(episodeId: episodeId) == false)
+
+        // Once the file reaches the pinned length it serves.
+        try Data(repeating: 0xC3, count: 5000).write(to: completeURL)
+        #expect(await manager.cachedFileURL(for: episodeId) == completeURL)
+        #expect(await manager.isCached(episodeId: episodeId))
+    }
+
+    @Test("An in-flight stream's Int64.max seed pin withholds the file until finalized")
+    func inflightSeedPinWithheld() async throws {
+        // Locks the playhead-wrj8 (R1) fix: streamingDownload seeds an
+        // Int64.max-length pin the instant the empty file exists (before its
+        // first network byte), so `servingURLIfComplete` withholds the
+        // growing file for the whole download rather than serving a
+        // 0-byte / partial file complete-by-existence.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-inflight-seed"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        // Freshly-created, still-empty stream file + the sentinel seed pin.
+        try Data().write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: Int64.max, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+        #expect(await manager.cachedFileURL(for: episodeId) == nil)
+        #expect(await manager.isCached(episodeId: episodeId) == false)
+
+        // Bytes accumulate but stay below the unfinalized sentinel.
+        try Data(repeating: 0x01, count: 4096).write(to: completeURL)
+        #expect(await manager.isCached(episodeId: episodeId) == false)
+
+        // Finalize to the true on-disk length (as streaming completion does).
+        await manager.writePin(
+            AudioAssetPin(expectedBytes: 4096, sha256: nil, sourceURL: nil, etag: nil),
+            for: episodeId
+        )
+        #expect(await manager.cachedFileURL(for: episodeId) == completeURL)
+    }
+
+    @Test("Bootstrap preserves an incomplete stream pin and keeps partial bytes withheld")
+    func bootstrapPreservesIncompletePin() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let firstManager = DownloadManager(cacheDirectory: dir)
+        try await firstManager.bootstrap()
+        let episodeId = "ep-interrupted-relaunch"
+        let completeURL = await firstManager.completeFileURL(for: episodeId)
+        try Data(repeating: 0x2A, count: 1_024).write(to: completeURL)
+        await firstManager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64.max,
+                sha256: nil,
+                sourceURL: "https://example.com/interrupted.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+
+        let relaunchedManager = DownloadManager(cacheDirectory: dir)
+        try await relaunchedManager.bootstrap()
+
+        #expect(await relaunchedManager.loadPin(for: episodeId) != nil)
+        #expect(
+            await relaunchedManager.servingURLIfComplete(for: episodeId) == nil,
+            "Bootstrap must not strip the sidecar that identifies partial bytes"
+        )
+    }
+
+    @Test("A malformed managed pin fails closed instead of becoming a legacy cache hit")
+    func malformedPinWithheld() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "ep-malformed-pin"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        try Data(repeating: 0x19, count: 2_048).write(to: completeURL)
+        try Data("not valid pin json".utf8).write(
+            to: await manager.pinFileURL(for: episodeId)
+        )
+
+        #expect(await manager.loadPin(for: episodeId) == nil)
+        #expect(
+            await manager.servingURLIfComplete(for: episodeId) == nil,
+            "An existing invalid sidecar identifies a managed artifact and must never receive legacy no-pin behavior"
+        )
+        #expect(await manager.isCached(episodeId: episodeId) == false)
+    }
+
+    @Test("A lone same-length artifact must match a strong completeness pin")
+    func loneCandidateMustMatchStrongPin() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "ep-lone-strong-pin"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        let canonicalBytes = Data(repeating: 0x3B, count: 2_048)
+        try canonicalBytes.write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(canonicalBytes.count),
+                sha256: try FileHasher.sha256(fileURL: completeURL),
+                sourceURL: "https://example.com/episode.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+
+        try Data(repeating: 0x4C, count: canonicalBytes.count)
+            .write(to: completeURL)
+
+        #expect(
+            await manager.servingURLIfComplete(for: episodeId) == nil,
+            "Length alone cannot authenticate the artifact named by a strong pin"
+        )
+    }
+
+    @Test("A legacy bare file with no pin is served (non-destructive migration)")
+    func legacyBareFileServed() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let completeURL = await manager.completeFileURL(for: "ep-legacy")
+        try Data(repeating: 0xD4, count: 2048).write(to: completeURL)
+
+        #expect(await manager.cachedFileURL(for: "ep-legacy") == completeURL)
+        #expect(await manager.isCached(episodeId: "ep-legacy"))
+    }
+
+    @Test("A supported uppercase extension remains the canonical path after bootstrap")
+    func uppercaseLegacyExtensionRemainsCanonical() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let firstManager = DownloadManager(cacheDirectory: dir)
+        try await firstManager.bootstrap()
+        let episodeId = "ep-uppercase-extension"
+        let uppercaseURL = firstManager.completeDirectory
+            .appendingPathComponent(
+                "\(DownloadManager.safeFilename(for: episodeId)).MP3"
+            )
+        try Data(repeating: 0xD5, count: 2_048).write(to: uppercaseURL)
+
+        let relaunchedManager = DownloadManager(cacheDirectory: dir)
+        try await relaunchedManager.bootstrap()
+
+        #expect(
+            await relaunchedManager.cachedFileURL(for: episodeId)
+                == uppercaseURL
+        )
+        #expect(
+            await relaunchedManager.completeFileURL(for: episodeId)
+                == uppercaseURL,
+            "The extension cache must preserve the selected on-disk path spelling"
+        )
+    }
+
+    @Test("A complete pinned artifact is NOT overwritten by a later background completion (different stitch)")
+    func pinnedArtifactSurvivesBackgroundCompletion() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "ep-pin-immutable"
+        let completeURL = await manager.completeFileURL(for: episodeId)
+
+        // Stitch A: the bytes the user played + marked ads against.
+        let stitchA = Data(repeating: 0xA1, count: 4096)
+        try stitchA.write(to: completeURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(stitchA.count),
+                sha256: nil,
+                sourceURL: "https://dai.example.com/ep.mp3",
+                etag: "\"A\""
+            ),
+            for: episodeId
+        )
+
+        // A background transfer completes later with a DIFFERENT stitch
+        // (different length + content) — the DAI rotation vector.
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PlayheadBGStagingWrj8A", isDirectory: true)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+        let staged = stagingDir.appendingPathComponent(
+            "\(DownloadManager.safeFilename(for: episodeId)).m4a"
+        )
+        let stitchB = Data(repeating: 0xB2, count: 2048)
+        try stitchB.write(to: staged)
+
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: staged,
+            originalURL: URL(string: "https://dai.example.com/ep.m4a"),
+            metadata: HTTPAssetMetadata(etag: "\"B\"", contentLength: 2048, lastModified: nil)
+        )
+
+        // The played bytes are untouched, and the rotated deposit was discarded.
+        let onDisk = try Data(contentsOf: completeURL)
+        #expect(onDisk == stitchA, "played artifact must not be overwritten by a rotated re-fetch")
+        #expect(!FileManager.default.fileExists(atPath: staged.path), "staged rotated copy must be discarded")
+        #expect(await manager.cachedFileURL(for: episodeId) == completeURL)
+        let rotatedURL = completeURL.deletingPathExtension()
+            .appendingPathExtension("m4a")
+        #expect(!FileManager.default.fileExists(atPath: rotatedURL.path))
+    }
+
+    @Test("Cross-extension replacement purges stale siblings and removal cannot resurrect them")
+    func crossExtensionReplacementAndRemovalAreSiblingAtomic() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "ep-cross-extension-retry"
+        let staleMP3 = await manager.completeFileURL(for: episodeId)
+        try Data(repeating: 0xA3, count: 800).write(to: staleMP3)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: 1_000,
+                sha256: nil,
+                sourceURL: "https://dai.example.com/ep.mp3",
+                etag: "\"partial-A\""
+            ),
+            for: episodeId
+        )
+
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "PlayheadCrossExtensionRetry-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: stagingDir,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: stagingDir) }
+        let stagedM4A = stagingDir.appendingPathComponent(
+            "\(DownloadManager.safeFilename(for: episodeId)).m4a"
+        )
+        let replacement = Data(repeating: 0xB4, count: 700)
+        try replacement.write(to: stagedM4A)
+
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: stagedM4A,
+            originalURL: URL(string: "https://dai.example.com/ep.m4a"),
+            metadata: HTTPAssetMetadata(
+                etag: "\"complete-B\"",
+                contentLength: Int64(replacement.count),
+                lastModified: nil
+            )
+        )
+
+        let served = await manager.servingURLIfComplete(for: episodeId)
+        let canonical = try #require(served)
+        #expect(canonical.pathExtension == "m4a")
+        #expect(try Data(contentsOf: canonical) == replacement)
+        #expect(!FileManager.default.fileExists(atPath: staleMP3.path))
+
+        try await manager.removeCache(for: episodeId)
+        #expect(!FileManager.default.fileExists(atPath: canonical.path))
+        #expect(await manager.loadPin(for: episodeId) == nil)
+        #expect(await manager.servingURLIfComplete(for: episodeId) == nil)
+    }
+
+    @Test("cleanup keeps the incomplete pin when artifact enumeration fails")
+    func cleanupEnumerationFailureRetainsPin() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+        let episodeId = "ep-cleanup-enumeration-failure"
+        let audioURL = await manager.completeFileURL(for: episodeId)
+        try Data(repeating: 0xE7, count: 32).write(to: audioURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64.max,
+                sha256: nil,
+                sourceURL: "https://example.com/audio.mp3",
+                etag: nil
+            ),
+            for: episodeId
+        )
+        let completeDirectory = audioURL.deletingLastPathComponent()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o300],
+            ofItemAtPath: completeDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: completeDirectory.path
+            )
+        }
+
+        var didThrow = false
+        do {
+            try await manager.removeCache(for: episodeId)
+        } catch {
+            didThrow = true
+        }
+        #expect(didThrow)
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: completeDirectory.path
+        )
+        #expect(FileManager.default.fileExists(atPath: audioURL.path))
+        #expect(await manager.loadPin(for: episodeId) != nil)
+        #expect(await manager.servingURLIfComplete(for: episodeId) == nil)
+    }
+
+    @Test("Eviction removes extension siblings and shared pin as one unit")
+    func evictionIsSiblingAtomic() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            maxCacheBytes: 1
+        )
+        try await manager.bootstrap()
+        let episodeId = "ep-sibling-eviction"
+        let mp3URL = await manager.completeFileURL(for: episodeId)
+        try Data(repeating: 0xC5, count: 100).write(to: mp3URL)
+        await manager._setExtensionCacheForTesting(
+            episodeId: episodeId,
+            fileExtension: "m4a"
+        )
+        let m4aURL = await manager.completeFileURL(for: episodeId)
+        let canonicalBytes = Data(repeating: 0xD6, count: 50)
+        try canonicalBytes.write(to: m4aURL)
+        await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: Int64(canonicalBytes.count),
+                sha256: try FileHasher.sha256(fileURL: m4aURL),
+                sourceURL: "https://example.com/episode.m4a",
+                etag: nil
+            ),
+            for: episodeId
+        )
+        #expect(await manager.cachedFileURL(for: episodeId) == m4aURL)
+
+        try await manager.evictIfNeeded()
+
+        #expect(!FileManager.default.fileExists(atPath: mp3URL.path))
+        #expect(!FileManager.default.fileExists(atPath: m4aURL.path))
+        #expect(await manager.loadPin(for: episodeId) == nil)
+        #expect(await manager.servingURLIfComplete(for: episodeId) == nil)
+    }
+
+    @Test("Eviction protection is refcounted — one release does not unprotect a doubly-held episode")
+    func protectionRefcounted() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // 100-byte budget with two 60-byte files (120 total) forces one eviction.
+        let manager = DownloadManager(cacheDirectory: dir, maxCacheBytes: 100)
+        try await manager.bootstrap()
+
+        let data = Data(repeating: 0x42, count: 60)
+        let heldURL = await manager.completeFileURL(for: "held")
+        let freeURL = await manager.completeFileURL(for: "free")
+        try data.write(to: heldURL)
+        try data.write(to: freeURL)
+
+        // Two overlapping owners (playback + analysis) protect "held".
+        await manager.protectForAnalysis(episodeId: "held")
+        await manager.protectForAnalysis(episodeId: "held")
+        // Analysis finishes and releases once — playback still holds it.
+        await manager.unprotectFromAnalysis(episodeId: "held")
+
+        try await manager.evictIfNeeded()
+
+        let fm = FileManager.default
+        #expect(fm.fileExists(atPath: heldURL.path), "still-held episode must survive eviction")
+        #expect(!fm.fileExists(atPath: freeURL.path), "unprotected episode is the eviction victim")
+
+        // Release the last holder → now unprotected.
+        await manager.unprotectFromAnalysis(episodeId: "held")
+        #expect(await manager.protectedEpisodeIdsForTesting().isEmpty)
     }
 }

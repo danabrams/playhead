@@ -8,7 +8,7 @@
 //
 // ┌─────────────────────────────────────────────────┐
 // │  Skipped · Squarespace · "Build your website"   │
-// │                          [Listen]    [Dismiss x] │
+// │  Was this right?       [Yes] [No] [Listen]  [x] │
 // └─────────────────────────────────────────────────┘
 
 import SwiftUI
@@ -24,20 +24,19 @@ import SwiftUI
 /// Voice rules (per `feedback_peace_of_mind_not_metrics`):
 /// - No quantified language anywhere in tier-driven copy.
 /// - Auto-skip copy describes a completed action ("Skipped …").
-/// - Suggest copy describes an observation + an actionable affordance
-///   ("Sounds like a sponsor break. Skip?"), never a probability.
+/// - Suggest copy describes an observation + an actionable affordance,
+///   never a probability.
 enum AdBannerTier: String, Sendable, Equatable, Codable {
     /// High-confidence tier (≥ `segmentAutoSkipThreshold`, default 0.55).
     /// Banner reports a skip that has already happened; user can rewind via
-    /// "Listen" or correct via "Not an ad". This is the existing behavior.
+    /// "Listen" or answer No to correct the skip.
     case autoSkipped
 
     /// Medium-confidence tier ([uiCandidate, autoSkip), default [0.40, 0.55)).
     /// Banner asks the user to confirm a skip that has NOT happened. The
     /// auto-skip path is deliberately suppressed; the user is the gate.
-    /// Tap-to-skip on the banner records a `.falseNegative` user
-    /// correction (calibration signal); tap-to-dismiss / auto-fade leaves
-    /// playback alone (silent decline).
+    /// Answering Yes records a `.falseNegative` user correction (calibration
+    /// signal) and skips; neutral dismiss / auto-fade leaves playback alone.
     case suggest
 }
 
@@ -62,6 +61,37 @@ struct AdSkipBannerItem: Identifiable, Equatable {
     let metadataSource: String
     /// The podcast ID, needed for trust scoring on revert.
     let podcastId: String
+    /// Episode identity captured by the orchestrator at emission time.
+    ///
+    /// The Now Playing surface survives autoplay and queue advancement. A
+    /// banner produced by the previous episode can therefore arrive after the
+    /// UI has already switched episodes. Production queueing requires this
+    /// identity to match the host's current episode before presenting it.
+    var episodeId: String? = nil
+    /// Playback request generation captured when the orchestrator lifecycle
+    /// that emitted this item began.
+    ///
+    /// Canonical episode identity is not a lifecycle identity: replaying the
+    /// same episode replaces its transport and orchestrator state without
+    /// changing `episodeId`. Production hosts require this token to match the
+    /// runtime's current request before presenting or acting on the item.
+    var playbackLifecycleGeneration: UInt64? = nil
+    /// Asset identity captured with the exact window material shown.
+    var analysisAssetId: String? = nil
+    /// Opaque producer-material revision for action-time validation.
+    ///
+    /// Auto-skipped Yes uses this in addition to episode/lifecycle identity:
+    /// a same-ID window whose span or attribution was recomputed cannot
+    /// receive a receipt intended for an older card.
+    var windowMaterialRevisionToken: String? = nil
+    /// Revision identity for a suggest-tier window presentation.
+    ///
+    /// Producer windows can retain the same `windowId` while their span or
+    /// attribution is recomputed within one playback lifecycle. Suggest
+    /// acknowledgements and actions must carry this token back to the
+    /// orchestrator so an older card cannot acknowledge, accept, or decline
+    /// the newer revision. Auto-skipped banners do not use this field.
+    var suggestionRevisionToken: String? = nil
     /// Evidence catalog entries associated with this ad window.
     /// Used by Phase 7's UserCorrectionStore to infer correction scopes
     /// (e.g. phraseOnShow) when the user taps "Listen" to revert a skip.
@@ -107,8 +137,8 @@ final class AdBannerQueue {
     /// (medium-confidence) banner. Slightly longer than the auto-skipped
     /// dwell because the user is being asked to make a choice — they
     /// need a beat or two more to read the line and decide whether to
-    /// tap "Skip". Auto-fade with no user action is interpreted as a
-    /// silent decline (see `SkipOrchestrator.declineSuggestedSkip`).
+    /// answer. Auto-fade with no user action clears the transient suggestion
+    /// but is not recorded as explicit banner feedback.
     private static let defaultSuggestAutoDismissSeconds: TimeInterval = 12.0
 
     /// Maximum gap (seconds) between skipped ads to coalesce into one banner.
@@ -118,17 +148,42 @@ final class AdBannerQueue {
     private let suggestAutoDismissSeconds: TimeInterval
     private let coalesceGap: TimeInterval
     private let autoDismissSleep: @Sendable (TimeInterval) async -> Void
+    private let feedbackCounterStore: BannerFeedbackCounterStore?
+    private var isAutoDismissPaused = false
 
-    /// playhead-gtt9.23: Invoked when a suggest-tier banner exits without
-    /// the user tapping Skip — either via the dismiss button or via the
-    /// auto-fade timer. Wired by `NowPlayingView` to
+    /// Production hosts opt into an episode-scoped generation before
+    /// observing banners. The generation rejects buffered events from an old
+    /// observation task, while `hostEpisodeId` rejects genuinely later
+    /// emissions from an orchestrator that has not yet switched episodes.
+    ///
+    /// Queues remain unscoped by default so isolated previews and unit tests
+    /// can enqueue fixture items without manufacturing host lifecycle state.
+    private var isHostScopeConfigured = false
+    private var isHostActive = true
+    private var hostEpisodeId: String?
+    private var hostPlaybackLifecycleGeneration: UInt64?
+    private var hostGeneration: UInt64 = 0
+
+    /// Guards the current visible presentation against rapid/repeated actions.
+    /// This remains presentation-scoped for synchronous controls. Explicit
+    /// feedback also records its presentation ID below so an accepted async
+    /// action can finish after the host disappears without being mislabeled as
+    /// a neutral exit or losing its aggregate receipt.
+    private var didClaimActionForCurrentPresentation = false
+    private var didRecordShownForCurrentPresentation = false
+    private var inFlightFeedbackItemIDs: Set<String> = []
+    private var inFlightUtilityActionItemIDs: Set<String> = []
+
+    /// playhead-gtt9.23: Invoked when a suggest-tier banner exits without an
+    /// accepted skip — via a neutral dismiss, an explicit No, or the auto-fade
+    /// timer. Wired by `NowPlayingView` to
     /// `SkipOrchestrator.declineSuggestedSkip` so the orchestrator can
     /// drop the suggested window from its in-memory set. `nil` when the
     /// view does not need this signal (tests, previews).
     ///
-    /// playhead-lc7z: the `Bool` distinguishes an explicit user dismissal
-    /// (the "✕" tap → `true`) from a passive auto-fade timeout (`false`).
-    /// Only the explicit dismissal is treated downstream as a
+    /// playhead-lc7z / playhead-jw63.1: the `Bool` distinguishes an explicit
+    /// No response (`true`) from a neutral x dismissal or passive auto-fade
+    /// (`false`). Only the explicit No is treated downstream as a
     /// `.falsePositive` correction — a banner the user ignored for the full
     /// dwell is too weak a signal to mint a hard negative.
     var onSuggestExitWithoutSkip: ((AdSkipBannerItem, Bool) -> Void)?
@@ -139,12 +194,14 @@ final class AdBannerQueue {
         coalesceGap: TimeInterval = AdBannerQueue.defaultCoalesceGap,
         autoDismissSleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(for: .seconds(seconds))
-        }
+        },
+        feedbackCounterStore: BannerFeedbackCounterStore? = nil
     ) {
         self.autoDismissSeconds = autoDismissSeconds
         self.suggestAutoDismissSeconds = suggestAutoDismissSeconds
         self.coalesceGap = coalesceGap
         self.autoDismissSleep = autoDismissSleep
+        self.feedbackCounterStore = feedbackCounterStore
     }
 
     // MARK: - Public API
@@ -152,11 +209,106 @@ final class AdBannerQueue {
     /// Enqueue a new ad skip banner. If the skip is adjacent to the current
     /// or last queued item, coalesce instead of adding a new entry.
     func enqueue(_ item: AdSkipBannerItem) {
+        guard acceptsHostScopedItem(item) else { return }
+        enqueueAccepted(item)
+    }
+
+    /// Production enqueue path. In addition to episode identity, require the
+    /// observation generation captured when the stream was attached. This
+    /// prevents a buffered item from a cancelled stream from crossing a
+    /// disappear/reappear or episode-transition boundary.
+    @discardableResult
+    func enqueue(
+        _ item: AdSkipBannerItem,
+        hostGeneration generation: UInt64
+    ) -> Bool {
+        guard generation == hostGeneration,
+              acceptsHostScopedItem(item)
+        else {
+            return false
+        }
+        enqueueAccepted(item)
+        return true
+    }
+
+    /// Removes an orchestrator-invalidated presentation without invoking
+    /// feedback or changing aggregate counters.
+    @discardableResult
+    func retireWindow(
+        _ retirement: AdBannerRetirement,
+        hostGeneration generation: UInt64
+    ) -> Bool {
+        guard generation == hostGeneration,
+              isHostActive,
+              retirement.episodeId == hostEpisodeId,
+              retirement.playbackLifecycleGeneration
+                == hostPlaybackLifecycleGeneration
+        else {
+            return false
+        }
+
+        let matches: (AdSkipBannerItem) -> Bool = { item in
+            item.windowId == retirement.windowId
+                && item.episodeId == retirement.episodeId
+                && item.playbackLifecycleGeneration
+                    == retirement.playbackLifecycleGeneration
+        }
+
+        let priorCount = queue.count
+        queue.removeAll(where: matches)
+        var didRetire = queue.count != priorCount
+
+        if let currentBanner, matches(currentBanner) {
+            didRetire = true
+            dismissTask?.cancel()
+            dismissTask = nil
+            advanceTask?.cancel()
+            advanceTask = nil
+            self.currentBanner = nil
+            if !queue.isEmpty {
+                advanceTask = Task {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    guard !Task.isCancelled else { return }
+                    advanceTask = nil
+                    showNext()
+                }
+            }
+        }
+        return didRetire
+    }
+
+    private func enqueueAccepted(_ item: AdSkipBannerItem) {
+        // Stream reconnection or producer replay can assign a fresh transport
+        // UUID to the same logical revision. Deduplicate across the entire
+        // single presentation lane, not just its tail: A may be current while
+        // an unrelated B is pending when A' is replayed. Appending A' in that
+        // state would surface a stale second prompt after both A and B.
+        if let currentBanner,
+           isDuplicateEmission(currentBanner, item) {
+            return
+        }
+        if queue.contains(where: { isDuplicateEmission($0, item) }) {
+            return
+        }
+
         // Try to coalesce with the most recent item (current or last in queue).
         if let last = queue.last, canCoalesce(last, item) {
             // Replace with the newer item (it has the broader time range).
             queue[queue.count - 1] = item
-        } else if let current = currentBanner, queue.isEmpty, canCoalesce(current, item) {
+        } else if let current = currentBanner,
+                  queue.isEmpty,
+                  canCoalesce(current, item) {
+            // A stream replay can deliver the exact same logical presentation
+            // with a fresh transport UUID while its first delivery is already
+            // being answered. Do not queue that replay behind the claimed card:
+            // it would surface a second, now-stale feedback prompt after the
+            // durable action completes. A genuinely adjacent extension remains
+            // queued so it can receive its own stable presentation after the
+            // claimed receipt.
+            if didClaimActionForCurrentPresentation {
+                queue.append(item)
+                return
+            }
             // Coalesce with the currently displayed banner — update in place.
             currentBanner = item
             restartAutoDismiss()
@@ -166,29 +318,42 @@ final class AdBannerQueue {
         }
 
         // If nothing is showing, pop the next one.
-        if currentBanner == nil {
+        // When a dismissal's slide-out pause is already advancing the lane,
+        // leave new arrivals queued for that retained task. Showing one here
+        // would let the delayed task overwrite it 350 ms later.
+        if currentBanner == nil, advanceTask == nil {
             showNext()
         }
     }
 
+    private func acceptsHostScopedItem(_ item: AdSkipBannerItem) -> Bool {
+        guard isHostScopeConfigured else { return true }
+        return isHostActive
+            && item.episodeId == hostEpisodeId
+            && item.playbackLifecycleGeneration
+                == hostPlaybackLifecycleGeneration
+    }
+
     /// Dismiss the current banner (user tapped dismiss or auto-dismiss fired).
     ///
-    /// playhead-lc7z: `userInitiated` is `true` only when the user tapped the
-    /// dismiss "✕". The auto-fade timer and internal queue-advance calls use
-    /// the default `false`. The flag is forwarded to `onSuggestExitWithoutSkip`
-    /// so a suggest-tier dismissal is captured as a `.falsePositive`
-    /// correction while a passive auto-fade is not.
-    func dismiss(userInitiated: Bool = false) {
+    /// playhead-lc7z / playhead-jw63.1: `isExplicitDenial` is `true` only for
+    /// the explicit No feedback path. Neutral x dismissal, the auto-fade
+    /// timer, and internal queue-advance calls use the default `false`. The
+    /// flag is forwarded to `onSuggestExitWithoutSkip` so No becomes a
+    /// `.falsePositive` correction while dismissal/fade does not.
+    func dismiss(isExplicitDenial: Bool = false) {
         dismissTask?.cancel()
         dismissTask = nil
+        advanceTask?.cancel()
+        advanceTask = nil
         // playhead-gtt9.23: notify any suggest-tier exit handler so the
         // orchestrator can clean up its in-memory suggest set when a
-        // suggest banner leaves WITHOUT a Skip tap (auto-fade, dismiss
-        // button, or queue advance). The Skip tap path bypasses this
+        // suggest banner leaves WITHOUT a Yes response (auto-fade, neutral
+        // dismiss, explicit No, or queue advance). The Yes path bypasses this
         // callback by setting `currentBanner` to nil before invoking
         // `dismiss()` — see `dismissAfterAccept(_:)`.
         if let banner = currentBanner, banner.tier == .suggest {
-            onSuggestExitWithoutSkip?(banner, userInitiated)
+            onSuggestExitWithoutSkip?(banner, isExplicitDenial)
         }
         currentBanner = nil
 
@@ -197,6 +362,8 @@ final class AdBannerQueue {
         if !queue.isEmpty {
             advanceTask = Task {
                 try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled else { return }
+                advanceTask = nil
                 showNext()
             }
         }
@@ -215,24 +382,315 @@ final class AdBannerQueue {
         }
         dismissTask?.cancel()
         dismissTask = nil
+        advanceTask?.cancel()
+        advanceTask = nil
         if !queue.isEmpty {
             advanceTask = Task {
                 try? await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled else { return }
+                advanceTask = nil
                 showNext()
             }
+        }
+    }
+
+    /// Completes an accepted Yes/No response only if its original card still
+    /// owns the lane. An in-flight response deliberately survives host cleanup,
+    /// but its eventual completion must never dismiss a replacement card or
+    /// cancel that replacement's dwell timer.
+    @discardableResult
+    func dismissAfterAcceptedFeedback(
+        for item: AdSkipBannerItem
+    ) -> Bool {
+        guard currentBanner?.id == item.id else {
+            return false
+        }
+        if item.tier == .suggest {
+            dismissAfterAccept(item)
+        } else {
+            dismiss()
+        }
+        return true
+    }
+
+    /// Claims the one explicit feedback slot before an asynchronous production
+    /// action begins. Claiming prevents double taps but deliberately does not
+    /// increment an aggregate or dismiss the card.
+    func claimFeedback(for item: AdSkipBannerItem) -> Bool {
+        guard claimPresentationAction(
+            for: item,
+            cancelAutoDismiss: true
+        ) else {
+            return false
+        }
+        inFlightFeedbackItemIDs.insert(item.id)
+        return true
+    }
+
+    /// Finalizes an already-claimed response after the lifecycle/revision-bound
+    /// production action reports acceptance.
+    func finalizeFeedback(
+        _ response: BannerFeedbackResponse,
+        for item: AdSkipBannerItem
+    ) -> Bool {
+        guard inFlightFeedbackItemIDs.remove(item.id) != nil else {
+            return false
+        }
+        switch response {
+        case .confirmed:
+            feedbackCounterStore?.recordConfirmed()
+        case .denied:
+            feedbackCounterStore?.recordDenied()
+        }
+        return true
+    }
+
+    /// Releases a failed/rejected async action so the still-current card can
+    /// be answered again. A stale or retired card is never resurrected.
+    func releaseFeedbackClaim(for item: AdSkipBannerItem) {
+        guard inFlightFeedbackItemIDs.remove(item.id) != nil else {
+            return
+        }
+        guard currentBanner?.id == item.id,
+              didClaimActionForCurrentPresentation
+        else {
+            // Host/lifecycle cleanup removed the presentation while the action
+            // was suspended. A failed suggest response still needs the same
+            // neutral cleanup that disappearance would have performed had it
+            // not been protected by the in-flight claim.
+            if item.tier == .suggest {
+                onSuggestExitWithoutSkip?(item, false)
+            }
+            return
+        }
+        didClaimActionForCurrentPresentation = false
+        restartAutoDismiss()
+    }
+
+    /// Claims an asynchronous non-feedback action, such as the durable
+    /// sponsor-on-show preference, without incrementing Yes/No aggregates.
+    /// Tracking the item separately lets the write finish after host cleanup
+    /// while preserving retry when the same card remains current.
+    func claimUtilityAction(
+        for item: AdSkipBannerItem,
+        cancelAutoDismiss: Bool = false
+    ) -> Bool {
+        guard claimPresentationAction(
+            for: item,
+            cancelAutoDismiss: cancelAutoDismiss
+        ) else {
+            return false
+        }
+        inFlightUtilityActionItemIDs.insert(item.id)
+        return true
+    }
+
+    func finalizeUtilityAction(for item: AdSkipBannerItem) -> Bool {
+        inFlightUtilityActionItemIDs.remove(item.id) != nil
+    }
+
+    func releaseUtilityActionClaim(for item: AdSkipBannerItem) {
+        guard inFlightUtilityActionItemIDs.remove(item.id) != nil else {
+            return
+        }
+        guard currentBanner?.id == item.id,
+              didClaimActionForCurrentPresentation
+        else {
+            return
+        }
+        didClaimActionForCurrentPresentation = false
+        restartAutoDismiss()
+    }
+
+    var hasClaimedCurrentPresentation: Bool {
+        didClaimActionForCurrentPresentation
+    }
+
+    /// Atomically claims the single durable/replay action slot for a visible
+    /// presentation without recording a Yes/No aggregate. Existing actions
+    /// such as Listen and "Always skip this sponsor" use this so a rapid
+    /// conflicting tap cannot persist two incompatible corrections.
+    func claimPresentationAction(
+        for item: AdSkipBannerItem,
+        cancelAutoDismiss: Bool = false
+    ) -> Bool {
+        guard currentBanner?.id == item.id,
+              !didClaimActionForCurrentPresentation
+        else {
+            return false
+        }
+
+        didClaimActionForCurrentPresentation = true
+        if cancelAutoDismiss {
+            dismissTask?.cancel()
+            dismissTask = nil
+        }
+        return true
+    }
+
+    /// Records an impression only after the current banner card is on screen.
+    ///
+    /// Queue-current is not the same as user-visible: pending banners can
+    /// advance and expire while `NowPlayingView` is off screen. The view calls
+    /// this from the card's `onAppear` or when an obscured card becomes exposed,
+    /// keeping the durable denominator tied to actual presentations. The
+    /// presentation guard also absorbs repeated SwiftUI exposure callbacks or
+    /// a current-item coalescing update.
+    @discardableResult
+    func recordBannerShown(for item: AdSkipBannerItem) -> Bool {
+        guard currentBanner?.id == item.id,
+              !didRecordShownForCurrentPresentation
+        else {
+            return false
+        }
+
+        didRecordShownForCurrentPresentation = true
+        feedbackCounterStore?.recordBannerShown()
+        return true
+    }
+
+    /// Pauses transient banner timers while an assistive control is active.
+    ///
+    /// VoiceOver and Switch Control users need an unbounded amount of time to
+    /// discover and activate the explicit feedback controls. Resuming starts a
+    /// fresh dwell for the current banner instead of immediately consuming the
+    /// timer interval that elapsed while accessibility navigation was active.
+    func setAutoDismissPaused(_ isPaused: Bool) {
+        guard isAutoDismissPaused != isPaused else { return }
+        isAutoDismissPaused = isPaused
+        dismissTask?.cancel()
+        dismissTask = nil
+        if !isPaused, currentBanner != nil {
+            restartAutoDismiss()
+        }
+    }
+
+    /// Dismisses an inline confirmation only when transient timers are active.
+    ///
+    /// The "Always skip this sponsor" receipt uses a separate two-second
+    /// delayed task rather than the queue's normal dwell. Route that task
+    /// through the same assistive-control pause state so VoiceOver and Switch
+    /// Control users do not lose the receipt while navigating it.
+    @discardableResult
+    func dismissConfirmationIfAllowed(for item: AdSkipBannerItem) -> Bool {
+        guard !isAutoDismissPaused, currentBanner?.id == item.id else {
+            return false
+        }
+        dismiss()
+        return true
+    }
+
+    /// Retires every transient banner when its owning Now Playing surface is
+    /// permanently removed. Pending suggestions also need a neutral exit
+    /// callback so the orchestrator does not retain windows that no UI can
+    /// answer. This is intentionally distinct from temporary exposure pauses
+    /// for sheets and inactive scenes.
+    func discardAllOnHostDisappear() {
+        isHostScopeConfigured = true
+        isHostActive = false
+        hostEpisodeId = nil
+        hostPlaybackLifecycleGeneration = nil
+        hostGeneration &+= 1
+        discardAllNeutrally()
+    }
+
+    /// Activates production enqueue gating for a mounted Now Playing host and
+    /// returns the generation its banner observer must carry.
+    @discardableResult
+    func activateHost(
+        for episodeId: String?,
+        playbackLifecycleGeneration: UInt64? = nil
+    ) -> UInt64 {
+        isHostScopeConfigured = true
+        isHostActive = true
+        hostEpisodeId = episodeId
+        hostPlaybackLifecycleGeneration = playbackLifecycleGeneration
+        hostGeneration &+= 1
+        return hostGeneration
+    }
+
+    /// Retires stale presentations when the mounted player advances to a
+    /// different episode. `NowPlayingView` survives autoplay/queue advancement,
+    /// so its disappearance hook alone is not an episode-lifetime boundary.
+    /// Treating this as a neutral exit prevents an old suggestion from being
+    /// confirmed after `SkipOrchestrator.beginEpisode` has already discarded
+    /// the corresponding window.
+    @discardableResult
+    func discardAllOnEpisodeChange(
+        from previousEpisodeId: String?,
+        to currentEpisodeId: String?
+    ) -> UInt64 {
+        discardAllOnPlaybackContextChange(
+            fromEpisodeId: previousEpisodeId,
+            toEpisodeId: currentEpisodeId,
+            fromPlaybackLifecycleGeneration:
+                hostPlaybackLifecycleGeneration,
+            toPlaybackLifecycleGeneration:
+                hostPlaybackLifecycleGeneration
+        )
+    }
+
+    /// Retires stale presentations whenever either the episode identity or
+    /// the playback request lifecycle changes. The latter catches replay and
+    /// replacement of the same canonical episode.
+    @discardableResult
+    func discardAllOnPlaybackContextChange(
+        fromEpisodeId previousEpisodeId: String?,
+        toEpisodeId currentEpisodeId: String?,
+        fromPlaybackLifecycleGeneration previousLifecycleGeneration: UInt64?,
+        toPlaybackLifecycleGeneration currentLifecycleGeneration: UInt64?
+    ) -> UInt64 {
+        guard previousEpisodeId != currentEpisodeId
+                || previousLifecycleGeneration != currentLifecycleGeneration
+        else {
+            return hostGeneration
+        }
+        isHostScopeConfigured = true
+        isHostActive = true
+        hostEpisodeId = currentEpisodeId
+        hostPlaybackLifecycleGeneration = currentLifecycleGeneration
+        hostGeneration &+= 1
+        discardAllNeutrally()
+        return hostGeneration
+    }
+
+    private func discardAllNeutrally() {
+        dismissTask?.cancel()
+        dismissTask = nil
+        advanceTask?.cancel()
+        advanceTask = nil
+
+        let discarded = [currentBanner].compactMap { $0 } + queue
+        let claimedCurrentID = currentBanner.flatMap {
+            inFlightFeedbackItemIDs.contains($0.id) ? $0.id : nil
+        }
+        currentBanner = nil
+        queue.removeAll()
+        didClaimActionForCurrentPresentation = false
+        didRecordShownForCurrentPresentation = false
+
+        for banner in discarded
+        where banner.tier == .suggest && banner.id != claimedCurrentID {
+            onSuggestExitWithoutSkip?(banner, false)
         }
     }
 
     // MARK: - Private
 
     private func showNext() {
-        guard !queue.isEmpty else { return }
+        // A retained advance task may wake after a new event has arrived.
+        // Never replace an already-presented banner in the single lane.
+        guard currentBanner == nil, !queue.isEmpty else { return }
+        didClaimActionForCurrentPresentation = false
+        didRecordShownForCurrentPresentation = false
         currentBanner = queue.removeFirst()
         restartAutoDismiss()
     }
 
     private func restartAutoDismiss() {
         dismissTask?.cancel()
+        dismissTask = nil
+        guard !isAutoDismissPaused, currentBanner != nil else { return }
         let dwell: TimeInterval = {
             switch currentBanner?.tier {
             case .suggest: return suggestAutoDismissSeconds
@@ -281,8 +739,46 @@ final class AdBannerQueue {
     /// different intents and different copy; collapsing them into one cell
     /// would lose the distinction the user relies on to know what happened.
     private func canCoalesce(_ a: AdSkipBannerItem, _ b: AdSkipBannerItem) -> Bool {
-        guard a.tier == b.tier else { return false }
-        return abs(a.adEndTime - b.adStartTime) <= coalesceGap
+        guard a.tier == b.tier,
+              a.episodeId == b.episodeId,
+              a.playbackLifecycleGeneration
+                == b.playbackLifecycleGeneration,
+              a.suggestionRevisionToken == b.suggestionRevisionToken
+        else {
+            return false
+        }
+        // Every response targets one precise orchestrator window. Folding
+        // distinct auto or suggest windows into one card would discard the
+        // first identity: the eventual Yes/No could act only on the
+        // replacement. Duplicate emissions for the same window may still
+        // coalesce safely.
+        if a.windowId != b.windowId {
+            return false
+        }
+        // Interval distance is zero for an exact replay or overlapping update.
+        // The previous one-directional `abs(a.end - b.start)` check treated a
+        // normal 30-second replay as 30 seconds apart, queuing a duplicate card
+        // for the same revision.
+        let intervalGap = max(
+            0,
+            max(a.adStartTime, b.adStartTime)
+                - min(a.adEndTime, b.adEndTime)
+        )
+        return intervalGap <= coalesceGap
+    }
+
+    private func isDuplicateEmission(
+        _ a: AdSkipBannerItem,
+        _ b: AdSkipBannerItem
+    ) -> Bool {
+        a.windowId == b.windowId
+            && a.tier == b.tier
+            && a.episodeId == b.episodeId
+            && a.playbackLifecycleGeneration
+                == b.playbackLifecycleGeneration
+            && a.suggestionRevisionToken == b.suggestionRevisionToken
+            && a.adStartTime == b.adStartTime
+            && a.adEndTime == b.adEndTime
     }
 }
 
@@ -293,21 +789,47 @@ final class AdBannerQueue {
 struct AdBannerView: View {
 
     var queue: AdBannerQueue
+    /// Whether the Now Playing surface is unobscured by an app-owned modal.
+    /// Scene activity is folded in separately below.
+    var isPresentationVisible: Bool = true
+
+    /// Production action-time episode guard. Queue gating rejects late
+    /// arrivals after SwiftUI observes an episode transition; this second
+    /// check covers the brief interval after the runtime changes episodes but
+    /// before the view's `onChange` cleanup has rendered.
+    var isItemCurrent: ((AdSkipBannerItem) -> Bool)?
 
     /// Called when the user taps "Listen" to jump back to the skipped ad.
     var onListen: ((AdSkipBannerItem) -> Void)?
+    /// Production acceptance contract for Listen. A failed durable transaction
+    /// releases the action slot and leaves a still-current card retryable.
+    var onListenAsync: ((AdSkipBannerItem) async -> Bool)?
 
-    /// Phase 7.2: Called when the user taps "Not an ad" to record a correction.
-    /// When nil, the button is hidden.
+    /// Production persistence contract for Yes on an auto-skipped banner.
+    /// The answer is unavailable without a durable sink.
+    var onAutoSkipConfirmed: ((AdSkipBannerItem) -> Void)?
+    var onAutoSkipConfirmedAsync: ((AdSkipBannerItem) async -> Bool)?
+
+    /// Phase 7.2: Called when the user answers No on an auto-skipped banner.
+    /// Production routes this through the existing precise correction path.
     var onNotAnAd: ((AdSkipBannerItem) -> Void)?
+    /// Production acceptance contract for the same action. The aggregate and
+    /// dismissal are finalized only when this lifecycle-bound operation
+    /// returns `true`. The synchronous seam above remains for previews and
+    /// isolated tests.
+    var onNotAnAdAsync: ((AdSkipBannerItem) async -> Bool)?
 
-    /// playhead-gtt9.23: Called when the user taps "Skip" on a suggest-tier
-    /// banner. The orchestrator promotes the suggested span into the active
-    /// skip path and records a `.falseNegative` correction. When nil on a
-    /// suggest banner, the Skip button is hidden — but suggest banners
-    /// without an action are not useful, so production wiring always
-    /// supplies this. Auto-skipped banners ignore the callback.
+    /// playhead-gtt9.23 / playhead-jw63.1: Called when the user answers Yes on
+    /// a suggest-tier banner. The orchestrator promotes the suggested span
+    /// into the active skip path and records a `.falseNegative` correction.
+    /// Auto-skipped banners ignore the callback.
     var onSuggestSkip: ((AdSkipBannerItem) -> Void)?
+    /// Production acceptance contract for suggest Yes.
+    var onSuggestSkipAsync: ((AdSkipBannerItem) async -> Bool)?
+
+    /// Production acceptance contract for an explicit suggest No. Neutral
+    /// dismiss/fade still uses the queue's fire-and-forget cleanup callback.
+    var onSuggestDeclineAsync: ((AdSkipBannerItem) async -> Bool)?
 
     /// playhead-3bv.4: Called when the user taps "Always skip this sponsor"
     /// on an auto-skipped banner. The host records a `sponsorOnShow`
@@ -318,6 +840,10 @@ struct AdBannerView: View {
     /// suggest-tier (the action only applies to confirmed auto-skips —
     /// "always skip" presupposes we just successfully skipped it).
     var onAlwaysSkipSponsor: ((AdSkipBannerItem) -> Void)?
+    /// Production persistence contract for "Always skip this sponsor." The
+    /// inline success receipt is shown only after the correction store accepts
+    /// the write; a rejected write leaves the current card retryable.
+    var onAlwaysSkipSponsorAsync: ((AdSkipBannerItem) async -> Bool)?
 
     /// Injected haptic player — defaults to `SystemHapticPlayer` in
     /// production, tests swap in a `RecordingHapticPlayer`.
@@ -336,16 +862,501 @@ struct AdBannerView: View {
     /// receipt the user needs. A short delayed dismiss closes the
     /// banner after the user has had time to read the line.
     @State private var confirmedAlwaysSkipBannerId: String?
+    @Environment(\.accessibilityVoiceOverEnabled)
+    private var accessibilityVoiceOverEnabled
+    @Environment(\.accessibilitySwitchControlEnabled)
+    private var accessibilitySwitchControlEnabled
+    @Environment(\.scenePhase)
+    private var scenePhase
+    @Environment(\.dynamicTypeSize)
+    private var dynamicTypeSize
 
     /// Duration before the banner auto-dismisses after the inline
     /// "Will always skip this sponsor" confirmation appears. Short
     /// enough that it never feels like a modal; long enough to read.
     static let alwaysSkipConfirmationSeconds: TimeInterval = 2.0
 
+    /// Shared, deliberately plain copy for both banner tiers. Keeping the
+    /// question and answers identical makes the interaction learnable without
+    /// introducing confidence language or dashboard-like terminology.
+    static let feedbackPrompt = "Was this right?"
+    static let confirmFeedbackLabel = "Yes"
+    static let denyFeedbackLabel = "No"
+    static let feedbackMinimumTapSize: CGFloat = 44
+
+    /// Semantic roles used by every essential banner text surface. Unlike the
+    /// fixed-size font factories, these roles are created relative to a text
+    /// style and therefore scale with Dynamic Type.
+    static let primaryCopyTypographyRole: TypographyRole = .caption
+    static let detailCopyTypographyRole: TypographyRole = .timestamp
+    static let evidenceTypographyRole: TypographyRole = .caption
+    static let confirmationTypographyRole: TypographyRole = .caption
+
+    /// Accessibility categories always receive the stacked utility layout.
+    /// Smaller categories still use `ViewThatFits` below, which falls back to
+    /// the same layout whenever the available card width is too narrow.
+    static func autoSkippedUtilityUsesStackedLayout(
+        for dynamicTypeSize: DynamicTypeSize
+    ) -> Bool {
+        dynamicTypeSize.isAccessibilitySize
+    }
+
+    /// Essential subject copy follows the same accessibility-size stacking
+    /// rule as the utility actions. At smaller categories `ViewThatFits`
+    /// still selects the stacked fallback when a compact card cannot fit the
+    /// full single-line treatment.
+    static func bannerHeaderUsesStackedLayout(
+        for dynamicTypeSize: DynamicTypeSize
+    ) -> Bool {
+        dynamicTypeSize.isAccessibilitySize
+    }
+
+    /// The feedback question and both answers are essential content. At
+    /// accessibility sizes they receive a dedicated question row so neither
+    /// 44-point answer target is compressed or pushed outside the card.
+    /// Standard sizes still use `ViewThatFits` to select the same fallback on
+    /// compact devices or unusually long localized copy.
+    static func feedbackChoiceUsesStackedLayout(
+        for dynamicTypeSize: DynamicTypeSize
+    ) -> Bool {
+        dynamicTypeSize.isAccessibilitySize
+    }
+
+    /// Expanded evidence stays concise at standard sizes but must not truncate
+    /// the explanation a low-vision user explicitly requested.
+    static func expandedEvidenceLineLimit(
+        for dynamicTypeSize: DynamicTypeSize
+    ) -> Int? {
+        dynamicTypeSize.isAccessibilitySize ? nil : 2
+    }
+
+    /// Canonical sponsor key shared by visibility, action eligibility, and
+    /// production persistence. Keeping one normalizer prevents a whitespace-
+    /// only label from showing a receipt for an action the sink rejects.
+    static func normalizedAlwaysSkipSponsor(_ advertiser: String) -> String {
+        let normalized = advertiser
+            .lowercased()
+            .trimmingCharacters(in: .whitespaces)
+        // SponsorKnowledgeStore intentionally defines identity by trimming
+        // `.whitespaces`, so preserve that exact non-empty key. Use the wider
+        // set only as a blankness probe: a newline-only model value must not
+        // expose a durable action, while a non-empty key keeps matching the
+        // downstream store byte-for-byte.
+        return normalized
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ? "" : normalized
+    }
+
+    struct FeedbackChoiceContent: Equatable {
+        let prompt: String
+        let confirmLabel: String
+        let denyLabel: String
+        let confirmAccessibilityLabel: String
+        let confirmAccessibilityHint: String
+        let denyAccessibilityLabel: String
+        let denyAccessibilityHint: String
+    }
+
+    /// Tier-specific content for the one shared feedback row rendered by
+    /// `bannerCard`. Keeping the visible and accessibility copy in one value
+    /// lets tests verify the actual content consumed by the controls without
+    /// inspecting Swift source text.
+    static func feedbackChoiceContent(for tier: AdBannerTier) -> FeedbackChoiceContent {
+        switch tier {
+        case .suggest:
+            return FeedbackChoiceContent(
+                prompt: feedbackPrompt,
+                confirmLabel: confirmFeedbackLabel,
+                denyLabel: denyFeedbackLabel,
+                confirmAccessibilityLabel: "Yes, skip this sponsor break",
+                confirmAccessibilityHint: "Confirms this is an ad and skips it",
+                denyAccessibilityLabel: "No, this was not an ad",
+                denyAccessibilityHint: "Marks this suggestion wrong and leaves playback unchanged"
+            )
+        case .autoSkipped:
+            return FeedbackChoiceContent(
+                prompt: feedbackPrompt,
+                confirmLabel: confirmFeedbackLabel,
+                denyLabel: denyFeedbackLabel,
+                confirmAccessibilityLabel: "Yes, the skip was right",
+                confirmAccessibilityHint: "Confirms Playhead skipped an ad",
+                denyAccessibilityLabel: "No, this was not an ad",
+                // `revertWindow` records the correction and removes the skip
+                // cue, but deliberately does not rewind playback. Keep this
+                // about the correction rather than promising Listen's rewind.
+                denyAccessibilityHint: "Records that this skipped segment was not an ad"
+            )
+        }
+    }
+
+    private var isAssistiveControlActive: Bool {
+        accessibilityVoiceOverEnabled || accessibilitySwitchControlEnabled
+    }
+
+    private var isPresentationExposed: Bool {
+        isPresentationVisible && scenePhase == .active
+    }
+
+    private func isCurrentHostItem(_ item: AdSkipBannerItem) -> Bool {
+        isItemCurrent?(item) ?? true
+    }
+
     /// Factored handler for the banner-appear haptic so tests can drive
     /// it without rendering a live SwiftUI hierarchy.
     func handleBannerAppear() {
         hapticPlayer.play(.notice)
+    }
+
+    /// Card-appearance handler used by production and behavioral tests.
+    ///
+    /// The queue accepts the appearance once per presentation. This couples
+    /// the haptic and durable shown count to the same real display boundary.
+    func handleBannerAppear(for item: AdSkipBannerItem) {
+        guard isCurrentHostItem(item),
+              queue.recordBannerShown(for: item)
+        else {
+            return
+        }
+        handleBannerAppear()
+    }
+
+    /// Synchronizes timers and the impression boundary with actual exposure.
+    ///
+    /// A mounted SwiftUI card may still be hidden beneath a sheet or belong to
+    /// an inactive/background scene. Those states pause the transient timer and
+    /// defer the shown count until the surface is exposed again. Assistive
+    /// controls pause timing without suppressing a genuinely visible
+    /// impression.
+    func handlePresentationExposureChange(
+        isExposed: Bool,
+        isAssistiveControlActive: Bool
+    ) {
+        queue.setAutoDismissPaused(
+            !isExposed || isAssistiveControlActive
+        )
+        if isExposed, let item = queue.currentBanner {
+            handleBannerAppear(for: item)
+        }
+    }
+
+    /// Records a replacement that becomes current while the banner surface is
+    /// already mounted and exposed. SwiftUI can coalesce a rapid
+    /// `current -> nil -> replacement` transition into one render pass, so the
+    /// replacement card's `onAppear` is not a reliable presentation boundary
+    /// on its own. The queue's presentation-scoped guard keeps this idempotent
+    /// when `onAppear` also fires.
+    func handleCurrentBannerIdentityChange(isExposed: Bool) {
+        if isExposed, let item = queue.currentBanner {
+            handleBannerAppear(for: item)
+        }
+    }
+
+    /// The existing Listen path is itself a precise false-positive correction.
+    /// Consume and dismiss the presentation so a subsequent Yes cannot record
+    /// a contradictory aggregate label after that revert.
+    @discardableResult
+    func handleListen(for item: AdSkipBannerItem) -> Bool {
+        guard isCurrentHostItem(item),
+              queue.currentBanner?.id == item.id,
+              let onListen,
+              onListenAsync == nil
+        else {
+            return false
+        }
+        guard queue.claimUtilityAction(
+            for: item,
+            cancelAutoDismiss: true
+        ) else {
+            return false
+        }
+        onListen(item)
+        guard queue.finalizeUtilityAction(for: item) else {
+            return false
+        }
+        queue.dismissAfterAcceptedFeedback(for: item)
+        return true
+    }
+
+    @discardableResult
+    func handleListenAwaitingAction(
+        for item: AdSkipBannerItem
+    ) async -> Bool {
+        guard isCurrentHostItem(item),
+              queue.currentBanner?.id == item.id,
+              onListenAsync != nil || onListen != nil,
+              queue.claimUtilityAction(
+                for: item,
+                cancelAutoDismiss: true
+              )
+        else {
+            return false
+        }
+
+        let accepted: Bool
+        if let onListenAsync {
+            accepted = await onListenAsync(item)
+        } else if let onListen {
+            onListen(item)
+            accepted = true
+        } else {
+            accepted = false
+        }
+        guard accepted else {
+            queue.releaseUtilityActionClaim(for: item)
+            return false
+        }
+        guard queue.finalizeUtilityAction(for: item) else {
+            return false
+        }
+        queue.dismissAfterAcceptedFeedback(for: item)
+        return true
+    }
+
+    /// Performs a neutral x dismissal only while the control's captured item
+    /// is still the active presentation. SwiftUI can deliver a queued tap after
+    /// an episode/generation replacement; that stale gesture must not dismiss
+    /// the newer card now occupying the shared lane.
+    @discardableResult
+    func handleNeutralDismiss(for item: AdSkipBannerItem) -> Bool {
+        guard isCurrentHostItem(item),
+              queue.currentBanner?.id == item.id,
+              !queue.hasClaimedCurrentPresentation
+        else {
+            return false
+        }
+        queue.dismiss()
+        return true
+    }
+
+    /// Persists the durable sponsor-on-show action at most once for this
+    /// presentation and reserves the same action slot used by feedback and
+    /// Listen. The banner remains visible briefly to show its inline receipt.
+    @discardableResult
+    func handleAlwaysSkipSponsor(for item: AdSkipBannerItem) -> Bool {
+        guard isCurrentHostItem(item),
+              item.tier == .autoSkipped,
+              let advertiser = item.advertiser,
+              !Self.normalizedAlwaysSkipSponsor(advertiser).isEmpty,
+              let onAlwaysSkipSponsor,
+              onAlwaysSkipSponsorAsync == nil,
+              queue.claimUtilityAction(
+                for: item,
+                cancelAutoDismiss: true
+              )
+        else {
+            return false
+        }
+
+        onAlwaysSkipSponsor(item)
+        guard queue.finalizeUtilityAction(for: item) else {
+            return false
+        }
+        confirmedAlwaysSkipBannerId = item.id
+        return true
+    }
+
+    /// Persistence-first production path for the durable sponsor preference.
+    /// The action slot is claimed before suspension for tap deduplication, but
+    /// rejection neither shows a receipt nor consumes a still-current card.
+    @discardableResult
+    func handleAlwaysSkipSponsorAwaitingPersistence(
+        for item: AdSkipBannerItem
+    ) async -> Bool {
+        guard isCurrentHostItem(item),
+              item.tier == .autoSkipped,
+              let advertiser = item.advertiser,
+              !Self.normalizedAlwaysSkipSponsor(advertiser).isEmpty,
+              onAlwaysSkipSponsorAsync != nil || onAlwaysSkipSponsor != nil,
+              queue.claimUtilityAction(
+                for: item,
+                cancelAutoDismiss: true
+              )
+        else {
+            return false
+        }
+
+        let accepted: Bool
+        if let onAlwaysSkipSponsorAsync {
+            accepted = await onAlwaysSkipSponsorAsync(item)
+        } else if let onAlwaysSkipSponsor {
+            onAlwaysSkipSponsor(item)
+            accepted = true
+        } else {
+            accepted = false
+        }
+
+        guard accepted else {
+            queue.releaseUtilityActionClaim(for: item)
+            return false
+        }
+        guard queue.finalizeUtilityAction(for: item) else {
+            return false
+        }
+        confirmedAlwaysSkipBannerId = item.id
+        return true
+    }
+
+    /// Whether this view has the existing tier action required to honor a
+    /// response. Production wires every path; previews and isolated hosts can
+    /// omit callbacks, so their unavailable control is disabled rather than
+    /// recording a label that cannot perform its advertised action.
+    func isFeedbackResponseAvailable(
+        _ response: BannerFeedbackResponse,
+        for item: AdSkipBannerItem
+    ) -> Bool {
+        guard isCurrentHostItem(item),
+              !queue.hasClaimedCurrentPresentation
+        else {
+            return false
+        }
+        switch (item.tier, response) {
+        case (.autoSkipped, .confirmed):
+            return onAutoSkipConfirmedAsync != nil
+                || onAutoSkipConfirmed != nil
+        case (.autoSkipped, .denied):
+            return onNotAnAdAsync != nil || onNotAnAd != nil
+        case (.suggest, .confirmed):
+            return onSuggestSkipAsync != nil || onSuggestSkip != nil
+        case (.suggest, .denied):
+            return onSuggestDeclineAsync != nil
+                || queue.onSuggestExitWithoutSkip != nil
+        }
+    }
+
+    /// Synchronous feedback seam retained for previews and isolated tests.
+    /// Production supplies async acceptance callbacks and uses
+    /// `handleFeedbackAwaitingAction`.
+    @discardableResult
+    func handleFeedback(
+        _ response: BannerFeedbackResponse,
+        for item: AdSkipBannerItem
+    ) -> Bool {
+        guard isFeedbackResponseAvailable(response, for: item) else {
+            return false
+        }
+
+        // Never report synchronous success when production installed an async
+        // contract for this route.
+        if (item.tier == .autoSkipped
+                && response == .confirmed
+                && onAutoSkipConfirmedAsync != nil)
+            || (item.tier == .autoSkipped
+                && response == .denied
+                && onNotAnAdAsync != nil)
+            || (item.tier == .suggest
+                && response == .confirmed
+                && onSuggestSkipAsync != nil)
+            || (item.tier == .suggest
+                && response == .denied
+                && onSuggestDeclineAsync != nil) {
+            return false
+        }
+
+        guard queue.claimFeedback(for: item) else { return false }
+        switch (item.tier, response) {
+        case (.autoSkipped, .confirmed):
+            guard let onAutoSkipConfirmed else {
+                queue.releaseFeedbackClaim(for: item)
+                return false
+            }
+            onAutoSkipConfirmed(item)
+
+        case (.autoSkipped, .denied):
+            guard let onNotAnAd else {
+                queue.releaseFeedbackClaim(for: item)
+                return false
+            }
+            onNotAnAd(item)
+
+        case (.suggest, .confirmed):
+            guard let onSuggestSkip else {
+                queue.releaseFeedbackClaim(for: item)
+                return false
+            }
+            onSuggestSkip(item)
+
+        case (.suggest, .denied):
+            guard let onExit = queue.onSuggestExitWithoutSkip else {
+                queue.releaseFeedbackClaim(for: item)
+                return false
+            }
+            onExit(item, true)
+        }
+
+        guard queue.finalizeFeedback(response, for: item) else {
+            return false
+        }
+        queue.dismissAfterAcceptedFeedback(for: item)
+        return true
+    }
+
+    /// Handles the explicit Yes/No choice through the production acceptance
+    /// contract. The presentation is claimed immediately for deduplication,
+    /// but its aggregate and dismissal are committed only after the
+    /// lifecycle/revision-bound actor operation accepts the response.
+    @discardableResult
+    func handleFeedbackAwaitingAction(
+        _ response: BannerFeedbackResponse,
+        for item: AdSkipBannerItem
+    ) async -> Bool {
+        guard isFeedbackResponseAvailable(response, for: item),
+              queue.claimFeedback(for: item)
+        else {
+            return false
+        }
+
+        let accepted: Bool
+        switch (item.tier, response) {
+        case (.autoSkipped, .confirmed):
+            if let onAutoSkipConfirmedAsync {
+                accepted = await onAutoSkipConfirmedAsync(item)
+            } else if let onAutoSkipConfirmed {
+                onAutoSkipConfirmed(item)
+                accepted = true
+            } else {
+                accepted = false
+            }
+
+        case (.autoSkipped, .denied):
+            if let onNotAnAdAsync {
+                accepted = await onNotAnAdAsync(item)
+            } else if let onNotAnAd {
+                onNotAnAd(item)
+                accepted = true
+            } else {
+                accepted = false
+            }
+
+        case (.suggest, .confirmed):
+            if let onSuggestSkipAsync {
+                accepted = await onSuggestSkipAsync(item)
+            } else if let onSuggestSkip {
+                onSuggestSkip(item)
+                accepted = true
+            } else {
+                accepted = false
+            }
+
+        case (.suggest, .denied):
+            if let onSuggestDeclineAsync {
+                accepted = await onSuggestDeclineAsync(item)
+            } else if let onExit = queue.onSuggestExitWithoutSkip {
+                onExit(item, true)
+                accepted = true
+            } else {
+                accepted = false
+            }
+        }
+
+        guard accepted else {
+            queue.releaseFeedbackClaim(for: item)
+            return false
+        }
+        guard queue.finalizeFeedback(response, for: item) else {
+            return false
+        }
+        queue.dismissAfterAcceptedFeedback(for: item)
+        return true
     }
 
     var body: some View {
@@ -363,6 +1374,30 @@ struct AdBannerView: View {
             }
         }
         .animation(Motion.standard, value: queue.currentBanner?.id)
+        .onAppear {
+            handlePresentationExposureChange(
+                isExposed: isPresentationExposed,
+                isAssistiveControlActive: isAssistiveControlActive
+            )
+        }
+        .onDisappear {
+            handlePresentationExposureChange(
+                isExposed: false,
+                isAssistiveControlActive: isAssistiveControlActive
+            )
+        }
+        .onChange(of: isPresentationExposed) { _, isExposed in
+            handlePresentationExposureChange(
+                isExposed: isExposed,
+                isAssistiveControlActive: isAssistiveControlActive
+            )
+        }
+        .onChange(of: isAssistiveControlActive) { _, isActive in
+            handlePresentationExposureChange(
+                isExposed: isPresentationExposed,
+                isAssistiveControlActive: isActive
+            )
+        }
         .onChange(of: queue.currentBanner?.id) { _, _ in
             // Always start each new banner collapsed so the default
             // ergonomics (compact, low-attention margin note) survive
@@ -375,6 +1410,9 @@ struct AdBannerView: View {
             // still true (because @State doesn't reset on its own) and
             // call `queue.dismiss()` on the WRONG (newer) banner.
             confirmedAlwaysSkipBannerId = nil
+            handleCurrentBannerIdentityChange(
+                isExposed: isPresentationExposed
+            )
         }
     }
 
@@ -400,7 +1438,7 @@ struct AdBannerView: View {
     /// playhead-gtt9.23: branches on the banner's tier. Auto-skipped banners
     /// keep the existing "Skipped …" voice (a completed observation).
     /// Suggest banners use a calm "Sounds like a sponsor break." voice
-    /// paired with a "Skip?" affordance — never quantified, never
+    /// paired with the shared Yes/No feedback choice — never quantified, never
     /// "X% confidence." Per `feedback_peace_of_mind_not_metrics`,
     /// suggest copy describes what was heard, not how sure we are.
     static func bannerCopy(for item: AdSkipBannerItem) -> BannerCopyLine {
@@ -551,47 +1589,7 @@ struct AdBannerView: View {
         let isExpanded = expandedBannerId == item.id && !evidenceLines.isEmpty
 
         VStack(alignment: .leading, spacing: Spacing.xs) {
-            // Top line: template-driven copy
-            HStack(spacing: 0) {
-                Text(copy.prefix)
-                    .font(AppTypography.sans(size: 13, weight: .semibold))
-                    .foregroundStyle(AppColors.accent)
-
-                if let advertiser = copy.advertiser {
-                    Text(" \u{00B7} ")
-                        .font(AppTypography.sans(size: 13, weight: .regular))
-                        .foregroundStyle(boneText)
-                    Text(advertiser)
-                        .font(AppTypography.sans(size: 13, weight: .medium))
-                        .foregroundStyle(boneText)
-                }
-
-                if let detail = copy.detail {
-                    Text(" \u{00B7} ")
-                        .font(AppTypography.sans(size: 13, weight: .regular))
-                        .foregroundStyle(boneText.opacity(0.6))
-                    Text("\"\(detail)\"")
-                        .font(AppTypography.mono(size: 12, weight: .regular))
-                        .foregroundStyle(boneText.opacity(0.7))
-                        .lineLimit(1)
-                }
-
-                // playhead-b6jq PR 5: subtle specialist-provenance glyph. Shown
-                // only for suggest-tier banners whose window was composed by the
-                // on-device specialist. Accent tint at low opacity — a quiet source
-                // badge, never a metric. The copy stays the generic "Sounds like a
-                // sponsor break." (no advertiser hallucination); this only marks
-                // WHERE the suggestion came from.
-                if Self.showsSpecialistGlyph(for: item) {
-                    Image(systemName: "waveform.badge.magnifyingglass")
-                        .font(AppTypography.sans(size: 11, weight: .regular))
-                        .foregroundStyle(AppColors.accent.opacity(0.55))
-                        .padding(.leading, Spacing.xxs)
-                        .accessibilityLabel("Detected by on-device sponsor scan")
-                }
-
-                Spacer(minLength: Spacing.xs)
-            }
+            bannerHeader(copy, item: item)
 
             // playhead-vjxc: Expanded evidence detail. Renders below the
             // top line and above the action row so the actions remain in
@@ -602,9 +1600,17 @@ struct AdBannerView: View {
                 VStack(alignment: .leading, spacing: Spacing.xxs) {
                     ForEach(Array(evidenceLines.enumerated()), id: \.offset) { _, line in
                         Text(line)
-                            .font(AppTypography.sans(size: 12, weight: .regular))
+                            .font(
+                                AppTypography.font(
+                                    for: Self.evidenceTypographyRole
+                                )
+                            )
                             .foregroundStyle(boneText.opacity(0.75))
-                            .lineLimit(2)
+                            .lineLimit(
+                                Self.expandedEvidenceLineLimit(
+                                    for: dynamicTypeSize
+                                )
+                            )
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -615,14 +1621,31 @@ struct AdBannerView: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            // Bottom line: actions — tier-aware so suggest banners get a
-            // prominent "Skip" affordance instead of the post-skip
-            // Listen / Not-an-ad pair.
-            switch item.tier {
-            case .autoSkipped:
-                autoSkippedActions(item: item, evidenceLines: evidenceLines, isExpanded: isExpanded)
-            case .suggest:
-                suggestActions(item: item, evidenceLines: evidenceLines, isExpanded: isExpanded)
+            // Every active banner gets this one shared feedback row by
+            // construction; only the utility row below varies by tier. The
+            // sponsor receipt is post-action state, so it replaces both rows.
+            if item.tier == .autoSkipped,
+               confirmedAlwaysSkipBannerId == item.id {
+                alwaysSkipConfirmation(item: item)
+            } else {
+                VStack(spacing: Spacing.xxs) {
+                    feedbackChoice(for: item)
+
+                    switch item.tier {
+                    case .autoSkipped:
+                        autoSkippedActions(
+                            item: item,
+                            evidenceLines: evidenceLines,
+                            isExpanded: isExpanded
+                        )
+                    case .suggest:
+                        suggestActions(
+                            item: item,
+                            evidenceLines: evidenceLines,
+                            isExpanded: isExpanded
+                        )
+                    }
+                }
             }
         }
         .padding(.horizontal, Spacing.md)
@@ -635,8 +1658,140 @@ struct AdBannerView: View {
         .animation(Motion.standard, value: isExpanded)
         .accessibilityElement(children: .contain)
         .onAppear {
-            // Subtle haptic on banner appear.
-            handleBannerAppear()
+            // Count and haptic only when the card is actually presented.
+            if isPresentationExposed {
+                handleBannerAppear(for: item)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bannerHeader(
+        _ copy: BannerCopyLine,
+        item: AdSkipBannerItem
+    ) -> some View {
+        if Self.bannerHeaderUsesStackedLayout(for: dynamicTypeSize) {
+            stackedBannerHeader(copy, item: item)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                horizontalBannerHeader(copy, item: item)
+                stackedBannerHeader(copy, item: item)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func horizontalBannerHeader(
+        _ copy: BannerCopyLine,
+        item: AdSkipBannerItem
+    ) -> some View {
+        HStack(spacing: 0) {
+            Text(copy.prefix)
+                .font(
+                    AppTypography.font(
+                        for: Self.primaryCopyTypographyRole
+                    )
+                )
+                .fontWeight(.semibold)
+                .foregroundStyle(AppColors.accent)
+
+            if let advertiser = copy.advertiser {
+                Text(" \u{00B7} ")
+                    .font(
+                        AppTypography.font(
+                            for: Self.primaryCopyTypographyRole
+                        )
+                    )
+                    .foregroundStyle(boneText)
+                Text(advertiser)
+                    .font(
+                        AppTypography.font(
+                            for: Self.primaryCopyTypographyRole
+                        )
+                    )
+                    .fontWeight(.medium)
+                    .foregroundStyle(boneText)
+            }
+
+            if let detail = copy.detail {
+                Text(" \u{00B7} ")
+                    .font(
+                        AppTypography.font(
+                            for: Self.primaryCopyTypographyRole
+                        )
+                    )
+                    .foregroundStyle(boneText.opacity(0.6))
+                Text("\"\(detail)\"")
+                    .font(
+                        AppTypography.font(
+                            for: Self.detailCopyTypographyRole
+                        )
+                    )
+                    .foregroundStyle(boneText.opacity(0.7))
+                    .lineLimit(1)
+            }
+
+            specialistGlyph(for: item)
+                .padding(.leading, Spacing.xxs)
+        }
+        // Expose the complete ideal width to ViewThatFits. Compact cards then
+        // select the stacked alternative instead of compressing/truncating.
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func stackedBannerHeader(
+        _ copy: BannerCopyLine,
+        item: AdSkipBannerItem
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xxs) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.xxs) {
+                Text(copy.prefix)
+                    .font(
+                        AppTypography.font(
+                            for: Self.primaryCopyTypographyRole
+                        )
+                    )
+                    .fontWeight(.semibold)
+                    .foregroundStyle(AppColors.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+                specialistGlyph(for: item)
+            }
+
+            if let advertiser = copy.advertiser {
+                Text(advertiser)
+                    .font(
+                        AppTypography.font(
+                            for: Self.primaryCopyTypographyRole
+                        )
+                    )
+                    .fontWeight(.medium)
+                    .foregroundStyle(boneText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let detail = copy.detail {
+                Text("\"\(detail)\"")
+                    .font(
+                        AppTypography.font(
+                            for: Self.detailCopyTypographyRole
+                        )
+                    )
+                    .foregroundStyle(boneText.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func specialistGlyph(for item: AdSkipBannerItem) -> some View {
+        // A quiet source badge, never confidence language. The fixed icon size
+        // is deliberate; all essential textual content uses semantic roles.
+        if Self.showsSpecialistGlyph(for: item) {
+            Image(systemName: "waveform.badge.magnifyingglass")
+                .font(AppTypography.sans(size: 11, weight: .regular))
+                .foregroundStyle(AppColors.accent.opacity(0.55))
+                .accessibilityLabel("Detected by on-device sponsor scan")
         }
     }
 
@@ -648,134 +1803,176 @@ struct AdBannerView: View {
         evidenceLines: [String],
         isExpanded: Bool
     ) -> some View {
-        // playhead-3bv.4: when the user has just tapped "Always skip
-        // this sponsor" the entire action row is replaced by an
-        // inline confirmation receipt. No buttons during the short
-        // confirmation window — there is nothing left to act on.
-        if confirmedAlwaysSkipBannerId == item.id {
-            alwaysSkipConfirmation(item: item)
+        if Self.autoSkippedUtilityUsesStackedLayout(
+            for: dynamicTypeSize
+        ) {
+            stackedAutoSkippedActions(
+                item: item,
+                evidenceLines: evidenceLines,
+                isExpanded: isExpanded
+            )
         } else {
-            HStack {
-                // Phase 7.2: "Not an ad" correction button (leading, muted).
-                if let onNotAnAd {
-                    Button {
-                        onNotAnAd(item)
-                        queue.dismiss()
-                    } label: {
-                        Text("Not an ad")
-                            .font(AppTypography.sans(size: 12, weight: .regular))
-                            .foregroundStyle(boneText.opacity(0.5))
-                    }
-                    .buttonStyle(BannerButtonStyle())
-                    .accessibilityLabel("Mark as not an ad")
-                    .accessibilityHint("Records that this segment was not an advertisement")
-                }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: Spacing.xxs) {
+                    alwaysSkipSponsorAction(item: item)
+                        .fixedSize(horizontal: true, vertical: false)
 
-                // playhead-3bv.4: "Always skip this sponsor" — sits
-                // alongside "Not an ad" so the two correction-style
-                // affordances are visually grouped (both muted, leading
-                // edge), separate from the rewind/dismiss actions
-                // (trailing edge, accent). Hidden when the host has
-                // not wired the callback OR when we have no advertiser
-                // name to record against (a sponsorOnShow scope with
-                // no sponsor is meaningless).
-                if let onAlwaysSkipSponsor,
-                   let advertiser = item.advertiser,
-                   !advertiser.isEmpty {
-                    Button {
-                        onAlwaysSkipSponsor(item)
-                        confirmedAlwaysSkipBannerId = item.id
-                        // Schedule a calm auto-dismiss so the
-                        // confirmation reads as a receipt, not a modal.
-                        Task { @MainActor in
-                            try? await Task.sleep(
-                                for: .seconds(Self.alwaysSkipConfirmationSeconds)
-                            )
-                            // Guard: only dismiss if we still own the
-                            // confirmation state for THIS banner AND
-                            // the queue's current banner is still this
-                            // one. A newer banner could have advanced
-                            // the queue in the meantime — dismissing
-                            // then would silently drop the new banner.
-                            // The `.onChange(of: queue.currentBanner?.id)`
-                            // handler resets `confirmedAlwaysSkipBannerId`
-                            // to nil on queue advance, but the explicit
-                            // queue-id check here is defense-in-depth.
-                            if confirmedAlwaysSkipBannerId == item.id,
-                               queue.currentBanner?.id == item.id {
-                                confirmedAlwaysSkipBannerId = nil
-                                queue.dismiss()
-                            }
-                        }
-                    } label: {
-                        Text("Always skip this sponsor")
-                            .font(AppTypography.sans(size: 12, weight: .regular))
-                            .foregroundStyle(boneText.opacity(0.5))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.85)
-                    }
-                    .buttonStyle(BannerButtonStyle())
-                    .accessibilityLabel("Always skip this sponsor")
-                    .accessibilityHint(
-                        "Tells Playhead to skip \(advertiser) on this show without asking again"
+                    Spacer(minLength: Spacing.xs)
+
+                    autoSkippedSecondaryActions(
+                        item: item,
+                        evidenceLines: evidenceLines,
+                        isExpanded: isExpanded
                     )
+                    .fixedSize(horizontal: true, vertical: false)
                 }
 
-                Spacer()
+                stackedAutoSkippedActions(
+                    item: item,
+                    evidenceLines: evidenceLines,
+                    isExpanded: isExpanded
+                )
+            }
+        }
+    }
 
-                // playhead-vjxc: chevron toggle. Only shown when there is
-                // catalog evidence to surface — empty-list banners keep
-                // the original three-button action row exactly.
-                if !evidenceLines.isEmpty {
-                    Button {
-                        if expandedBannerId == item.id {
-                            expandedBannerId = nil
-                        } else {
-                            expandedBannerId = item.id
-                        }
-                    } label: {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(boneText.opacity(0.5))
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
+    private func stackedAutoSkippedActions(
+        item: AdSkipBannerItem,
+        evidenceLines: [String],
+        isExpanded: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xxs) {
+            alwaysSkipSponsorAction(item: item)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: Spacing.xxs) {
+                Spacer(minLength: 0)
+                autoSkippedSecondaryActions(
+                    item: item,
+                    evidenceLines: evidenceLines,
+                    isExpanded: isExpanded
+                )
+            }
+        }
+    }
+
+    /// playhead-3bv.4: "Always skip this sponsor" sits on the quiet utility
+    /// row, separate from the explicit Yes/No learning choice.
+    @ViewBuilder
+    private func alwaysSkipSponsorAction(
+        item: AdSkipBannerItem
+    ) -> some View {
+        if onAlwaysSkipSponsorAsync != nil || onAlwaysSkipSponsor != nil,
+           let advertiser = item.advertiser,
+           !Self.normalizedAlwaysSkipSponsor(advertiser).isEmpty {
+            Button {
+                Task { @MainActor in
+                    guard await handleAlwaysSkipSponsorAwaitingPersistence(
+                        for: item
+                    ) else {
+                        return
                     }
-                    .buttonStyle(BannerButtonStyle())
-                    .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
-                    .accessibilityHint("Reveals the signals that led Playhead to skip this segment")
+                    // Schedule a calm auto-dismiss so the confirmation reads
+                    // as a receipt, not a modal.
+                    try? await Task.sleep(
+                        for: .seconds(Self.alwaysSkipConfirmationSeconds)
+                    )
+                    // Guard against dismissing a newer banner.
+                    if confirmedAlwaysSkipBannerId == item.id,
+                       queue.dismissConfirmationIfAllowed(for: item) {
+                        confirmedAlwaysSkipBannerId = nil
+                    }
                 }
+            } label: {
+                Text("Always skip this sponsor")
+                    .font(AppTypography.caption)
+                    .foregroundStyle(boneText.opacity(0.5))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: Self.feedbackMinimumTapSize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Always skip this sponsor")
+            .accessibilityHint(
+                "Tells Playhead to skip \(advertiser) on this show without asking again"
+            )
+        }
+    }
 
-                // Listen button — copper accent
+    private func autoSkippedSecondaryActions(
+        item: AdSkipBannerItem,
+        evidenceLines: [String],
+        isExpanded: Bool
+    ) -> some View {
+        HStack(spacing: Spacing.xxs) {
+            // playhead-vjxc: optional evidence chevron.
+            if !evidenceLines.isEmpty {
                 Button {
-                    onListen?(item)
+                    if expandedBannerId == item.id {
+                        expandedBannerId = nil
+                    } else {
+                        expandedBannerId = item.id
+                    }
                 } label: {
-                    Text("Listen")
-                        .font(AppTypography.sans(size: 13, weight: .semibold))
-                        .foregroundStyle(AppColors.accent)
-                        .padding(.horizontal, Spacing.sm)
-                        .padding(.vertical, Spacing.xxs)
-                        .background(
-                            RoundedRectangle(cornerRadius: CornerRadius.small)
-                                .fill(AppColors.accent.opacity(0.12))
-                        )
-                }
-                .buttonStyle(BannerButtonStyle())
-                .accessibilityLabel("Listen to skipped ad")
-                .accessibilityHint("Rewinds to the start of the skipped ad segment")
-
-                // Dismiss button
-                Button {
-                    queue.dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(AppTypography.caption)
+                        .fontWeight(.semibold)
                         .foregroundStyle(boneText.opacity(0.5))
-                        .frame(width: 28, height: 28)
+                        .frame(
+                            width: Self.feedbackMinimumTapSize,
+                            height: Self.feedbackMinimumTapSize
+                        )
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(BannerButtonStyle())
-                .accessibilityLabel("Dismiss banner")
+                .accessibilityLabel(isExpanded ? "Hide evidence" : "Show evidence")
+                .accessibilityHint(
+                    "Reveals the signals that led Playhead to skip this segment"
+                )
             }
+
+            // Listen button — copper accent
+            Button {
+                Task {
+                    await handleListenAwaitingAction(for: item)
+                }
+            } label: {
+                Text("Listen")
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(AppColors.accent)
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xxs)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.small)
+                            .fill(AppColors.accent.opacity(0.12))
+                    )
+                    .frame(
+                        minWidth: Self.feedbackMinimumTapSize,
+                        minHeight: Self.feedbackMinimumTapSize
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Listen to skipped ad")
+            .accessibilityHint("Rewinds to the start of the skipped ad segment")
+
+            Button {
+                handleNeutralDismiss(for: item)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(boneText.opacity(0.5))
+                    .frame(
+                        width: Self.feedbackMinimumTapSize,
+                        height: Self.feedbackMinimumTapSize
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Dismiss banner")
         }
     }
 
@@ -791,7 +1988,11 @@ struct AdBannerView: View {
                 .foregroundStyle(AppColors.accent)
                 .accessibilityHidden(true)
             Text("Will always skip this sponsor")
-                .font(AppTypography.sans(size: 12, weight: .regular))
+                .font(
+                    AppTypography.font(
+                        for: Self.confirmationTypographyRole
+                    )
+                )
                 .foregroundStyle(boneText.opacity(0.75))
             Spacer(minLength: 0)
         }
@@ -800,11 +2001,9 @@ struct AdBannerView: View {
         .transition(.opacity)
     }
 
-    /// playhead-gtt9.23: action row for the suggest tier. Replaces the
-    /// post-skip Listen / Not-an-ad pair with a prominent **Skip** button
-    /// (the user is the gate) plus a quiet dismiss. Auto-fade with no
-    /// action is treated as a silent decline upstream — see
-    /// `SkipOrchestrator.declineSuggestedSkip`.
+    /// Suggest-tier choice plus quiet evidence/dismiss utilities. Yes uses the
+    /// existing accepted-skip path, No uses the explicit false-positive path,
+    /// and fade/x remain unlabeled.
     @ViewBuilder
     private func suggestActions(
         item: AdSkipBannerItem,
@@ -812,9 +2011,8 @@ struct AdBannerView: View {
         isExpanded: Bool
     ) -> some View {
         HStack {
-            // Optional evidence chevron (same as auto-skipped path) so the
-            // user can read the signals before deciding. Hidden when no
-            // catalog data overlaps the suggested span.
+            // Optional evidence chevron (same as auto-skipped path) so
+            // the user can inspect signals without answering.
             if !evidenceLines.isEmpty {
                 Button {
                     if expandedBannerId == item.id {
@@ -824,9 +2022,13 @@ struct AdBannerView: View {
                     }
                 } label: {
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppTypography.caption)
+                        .fontWeight(.semibold)
                         .foregroundStyle(boneText.opacity(0.5))
-                        .frame(width: 28, height: 28)
+                        .frame(
+                            width: Self.feedbackMinimumTapSize,
+                            height: Self.feedbackMinimumTapSize
+                        )
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(BannerButtonStyle())
@@ -836,51 +2038,130 @@ struct AdBannerView: View {
 
             Spacer()
 
-            // Skip button — copper accent, prominent. This is the suggest
-            // tier's primary affordance. Tap routes to onSuggestSkip,
-            // which (in production) promotes the suggest window into
-            // the active skip path and records a falseNegative correction.
-            // We use `dismissAfterAccept` rather than `dismiss()` so the
-            // queue does NOT also fire the suggest-exit callback —
-            // `acceptSuggestedSkip` already removes the window from the
-            // orchestrator's suggest set.
+            // The x is now explicitly neutral because the adjacent No
+            // button is the unambiguous false-positive signal.
             Button {
-                onSuggestSkip?(item)
-                queue.dismissAfterAccept(item)
+                handleNeutralDismiss(for: item)
             } label: {
-                Text("Skip")
-                    .font(AppTypography.sans(size: 13, weight: .semibold))
+                Image(systemName: "xmark")
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(boneText.opacity(0.5))
+                    .frame(
+                        width: Self.feedbackMinimumTapSize,
+                        height: Self.feedbackMinimumTapSize
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BannerButtonStyle())
+            .accessibilityLabel("Dismiss without feedback")
+            .accessibilityHint("Leaves playback unchanged without answering")
+        }
+    }
+
+    /// The same compact, accessible learning choice appears on every tier.
+    @ViewBuilder
+    private func feedbackChoice(for item: AdSkipBannerItem) -> some View {
+        let content = Self.feedbackChoiceContent(for: item.tier)
+
+        if Self.feedbackChoiceUsesStackedLayout(for: dynamicTypeSize) {
+            stackedFeedbackChoice(content: content, item: item)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                horizontalFeedbackChoice(content: content, item: item)
+                stackedFeedbackChoice(content: content, item: item)
+            }
+        }
+    }
+
+    private func horizontalFeedbackChoice(
+        content: FeedbackChoiceContent,
+        item: AdSkipBannerItem
+    ) -> some View {
+        HStack(spacing: Spacing.xs) {
+            Text(content.prompt)
+                .font(AppTypography.caption)
+                .foregroundStyle(boneText.opacity(0.72))
+
+            Spacer(minLength: Spacing.xs)
+
+            feedbackAnswerButtons(content: content, item: item)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        // Expose the complete ideal width to `ViewThatFits`; otherwise SwiftUI
+        // may compress the prompt until it truncates instead of selecting the
+        // stacked alternative.
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func stackedFeedbackChoice(
+        content: FeedbackChoiceContent,
+        item: AdSkipBannerItem
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xxs) {
+            Text(content.prompt)
+                .font(AppTypography.caption)
+                .foregroundStyle(boneText.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
+
+            feedbackAnswerButtons(content: content, item: item)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func feedbackAnswerButtons(
+        content: FeedbackChoiceContent,
+        item: AdSkipBannerItem
+    ) -> some View {
+        HStack(spacing: Spacing.xs) {
+            Button {
+                Task {
+                    await handleFeedbackAwaitingAction(.confirmed, for: item)
+                }
+            } label: {
+                Text(content.confirmLabel)
+                    .font(AppTypography.caption)
+                    .fontWeight(.semibold)
                     .foregroundStyle(AppColors.accent)
                     .padding(.horizontal, Spacing.sm)
                     .padding(.vertical, Spacing.xxs)
                     .background(
                         RoundedRectangle(cornerRadius: CornerRadius.small)
-                            .fill(AppColors.accent.opacity(0.18))
+                            .fill(AppColors.accent.opacity(0.14))
                     )
-            }
-            .buttonStyle(BannerButtonStyle())
-            .accessibilityLabel("Skip this segment")
-            .accessibilityHint("Skips the suggested sponsor break")
-
-            // Dismiss button. playhead-lc7z: an explicit "✕" tap on a
-            // suggest banner is the user saying "no, that isn't an ad" —
-            // pass `userInitiated: true` so the queue forwards it to
-            // `onSuggestExitWithoutSkip` as a dismissal, which the
-            // orchestrator captures as a `.falsePositive` correction. (A
-            // passive auto-fade of the same banner calls `dismiss()` with
-            // the default `false` and records nothing.)
-            Button {
-                queue.dismiss(userInitiated: true)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(boneText.opacity(0.5))
-                    .frame(width: 28, height: 28)
+                    .frame(
+                        minWidth: Self.feedbackMinimumTapSize,
+                        minHeight: Self.feedbackMinimumTapSize
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(BannerButtonStyle())
-            .accessibilityLabel("Dismiss")
-            .accessibilityHint("Leaves playback unchanged")
+            .disabled(!isFeedbackResponseAvailable(.confirmed, for: item))
+            .accessibilityLabel(content.confirmAccessibilityLabel)
+            .accessibilityHint(content.confirmAccessibilityHint)
+
+            Button {
+                Task {
+                    await handleFeedbackAwaitingAction(.denied, for: item)
+                }
+            } label: {
+                Text(content.denyLabel)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(boneText.opacity(0.62))
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xxs)
+                    .frame(
+                        minWidth: Self.feedbackMinimumTapSize,
+                        minHeight: Self.feedbackMinimumTapSize
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BannerButtonStyle())
+            .disabled(!isFeedbackResponseAvailable(.denied, for: item))
+            .accessibilityLabel(content.denyAccessibilityLabel)
+            .accessibilityHint(content.denyAccessibilityHint)
         }
     }
 

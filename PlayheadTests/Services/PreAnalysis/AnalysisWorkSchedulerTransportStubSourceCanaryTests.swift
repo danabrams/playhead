@@ -75,7 +75,7 @@ final class AnalysisWorkSchedulerTransportStubSourceCanaryTests: XCTestCase {
             // (`AnalysisWorkScheduler   (` would still match).
             var searchStart = stripped.startIndex
             while let ctorRange = stripped.range(
-                of: #"AnalysisWorkScheduler\s*\("#,
+                of: #"\bAnalysisWorkScheduler\s*\("#,
                 options: .regularExpression,
                 range: searchStart..<stripped.endIndex
             ) {

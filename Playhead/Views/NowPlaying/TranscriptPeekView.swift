@@ -17,6 +17,12 @@ struct TranscriptPeekView: View {
     /// Current playback time, driven by the parent NowPlayingViewModel.
     let currentTime: TimeInterval
 
+    /// Episode duration, driven by the parent NowPlayingViewModel. Used to
+    /// seed a coverage-free "mark the untranscribed tail" span that runs to
+    /// the episode end (playhead-m1l9). Defaults to 0 (no tail affordance)
+    /// so previews/tests that don't supply it are unaffected.
+    var episodeDuration: TimeInterval = 0
+
     /// Phase 5 (u4d): User correction store for "This isn't an ad" gesture.
     /// Defaults to no-op; Phase 7 injects a real store via PlayheadRuntime.
     var correctionStore: any UserCorrectionStore = NoOpUserCorrectionStore()
@@ -41,25 +47,34 @@ struct TranscriptPeekView: View {
     /// False negative marking mode: when true, tapping chunks selects/deselects them for ad marking.
     @State private var isMarkingMode = false
 
-    /// Indices of chunks selected as ad content in marking mode.
-    @State private var markedChunkIndices: Set<Int> = []
+    /// Audio envelopes captured from chunks selected as ad content. These
+    /// remain stable if polling changes the canonical row array.
+    @State private var markedChunkSelections: Set<TranscriptChunkSelection> = []
 
     /// Confirmation alert for submitting marked chunks as false negative.
     @State private var showMarkConfirmation = false
 
+    /// Confirmation alert for marking the untranscribed post-roll/tail as an ad.
+    @State private var showTailMarkConfirmation = false
+
+    /// Span captured when the tail affordance is tapped, submitted on confirm.
+    @State private var pendingTailSpan: (start: Double, end: Double)? = nil
+
     /// "Not an ad" marking mode: when true, tapping chunks selects/deselects them for veto.
     @State private var isNotAdMarkingMode = false
 
-    /// Indices of chunks selected as "not an ad" in not-ad marking mode.
-    @State private var notAdMarkedChunkIndices: Set<Int> = []
+    /// Audio envelopes captured from chunks selected as "not an ad".
+    @State private var notAdMarkedChunkSelections: Set<TranscriptChunkSelection> = []
 
     /// Confirmation alert for submitting not-ad chunks.
     @State private var showNotAdConfirmation = false
 
-    /// Last whole-second of `currentTime` applied to the view model. Used to
-    /// coalesce sub-second `onChange` fires that would otherwise trigger
-    /// same-frame state updates (SwiftUI warns; chunk boundaries are seconds-scale).
-    @State private var lastAppliedSecond: Int = .min
+    /// Audio envelopes represented by the current canonical projection.
+    /// Watching this set lets polling retire selections whose rows were
+    /// replaced with different bounds without tying selection to array offsets.
+    private var visibleChunkSelections: Set<TranscriptChunkSelection> {
+        Set(peekViewModel.chunks.map(TranscriptChunkSelection.init))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,17 +96,48 @@ struct TranscriptPeekView: View {
             } else {
                 transcriptScroll
             }
+
+            // playhead-m1l9: coverage-free affordance for a post-roll / tail
+            // the fast transcript hasn't reached — the chunk-selection "Mark
+            // ad" flow can't reach it because there are no chunks to tap.
+            if !peekViewModel.isLoading,
+               let tailSpan = peekViewModel.untranscribedTailMarkSpan(
+                   currentTime: currentTime,
+                   episodeDuration: episodeDuration
+               ) {
+                untranscribedTailFooter(span: tailSpan)
+            }
         }
         .background(AppColors.surface)
+        // playhead-m1l9: the tail-mark confirmation lives on the always-present
+        // body (not the conditionally-rendered footer) so it survives the
+        // footer disappearing mid-interaction (e.g. playback reaching the end).
+        .alert("Mark ad to the end?", isPresented: $showTailMarkConfirmation) {
+            Button("Cancel", role: .cancel) {
+                pendingTailSpan = nil
+            }
+            Button("Report missed ad", role: .destructive) {
+                if let pending = pendingTailSpan {
+                    submitUntranscribedTailMark(span: pending)
+                }
+                pendingTailSpan = nil
+            }
+        } message: {
+            Text("The untranscribed section from here to the end of the episode will be reported as an ad.")
+        }
         .onChange(of: currentTime) { _, newTime in
-            let second = Int(newTime)
-            guard second != lastAppliedSecond else { return }
-            lastAppliedSecond = second
             peekViewModel.updatePlaybackPosition(newTime)
+        }
+        .onChange(of: visibleChunkSelections) {
+            markedChunkSelections = peekViewModel.reconciledSelections(
+                markedChunkSelections
+            )
+            notAdMarkedChunkSelections = peekViewModel.reconciledSelections(
+                notAdMarkedChunkSelections
+            )
         }
         .onAppear {
             peekViewModel.startPolling()
-            lastAppliedSecond = Int(currentTime)
             peekViewModel.updatePlaybackPosition(currentTime)
         }
         .onDisappear {
@@ -142,7 +188,7 @@ private extension TranscriptPeekView {
         Button {
             if isNotAdMarkingMode {
                 // Exiting not-ad mode — if chunks are selected, show confirmation
-                if !notAdMarkedChunkIndices.isEmpty {
+                if !notAdMarkedChunkSelections.isEmpty {
                     showNotAdConfirmation = true
                 } else {
                     isNotAdMarkingMode = false
@@ -150,19 +196,19 @@ private extension TranscriptPeekView {
             } else {
                 // Enter not-ad mode, exit mark-ad mode if active
                 isMarkingMode = false
-                markedChunkIndices = []
+                markedChunkSelections = []
                 isNotAdMarkingMode = true
-                notAdMarkedChunkIndices = []
+                notAdMarkedChunkSelections = []
             }
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: isNotAdMarkingMode
-                    ? (notAdMarkedChunkIndices.isEmpty ? "xmark" : "checkmark")
+                    ? (notAdMarkedChunkSelections.isEmpty ? "xmark" : "checkmark")
                     : "hand.raised"
                 )
                 .font(.system(size: 11, weight: .semibold))
                 Text(isNotAdMarkingMode
-                    ? (notAdMarkedChunkIndices.isEmpty ? "Cancel" : "Done")
+                    ? (notAdMarkedChunkSelections.isEmpty ? "Cancel" : "Done")
                     : "Not ad"
                 )
                 .font(AppTypography.sans(size: 11, weight: .semibold))
@@ -190,7 +236,7 @@ private extension TranscriptPeekView {
                 isNotAdMarkingMode = false
             }
         } message: {
-            Text("\(notAdMarkedChunkIndices.count) sentence\(notAdMarkedChunkIndices.count == 1 ? "" : "s") will be marked as not an ad. Any overlapping ad detections will be dismissed.")
+            Text("\(notAdMarkedChunkSelections.count) sentence\(notAdMarkedChunkSelections.count == 1 ? "" : "s") will be marked as not an ad. Any overlapping ad detections will be dismissed.")
         }
     }
 
@@ -198,7 +244,7 @@ private extension TranscriptPeekView {
         Button {
             if isMarkingMode {
                 // Exiting marking mode — if chunks are selected, show confirmation
-                if !markedChunkIndices.isEmpty {
+                if !markedChunkSelections.isEmpty {
                     showMarkConfirmation = true
                 } else {
                     isMarkingMode = false
@@ -206,19 +252,19 @@ private extension TranscriptPeekView {
             } else {
                 // Enter mark-ad mode, exit not-ad mode if active
                 isNotAdMarkingMode = false
-                notAdMarkedChunkIndices = []
+                notAdMarkedChunkSelections = []
                 isMarkingMode = true
-                markedChunkIndices = []
+                markedChunkSelections = []
             }
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: isMarkingMode
-                    ? (markedChunkIndices.isEmpty ? "xmark" : "checkmark")
+                    ? (markedChunkSelections.isEmpty ? "xmark" : "checkmark")
                     : "hand.tap"
                 )
                 .font(.system(size: 11, weight: .semibold))
                 Text(isMarkingMode
-                    ? (markedChunkIndices.isEmpty ? "Cancel" : "Done")
+                    ? (markedChunkSelections.isEmpty ? "Cancel" : "Done")
                     : "Mark ad"
                 )
                 .font(AppTypography.sans(size: 11, weight: .semibold))
@@ -246,7 +292,7 @@ private extension TranscriptPeekView {
                 isMarkingMode = false
             }
         } message: {
-            Text("\(markedChunkIndices.count) sentence\(markedChunkIndices.count == 1 ? "" : "s") will be reported as a missed ad.")
+            Text("\(markedChunkSelections.count) sentence\(markedChunkSelections.count == 1 ? "" : "s") will be reported as a missed ad.")
         }
     }
 
@@ -301,6 +347,59 @@ private extension TranscriptPeekView {
         .padding(.horizontal, Spacing.lg)
     }
 
+    // MARK: Untranscribed-tail mark footer (playhead-m1l9)
+
+    /// Pinned footer offering a coverage-free mark for a post-roll / tail the
+    /// fast transcript hasn't reached yet. Routes to the same
+    /// `injectUserMarkedAd` path the player "Hearing an ad" button uses,
+    /// seeding a span from the playhead to the episode end.
+    func untranscribedTailFooter(span: (start: Double, end: Double)) -> some View {
+        VStack(spacing: 0) {
+            Divider()
+                .foregroundStyle(AppColors.textSecondary.opacity(0.2))
+
+            Button {
+                pendingTailSpan = span
+                showTailMarkConfirmation = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Rectangle()
+                        .fill(AppColors.accent)
+                        .frame(width: 3)
+                        .frame(maxHeight: .infinity)
+
+                    Image(systemName: "ear.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(AppColors.accent)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Hearing an ad past the transcript?")
+                            .font(AppTypography.sans(size: 13, weight: .semibold))
+                            .foregroundStyle(AppColors.textPrimary)
+                        Text("Mark from here to the end as an ad")
+                            .font(AppTypography.sans(size: 11, weight: .regular))
+                            .foregroundStyle(AppColors.textTertiary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AppColors.textTertiary.opacity(0.6))
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.sm)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(minHeight: 44)
+        }
+        .background(AppColors.surface)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Mark an ad in the untranscribed section")
+        .accessibilityHint("Reports the post-roll from the current position to the end of the episode as an ad")
+    }
+
     // MARK: Transcript Scroll
 
     var transcriptScroll: some View {
@@ -349,6 +448,7 @@ private extension TranscriptPeekView {
 
     func chunkRow(chunk: TranscriptChunk, index: Int) -> some View {
         let isActive = peekViewModel.activeChunkIndex == index
+        let selection = TranscriptChunkSelection(chunk: chunk)
 
         // Legacy Phase 2 ad detection
         let isAd = peekViewModel.isAdSegment(
@@ -442,17 +542,17 @@ private extension TranscriptPeekView {
         .onTapGesture {
             if isMarkingMode {
                 // Toggle selection in mark-ad mode
-                if markedChunkIndices.contains(index) {
-                    markedChunkIndices.remove(index)
+                if markedChunkSelections.contains(selection) {
+                    markedChunkSelections.remove(selection)
                 } else {
-                    markedChunkIndices.insert(index)
+                    markedChunkSelections.insert(selection)
                 }
             } else if isNotAdMarkingMode {
                 // Toggle selection in not-ad mode
-                if notAdMarkedChunkIndices.contains(index) {
-                    notAdMarkedChunkIndices.remove(index)
+                if notAdMarkedChunkSelections.contains(selection) {
+                    notAdMarkedChunkSelections.remove(selection)
                 } else {
-                    notAdMarkedChunkIndices.insert(index)
+                    notAdMarkedChunkSelections.insert(selection)
                 }
             } else if let span = primarySpan {
                 selectedDecodedSpan = span
@@ -461,23 +561,23 @@ private extension TranscriptPeekView {
         // Visual selection indicator in marking mode
         .overlay(alignment: .trailing) {
             if isMarkingMode {
-                Image(systemName: markedChunkIndices.contains(index)
+                Image(systemName: markedChunkSelections.contains(selection)
                     ? "checkmark.circle.fill"
                     : "circle"
                 )
                 .font(.system(size: 18))
-                .foregroundStyle(markedChunkIndices.contains(index)
+                .foregroundStyle(markedChunkSelections.contains(selection)
                     ? AppColors.accent
                     : AppColors.textTertiary.opacity(0.4)
                 )
                 .padding(.trailing, Spacing.xs)
             } else if isNotAdMarkingMode {
-                Image(systemName: notAdMarkedChunkIndices.contains(index)
+                Image(systemName: notAdMarkedChunkSelections.contains(selection)
                     ? "checkmark.circle.fill"
                     : "circle"
                 )
                 .font(.system(size: 18))
-                .foregroundStyle(notAdMarkedChunkIndices.contains(index)
+                .foregroundStyle(notAdMarkedChunkSelections.contains(selection)
                     ? AppColors.textPrimary
                     : AppColors.textTertiary.opacity(0.4)
                 )
@@ -485,9 +585,9 @@ private extension TranscriptPeekView {
             }
         }
         .background(
-            markedChunkIndices.contains(index)
+            markedChunkSelections.contains(selection)
                 ? AppColors.accent.opacity(0.08)
-                : (notAdMarkedChunkIndices.contains(index)
+                : (notAdMarkedChunkSelections.contains(selection)
                     ? AppColors.textPrimary.opacity(0.06)
                     : Color.clear)
         )
@@ -545,23 +645,20 @@ private extension TranscriptPeekView {
     /// immediate skip + UI update + persistence. The chunks already carry
     /// startTime/endTime, so no BoundaryExpander is needed.
     func submitMarkedChunks() {
-        guard !markedChunkIndices.isEmpty else { return }
+        guard !markedChunkSelections.isEmpty else { return }
 
         // Clear selection immediately to prevent duplicate submissions
         // if the alert action fires more than once.
-        let selectedIndices = markedChunkIndices
-        markedChunkIndices = []
+        let selectedChunks = markedChunkSelections
+        markedChunkSelections = []
 
-        let chunks = peekViewModel.chunks
-        let selectedChunks = selectedIndices.compactMap { idx -> TranscriptChunk? in
-            guard idx < chunks.count else { return nil }
-            return chunks[idx]
+        guard let selectedRange = peekViewModel.selectedChunkTimeRange(
+            selections: selectedChunks
+        ) else {
+            return
         }
-        guard !selectedChunks.isEmpty else { return }
-
-        // Derive the time range from the selected chunks' min start / max end.
-        let startTime = selectedChunks.map(\.startTime).min() ?? 0
-        let endTime = selectedChunks.map(\.endTime).max() ?? 0
+        let startTime = selectedRange.start
+        let endTime = selectedRange.end
 
         let trustSvc = trustService
         let pid = podcastId
@@ -581,25 +678,47 @@ private extension TranscriptPeekView {
         }
     }
 
+    /// Submit a coverage-free mark for the untranscribed post-roll/tail
+    /// (playhead-m1l9). Mirrors `submitMarkedChunks`' downstream calls —
+    /// `injectUserMarkedAd` for immediate skip + AdWindow/CorrectionEvent
+    /// persistence, plus the false-negative trust signal — but sources the
+    /// span from the playhead-to-episode-end seed rather than existing chunks,
+    /// so a tail with NO transcript chunks can still be marked.
+    func submitUntranscribedTailMark(span: (start: Double, end: Double)) {
+        let startTime = span.start
+        let endTime = span.end
+        guard endTime > startTime else { return }
+
+        let trustSvc = trustService
+        let pid = podcastId
+        let runtimeRef = runtime
+        Task {
+            if let runtimeRef {
+                await runtimeRef.injectUserMarkedAd(start: startTime, end: endTime)
+            }
+            if let pid, let trustSvc {
+                await trustSvc.recordFalseNegativeSignal(podcastId: pid)
+            }
+        }
+    }
+
     /// Submit the not-ad marked chunks as a manual veto correction.
     /// Records a .manualVeto CorrectionEvent and calls onRevertAdWindows
     /// with a synthetic DecodedSpan covering the selected time range.
     func submitNotAdChunks() {
-        guard !notAdMarkedChunkIndices.isEmpty else { return }
+        guard !notAdMarkedChunkSelections.isEmpty else { return }
 
         // Capture and clear selection immediately.
-        let selectedIndices = notAdMarkedChunkIndices
-        notAdMarkedChunkIndices = []
+        let selectedChunks = notAdMarkedChunkSelections
+        notAdMarkedChunkSelections = []
 
-        let chunks = peekViewModel.chunks
-        let selectedChunks = selectedIndices.compactMap { idx -> TranscriptChunk? in
-            guard idx < chunks.count else { return nil }
-            return chunks[idx]
+        guard let selectedRange = peekViewModel.selectedChunkTimeRange(
+            selections: selectedChunks
+        ) else {
+            return
         }
-        guard !selectedChunks.isEmpty else { return }
-
-        let startTime = selectedChunks.map(\.startTime).min() ?? 0
-        let endTime = selectedChunks.map(\.endTime).max() ?? 0
+        let startTime = selectedRange.start
+        let endTime = selectedRange.end
         let assetId = peekViewModel.analysisAssetId
 
         // Build a synthetic DecodedSpan covering the selected range. This is

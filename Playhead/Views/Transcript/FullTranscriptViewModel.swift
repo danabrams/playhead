@@ -122,27 +122,83 @@ final class FullTranscriptViewModel {
     // MARK: Playback position
 
     /// Update which paragraph is currently active based on a playback
-    /// time in seconds. Called from the view's `onChange(of: currentTime)`.
-    /// Coalescing of sub-second updates is the caller's responsibility
-    /// (mirrors the peek view).
+    /// time in seconds. Called for every playback tick so fractional
+    /// half-open transcript boundaries are resolved without rounding.
     func updatePlaybackPosition(_ currentTime: TimeInterval) {
         guard !paragraphs.isEmpty else {
             activeParagraphIndex = nil
             return
         }
 
-        // Walk the sorted paragraphs and pick the last one whose
-        // startTime is <= currentTime. Falls back to the first
-        // paragraph when the time is before the entire transcript.
-        var best: Int = 0
+        // Retained partial-overlap rows can produce overlapping paragraphs
+        // when their ad status differs. Prefer a paragraph with a final-pass
+        // chunk that actually covers playback, then one with any covering
+        // chunk, then a paragraph whose grouped envelope covers playback.
+        // Within the same quality, the latest-starting paragraph wins.
+        // Fall back to the closest preceding paragraph in a transcript gap,
+        // or the first paragraph before the transcript begins.
+        var preceding: Int?
+        var covering: (index: Int, quality: Int)?
         for (index, paragraph) in paragraphs.enumerated() {
             if paragraph.startTime <= currentTime {
-                best = index
+                // Overlapping paragraphs can have non-monotonic end times.
+                // In a gap, the closest preceding paragraph is the one whose
+                // covered audio ended most recently, not necessarily the one
+                // that started last.
+                if let currentPreceding = preceding {
+                    if paragraph.endTime >= paragraphs[currentPreceding].endTime {
+                        preceding = index
+                    }
+                } else {
+                    preceding = index
+                }
+
+                guard let quality = coverageQuality(
+                    paragraph: paragraph,
+                    currentTime: currentTime
+                ) else {
+                    continue
+                }
+                if covering == nil || quality >= covering!.quality {
+                    covering = (index, quality)
+                }
             } else {
                 break
             }
         }
-        activeParagraphIndex = best
+        let resolved = covering?.index ?? preceding ?? 0
+        if activeParagraphIndex != resolved {
+            activeParagraphIndex = resolved
+        }
+    }
+
+    /// Quality rank for a paragraph that covers `currentTime`.
+    ///
+    /// Paragraph envelopes may bridge pauses up to two seconds, so an
+    /// envelope-only match is weaker than a real chunk match. Final-pass
+    /// chunk coverage outranks retained fast-pass coverage in the same way
+    /// Transcript Peek resolves overlapping canonical rows.
+    private func coverageQuality(
+        paragraph: TranscriptParagraph,
+        currentTime: TimeInterval
+    ) -> Int? {
+        // Transcript audio envelopes are half-open [start, end). This keeps
+        // an ended final paragraph from stealing a touching boundary from
+        // the paragraph that begins there.
+        guard paragraph.endTime > currentTime else { return nil }
+
+        let coveringChunks = paragraph.chunks.filter {
+            $0.startTime <= currentTime && $0.endTime > currentTime
+        }
+        if coveringChunks.contains(where: {
+            $0.pass == TranscriptPassType.final_.rawValue
+        }) {
+            return 2
+        }
+        if !coveringChunks.isEmpty {
+            return 1
+        }
+        return 0
     }
 
     // MARK: Scroll state machine

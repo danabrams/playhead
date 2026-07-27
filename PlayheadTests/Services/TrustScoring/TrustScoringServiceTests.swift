@@ -27,6 +27,23 @@ private let testPodcastId = "trust-test-podcast"
 /// 0.1 + 0.2 != 0.3 in IEEE 754; this absorbs that.
 private let scoreTolerance = 1e-10
 
+private final class TrustSignalLogRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [TrustScoringSignalLogEvent] = []
+
+    func record(_ event: TrustScoringSignalLogEvent) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+
+    func snapshot() -> [TrustScoringSignalLogEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
 private func expectScore(
     _ actual: Double?,
     equals expected: Double,
@@ -729,5 +746,107 @@ struct TrustScoringFalseNegativeTests {
                 "FN did not move trust by -falseSignalPenalty; got \(scoreB)")
         #expect(abs(scoreA - scoreB) < scoreTolerance,
                 "FP and FN must produce identical trust deltas; FP=\(scoreA) FN=\(scoreB)")
+    }
+}
+
+@Suite("TrustScoring — Explicit Feedback Privacy", .serialized)
+struct TrustScoringExplicitFeedbackPrivacyTests {
+    @Test(
+        "successful explicit FP and FN updates emit no detailed signal-log event"
+    )
+    func explicitSuccessSuppressesDetailedTelemetry() async throws {
+        let store = try await makeTestStore()
+        try await store.upsertProfile(
+            makeProfile(
+                mode: SkipMode.manual.rawValue,
+                trustScore: 0.8,
+                observations: 8
+            )
+        )
+        let recorder = TrustSignalLogRecorder()
+        let service = TrustScoringService(
+            store: store,
+            signalLogObserver: { recorder.record($0) }
+        )
+
+        await service.recordFalseSkipSignal(
+            podcastId: testPodcastId,
+            privacy: .explicitBannerFeedback
+        )
+        await service.recordFalseNegativeSignal(
+            podcastId: testPodcastId,
+            privacy: .explicitBannerFeedback
+        )
+
+        #expect(recorder.snapshot().isEmpty)
+        let profile = try #require(
+            try await store.fetchProfile(podcastId: testPodcastId)
+        )
+        #expect(
+            abs(profile.skipTrustScore - 0.6) < scoreTolerance,
+            "Privacy suppression must not suppress the trust mutations"
+        )
+    }
+
+    @Test(
+        "explicit trust failures expose only the generic typed operation event"
+    )
+    func explicitFailureIsGeneric() async throws {
+        let store = try await makeTestStore()
+        try await store.upsertProfile(
+            makeProfile(
+                mode: SkipMode.manual.rawValue,
+                trustScore: 0.8,
+                observations: 8
+            )
+        )
+        try await store.execForTesting(
+            """
+            CREATE TRIGGER fail_explicit_trust_update
+            BEFORE UPDATE ON podcast_profiles
+            BEGIN
+                SELECT RAISE(ABORT, 'private podcast/window/span details');
+            END
+            """
+        )
+        let recorder = TrustSignalLogRecorder()
+        let service = TrustScoringService(
+            store: store,
+            signalLogObserver: { recorder.record($0) }
+        )
+
+        await service.recordFalseSkipSignal(
+            podcastId: "private-podcast-id",
+            privacy: .explicitBannerFeedback
+        )
+        await service.recordFalseNegativeSignal(
+            podcastId: testPodcastId,
+            privacy: .explicitBannerFeedback
+        )
+
+        #expect(
+            recorder.snapshot()
+                == [
+                    .explicitFeedbackOperationFailed,
+                ],
+            "The missing-profile call is silent; the failing update exposes exactly one generic event"
+        )
+    }
+
+    @Test("standard trust signals retain normal success telemetry")
+    func standardSignalsRetainTelemetry() async throws {
+        let store = try await makeTestStore()
+        try await store.upsertProfile(makeProfile())
+        let recorder = TrustSignalLogRecorder()
+        let service = TrustScoringService(
+            store: store,
+            signalLogObserver: { recorder.record($0) }
+        )
+
+        await service.recordFalseSkipSignal(
+            podcastId: testPodcastId
+        )
+
+        #expect(recorder.snapshot() == [.standardSuccess])
     }
 }

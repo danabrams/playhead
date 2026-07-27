@@ -33,9 +33,8 @@ struct FullTranscriptView: View {
 
     @State private var viewModel: FullTranscriptViewModel
 
-    /// Current playback time in seconds. The presenter updates this on
-    /// every PlaybackService tick; the view coalesces sub-second
-    /// changes via `lastAppliedSecond` (mirrors the peek view).
+    /// Current playback time in seconds. The presenter updates this on every
+    /// PlaybackService tick so fractional transcript boundaries are honored.
     let currentTime: TimeInterval
 
     /// Episode duration. Used for the seek-while-loading guard.
@@ -49,11 +48,6 @@ struct FullTranscriptView: View {
     /// non-nil, the view enables the long-press → selection-mode UI
     /// and renders a Share button when ≥1 paragraphs are selected.
     let shareMetadata: ShareMetadata?
-
-    /// Last whole-second of `currentTime` applied to the view-model.
-    /// Coalesces sub-second `onChange` fires so the view-model's
-    /// active-paragraph index doesn't churn at frame rate.
-    @State private var lastAppliedSecond: Int = .min
 
     /// Driven by the search bar's `.searchable` modifier.
     @State private var searchText: String = ""
@@ -113,13 +107,9 @@ struct FullTranscriptView: View {
         }
         .task {
             await viewModel.load()
-            lastAppliedSecond = Int(currentTime)
             viewModel.updatePlaybackPosition(currentTime)
         }
         .onChange(of: currentTime) { _, newTime in
-            let second = Int(newTime)
-            guard second != lastAppliedSecond else { return }
-            lastAppliedSecond = second
             viewModel.updatePlaybackPosition(newTime)
         }
     }

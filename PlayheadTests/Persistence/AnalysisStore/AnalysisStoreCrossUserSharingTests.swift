@@ -36,7 +36,11 @@ private func makeSharingWindow(
     start: Double = 10,
     end: Double = 40,
     confidence: Double = 0.92,
-    evidenceText: String? = "raw transcript evidence should not be shared"
+    evidenceText: String? = "raw transcript evidence should not be shared",
+    boundaryState: String = AdBoundaryState.acousticRefined.rawValue,
+    decisionState: String = AdDecisionState.confirmed.rawValue,
+    wasSkipped: Bool = true,
+    userDismissedBanner: Bool = false
 ) -> AdWindow {
     AdWindow(
         id: id,
@@ -44,8 +48,8 @@ private func makeSharingWindow(
         startTime: start,
         endTime: end,
         confidence: confidence,
-        boundaryState: AdBoundaryState.acousticRefined.rawValue,
-        decisionState: AdDecisionState.confirmed.rawValue,
+        boundaryState: boundaryState,
+        decisionState: decisionState,
         detectorVersion: "fm-test-v1",
         advertiser: "Acme",
         product: "Widget",
@@ -55,8 +59,8 @@ private func makeSharingWindow(
         metadataSource: "foundation-model",
         metadataConfidence: 0.81,
         metadataPromptVersion: "prompt-v1",
-        wasSkipped: true,
-        userDismissedBanner: true,
+        wasSkipped: wasSkipped,
+        userDismissedBanner: userDismissedBanner,
         evidenceSources: "semantic,fusion",
         eligibilityGate: SkipEligibilityGate.eligible.rawValue,
         catalogStoreMatchSimilarity: 0.63
@@ -136,6 +140,198 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(!encoded.contains("episodeId"))
         #expect(!encoded.contains("raw transcript evidence"))
         #expect(!encoded.contains("evidenceText"))
+    }
+
+    @Test(
+        "all explicit response routes produce the exact unanswered cross-user snapshot"
+    )
+    func explicitResponsesAreCrossUserSnapshotEquivalent() async throws {
+        let assetId = "asset-explicit-equivalence"
+        let fileSHA =
+            "abababababababababababababababababababababababababababababababab"
+        let exportedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let sources: [CorrectionSource] = [
+            .bannerAutoSkipConfirmed,
+            .bannerAutoSkipDenied,
+            .bannerSuggestionConfirmed,
+            .bannerSuggestionDenied,
+        ]
+
+        for (index, source) in sources.enumerated() {
+            let original = makeSharingWindow(
+                id: "source-window-\(index)",
+                assetId: assetId,
+                start: 10,
+                end: 40,
+                wasSkipped:
+                    source == .bannerAutoSkipConfirmed
+                    || source == .bannerAutoSkipDenied
+            )
+
+            let baselineStore = try await makeTestStore()
+            try await seedSharingAsset(
+                store: baselineStore,
+                id: assetId,
+                episodeId: "episode-1",
+                fileSHA: fileSHA
+            )
+            try await baselineStore.insertAdWindow(original)
+            let baseline = try await baselineStore
+                .exportCrossUserAnalysisSnapshot(
+                    assetId: assetId,
+                    podcastId: "podcast-1",
+                    exportedAt: exportedAt,
+                    sourceAppBuild: "test-build"
+                )
+
+            let respondedStore = try await makeTestStore()
+            try await seedSharingAsset(
+                store: respondedStore,
+                id: assetId,
+                episodeId: "episode-1",
+                fileSHA: fileSHA
+            )
+            try await respondedStore.insertAdWindow(original)
+            try await respondedStore
+                .captureExplicitFeedbackEgressBaselineForTesting(
+                    analysisAssetId: assetId
+                )
+            try await respondedStore.execForTesting(
+                "DELETE FROM ad_windows WHERE analysisAssetId = '\(assetId)'"
+            )
+            let promoted = makeSharingWindow(
+                id: "promoted-window-\(index)",
+                assetId: assetId,
+                start: 10,
+                end: 40,
+                boundaryState: "userConfirmedSuggested",
+                decisionState: AdDecisionState.applied.rawValue,
+                wasSkipped: true
+            )
+            let responseRows: [AdWindow]
+            let singularId: String
+            let targetIds: [String]
+            switch source {
+            case .bannerAutoSkipConfirmed:
+                responseRows = [
+                    original.withDecisionState(
+                        AdDecisionState.applied.rawValue
+                    ),
+                ]
+                singularId = original.id
+                targetIds = [original.id]
+            case .bannerAutoSkipDenied,
+                 .bannerSuggestionDenied:
+                responseRows = [
+                    makeSharingWindow(
+                        id: original.id,
+                        assetId: assetId,
+                        start: original.startTime,
+                        end: original.endTime,
+                        decisionState: AdDecisionState.reverted.rawValue,
+                        wasSkipped: source == .bannerAutoSkipDenied,
+                        userDismissedBanner:
+                            source == .bannerSuggestionDenied
+                    ),
+                ]
+                singularId = original.id
+                targetIds = [original.id]
+            case .bannerSuggestionConfirmed:
+                responseRows = [
+                    makeSharingWindow(
+                        id: original.id,
+                        assetId: assetId,
+                        start: original.startTime,
+                        end: original.endTime,
+                        decisionState:
+                            AdDecisionState.suppressed.rawValue,
+                        wasSkipped: false
+                    ),
+                    promoted,
+                ]
+                singularId = promoted.id
+                targetIds = [original.id, promoted.id]
+            case .listenRevert, .manualVeto, .falseNegative:
+                Issue.record("Unexpected non-explicit source")
+                continue
+            }
+            for row in responseRows {
+                try await respondedStore.insertAdWindow(row)
+            }
+            try await respondedStore.appendCorrectionEvent(
+                CorrectionEvent(
+                    analysisAssetId: assetId,
+                    scope: CorrectionScope.exactTimeSpan(
+                        assetId: assetId,
+                        startTime: original.startTime,
+                        endTime: original.endTime
+                    ).serialized,
+                    createdAt: 1_700_000_000 + Double(index),
+                    source: source,
+                    correctionType: source.kind.correctionType,
+                    targetRefs: CorrectionTargetRefs(
+                        adWindowId: singularId,
+                        adWindowIds: targetIds,
+                        explicitFeedbackDetectionProjection:
+                            ExplicitFeedbackDetectionProjection(original)
+                    )
+                )
+            )
+            let afterResponse = try await respondedStore
+                .exportCrossUserAnalysisSnapshot(
+                    assetId: assetId,
+                    podcastId: "podcast-1",
+                    exportedAt: exportedAt,
+                    sourceAppBuild: "test-build"
+                )
+
+            #expect(
+                afterResponse == baseline,
+                "\(source) must not change bytes, rows, spans, or duplicate shape in the shared snapshot"
+            )
+        }
+    }
+
+    @Test("ambiguous explicit receipt fails cross-user export closed")
+    func ambiguousExplicitReceiptFailsCrossUserExportClosed()
+        async throws
+    {
+        let store = try await makeTestStore()
+        let assetId = "asset-explicit-ambiguous"
+        try await seedSharingAsset(
+            store: store,
+            id: assetId,
+            episodeId: "episode-1",
+            fileSHA:
+                "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        )
+        let original = makeSharingWindow(
+            id: "ambiguous-original",
+            assetId: assetId
+        )
+        try await store.insertAdWindow(original)
+        try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: assetId,
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: assetId,
+                    startTime: original.startTime,
+                    endTime: original.endTime
+                ).serialized,
+                source: .bannerSuggestionConfirmed,
+                correctionType: .falseNegative,
+                targetRefs: CorrectionTargetRefs(
+                    adWindowId: original.id
+                )
+            )
+        )
+
+        let snapshot = try await store.exportCrossUserAnalysisSnapshot(
+            assetId: assetId,
+            podcastId: "podcast-1",
+            exportedAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+        #expect(snapshot == nil)
     }
 
     @Test("export suppresses snapshots when the local fingerprint is not a full-file SHA")
@@ -1348,16 +1544,6 @@ struct AnalysisStoreCrossUserSharingTests {
                 confidence: 0.92
             ).withDecisionState(AdDecisionState.applied.rawValue)
         )
-        try await store.insertAdWindow(
-            makeSharingWindow(
-                id: "source-reverted-window",
-                assetId: "asset-a",
-                start: 50,
-                end: 80,
-                confidence: 0.95
-            ).withDecisionState(AdDecisionState.reverted.rawValue)
-        )
-
         let snapshot = try await store.exportCrossUserAnalysisSnapshot(
             assetId: "asset-a",
             podcastId: "podcast-1"
@@ -1370,7 +1556,7 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(windows.first?.isAd == true)
     }
 
-    @Test("export coverage does not include locally reverted windows")
+    @Test("locally reverted rows without private receipts normalize to detection state")
     func exportCoverageDoesNotIncludeLocallyRevertedWindows() async throws {
         let store = try await makeTestStore()
         try await seedSharingAsset(
@@ -1402,13 +1588,24 @@ struct AnalysisStoreCrossUserSharingTests {
             podcastId: "podcast-1"
         )
 
-        let exported = try #require(snapshot)
-        #expect(exported.windows.map(\.sourceWindowId) == ["source-confirmed-window"])
-        #expect(exported.analysisCoverageEndSec == 40)
+        let windows = try #require(snapshot?.windows)
+        #expect(
+            windows.map(\.sourceWindowId)
+                == [
+                    "source-confirmed-window",
+                    "source-reverted-window",
+                ]
+        )
+        #expect(
+            windows.allSatisfy {
+                $0.decisionState
+                    == AdDecisionState.confirmed.rawValue
+            }
+        )
     }
 
-    @Test("export suppresses snapshots when no shareable windows remain")
-    func exportSuppressesSnapshotWhenNoShareableWindowsRemain() async throws {
+    @Test("a reverted row remains shareable when a later local-only row is omitted")
+    func exportKeepsRevertedPrefixBeforeLocalOnlyRow() async throws {
         let store = try await makeTestStore()
         try await seedSharingAsset(
             store: store,
@@ -1438,7 +1635,16 @@ struct AnalysisStoreCrossUserSharingTests {
             podcastId: "podcast-1"
         )
 
-        #expect(snapshot == nil)
+        let windows = try #require(snapshot?.windows)
+        #expect(windows.count == 1)
+        #expect(
+            windows.first?.sourceWindowId
+                == "source-reverted-window"
+        )
+        #expect(
+            windows.first?.decisionState
+                == AdDecisionState.confirmed.rawValue
+        )
     }
 
     @Test("export suppresses snapshots when only suppressed windows remain")
@@ -1504,7 +1710,7 @@ struct AnalysisStoreCrossUserSharingTests {
         #expect(exported.windows.allSatisfy { $0.decisionState != AdDecisionState.suppressed.rawValue })
     }
 
-    @Test("export drops suppressed or reverted windows with unknown boundary state")
+    @Test("unknown-boundary reverted windows without receipts fail export closed")
     func exportDropsSuppressedOrRevertedWindowsWithUnknownBoundaryState() async throws {
         let store = try await makeTestStore()
         try await seedSharingAsset(
@@ -1548,12 +1754,7 @@ struct AnalysisStoreCrossUserSharingTests {
             podcastId: "podcast-1"
         )
 
-        let exported = try #require(snapshot)
-        #expect(exported.windows.map(\.sourceWindowId) == ["source-confirmed-window"])
-        #expect(exported.analysisCoverageEndSec == 40)
-        let encoded = try exported.encodedJSONString()
-        #expect(!encoded.contains("future-suppressed-boundary"))
-        #expect(!encoded.contains("future-reverted-boundary"))
+        #expect(snapshot == nil)
     }
 
     @Test("export drops local correction boundary states without inflating coverage")
@@ -2349,7 +2550,8 @@ struct AnalysisStoreCrossUserSharingTests {
                 start: 100,
                 end: 115,
                 confidence: 0.4,
-                evidenceText: "local evidence stays local"
+                evidenceText: "local evidence stays local",
+                userDismissedBanner: true
             )
         )
 

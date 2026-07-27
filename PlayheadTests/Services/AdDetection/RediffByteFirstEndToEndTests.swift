@@ -103,6 +103,16 @@ struct RediffByteFirstEndToEndTests {
         func refetchedBSideFileURL(assetId: String) async -> URL? { fileURL }
     }
 
+    /// playhead-xsdz.36.2 (k-way): serves K staged B-side files (the byte differ
+    /// aligns A vs each and unions the divergent regions).
+    private actor MultiBSideProvider: RediffBSideProvider {
+        private let urls: [URL]
+        init(_ urls: [URL]) { self.urls = urls }
+        func refetchedBSideMono16kHz(assetId: String) async -> [Float]? { nil }
+        func refetchedBSideFileURL(assetId: String) async -> URL? { urls.first }
+        func refetchedBSideFileURLs(assetId: String) async -> [URL] { urls }
+    }
+
     /// A/B synthetic MP3 pair: A carries an ID3-separated distinct ad block over
     /// [~95, ~165] s; B is the same content without it. Byte slot ≈ [95, 165].
     private struct BytePair {
@@ -197,6 +207,58 @@ struct RediffByteFirstEndToEndTests {
         #expect(!span.anchorProvenance.contains(.spliceSlot))
         // Chroma differ NEVER invoked on the byte-primary path.
         #expect(await provider.pcmCallCount == 0)
+    }
+
+    // MARK: - playhead-xsdz.36.2: k-way byte union through the real service
+
+    @Test("k-way byte union recovers a pod a single fetch-pair misses (collision B ≡ A; a divergent B recovers it)")
+    func kWayByteUnionRecoversCollisionMissedPod() async throws {
+        let dir = try makeTempDir(prefix: "RediffByteFirst-kway")
+        let pair = try BytePair.stage(in: dir)  // A: ad present; pair.bURL: ad removed
+        // A byte-IDENTICAL copy of A models a COLLISION re-fetch — its stitch
+        // matches A exactly at the slot, so A-vs-collision diverges NOWHERE and
+        // the ad pod is MISSED by that single pair.
+        let collisionURL = dir.appendingPathComponent("byte-b-collision.fresh.mp3", isDirectory: false)
+        try FileManager.default.copyItem(at: pair.aURL, to: collisionURL)
+
+        // Control — the colliding fetch ALONE reveals no divergence → status quo
+        // (no rediff-owned width).
+        let soloStore = try await makeTestStore()
+        try await soloStore.insertAsset(AnalysisAsset(
+            id: "kway-solo", episodeId: "ep-kway-solo", assetFingerprint: "fp-kway-solo",
+            weakFingerprint: nil, sourceURL: pair.aURL.absoluteString,
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil))
+        try await service(store: soloStore, provider: MultiBSideProvider([collisionURL])).runBackfill(
+            chunks: chunks(assetId: "kway-solo"), analysisAssetId: "kway-solo",
+            podcastId: "podcast-kway", episodeDuration: 280.0)
+        let soloSpans = try await soloStore.fetchDecodedSpans(assetId: "kway-solo")
+        #expect(!soloSpans.isEmpty, "the ad span still decodes")
+        #expect(!soloSpans.contains { $0.anchorProvenance.contains(.rediffSlot) },
+                "a single colliding fetch reveals no byte divergence → no rediff width")
+
+        // k-way — [collision B, divergent B]: the UNION recovers the byte-exact
+        // pod the single pair missed, flowing through the SAME RediffSlotOwnership
+        // → marks path.
+        let unionStore = try await makeTestStore()
+        try await unionStore.insertAsset(AnalysisAsset(
+            id: "kway-union", episodeId: "ep-kway-union", assetFingerprint: "fp-kway-union",
+            weakFingerprint: nil, sourceURL: pair.aURL.absoluteString,
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil))
+        try await service(store: unionStore, provider: MultiBSideProvider([collisionURL, pair.bURL])).runBackfill(
+            chunks: chunks(assetId: "kway-union"), analysisAssetId: "kway-union",
+            podcastId: "podcast-kway", episodeDuration: 280.0)
+        let unionSpans = try await unionStore.fetchDecodedSpans(assetId: "kway-union")
+
+        let rediffOwned = unionSpans.filter { $0.anchorProvenance.contains(.rediffSlot) }
+        #expect(rediffOwned.count == 1, "the k-way union recovers the ad pod the single pair missed")
+        let span = try #require(rediffOwned.first)
+        // The recovered slot sits at the byte-exact splice edges (~95, ~165).
+        #expect(span.startTime >= 94.5 && span.startTime <= 95.5, "start ≈ 95, got \(span.startTime)")
+        #expect(span.endTime >= 164.5 && span.endTime <= 165.5, "end ≈ 165, got \(span.endTime)")
     }
 
     // MARK: - playhead-hdgk: real-pipeline persistence of the rediff tier

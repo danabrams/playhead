@@ -70,6 +70,7 @@ final class AnalysisStoreWorkJournalRecorder: WorkJournalRecording, Sendable {
     }
 
     func recordFinalized(episodeId: String) async {
+        guard !Task.isCancelled else { return }
         await persist(
             episodeId: episodeId,
             eventType: .finalized,
@@ -148,6 +149,7 @@ final class AnalysisStoreWorkJournalRecorder: WorkJournalRecording, Sendable {
         metadataJSON: String
     ) async {
         do {
+            try Task.checkCancellation()
             guard let job = try await store.fetchLatestJobForEpisode(episodeId) else {
                 logger.warning(
                     "WorkJournal append skipped: no analysis_jobs row for episode=\(episodeId, privacy: .public) event=\(eventType.rawValue, privacy: .public)"
@@ -178,7 +180,10 @@ final class AnalysisStoreWorkJournalRecorder: WorkJournalRecording, Sendable {
                 metadata: metadataJSON,
                 artifactClass: .scratch
             )
-            try await store.appendWorkJournalEntry(entry)
+            try Task.checkCancellation()
+            try await store.appendWorkJournalEntryUnlessCancelled(entry)
+        } catch is CancellationError {
+            return
         } catch {
             logger.error(
                 "WorkJournal append failed for episode=\(episodeId, privacy: .public) event=\(eventType.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
