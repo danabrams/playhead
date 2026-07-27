@@ -82,9 +82,31 @@
 #   KNOWN GAP block (see the MERGE NOTE above `MUTATIONS`). All 26 anchors are
 #   dry-run verified to apply exactly once against the merged source.
 #
-#   Batches 1–7 were re-run and are 19/19 KILLED. Batches 8–12 were NOT re-run,
-#   for two different reasons, and BOTH must be cleared before this file can
-#   claim a whole-battery green again:
+#   Batches 1–7 were re-run: 15 mutations, 14 KILLED, 1 SURVIVED (M17).
+#
+#   M17 SURVIVED and the survivor is REAL, but it is an unpinned rail rather
+#   than a live defect, so read the next paragraph before "fixing" anything.
+#   Production attribution is correct by construction: both seams pass the
+#   `sourceShowId` captured at gesture time into `makeManualCorrectionVetoEvent`
+#   and never read `activePodcastId`. What changed is the OBSERVATION POINT. On
+#   main the receipt was written by `persistManualCorrectionVeto` AFTER the
+#   revert barrier, so parking there and swapping episodes made a
+#   live-attributed receipt visible. o4qr mints the event and commits it inside
+#   the atomic transaction BEFORE that barrier (SkipOrchestrator.swift: mint,
+#   then `persistRevertedAdWindowsIfCurrent`, then the barrier), so by the time
+#   the race test can replace the episode the receipt is already durable and
+#   `activePodcastId` still equals `sourceShowId`. The mutation is inert.
+#
+#   Pinning it again needs a barrier at the suspension that CAN corrupt the
+#   attribution — the `await revokeRecurrenceEvidence` that precedes the mint —
+#   not the one that precedes the live-state guard. One barrier cannot pin both
+#   under this structure, because the durable write now sits above the effects:
+#   the current placement is what makes M07/M12/M14/M15/M16 killable. Adding a
+#   second, pre-mint barrier is the fix; it is a new test seam, deliberately not
+#   done as part of a merge.
+#
+#   Batches 8–12 were NOT re-run, for two different reasons, and BOTH must be
+#   cleared before this file can claim a whole-battery green again:
 #     • batches 8 and 9 contain N06 and N07, whose only victim
 #       (`anonymousRevertRecordsNoControllerSample`) is currently RED — o4qr's
 #       `exactFeedbackShowIdentity` refuses a revert whose show id is nil or
