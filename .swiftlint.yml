@@ -6,7 +6,8 @@
 # A linter that is permanently red protects nothing — everyone learns to
 # ignore it and real regressions ride in behind the noise. So this config was
 # built by MEASUREMENT, not by taste: every rule below was run against the
-# whole tree (1,174 Swift files) and admitted only at a violation count of
+# whole tree (1,174 tracked Swift files; 1,120 linted after the exclusions
+# below drop vendored source) and admitted only at a violation count of
 # EXACTLY ZERO. Nothing was reformatted to get here; no `swiftlint --fix`
 # sweep was ever run. `scripts/lint.sh` therefore passes on a clean checkout,
 # which means any violation you see is one YOU just introduced.
@@ -174,7 +175,7 @@ only_rules:
   - legacy_random
   - legacy_uigraphics_function
 
-  # ── Formatting the codebase already gets right 1,174 files out of 1,174 ────
+  # ── Formatting the codebase already gets right on all 1,120 linted files ───
   # Enabling these locks in the convention that is ALREADY here. Note what is
   # absent: line_length, indentation_width, opening/contrasted brace style,
   # multiline_* — those fight the real conventions of this repo and are in the
