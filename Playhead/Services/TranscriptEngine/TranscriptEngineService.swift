@@ -650,6 +650,11 @@ actor TranscriptEngineService {
             }
         }
 
+        // playhead-0sro: reconcile the watermark against persisted chunk
+        // coverage BEFORE emitting `.completed` — the runner reads the
+        // asset row the moment it observes that event.
+        await reconcileCoverageAtCompletion(analysisAssetId: analysisAssetId)
+
         let loopElapsed = ContinuousClock.now - loopStart
         logger.info("Transcription loop complete for asset \(analysisAssetId) in \(loopElapsed)")
         emitEvent(.completed(analysisAssetId: analysisAssetId))
@@ -920,6 +925,18 @@ actor TranscriptEngineService {
 
     // MARK: - Coverage updates
 
+    /// Advance the asset's fast-transcript coverage watermark to `endTime`.
+    ///
+    /// playhead-0sro: the store write is MONOTONIC. That matters here
+    /// specifically because ``prioritizeShards(_:)`` orders shards by
+    /// playhead proximity, not by time — behind-the-playhead shards run
+    /// LAST, descending — and the shard-0 backfill at the tail of
+    /// ``runTranscriptionLoop(analysisAssetId:)`` runs later still. So the
+    /// last `updateCoverage` call of a full pass carries an EARLY shard's
+    /// end time. Under the old blind `SET … = ?` that rewound a complete
+    /// episode's watermark to a low shard boundary and left every consumer
+    /// (yqax catch-up, glo9 drain, activity denominators) reading stale
+    /// state. Coverage is a high-water reach; only advances are meaningful.
     private func updateCoverage(
         analysisAssetId: String,
         endTime: Double
@@ -931,10 +948,34 @@ actor TranscriptEngineService {
         // here as a belt-and-suspenders to the per-shard checks in
         // `transcribeShard`.
         try checkStopped(analysisAssetId: analysisAssetId)
-        try await store.updateFastTranscriptCoverage(
+        try await store.advanceFastTranscriptCoverage(
             id: analysisAssetId,
             endTime: endTime
         )
+    }
+
+    /// playhead-0sro: FINALIZATION reconcile. Before announcing
+    /// `.completed` — the signal downstream consumers treat as "coverage is
+    /// durable" — raise the watermark to the canonical `pass = 'fast'`
+    /// chunk `MAX(endTime)` for this asset.
+    ///
+    /// The monotonic per-shard advance already prevents rewinds, but the
+    /// watermark tracks SHARD ends while the chunks are what actually
+    /// landed; a shard that failed mid-pass (the `continue`-on-error arm of
+    /// the loop) leaves chunks written by an earlier successful shard
+    /// unrepresented in the shard-derived high-water mark. Reconciling once
+    /// at the end makes the completion state agree with the artifacts
+    /// without adding a per-chunk write.
+    ///
+    /// Best-effort by design: a store hiccup here must not suppress
+    /// `.completed`, because a missing completion event strands the runner
+    /// on its 5-minute timeout. The next resume reconcile repairs it.
+    private func reconcileCoverageAtCompletion(analysisAssetId: String) async {
+        do {
+            try await store.reconcileFastTranscriptCoverage(id: analysisAssetId)
+        } catch {
+            logger.warning("Coverage reconcile at completion failed for asset \(analysisAssetId): \(error)")
+        }
     }
 
     // MARK: - Fingerprinting

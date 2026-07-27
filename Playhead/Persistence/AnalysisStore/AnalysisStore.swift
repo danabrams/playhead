@@ -682,6 +682,148 @@ enum AnalysisCoverageMath {
     }
 }
 
+/// playhead-0sro: the persisted-state invariant for the fast-transcript
+/// coverage watermark (`analysis_assets.fastTranscriptCoverageEndTime`).
+///
+/// The watermark is a HIGH-WATER REACH: "how far into the audio has the
+/// fast pass reached?". `transcript_chunks` rows with `pass = 'fast'` are
+/// the canonical record of that reach, so the watermark must never sit
+/// behind their `MAX(endTime)`, and it must never claim reach past the
+/// end of the audio. Those are the two directions this invariant checks.
+///
+/// Why an explicit tolerance rather than exact equality:
+///   - **Behind chunks.** Shard ends and chunk ends are floating-point
+///     seconds derived from different arithmetic (sample-count division
+///     vs. ASR segment timestamps), so a sub-second disagreement is
+///     normal and is NOT a defect. Only a gap wider than
+///     ``Tolerances/watermarkBehindChunksSec`` means the watermark
+///     genuinely lags the transcript (the playhead-0sro bug: 60 s
+///     persisted against 3575.88 s of real chunk coverage).
+///   - **Past duration.** `episodeDurationSec` is the shard-sum of the
+///     decoded audio (or a probe), while the final shard's end is the
+///     sum of shard durations — and a feed-declared duration can differ
+///     from the measured file by whole seconds. The final fast chunk can
+///     also legitimately end a hair past the shard-sum. So a watermark
+///     within ``Tolerances/watermarkPastDurationSec`` of the duration is
+///     healthy; beyond that the watermark is describing audio that does
+///     not exist.
+///
+/// This invariant deliberately says NOTHING about interior gaps. A
+/// watermark of 3575 s over a transcript with a hole at 1000–1200 s is
+/// *correct* — reach is not area. Gap-aware AREA is
+/// ``AnalysisCoverageSummary/fastTranscriptCoveredSec`` (interval union),
+/// and conflating the two is the "AN 100% / TX 39%" antipattern
+/// playhead-sd71 fixed. Keep them separate.
+enum FastTranscriptCoverageInvariant {
+
+    /// Tolerated slack in each direction, in seconds. Both default to a
+    /// deliberately explicit value rather than 0 — see the type doc for
+    /// why exact equality is the wrong contract.
+    struct Tolerances: Sendable, Equatable {
+        /// How far the watermark may sit BELOW the canonical chunk
+        /// `MAX(endTime)` before it counts as stale. One second absorbs
+        /// float/timestamp disagreement without hiding a real lag.
+        var watermarkBehindChunksSec: Double
+        /// How far the watermark may sit ABOVE `episodeDurationSec`
+        /// before it counts as over-claiming. One shard (30 s) absorbs
+        /// feed-vs-measured duration drift and shard-sum rounding.
+        var watermarkPastDurationSec: Double
+
+        init(
+            watermarkBehindChunksSec: Double = 1.0,
+            watermarkPastDurationSec: Double = AnalysisAudioService.defaultShardDuration
+        ) {
+            self.watermarkBehindChunksSec = watermarkBehindChunksSec
+            self.watermarkPastDurationSec = watermarkPastDurationSec
+        }
+
+        static let standard = Tolerances()
+    }
+
+    /// A specific way the persisted watermark contradicts the artifacts
+    /// around it. Carries the measured numbers so callers can log a
+    /// diagnosable line without a second query.
+    enum Violation: Sendable, Equatable {
+        /// The watermark lags canonical fast-chunk coverage by more than
+        /// ``Tolerances/watermarkBehindChunksSec``. This is the
+        /// playhead-0sro stale-watermark defect.
+        case watermarkBehindChunks(watermarkSec: Double, chunkMaxEndSec: Double)
+        /// The watermark claims reach past the end of the audio by more
+        /// than ``Tolerances/watermarkPastDurationSec``.
+        case watermarkPastDuration(watermarkSec: Double, episodeDurationSec: Double)
+    }
+
+    /// Evaluate the invariant for one asset.
+    ///
+    /// - Parameters:
+    ///   - watermarkSec: persisted `fastTranscriptCoverageEndTime`. `nil`
+    ///     (never written) is vacuously healthy — there is nothing to
+    ///     contradict yet; the caller distinguishes "absent" from "stale"
+    ///     via provenance, not via this invariant.
+    ///   - chunkMaxEndSec: `MAX(endTime)` over `pass = 'fast'` chunks, or
+    ///     `nil` when no fast chunks have landed.
+    ///   - episodeDurationSec: canonical duration, or `nil`/non-positive
+    ///     when unknown (the past-duration check is then skipped rather
+    ///     than reported against a bogus denominator).
+    /// - Returns: every violation found, in a stable order. Empty means
+    ///   the persisted state is self-consistent.
+    static func violations(
+        watermarkSec: Double?,
+        chunkMaxEndSec: Double?,
+        episodeDurationSec: Double?,
+        tolerances: Tolerances = .standard
+    ) -> [Violation] {
+        // A watermark that was never written cannot contradict anything.
+        // Non-finite input is treated the same way: there is no
+        // meaningful comparison to make, and reporting a violation on
+        // NaN would produce an unactionable log line.
+        guard let watermarkSec, watermarkSec.isFinite else { return [] }
+
+        var found: [Violation] = []
+
+        if let chunkMaxEndSec,
+           chunkMaxEndSec.isFinite,
+           chunkMaxEndSec - watermarkSec > tolerances.watermarkBehindChunksSec {
+            found.append(
+                .watermarkBehindChunks(
+                    watermarkSec: watermarkSec,
+                    chunkMaxEndSec: chunkMaxEndSec
+                )
+            )
+        }
+
+        if let episodeDurationSec,
+           episodeDurationSec.isFinite,
+           episodeDurationSec > 0,
+           watermarkSec - episodeDurationSec > tolerances.watermarkPastDurationSec {
+            found.append(
+                .watermarkPastDuration(
+                    watermarkSec: watermarkSec,
+                    episodeDurationSec: episodeDurationSec
+                )
+            )
+        }
+
+        return found
+    }
+
+    /// Convenience predicate: `true` when the persisted state satisfies
+    /// the invariant under `tolerances`.
+    static func holds(
+        watermarkSec: Double?,
+        chunkMaxEndSec: Double?,
+        episodeDurationSec: Double?,
+        tolerances: Tolerances = .standard
+    ) -> Bool {
+        violations(
+            watermarkSec: watermarkSec,
+            chunkMaxEndSec: chunkMaxEndSec,
+            episodeDurationSec: episodeDurationSec,
+            tolerances: tolerances
+        ).isEmpty
+    }
+}
+
 struct PodcastProfile: Sendable {
     let podcastId: String
     let sponsorLexicon: String?
@@ -1084,7 +1226,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 36
+    nonisolated static let currentSchemaVersion = 37
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1816,6 +1958,9 @@ actor AnalysisStore {
             try migrateAdWindowCatalogProvenanceV35IfNeeded()
             try createRepeatedAdCacheRevocationsTableIfNeeded()
             try migrateRepeatedAdCacheProducerRevisionV36IfNeeded()
+            // playhead-0sro: data-only repair of stale fast-transcript
+            // coverage watermarks on already-persisted assets.
+            try migrateFastTranscriptCoverageReconcileV37IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2110,6 +2255,12 @@ actor AnalysisStore {
         try migrateAdWindowCatalogProvenanceV35IfNeeded()
         try createRepeatedAdCacheRevocationsTableIfNeeded()
         try migrateRepeatedAdCacheProducerRevisionV36IfNeeded()
+        // playhead-0sro (v37): mirror the fast-transcript watermark
+        // reconciliation into the ladder seam. The helper is fully
+        // idempotent and guards on `tableExists` internally, so seeded
+        // fixtures without `analysis_assets` / `transcript_chunks` still
+        // reach v37.
+        try migrateFastTranscriptCoverageReconcileV37IfNeeded()
     }
     #endif
 
@@ -5117,6 +5268,37 @@ actor AnalysisStore {
         }
     }
 
+    /// playhead-0sro (v37): one-time repair of stale fast-transcript
+    /// coverage watermarks on assets that are ALREADY on disk.
+    ///
+    /// Pre-0sro, `TranscriptEngineService` wrote the watermark with a blind
+    /// `SET … = ?` carrying the end of whichever shard it finished LAST —
+    /// and shard order is playhead-relative, ending on a behind-the-playhead
+    /// shard. Every device that ran such a build carries assets whose
+    /// watermark is frozen at a low shard boundary (60.0 s with the default
+    /// 30 s shards) while `transcript_chunks` proves the fast pass reached
+    /// the end of the episode. Nothing re-writes the watermark for an
+    /// episode whose transcription already finished, so without this
+    /// migration those rows stay wrong forever — and the glo9 opportunistic
+    /// backlog drain stays permanently blocked behind them.
+    ///
+    /// Data-only and forward-only (no DDL): raises each watermark to its
+    /// canonical `pass = 'fast'` chunk `MAX(endTime)` where the chunks reach
+    /// further, and touches nothing else. Idempotent — re-running matches no
+    /// rows. Runs inside `runSchemaMigration`'s enclosing transaction.
+    private func migrateFastTranscriptCoverageReconcileV37IfNeeded() throws {
+        let startingVersion = try schemaVersion() ?? 1
+        let repaired = try reconcileAllFastTranscriptCoverageWatermarks()
+        if repaired > 0 {
+            logger.notice(
+                "playhead-0sro: reconciled \(repaired, privacy: .public) stale fast-transcript coverage watermark(s) against persisted chunk coverage"
+            )
+        }
+        if startingVersion < 37 {
+            try setSchemaVersion(37)
+        }
+    }
+
     /// playhead-b6jq PR 4: canonical column list for `specialist_scan_results`.
     /// Positional index mapping (see `readSpecialistScanResult`):
     ///   0  id                    7  modelVersion
@@ -8006,13 +8188,152 @@ actor AnalysisStore {
         }
     }
 
-    func updateFastTranscriptCoverage(id: String, endTime: Double) throws {
-        let sql = "UPDATE analysis_assets SET fastTranscriptCoverageEndTime = ? WHERE id = ?"
+    /// playhead-0sro: advance the fast-transcript coverage watermark on an
+    /// `analysis_assets` row. MONOTONIC — the new value is taken iff it is
+    /// strictly greater than the existing watermark (a NULL watermark
+    /// always loses), exactly like ``advanceFinalPassCoverage(id:endTime:)``.
+    ///
+    /// Why monotonic (this is the playhead-0sro root cause): the caller is
+    /// `TranscriptEngineService`, which writes the END OF THE SHARD IT JUST
+    /// FINISHED — and `TranscriptEngineService.prioritizeShards` deliberately
+    /// orders behind-the-playhead shards LAST, descending, so the final write
+    /// of a full pass is the EARLIEST non-zero shard. With a blind
+    /// `SET … = ?` that clobbered a 3575 s reach back down to shard 1's end
+    /// (30 s shards ⇒ exactly 60.0), and every consumer — the yqax catch-up
+    /// trigger, the glo9 opportunistic backlog drain, activity/diagnostics
+    /// denominators — then read a watermark that said the episode was 60 s in.
+    /// Shard order is a transcription-quality decision and is not this
+    /// method's business; making the write a high-water advance decouples the
+    /// two.
+    ///
+    /// A deliberate rewind (the "state says complete but 0 chunks exist"
+    /// repair in `AnalysisCoordinator.resolveSession`) must call
+    /// ``resetFastTranscriptCoverage(id:)`` — it cannot be expressed here.
+    func advanceFastTranscriptCoverage(id: String, endTime: Double) throws {
+        let sql = """
+            UPDATE analysis_assets
+            SET fastTranscriptCoverageEndTime = ?
+            WHERE id = ?
+              AND (fastTranscriptCoverageEndTime IS NULL
+                   OR fastTranscriptCoverageEndTime < ?)
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, endTime)
         bind(stmt, 2, id)
+        bind(stmt, 3, endTime)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-0sro: the ONLY sanctioned rewind of the fast-transcript
+    /// watermark. Used when the persisted transcript is known to be gone
+    /// (a crash left `analysis_assets.analysisState` at a late stage with
+    /// zero `transcript_chunks` rows), so the next pass must not skip
+    /// shards on the strength of a watermark nothing backs.
+    ///
+    /// Deliberately a separate, explicitly-named method: expressing this
+    /// as `advance(…, endTime: 0)` would silently no-op under the
+    /// monotonic contract, and expressing it as a general setter would
+    /// re-open the clobber this bead closed.
+    func resetFastTranscriptCoverage(id: String) throws {
+        let sql = "UPDATE analysis_assets SET fastTranscriptCoverageEndTime = 0 WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-0sro: reconcile ONE asset's fast-transcript watermark
+    /// against its canonical persisted chunk coverage.
+    ///
+    /// Raises the watermark to `MAX(endTime)` over that asset's
+    /// `pass = 'fast'` `transcript_chunks` when the chunks reach further.
+    /// Never lowers it: a watermark ahead of the chunks is a legitimate
+    /// state (the engine advances coverage for a silent shard that
+    /// produced no segments), and this method's job is repairing lag, not
+    /// enforcing equality.
+    ///
+    /// Degenerate/inverted chunk rows (`endTime <= startTime`) are excluded
+    /// so a poisoned row cannot inflate the watermark — the same filter
+    /// ``fetchCoverageSummariesByAssetIds(_:)`` applies.
+    ///
+    /// - Returns: the watermark after reconciliation, or `nil` when no
+    ///   `analysis_assets` row exists for `id`.
+    @discardableResult
+    func reconcileFastTranscriptCoverage(id: String) throws -> Double? {
+        let sql = """
+            UPDATE analysis_assets
+            SET fastTranscriptCoverageEndTime = (
+                SELECT MAX(c.endTime) FROM transcript_chunks c
+                WHERE c.analysisAssetId = analysis_assets.id
+                  AND c.pass = 'fast'
+                  AND c.endTime > c.startTime
+            )
+            WHERE id = ?
+              AND (
+                SELECT MAX(c.endTime) FROM transcript_chunks c
+                WHERE c.analysisAssetId = analysis_assets.id
+                  AND c.pass = 'fast'
+                  AND c.endTime > c.startTime
+              ) > COALESCE(fastTranscriptCoverageEndTime, -1)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        try step(stmt, expecting: SQLITE_DONE)
+        return try fetchFastTranscriptCoverageEndTime(id: id)
+    }
+
+    /// Read back a single asset's fast-transcript watermark without
+    /// materializing the whole `AnalysisAsset` row.
+    func fetchFastTranscriptCoverageEndTime(id: String) throws -> Double? {
+        let sql = "SELECT fastTranscriptCoverageEndTime FROM analysis_assets WHERE id = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return optionalDouble(stmt, 0)
+    }
+
+    /// playhead-0sro: MIGRATION / whole-table reconciliation. Raises every
+    /// `analysis_assets` row's fast-transcript watermark to its canonical
+    /// `pass = 'fast'` chunk `MAX(endTime)` wherever the chunks reach
+    /// further than the persisted watermark.
+    ///
+    /// This is what repairs the assets ALREADY on disk. The monotonic
+    /// ``advanceFastTranscriptCoverage(id:endTime:)`` only prevents NEW
+    /// staleness; every device that has run a pre-0sro build carries rows
+    /// frozen at a low shard boundary (60 s on 30 s shards), and those rows
+    /// would otherwise stay broken forever because nothing re-writes a
+    /// watermark for an episode whose transcription already finished.
+    ///
+    /// Set-based single statement — SQLite does the join internally, so
+    /// there is no page-at-a-time sweep to write and no risk of
+    /// materializing a large library in memory. Idempotent: a second run
+    /// matches no rows.
+    ///
+    /// - Returns: the number of rows repaired.
+    @discardableResult
+    func reconcileAllFastTranscriptCoverageWatermarks() throws -> Int {
+        guard try tableExists("analysis_assets"), try tableExists("transcript_chunks") else {
+            return 0
+        }
+        try exec("""
+            UPDATE analysis_assets
+            SET fastTranscriptCoverageEndTime = (
+                SELECT MAX(c.endTime) FROM transcript_chunks c
+                WHERE c.analysisAssetId = analysis_assets.id
+                  AND c.pass = 'fast'
+                  AND c.endTime > c.startTime
+            )
+            WHERE (
+                SELECT MAX(c.endTime) FROM transcript_chunks c
+                WHERE c.analysisAssetId = analysis_assets.id
+                  AND c.pass = 'fast'
+                  AND c.endTime > c.startTime
+            ) > COALESCE(fastTranscriptCoverageEndTime, -1)
+            """)
+        return Int(sqlite3_changes(db))
     }
 
     /// Bug 9 (final-pass wiring): advance the final-pass coverage

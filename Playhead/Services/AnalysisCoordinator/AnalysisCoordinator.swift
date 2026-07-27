@@ -1580,6 +1580,21 @@ actor AnalysisCoordinator {
         if let existing = existingAsset {
             assetId = existing.id
 
+            // playhead-0sro: RESUME reconcile. Every path below returns an
+            // asset the pipeline is about to resume against, and the
+            // scheduler/runner immediately read its fast-transcript
+            // watermark (yqax catch-up, glo9 drain admission, M1 shard
+            // gating). Raise it to the canonical persisted chunk coverage
+            // first so resume never starts from a watermark the transcript
+            // already contradicts. Never lowers the watermark, and it is a
+            // no-op when the two already agree. Best-effort: a failed
+            // repair must not block resuming the episode.
+            do {
+                try await store.reconcileFastTranscriptCoverage(id: assetId)
+            } catch {
+                logger.warning("Coverage reconcile on resume failed for asset \(assetId): \(error)")
+            }
+
             // Check for an existing session.
             let existingSession = try await store.fetchLatestSessionForAsset(assetId: assetId)
             if let session = existingSession {
@@ -1599,7 +1614,13 @@ actor AnalysisCoordinator {
                                 )
                                 try await store.updateAssetState(id: assetId, state: SessionState.queued.rawValue)
                                 // Reset coverage watermarks so no shards are skipped.
-                                try await store.updateFastTranscriptCoverage(id: assetId, endTime: 0)
+                                // playhead-0sro: this is the one sanctioned
+                                // REWIND — the transcript backing the
+                                // watermark provably does not exist (0 chunks),
+                                // so the monotonic advance path cannot express
+                                // it. The resume reconcile above was a no-op
+                                // for the same reason.
+                                try await store.resetFastTranscriptCoverage(id: assetId)
                                 return (session.id, assetId, .queued)
                             }
                         }

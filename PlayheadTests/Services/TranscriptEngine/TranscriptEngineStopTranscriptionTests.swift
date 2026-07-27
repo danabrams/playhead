@@ -18,7 +18,7 @@
 //      `transcript_chunks` rows are inserted for that asset, even if
 //      the recognizer was mid-flight when the stop landed.
 //   2. After stop, `analysis_assets.fastTranscriptCoverageEndTime` does
-//      not advance — late `updateFastTranscriptCoverage` calls are
+//      not advance — late `advanceFastTranscriptCoverage` calls are
 //      gated.
 //   3. After stop, no `.completed` event is emitted for that asset.
 //   4. After stop, late `appendShards(_:analysisAssetId:snapshot:)`
@@ -305,7 +305,7 @@ struct TranscriptEngineStopTranscriptionTests {
         // Now release the recognizer. The engine's Task resumes and
         // would (without the stop gate) run through the persistence
         // path: insertTranscriptChunks → emitEvent(.chunksPersisted) →
-        // updateFastTranscriptCoverage → eventually emit `.completed`.
+        // advanceFastTranscriptCoverage → eventually emit `.completed`.
         // Every one of those writes must be dropped.
         await recognizer.core.disableStall()
 
