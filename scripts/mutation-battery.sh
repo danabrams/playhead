@@ -78,6 +78,13 @@
 # Recorded so a later reader can tell "never run since it was written" apart
 # from "run and passing". If you change the source under it, re-run and update
 # this — a stale line here is worse than no line.
+#
+# PARTIAL SINCE THEN
+#   2026-07-27 — playhead-ugy4 added S01–S05 (batches 10–12) and two suites to
+#   FOCUSED_SUITES. Those three batches were run and are 5/5 KILLED; M01–N07
+#   were NOT re-run against the widened suite list. The line above therefore
+#   still describes the last WHOLE-battery run. Next whole-battery run: fold
+#   both lines into one.
 
 set -uo pipefail
 
@@ -101,6 +108,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertLifecycleRaceTests
+  # playhead-ugy4: the two suggest-tier rails (S04/S05) live in
+  # SkipOrchestratorCharacterizationTests.swift, whose @Suite structs are
+  # named for their topic rather than the file.
+  -only-testing:PlayheadTests/SkipOrchestratorAdDecisionContractTests
+  -only-testing:PlayheadTests/SkipOrchestratorSuggestTierTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -154,6 +166,20 @@ T_ANON_SILENT="An anonymous revert (no podcastId, or an empty one) records no co
 T_ACCEPT_RACE="A suggest Yes whose episode is replaced mid-flight calibrates the captured show"
 T_DENY_RACE="A banner No whose episode is replaced mid-flight calibrates the captured show"
 
+# playhead-ugy4. Seven tests that named a suggest-tier contract but could not
+# observe it: their fixtures made `acceptSuggestedSkip` abort in
+# `AnalysisStore.persistAcceptedSuggestionIfCurrent` (asset owned by a
+# different episode, no durable suggestion row) long before the seam under
+# test mattered, so "a stale Yes must not promote" was proved by the fixture.
+# The fixtures are repaired; these five entries are what keeps them honest.
+T_ADWINDOW_STALE_YES="blocked and inventory-rejected AdWindows retire stale suggestions"
+T_DECISION_STALE_YES="blocked and inventory-rejected decisions retire stale suggestions"
+T_EXPLICIT_RETIRE_STALE_YES="explicit window retirement also invalidates a suggestion"
+T_LATE_INVENTORY_STALE_YES="late inventory context retires a newly-invalid suggestion"
+T_STALE_IDENTITY="episode-bound suggest actions reject stale banner identities"
+T_FUSION_CLEARS_SUGGEST="Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)"
+T_DECLINE_NO_CONFIRM="declineSuggestedSkip drops the window without confirming it"
+
 MUTATIONS=(
   "M01|1|ORCH|$T_MANAGED_RACE"
   "M02|1|ORCH|$T_SUGGEST_RACE"
@@ -196,6 +222,27 @@ MUTATIONS=(
 
   "N05|9|ORCH|$T_ACCEPT_RACE"
   "N07|9|ORCH|$T_ANON_SILENT"
+
+  # playhead-ugy4. S01 gets a batch to itself: a stale Yes that can reach a
+  # promotion reddens EVERY suggest-tier test whose id survives in
+  # `lastSuggestRevisionByWindowId`, including S04's and S05's expectations —
+  # sharing a batch would credit those two off S01's blast radius.
+  "S01|10|ORCH|$T_ADWINDOW_STALE_YES;$T_DECISION_STALE_YES;$T_EXPLICIT_RETIRE_STALE_YES;$T_LATE_INVENTORY_STALE_YES"
+
+  # S02 is safe here: every accept in S04's and S05's tests goes through the
+  # one-argument `acceptSuggestedSkip(windowId:)`, which forwards
+  # `ifCurrentEpisodeId: activeEpisodeId`, so deleting that guard is inert for
+  # them and only `episodeBoundSuggestActionsRejectStaleIdentity` moves. That
+  # is a standing DEPENDENCY, not a proof: if either test is ever edited to
+  # pass an episode id of its own, S02 gains a second victim and must move to
+  # a batch of its own.
+  "S02|11|ORCH|$T_STALE_IDENTITY"
+  "S04|11|ORCH|$T_FUSION_CLEARS_SUGGEST"
+  "S05|11|ORCH|$T_DECLINE_NO_CONFIRM"
+
+  # S03 is the decline-side twin of S02 and names the same test, so it needs
+  # its own batch.
+  "S03|12|ORCH|$T_STALE_IDENTITY"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -246,6 +293,11 @@ describe_mutation() {
     N05) echo "acceptSuggestedSkip: MISS attributed to activePodcastId instead of the captured show" ;;
     N06) echo "drop the empty-show-id refusal at BOTH sites (orchestrator + controller store)" ;;
     N07) echo "revertWindow: controller sample attributed to activePodcastId instead of the captured show" ;;
+    S01) echo "acceptSuggestedSkip: fall back to the last retired suggest revision, so a stale Yes promotes anyway" ;;
+    S02) echo "acceptSuggestedSkip: delete the active-episode guard on the episode-bound form" ;;
+    S03) echo "declineSuggestedSkip: delete the active-episode guard on the episode-bound form" ;;
+    S04) echo "receiveAdDecisionResults: delete the symmetric suggest clear on a same-id eligible result" ;;
+    S05) echo "declineSuggestedSkip: read the suggest entry instead of removing it" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -704,6 +756,92 @@ EOF
     snippet NEW <<'EOF'
         // cannot silently discard valid old-episode feedback.
         recordThresholdControlSignal(.falsePositive, podcastId: activePodcastId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  S01)
+    snippet OLD <<'EOF'
+        guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
+            return false
+        }
+        provisionallyResolvingSuggestWindowIds.insert(windowId)
+EOF
+    snippet NEW <<'EOF'
+        guard let suggested = suggestWindows.removeValue(forKey: windowId)
+                ?? lastSuggestRevisionByWindowId[windowId] else {
+            return false
+        }
+        provisionallyResolvingSuggestWindowIds.insert(windowId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  S02)
+    snippet OLD <<'EOF'
+        windowId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil,
+        ifSuggestionRevisionToken expectedRevisionToken: String? = nil
+    ) async -> Bool {
+        guard let expectedEpisodeId,
+              activeEpisodeId == expectedEpisodeId,
+EOF
+    snippet NEW <<'EOF'
+        windowId: String,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil,
+        ifSuggestionRevisionToken expectedRevisionToken: String? = nil
+    ) async -> Bool {
+        guard let expectedEpisodeId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  S03)
+    snippet OLD <<'EOF'
+        isExplicitDenial: Bool = false,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil,
+        ifSuggestionRevisionToken expectedRevisionToken: String? = nil
+    ) async -> Bool {
+        guard let expectedEpisodeId,
+              activeEpisodeId == expectedEpisodeId,
+EOF
+    snippet NEW <<'EOF'
+        isExplicitDenial: Bool = false,
+        ifCurrentEpisodeId expectedEpisodeId: String?,
+        ifPlaybackLifecycleGeneration expectedPlaybackGeneration: UInt64? = nil,
+        ifSuggestionRevisionToken expectedRevisionToken: String? = nil
+    ) async -> Bool {
+        guard let expectedEpisodeId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  S04)
+    snippet OLD <<'EOF'
+            if retireSuggestedWindowIfPresent(windowId: result.id) {
+                logger.debug(
+                    "AdDecisionResult \(result.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            // mutation S04: symmetric suggest clear deleted.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  S05)
+    snippet OLD <<'EOF'
+        guard let suggested = suggestWindows.removeValue(forKey: windowId) else {
+            return false
+        }
+
+        guard isExplicitDenial else {
+EOF
+    snippet NEW <<'EOF'
+        guard let suggested = suggestWindows[windowId] else {
+            return false
+        }
+
+        guard isExplicitDenial else {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

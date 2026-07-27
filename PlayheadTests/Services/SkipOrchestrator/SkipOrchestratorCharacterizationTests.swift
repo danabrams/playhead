@@ -746,7 +746,15 @@ struct SkipOrchestratorAdDecisionContractTests {
         // and synthesize a duplicate managed window via
         // `UUID().uuidString`.
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // playhead-ugy4: the asset must be OWNED by the episode being played
+        // and the markOnly row must exist durably, or step 3's
+        // `acceptSuggestedSkip` aborts inside
+        // `persistAcceptedSuggestionIfCurrent` no matter what the fusion path
+        // did to the suggest entry — which would make this test pass with the
+        // symmetric clear deleted.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
         let trustService = try await makeSkipTestTrustService(
             mode: "manual",
             trustScore: 0.6,
@@ -780,6 +788,7 @@ struct SkipOrchestratorAdDecisionContractTests {
             evidenceSources: nil,
             eligibilityGate: "markOnly"
         )
+        try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
 
         // 2. Fusion produces an eligible decision under the same id.
@@ -805,6 +814,12 @@ struct SkipOrchestratorAdDecisionContractTests {
             "Exactly one managed window should cover the span (the fusion-managed one); got \(onSpan.count)")
         #expect(onSpan.first?.id == "ad-shared-id",
             "The surviving window must be the fusion-managed entry, not a UUID-keyed late promotion")
+        // playhead-ugy4: `confirmedWindows()` filters to `.confirmed`, and a
+        // late promotion lands as `.applied` — so the two assertions above
+        // cannot see the duplicate they describe. `activeWindowIDs()` is the
+        // dictionary the promotion actually writes into.
+        #expect(await orchestrator.activeWindowIDs() == ["ad-shared-id"],
+            "A late accept on the cleared suggest entry must not add a UUID-keyed managed window")
     }
 }
 
@@ -1328,7 +1343,13 @@ struct SkipOrchestratorSuggestTierTests {
     @Test("declineSuggestedSkip drops the window without confirming it")
     func declineSuggestedSkipDoesNotConfirm() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // playhead-ugy4: the asset must be OWNED by the episode being played
+        // and the markOnly row must exist durably, or the stale accept below
+        // aborts inside `persistAcceptedSuggestionIfCurrent` whether or not
+        // `declineSuggestedSkip` cleared the suggest entry.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1337,6 +1358,7 @@ struct SkipOrchestratorSuggestTierTests {
         )
 
         let window = makeMarkOnlyAdWindow(id: "ad-suggest-decline")
+        try await store.insertAdWindow(window)
         await orchestrator.receiveAdWindows([window])
 
         await orchestrator.declineSuggestedSkip(windowId: "ad-suggest-decline")
@@ -1344,6 +1366,8 @@ struct SkipOrchestratorSuggestTierTests {
         let confirmed = await orchestrator.confirmedWindows()
         #expect(confirmed.isEmpty,
             "declineSuggestedSkip must not promote the window into the skip path")
+        #expect(!(await orchestrator.activeSuggestWindowIDs()).contains("ad-suggest-decline"),
+            "declineSuggestedSkip must clear the suggest entry")
 
         // Subsequent accept on the same id is now a no-op — the suggest
         // entry has been cleared. (This protects against a stale tap
@@ -1352,6 +1376,11 @@ struct SkipOrchestratorSuggestTierTests {
         let confirmedAfter = await orchestrator.confirmedWindows()
         #expect(confirmedAfter.isEmpty,
             "Accept after decline must be a no-op — the suggest window is gone")
+        // playhead-ugy4: a promotion lands as `.applied`, which
+        // `confirmedWindows()` filters out — so the assertion above cannot
+        // see the window it is describing. `activeWindowIDs()` can.
+        #expect((await orchestrator.activeWindowIDs()).isEmpty,
+            "Accept after decline must not install a managed window")
     }
 
     @Test("Suggest banner fires only once per markOnly window")
