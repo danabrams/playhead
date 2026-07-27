@@ -874,18 +874,39 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   N06)
-    # BOTH sites, because the empty-show-id contract is enforced twice —
+    # BOTH sites, because the unattributed-show contract is enforced twice —
     # `recordThresholdControlSignal` refuses to call, and
     # `PerShowThresholdControllerStore.record` refuses to write. Deleting
     # either one alone is an EQUIVALENT MUTANT that no test can kill (verified:
     # each half survives on its own). What a test CAN rail is the contract, so
     # that is what this mutation removes. `$file` is the orchestrator; the
     # store is patched by absolute key below.
+    #
+    # playhead-o4qr — THE EDIT WAS REWRITTEN, THE EXPECTATION WAS NOT. The
+    # previous edit weakened the guard from `let podcastId, !podcastId.isEmpty`
+    # to `let podcastId`, i.e. it removed only the EMPTY clause. That reproduced
+    # a real defect while `revertWindow` passed the caller's raw show id
+    # through; it no longer does. `exactFeedbackShowIdentity` canonicalizes an
+    # empty request to nil upstream, so `""` can no longer reach this method at
+    # all and the old edit became an equivalent mutant — it SURVIVED batch 8 on
+    # 2026-07-27, correctly.
+    #
+    # The defect the entry has always DESCRIBED — "every unattributed
+    # correction would pile into that one shared bucket" — is still live, and
+    # this is the shape it now takes: fold the nil case into `""` and let the
+    # store accept it. Same contract, same expectation, reachable edit.
+    #
+    # The `perShowThresholdControllerStore` line is here for UNIQUENESS: the
+    # nil/empty refusal is written twice in this file now, because
+    # `ingestNegativeFingerprint` grew a deliberately identical guard when the
+    # hard-negative bank joined the per-show learning surfaces.
     snippet OLD <<'EOF'
+        guard let store = perShowThresholdControllerStore else { return }
         guard let podcastId, !podcastId.isEmpty else { return }
 EOF
     snippet NEW <<'EOF'
-        guard let podcastId else { return }
+        guard let store = perShowThresholdControllerStore else { return }
+        let podcastId = podcastId ?? ""
 EOF
     patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
