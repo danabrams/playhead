@@ -161,6 +161,12 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             listenPush.lowerBound,
             "recordListenRevert's lifecycle guard must gate evaluateAndPush()"
         )
+        assertNoLifecycleRecheck(
+            in: listenRevert,
+            from: listenReceipt.lowerBound,
+            to: listenGuard.lowerBound,
+            seam: "recordListenRevert"
+        )
 
         guard let timeRangeRevert = SwiftSourceInspector.firstBody(
             in: source,
@@ -220,6 +226,12 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             rangePush.lowerBound,
             "revertByTimeRange's final guard must gate evaluateAndPush()"
         )
+        assertNoLifecycleRecheck(
+            in: timeRangeRevert,
+            from: rangeReceipt.lowerBound,
+            to: rangeFinalGuard.lowerBound,
+            seam: "revertByTimeRange"
+        )
 
         // playhead-i08e: the in-loop lifecycle guards must `break`, never
         // `return`. A `return` abandons a gesture whose windows are already
@@ -242,6 +254,51 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             gesture's receipt and calibration signals still reach the captured \
             source show.
             """
+        )
+    }
+
+    /// playhead-i08e (third-pass hardening): closes the residual gap the
+    /// ordering assertions above cannot see on their own.
+    ///
+    /// Those assertions only prove each effect appears BEFORE the seam's
+    /// live-state guard. They say nothing about what sits BETWEEN them — so an
+    /// effect re-wrapped in its own equivalent lifecycle check, e.g.
+    ///
+    ///     if episodeLifecycleGeneration == sourceLifecycleGeneration {
+    ///         recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+    ///     }
+    ///
+    /// would restore the exact silent-drop bug this canary exists to prevent
+    /// while every `XCTAssertLessThan` above still passed. Both prior reviews
+    /// of this bead flagged that hole and left it open.
+    ///
+    /// `sourceLifecycleGeneration` is the ONLY captured-generation identifier in
+    /// either seam, so any lifecycle re-check — `guard`, `if`, ternary, or a
+    /// `&&` folded into an existing condition — must name it. Requiring the
+    /// region to be free of that identifier therefore rejects every spelling of
+    /// the evasion, not just the `guard` form.
+    private func assertNoLifecycleRecheck(
+        in body: String,
+        from start: String.Index,
+        to end: String.Index,
+        seam: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let region = String(body[start..<end])
+        XCTAssertFalse(
+            region.contains("sourceLifecycleGeneration"),
+            """
+            \(seam) re-checks the captured lifecycle generation between its \
+            first durable/calibration effect and its live-state guard. Those \
+            effects are owed to the CAPTURED show unconditionally: gating any \
+            of them on the lifecycle still current re-introduces the drop this \
+            canary guards (the trust penalty has already landed by then). \
+            Offending region:
+            \(region.trimmingCharacters(in: .whitespacesAndNewlines))
+            """,
+            file: file,
+            line: line
         )
     }
 
@@ -5369,7 +5426,20 @@ struct SkipOrchestratorRevertTests {
     @Test("declineSuggestedSkip auto-fade (isExplicitDenial:false) records NO correction and leaves userDismissedBanner=0")
     func suggestAutoFadeRecordsNothing() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // playhead-i08e (third pass): the asset row must declare the SAME
+        // episode `beginEpisode` announces below, exactly as this test's
+        // explicit-denial sibling `suggestDenialPersistsFalsePositiveCorrection`
+        // already does. With the fixture's default `"ep-1"` against
+        // `beginEpisode(episodeId: "asset-1")`, `feedbackAssetMatches` refused
+        // `persistDeclinedSuggestionIfCurrent` on ownership grounds — so a
+        // regression that treated a passive auto-fade as an explicit denial
+        // would ALSO have written nothing, and all three negative assertions
+        // below would have held for a reason unrelated to the contract they
+        // name. Aligning the ids makes the persistence path genuinely
+        // reachable, so only `isExplicitDenial == false` keeps it silent.
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "asset-1")
+        )
         let correctionStore = PersistentUserCorrectionStore(store: store)
         let orchestrator = SkipOrchestrator(store: store, correctionStore: correctionStore)
         await orchestrator.beginEpisode(

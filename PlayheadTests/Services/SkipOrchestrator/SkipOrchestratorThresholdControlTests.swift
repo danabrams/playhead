@@ -122,6 +122,23 @@ struct SkipOrchestratorThresholdControlTests {
         return await store.state(forShow: show)
     }
 
+    /// playhead-i08e (third pass): row count for the "this seam must record
+    /// NOTHING" assertions, read only after a settle window.
+    ///
+    /// `recordThresholdControlSignal` writes through an unstructured `Task`, so
+    /// reading the store the instant a gesture returns reports 0 for a seam
+    /// that is about to write. Without the settle, every negative assertion
+    /// below would pass against an implementation that DOES write — i.e. it
+    /// would be vacuous, which is the specific defect this bead is cleaning up.
+    /// Counting ROWS (not one show's samples) also catches a write misrouted to
+    /// some other show id.
+    private func settledControllerRowCount(
+        _ store: PerShowThresholdControllerStore
+    ) async throws -> Int {
+        try await Task.sleep(nanoseconds: 500_000_000)
+        return try await store.count()
+    }
+
     @Test("Listen revert of a managed auto-skip window records a FALSE-POSITIVE signal (integral +1)")
     func listenRevertRecordsFalsePositive() async throws {
         let store = try await makeTestStore()
@@ -371,11 +388,194 @@ struct SkipOrchestratorThresholdControlTests {
         let row = try #require(try await store.fetchAdWindow(id: "ad-none-veto"))
         #expect(row.decisionState == AdDecisionState.reverted.rawValue)
 
-        // Build a fresh, separate store and confirm it is empty — proving the
-        // orchestrator wrote nowhere (there is no global store to leak into).
-        let probe = try makeControllerStore()
-        #expect(try await probe.count() == 0)
-        await probe.close()
+        // playhead-i08e (third pass): this test used to close by building a
+        // BRAND-NEW `PerShowThresholdControllerStore` in a fresh unique temp
+        // directory and asserting `count() == 0`, commented as "proving the
+        // orchestrator wrote nowhere". A store that was created after the
+        // gesture, in a directory nothing has ever written to, is empty by
+        // construction — the assertion could not fail for any implementation
+        // and proved nothing. It is deleted rather than rewritten: with no
+        // controller store wired there is, by definition, no surface on which
+        // a write could be observed, so the honest content of this test is the
+        // durable evidence above that both seams ran to completion instead of
+        // trapping or aborting. The observable half of the no-write contract —
+        // a store IS wired but the correction has no show to attribute to — is
+        // covered by `anonymousRevertRecordsNoControllerSample`.
+    }
+
+    // MARK: - playhead-i08e (third pass): seams that must record NOTHING
+    //
+    // The suite above proves each calibration seam records exactly ONE sample
+    // with the right sign. The other half of that contract — the seams and
+    // conditions that must record NO sample — had no coverage at all, and it
+    // is the half most exposed by this bead: reviving four dead explicit-
+    // feedback paths makes it newly possible for one of them to start writing
+    // where it must not. Each test below pairs its negative assertion with a
+    // POSITIVE CONTROL (the gesture returned true / its durable receipt or row
+    // flip landed) so "recorded nothing" can never be satisfied by a seam that
+    // simply aborted — which is exactly how the original regression hid.
+
+    /// The controller is per-show, so a correction carrying no show id has
+    /// nowhere to land (`recordThresholdControlSignal`'s second guard). This
+    /// replaces the deleted fresh-store probe in `noStoreNoWrite`: the store IS
+    /// wired here, so a regression that fell back to `activePodcastId` — which
+    /// `beginEpisode` set to a real value below — turns this red.
+    @Test("An anonymous revert (no podcastId) records no controller sample")
+    func anonymousRevertRecordsNoControllerSample() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let controllerStore = try makeControllerStore()
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
+
+        let ad = makeSkipTestAdWindow(id: "ad-anon", startTime: 60, endTime: 120, confidence: 0.85, decisionState: "confirmed")
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        #expect(await orchestrator.revertWindow(windowId: "ad-anon", podcastId: nil))
+        let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
+        #expect(receipts.count == 1, "the veto itself still commits its durable receipt")
+        #expect(receipts.first?.source == .manualVeto)
+
+        #expect(
+            try await settledControllerRowCount(controllerStore) == 0,
+            "an unattributed correction must not be folded into any show's controller state"
+        )
+        await controllerStore.close()
+    }
+
+    /// `confirmAutoSkippedBanner` is capture-only: the user agreeing that a
+    /// skip was right is a TRUE positive, and the controller models only
+    /// false-positive (raise) and miss (lower). Writing here would push the
+    /// threshold on agreement.
+    @Test("Confirming an auto-skipped banner records no controller sample")
+    func confirmAutoSkippedBannerRecordsNoControllerSample() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
+        let controllerStore = try makeControllerStore()
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: episodeId,
+            podcastId: podcastId,
+            playbackLifecycleGeneration: 7
+        )
+        let events = await orchestrator.bannerEventStream()
+
+        let ad = makeSkipTestAdWindow(id: "ad-confirm", startTime: 60, endTime: 120, confidence: 0.9, decisionState: "confirmed")
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        let item = try #require(await firstPresentedBannerItem(events))
+        #expect(item.windowId == "ad-confirm")
+        #expect(
+            await orchestrator.confirmAutoSkippedBanner(
+                windowId: item.windowId,
+                analysisAssetId: item.analysisAssetId,
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                ifCurrentEpisodeId: item.episodeId,
+                ifPlaybackLifecycleGeneration: item.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken: item.windowMaterialRevisionToken
+            ),
+            "the exact displayed material must be accepted"
+        )
+        let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
+        #expect(receipts.count == 1, "the Yes ran to completion and committed its receipt")
+        #expect(receipts.first?.source == .bannerAutoSkipConfirmed)
+
+        #expect(
+            try await settledControllerRowCount(controllerStore) == 0,
+            "agreeing with a skip is a true positive — it must not move the threshold"
+        )
+        await controllerStore.close()
+    }
+
+    /// `declineSuggestedSkip` is capture-only for the mirror reason: the
+    /// algorithm only OFFERED a banner, it never altered playback, so a No is
+    /// too weak to raise the auto-skip threshold. This seam was one of the four
+    /// revived by playhead-i08e — before the fix it aborted at its first
+    /// statement, so this assertion would have been vacuous.
+    @Test("An explicit suggest-tier No records no controller sample")
+    func declineSuggestedSkipRecordsNoControllerSample() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let controllerStore = try makeControllerStore()
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
+
+        let markOnly = makeMarkOnlySuggestWindow(id: "ad-suggest-no")
+        try await store.insertAdWindow(markOnly)
+        await orchestrator.receiveAdWindows([markOnly])
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-no"))
+
+        #expect(
+            await orchestrator.declineSuggestedSkip(
+                windowId: "ad-suggest-no",
+                isExplicitDenial: true
+            ),
+            "the explicit No must run to completion"
+        )
+        let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
+        #expect(receipts.count == 1, "the No ran to completion and committed its receipt")
+        #expect(receipts.first?.source == .bannerSuggestionDenied)
+
+        #expect(
+            try await settledControllerRowCount(controllerStore) == 0,
+            "a suggest-tier veto never altered playback — too weak to raise the threshold"
+        )
+        await controllerStore.close()
+    }
+
+    /// The `revertedManagedAny` routing that playhead-i08e relocated above the
+    /// trust hop. `revertByTimeRangeManagedRecordsFalsePositive` covers the
+    /// true arm; dropping the condition entirely would leave that test green,
+    /// so the false arm needs its own rail.
+    @Test("A suggest-tier-only revertByTimeRange records no controller sample")
+    func revertByTimeRangeSuggestOnlyRecordsNoControllerSample() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
+        let controllerStore = try makeControllerStore()
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
+
+        // markOnly ONLY — the gesture must find no managed auto-skip window,
+        // so `revertedManagedAny` stays false.
+        let markOnly = makeMarkOnlySuggestWindow(id: "ad-suggest-range")
+        try await store.insertAdWindow(markOnly)
+        await orchestrator.receiveAdWindows([markOnly])
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-range"))
+
+        await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: podcastId)
+
+        #expect(
+            !(await orchestrator.activeSuggestWindowIDs()).contains("ad-suggest-range"),
+            "the suggest tier really was vetoed — the gesture is not a no-op"
+        )
+        let row = try #require(try await store.fetchAdWindow(id: "ad-suggest-range"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+
+        #expect(
+            try await settledControllerRowCount(controllerStore) == 0,
+            "a suggest-only revert never altered playback — too weak to raise the threshold"
+        )
+        await controllerStore.close()
     }
 
     /// A markOnly (suggest-tier) window — surfaced as a suggest banner, never

@@ -2275,6 +2275,19 @@ actor SkipOrchestrator {
             // already vetoed above are durably reverted, so the gesture's
             // receipt and calibration signals below are still owed to the
             // captured show. Returning here dropped them.
+            //
+            // KNOWN GAP (pre-existing, unchanged by the `break`): the windows
+            // this loop had not yet reached are abandoned — their rows keep
+            // `applied`/`confirmed`, so `beginEpisode`'s preload re-cues them
+            // on relaunch even though the gesture below reports a receipt over
+            // the whole `[start, end]` and a full-magnitude trust penalty.
+            // `updateAdWindowDecision(id:decisionState:)` is a pure id-keyed
+            // UPDATE with no lifecycle argument, so closing this properly means
+            // running the loop to completion under a `didLoseLifecycle` flag
+            // that suppresses only the live-state mutations. That is a
+            // restructure of both loops, not a threshold-control fix; `main`
+            // had the identical durability gap plus the dropped receipt, so
+            // this is strictly better, not complete.
             guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
                 break
             }
@@ -2767,9 +2780,17 @@ actor SkipOrchestrator {
     /// it with the AdWindow mutation — `correctionStore` only receives the
     /// post-commit derived-learning notification, and that hop already
     /// no-ops when unwired (`schedulePostCommitCorrectionLearning`). Throwing
-    /// on an unwired optional learning dependency aborted the whole gesture,
-    /// silently killing both the user's correction and the calibration
-    /// signals (trust + per-show threshold controller) that follow it.
+    /// on an unwired optional learning dependency aborted the whole gesture at
+    /// its first statement, killing both the user's correction and the
+    /// calibration signals (trust + per-show threshold controller) that follow
+    /// it.
+    ///
+    /// Scope, stated precisely so this is not misread as a shipped user-facing
+    /// defect: `PlayheadRuntime` is the only production construction site and
+    /// it always injects a store, so the precondition never fired for a real
+    /// user — it bought nothing there while silently disabling the seam in
+    /// every other configuration, which is where the dead threshold-control
+    /// write path was found.
     private func makeManualCorrectionVetoEvent(
         startTime: Double,
         endTime: Double,
@@ -3135,9 +3156,11 @@ actor SkipOrchestrator {
     ///     `decisionState` to `.reverted` so a relaunch/replay never
     ///     resurfaces the banner the user explicitly denied. No trust /
     ///     threshold signal is fired here — this seam is capture-only; the
-    ///     runtime-calibration surfaces stay owned by the paths that veto an
-    ///     auto-skip the algorithm actually committed to
-    ///     (`revertByTimeRange` / `revertWindow` / `denyAutoSkippedBanner`).
+    ///     runtime-calibration surfaces stay owned by the paths that veto a
+    ///     MANAGED (auto-skip-tier) window: `recordListenRevert`,
+    ///     `revertByTimeRange` (only when `revertedManagedAny`),
+    ///     `revertWindow`, and `denyAutoSkippedBanner`. `confirmAutoSkippedBanner`
+    ///     is capture-only for the same reason this seam is.
     @discardableResult
     func declineSuggestedSkip(
         windowId: String,
@@ -3266,7 +3289,8 @@ actor SkipOrchestrator {
     /// playhead-i08e: as with `makeManualCorrectionVetoEvent`, a wired
     /// `correctionStore` is not a precondition — the receipt's durability is
     /// owned by the AnalysisStore transaction, not by the derived-learning
-    /// listener.
+    /// listener. See that method for why the precondition was unreachable in
+    /// production yet disabled this seam everywhere else.
     private func makeSuggestDenialCorrection(
         window: AdWindow,
         podcastId: String?
