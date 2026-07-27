@@ -149,7 +149,10 @@ struct MetricKitDiagnosticProjectorTests {
     @Test("frames are capped and the record says so, while frame_count keeps the true depth")
     func frameTruncation() throws {
         var diagnostic = MetricKitPayloadFixture.crashDiagnostic()
-        diagnostic["callStackTree"] = MetricKitPayloadFixture.deepCallStackTree(depth: 200)
+        // 40 levels: deep enough to exercise the cap, shallow enough
+        // that JSONSerialization's recursive writer stays inside Swift
+        // Testing's small per-test task stack.
+        diagnostic["callStackTree"] = MetricKitPayloadFixture.deepCallStackTree(depth: 40)
         let data = try MetricKitPayloadFixture.payloadData(
             MetricKitPayloadFixture.payload(crashes: [diagnostic])
         )
@@ -160,7 +163,7 @@ struct MetricKitDiagnosticProjectorTests {
         )
         let record = try #require(records.first)
         #expect(record.frames.count == 8)
-        #expect(record.frameCount > 8)
+        #expect(record.frameCount == 40, "frame_count must report the TRUE depth, not the capped one")
         #expect(record.framesTruncated)
     }
 

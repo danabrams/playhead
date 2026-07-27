@@ -115,6 +115,14 @@ enum MetricKitPayloadFixture {
 
     /// A synthetic deep chain of `depth` nested frames, for the
     /// truncation test.
+    ///
+    /// Keep `depth` modest at the call site. `JSONSerialization` writes
+    /// nested containers recursively (two C frames per level here: the
+    /// `subFrames` array and the frame object), and Swift Testing runs
+    /// each test on a task with a small stack — a 200-deep tree
+    /// overflowed it and took the whole test host down with
+    /// `EXC_BAD_ACCESS / excessive recursion`, which surfaces as EVERY
+    /// test in the process failing at once.
     static func deepCallStackTree(depth: Int) -> [String: Any] {
         var node: [String: Any] = [
             "binaryUUID": appBinaryUUID,

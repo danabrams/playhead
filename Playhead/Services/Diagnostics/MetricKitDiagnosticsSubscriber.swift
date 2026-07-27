@@ -68,6 +68,10 @@ final class MetricKitDiagnosticsSubscriber: NSObject, MXMetricManagerSubscriber 
         }
         guard !records.isEmpty else { return }
         logger.info("ingested \(records.count, privacy: .public) stability diagnostic(s)")
+        // Capture the actor, not `self`: this class is not Sendable, so
+        // a closure that captures it cannot cross into the Task under
+        // Swift 6 region isolation.
+        let store = self.store
         Task { await store.append(records) }
     }
 }
