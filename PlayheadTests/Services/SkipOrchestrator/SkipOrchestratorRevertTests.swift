@@ -327,6 +327,56 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             source show.
             """
         )
+
+        // playhead-i08e: the `break` above is what MAKES this next rail
+        // load-bearing, so the two must move together. While the in-loop guard
+        // `return`ed, losing the lifecycle inside the managed loop abandoned
+        // the function outright and the suggest-tier pass below was simply
+        // unreachable. Now the function keeps going — so that pass, which reads
+        // and mutates the LIVE `suggestWindows` dictionary, has to carry its own
+        // lifecycle gate. Without one it builds its work list from the
+        // REPLACEMENT episode's suggestions and vetoes them: not a dropped
+        // signal this time but cross-episode corruption, a strictly worse bug
+        // than the one this canary was written for.
+        //
+        // Source-level because it is the one invariant in this seam that no
+        // behavioural test can reach: reproducing it needs an episode switch to
+        // interleave with an AnalysisStore suspension, and `revertByTimeRange`
+        // exposes no persistence barrier to make that deterministic. Verified by
+        // mutation — deleting the gate leaves every behavioural test in
+        // SkipOrchestratorThresholdControlTests and SkipOrchestratorRevertTests
+        // green.
+        //
+        // The region runs from the end of the managed loop's in-loop guard to
+        // the loop that consumes the work list, so it accepts every reasonable
+        // spelling of the gate — today's ternary, or an `if` / `guard` wrapper
+        // around the `compactMap` — and only rejects its absence.
+        guard let rangeSuggestLoop = timeRangeRevert.range(
+            of: "for (id, suggested) in suggestRevertTargets"
+        ) else {
+            XCTFail("revertByTimeRange must still build a suggest-tier work list before consuming it")
+            return
+        }
+        guard let rangeManagedGuard = timeRangeRevert.range(
+            of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration"
+        ), rangeManagedGuard.upperBound < rangeSuggestLoop.lowerBound else {
+            XCTFail(
+                "revertByTimeRange: the managed loop's in-loop lifecycle guard is missing or has moved below the suggest-tier pass — the canary's anchors have drifted"
+            )
+            return
+        }
+        XCTAssertTrue(
+            timeRangeRevert[rangeManagedGuard.upperBound..<rangeSuggestLoop.lowerBound]
+                .contains("episodeLifecycleGeneration == sourceLifecycleGeneration"),
+            """
+            revertByTimeRange builds its suggest-tier work list without \
+            re-checking the captured lifecycle. `suggestWindows` is LIVE state: \
+            once the managed loop has `break`ed because a replacement episode \
+            took ownership, reading it here collects the NEW episode's \
+            suggestions and the loop below vetoes them. Gate the work list \
+            (ternary, `if`, or `guard`) between the managed loop and this pass.
+            """
+        )
     }
 
     /// Brace nesting depth of `index` within a function body. Depth 0 means

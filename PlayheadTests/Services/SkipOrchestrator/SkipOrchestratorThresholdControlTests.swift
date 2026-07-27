@@ -600,9 +600,18 @@ struct SkipOrchestratorThresholdControlTests {
 
     /// `declineSuggestedSkip` is capture-only for the mirror reason: the
     /// algorithm only OFFERED a banner, it never altered playback, so a No is
-    /// too weak to raise the auto-skip threshold. This seam was one of the four
-    /// revived by playhead-i08e — before the fix it aborted at its first
-    /// statement, so this assertion would have been vacuous.
+    /// too weak to raise the auto-skip threshold.
+    ///
+    /// This seam was one of the four revived by playhead-i08e, but NOT by this
+    /// test: it wires a `PersistentUserCorrectionStore`, so the removed
+    /// `correctionStore != nil` precondition never fired here and this test
+    /// passed before the fix too. (Confirmed by mutation: restoring the
+    /// precondition in `makeSuggestDenialCorrection` reddens only
+    /// `suggestNoPersistsWithoutCorrectionStore` in SkipOrchestratorRevertTests,
+    /// which is the unwired-configuration rail and must not be deleted as a
+    /// duplicate of this one.) What keeps THIS test honest is the positive
+    /// control below — the gesture returned true and committed its receipt —
+    /// so "recorded nothing" cannot be satisfied by a seam that aborted.
     @Test("An explicit suggest-tier No records no controller sample")
     func declineSuggestedSkipRecordsNoControllerSample() async throws {
         let store = try await makeTestStore()
