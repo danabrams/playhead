@@ -18,7 +18,6 @@ import OSLog
 
 private enum SkipOrchestratorFeedbackError: Error {
     case invalidCorrectionRange
-    case correctionStoreUnavailable
     case staleDurableMaterial
 }
 
@@ -222,6 +221,21 @@ actor SkipOrchestrator {
     /// Test-only suspension point for the fire-and-forget durable applied
     /// transition. Production leaves this nil.
     private var appliedPersistenceBarrierForTesting:
+        (@Sendable () async -> Void)?
+    /// playhead-i08e: test-only suspension point taken by the REVERT seams
+    /// (`recordListenRevert` and both of `revertByTimeRange`'s loops)
+    /// immediately after each durable decision-state write and before the
+    /// live-lifecycle guard that follows it. Production leaves this nil.
+    ///
+    /// It exists so `SkipOrchestratorRevertLifecycleRaceTests` can interleave
+    /// an episode switch with the exact suspension those guards were written
+    /// for, and therefore assert the invariant BEHAVIOURALLY: a gesture whose
+    /// lifecycle is replaced mid-flight still delivers its durable receipt and
+    /// its calibration samples to the CAPTURED show, still stops mutating live
+    /// state, and no longer republishes cues. Without it the invariant is only
+    /// reachable by scanning this file's source text, which is what five
+    /// review rounds of playhead-i08e spent themselves on.
+    private var revertPersistenceBarrierForTesting:
         (@Sendable () async -> Void)?
 
     // MARK: - Phase 7.2: User Correction Store
@@ -647,6 +661,12 @@ actor SkipOrchestrator {
         _ barrier: (@Sendable () async -> Void)?
     ) {
         appliedPersistenceBarrierForTesting = barrier
+    }
+
+    func _setRevertPersistenceBarrierForTesting(
+        _ barrier: (@Sendable () async -> Void)?
+    ) {
+        revertPersistenceBarrierForTesting = barrier
     }
 
     func _suggestWindowForTesting(id: String) -> AdWindow? {
@@ -2149,14 +2169,23 @@ actor SkipOrchestrator {
         } catch {
             logger.warning("Failed to persist revert for \(windowId): \(error.localizedDescription)")
         }
+        if let barrier = revertPersistenceBarrierForTesting {
+            await barrier()
+        }
 
         // Signal the trust engine about the false skip.
         if let podcastId, let trustService {
             await trustService.recordFalseSkipSignal(podcastId: podcastId)
         }
-        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-            return
-        }
+
+        // playhead-i08e: the capture and calibration effects below belong to
+        // the CAPTURED source show. Each is fire-and-forget over values read
+        // before the first suspension, so an episode switch that landed during
+        // the store/trust hops must not discard them — by that point this
+        // gesture's trust penalty has ALREADY been applied, so dropping the
+        // matching receipt/hard-negative/controller sample would leave trust
+        // and corrections permanently out of step. `revertWindow` states the
+        // same policy; only live cue state below is lifecycle-scoped.
 
         // Phase 7.2 / playhead-zskc: persist a listenRevert CorrectionEvent
         // with window-precise time scope (fire-and-forget). AdWindow does not
@@ -2186,6 +2215,12 @@ actor SkipOrchestrator {
         // conservative). No-op when no controller store is wired (flag-OFF
         // production default).
         recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+
+        guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+            // A replacement episode owns the live cue state now; the durable
+            // and calibration effects above were the old lifecycle's to write.
+            return
+        }
 
         // Remove the cue and re-push.
         evaluateAndPush()
@@ -2257,8 +2292,31 @@ actor SkipOrchestrator {
             } catch {
                 logger.warning("Failed to persist revert for \(id): \(error.localizedDescription)")
             }
+            if let barrier = revertPersistenceBarrierForTesting {
+                await barrier()
+            }
+            // playhead-i08e: stop touching LIVE state once a replacement
+            // episode owns it — the remaining entries of this snapshot belong
+            // to the old lifecycle and re-inserting them would inject stale
+            // windows into the new episode. `break`, not `return`: the windows
+            // already vetoed above are durably reverted, so the gesture's
+            // receipt and calibration signals below are still owed to the
+            // captured show. Returning here dropped them.
+            //
+            // KNOWN GAP (pre-existing, unchanged by the `break`): the windows
+            // this loop had not yet reached are abandoned — their rows keep
+            // `applied`/`confirmed`, so `beginEpisode`'s preload re-cues them
+            // on relaunch even though the gesture below reports a receipt over
+            // the whole `[start, end]` and a full-magnitude trust penalty.
+            // `updateAdWindowDecision(id:decisionState:)` is a pure id-keyed
+            // UPDATE with no lifecycle argument, so closing this properly means
+            // running the loop to completion under a `didLoseLifecycle` flag
+            // that suppresses only the live-state mutations. That is a
+            // restructure of both loops, not a threshold-control fix; `main`
+            // had the identical durability gap plus the dropped receipt, so
+            // this is strictly better, not complete.
             guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                return
+                break
             }
         }
 
@@ -2278,11 +2336,18 @@ actor SkipOrchestrator {
         // documented as undefined behavior — even though COW happens to
         // make the current loop survive in practice, depending on that is
         // a maintenance hazard. Build the work list first, then mutate.
+        //
+        // playhead-i08e: `suggestWindows` is LIVE state. If the loop above
+        // broke out because a replacement episode took ownership, this pass
+        // would read and veto the NEW episode's suggestions, so it is skipped
+        // wholesale rather than entered and broken out of.
         let suggestRevertTargets: [(id: String, window: AdWindow)] =
-            suggestWindows.compactMap { (id, suggested) in
+            episodeLifecycleGeneration == sourceLifecycleGeneration
+            ? suggestWindows.compactMap { (id, suggested) in
                 guard suggested.startTime < end, suggested.endTime > start else { return nil }
                 return (id, suggested)
             }
+            : []
 
         for (id, suggested) in suggestRevertTargets {
             emitBannerRetirement(windowId: id)
@@ -2309,8 +2374,14 @@ actor SkipOrchestrator {
             } catch {
                 logger.warning("Failed to persist suggest-tier revert for \(id): \(error.localizedDescription)")
             }
+            if let barrier = revertPersistenceBarrierForTesting {
+                await barrier()
+            }
+            // See the managed loop above: `break`, not `return`, so the
+            // gesture's receipt and calibration signals still reach the
+            // captured source show.
             guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                return
+                break
             }
         }
 
@@ -2329,6 +2400,22 @@ actor SkipOrchestrator {
                     podcastId: podcastId,
                     source: .manualVeto
                 )
+            }
+
+            // playhead-xsdz.11: feed the per-show threshold controller a
+            // FALSE-POSITIVE signal ONLY when a MANAGED auto-skip window was
+            // reverted — that is the "listened through an auto-skip" event the
+            // bead names. A suggest-tier-only revert never altered playback, so
+            // it is too weak to RAISE the auto-skip threshold (mirrors the
+            // full-vs-weak trust-signal routing below). No-op when no store is
+            // wired (flag-OFF production default).
+            //
+            // playhead-i08e: recorded BEFORE the trust hop suspends. Like the
+            // receipt above it is a fire-and-forget write for the captured
+            // source show, so an episode switch landing during that await must
+            // not drop it after the matching trust penalty has been applied.
+            if revertedManagedAny {
+                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
             }
 
             // Signal trust engine once per user correction, not per window.
@@ -2350,21 +2437,20 @@ actor SkipOrchestrator {
                 } else {
                     await trustService.recordWeakFalseSkipSignal(podcastId: podcastId)
                 }
-                guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                    return
-                }
             }
 
-            // playhead-xsdz.11: feed the per-show threshold controller a
-            // FALSE-POSITIVE signal ONLY when a MANAGED auto-skip window was
-            // reverted — that is the "listened through an auto-skip" event the
-            // bead names. A suggest-tier-only revert never altered playback, so
-            // it is too weak to RAISE the auto-skip threshold (mirrors the
-            // full-vs-weak trust-signal routing above). No-op when no store is
-            // wired (flag-OFF production default).
-            if revertedManagedAny {
-                recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
+            // playhead-i08e: the SINGLE live-state gate for this gesture. It
+            // covers a lifecycle change that landed in either revert loop as
+            // well as during the trust hop above, and — unlike the guard it
+            // replaces, which sat inside the `podcastId`/`trustService` branch
+            // — it also holds for anonymous reverts that never reach the trust
+            // engine. Everything above this line is durable or fire-and-forget
+            // work owed to the CAPTURED show; only the cue republication below
+            // touches state a replacement episode now owns.
+            guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+                return
             }
+
             evaluateAndPush()
         }
     }
@@ -2499,6 +2585,17 @@ actor SkipOrchestrator {
                         requestedManaged.adWindow
                     )
             )
+            // playhead-i08e: the same suspension `confirmAutoSkippedBanner`,
+            // `acceptSuggestedSkip` and `declineSuggestedSkip` already take.
+            // Without it this seam — one of only two that reach the threshold
+            // controller in a shipped build — had no way to be interleaved
+            // with an episode replacement, so the fact that its calibration
+            // runs BEFORE the ownership guard below (deliberately: the
+            // captured show is owed the feedback) could not be asserted.
+            // Production leaves the barrier nil.
+            if let barrier = feedbackPersistenceBarrierForTesting {
+                await barrier()
+            }
             guard let wasNewlyInserted =
                     try await store.persistDeniedAutoSkip(
                         windowId: windowId,
@@ -2573,9 +2670,14 @@ actor SkipOrchestrator {
         )
     }
 
-    /// Episode-bound generic form used by deferred non-banner correction
+    /// Episode-bound generic form intended for deferred non-banner correction
     /// surfaces. The outer UI guard is not sufficient because this actor can
     /// be re-entered while its store and trust calls suspend.
+    ///
+    /// playhead-i08e: "intended for", not "used by" — no production caller
+    /// exists yet. `NowPlayingView` has a closure parameter named
+    /// `revertWindow`, but the closure bound to it calls
+    /// `denyAutoSkippedBanner`. See the census above `declineSuggestedSkip`.
     @discardableResult
     func revertWindow(
         windowId: String,
@@ -2677,10 +2779,6 @@ actor SkipOrchestrator {
 
     // MARK: - Correction persistence helper (playhead-zskc)
 
-    /// Fire-and-forget a `.exactTimeSpan` CorrectionEvent through the
-    /// injected correction store. Centralises the three manual-veto call
-    /// sites (`recordListenRevert`, `revertByTimeRange`, `revertWindow`) so
-    /// actor-isolated capture ritual and nil-store guard live in one place.
     /// playhead-rfu-sad: episode-scoped bookkeeping for the tap-then-flip
     /// race guard. Accepted producer IDs remain terminal until the lifecycle
     /// is replaced or ended.
@@ -2688,6 +2786,15 @@ actor SkipOrchestrator {
         recentlyAcceptedSuggestIds.insert(id)
     }
 
+    /// Fire-and-forget a `.exactTimeSpan` CorrectionEvent through the
+    /// injected correction store. Centralises the two manual-veto call sites
+    /// (`recordListenRevert`, `revertByTimeRange`) so the actor-isolated
+    /// capture ritual and the nil-store guard live in one place.
+    ///
+    /// `revertWindow` deliberately does NOT route through here: it needs the
+    /// receipt committed ATOMICALLY with the row retirement, so it mints the
+    /// event via `makeManualCorrectionVetoEvent` and hands it to
+    /// `store.persistRevertedAdWindow`.
     private func persistManualCorrectionVeto(
         startTime: Double,
         endTime: Double,
@@ -2713,6 +2820,23 @@ actor SkipOrchestrator {
     /// responses. The owning AnalysisStore transaction appends it together
     /// with the authoritative AdWindow mutation; post-commit derived learning
     /// is notified separately without appending again.
+    ///
+    /// playhead-i08e: deliberately does NOT require `correctionStore`. The
+    /// receipt is made durable by the AnalysisStore transaction that commits
+    /// it with the AdWindow mutation — `correctionStore` only receives the
+    /// post-commit derived-learning notification, and that hop already
+    /// no-ops when unwired (`schedulePostCommitCorrectionLearning`). Throwing
+    /// on an unwired optional learning dependency aborted the whole gesture at
+    /// its first statement, killing both the user's correction and the
+    /// calibration signals (trust + per-show threshold controller) that follow
+    /// it.
+    ///
+    /// Scope, stated precisely so this is not misread as a shipped user-facing
+    /// defect: `PlayheadRuntime` is the only production construction site and
+    /// it always injects a store, so the precondition never fired for a real
+    /// user — it bought nothing there while silently disabling the seam in
+    /// every other configuration, which is where the dead threshold-control
+    /// write path was found.
     private func makeManualCorrectionVetoEvent(
         startTime: Double,
         endTime: Double,
@@ -2724,9 +2848,6 @@ actor SkipOrchestrator {
         detectionProjection:
             ExplicitFeedbackDetectionProjection? = nil
     ) throws -> CorrectionEvent {
-        guard correctionStore != nil else {
-            throw SkipOrchestratorFeedbackError.correctionStoreUnavailable
-        }
         guard startTime.isFinite, endTime.isFinite else {
             throw SkipOrchestratorFeedbackError.invalidCorrectionRange
         }
@@ -3080,9 +3201,43 @@ actor SkipOrchestrator {
     ///     `userDismissedBanner = 1` on the row, and flip its persisted
     ///     `decisionState` to `.reverted` so a relaunch/replay never
     ///     resurfaces the banner the user explicitly denied. No trust /
-    ///     threshold signal is fired here — this seam is capture-only; the
-    ///     runtime-calibration surfaces stay owned by the explicit
-    ///     revert paths (`revertByTimeRange` / `revertWindow`).
+    ///     threshold signal is fired here — this seam is capture-only, because
+    ///     the algorithm only OFFERED a banner and never altered playback, so
+    ///     the disagreement is too weak to raise the auto-skip threshold.
+    ///
+    /// The full census of which seams DO calibrate the per-show threshold
+    /// controller, since the paragraph above is easy to read as exhaustive and
+    /// is not:
+    ///   • FALSE-POSITIVE (raise) — every path that vetoes a MANAGED
+    ///     (auto-skip-tier) window: `recordListenRevert`, `revertByTimeRange`
+    ///     (only when `revertedManagedAny`), `revertWindow`, and
+    ///     `denyAutoSkippedBanner`.
+    ///
+    ///     This is a census of SEAMS, not of shipped behaviour, and TWO of
+    ///     those four are reachable only from tests today:
+    ///       – `recordListenRevert` — the banner Listen tap runs
+    ///         `retireLiveSkipForListen` plus
+    ///         `AdDetectionService.recordListenRewind`, neither of which
+    ///         calibrates.
+    ///       – `revertWindow` — the only production reference is
+    ///         `NowPlayingView`'s closure PARAMETER of the same name
+    ///         (`BannerFeedbackProductionActions.revertWindow`), and the
+    ///         closure bound to it at the single construction site calls
+    ///         `denyAutoSkippedBanner`. The name is vestigial; nothing calls
+    ///         this method outside tests.
+    ///     Wiring either is tracked separately. What actually reaches the
+    ///     controller in production is `revertByTimeRange` (the transcript
+    ///     "This isn't an ad" gesture) and `denyAutoSkippedBanner` (the banner
+    ///     No) — do not read this list as "what the controller is being fed".
+    ///   • MISS (lower) — `acceptSuggestedSkip`. This is the one SUGGEST-tier
+    ///     gesture that calibrates: the user saying "this WAS an ad" about
+    ///     something we did not auto-skip is a false negative, which is a
+    ///     signal the controller models.
+    ///   • Capture-only — this seam, and `confirmAutoSkippedBanner`. Note the
+    ///     reasons differ: this one because a suggest-tier No never altered
+    ///     playback, `confirmAutoSkippedBanner` because agreement with a skip
+    ///     is a TRUE positive and the controller models only false positives
+    ///     (raise) and misses (lower), so there is no signal to fire.
     @discardableResult
     func declineSuggestedSkip(
         windowId: String,
@@ -3146,7 +3301,7 @@ actor SkipOrchestrator {
         // Persist `userDismissedBanner = 1` and flip the row to `.reverted`
         // so the vetoed suggestion does not resurface on the next launch.
         do {
-            let correction = try makeSuggestDenialCorrection(
+            let correction = makeSuggestDenialCorrection(
                 window: suggested,
                 podcastId: sourcePodcastId
             )
@@ -3206,14 +3361,17 @@ actor SkipOrchestrator {
     /// attribution across the gesture boundary) this builds a fully-formed
     /// event so `causalSource` and `targetRefs` land on the row — the
     /// hard-negative miner needs both. The caller commits it atomically with
-    /// the AdWindow denial. Returns nil when no correction store is wired.
+    /// the AdWindow denial.
+    ///
+    /// playhead-i08e: as with `makeManualCorrectionVetoEvent`, a wired
+    /// `correctionStore` is not a precondition — the receipt's durability is
+    /// owned by the AnalysisStore transaction, not by the derived-learning
+    /// listener. See that method for why the precondition was unreachable in
+    /// production yet disabled this seam everywhere else.
     private func makeSuggestDenialCorrection(
         window: AdWindow,
         podcastId: String?
-    ) throws -> CorrectionEvent {
-        guard correctionStore != nil else {
-            throw SkipOrchestratorFeedbackError.correctionStoreUnavailable
-        }
+    ) -> CorrectionEvent {
         let assetId = window.analysisAssetId
         let scope = CorrectionScope.exactTimeSpan(
             assetId: assetId,
