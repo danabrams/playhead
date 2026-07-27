@@ -152,3 +152,88 @@ cancel/fail paths cannot leak state. The
   proof).
 - `PlayheadTests/Support/Diagnostics/DiagnosticsExportCoordinatorTests.swift:165`
   / `:183` — `.cancelled` / `.failed` preserve (sink is not called).
+
+## (e) Stability diagnostics: MetricKit crash + hang records carry no free text
+
+Added by playhead-jw63.4. `DefaultBundle.stability_diagnostics` carries
+the local MetricKit crash / hang ring buffer
+(`StabilityDiagnosticsStore`, 50 records, `Application Support/Diagnostics/
+stability-diagnostics.jsonl`, `.completeUntilFirstUserAuthentication`).
+
+**Why this needs its own checklist item.** MetricKit is the one input to
+the bundle that Playhead does not author. iOS hands the app free-text
+fields that routinely contain interpolated application strings and
+absolute container paths:
+
+| MetricKit field | What it can contain | Disposition |
+|---|---|---|
+| `exceptionReason.composedMessage` | the `NSException` reason, e.g. `assertionFailure("no ad span for \(episode.title)")` | **never read** |
+| `exceptionReason.formatString` / `.arguments` | the same message, pre-interpolation | **never read** |
+| `terminationReason` | `<RBSTerminateContext\| … >` including the app bundle path | decomposed to `termination_namespace` (allowlisted token) + `termination_code` (hex); raw string discarded |
+| `virtualMemoryRegionInfo` | memory-map dump with absolute paths | **never read** |
+| frame `address` | ASLR'd absolute address | **never read** (`offset_into_binary_text_segment` is what `atos` wants) |
+
+**Contract, in four parts.**
+
+1. **Allowlist projection.** `MetricKitDiagnosticProjector` names every
+   key it reads (`payloadKeys`, `metadataKeys`, `exceptionReasonKeys`).
+   A field that is never read cannot leak, and a future iOS field is
+   invisible by default rather than by vigilance.
+2. **Character allowlist.** Every surviving string passes
+   `DiagnosticTextSanitizer`, which admits only
+   `[A-Za-z0-9_.$+\-() ]` (plus the comma in `device_type`, behind the
+   Apple `iPhone17,1` model grammar). No `/`, no `:`, no quotes, no
+   non-ASCII — so a URL, a POSIX path, or non-Latin transcript text
+   cannot be represented. Rejection DROPS the field; it never truncates
+   (a truncated leak is still a leak).
+3. **Closed shape.** `StabilityDiagnosticRecord` has no
+   `metadata: [String: String]`, no `rawPayload`, no `message`, no
+   `reason`. Every field is a number, a boolean, an enum rawValue, or a
+   sanitised string.
+4. **No episode reference at all.** Unlike `scheduler_events` /
+   `work_journal_tail`, a stability record carries not even the salted
+   `episode_id_hash` — a stack trace has nothing to correlate to an
+   episode, so the field does not exist.
+
+**Verified by** (`PlayheadTests/Support/Diagnostics/StabilityDiagnosticScrubbingTests.swift`):
+- `sentinelsAreScrubbed` — a payload seeded with transcript text, an
+  episode title, a feed URL, and a container path (in
+  `composedMessage`, `arguments`, `terminationReason`, and
+  `virtualMemoryRegionInfo`) projects to records whose encoded bytes
+  contain none of them, nor any distinctive fragment of them. The
+  records are still CAPTURED — the test asserts a count, so scrubbing
+  by dropping the diagnostic would not pass.
+- `encodedStringsObeyAllowlist` — walks every string in the encoded
+  record tree and asserts the allowlist + length cap.
+- `locatorCharactersAreUnrepresentable` — asserts `/ : ? & @ % " ' < >
+  { } [ ] | ^ ~ ; , ! \` are outside the allowlist, and that a URL, a
+  path, and non-ASCII text are all rejected by the sanitiser.
+- `encodedRecordShapeIsClosed` — the encoded key set is a subset of the
+  declared `CodingKeys`, and none of the known-leaky MetricKit key names
+  appear on a record or a frame.
+- `metadataAllowlistIsExhaustive` + `leakyKeysAreAbsentFromProjectorCode`
+  — source canaries: the projector reads only its declared metadata
+  keys, and the leaky key identifiers appear nowhere in its code.
+- `PlayheadTests/Support/Diagnostics/DiagnosticsBundleStabilityDiagnosticsTests.swift`
+  — `payloadTravelsToBundleScrubbed` runs the whole pipeline
+  (payload → projector → store → coordinator → encoded bundle) and
+  sweeps the sentinels against the ENTIRE encoded bundle, not just the
+  stability subtree; `noEpisodeReference` asserts part 4.
+- `PlayheadTests/E2E/Privacy/MetricKitDiagnosticsWiringSourceCanaryTests.swift`
+  — pins the two links the simulator cannot execute (the app-delegate
+  registration and the subscriber's forward), and asserts the subscriber
+  reads no MetricKit property directly, so payload interpretation cannot
+  migrate out of the tested projector.
+
+**Egress.** None added. The store is local; records leave the device
+only inside a diagnostics bundle the user actively chooses to send,
+through the same mail path audited in (a)-(d). The parallel
+(and complementary) route is Apple's own: users who leave "Share With
+App Developers" on send crash + hang diagnostics to App Store Connect
+directly, with no Playhead code involved.
+
+**Symbolication.** `scripts/symbolicate-stability-diagnostics.sh` maps
+`binary_uuid` → dSYM (`dwarfdump --uuid`) and resolves each
+`offset_into_binary_text_segment` with `atos -l 0`. Records carry their
+OWN `app_version` / `app_build_version` because MetricKit delivers up to
+24 h late, often after the user has taken an update.
