@@ -66,6 +66,26 @@ fi
 
 # Snag 1: bootstrap a fresh worktree — link the gitignored model, then regenerate
 # the project + scheme. Only runs when the scheme is missing the plan.
+# playhead-ia2s: lint BEFORE building. It costs ~0.2s warm / ~2.4s cold and
+# needs no project, so catching a violation here saves the ~3 minutes the test
+# run would have spent before telling you the same thing.
+#
+# Exit 70 from lint.sh means INFRASTRUCTURE (swiftlint or Xcode missing), not
+# dirty code — warn and carry on rather than failing a whole test gate over a
+# missing dev tool. Any other non-zero is a real violation and stops the gate.
+# Escape hatch: PLAYHEAD_SKIP_LINT=1.
+if [ "${PLAYHEAD_SKIP_LINT:-0}" != "1" ]; then
+  ./scripts/lint.sh
+  LINT_RC=$?
+  if [ "$LINT_RC" -eq 70 ]; then
+    echo "fast-gate: WARNING — lint could not run (exit 70); continuing to tests"
+  elif [ "$LINT_RC" -ne 0 ]; then
+    echo "fast-gate: lint FAILED (exit $LINT_RC) — stopping before the build."
+    echo "fast-gate: fix the violations, or re-run with PLAYHEAD_SKIP_LINT=1 to bypass."
+    exit "$LINT_RC"
+  fi
+fi
+
 SCHEME=Playhead.xcodeproj/xcshareddata/xcschemes/Playhead.xcscheme
 if [ ! -f "$SCHEME" ] || ! grep -q "${PLAN}.xctestplan" "$SCHEME" 2>/dev/null; then
   MODEL_REL="Playhead/Resources/Models/qwen3_0_6b_4bit_dynamic_ft_v2"

@@ -18,6 +18,32 @@ When investigation reveals a framework is broken, present findings and proposed 
 
 ## Testing
 
+### Lint first (`scripts/lint.sh`) — playhead-ia2s
+
+**Run this before the test gate. It takes ~0.2s warm / ~2.4s cold and needs no build.** SwiftLint was installed on this box all along but the repo had no `.swiftlint.yml`, so for months "lint" was a no-op step in every bead gate and every review round — style, dead-code and complexity regressions landed unreviewed, and human reviewers burned rounds on things a linter catches mechanically.
+
+```bash
+scripts/lint.sh                    # whole repo, strict — the gate
+scripts/lint.sh --changed          # only Swift files changed vs the merge-base
+scripts/lint.sh --lenient          # report violations but exit 0
+scripts/lint.sh --fix <paths>      # autocorrect; EXPLICIT PATHS ONLY, refuses repo-wide
+```
+
+`scripts/fast-gate.sh` runs it automatically before building, so a violation stops you in 2 seconds instead of after a 3-minute test run. Bypass with `PLAYHEAD_SKIP_LINT=1`.
+
+**Warnings vs errors — the policy.** Every rule in `.swiftlint.yml` is `warning` severity, and `scripts/lint.sh` adds `--strict` to turn warnings into a non-zero exit. The split is deliberate:
+
+- Bare `swiftlint lint` — what Xcode and editor integrations run — exits 0 and paints yellow. **Lint never blocks an unrelated build.**
+- `scripts/lint.sh` is the gate and is zero-tolerance. It can afford to be: the baseline is **0 violations, measured**, so any failure is in your own diff.
+
+A rule is promoted `warning` → `error` (so it bites even without `--strict`, i.e. inside Xcode) only when it has held at zero for a full release cycle **and** its violations are always genuine defects, never taste. Style rules are never promoted — a style rule that hard-errors in the IDE is how linters get uninstalled.
+
+**The baseline is green and must stay green.** `.swiftlint.yml` was built by measurement, not taste: every candidate rule was run against the whole tree and admitted only at a violation count of exactly zero. 84 rules are enabled; nothing was reformatted and `swiftlint --fix` was never run repo-wide. Rules that fire today are **not** disabled quietly — they are listed at the bottom of `.swiftlint.yml` with their measured counts, tiered as a follow-up roadmap (Tier D is the high-value shortlist: `variable_shadowing` 144, `unused_parameter` 401, `async_without_await` 396, `force_unwrapping` 389, and `identical_operands` 3 which is probably three real defects).
+
+**Two things not to do.** Do not run `swiftlint --fix` across the repo to adopt a new rule — a ~1,100-file reformat destroys `git blame` and collides with every open bead branch; `scripts/lint.sh --fix` refuses without explicit paths for exactly this reason. And do not add a rule to `only_rules` without measuring it first: one red rule and everyone learns to route around the gate, which is strictly worse than having no linter.
+
+### Test plans
+
 Two test plans exist. **Use the correct one for your context:**
 
 **Per-bead work (implementation, review, fix cycles):**
