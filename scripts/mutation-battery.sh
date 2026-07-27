@@ -229,9 +229,13 @@ MUTATIONS=(
   # sharing a batch would credit those two off S01's blast radius.
   "S01|10|ORCH|$T_ADWINDOW_STALE_YES;$T_DECISION_STALE_YES;$T_EXPLICIT_RETIRE_STALE_YES;$T_LATE_INVENTORY_STALE_YES"
 
-  # S02 is safe here: every accept in S04's and S05's tests passes
-  # `ifCurrentEpisodeId: activeEpisodeId`, so deleting that guard is inert
-  # for them and only `episodeBoundSuggestActionsRejectStaleIdentity` moves.
+  # S02 is safe here: every accept in S04's and S05's tests goes through the
+  # one-argument `acceptSuggestedSkip(windowId:)`, which forwards
+  # `ifCurrentEpisodeId: activeEpisodeId`, so deleting that guard is inert for
+  # them and only `episodeBoundSuggestActionsRejectStaleIdentity` moves. That
+  # is a standing DEPENDENCY, not a proof: if either test is ever edited to
+  # pass an episode id of its own, S02 gains a second victim and must move to
+  # a batch of its own.
   "S02|11|ORCH|$T_STALE_IDENTITY"
   "S04|11|ORCH|$T_FUSION_CLEARS_SUGGEST"
   "S05|11|ORCH|$T_DECLINE_NO_CONFIRM"

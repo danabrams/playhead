@@ -5868,6 +5868,15 @@ struct SkipOrchestratorRevertTests {
         // the guard this test names, as the only thing that can reject it.
         // With the asset owned by the ACTIVE episode both guards refuse, and
         // deleting the orchestrator one changes nothing observable.
+        //
+        // Scope, so a later reader does not over-read this: what is pinned
+        // here is the refusal of a WRONGLY-STAMPED caller. It is not the
+        // episode-switch race — a real `beginEpisode` also clears
+        // `suggestRevisionTokensByWindowId`, so after a genuine switch the
+        // token lookup in the same guard chain refuses the stale tap on its
+        // own. The asset-ownership half of the pair is pinned separately by
+        // `explicitResponseRequiresAssetEpisodeOwnership`, which uses the
+        // inverse fixture; neither test can drift into covering the other.
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(episodeId: "episode-stale")
         )
