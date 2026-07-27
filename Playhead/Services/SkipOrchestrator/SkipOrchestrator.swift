@@ -2268,8 +2268,15 @@ actor SkipOrchestrator {
             } catch {
                 logger.warning("Failed to persist revert for \(id): \(error.localizedDescription)")
             }
+            // playhead-i08e: stop touching LIVE state once a replacement
+            // episode owns it — the remaining entries of this snapshot belong
+            // to the old lifecycle and re-inserting them would inject stale
+            // windows into the new episode. `break`, not `return`: the windows
+            // already vetoed above are durably reverted, so the gesture's
+            // receipt and calibration signals below are still owed to the
+            // captured show. Returning here dropped them.
             guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                return
+                break
             }
         }
 
@@ -2289,11 +2296,18 @@ actor SkipOrchestrator {
         // documented as undefined behavior — even though COW happens to
         // make the current loop survive in practice, depending on that is
         // a maintenance hazard. Build the work list first, then mutate.
+        //
+        // playhead-i08e: `suggestWindows` is LIVE state. If the loop above
+        // broke out because a replacement episode took ownership, this pass
+        // would read and veto the NEW episode's suggestions, so it is skipped
+        // wholesale rather than entered and broken out of.
         let suggestRevertTargets: [(id: String, window: AdWindow)] =
-            suggestWindows.compactMap { (id, suggested) in
+            episodeLifecycleGeneration == sourceLifecycleGeneration
+            ? suggestWindows.compactMap { (id, suggested) in
                 guard suggested.startTime < end, suggested.endTime > start else { return nil }
                 return (id, suggested)
             }
+            : []
 
         for (id, suggested) in suggestRevertTargets {
             emitBannerRetirement(windowId: id)
@@ -2320,8 +2334,11 @@ actor SkipOrchestrator {
             } catch {
                 logger.warning("Failed to persist suggest-tier revert for \(id): \(error.localizedDescription)")
             }
+            // See the managed loop above: `break`, not `return`, so the
+            // gesture's receipt and calibration signals still reach the
+            // captured source show.
             guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                return
+                break
             }
         }
 
@@ -2377,9 +2394,18 @@ actor SkipOrchestrator {
                 } else {
                     await trustService.recordWeakFalseSkipSignal(podcastId: podcastId)
                 }
-                guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
-                    return
-                }
+            }
+
+            // playhead-i08e: the SINGLE live-state gate for this gesture. It
+            // covers a lifecycle change that landed in either revert loop as
+            // well as during the trust hop above, and — unlike the guard it
+            // replaces, which sat inside the `podcastId`/`trustService` branch
+            // — it also holds for anonymous reverts that never reach the trust
+            // engine. Everything above this line is durable or fire-and-forget
+            // work owed to the CAPTURED show; only the cue republication below
+            // touches state a replacement episode now owns.
+            guard episodeLifecycleGeneration == sourceLifecycleGeneration else {
+                return
             }
 
             evaluateAndPush()

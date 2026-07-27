@@ -166,6 +166,48 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             rangeTrust.lowerBound,
             "revertByTimeRange must record its threshold-control sample before the trust hop suspends"
         )
+
+        // `revertByTimeRange` guards its lifecycle in three places: once inside
+        // each revert loop (those protect LIVE dictionary mutation and are
+        // deliberately EARLIER than the receipt) and once as the final gate in
+        // front of `evaluateAndPush()`. Only the last one may follow the
+        // durable/calibration effects, so anchor on it explicitly.
+        guard let rangeFinalGuard = timeRangeRevert.range(
+            of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration",
+            options: .backwards
+        ) else {
+            XCTFail("revertByTimeRange must keep a final live-state lifecycle guard")
+            return
+        }
+        for (label, effect) in [
+            ("the manualVeto receipt", rangeReceipt),
+            ("the threshold-control sample", rangeController),
+        ] {
+            XCTAssertLessThan(
+                effect.lowerBound,
+                rangeFinalGuard.lowerBound,
+                "revertByTimeRange must issue \(label) before its final live-state guard"
+            )
+        }
+
+        // playhead-i08e: the in-loop lifecycle guards must `break`, never
+        // `return`. A `return` abandons a gesture whose windows are already
+        // durably reverted, leaving no receipt and no calibration for a
+        // correction the user really made — the same class of silent drop this
+        // canary exists to prevent.
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"guard episodeLifecycleGeneration == sourceLifecycleGeneration else \{\s*return"#,
+                in: timeRangeRevert
+            ),
+            1,
+            """
+            Exactly one lifecycle guard in revertByTimeRange may `return` (the \
+            final live-state gate). The in-loop guards must `break` so the \
+            gesture's receipt and calibration signals still reach the captured \
+            source show.
+            """
+        )
     }
 
     /// Exact feedback receipts belong only in the durable correction store.
@@ -1095,10 +1137,34 @@ struct SkipOrchestratorRevertTests {
         #expect(finalRow.wasSkipped)
     }
 
-    @Test("Auto-No rejects without a correction store and leaves the card-owned row untouched")
-    func autoSkipNoRequiresCorrectionStore() async throws {
+    // MARK: - playhead-i08e: an unwired correction store must NOT veto feedback
+    //
+    // `UserCorrectionStore` is the POST-COMMIT derived-learning listener
+    // (`schedulePostCommitCorrectionLearning`), not the durability owner — the
+    // receipt is appended inside the same AnalysisStore transaction as the
+    // AdWindow mutation. Between 5c1a167e and playhead-i08e the two correction
+    // BUILDERS opened with `guard correctionStore != nil else { throw }`, so an
+    // orchestrator without that optional listener aborted every explicit
+    // response at its first statement: no receipt, no row flip, no trust or
+    // threshold-control calibration. Production always injects the store
+    // (`PlayheadRuntime` line ~1150, non-optional), so the precondition bought
+    // nothing there while silently killing the gesture everywhere else.
+    //
+    // These three tests previously asserted the OPPOSITE contract ("rejects
+    // without a correction store"). They kept passing after the precondition
+    // was removed only because their fixture was incoherent: the asset row
+    // carried `episodeId: "ep-1"` (the `makeSkipTestAnalysisAsset` default)
+    // while `beginEpisode` declared `"episode-1"`, so `feedbackAssetMatches`
+    // rejected the write for an unrelated ownership reason. Both the contract
+    // and the fixture are corrected here — each seam now declares the real
+    // episode id, so the ONLY variable under test is the absent listener.
+
+    @Test("Auto-No persists its durable receipt with no correction store wired")
+    func autoSkipNoPersistsWithoutCorrectionStore() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1123,7 +1189,7 @@ struct SkipOrchestratorRevertTests {
         }
 
         #expect(
-            !(await orchestrator.denyAutoSkippedBanner(
+            await orchestrator.denyAutoSkippedBanner(
                 windowId: item.windowId,
                 analysisAssetId: item.analysisAssetId,
                 startTime: item.adStartTime,
@@ -1134,22 +1200,26 @@ struct SkipOrchestratorRevertTests {
                     item.playbackLifecycleGeneration,
                 ifWindowMaterialRevisionToken:
                     item.windowMaterialRevisionToken
-            ))
+            ),
+            "an unwired derived-learning listener must not veto an explicit No"
         )
         let row = try #require(try await store.fetchAdWindow(id: applied.id))
-        #expect(row.decisionState == AdDecisionState.applied.rawValue)
-        #expect(
-            try await store.loadCorrectionEvents(
-                analysisAssetId: applied.analysisAssetId
-            ).isEmpty
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+        #expect(row.wasSkipped, "the denied skip is still recorded as having fired")
+        let receipts = try await store.loadCorrectionEvents(
+            analysisAssetId: applied.analysisAssetId
         )
+        #expect(receipts.count == 1, "the No must commit exactly one durable receipt")
+        #expect(receipts.first?.source == .bannerAutoSkipDenied)
         #expect((await orchestrator.activeWindowIDs()).contains(applied.id))
     }
 
-    @Test("Suggest-Yes rejects without a correction store and restores the exact suggestion")
-    func suggestYesRequiresCorrectionStore() async throws {
+    @Test("Suggest-Yes persists its durable receipt with no correction store wired")
+    func suggestYesPersistsWithoutCorrectionStore() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1168,35 +1238,41 @@ struct SkipOrchestratorRevertTests {
         }
 
         #expect(
-            !(await orchestrator.acceptSuggestedSkip(
+            await orchestrator.acceptSuggestedSkip(
                 windowId: item.windowId,
                 ifCurrentEpisodeId: item.episodeId,
                 ifPlaybackLifecycleGeneration:
                     item.playbackLifecycleGeneration,
                 ifSuggestionRevisionToken:
                     item.suggestionRevisionToken
-            ))
+            ),
+            "an unwired derived-learning listener must not veto an explicit Yes"
         )
         let row = try #require(
             try await store.fetchAdWindow(id: suggestion.id)
         )
-        #expect(row.decisionState == suggestion.decisionState)
         #expect(
-            try await store.loadCorrectionEvents(
-                analysisAssetId: suggestion.analysisAssetId
-            ).isEmpty
+            row.decisionState == AdDecisionState.suppressed.rawValue,
+            "the original suggest row is retired in favour of the promoted window"
         )
+        let receipts = try await store.loadCorrectionEvents(
+            analysisAssetId: suggestion.analysisAssetId
+        )
+        #expect(receipts.count == 1, "the Yes must commit exactly one durable receipt")
+        #expect(receipts.first?.source == .bannerSuggestionConfirmed)
         #expect(
-            (await orchestrator.activeSuggestWindowIDs())
+            !(await orchestrator.activeSuggestWindowIDs())
                 .contains(suggestion.id)
         )
-        #expect((await orchestrator.activeWindowIDs()).isEmpty)
+        #expect(!(await orchestrator.activeWindowIDs()).isEmpty)
     }
 
-    @Test("Suggest-No rejects without a correction store and restores the exact suggestion")
-    func suggestNoRequiresCorrectionStore() async throws {
+    @Test("Suggest-No persists its durable receipt with no correction store wired")
+    func suggestNoPersistsWithoutCorrectionStore() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-1")
+        )
         let orchestrator = SkipOrchestrator(store: store)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
@@ -1215,7 +1291,7 @@ struct SkipOrchestratorRevertTests {
         }
 
         #expect(
-            !(await orchestrator.declineSuggestedSkip(
+            await orchestrator.declineSuggestedSkip(
                 windowId: item.windowId,
                 isExplicitDenial: true,
                 ifCurrentEpisodeId: item.episodeId,
@@ -1223,21 +1299,93 @@ struct SkipOrchestratorRevertTests {
                     item.playbackLifecycleGeneration,
                 ifSuggestionRevisionToken:
                     item.suggestionRevisionToken
-            ))
+            ),
+            "an unwired derived-learning listener must not veto an explicit No"
         )
         let row = try #require(
             try await store.fetchAdWindow(id: suggestion.id)
         )
-        #expect(row.decisionState == suggestion.decisionState)
-        #expect(!row.userDismissedBanner)
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+        #expect(row.userDismissedBanner)
+        let receipts = try await store.loadCorrectionEvents(
+            analysisAssetId: suggestion.analysisAssetId
+        )
+        #expect(receipts.count == 1, "the No must commit exactly one durable receipt")
+        #expect(receipts.first?.source == .bannerSuggestionDenied)
+        #expect(
+            !(await orchestrator.activeSuggestWindowIDs())
+                .contains(suggestion.id)
+        )
+    }
+
+    /// playhead-i08e: the guard that ACTUALLY refuses an explicit response is
+    /// `AnalysisStore.feedbackAssetMatches` — the acting card's episode must own
+    /// the asset row. Every explicit-feedback transaction
+    /// (`persistDeniedAutoSkip`, `persistConfirmedAutoSkip`,
+    /// `persistAcceptedSuggestionIfCurrent`,
+    /// `persistDeclinedSuggestionIfCurrent`) shares it, so one seam pins it.
+    ///
+    /// This is pinned deliberately: the three tests above used to exercise this
+    /// rejection by ACCIDENT — their asset row carried the fixture's default
+    /// `episodeId` while `beginEpisode` declared another — which is what let
+    /// them keep passing under the name "rejects without a correction store"
+    /// after that precondition was deleted. Fixing those fixtures would have
+    /// left the ownership check with no coverage at this layer.
+    @Test("an explicit response is refused when the card's episode does not own the asset")
+    func explicitResponseRequiresAssetEpisodeOwnership() async throws {
+        let store = try await makeTestStore()
+        // The asset row belongs to "episode-owner"; the orchestrator (and so
+        // every card it emits) claims "episode-impostor".
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(episodeId: "episode-owner")
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "episode-impostor",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 204
+        )
+        let stream = await orchestrator.bannerEventStream()
+        let probe = BoundedStreamProbe(stream)
+        let applied = makeSkipTestAdWindow(
+            id: "foreign-episode-auto-no",
+            startTime: 60,
+            endTime: 120,
+            confidence: 0.9,
+            decisionState: AdDecisionState.applied.rawValue
+        )
+        try await store.insertAdWindow(applied)
+        await orchestrator.receiveAdWindows([applied])
+        guard case let .present(item) = await probe.next() else {
+            Issue.record("Expected applied auto-skip card")
+            return
+        }
+
+        #expect(
+            !(await orchestrator.denyAutoSkippedBanner(
+                windowId: item.windowId,
+                analysisAssetId: item.analysisAssetId,
+                startTime: item.adStartTime,
+                endTime: item.adEndTime,
+                podcastId: item.podcastId,
+                ifCurrentEpisodeId: item.episodeId,
+                ifPlaybackLifecycleGeneration:
+                    item.playbackLifecycleGeneration,
+                ifWindowMaterialRevisionToken:
+                    item.windowMaterialRevisionToken
+            )),
+            "a card whose episode does not own the asset may not write a receipt"
+        )
+        let row = try #require(try await store.fetchAdWindow(id: applied.id))
+        #expect(row.decisionState == AdDecisionState.applied.rawValue)
         #expect(
             try await store.loadCorrectionEvents(
-                analysisAssetId: suggestion.analysisAssetId
+                analysisAssetId: applied.analysisAssetId
             ).isEmpty
-        )
-        #expect(
-            (await orchestrator.activeSuggestWindowIDs())
-                .contains(suggestion.id)
         )
     }
 

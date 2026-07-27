@@ -357,6 +357,20 @@ struct SkipOrchestratorThresholdControlTests {
         // controller when the flag is off.
         #expect(await orchestrator.revertWindow(windowId: "ad-none-veto", podcastId: podcastId))
 
+        // The seams must have run to completion, not merely "not crashed" — an
+        // aborted gesture also writes no controller sample, so without this the
+        // assertion below would hold just as well for the dead write path this
+        // bead fixed. `revertWindow`'s receipt is committed by the AnalysisStore
+        // transaction and so lands even with no correction store wired.
+        let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
+        #expect(
+            receipts.count == 1,
+            "the veto must still commit its durable receipt with the flag off"
+        )
+        #expect(receipts.first?.source == .manualVeto)
+        let row = try #require(try await store.fetchAdWindow(id: "ad-none-veto"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+
         // Build a fresh, separate store and confirm it is empty — proving the
         // orchestrator wrote nowhere (there is no global store to leak into).
         let probe = try makeControllerStore()
