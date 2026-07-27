@@ -390,6 +390,7 @@ func makeSkipTestAdWindow(
     endTime: Double = 120,
     confidence: Double = 0.75,
     decisionState: String = "confirmed",
+    evidenceText: String? = "brought to you by",
     startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
     endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue
 ) -> AdWindow {
@@ -405,7 +406,7 @@ func makeSkipTestAdWindow(
         advertiser: nil,
         product: nil,
         adDescription: nil,
-        evidenceText: "brought to you by",
+        evidenceText: evidenceText,
         evidenceStartTime: startTime,
         metadataSource: "none",
         metadataConfidence: nil,
@@ -414,6 +415,207 @@ func makeSkipTestAdWindow(
         userDismissedBanner: false,
         startEdgeAnchor: startEdgeAnchor,
         endEdgeAnchor: endEdgeAnchor
+    )
+}
+
+// MARK: - Fire-and-forget effect polling (playhead-xsdz.11 / playhead-i08e)
+//
+// The orchestrator's calibration effects — the durable correction receipt, the
+// hard-negative ingest, the per-show threshold-controller sample — are all
+// issued through unstructured `Task`s, so a gesture returns before they land.
+// Every suite that asserts on them needs the same two primitives: poll until an
+// effect appears, and flush pending writes before asserting one did NOT.
+// Shared here because two suites need them and a second copy of the polling
+// idiom lost the barrier in transcription, which quietly turned an
+// upper-bounded assertion into a lower-bounded one.
+
+/// Raised when a fire-and-forget effect never lands inside the polling budget.
+///
+/// Failing loudly is the point: a helper that returned a zero value on timeout
+/// made a DEAD write path (nothing recorded at all) look exactly like a live
+/// one that computed zero, which is how playhead-i08e's regression first read
+/// as "the controller math is wrong".
+struct TestEffectTimeout: Error, CustomStringConvertible {
+    let effect: String
+    let expected: Int
+    let observed: Int
+
+    var description: String {
+        """
+        \(effect): expected at least \(expected) within the ~10s budget, \
+        observed \(observed). The seam under test never issued the effect — \
+        this is a DEAD WRITE PATH, not a miscomputed value.
+        """
+    }
+}
+
+/// Show id used ONLY as a write barrier. Never asserted on directly; its row is
+/// subtracted out by ``controllerRowsExcludingBarrier(_:_:)``.
+let thresholdControllerBarrierShow = "i08e-controller-write-barrier"
+
+func makeTestControllerStore(
+    prefix: String = "threshold-controller"
+) throws -> PerShowThresholdControllerStore {
+    try PerShowThresholdControllerStore(directoryURL: try makeTempDir(prefix: prefix))
+}
+
+/// Poll until the show's sampleCount reaches `expected`.
+///
+/// The budget is generous on purpose — it is only ever spent on the failing
+/// path (a satisfied poll exits on its first read), so a saturated machine
+/// cannot turn a live write path into a red test.
+func pollControllerSampleCount(
+    _ store: PerShowThresholdControllerStore,
+    show: String,
+    expected: Int
+) async throws -> PerShowThresholdControllerState {
+    var state = PerShowThresholdControllerState.zero
+    for _ in 0..<200 { // up to ~10s, only consumed when the write is dead
+        state = await store.state(forShow: show)
+        if state.sampleCount >= expected { return state }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    throw TestEffectTimeout(
+        effect: "controller samples for show \"\(show)\"",
+        expected: expected,
+        observed: state.sampleCount
+    )
+}
+
+/// Flush any controller write the gesture under test may have issued, WITHOUT
+/// a wall-clock guess.
+///
+/// Issues one write of our own through the same production seam and waits for
+/// it to become visible. A write the gesture issued is an unstructured `Task`
+/// created on the orchestrator's executor (`Task {}` in
+/// `recordThresholdControlSignal` inherits actor context, and nothing in the
+/// path is `Task.detached`), strictly before this call's; each then hops to the
+/// same `PerShowThresholdControllerStore` actor. Same-priority actor jobs run
+/// in enqueue order, so observing the barrier's row means the earlier write has
+/// landed.
+///
+/// Two honest limits. That ordering is an implementation property of the
+/// default actor executor, not a language guarantee. And it orders only writes
+/// whose `Task` was created synchronously inside the gesture — a regression
+/// that wrote from a task spawned by a LATER hop (say derived learning calling
+/// back into the orchestrator) would still be enqueued after the barrier.
+///
+/// It replaces a fixed 500 ms settle, which had both limits plus a worse one: a
+/// fixed window is the wrong shape for a negative assertion. It never makes a
+/// correct implementation fail, but on a loaded machine a REGRESSION's write
+/// can land just after it expires and the assertion silently passes. The
+/// barrier scales with load instead of racing it.
+func drainControllerWrites(
+    _ store: PerShowThresholdControllerStore,
+    _ orchestrator: SkipOrchestrator
+) async throws {
+    let before = await store.state(forShow: thresholdControllerBarrierShow).sampleCount
+    await orchestrator.recordThresholdControlMiss(
+        podcastId: thresholdControllerBarrierShow
+    )
+    _ = try await pollControllerSampleCount(
+        store,
+        show: thresholdControllerBarrierShow,
+        expected: before + 1
+    )
+}
+
+/// Wait for the seam's sample, then re-read behind a barrier so callers'
+/// `sampleCount == expected` assertions bound the count from ABOVE as well as
+/// below — a second, opposing write issued by the same gesture would otherwise
+/// land just after the poll returned and cancel the integral unobserved.
+func awaitControllerSampleCount(
+    _ store: PerShowThresholdControllerStore,
+    orchestrator: SkipOrchestrator,
+    show: String,
+    expected: Int
+) async throws -> PerShowThresholdControllerState {
+    _ = try await pollControllerSampleCount(store, show: show, expected: expected)
+    try await drainControllerWrites(store, orchestrator)
+    return await store.state(forShow: show)
+}
+
+/// Row count for "this seam must record NOTHING" assertions, read behind the
+/// barrier above and with the barrier's own row subtracted.
+///
+/// Counting ROWS (not one show's samples) also catches a write misrouted to
+/// some other show id — including the replacement show in a lifecycle race.
+func controllerRowsExcludingBarrier(
+    _ store: PerShowThresholdControllerStore,
+    _ orchestrator: SkipOrchestrator
+) async throws -> Int {
+    try await drainControllerWrites(store, orchestrator)
+    return try await store.count() - 1
+}
+
+/// Poll the durable correction receipts for an asset. `persistManualCorrectionVeto`
+/// writes them through an unstructured `Task` as well.
+func awaitCorrectionReceipts(
+    _ store: AnalysisStore,
+    assetId: String,
+    expected: Int
+) async throws -> [CorrectionEvent] {
+    var events: [CorrectionEvent] = []
+    for _ in 0..<200 {
+        events = try await store.loadCorrectionEvents(analysisAssetId: assetId)
+        if events.count >= expected { return events }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    throw TestEffectTimeout(
+        effect: "durable correction receipts for asset \"\(assetId)\"",
+        expected: expected,
+        observed: events.count
+    )
+}
+
+/// Poll the hard-negative bank. `ingestNegativeFingerprint` is fire-and-forget
+/// through an unstructured `Task` like the other calibration effects.
+func awaitNegativeBankEntries(
+    _ bank: NegativeFingerprintBank,
+    expected: Int
+) async throws -> [NegativeFingerprintEntry] {
+    var entries: [NegativeFingerprintEntry] = []
+    for _ in 0..<200 {
+        entries = try await bank.allEntries()
+        if entries.count >= expected { return entries }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    throw TestEffectTimeout(
+        effect: "hard-negative bank entries",
+        expected: expected,
+        observed: entries.count
+    )
+}
+
+/// A markOnly (suggest-tier) window: surfaced as a suggest banner, never
+/// auto-skipped. Accepting one is the "we missed an ad" gesture; vetoing one is
+/// a suggest-tier-only revert. Distinct enough from `makeSkipTestAdWindow` —
+/// different eligibility gate, boundary state, and sub-auto-skip confidence —
+/// to be worth its own factory rather than six more parameters on that one.
+func makeSkipTestMarkOnlyWindow(
+    id: String,
+    assetId: String = "asset-1",
+    startTime: Double = 60,
+    endTime: Double = 120
+) -> AdWindow {
+    AdWindow(
+        id: id,
+        analysisAssetId: assetId,
+        startTime: startTime,
+        endTime: endTime,
+        confidence: 0.55,
+        boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+        decisionState: AdDecisionState.candidate.rawValue,
+        detectorVersion: "test-1",
+        advertiser: nil, product: nil, adDescription: nil,
+        evidenceText: nil, evidenceStartTime: startTime,
+        metadataSource: "none",
+        metadataConfidence: nil,
+        metadataPromptVersion: nil,
+        wasSkipped: false,
+        userDismissedBanner: false,
+        evidenceSources: nil,
+        eligibilityGate: SkipEligibilityGate.markOnly.rawValue
     )
 }
 

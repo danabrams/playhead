@@ -25,29 +25,6 @@ import Foundation
 import Testing
 @testable import Playhead
 
-/// playhead-i08e: raised by `awaitSampleCount` when no controller sample lands
-/// inside the polling budget.
-///
-/// The helper previously returned `PerShowThresholdControllerState.zero` on
-/// timeout, which made a DEAD write path (no sample recorded at all) look
-/// exactly like a live write path that computed `integral == 0`. That
-/// ambiguity is what let this regression read as "the controller math is
-/// wrong". Failing loudly keeps the two diagnoses apart.
-private struct ControllerSampleTimeout: Error, CustomStringConvertible {
-    let show: String
-    let expected: Int
-    let observed: Int
-
-    var description: String {
-        """
-        No controller sample was recorded for show "\(show)" within the ~10s \
-        budget: expected sampleCount >= \(expected), observed \(observed). \
-        The seam under test never reached recordThresholdControlSignal — this \
-        is a DEAD WRITE PATH, not a miscomputed controller value.
-        """
-    }
-}
-
 /// Bounded read of the first `.present` banner item. `denyAutoSkippedBanner`
 /// validates the action against the exact material the card displayed, so the
 /// test has to answer with the orchestrator's own emission rather than a
@@ -85,116 +62,12 @@ struct SkipOrchestratorThresholdControlTests {
     /// is exactly what production guarantees by passing the real episode id.
     private let episodeId = "ep-1"
 
-    private func makeControllerStore() throws -> PerShowThresholdControllerStore {
-        let dir = try makeTempDir(prefix: "xsdz11-orch-store")
-        return try PerShowThresholdControllerStore(directoryURL: dir)
-    }
-
-    /// Show id used ONLY as a write barrier. Never asserted on directly; its
-    /// row is subtracted out by `controllerRowsExcludingBarrier`.
-    private static let barrierShow = "i08e-controller-write-barrier"
-
-    /// Poll until the show's sampleCount reaches `expected`. The controller
-    /// write is fire-and-forget via an unstructured Task, so a gesture can
-    /// return before its sample lands.
-    ///
-    /// playhead-i08e: throws rather than returning `.zero` when the budget
-    /// expires, so "nothing was ever recorded" can never masquerade as a
-    /// computed value. The budget is generous on purpose — it is only ever
-    /// spent on the failing path (a satisfied poll exits on its first read), so
-    /// a saturated machine cannot turn a live write path into a red test.
-    private func pollSampleCount(
-        _ store: PerShowThresholdControllerStore,
-        show: String,
-        expected: Int
-    ) async throws -> PerShowThresholdControllerState {
-        var state = PerShowThresholdControllerState.zero
-        for _ in 0..<200 { // up to ~10s, only consumed when the write is dead
-            state = await store.state(forShow: show)
-            if state.sampleCount >= expected { return state }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        throw ControllerSampleTimeout(
-            show: show,
-            expected: expected,
-            observed: state.sampleCount
-        )
-    }
-
-    /// playhead-i08e (fourth pass): flush any controller write the gesture
-    /// under test may have issued, WITHOUT a wall-clock guess.
-    ///
-    /// Issues one write of our own through the same production seam and waits
-    /// for it to become visible. A write the gesture issued is an unstructured
-    /// `Task` created on the orchestrator's executor (`Task {}` in
-    /// `recordThresholdControlSignal` inherits actor context, and nothing in
-    /// the path is `Task.detached`), strictly before this call's; each then
-    /// hops to the same `PerShowThresholdControllerStore` actor. Same-priority
-    /// actor jobs run in enqueue order, so observing the barrier's row means
-    /// the earlier write has landed.
-    ///
-    /// Two honest limits. That ordering is an implementation property of the
-    /// default actor executor, not a language guarantee. And it orders only
-    /// writes whose `Task` was created synchronously inside the gesture — a
-    /// regression that wrote from a task spawned by a LATER hop (say derived
-    /// learning calling back into the orchestrator) would still be enqueued
-    /// after the barrier.
-    ///
-    /// It replaces a fixed 500 ms settle, which had both limits plus a worse
-    /// one: a fixed window is the wrong shape for a negative assertion. It
-    /// never makes a correct implementation fail, but on a loaded machine a
-    /// REGRESSION's write can land just after it expires and the assertion
-    /// silently passes. The barrier scales with load instead of racing it.
-    private func drainControllerWrites(
-        _ store: PerShowThresholdControllerStore,
-        _ orchestrator: SkipOrchestrator
-    ) async throws {
-        let before = await store.state(forShow: Self.barrierShow).sampleCount
-        await orchestrator.recordThresholdControlMiss(
-            podcastId: Self.barrierShow
-        )
-        _ = try await pollSampleCount(
-            store,
-            show: Self.barrierShow,
-            expected: before + 1
-        )
-    }
-
-    /// Wait for the seam's sample, then re-read behind a barrier so callers'
-    /// `sampleCount == expected` assertions bound the count from ABOVE as well
-    /// as below — a second, opposing write issued by the same gesture would
-    /// otherwise land just after the poll returned and cancel the integral
-    /// unobserved.
-    private func awaitSampleCount(
-        _ store: PerShowThresholdControllerStore,
-        orchestrator: SkipOrchestrator,
-        show: String,
-        expected: Int
-    ) async throws -> PerShowThresholdControllerState {
-        _ = try await pollSampleCount(store, show: show, expected: expected)
-        try await drainControllerWrites(store, orchestrator)
-        return await store.state(forShow: show)
-    }
-
-    /// Row count for the "this seam must record NOTHING" assertions, read
-    /// behind the barrier above and with the barrier's own row subtracted.
-    ///
-    /// Counting ROWS (not one show's samples) also catches a write misrouted to
-    /// some other show id.
-    private func controllerRowsExcludingBarrier(
-        _ store: PerShowThresholdControllerStore,
-        _ orchestrator: SkipOrchestrator
-    ) async throws -> Int {
-        try await drainControllerWrites(store, orchestrator)
-        return try await store.count() - 1
-    }
-
     @Test("Listen revert of a managed auto-skip window records a FALSE-POSITIVE signal (integral +1)")
     func listenRevertRecordsFalsePositive() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
@@ -206,7 +79,7 @@ struct SkipOrchestratorThresholdControlTests {
 
         await orchestrator.recordListenRevert(windowId: "ad-fp", podcastId: podcastId)
 
-        let state = try await awaitSampleCount(
+        let state = try await awaitControllerSampleCount(
             controllerStore,
             orchestrator: orchestrator,
             show: podcastId,
@@ -222,7 +95,7 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
@@ -234,7 +107,7 @@ struct SkipOrchestratorThresholdControlTests {
 
         #expect(await orchestrator.revertWindow(windowId: "ad-veto", podcastId: podcastId))
 
-        let state = try await awaitSampleCount(
+        let state = try await awaitControllerSampleCount(
             controllerStore,
             orchestrator: orchestrator,
             show: podcastId,
@@ -272,7 +145,7 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
@@ -288,7 +161,7 @@ struct SkipOrchestratorThresholdControlTests {
 
         #expect(await orchestrator.revertWindow(windowId: "ad-veto-wired", podcastId: podcastId))
 
-        let state = try await awaitSampleCount(
+        let state = try await awaitControllerSampleCount(
             controllerStore,
             orchestrator: orchestrator,
             show: podcastId,
@@ -304,7 +177,7 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
@@ -316,7 +189,7 @@ struct SkipOrchestratorThresholdControlTests {
 
         await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: podcastId)
 
-        let state = try await awaitSampleCount(
+        let state = try await awaitControllerSampleCount(
             controllerStore,
             orchestrator: orchestrator,
             show: podcastId,
@@ -335,7 +208,7 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
@@ -367,7 +240,7 @@ struct SkipOrchestratorThresholdControlTests {
             "the exact displayed material must be accepted"
         )
 
-        let state = try await awaitSampleCount(
+        let state = try await awaitControllerSampleCount(
             controllerStore,
             orchestrator: orchestrator,
             show: podcastId,
@@ -383,20 +256,20 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
 
-        let markOnly = makeMarkOnlySuggestWindow(id: "ad-suggest-miss")
+        let markOnly = makeSkipTestMarkOnlyWindow(id: "ad-suggest-miss")
         try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
         #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-miss"))
 
         #expect(await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-miss"))
 
-        let state = try await awaitSampleCount(
+        let state = try await awaitControllerSampleCount(
             controllerStore,
             orchestrator: orchestrator,
             show: podcastId,
@@ -415,7 +288,7 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(
             store: store,
             trustService: trustService,
@@ -425,14 +298,14 @@ struct SkipOrchestratorThresholdControlTests {
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
 
-        let markOnly = makeMarkOnlySuggestWindow(id: "ad-suggest-miss-wired")
+        let markOnly = makeSkipTestMarkOnlyWindow(id: "ad-suggest-miss-wired")
         try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
         #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-miss-wired"))
 
         #expect(await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-miss-wired"))
 
-        let state = try await awaitSampleCount(
+        let state = try await awaitControllerSampleCount(
             controllerStore,
             orchestrator: orchestrator,
             show: podcastId,
@@ -523,7 +396,7 @@ struct SkipOrchestratorThresholdControlTests {
     func anonymousRevertRecordsNoControllerSample() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(
             store: store,
             correctionStore: PersistentUserCorrectionStore(store: store)
@@ -557,7 +430,7 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
@@ -616,7 +489,7 @@ struct SkipOrchestratorThresholdControlTests {
     func declineSuggestedSkipRecordsNoControllerSample() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(
             store: store,
             correctionStore: PersistentUserCorrectionStore(store: store)
@@ -625,7 +498,7 @@ struct SkipOrchestratorThresholdControlTests {
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
 
-        let markOnly = makeMarkOnlySuggestWindow(id: "ad-suggest-no")
+        let markOnly = makeSkipTestMarkOnlyWindow(id: "ad-suggest-no")
         try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
         #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-no"))
@@ -657,7 +530,7 @@ struct SkipOrchestratorThresholdControlTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
-        let controllerStore = try makeControllerStore()
+        let controllerStore = try makeTestControllerStore(prefix: "xsdz11-orch-store")
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
@@ -665,7 +538,7 @@ struct SkipOrchestratorThresholdControlTests {
 
         // markOnly ONLY — the gesture must find no managed auto-skip window,
         // so `revertedManagedAny` stays false.
-        let markOnly = makeMarkOnlySuggestWindow(id: "ad-suggest-range")
+        let markOnly = makeSkipTestMarkOnlyWindow(id: "ad-suggest-range")
         try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
         #expect(await orchestrator.activeSuggestWindowIDs().contains("ad-suggest-range"))
@@ -684,29 +557,5 @@ struct SkipOrchestratorThresholdControlTests {
             "a suggest-only revert never altered playback — too weak to raise the threshold"
         )
         await controllerStore.close()
-    }
-
-    /// A markOnly (suggest-tier) window — surfaced as a suggest banner, never
-    /// auto-skipped. Accepting it is the "we missed an ad" gesture.
-    private func makeMarkOnlySuggestWindow(id: String) -> AdWindow {
-        AdWindow(
-            id: id,
-            analysisAssetId: "asset-1",
-            startTime: 60,
-            endTime: 120,
-            confidence: 0.55,
-            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
-            decisionState: AdDecisionState.candidate.rawValue,
-            detectorVersion: "test-1",
-            advertiser: nil, product: nil, adDescription: nil,
-            evidenceText: nil, evidenceStartTime: 60,
-            metadataSource: "none",
-            metadataConfidence: nil,
-            metadataPromptVersion: nil,
-            wasSkipped: false,
-            userDismissedBanner: false,
-            evidenceSources: nil,
-            eligibilityGate: SkipEligibilityGate.markOnly.rawValue
-        )
     }
 }

@@ -222,6 +222,21 @@ actor SkipOrchestrator {
     /// transition. Production leaves this nil.
     private var appliedPersistenceBarrierForTesting:
         (@Sendable () async -> Void)?
+    /// playhead-i08e: test-only suspension point taken by the REVERT seams
+    /// (`recordListenRevert` and both of `revertByTimeRange`'s loops)
+    /// immediately after each durable decision-state write and before the
+    /// live-lifecycle guard that follows it. Production leaves this nil.
+    ///
+    /// It exists so `SkipOrchestratorRevertLifecycleRaceTests` can interleave
+    /// an episode switch with the exact suspension those guards were written
+    /// for, and therefore assert the invariant BEHAVIOURALLY: a gesture whose
+    /// lifecycle is replaced mid-flight still delivers its durable receipt and
+    /// its calibration samples to the CAPTURED show, still stops mutating live
+    /// state, and no longer republishes cues. Without it the invariant is only
+    /// reachable by scanning this file's source text, which is what five
+    /// review rounds of playhead-i08e spent themselves on.
+    private var revertPersistenceBarrierForTesting:
+        (@Sendable () async -> Void)?
 
     // MARK: - Phase 7.2: User Correction Store
 
@@ -646,6 +661,12 @@ actor SkipOrchestrator {
         _ barrier: (@Sendable () async -> Void)?
     ) {
         appliedPersistenceBarrierForTesting = barrier
+    }
+
+    func _setRevertPersistenceBarrierForTesting(
+        _ barrier: (@Sendable () async -> Void)?
+    ) {
+        revertPersistenceBarrierForTesting = barrier
     }
 
     func _suggestWindowForTesting(id: String) -> AdWindow? {
@@ -2148,6 +2169,9 @@ actor SkipOrchestrator {
         } catch {
             logger.warning("Failed to persist revert for \(windowId): \(error.localizedDescription)")
         }
+        if let barrier = revertPersistenceBarrierForTesting {
+            await barrier()
+        }
 
         // Signal the trust engine about the false skip.
         if let podcastId, let trustService {
@@ -2268,6 +2292,9 @@ actor SkipOrchestrator {
             } catch {
                 logger.warning("Failed to persist revert for \(id): \(error.localizedDescription)")
             }
+            if let barrier = revertPersistenceBarrierForTesting {
+                await barrier()
+            }
             // playhead-i08e: stop touching LIVE state once a replacement
             // episode owns it — the remaining entries of this snapshot belong
             // to the old lifecycle and re-inserting them would inject stale
@@ -2346,6 +2373,9 @@ actor SkipOrchestrator {
                 )
             } catch {
                 logger.warning("Failed to persist suggest-tier revert for \(id): \(error.localizedDescription)")
+            }
+            if let barrier = revertPersistenceBarrierForTesting {
+                await barrier()
             }
             // See the managed loop above: `break`, not `return`, so the
             // gesture's receipt and calibration signals still reach the

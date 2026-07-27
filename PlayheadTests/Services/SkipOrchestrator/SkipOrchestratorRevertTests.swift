@@ -91,571 +91,6 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         }
     }
 
-    /// playhead-i08e: the lifecycle guards in the revert seams protect LIVE
-    /// state only. A revert's durable receipt, hard-negative ingest, and
-    /// threshold-control sample belong to the show captured at gesture time and
-    /// are all fire-and-forget over pre-suspension values, so they must be
-    /// issued BEFORE the live-state guard that gates `evaluateAndPush()`.
-    /// Ordering them after it — which is how `recordListenRevert` and
-    /// `revertByTimeRange` read between 5c1a167e and playhead-i08e — silently
-    /// discards a valid old-episode correction AFTER that same gesture's trust
-    /// penalty has already landed, leaving trust and corrections permanently
-    /// out of step.
-    ///
-    /// Precision note: this pins each effect against its own function's
-    /// live-state guard. It does NOT claim every seam issues its effects before
-    /// its trust hop — `revertByTimeRange` and `revertWindow` do,
-    /// `recordListenRevert` does not, and that is fine because no guard sits
-    /// between `recordListenRevert`'s trust hop and its effects. Ordering
-    /// against the guard is the invariant that actually prevents the drop.
-    ///
-    /// Source-level because the race needs an episode switch to interleave
-    /// with an AnalysisStore/TrustScoringService suspension, and neither seam
-    /// exposes a persistence barrier to make that deterministic.
-    func testRevertCalibrationEffectsPrecedeTheirLiveStateGuard() throws {
-        let source = try SwiftSourceInspector.loadSource(
-            repoRelativePath: "Playhead/Services/SkipOrchestrator/SkipOrchestrator.swift"
-        )
-
-        // Strings are blanked as well as comments: every rail below greps for a
-        // CODE token (`return`, a lifecycle identifier), and a future log line
-        // that merely mentions one inside a literal must not redden the canary.
-        // `strippingCommentsAndStrings` is length-preserving, so `braceDepth`'s
-        // offset arithmetic is unaffected.
-        guard let listenRevert = SwiftSourceInspector.firstBody(
-            in: source,
-            after: "func recordListenRevert("
-        ).map(SwiftSourceInspector.strippingCommentsAndStrings) else {
-            XCTFail("Could not locate the recordListenRevert body")
-            return
-        }
-        guard let listenCapture = listenRevert.range(
-                of: "let sourceLifecycleGeneration = episodeLifecycleGeneration"
-              ),
-              let listenReceipt = listenRevert.range(of: "persistManualCorrectionVeto("),
-              let listenNegative = listenRevert.range(of: "ingestNegativeFingerprint("),
-              let listenController = listenRevert.range(of: "recordThresholdControlSignal("),
-              let listenGuard = listenRevert.range(
-                of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration"
-              )
-        else {
-            XCTFail(
-                "recordListenRevert must keep its receipt, hard-negative ingest, controller write, and lifecycle guard"
-            )
-            return
-        }
-        for (label, effect) in [
-            ("the manualVeto receipt", listenReceipt),
-            ("the hard-negative ingest", listenNegative),
-            ("the threshold-control sample", listenController),
-        ] {
-            XCTAssertLessThan(
-                effect.lowerBound,
-                listenGuard.lowerBound,
-                "recordListenRevert must issue \(label) before its live-lifecycle guard"
-            )
-            // Structural, not positional: each effect must also sit at the TOP
-            // LEVEL of the function body. Any conditional wrapper — wherever it
-            // is opened — nests it one brace deeper, so this rejects the whole
-            // family of "gate the effects on the lifecycle" evasions at once,
-            // including the ones a position-anchored scan cannot see.
-            XCTAssertEqual(
-                braceDepth(in: listenRevert, at: effect.lowerBound),
-                0,
-                """
-                recordListenRevert must issue \(label) unconditionally, at the \
-                top level of the function body. It is nested inside a block, \
-                which means some condition can now suppress an effect that is \
-                owed to the CAPTURED show whatever the live lifecycle is.
-                """
-            )
-        }
-        // The guard is only load-bearing if it still gates the live-state work.
-        // Without this, moving it BELOW `evaluateAndPush()` would satisfy every
-        // assertion above while restoring cross-episode cue republication.
-        guard let listenPush = listenRevert.range(of: "evaluateAndPush(") else {
-            XCTFail("recordListenRevert must still republish cues")
-            return
-        }
-        XCTAssertLessThan(
-            listenGuard.lowerBound,
-            listenPush.lowerBound,
-            "recordListenRevert's lifecycle guard must gate evaluateAndPush()"
-        )
-        // Belt-and-suspenders on the same contract: the span from the capture
-        // to the guard must not name the captured generation at all. Anchored
-        // at the CAPTURE rather than at the first effect — an `if` opened one
-        // line above `persistManualCorrectionVeto(` lies outside a
-        // first-effect-anchored region, which is how this assertion was
-        // defeated. `recordListenRevert` has exactly two legitimate mentions of
-        // the captured generation, this capture and the final guard, and the
-        // bounds exclude both.
-        assertNoLifecycleRecheck(
-            in: listenRevert,
-            from: listenCapture.upperBound,
-            to: listenGuard.lowerBound,
-            seam: "recordListenRevert"
-        )
-        guard let listenSuspension = listenRevert.range(
-            of: "try await store.updateAdWindowDecision("
-        ) else {
-            XCTFail("recordListenRevert must still persist its decision-state change")
-            return
-        }
-        assertNoEarlyExit(
-            in: listenRevert,
-            from: listenSuspension.upperBound,
-            to: listenGuard.lowerBound,
-            seam: "recordListenRevert"
-        )
-
-        guard let timeRangeRevert = SwiftSourceInspector.firstBody(
-            in: source,
-            after: "func revertByTimeRange("
-        ).map(SwiftSourceInspector.strippingCommentsAndStrings) else {
-            XCTFail("Could not locate the revertByTimeRange body")
-            return
-        }
-        guard let rangeReceipt = timeRangeRevert.range(of: "persistManualCorrectionVeto("),
-              let rangeController = timeRangeRevert.range(of: "recordThresholdControlSignal("),
-              let rangeTrust = timeRangeRevert.range(of: "await trustService.recordFalseSkipSignal(")
-        else {
-            XCTFail(
-                "revertByTimeRange must keep its receipt, controller write, and full-magnitude trust signal"
-            )
-            return
-        }
-        XCTAssertLessThan(
-            rangeReceipt.lowerBound,
-            rangeTrust.lowerBound,
-            "revertByTimeRange must write its receipt before the trust hop suspends"
-        )
-        XCTAssertLessThan(
-            rangeController.lowerBound,
-            rangeTrust.lowerBound,
-            "revertByTimeRange must record its threshold-control sample before the trust hop suspends"
-        )
-
-        // `revertByTimeRange` guards its lifecycle in three places: once inside
-        // each revert loop (those protect LIVE dictionary mutation and are
-        // deliberately EARLIER than the receipt) and once as the final gate in
-        // front of `evaluateAndPush()`. Only the last one may follow the
-        // durable/calibration effects, so anchor on it explicitly.
-        guard let rangeFinalGuard = timeRangeRevert.range(
-            of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration",
-            options: .backwards
-        ) else {
-            XCTFail("revertByTimeRange must keep a final live-state lifecycle guard")
-            return
-        }
-        for (label, effect) in [
-            ("the manualVeto receipt", rangeReceipt),
-            ("the threshold-control sample", rangeController),
-        ] {
-            XCTAssertLessThan(
-                effect.lowerBound,
-                rangeFinalGuard.lowerBound,
-                "revertByTimeRange must issue \(label) before its final live-state guard"
-            )
-        }
-        guard let rangePush = timeRangeRevert.range(of: "evaluateAndPush(") else {
-            XCTFail("revertByTimeRange must still republish cues")
-            return
-        }
-        XCTAssertLessThan(
-            rangeFinalGuard.lowerBound,
-            rangePush.lowerBound,
-            "revertByTimeRange's final guard must gate evaluateAndPush()"
-        )
-        // The structural landmarks of the function, in source order: the
-        // managed loop's persistence hop, its in-loop lifecycle guard, the
-        // suggest-tier work list, the loop that consumes it, and the effects
-        // block. Everything below is expressed against these, so a refactor
-        // that moves one reports as a single anchor-drift failure rather than a
-        // scatter of unrelated ones.
-        guard let rangeManagedPersist = timeRangeRevert.range(
-                of: "try await store.updateAdWindowDecision("
-              ),
-              let rangeManagedGuard = timeRangeRevert.range(
-                of: "guard episodeLifecycleGeneration == sourceLifecycleGeneration"
-              ),
-              let rangeSuggestBuild = timeRangeRevert.range(of: "suggestWindows.compactMap"),
-              let rangeSuggestLoop = timeRangeRevert.range(
-                of: "for (id, suggested) in suggestRevertTargets"
-              ),
-              let rangeEffectsBlock = timeRangeRevert.range(of: "if revertedAny"),
-              rangeManagedPersist.upperBound < rangeManagedGuard.lowerBound,
-              rangeManagedGuard.upperBound < rangeSuggestBuild.lowerBound,
-              rangeSuggestBuild.upperBound < rangeSuggestLoop.lowerBound,
-              rangeSuggestLoop.upperBound < rangeEffectsBlock.lowerBound
-        else {
-            XCTFail(
-                """
-                revertByTimeRange no longer has the shape this canary scans — \
-                a managed-loop persistence hop, an in-loop lifecycle guard, a \
-                suggest-tier work list, its consuming loop, and an \
-                `if revertedAny` effects block, in that order. The canary's \
-                anchors have drifted; re-derive them rather than deleting rails.
-                """
-            )
-            return
-        }
-        // `revertByTimeRange`'s effects are legitimately nested (inside
-        // `if revertedAny`, then `if let assetId` / `if revertedManagedAny`),
-        // so the depth check anchors on the block instead of the statements:
-        // `if revertedAny` itself must be top-level, which rejects any wrapper
-        // opened ABOVE it, and the region scans below reject one opened INSIDE
-        // it. Together those cover both sides of the anchor.
-        XCTAssertEqual(
-            braceDepth(in: timeRangeRevert, at: rangeEffectsBlock.lowerBound),
-            0,
-            """
-            revertByTimeRange's `if revertedAny` effects block must sit at the \
-            top level of the function body. Nesting it means something can \
-            suppress the whole gesture's receipt and calibration — which is \
-            the drop this canary exists to prevent.
-            """
-        )
-        // Everything from that block's opening to the final guard — receipt,
-        // controller sample, trust hop — is owed to the captured show
-        // unconditionally, so no mention of the captured generation belongs in
-        // it. (The two in-loop guards and the suggest-target ternary, which
-        // legitimately mention it, are all upstream of this block.)
-        assertNoLifecycleRecheck(
-            in: timeRangeRevert,
-            from: rangeEffectsBlock.lowerBound,
-            to: rangeFinalGuard.lowerBound,
-            seam: "revertByTimeRange"
-        )
-        // `revertByTimeRange` is scanned for early exits in THREE pieces rather
-        // than one. A single region has to start below the
-        // `suggestWindows.compactMap` closure — a `return` there exits the
-        // closure, not the function, and a textual scan cannot tell them apart
-        // — and that concession left the entire pre-effects span unscanned.
-        //
-        // playhead-i08e (fifth pass): that span was not, in fact, covered by
-        // the `break`-not-`return` regex below, which only recognises the
-        // literal `guard episodeLifecycleGeneration == …` form. A top-level
-        //
-        //     guard activePodcastId == podcastId else { return }
-        //
-        // placed just above `if revertedAny` — the "harmonise with
-        // `revertWindow`/`denyAutoSkippedBanner`" refactor, spelled against a
-        // different field — dropped the receipt, the controller sample AND the
-        // trust penalty with every rail in this test green and every
-        // behavioural test green too (they all pass a `podcastId` equal to the
-        // active one). Verified by mutation before and after this split.
-        //
-        // The two added regions are closure-free by construction, so they need
-        // no depth filtering: the only closure in the function lies strictly
-        // between them.
-        assertNoEarlyExit(
-            in: timeRangeRevert,
-            from: rangeManagedPersist.upperBound,
-            to: rangeSuggestBuild.lowerBound,
-            seam: "revertByTimeRange (managed loop → suggest work list)"
-        )
-        assertNoEarlyExit(
-            in: timeRangeRevert,
-            from: rangeSuggestLoop.lowerBound,
-            to: rangeEffectsBlock.lowerBound,
-            seam: "revertByTimeRange (suggest loop → effects block)"
-        )
-        assertNoEarlyExit(
-            in: timeRangeRevert,
-            from: rangeEffectsBlock.lowerBound,
-            to: rangeFinalGuard.lowerBound,
-            seam: "revertByTimeRange (effects block → final guard)"
-        )
-
-        // playhead-i08e: `revertByTimeRange` has exactly three lifecycle
-        // guards, and BOTH halves of that census are load-bearing.
-        //
-        //   • The two in-loop guards must `break`, never `return`. A `return`
-        //     abandons a gesture whose windows are already durably reverted,
-        //     leaving no receipt and no calibration for a correction the user
-        //     really made.
-        //   • Both must also still EXIST. Counting only the `return` form (as
-        //     this rail did through the fourth pass) let the SUGGEST loop's
-        //     guard be deleted outright with the count unchanged at 1 — after
-        //     which a lifecycle lost mid-loop keeps writing the OLD snapshot's
-        //     ids into `suggestBanneredWindowIds` / `vetoedSuggestWindowIds`,
-        //     which `beginEpisode` has just cleared for the replacement
-        //     episode, and emits retirements stamped with the NEW episode's
-        //     identity for OLD window ids. Mutation-verified as a live hole.
-        //
-        // `[^{}]*` rather than `\s*` before the keyword: requiring the keyword
-        // to be the first thing inside the brace made a plain diagnostic —
-        // `logger.debug(…)` above the `return` in the final guard — read as a
-        // count of 0 and fail with a message naming the opposite defect ("the
-        // in-loop guards must `break`"), sending the next author to the wrong
-        // place entirely. Also mutation-verified.
-        XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(
-                of: #"guard\s+episodeLifecycleGeneration\s*==\s*sourceLifecycleGeneration\s+else\s*\{[^{}]*\breturn\b"#,
-                in: timeRangeRevert
-            ),
-            1,
-            """
-            Exactly one lifecycle guard in revertByTimeRange may `return` (the \
-            final live-state gate). The in-loop guards must `break` so the \
-            gesture's receipt and calibration signals still reach the captured \
-            source show.
-            """
-        )
-        XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(
-                of: #"guard\s+episodeLifecycleGeneration\s*==\s*sourceLifecycleGeneration\s+else\s*\{[^{}]*\bbreak\b"#,
-                in: timeRangeRevert
-            ),
-            2,
-            """
-            revertByTimeRange must keep BOTH in-loop lifecycle guards — one in \
-            the managed loop, one in the suggest-tier loop — and both must \
-            `break`. Losing the suggest-tier one lets a gesture keep mutating \
-            live suggest state (`suggestWindows`, `suggestBanneredWindowIds`, \
-            `vetoedSuggestWindowIds`, banner retirements) after a replacement \
-            episode has taken ownership of it.
-            """
-        )
-
-        // playhead-i08e: the `break` above is what MAKES this next rail
-        // load-bearing, so the two must move together. While the in-loop guard
-        // `return`ed, losing the lifecycle inside the managed loop abandoned
-        // the function outright and the suggest-tier pass below was simply
-        // unreachable. Now the function keeps going — so that pass, which reads
-        // and mutates the LIVE `suggestWindows` dictionary, has to carry its own
-        // lifecycle gate. Without one it builds its work list from the
-        // REPLACEMENT episode's suggestions and vetoes them: not a dropped
-        // signal this time but cross-episode corruption, a strictly worse bug
-        // than the one this canary was written for.
-        //
-        // Source-level because it is the one invariant in this seam that no
-        // behavioural test can reach: reproducing it needs an episode switch to
-        // interleave with an AnalysisStore suspension, and `revertByTimeRange`
-        // exposes no persistence barrier to make that deterministic. Verified by
-        // mutation — deleting the gate leaves every behavioural test in
-        // SkipOrchestratorThresholdControlTests and SkipOrchestratorRevertTests
-        // green.
-        //
-        // The region runs from the end of the managed loop's in-loop guard to
-        // the loop that consumes the work list, so it accepts every reasonable
-        // spelling of the gate — today's ternary, an `if` / `guard` wrapper
-        // around the `compactMap`, or a check inside the closure — and only
-        // rejects its absence. All three spellings verified.
-        XCTAssertTrue(
-            timeRangeRevert[rangeManagedGuard.upperBound..<rangeSuggestLoop.lowerBound]
-                .contains("episodeLifecycleGeneration == sourceLifecycleGeneration"),
-            """
-            revertByTimeRange builds its suggest-tier work list without \
-            re-checking the captured lifecycle. `suggestWindows` is LIVE state: \
-            once the managed loop has `break`ed because a replacement episode \
-            took ownership, reading it here collects the NEW episode's \
-            suggestions and the loop below vetoes them. Gate the work list \
-            (ternary, `if`, or `guard`) between the managed loop and this pass.
-            """
-        )
-    }
-
-    /// Brace nesting depth of `index` within a function body. Depth 0 means
-    /// "a statement of the function itself" — not nested in any block.
-    ///
-    /// This is the structural half of the contract, and it is what makes the
-    /// canary robust rather than merely well-anchored: a textual region has a
-    /// start position, and every start position can be evaded by opening the
-    /// offending conditional one line earlier. Depth has no such loophole —
-    /// wrapping a statement in anything at all increases it, including a
-    /// wrapper that never names the captured generation and so is invisible to
-    /// `assertNoLifecycleRecheck` (verified by mutation with
-    /// `if !windows.isEmpty { … }`).
-    ///
-    /// Depth 0 is deliberately STRICTER than "reached unconditionally". A
-    /// behaviour-preserving wrapper such as
-    /// `if let podcastId { recordThresholdControlSignal(…) }` — redundant,
-    /// since that call already guards its own nil — is rejected too. That is
-    /// the intended trade: "is THIS particular condition safe to gate the
-    /// effect on?" is exactly the judgement call that produced this bug, so
-    /// the rail refuses to adjudicate it and requires the effects to be
-    /// unconditional statements.
-    ///
-    /// String-literal contents are blanked before counting, so a brace inside
-    /// a literal cannot shift the result. `strippingCommentsAndStrings`
-    /// preserves length exactly (pinned by
-    /// `SwiftSourceInspectorStringStrippingTests`), so offsets computed on
-    /// `body` address the same characters in the blanked copy.
-    private func braceDepth(in body: String, at index: String.Index) -> Int {
-        let scan = SwiftSourceInspector.strippingCommentsAndStrings(body)
-        let offset = body.distance(from: body.startIndex, to: index)
-        guard offset >= 0, offset <= scan.count else { return .min }
-        let end = scan.index(scan.startIndex, offsetBy: offset)
-        var depth = 0
-        for character in scan[scan.startIndex..<end] {
-            if character == "{" {
-                depth += 1
-            } else if character == "}" {
-                depth -= 1
-            }
-        }
-        return depth
-    }
-
-    /// Once a seam has SUSPENDED, nothing may abort it before its live-state
-    /// guard: by then its trust penalty may already have landed, so an early
-    /// exit drops the matching receipt and calibration.
-    ///
-    /// This closes the family `braceDepth` cannot see. Depth rejects *nesting*,
-    /// but a top-level early exit is itself depth 0 and need not name the
-    /// captured generation — e.g.
-    ///
-    ///     guard activeEpisodeId == sourceEpisodeId else { return }
-    ///
-    /// which is not hypothetical: `revertWindow` and `denyAutoSkippedBanner`
-    /// both open with exactly that pair, so "harmonise `recordListenRevert`
-    /// with its siblings" writes it verbatim. Mutation-verified to restore the
-    /// silent drop with every other assertion here green.
-    ///
-    /// Callers anchor `start` as early as they can while keeping the span free
-    /// of CLOSURE LITERALS — a `return` inside a closure exits the closure, not
-    /// the function, and a textual scan cannot tell them apart. For
-    /// `recordListenRevert` that is its first suspension: the preconditions
-    /// above it (`guard var managed = windows[windowId] else { return }`) run
-    /// before any await and so cannot be observing a lifecycle change, and
-    /// nothing below it legitimately returns early. `revertByTimeRange` cannot
-    /// be covered by one region for that reason — the span between its loops
-    /// contains a `compactMap` closure — so it is scanned in three
-    /// closure-free pieces instead. See the call sites.
-    private func assertNoEarlyExit(
-        in body: String,
-        from start: String.Index,
-        to end: String.Index,
-        seam: String,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        guard start < end else {
-            XCTFail(
-                "\(seam): early-exit region anchors are inverted — the canary's anchors have drifted",
-                file: file,
-                line: line
-            )
-            return
-        }
-        let region = String(body[start..<end])
-        XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(of: #"\breturn\b"#, in: region),
-            0,
-            """
-            \(seam) can abort between its first suspension and its live-state \
-            guard. Everything in that span is owed to the CAPTURED show \
-            unconditionally — the gesture's rows are already durably reverted \
-            and its trust penalty may already have landed — so an early exit \
-            there drops the matching receipt and calibration, which is the \
-            silent drop this canary exists to prevent. Offending region:
-            \(region.trimmingCharacters(in: .whitespacesAndNewlines))
-            """,
-            file: file,
-            line: line
-        )
-    }
-
-    /// playhead-i08e (third-pass hardening): closes the residual gap the
-    /// ordering assertions above cannot see on their own.
-    ///
-    /// Those assertions only prove each effect appears BEFORE the seam's
-    /// live-state guard. They say nothing about what sits BETWEEN them — so an
-    /// effect re-wrapped in its own equivalent lifecycle check, e.g.
-    ///
-    ///     if episodeLifecycleGeneration == sourceLifecycleGeneration {
-    ///         recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-    ///     }
-    ///
-    /// would restore the exact silent-drop bug this canary exists to prevent
-    /// while every `XCTAssertLessThan` above still passed.
-    ///
-    /// The scan is by IDENTIFIER, so a re-check is rejected in every spelling —
-    /// `guard`, `if`, ternary, or a clause folded into an existing condition —
-    /// not just the `guard` form.
-    ///
-    /// playhead-i08e (fifth pass): the forbidden set is the whole
-    /// lifecycle-identity family, not just `sourceLifecycleGeneration`. Pinning
-    /// the one identifier left an equivalent test against a DIFFERENT field
-    /// free to do the same damage, and folded into an existing condition it
-    /// evades `braceDepth` as well (the guarded call's nesting is unchanged):
-    ///
-    ///     if revertedManagedAny, activePodcastId == podcastId {
-    ///         recordThresholdControlSignal(.falsePositive, podcastId: podcastId)
-    ///     }
-    ///
-    /// After an episode switch `activePodcastId` is the replacement show, so
-    /// that drops the captured show's sample exactly as the original bug did —
-    /// mutation-verified green against every other rail here. None of these
-    /// identifiers appears in either scanned region today, and none has any
-    /// business there: every value those regions need was captured before the
-    /// first suspension. Re-checks that reach live state without naming any of
-    /// them are covered by `braceDepth` (wrappers) and `assertNoEarlyExit`
-    /// (top-level exits) instead; no one of the three is sufficient alone.
-    ///
-    /// The region bounds are load-bearing, and getting them wrong is how this
-    /// assertion was defeated before: callers must anchor `start` ABOVE the
-    /// first effect (at the generation capture, or at the top of the effects
-    /// block), never at the first effect itself. An `if` opened one line
-    /// earlier than the first effect wraps every effect while its own text lies
-    /// outside a first-effect-anchored region — verified by mutation: wrapping
-    /// all three `recordListenRevert` effects in a single lifecycle `if`
-    /// reproduced the bug with this canary still green.
-    private func assertNoLifecycleRecheck(
-        in body: String,
-        from start: String.Index,
-        to end: String.Index,
-        seam: String,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        // Anchors are located by literal search, so a refactor can make one of
-        // them resolve to an unexpected occurrence and invert the bounds.
-        // Report that as a canary failure; slicing `body[start..<end]` with
-        // `start > end` traps the whole test runner instead.
-        guard start < end else {
-            XCTFail(
-                "\(seam): lifecycle-recheck region anchors are inverted — the canary's anchors have drifted",
-                file: file,
-                line: line
-            )
-            return
-        }
-        let region = String(body[start..<end])
-        for token in Self.lifecycleIdentityTokens {
-            XCTAssertFalse(
-                region.contains(token),
-                """
-                \(seam) re-checks live episode identity (`\(token)`) inside the \
-                region that must be unconditional — everything between the \
-                anchor above its durable/calibration effects and its \
-                live-state guard. Those effects are owed to the CAPTURED show \
-                unconditionally: gating any of them on the episode still being \
-                current re-introduces the drop this canary guards (the trust \
-                penalty has already landed by then), and every value this \
-                region needs was captured before the first suspension. \
-                Offending region:
-                \(region.trimmingCharacters(in: .whitespacesAndNewlines))
-                """,
-                file: file,
-                line: line
-            )
-        }
-    }
-
-    /// The live-episode-identity fields a seam must NOT consult between its
-    /// first suspension and its live-state guard. See
-    /// ``assertNoLifecycleRecheck(in:from:to:seam:file:line:)``.
-    private static let lifecycleIdentityTokens = [
-        "sourceLifecycleGeneration",
-        "episodeLifecycleGeneration",
-        "activeEpisodeId",
-        "activePodcastId",
-        "activeAssetId",
-    ]
-
     /// Exact feedback receipts belong only in the durable correction store.
     /// Pin every explicit route against accidentally reusing the diagnostic
     /// decision logger or interpolating receipt fields into OSLog.
@@ -810,6 +245,424 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         XCTAssertFalse(branch.contains("scope"))
         XCTAssertFalse(branch.contains("localizedDescription"))
         XCTAssertFalse(branch.contains("source"))
+    }
+}
+
+// MARK: - playhead-i08e: revert seams under mid-gesture episode replacement
+//
+// These replace a ~560-line SOURCE canary that scanned `SkipOrchestrator.swift`
+// for the ORDER and NESTING of the revert seams' statements. That canary was
+// deleted, not weakened, and the reasoning is worth keeping because it applies
+// to every rail of its kind:
+//
+//   • A textual rail can only reject the spellings someone thought of. Five
+//     consecutive review passes each found a fresh spelling that reproduced the
+//     bug with every existing rail green (a wrapper block, a top-level
+//     `guard activeEpisodeId == … else { return }`, a lifecycle clause folded
+//     into an existing condition, a check against a DIFFERENT live field, a
+//     deleted-but-not-`return`ing in-loop guard). There is always an evasion
+//     N+1, so the rail's strength was a function of review effort rather than
+//     of the invariant.
+//   • It also failed in the other direction: it pinned `revertByTimeRange`'s
+//     exact shape (an `if revertedAny` block, a `suggestWindows.compactMap`
+//     work list, exactly two `break` guards and one `return` guard), so the
+//     restructure that the seam's own KNOWN-GAP comment recommends — running
+//     both loops to completion under a `didLoseLifecycle` flag — would have
+//     reddened it wholesale while IMPROVING the behaviour it guards.
+//
+// The tests below assert the CONTRACT instead, by interleaving a real episode
+// replacement with the exact suspension the live-lifecycle guards were written
+// for. They are spelling-independent (any way of dropping the effects fails
+// them) and shape-independent (any restructure that preserves the behaviour
+// keeps them green).
+//
+// The interleave needs a suspension point inside the seams, which is what
+// `_setRevertPersistenceBarrierForTesting` provides — the fourth instance of a
+// pattern this file already relies on to test the banner seams' equivalent
+// races (`_setFeedbackPersistenceBarrierForTesting`,
+// `_setSuggestPersistenceBarrierForTesting`,
+// `_setAppliedPersistenceBarrierForTesting`; see
+// `staleAutoYesCannotCommitAfterMaterialReplacement` below). Production leaves
+// it nil, so the added production surface is one optional-closure check per
+// durable revert write.
+
+/// Counts skip-cue republications. The orchestrator's cue handler is a
+/// synchronous `@Sendable` closure, so it cannot read an actor; a lock-guarded
+/// counter is the smallest thing that can observe it.
+private final class SkipCuePushCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func record() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+@Suite("SkipOrchestrator revert seams survive mid-gesture episode replacement (playhead-i08e)")
+struct SkipOrchestratorRevertLifecycleRaceTests {
+
+    /// `recordListenRevert`: the whole seam in one interleave. The receipt and
+    /// the controller sample are owed to the CAPTURED show — by the time the
+    /// replacement lands, this gesture's full-magnitude trust penalty has
+    /// already been applied, so dropping them leaves trust and corrections
+    /// permanently out of step. Only the cue republication belongs to whoever
+    /// owns the episode now.
+    ///
+    /// Mutation-verified: moving the seam's lifecycle guard back above the
+    /// effects (its shape between 5c1a167e and playhead-i08e) fails this on the
+    /// controller-sample poll; moving only `ingestNegativeFingerprint` below
+    /// the guard fails it on the hard-negative poll; attributing the sample to
+    /// `activePodcastId` instead of the captured `podcastId` fails it on the
+    /// same poll (the replacement episode is a DIFFERENT show, which is what
+    /// makes "the captured show" an assertable claim here); and deleting the
+    /// guard outright fails it on the cue-push count.
+    @Test(
+        "A Listen revert whose episode is replaced mid-flight still calibrates the captured show",
+        .timeLimit(.minutes(1))
+    )
+    func listenRevertSurvivesEpisodeReplacement() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        // The hard-negative ingest is the third calibration effect the seam
+        // owes the captured show, and it is invisible unless a bank is wired.
+        let negativeBank = try NegativeFingerprintBank(
+            directoryURL: try makeTempDir(prefix: "i08e-revert-race-bank")
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        await orchestrator.setNegativeFingerprintBank(negativeBank)
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        let ad = makeSkipTestAdWindow(
+            id: "ad-race", startTime: 60, endTime: 120,
+            confidence: 0.85, decisionState: "confirmed",
+            // Comfortably above the bank's 4-token floor, so a short fixture
+            // string can never make the hard-negative assertion vacuous.
+            evidenceText: "this episode is brought to you by our sponsor"
+        )
+        try await store.insertAdWindow(ad)
+        await orchestrator.receiveAdWindows([ad])
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.recordListenRevert(
+                windowId: "ad-race", podcastId: "podcast-1"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        // A replacement episode takes ownership while the gesture is parked.
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        let state = try await awaitControllerSampleCount(
+            controllerStore, orchestrator: orchestrator, show: "podcast-1", expected: 1
+        )
+        #expect(state.sampleCount == 1, "one revert must record exactly one controller sample")
+        #expect(state.integral == 1, "a Listen revert is a FALSE-POSITIVE signal → integral +1")
+
+        let receipts = try await awaitCorrectionReceipts(
+            store, assetId: "asset-1", expected: 1
+        )
+        #expect(receipts.count == 1, "the captured show's receipt must still commit")
+        #expect(receipts.first?.source == .listenRevert)
+
+        let negatives = try await awaitNegativeBankEntries(negativeBank, expected: 1)
+        #expect(negatives.count == 1, "the confirmed-FP hard negative must still be ingested")
+        #expect(
+            negatives.first?.showId == "podcast-1",
+            "the hard negative belongs to the CAPTURED show, not the replacement"
+        )
+
+        #expect(
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 1,
+            """
+            Exactly one show may carry controller state. A second row means the \
+            sample was attributed to the show that is live at effect time \
+            rather than the one captured at gesture time.
+            """
+        )
+
+        let row = try #require(try await store.fetchAdWindow(id: "ad-race"))
+        #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            """
+            The replaced gesture republished skip cues. LIVE cue state belongs \
+            to the episode that owns the orchestrator now, so the lifecycle \
+            guard must still gate evaluateAndPush().
+            """
+        )
+        await controllerStore.close()
+        await negativeBank.close()
+    }
+
+    /// `revertByTimeRange`, managed loop. One interleave pins three contracts
+    /// the deleted canary needed three separate regex rails for:
+    ///
+    ///   • the in-loop guard must `break`, not `return` — a `return` abandons a
+    ///     gesture whose row is already durably reverted, dropping the receipt
+    ///     and the controller sample;
+    ///   • the suggest-tier work list must be gated on the captured lifecycle —
+    ///     `suggestWindows` is live state, so building it after the loop broke
+    ///     out collects and vetoes the REPLACEMENT episode's suggestions;
+    ///   • the final guard must still gate `evaluateAndPush()`.
+    @Test(
+        "A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone",
+        .timeLimit(.minutes(1))
+    )
+    func timeRangeRevertSurvivesEpisodeReplacementInManagedLoop() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        let managed = makeSkipTestAdWindow(
+            id: "ad-range", startTime: 60, endTime: 120,
+            confidence: 0.85, decisionState: "confirmed"
+        )
+        try await store.insertAdWindow(managed)
+        await orchestrator.receiveAdWindows([managed])
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.revertByTimeRange(
+                start: 70, end: 110, podcastId: "podcast-1"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        // The replacement episode takes ownership and publishes a suggestion
+        // that overlaps the SAME time range the parked gesture is vetoing.
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        let replacementSuggestion = makeSkipTestMarkOnlyWindow(
+            id: "sug-replacement", assetId: "asset-2", startTime: 80, endTime: 100
+        )
+        try await store.insertAdWindow(replacementSuggestion)
+        await orchestrator.receiveAdWindows([replacementSuggestion])
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("sug-replacement"))
+
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        let state = try await awaitControllerSampleCount(
+            controllerStore, orchestrator: orchestrator, show: "podcast-1", expected: 1
+        )
+        #expect(state.sampleCount == 1, "one time-range revert must record exactly one controller sample")
+        #expect(state.integral == 1, "a managed-window revert is a FALSE-POSITIVE signal → integral +1")
+
+        let receipts = try await awaitCorrectionReceipts(
+            store, assetId: "asset-1", expected: 1
+        )
+        #expect(receipts.count == 1, "the captured show's receipt must still commit")
+        #expect(receipts.first?.source == .manualVeto)
+
+        #expect(
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 1,
+            "the sample must land on the captured show only, never on the replacement"
+        )
+
+        let revertedRow = try #require(try await store.fetchAdWindow(id: "ad-range"))
+        #expect(revertedRow.decisionState == AdDecisionState.reverted.rawValue)
+
+        #expect(
+            await orchestrator.activeSuggestWindowIDs().contains("sug-replacement"),
+            """
+            The replaced gesture vetoed the REPLACEMENT episode's suggestion. \
+            `suggestWindows` is live state, so the suggest-tier work list must \
+            be gated on the captured lifecycle.
+            """
+        )
+        let replacementRow = try #require(
+            try await store.fetchAdWindow(id: "sug-replacement")
+        )
+        #expect(
+            replacementRow.decisionState != AdDecisionState.reverted.rawValue,
+            "the replacement episode's suggestion must not be durably reverted either"
+        )
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            "the final lifecycle guard must still gate evaluateAndPush()"
+        )
+        await controllerStore.close()
+    }
+
+    /// `revertByTimeRange`, suggest-tier loop. The mirror of the case above for
+    /// the loop the deleted canary reached only by counting `break` keywords:
+    /// the guard must exist (so the loop stops mutating live banner state for a
+    /// replacement episode) AND it must `break` (so the receipt still lands).
+    ///
+    /// A suggest-only gesture is also the negative arm of `revertedManagedAny`:
+    /// nothing was auto-skipped, so no controller sample may be recorded even
+    /// though the gesture completed.
+    @Test(
+        "A suggest-only revert whose episode is replaced mid-loop keeps its receipt and stops retiring banners",
+        .timeLimit(.minutes(1))
+    )
+    func timeRangeRevertSurvivesEpisodeReplacementInSuggestLoop() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1"))
+        try await store.insertAsset(makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2"))
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let controllerStore = try makeTestControllerStore(prefix: "i08e-revert-race")
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setPerShowThresholdControllerStore(controllerStore)
+        let cuePushes = SkipCuePushCounter()
+        await orchestrator.setSkipCueHandler { _ in cuePushes.record() }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+
+        // Two suggest-tier windows so the loop has a second iteration to be
+        // stopped before. No managed windows at all, so the managed loop's
+        // body — and its copy of the barrier — is never entered.
+        let first = makeSkipTestMarkOnlyWindow(
+            id: "sug-a", assetId: "asset-1", startTime: 60, endTime: 90
+        )
+        let second = makeSkipTestMarkOnlyWindow(
+            id: "sug-b", assetId: "asset-1", startTime: 95, endTime: 118
+        )
+        try await store.insertAdWindow(first)
+        try await store.insertAdWindow(second)
+        await orchestrator.receiveAdWindows([first, second])
+        #expect(await orchestrator.activeSuggestWindowIDs() == ["sug-a", "sug-b"])
+
+        let gate = ControlledAsyncGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.revertByTimeRange(
+                start: 50, end: 130, podcastId: "podcast-1"
+            )
+        }
+        await gate.waitUntilStarted()
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-2", episodeId: "ep-2", podcastId: "podcast-2"
+        )
+        // A suggestion the replacement episode owns, well outside the parked
+        // gesture's range. It is the SENTINEL: retiring it on demand after the
+        // gesture finishes turns the negative assertion below into an ordering
+        // question on one continuation instead of a wall-clock guess, which
+        // would otherwise pass spuriously whenever a loaded machine delayed a
+        // straggler past the probe's deadline.
+        let sentinel = makeSkipTestMarkOnlyWindow(
+            id: "sug-sentinel", assetId: "asset-2", startTime: 200, endTime: 220
+        )
+        try await store.insertAdWindow(sentinel)
+        await orchestrator.receiveAdWindows([sentinel])
+        #expect(await orchestrator.activeSuggestWindowIDs().contains("sug-sentinel"))
+
+        // Subscribe AFTER the switch so the probe sees only what the parked
+        // gesture emits once it resumes. The first iteration's retirement was
+        // emitted before the barrier and belongs to the old lifecycle.
+        let probe = BoundedStreamProbe(await orchestrator.bannerEventStream())
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        let pushesBeforeResume = cuePushes.count
+        await gate.release()
+        await gesture.value
+
+        let receipts = try await awaitCorrectionReceipts(
+            store, assetId: "asset-1", expected: 1
+        )
+        #expect(receipts.count == 1, "the captured show's receipt must still commit")
+        #expect(receipts.first?.source == .manualVeto)
+
+        #expect(
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
+            "a suggest-only revert never altered playback — too weak to raise the threshold"
+        )
+
+        #expect(
+            cuePushes.count == pushesBeforeResume,
+            "the final lifecycle guard must still gate evaluateAndPush()"
+        )
+
+        // Retire the sentinel. Both it and any straggler the parked gesture
+        // emitted share one continuation, so FIFO makes the assertion exact:
+        // the first retirement to arrive must be the sentinel's.
+        await orchestrator.revertByTimeRange(
+            start: 195, end: 225, podcastId: "podcast-2"
+        )
+        var firstRetirement: AdBannerRetirement?
+        while let event = await probe.next() {
+            if case let .retireWindow(retirement) = event {
+                firstRetirement = retirement
+                break
+            }
+        }
+        let retired = try #require(
+            firstRetirement,
+            "the sentinel retirement never arrived — this test's own probe is broken"
+        )
+        #expect(
+            retired.windowId == "sug-sentinel",
+            """
+            The replaced gesture kept mutating live suggest state and retired \
+            "\(retired.windowId)" — an OLD window id stamped with the \
+            REPLACEMENT episode's identity. The suggest loop must stop at its \
+            lifecycle guard.
+            """
+        )
+        await controllerStore.close()
     }
 }
 
