@@ -65,15 +65,27 @@ Run from the repo root after PR merge. Substitute `<slug>` (e.g. `bd-r835`) and 
 
 ```bash
 cd /Users/dabrams/playhead && git checkout main && git pull --ff-only
-git branch --merged main | grep -qx "  <branch>" || { echo "NOT MERGED — abort"; exit 1; }
-WT=/Users/dabrams/playhead/.worktrees/<slug>
-git -C "$WT" status --porcelain | grep -q . && { echo "DIRTY — stash or commit first"; exit 1; }
+BR=<branch>; WT=/Users/dabrams/playhead/.worktrees/<slug>
+git merge-base --is-ancestor "$BR" origin/main || { echo "NOT MERGED — abort"; exit 1; }
+[ -z "$(git -C "$WT" status --porcelain)" ] || { echo "DIRTY — stash or commit first"; exit 1; }
 bd close playhead-<slug>
 git worktree remove "$WT"
 [ -d "$WT/.derivedData" ] && rm -rf "$WT/.derivedData" && echo "removed $WT/.derivedData"
 git worktree prune -v
-git branch -d <branch>
+git push origin --delete "$BR"   # do this BEFORE `git branch -d` (see below)
+git branch -d "$BR"
 ```
+
+Two traps this sequence exists to avoid (both hit on 2026-07-26):
+
+- **Don't test merged-ness with `git branch --merged main | grep -qx "  <branch>"`.** A branch checked
+  out in a linked worktree is listed as `+ bead/foo`, not `  bead/foo` — and at close time every bead
+  branch is in a worktree, so that guard reports "NOT MERGED" for branches that are merged, every time.
+  `git merge-base --is-ancestor` asks the real question and is indifferent to the listing prefix.
+  Compare against `origin/main`, not `main`, so you also prove the merge was actually pushed.
+- **`git branch -d` refuses while the remote branch still predates the merge**, with a confusing "not
+  fully merged" error even though it is merged to HEAD. Delete the remote branch first and `-d`
+  succeeds — never reach for `-D` to silence this, since `-d`'s refusal is the safety net.
 
 ### Safety rails
 
