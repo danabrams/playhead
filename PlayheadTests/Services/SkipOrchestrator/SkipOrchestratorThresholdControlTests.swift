@@ -6,8 +6,10 @@
 //   • a manual "not an ad" revert (revertWindow)      → FALSE-POSITIVE (raise)
 //   • denying an auto-skipped banner ("No")           → FALSE-POSITIVE (raise)
 //   • accepting a suggested skip we did not auto-skip → MISS (lower)
-// and that with NO store wired (the flag-OFF production default) the
-// orchestrator performs no controller write.
+// and that with NO store wired (the flag-OFF production default) those seams
+// still run to completion. The complementary "records NOTHING" contracts —
+// which need a wired store to be observable at all — are pinned in the
+// negative-coverage section further down.
 //
 // playhead-i08e: three of those seams (revertWindow, denyAutoSkippedBanner,
 // acceptSuggestedSkip) went dead when the explicit-feedback refactor made
@@ -38,7 +40,7 @@ private struct ControllerSampleTimeout: Error, CustomStringConvertible {
 
     var description: String {
         """
-        No controller sample was recorded for show "\(show)" within the ~2s \
+        No controller sample was recorded for show "\(show)" within the ~10s \
         budget: expected sampleCount >= \(expected), observed \(observed). \
         The seam under test never reached recordThresholdControlSignal — this \
         is a DEAD WRITE PATH, not a miscomputed controller value.
@@ -88,55 +90,103 @@ struct SkipOrchestratorThresholdControlTests {
         return try PerShowThresholdControllerStore(directoryURL: dir)
     }
 
-    /// Poll until the show's sampleCount reaches `expected` (the controller
-    /// write is fire-and-forget via an unstructured Task), then re-read after a
-    /// short settle so callers' `sampleCount == expected` assertions bound the
-    /// count from ABOVE as well as below — a second, opposing write issued by
-    /// the same gesture would otherwise land just after the poll returned and
-    /// cancel the integral unobserved. The settle is a wall-clock window, so it
-    /// catches a duplicate issued by the seam itself (the realistic
-    /// regression), not one deferred behind an arbitrarily long hop.
+    /// Show id used ONLY as a write barrier. Never asserted on directly; its
+    /// row is subtracted out by `controllerRowsExcludingBarrier`.
+    private static let barrierShow = "i08e-controller-write-barrier"
+
+    /// Poll until the show's sampleCount reaches `expected`. The controller
+    /// write is fire-and-forget via an unstructured Task, so a gesture can
+    /// return before its sample lands.
     ///
     /// playhead-i08e: throws rather than returning `.zero` when the budget
     /// expires, so "nothing was ever recorded" can never masquerade as a
-    /// computed value.
-    private func awaitSampleCount(
+    /// computed value. The budget is generous on purpose — it is only ever
+    /// spent on the failing path (a satisfied poll exits on its first read), so
+    /// a saturated machine cannot turn a live write path into a red test.
+    private func pollSampleCount(
         _ store: PerShowThresholdControllerStore,
         show: String,
         expected: Int
     ) async throws -> PerShowThresholdControllerState {
         var state = PerShowThresholdControllerState.zero
-        for _ in 0..<40 { // up to ~2s
+        for _ in 0..<200 { // up to ~10s, only consumed when the write is dead
             state = await store.state(forShow: show)
-            if state.sampleCount >= expected { break }
+            if state.sampleCount >= expected { return state }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        guard state.sampleCount >= expected else {
-            throw ControllerSampleTimeout(
-                show: show,
-                expected: expected,
-                observed: state.sampleCount
-            )
-        }
-        try await Task.sleep(nanoseconds: 200_000_000)
+        throw ControllerSampleTimeout(
+            show: show,
+            expected: expected,
+            observed: state.sampleCount
+        )
+    }
+
+    /// playhead-i08e (fourth pass): flush any controller write the gesture
+    /// under test may have issued, WITHOUT a wall-clock guess.
+    ///
+    /// Issues one write of our own through the same production seam and waits
+    /// for it to become visible. A write the gesture issued is an unstructured
+    /// `Task` created on the orchestrator's executor (`Task {}` in
+    /// `recordThresholdControlSignal` inherits actor context, and nothing in
+    /// the path is `Task.detached`), strictly before this call's; each then
+    /// hops to the same `PerShowThresholdControllerStore` actor. Same-priority
+    /// actor jobs run in enqueue order, so observing the barrier's row means
+    /// the earlier write has landed.
+    ///
+    /// Two honest limits. That ordering is an implementation property of the
+    /// default actor executor, not a language guarantee. And it orders only
+    /// writes whose `Task` was created synchronously inside the gesture — a
+    /// regression that wrote from a task spawned by a LATER hop (say derived
+    /// learning calling back into the orchestrator) would still be enqueued
+    /// after the barrier.
+    ///
+    /// It replaces a fixed 500 ms settle, which had both limits plus a worse
+    /// one: a fixed window is the wrong shape for a negative assertion. It
+    /// never makes a correct implementation fail, but on a loaded machine a
+    /// REGRESSION's write can land just after it expires and the assertion
+    /// silently passes. The barrier scales with load instead of racing it.
+    private func drainControllerWrites(
+        _ store: PerShowThresholdControllerStore,
+        _ orchestrator: SkipOrchestrator
+    ) async throws {
+        let before = await store.state(forShow: Self.barrierShow).sampleCount
+        await orchestrator.recordThresholdControlMiss(
+            podcastId: Self.barrierShow
+        )
+        _ = try await pollSampleCount(
+            store,
+            show: Self.barrierShow,
+            expected: before + 1
+        )
+    }
+
+    /// Wait for the seam's sample, then re-read behind a barrier so callers'
+    /// `sampleCount == expected` assertions bound the count from ABOVE as well
+    /// as below — a second, opposing write issued by the same gesture would
+    /// otherwise land just after the poll returned and cancel the integral
+    /// unobserved.
+    private func awaitSampleCount(
+        _ store: PerShowThresholdControllerStore,
+        orchestrator: SkipOrchestrator,
+        show: String,
+        expected: Int
+    ) async throws -> PerShowThresholdControllerState {
+        _ = try await pollSampleCount(store, show: show, expected: expected)
+        try await drainControllerWrites(store, orchestrator)
         return await store.state(forShow: show)
     }
 
-    /// playhead-i08e (third pass): row count for the "this seam must record
-    /// NOTHING" assertions, read only after a settle window.
+    /// Row count for the "this seam must record NOTHING" assertions, read
+    /// behind the barrier above and with the barrier's own row subtracted.
     ///
-    /// `recordThresholdControlSignal` writes through an unstructured `Task`, so
-    /// reading the store the instant a gesture returns reports 0 for a seam
-    /// that is about to write. Without the settle, every negative assertion
-    /// below would pass against an implementation that DOES write — i.e. it
-    /// would be vacuous, which is the specific defect this bead is cleaning up.
     /// Counting ROWS (not one show's samples) also catches a write misrouted to
     /// some other show id.
-    private func settledControllerRowCount(
-        _ store: PerShowThresholdControllerStore
+    private func controllerRowsExcludingBarrier(
+        _ store: PerShowThresholdControllerStore,
+        _ orchestrator: SkipOrchestrator
     ) async throws -> Int {
-        try await Task.sleep(nanoseconds: 500_000_000)
-        return try await store.count()
+        try await drainControllerWrites(store, orchestrator)
+        return try await store.count() - 1
     }
 
     @Test("Listen revert of a managed auto-skip window records a FALSE-POSITIVE signal (integral +1)")
@@ -156,7 +206,12 @@ struct SkipOrchestratorThresholdControlTests {
 
         await orchestrator.recordListenRevert(windowId: "ad-fp", podcastId: podcastId)
 
-        let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
+        let state = try await awaitSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: podcastId,
+            expected: 1
+        )
         #expect(state.sampleCount == 1, "one revert must record exactly one controller sample")
         #expect(state.integral == 1, "a Listen revert is a FALSE-POSITIVE signal → integral +1")
         await controllerStore.close()
@@ -179,7 +234,12 @@ struct SkipOrchestratorThresholdControlTests {
 
         #expect(await orchestrator.revertWindow(windowId: "ad-veto", podcastId: podcastId))
 
-        let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
+        let state = try await awaitSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: podcastId,
+            expected: 1
+        )
         #expect(state.sampleCount == 1, "one veto must record exactly one controller sample")
         #expect(state.integral == 1, "a manual veto of a managed window is a FALSE-POSITIVE signal → integral +1")
 
@@ -198,8 +258,15 @@ struct SkipOrchestratorThresholdControlTests {
 
     /// playhead-i08e: the same seam in the PRODUCTION wiring. A correction
     /// store is always injected by `PlayheadRuntime`, so this is the shape the
-    /// app actually runs; the exact `sampleCount` also rejects a second
-    /// controller write issued anywhere in the same gesture.
+    /// app actually runs.
+    ///
+    /// What this adds over its unwired sibling is ONLY the wired listener:
+    /// whether `schedulePostCommitCorrectionLearning` — which no-ops without a
+    /// store — induces a second controller write once it is live. (The sibling
+    /// is the regression rail: restoring the `correctionStore != nil`
+    /// precondition reddens it and leaves this one green.) Deleting the seam's
+    /// controller write kills both, so this is not independent coverage of the
+    /// write itself.
     @Test("Manual 'not an ad' revertWindow records exactly one FALSE-POSITIVE with the correction store wired")
     func revertWindowWithCorrectionStoreRecordsOneFalsePositive() async throws {
         let store = try await makeTestStore()
@@ -221,7 +288,12 @@ struct SkipOrchestratorThresholdControlTests {
 
         #expect(await orchestrator.revertWindow(windowId: "ad-veto-wired", podcastId: podcastId))
 
-        let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
+        let state = try await awaitSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: podcastId,
+            expected: 1
+        )
         #expect(state.sampleCount == 1, "one veto must record exactly one controller sample")
         #expect(state.integral == 1, "a manual veto of a managed window is a FALSE-POSITIVE signal → integral +1")
         await controllerStore.close()
@@ -244,7 +316,12 @@ struct SkipOrchestratorThresholdControlTests {
 
         await orchestrator.revertByTimeRange(start: 70, end: 110, podcastId: podcastId)
 
-        let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
+        let state = try await awaitSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: podcastId,
+            expected: 1
+        )
         #expect(state.sampleCount == 1, "one time-range revert must record exactly one controller sample")
         #expect(state.integral == 1, "a managed-window time-range revert is a FALSE-POSITIVE signal → integral +1")
         await controllerStore.close()
@@ -290,7 +367,12 @@ struct SkipOrchestratorThresholdControlTests {
             "the exact displayed material must be accepted"
         )
 
-        let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
+        let state = try await awaitSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: podcastId,
+            expected: 1
+        )
         #expect(state.sampleCount == 1, "one denial must record exactly one controller sample")
         #expect(state.integral == 1, "an explicit banner No is a FALSE-POSITIVE signal → integral +1")
         await controllerStore.close()
@@ -314,14 +396,20 @@ struct SkipOrchestratorThresholdControlTests {
 
         #expect(await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-miss"))
 
-        let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
+        let state = try await awaitSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: podcastId,
+            expected: 1
+        )
         #expect(state.sampleCount == 1, "one acceptance must record exactly one controller sample")
         #expect(state.integral == -1, "accepting a suggested (missed) ad is a MISS signal → integral −1")
         await controllerStore.close()
     }
 
-    /// playhead-i08e: the same seam in the PRODUCTION wiring (see
-    /// `revertWindowWithCorrectionStoreRecordsOneFalsePositive`).
+    /// playhead-i08e: the same seam in the PRODUCTION wiring — see
+    /// `revertWindowWithCorrectionStoreRecordsOneFalsePositive` for exactly
+    /// what the wired variant does and does not add.
     @Test("Accepting a suggested ad records exactly one MISS with the correction store wired")
     func acceptSuggestedSkipWithCorrectionStoreRecordsOneMiss() async throws {
         let store = try await makeTestStore()
@@ -344,14 +432,27 @@ struct SkipOrchestratorThresholdControlTests {
 
         #expect(await orchestrator.acceptSuggestedSkip(windowId: "ad-suggest-miss-wired"))
 
-        let state = try await awaitSampleCount(controllerStore, show: podcastId, expected: 1)
+        let state = try await awaitSampleCount(
+            controllerStore,
+            orchestrator: orchestrator,
+            show: podcastId,
+            expected: 1
+        )
         #expect(state.sampleCount == 1, "one acceptance must record exactly one controller sample")
         #expect(state.integral == -1, "accepting a suggested (missed) ad is a MISS signal → integral −1")
         await controllerStore.close()
     }
 
-    @Test("No controller store wired ⇒ a revert performs no controller write (flag-OFF default)")
-    func noStoreNoWrite() async throws {
+    /// playhead-i08e (fourth pass): renamed from `noStoreNoWrite` / "performs
+    /// no controller write". With no store wired there is no surface on which a
+    /// write could be observed, so that title named a contract this test cannot
+    /// falsify — the same defect class the bead is cleaning up. What it really
+    /// pins, and what the pre-fix code failed, is that both seams RUN TO
+    /// COMPLETION in the flag-OFF default instead of trapping on the absent
+    /// dependency. The observable half lives in
+    /// `anonymousRevertRecordsNoControllerSample`.
+    @Test("No controller store wired ⇒ the revert seams still run to completion (flag-OFF default)")
+    func noControllerStoreLeavesRevertSeamsIntact() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(mode: "auto", trustScore: 0.9, observations: 10)
@@ -367,18 +468,15 @@ struct SkipOrchestratorThresholdControlTests {
         try await store.insertAdWindow(vetoed)
         await orchestrator.receiveAdWindows([listened, vetoed])
 
-        // Must complete cleanly with no store side effect to observe.
         await orchestrator.recordListenRevert(windowId: "ad-none", podcastId: podcastId)
         // playhead-i08e: cover a seam this bead made live again, not only the
-        // one that never broke — `revertWindow` must stay a no-op on the
-        // controller when the flag is off.
+        // one that never broke — `revertWindow` is the path whose first
+        // statement used to throw when no correction store was wired.
         #expect(await orchestrator.revertWindow(windowId: "ad-none-veto", podcastId: podcastId))
 
-        // The seams must have run to completion, not merely "not crashed" — an
-        // aborted gesture also writes no controller sample, so without this the
-        // assertion below would hold just as well for the dead write path this
-        // bead fixed. `revertWindow`'s receipt is committed by the AnalysisStore
-        // transaction and so lands even with no correction store wired.
+        // Durable proof of completion, not merely "did not crash": an aborted
+        // gesture is also silent. `revertWindow`'s receipt is committed by the
+        // AnalysisStore transaction, so it lands even with no correction store.
         let receipts = try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
         #expect(
             receipts.count == 1,
@@ -387,20 +485,20 @@ struct SkipOrchestratorThresholdControlTests {
         #expect(receipts.first?.source == .manualVeto)
         let row = try #require(try await store.fetchAdWindow(id: "ad-none-veto"))
         #expect(row.decisionState == AdDecisionState.reverted.rawValue)
+        // `recordListenRevert` needs its own durable evidence. Its receipt goes
+        // through `persistManualCorrectionVeto`, which no-ops without a
+        // correction store, so the row flip is the only observable it leaves —
+        // and without asserting it, making `return` the seam's first statement
+        // would keep this test green even though the title names both seams.
+        let listenedRow = try #require(try await store.fetchAdWindow(id: "ad-none"))
+        #expect(
+            listenedRow.decisionState == AdDecisionState.reverted.rawValue,
+            "the Listen revert must also have run to completion"
+        )
 
-        // playhead-i08e (third pass): this test used to close by building a
-        // BRAND-NEW `PerShowThresholdControllerStore` in a fresh unique temp
-        // directory and asserting `count() == 0`, commented as "proving the
-        // orchestrator wrote nowhere". A store that was created after the
-        // gesture, in a directory nothing has ever written to, is empty by
-        // construction — the assertion could not fail for any implementation
-        // and proved nothing. It is deleted rather than rewritten: with no
-        // controller store wired there is, by definition, no surface on which
-        // a write could be observed, so the honest content of this test is the
-        // durable evidence above that both seams ran to completion instead of
-        // trapping or aborting. The observable half of the no-write contract —
-        // a store IS wired but the correction has no show to attribute to — is
-        // covered by `anonymousRevertRecordsNoControllerSample`.
+        // playhead-i08e (third pass): a closing probe that built a BRAND-NEW
+        // controller store in a fresh temp directory and asserted `count() == 0`
+        // was deleted here — empty by construction, unfalsifiable.
     }
 
     // MARK: - playhead-i08e (third pass): seams that must record NOTHING
@@ -417,7 +515,8 @@ struct SkipOrchestratorThresholdControlTests {
 
     /// The controller is per-show, so a correction carrying no show id has
     /// nowhere to land (`recordThresholdControlSignal`'s second guard). This
-    /// replaces the deleted fresh-store probe in `noStoreNoWrite`: the store IS
+    /// replaces the deleted fresh-store probe in
+    /// `noControllerStoreLeavesRevertSeamsIntact`: the store IS
     /// wired here, so a regression that fell back to `activePodcastId` — which
     /// `beginEpisode` set to a real value below — turns this red.
     @Test("An anonymous revert (no podcastId) records no controller sample")
@@ -443,7 +542,7 @@ struct SkipOrchestratorThresholdControlTests {
         #expect(receipts.first?.source == .manualVeto)
 
         #expect(
-            try await settledControllerRowCount(controllerStore) == 0,
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
             "an unattributed correction must not be folded into any show's controller state"
         )
         await controllerStore.close()
@@ -493,7 +592,7 @@ struct SkipOrchestratorThresholdControlTests {
         #expect(receipts.first?.source == .bannerAutoSkipConfirmed)
 
         #expect(
-            try await settledControllerRowCount(controllerStore) == 0,
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
             "agreeing with a skip is a true positive — it must not move the threshold"
         )
         await controllerStore.close()
@@ -534,7 +633,7 @@ struct SkipOrchestratorThresholdControlTests {
         #expect(receipts.first?.source == .bannerSuggestionDenied)
 
         #expect(
-            try await settledControllerRowCount(controllerStore) == 0,
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
             "a suggest-tier veto never altered playback — too weak to raise the threshold"
         )
         await controllerStore.close()
@@ -572,7 +671,7 @@ struct SkipOrchestratorThresholdControlTests {
         #expect(row.decisionState == AdDecisionState.reverted.rawValue)
 
         #expect(
-            try await settledControllerRowCount(controllerStore) == 0,
+            try await controllerRowsExcludingBarrier(controllerStore, orchestrator) == 0,
             "a suggest-only revert never altered playback — too weak to raise the threshold"
         )
         await controllerStore.close()

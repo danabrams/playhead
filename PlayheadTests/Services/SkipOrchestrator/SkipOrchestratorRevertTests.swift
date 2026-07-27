@@ -111,9 +111,7 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
     ///
     /// Source-level because the race needs an episode switch to interleave
     /// with an AnalysisStore/TrustScoringService suspension, and neither seam
-    /// exposes a persistence barrier to make that deterministic. The residual
-    /// gap this leaves is textual: an effect wrapped in its own equivalent
-    /// lifecycle `if` above the guard would satisfy every assertion here.
+    /// exposes a persistence barrier to make that deterministic.
     func testRevertCalibrationEffectsPrecedeTheirLiveStateGuard() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/Services/SkipOrchestrator/SkipOrchestrator.swift"
@@ -126,7 +124,10 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             XCTFail("Could not locate the recordListenRevert body")
             return
         }
-        guard let listenReceipt = listenRevert.range(of: "persistManualCorrectionVeto("),
+        guard let listenCapture = listenRevert.range(
+                of: "let sourceLifecycleGeneration = episodeLifecycleGeneration"
+              ),
+              let listenReceipt = listenRevert.range(of: "persistManualCorrectionVeto("),
               let listenNegative = listenRevert.range(of: "ingestNegativeFingerprint("),
               let listenController = listenRevert.range(of: "recordThresholdControlSignal("),
               let listenGuard = listenRevert.range(
@@ -148,6 +149,21 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
                 listenGuard.lowerBound,
                 "recordListenRevert must issue \(label) before its live-lifecycle guard"
             )
+            // Structural, not positional: each effect must also sit at the TOP
+            // LEVEL of the function body. Any conditional wrapper — wherever it
+            // is opened — nests it one brace deeper, so this rejects the whole
+            // family of "gate the effects on the lifecycle" evasions at once,
+            // including the ones a position-anchored scan cannot see.
+            XCTAssertEqual(
+                braceDepth(in: listenRevert, at: effect.lowerBound),
+                0,
+                """
+                recordListenRevert must issue \(label) unconditionally, at the \
+                top level of the function body. It is nested inside a block, \
+                which means some condition can now suppress an effect that is \
+                owed to the CAPTURED show whatever the live lifecycle is.
+                """
+            )
         }
         // The guard is only load-bearing if it still gates the live-state work.
         // Without this, moving it BELOW `evaluateAndPush()` would satisfy every
@@ -161,9 +177,29 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             listenPush.lowerBound,
             "recordListenRevert's lifecycle guard must gate evaluateAndPush()"
         )
+        // Belt-and-suspenders on the same contract: the span from the capture
+        // to the guard must not name the captured generation at all. Anchored
+        // at the CAPTURE rather than at the first effect — an `if` opened one
+        // line above `persistManualCorrectionVeto(` lies outside a
+        // first-effect-anchored region, which is how this assertion was
+        // defeated. `recordListenRevert` has exactly two legitimate mentions of
+        // the captured generation, this capture and the final guard, and the
+        // bounds exclude both.
         assertNoLifecycleRecheck(
             in: listenRevert,
-            from: listenReceipt.lowerBound,
+            from: listenCapture.upperBound,
+            to: listenGuard.lowerBound,
+            seam: "recordListenRevert"
+        )
+        guard let listenSuspension = listenRevert.range(
+            of: "try await store.updateAdWindowDecision("
+        ) else {
+            XCTFail("recordListenRevert must still persist its decision-state change")
+            return
+        }
+        assertNoEarlyExit(
+            in: listenRevert,
+            from: listenSuspension.upperBound,
             to: listenGuard.lowerBound,
             seam: "recordListenRevert"
         )
@@ -226,9 +262,45 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             rangePush.lowerBound,
             "revertByTimeRange's final guard must gate evaluateAndPush()"
         )
+        // `revertByTimeRange`'s effects are legitimately nested (inside
+        // `if revertedAny`, then `if let assetId` / `if revertedManagedAny`),
+        // so the depth check anchors on the block instead of the statements:
+        // `if revertedAny` itself must be top-level, which rejects any wrapper
+        // opened ABOVE it, and the region scan below rejects any opened INSIDE
+        // it. Together those cover both sides of the anchor.
+        guard let rangeEffectsBlock = timeRangeRevert.range(of: "if revertedAny") else {
+            XCTFail("revertByTimeRange must keep its `if revertedAny` effects block")
+            return
+        }
+        XCTAssertEqual(
+            braceDepth(in: timeRangeRevert, at: rangeEffectsBlock.lowerBound),
+            0,
+            """
+            revertByTimeRange's `if revertedAny` effects block must sit at the \
+            top level of the function body. Nesting it means something can \
+            suppress the whole gesture's receipt and calibration — which is \
+            the drop this canary exists to prevent.
+            """
+        )
+        // Everything from that block's opening to the final guard — receipt,
+        // controller sample, trust hop — is owed to the captured show
+        // unconditionally, so no mention of the captured generation belongs in
+        // it. (The two in-loop guards and the suggest-target ternary, which
+        // legitimately mention it, are all upstream of this block.)
         assertNoLifecycleRecheck(
             in: timeRangeRevert,
-            from: rangeReceipt.lowerBound,
+            from: rangeEffectsBlock.lowerBound,
+            to: rangeFinalGuard.lowerBound,
+            seam: "revertByTimeRange"
+        )
+        // Anchored at the effects block, NOT at this seam's first suspension:
+        // the span between the loops contains the `suggestWindows.compactMap`
+        // closure, whose `return`s are closure exits rather than function
+        // exits, and a textual scan cannot tell the two apart. The loop span it
+        // gives up is already covered by the `break`-not-`return` regex below.
+        assertNoEarlyExit(
+            in: timeRangeRevert,
+            from: rangeEffectsBlock.lowerBound,
             to: rangeFinalGuard.lowerBound,
             seam: "revertByTimeRange"
         )
@@ -257,6 +329,106 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// Brace nesting depth of `index` within a function body. Depth 0 means
+    /// "a statement of the function itself" — not nested in any block.
+    ///
+    /// This is the structural half of the contract, and it is what makes the
+    /// canary robust rather than merely well-anchored: a textual region has a
+    /// start position, and every start position can be evaded by opening the
+    /// offending conditional one line earlier. Depth has no such loophole —
+    /// wrapping a statement in anything at all increases it, including a
+    /// wrapper that never names the captured generation and so is invisible to
+    /// `assertNoLifecycleRecheck` (verified by mutation with
+    /// `if !windows.isEmpty { … }`).
+    ///
+    /// Depth 0 is deliberately STRICTER than "reached unconditionally". A
+    /// behaviour-preserving wrapper such as
+    /// `if let podcastId { recordThresholdControlSignal(…) }` — redundant,
+    /// since that call already guards its own nil — is rejected too. That is
+    /// the intended trade: "is THIS particular condition safe to gate the
+    /// effect on?" is exactly the judgement call that produced this bug, so
+    /// the rail refuses to adjudicate it and requires the effects to be
+    /// unconditional statements.
+    ///
+    /// String-literal contents are blanked before counting, so a brace inside
+    /// a literal cannot shift the result. `strippingCommentsAndStrings`
+    /// preserves length exactly (pinned by
+    /// `SwiftSourceInspectorStringStrippingTests`), so offsets computed on
+    /// `body` address the same characters in the blanked copy.
+    private func braceDepth(in body: String, at index: String.Index) -> Int {
+        let scan = SwiftSourceInspector.strippingCommentsAndStrings(body)
+        let offset = body.distance(from: body.startIndex, to: index)
+        guard offset >= 0, offset <= scan.count else { return .min }
+        let end = scan.index(scan.startIndex, offsetBy: offset)
+        var depth = 0
+        for character in scan[scan.startIndex..<end] {
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+            }
+        }
+        return depth
+    }
+
+    /// Once a seam has SUSPENDED, nothing may abort it before its live-state
+    /// guard: by then its trust penalty may already have landed, so an early
+    /// exit drops the matching receipt and calibration.
+    ///
+    /// This closes the family `braceDepth` cannot see. Depth rejects *nesting*,
+    /// but a top-level early exit is itself depth 0 and need not name the
+    /// captured generation — e.g.
+    ///
+    ///     guard activeEpisodeId == sourceEpisodeId else { return }
+    ///
+    /// which is not hypothetical: `revertWindow` and `denyAutoSkippedBanner`
+    /// both open with exactly that pair, so "harmonise `recordListenRevert`
+    /// with its siblings" writes it verbatim. Mutation-verified to restore the
+    /// silent drop with every other assertion here green.
+    ///
+    /// Callers anchor `start` as early as they can while keeping the span free
+    /// of CLOSURE LITERALS — a `return` inside a closure exits the closure, not
+    /// the function, and a textual scan cannot tell them apart. For
+    /// `recordListenRevert` that is its first suspension: the preconditions
+    /// above it (`guard var managed = windows[windowId] else { return }`) run
+    /// before any await and so cannot be observing a lifecycle change, and
+    /// nothing below it legitimately returns early. `revertByTimeRange` has to
+    /// start lower, at its effects block, because the span between its loops
+    /// contains a `compactMap` closure.
+    private func assertNoEarlyExit(
+        in body: String,
+        from start: String.Index,
+        to end: String.Index,
+        seam: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard start < end else {
+            XCTFail(
+                "\(seam): early-exit region anchors are inverted — the canary's anchors have drifted",
+                file: file,
+                line: line
+            )
+            return
+        }
+        let region = String(body[start..<end])
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: #"\breturn\b"#, in: region),
+            0,
+            """
+            \(seam) can abort between its first suspension and its live-state \
+            guard. Everything in that span is owed to the CAPTURED show \
+            unconditionally — the gesture's rows are already durably reverted \
+            and its trust penalty may already have landed — so an early exit \
+            there drops the matching receipt and calibration, which is the \
+            silent drop this canary exists to prevent. Offending region:
+            \(region.trimmingCharacters(in: .whitespacesAndNewlines))
+            """,
+            file: file,
+            line: line
+        )
+    }
+
     /// playhead-i08e (third-pass hardening): closes the residual gap the
     /// ordering assertions above cannot see on their own.
     ///
@@ -269,14 +441,24 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
     ///     }
     ///
     /// would restore the exact silent-drop bug this canary exists to prevent
-    /// while every `XCTAssertLessThan` above still passed. Both prior reviews
-    /// of this bead flagged that hole and left it open.
+    /// while every `XCTAssertLessThan` above still passed.
     ///
     /// `sourceLifecycleGeneration` is the ONLY captured-generation identifier in
-    /// either seam, so any lifecycle re-check — `guard`, `if`, ternary, or a
-    /// `&&` folded into an existing condition — must name it. Requiring the
-    /// region to be free of that identifier therefore rejects every spelling of
-    /// the evasion, not just the `guard` form.
+    /// either seam, so a lifecycle re-check that NAMES it — `guard`, `if`,
+    /// ternary, or a `&&` folded into an existing condition — is rejected in
+    /// every spelling, not just the `guard` form. Re-checks that reach live
+    /// state by another route are covered by `braceDepth` (wrappers) and
+    /// `assertNoEarlyExit` (top-level exits) instead; no one of the three is
+    /// sufficient alone.
+    ///
+    /// The region bounds are load-bearing, and getting them wrong is how this
+    /// assertion was defeated before: callers must anchor `start` ABOVE the
+    /// first effect (at the generation capture, or at the top of the effects
+    /// block), never at the first effect itself. An `if` opened one line
+    /// earlier than the first effect wraps every effect while its own text lies
+    /// outside a first-effect-anchored region — verified by mutation: wrapping
+    /// all three `recordListenRevert` effects in a single lifecycle `if`
+    /// reproduced the bug with this canary still green.
     private func assertNoLifecycleRecheck(
         in body: String,
         from start: String.Index,
@@ -285,16 +467,29 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
+        // Anchors are located by literal search, so a refactor can make one of
+        // them resolve to an unexpected occurrence and invert the bounds.
+        // Report that as a canary failure; slicing `body[start..<end]` with
+        // `start > end` traps the whole test runner instead.
+        guard start < end else {
+            XCTFail(
+                "\(seam): lifecycle-recheck region anchors are inverted — the canary's anchors have drifted",
+                file: file,
+                line: line
+            )
+            return
+        }
         let region = String(body[start..<end])
         XCTAssertFalse(
             region.contains("sourceLifecycleGeneration"),
             """
-            \(seam) re-checks the captured lifecycle generation between its \
-            first durable/calibration effect and its live-state guard. Those \
-            effects are owed to the CAPTURED show unconditionally: gating any \
-            of them on the lifecycle still current re-introduces the drop this \
-            canary guards (the trust penalty has already landed by then). \
-            Offending region:
+            \(seam) re-checks the captured lifecycle generation inside the \
+            region that must be unconditional — everything between the anchor \
+            above its durable/calibration effects and its live-state guard. \
+            Those effects are owed to the CAPTURED show unconditionally: \
+            gating any of them on the lifecycle still being current \
+            re-introduces the drop this canary guards (the trust penalty has \
+            already landed by then). Offending region:
             \(region.trimmingCharacters(in: .whitespacesAndNewlines))
             """,
             file: file,
