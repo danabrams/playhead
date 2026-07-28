@@ -18,19 +18,25 @@
 // 32 tests in this file had no `.timeLimit` at all, while awaiting
 // `ControlledItemSeek` / `ControlledSeekSequence` continuation gates and
 // `AsyncStream` iterators that carry no deadline of their own. A regression
-// on those paths HUNG THE GATE HOST indefinitely instead of failing a test
-// — strictly worse than a flake, since a hang burns the whole run and
-// reports nothing.
+// on those paths produced NO DIAGNOSTIC AT ALL: the test task simply never
+// returned and the run said nothing about which test wedged.
+//
+// Be precise about what the trait buys, since this file is otherwise about
+// not overclaiming. It does NOT guarantee every hang unwinds — a body parked
+// on a `withCheckedContinuation` that ignores cancellation (which is what the
+// gate actors above use) cannot be forced to return. What it guarantees is a
+// REPORTED failure naming the test and the deadline it blew, and an unwind of
+// every cancellation-aware wait. That is the difference between "the gate
+// hung" and "this test hung", which is the whole diagnostic value.
 //
 // Every suite below carries `.timeLimit(.minutes(3))` so tests added later
 // inherit a backstop, and every test carries it explicitly so the coverage
 // is greppable rather than inherited-and-assumed. Three minutes is chosen
-// deliberately: the documented executor-starvation signature on this box
-// reaches ~98-131 s of queueing delay under a saturated gate (the same
-// reasoning already recorded on
-// `RuntimeShutdownLifecycleTests.lifecycleInvalidationDoesNotJoinStalledCacheTask`),
-// so 3 minutes clears contention — a trip means a real hang, not a busy
-// machine — while staying far below the gate's outer timeout.
+// against MEASUREMENT, not taste: in a full `PlayheadFastTests` run on this
+// box (2026-07-28) tests carrying a 60 s limit blew it at 119-134 s elapsed,
+// on `main@89bf541a` as well as on this branch. 3 minutes therefore clears
+// observed contention — a trip means a real hang, not a busy machine — while
+// staying far below the gate's outer timeout.
 //
 // playhead-xc6b — EVERY TEST HERE MUST TEAR DOWN ITS SERVICE.
 //
@@ -171,17 +177,6 @@ struct PlaybackServiceSeekValidationTests {
     }
 }
 
-/// playhead-xc6b: budget for the positive controls and barriers below.
-///
-/// `pollUntil`'s 30 s default is sized for a busy machine, not a starved one,
-/// and the documented executor-starvation signature on this box reaches
-/// ~98-131 s of queueing delay under a saturated gate. These polls are only
-/// ever spent on the FAILING path — a satisfied poll exits on its first read
-/// — so a longer budget costs nothing when the code is correct and stops a
-/// merely-starved run from reddening. It stays under the suites'
-/// `.timeLimit(.minutes(3))` hang backstop, which remains the outer bound.
-private let pollBudgetUnderStarvation: Duration = .seconds(90)
-
 /// playhead-xc6b: POSITIVE CONTROL for the audio-session interruption
 /// observer, used by the two tests whose real subject is that observer.
 ///
@@ -215,7 +210,7 @@ private func driveInterruptionObserverUntilLive(
             playbackSpeed: 1
         )
     )
-    return await pollUntil(timeout: pollBudgetUnderStarvation) {
+    return await pollUntil(timeout: starvationPollBudget) {
         center.post(
             name: AVAudioSession.interruptionNotification,
             object: nil,
@@ -298,9 +293,16 @@ private final class InterruptionWitness: @unchecked Sendable {
 /// notifications posted after its own registration — a single pre-
 /// registration post would be dropped and never redelivered.
 ///
-/// Honest limit, the same one carried by `drainOrchestratorEffects`:
-/// same-priority FIFO on an actor's default executor is an implementation
-/// property, not a language guarantee.
+/// TWO honest limits, both load-bearing, neither a documented guarantee:
+///   1. Same-priority FIFO on an actor's default executor is an
+///      implementation property, not a language guarantee — the same limit
+///      `drainOrchestratorEffects` carries.
+///   2. The argument above also assumes `NotificationCenter` delivers to
+///      observers in REGISTRATION order. Apple leaves observer delivery
+///      order unspecified, so this is an observed behaviour, not a contract.
+/// If either stops holding, this degrades to "the stimulus was definitely
+/// delivered to someone" — still far stronger than the fixed yield budget it
+/// replaced, but no longer a strict ordering proof.
 private func postInterruptionUntilWitnessed(
     _ center: NotificationCenter,
     type: AVAudioSession.InterruptionType,
@@ -311,7 +313,7 @@ private func postInterruptionUntilWitnessed(
     defer { witness.stop() }
     let rawType = type.rawValue
     let rawOptions = options.rawValue
-    return await pollUntil(timeout: pollBudgetUnderStarvation) {
+    return await pollUntil(timeout: starvationPollBudget) {
         var userInfo: [AnyHashable: Any] = [
             AVAudioSessionInterruptionTypeKey: rawType,
         ]
@@ -1179,8 +1181,11 @@ struct PlaybackServiceActorIsolationTests {
         let deallocated = await makeObservedServiceLatch()
         // Event-driven and unbounded by design: resumes exactly when the
         // service deallocates. A genuine cycle through the interruption
-        // observer leaves the latch silent and the test fails on its
-        // `.timeLimit` backstop instead of hanging the gate host.
+        // observer leaves the latch silent, and the `.timeLimit` backstop
+        // then reports a named failure at 3 minutes rather than leaving an
+        // unattributed wedge. (`DeallocLatch.wait()` parks on a checked
+        // continuation with no cancellation handler, so the trait bounds the
+        // DIAGNOSIS here, not necessarily the process.)
         await deallocated.wait()
         #expect(
             weakService == nil,
@@ -1473,7 +1478,7 @@ struct ProgressiveLoaderDecouplingTests {
         )
         #expect(
             await loaderDriver.completedToggles == 50,
-            "the loader side must complete its full suspend/resume workload alongside the actor reads"
+            "the loader side must issue its full suspend/resume workload alongside the actor reads (suspend/resume are queue.async, so this bounds the calls made, not their execution)"
         )
         await service.tearDown()
     }

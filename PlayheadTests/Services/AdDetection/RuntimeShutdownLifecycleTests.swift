@@ -132,10 +132,20 @@ private actor RuntimeSeekPersistenceProbe {
 
     /// playhead-xc6b: recorded on EVERY exit path of the persistence handler,
     /// including the superseded invocation that bails on `Task.isCancelled`.
-    /// Waiting for both invocations to finish is what lets the caller's
+    /// Waiting for both invocations to finish lets the caller's
     /// `snapshot() == [90]` bound the recorded positions from ABOVE as well as
-    /// below — otherwise the older invocation could append a second `90` just
-    /// after the assertion read the array.
+    /// below.
+    ///
+    /// Honest scope, checked rather than assumed: today the barrier is
+    /// BELT-AND-BRACES, not load-bearing. `requestPlaybackPositionPersistence`
+    /// does `await task.value` (PlayheadRuntime.swift:3396), so the seek does
+    /// not return until its handler invocation has finished — which means the
+    /// count is already 2 before the caller reads, and the poll is satisfied
+    /// on its first probe. It is kept because that guarantee lives in
+    /// production code the test does not own: a future restructure to
+    /// fire-and-forget persistence would silently reopen the window, and this
+    /// makes the test state its own requirement locally instead of inheriting
+    /// it.
     func noteInvocationFinished() {
         finishedInvocations += 1
     }
@@ -225,16 +235,25 @@ private actor FirstAcceptedRuntimeSeekGate {
 /// 18 tests in this file carried no `.timeLimit` at all while awaiting
 /// continuation gates (`FirstAcceptedRuntimeSeekGate`,
 /// `RuntimePlaybackObserverGate`) and `DeinitLatch`es that have no deadline
-/// of their own. A regression on those paths HUNG THE GATE HOST forever
-/// instead of failing a test — strictly worse than a flake, because a hang
-/// burns the whole run and reports nothing.
+/// of their own. A regression on those paths produced NO DIAGNOSTIC AT ALL:
+/// the test task never returned and the run said nothing about which test
+/// wedged.
+///
+/// What the trait actually buys, stated precisely: a REPORTED failure naming
+/// the test and the deadline it blew, plus an unwind of every
+/// cancellation-aware wait. It cannot force a body parked on a
+/// `withCheckedContinuation` with no cancellation handler — which is what the
+/// gate actors above use — to return. So it bounds the DIAGNOSIS reliably and
+/// the process only when the wait is cancellable. That is still the
+/// difference between "the gate hung" and "this test hung".
 ///
 /// The suite-level trait below arms every test in the suite, including ones
 /// added later; each test also carries the trait explicitly so the coverage
 /// is greppable rather than inherited-and-assumed. Three minutes is chosen
-/// deliberately: the documented executor-starvation signature on this box
-/// reaches ~98-131 s of queueing delay under a saturated gate, so 3 minutes
-/// sits well clear of contention — a trip means a real hang, not a busy
+/// against MEASUREMENT, not taste: in a full `PlayheadFastTests` run on this
+/// box (2026-07-28) tests carrying a 60 s limit blew it at 119-134 s elapsed,
+/// on `main@89bf541a` as well as on this branch. 3 minutes therefore sits
+/// clear of observed contention — a trip means a real hang, not a busy
 /// machine — while staying far below the gate's outer timeout.
 @Suite("playhead-7h2: runtime shutdown lifecycle", .timeLimit(.minutes(3)))
 struct RuntimeShutdownLifecycleTests {
@@ -675,11 +694,15 @@ struct RuntimeShutdownLifecycleTests {
         // `drainOrchestratorEffects` / `awaitTrustFalseSkipSignals` in
         // TestHelpers.swift) is: establish a POSITIVE control that must be
         // observed first, then assert the negative behind that barrier. The
-        // control here is `observerTask.isCancelled` — `shutdown()` cancels
-        // the playback-state observer task and only afterwards awaits it, so
-        // observing the cancellation proves shutdown has actually entered and
-        // reached the join. The poll scales with load instead of racing it.
-        let shutdownReachedTheJoin = await pollUntil(timeout: .seconds(90)) {
+        // control here is `observerTask.isCancelled`. Precisely: `shutdown()`
+        // cancels the playback-state observer task at PlayheadRuntime.swift
+        // :3265 and joins it at :3274, with an `await` on the playback
+        // LIFECYCLE task in between — so observing the cancellation proves
+        // shutdown entered and reached its CANCEL step, not literally the
+        // join. That is sufficient here, and is the point: the old budget
+        // could not prove shutdown had started at all. The poll scales with
+        // load instead of racing it.
+        let shutdownReachedTheJoin = await pollUntil(timeout: starvationPollBudget) {
             observerTask.isCancelled
         }
         #expect(
@@ -1075,11 +1098,9 @@ struct RuntimeShutdownLifecycleTests {
             // before reading. Exactly two are invoked — the superseded seek's
             // (held by the gate, released above) and the winner's — and both
             // are already inside the handler by this point, so this cannot
-            // hang on a third that never comes. Reading without it made the
-            // exactness assertion race the older invocation's
-            // `Task.isCancelled` check: a regression that let the superseded
-            // seek persist would land `[90, 90]` just after the read.
-            let bothFinished = await pollUntil(timeout: .seconds(90)) {
+            // hang on a third that never comes. See the probe's own doc for
+            // why this is belt-and-braces today and kept anyway.
+            let bothFinished = await pollUntil(timeout: starvationPollBudget) {
                 await persistence.invocationsFinished() == 2
             }
             #expect(
