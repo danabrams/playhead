@@ -317,8 +317,14 @@ struct SpeechRecognitionRequestGateWatchdogTests {
     @Test("A holder that never returns is abandoned instead of holding forever",
           .timeLimit(.minutes(1)))
     func wedgedHolderIsAbandoned() async throws {
-        let gate = SpeechRecognitionRequestGate(holderDeadline: .milliseconds(250))
+        let deadline: Duration = .milliseconds(250)
+        let gate = SpeechRecognitionRequestGate(holderDeadline: deadline)
         let wedge = WedgedCall()
+
+        // Read BEFORE the holder task exists, so it strictly precedes the
+        // instant the watchdog timer is armed. That ordering is what makes the
+        // lower bound below sound rather than approximate.
+        let start = ContinuousClock.now
 
         let wedged = Task {
             try await gate.withExclusiveAccess {
@@ -328,11 +334,74 @@ struct SpeechRecognitionRequestGateWatchdogTests {
         }
         await wedge.awaitEntry()
 
-        await #expect(throws: TranscriptEngineError.self) {
+        let thrown = await #expect(throws: TranscriptEngineError.self) {
             _ = try await wedged.value
         }
+        // WHICH error, not merely which type. `TranscriptEngineError` has four
+        // cases and the type check accepts all of them, so on its own it does
+        // not distinguish "the watchdog fired" from "something unrelated went
+        // wrong on the way in".
+        #expect(
+            thrown?.description.contains("watchdog deadline") == true,
+            "expected the watchdog abandonment error, got \(String(describing: thrown))"
+        )
+
+        // THE DEADLINE IS A SCALE, NOT A FLAG. Nothing else in this file reads
+        // the clock, so before this line the watchdog could have been wired to
+        // any fraction of `holderDeadline` and every test still passed —
+        // measured, not assumed: `timeout: deadline / 4` survived the whole
+        // suite. That mutation is not academic. The 120 s value is justified in
+        // `SpeechRecognitionRequestGate` by being 4x a shard's own wall-clock
+        // duration; silently quartering it puts the watchdog *at* one shard's
+        // duration, where a merely-slow call is abandoned routinely and the
+        // cost stops being one shard's coverage.
+        //
+        // A LOWER bound is the only load-safe form: `Task.sleep` guarantees at
+        // least its duration and contention can only push the fire later, so
+        // this can never flake, while any under-scaled timeout fails it
+        // deterministically.
+        #expect(ContinuousClock.now - start >= deadline)
 
         await wedge.unwedge()
+    }
+
+    @Test("An abandoned call is cancelled, so it stops competing for the recognizer",
+          .timeLimit(.minutes(1)))
+    func abandonedCallIsCancelled() async throws {
+        let gate = SpeechRecognitionRequestGate(holderDeadline: .milliseconds(250))
+        let entered = TestSignal()
+        let noticedCancellation = TestSignal()
+
+        // The other half of the pair `WedgedCall` models. A wedged call cannot
+        // be unwound at all; a merely-slow one can, and the watchdog's job on
+        // the way out is to tell it to stop.
+        let holder = Task {
+            try await gate.withExclusiveAccess {
+                await entered.signal()
+                // Long enough that only cancellation can end it inside the
+                // test's time limit.
+                try? await Task.sleep(for: .seconds(30))
+                if Task.isCancelled { await noticedCancellation.signal() }
+                return 1
+            }
+        }
+        await entered.wait()
+
+        await #expect(throws: TranscriptEngineError.self) {
+            _ = try await holder.value
+        }
+
+        // Nothing in this test cancels `holder`, so the only route to this
+        // signal is the `work.cancel()` on the abandonment branch. That cancel
+        // is exactly what the 120 s calibration leans on when it argues the
+        // window in which an abandoned call can still overlap the *next*
+        // recognizer request is short — the `SFSpeechErrorDomain Code=16`
+        // overlap this gate exists to prevent. Measured: deleting that one line
+        // left every other test in this file green.
+        //
+        // Awaiting the signal is the liveness claim; `.timeLimit` is the
+        // backstop, so a regression hangs here rather than mis-asserting.
+        await noticedCancellation.wait()
     }
 
     @Test("A never-finishing holder does not wedge a subsequent acquire",

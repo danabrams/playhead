@@ -802,6 +802,115 @@ private func firstCompletion(
     }
 }
 
+// MARK: - Watchdog abandonment blast radius (playhead-8m2w)
+
+/// Fails one designated shard and transcribes every other one.
+private final class ShardFailingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let failingShardId: Int
+    private let _shardIds = OSAllocatedUnfairLock(initialState: [Int]())
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+
+    init(failingShardId: Int) {
+        self.failingShardId = failingShardId
+    }
+
+    var transcribedShardIds: [Int] { _shardIds.withLock { $0 } }
+
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard _loaded.withLock({ $0 }) else { throw TranscriptEngineError.modelNotLoaded }
+        if shard.id == failingShardId {
+            // Byte-for-byte the shape `SpeechRecognitionRequestGate`'s watchdog
+            // throws when it abandons a hung recognizer call.
+            throw TranscriptEngineError.transcriptionFailed(
+                "Speech request exceeded its watchdog deadline and was abandoned"
+            )
+        }
+        _shardIds.withLock { $0.append(shard.id) }
+
+        let word = TranscriptWord(
+            text: "shard\(shard.id)",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            confidence: 0.9
+        )
+        return [TranscriptSegment(
+            id: shard.id,
+            words: [word],
+            text: "shard\(shard.id)",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            avgConfidence: 0.9,
+            passType: .fast
+        )]
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
+/// playhead-8m2w. `SpeechRecognitionRequestGate.defaultHolderDeadline` is
+/// argued at 120 s partly on the size of a false positive: the doc comment says
+/// a spuriously abandoned call "costs one shard's coverage, not the job",
+/// because `runTranscriptionLoop`'s per-shard `catch` logs and `continue`s.
+///
+/// That premise was load-bearing for the shipped constant and untested — no
+/// test made a single shard throw and then checked that the *rest* of the job
+/// still ran. This pins it, so a future edit that turns either per-shard
+/// `continue` into a `return` cannot quietly invalidate the calibration.
+@Suite("TranscriptEngine – a watchdog-abandoned shard does not abort the job")
+struct TranscriptEngineShardFailureIsolationTests {
+
+    @Test("A shard the ASR watchdog abandons costs one shard, not the loop",
+          .timeLimit(.minutes(1)))
+    func abandonedShardDoesNotAbortTheLoop() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeTranscriptAsset(id: "asset-shard-fail", episodeId: "ep-shard-fail")
+        )
+        // Shard 1, not shard 0: a failed shard 0 would additionally trip the
+        // end-of-loop shard-0 backfill, which is a different branch and would
+        // blur what this test pins.
+        let recognizer = ShardFailingRecognizer(failingShardId: 1)
+        let speech = SpeechService(
+            recognizer: recognizer,
+            serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-shard-fail", startTime: 0, duration: 30),
+                makeShard(id: 1, episodeID: "ep-shard-fail", startTime: 30, duration: 30),
+                makeShard(id: 2, episodeID: "ep-shard-fail", startTime: 60, duration: 30),
+            ],
+            analysisAssetId: "asset-shard-fail",
+            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+        )
+        await engine.finishAppending(analysisAssetId: "asset-shard-fail")
+
+        // The job still finishes. A loop that returned on the first shard error
+        // would never emit this and the wait would fall through to nil.
+        let completed = await firstCompletion(from: events, within: .seconds(10))
+        #expect(completed == "asset-shard-fail")
+
+        // And it kept going PAST the failure rather than merely reaching the
+        // end some other way: shard 2 is ordered after shard 1.
+        let transcribed = recognizer.transcribedShardIds
+        #expect(transcribed.contains(2), "shard after the failure must still be transcribed")
+        #expect(!transcribed.contains(1))
+    }
+}
+
 @Suite("TranscriptEngine – Asset Switching")
 struct TranscriptEngineAssetSwitchingTests {
 
