@@ -303,18 +303,96 @@ protocol SpeechRecognizer: Sendable {
 /// still overlap a restarted one unless we hold an explicit permit across the
 /// full async recognizer call. Overlap triggers `SFSpeechErrorDomain Code=16`
 /// ("Maximum number of simultaneous requests reached") on `prepareToAnalyze`.
-private actor SpeechRecognitionRequestGate {
-    private var isHeld = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+///
+/// playhead-8m2w: the permit used to be unbounded in both directions. A queued
+/// waiter had no way out, and a holder had no ceiling — so a single Speech call
+/// that never returned left `isHeld` true for the lifetime of the process and
+/// parked every later transcription behind it. `SpeechService.requestGate` is
+/// one process-wide instance, so that is *all* transcription in the app, with
+/// no recovery short of a restart. Two independent bounds close it:
+///
+/// 1. A cancelled waiter leaves the queue and `withExclusiveAccess` throws
+///    `CancellationError`. Such a waiter never held the permit, so it must not
+///    release one — handing the gate to nobody would wedge it permanently,
+///    which is strictly worse than the bug being fixed.
+/// 2. A holder is raced against `holderDeadline`, so a wedged call degrades
+///    one shard instead of the whole app's ASR.
+///
+/// Internal rather than file-private so both bounds can be tested against a
+/// dedicated instance rather than the shared process-wide one.
+actor SpeechRecognitionRequestGate {
 
-    func withExclusiveAccess<T>(
-        _ operation: @Sendable () async throws -> T
+    /// One parked `acquire()`. A reference type so the cancellation path and
+    /// the hand-off path can name the same waiter.
+    ///
+    /// `@unchecked Sendable` is load-bearing and audited: every read and write
+    /// happens while executing on `SpeechRecognitionRequestGate`. That is what
+    /// makes `resolve` a once guard *without* a second hand-written one — the
+    /// actor is the serialization primitive. (Same shape as
+    /// `BackgroundProcessingService.WaiterSlot`.)
+    private final class Waiter: @unchecked Sendable {
+        /// Non-nil only between parking and resolution.
+        var continuation: CheckedContinuation<Bool, Never>?
+        /// `true` once the permit was handed over, `false` once the waiter
+        /// gave up, `nil` while undecided. The once guard reads this.
+        var outcome: Bool?
+    }
+
+    /// Ceiling on how long one recognizer call may hold the permit.
+    ///
+    /// WHY 120 SECONDS. This has to bound a *hung* call while leaving a merely
+    /// slow one alone, and it is calibrated from both ends:
+    ///
+    /// - From below, by the work. A shard is 30 s of audio
+    ///   (`AnalysisAudioService.defaultShardDuration`), and on-device
+    ///   `SpeechAnalyzer` transcribes one in a small fraction of real time.
+    ///   120 s is four times the shard's own wall-clock duration. Note what
+    ///   is NOT inside the permit: locale asset installation happens in
+    ///   `loadModel()` → `AppleSpeechAssetBootstrapper.prepare()`, which the
+    ///   gate never wraps, so a cold first launch cannot spend the budget.
+    ///   What the permit does cover is one `SpeechAnalyzer` session —
+    ///   `prepareToAnalyze`, `analyzeSequence`, `finalizeAndFinish` and the
+    ///   result collector — for a single 30 s buffer.
+    /// - From above, by the tightest caller. `AnalysisJobRunner` gives the
+    ///   *entire* transcription stage 300 s (`Task.sleep(for: .seconds(300))`
+    ///   racing the `.completed` event) before it falls through to
+    ///   `transcription:zeroCoverage`. A per-call ceiling at or above that
+    ///   would protect nothing: the stage would already have given up, and a
+    ///   wedged holder would still own the permit for the next job.
+    ///
+    /// 4x realtime is a wide margin, not a proof. Sustained `.background` QoS
+    /// starvation could in principle stretch a live call past 120 s, so the
+    /// cost of a false positive is bounded deliberately rather than argued
+    /// away: `runTranscriptionLoop` catches the resulting
+    /// `transcriptionFailed` in its per-shard `catch` and `continue`s, so a
+    /// spurious fire costs one shard's coverage, not the job. The abandoned
+    /// call is also cancelled, and a merely-slow call — unlike a wedged one —
+    /// honours that, so the window in which it can still overlap the next
+    /// recognizer request is short.
+    static let defaultHolderDeadline: Duration = .seconds(120)
+
+    private static let logger = Logger(subsystem: "com.playhead", category: "SpeechRequestGate")
+
+    private var isHeld = false
+    private var waiters: [Waiter] = []
+    private let holderDeadline: Duration
+
+    init(holderDeadline: Duration = SpeechRecognitionRequestGate.defaultHolderDeadline) {
+        self.holderDeadline = holderDeadline
+    }
+
+    func withExclusiveAccess<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        await acquire()
+        guard await acquire() else {
+            // Cancelled while queued. We never owned the permit, so there is
+            // deliberately no `release()` on this path.
+            throw CancellationError()
+        }
 
         do {
             try Task.checkCancellation()
-            let result = try await operation()
+            let result = try await Self.runUnderWatchdog(operation, deadline: holderDeadline)
             release()
             return result
         } catch {
@@ -323,25 +401,173 @@ private actor SpeechRecognitionRequestGate {
         }
     }
 
-    private func acquire() async {
-        guard !isHeld else {
-            await withCheckedContinuation { continuation in
-                waiters.append(continuation)
-            }
-            return
+    /// Run one recognizer call so that the permit is guaranteed to come back.
+    ///
+    /// Static, therefore nonisolated — deliberately, but as HYGIENE, not as a
+    /// load-bearing invariant, and the distinction is measured rather than
+    /// argued. `Task { }` inherits its lexical context's isolation, so written
+    /// inside an isolated method every `Task` below would start on the gate
+    /// instead of the cooperative pool. Keeping the recognizer call and the
+    /// watchdog plumbing off the gate's executor is worth having; nothing here
+    /// *depends* on it. Round 4 rewrote this as an isolated instance method and
+    /// all 14 of the bead's tests still passed, because the gate's executor is
+    /// never busy for long — every method on it returns without blocking.
+    ///
+    /// Contrast `BoundedContinuationGate.armTimeout`, which carries the same
+    /// KEEP-THIS-NONISOLATED note for a reason that *is* load-bearing: its
+    /// timer has to fire on behalf of a caller that is already stuck, so a
+    /// timer queued behind that caller's executor could never fire. The gate
+    /// has no equivalent stuck-executor mode, which is exactly why the same
+    /// note here is weaker.
+    ///
+    /// Nothing here changes what the Speech call does, only how long it may
+    /// hold the permit. Two failure modes are separated:
+    ///
+    /// - **Cancellation** is forwarded into `work` and then *waited out*. The
+    ///   permit is not released until the recognizer call has actually
+    ///   unwound, because releasing early is precisely the overlap this gate
+    ///   exists to prevent (`SFSpeechErrorDomain Code=16`). This is why the
+    ///   bounded wait sits inside its own unstructured `Task`:
+    ///   `withBoundedCheckedContinuation` also resolves on cancellation, and
+    ///   an unstructured task does not inherit cancellation, so inside it only
+    ///   the hard deadline can resolve the wait.
+    /// - **A hung call** cannot be unwound at all — that is the whole failure
+    ///   class (playhead-xc6b): a continuation parked with no resume left has
+    ///   no suspension point to throw at. So on the deadline the call is
+    ///   abandoned: this shard fails loudly and the permit is freed, instead
+    ///   of every later transcription in the process parking behind it.
+    private static func runUnderWatchdog<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T,
+        deadline: Duration
+    ) async throws -> T {
+        let work = Task { try await operation() }
+
+        let reportAbandonment: @Sendable (BoundedContinuationFallback) -> Void = { _ in
+            logger.error("""
+                Speech request exceeded its \(deadline) watchdog deadline — \
+                abandoning it and freeing the request gate
+                """)
         }
 
-        isHeld = true
+        let bounded = Task {
+            await withBoundedCheckedContinuation(
+                timeout: deadline,
+                fallback: false,
+                onFallback: reportAbandonment
+            ) { resume in
+                Task {
+                    _ = try? await work.value
+                    resume(true)
+                }
+            }
+        }
+
+        let completed = await withTaskCancellationHandler {
+            // `Task<Bool, Never>.value` is not a cancellation point, which is
+            // what keeps us waiting for `work` to finish unwinding.
+            await bounded.value
+        } onCancel: {
+            work.cancel()
+        }
+
+        guard completed else {
+            // Best effort — a call that is merely slow will notice, a wedged
+            // one will not, and we do not wait to find out which.
+            work.cancel()
+            throw TranscriptEngineError.transcriptionFailed(
+                "Speech request exceeded its \(deadline) watchdog deadline and was abandoned"
+            )
+        }
+
+        // `work` has already finished; this rethrows its original error
+        // unchanged so callers keep matching on `TranscriptEngineError`.
+        return try await work.value
+    }
+
+    /// Returns `true` when the caller owns the permit and is responsible for
+    /// releasing it, `false` when the caller gave up while queued and owns
+    /// nothing.
+    private func acquire() async -> Bool {
+        guard isHeld else {
+            isHeld = true
+            return true
+        }
+
+        let waiter = Waiter()
+        waiters.append(waiter)
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                // Defence in depth, and — like `release()`'s skip below —
+                // unreachable today: `resolve` runs only on this actor, and
+                // nothing between the `append` above and this body releases
+                // the actor, so `outcome` is still nil every time. Replaying it
+                // rather than asserting its absence is the cheap half of that
+                // bet: if the ordering ever stops holding, a waiter resolved
+                // early wakes with the right answer instead of parking forever.
+                if let outcome = waiter.outcome {
+                    continuation.resume(returning: outcome)
+                } else {
+                    waiter.continuation = continuation
+                }
+            }
+        } onCancel: {
+            // `onCancel` runs on whichever thread called `cancel()`, so it has
+            // to hop back onto the gate to touch `waiters`. Two properties make
+            // that hop safe. It cannot arrive *before* the waiter is queued:
+            // the append above and the park below are one uninterrupted actor
+            // job, so this message cannot be serviced until the waiter is
+            // already in the queue. And it cannot starve: the gate never holds
+            // its executor across the recognizer call, because
+            // `withExclusiveAccess` SUSPENDS at `await bounded.value` inside
+            // `runUnderWatchdog` and a Swift actor is released at every
+            // suspension point. It is the suspension that frees the actor for
+            // this message, NOT `runUnderWatchdog` happening to be nonisolated
+            // — measured in round 4, where isolating that function left
+            // `cancelledWaiterUnblocks`, which needs exactly this hop while a
+            // holder is parked inside its operation, green in 0.12 s.
+            Task { await self.abandon(waiter) }
+        }
+    }
+
+    /// Cancellation path: the waiter gives up its place in the queue.
+    /// A no-op if the permit was already handed to it, in which case the
+    /// waiter wakes owning the permit and `withExclusiveAccess`'s
+    /// `Task.checkCancellation()` releases it back on the very next line.
+    private func abandon(_ waiter: Waiter) {
+        waiters.removeAll { $0 === waiter }
+        resolve(waiter, granted: false)
     }
 
     private func release() {
-        guard !waiters.isEmpty else {
-            isHeld = false
+        // Anything still queued is by construction unresolved: `abandon`
+        // removes a waiter from the queue before resolving it, and both run on
+        // the gate with no `await` in between. The `outcome == nil` skip is
+        // therefore dead code today — and it stays, because it is the one
+        // place where being wrong is unrecoverable. Handing the permit to an
+        // already-resolved waiter would resume nobody and leave `isHeld` true
+        // for the lifetime of the process: strictly worse than the bug this
+        // bead fixes. Skipping to the next candidate (and freeing the permit
+        // when none is left) turns that from a wedge into a no-op.
+        while !waiters.isEmpty {
+            let waiter = waiters.removeFirst()
+            guard waiter.outcome == nil else { continue }
+            resolve(waiter, granted: true)
             return
         }
 
-        let waiter = waiters.removeFirst()
-        waiter.resume()
+        isHeld = false
+    }
+
+    /// The single resolution point. Actor isolation is the once guard: the
+    /// first call decides `outcome` and every later call returns immediately,
+    /// so a `CheckedContinuation` can never be resumed twice.
+    private func resolve(_ waiter: Waiter, granted: Bool) {
+        guard waiter.outcome == nil else { return }
+        waiter.outcome = granted
+        guard let continuation = waiter.continuation else { return }
+        waiter.continuation = nil
+        continuation.resume(returning: granted)
     }
 }
 
@@ -533,7 +759,7 @@ actor SpeechService {
     }
 
     private func performRecognizerRequest<T: Sendable>(
-        _ operation: @Sendable () async throws -> T
+        _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         guard serializesRecognizerRequests else {
             try Task.checkCancellation()

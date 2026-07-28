@@ -455,6 +455,26 @@ actor TranscriptEngineService {
         activeTask != nil && activeTask?.isCancelled == false
     }
 
+#if DEBUG
+    /// playhead-8m2w test seam: hand out the live transcription task so a test
+    /// can cancel it the way a *silently dying producer* would — with none of
+    /// the `resumeAllAppendWaiters()` pairings that every production cancel
+    /// site in this file hand-writes — and then await its exit. There is no
+    /// production caller: every production path that cancels this task is
+    /// reached through `stop`, `stopTranscription` or `startTranscription`.
+    func activeTaskForTesting() -> Task<Void, Never>? {
+        activeTask
+    }
+
+    /// playhead-8m2w test seam: non-zero exactly while the drain loop is
+    /// parked in `waitForMoreShards()`. Lets a test prove it is testing the
+    /// PARKED case rather than racing the loop and exiting at the pre-park
+    /// `Task.isCancelled` check — which would pass even against the bug.
+    var appendWaiterCountForTesting: Int {
+        appendWaiters.count
+    }
+#endif
+
     func events() -> AsyncStream<TranscriptEngineEvent> {
         let id = UUID()
         return AsyncStream { continuation in
@@ -665,9 +685,59 @@ actor TranscriptEngineService {
     /// Suspend until another actor touches the append queue or the
     /// session ends. The resume side is any of `appendShards`,
     /// `finishAppending`, `stop`, or a fresh `startTranscription`.
+    ///
+    /// playhead-8m2w: the drain loop tests `Task.isCancelled` one line before
+    /// it parks here, so a cancel landing in that window used to park anyway —
+    /// and a parked continuation cannot be unwound by cancellation
+    /// (playhead-xc6b), so the loop stayed suspended for the lifetime of the
+    /// process. It was only ever saved by discipline: every
+    /// `activeTask?.cancel()` in this file is hand-paired with a
+    /// `resumeAllAppendWaiters()`. That pairing does not survive a producer
+    /// that dies *silently* — `shardConsumerTask` stalling inside
+    /// `featureService.extractAndPersist` so `finishAppending` is never
+    /// reached, with no `stop()` behind it — and it silently rots the first
+    /// time a future cancel site forgets the pairing.
+    ///
+    /// The cancellation handler closes both. It resumes through the existing
+    /// `resumeAllAppendWaiters()` rather than picking out this one waiter on
+    /// purpose: that function drains the list *before* resuming and runs on
+    /// this actor, so actor isolation is already the once guard and no second
+    /// hand-written one is introduced. Waking a sibling waiter early is
+    /// harmless — a waiter that wakes with the queue still empty and input
+    /// still open simply re-parks, which is the behaviour that function is
+    /// already documented and used for.
+    ///
+    /// The handler is the load-bearing half, and it is airtight on its own.
+    /// `onCancel` fires on the canceller's thread and has to hop back here to
+    /// reach `appendWaiters`, but that hop *cannot be serviced until this
+    /// actor job suspends* — which happens only after the append. So the
+    /// waiter is always already in the list by the time the hop drains it,
+    /// including for a cancel that lands before the park:
+    /// `withTaskCancellationHandler` invokes `onCancel` immediately when the
+    /// task is already cancelled at install time, so that ordering schedules
+    /// the same hop.
+    ///
+    /// The `Task.isCancelled` check inside the continuation body is defence in
+    /// depth, not a hole being plugged. What it buys is independence from that
+    /// already-cancelled-fires-immediately contract, and one less actor hop on
+    /// the common path: an already-cancelled loop never parks in the first
+    /// place. (Same shape as `BoundedContinuation`'s settle-before-attach
+    /// phase.) It is deliberately kept even though no test can distinguish it
+    /// from the handler alone — the window it covers is a few instructions
+    /// wide and not reachable from a test seam.
     private func waitForMoreShards() async {
-        await withCheckedContinuation { continuation in
-            appendWaiters.append(continuation)
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    appendWaiters.append(continuation)
+                }
+            }
+        } onCancel: {
+            Task { [weak self] in
+                await self?.resumeAllAppendWaiters()
+            }
         }
     }
 
