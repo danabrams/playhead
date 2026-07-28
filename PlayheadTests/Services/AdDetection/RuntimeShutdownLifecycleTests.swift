@@ -232,12 +232,17 @@ private actor FirstAcceptedRuntimeSeekGate {
 /// measurement tests and must never be migrated behind `PerfGate`.
 ///
 /// What they did lack is a finite backstop. Before playhead-xc6b, 8 of the
-/// 18 tests in this file carried no `.timeLimit` at all while awaiting
-/// continuation gates (`FirstAcceptedRuntimeSeekGate`,
-/// `RuntimePlaybackObserverGate`) and `DeinitLatch`es that have no deadline
-/// of their own. A regression on those paths produced NO DIAGNOSTIC AT ALL:
-/// the test task never returned and the run said nothing about which test
-/// wedged.
+/// 18 tests in this file carried no `.timeLimit` at all. Two of those eight
+/// park on a `FirstAcceptedRuntimeSeekGate` continuation
+/// (`newestRuntimeSeekSuppressesOlderDownstreamEffects`,
+/// `newestSeekWinsAcrossInEffectSuspension`), which has no deadline of its
+/// own; the other six await runtime seek hooks and transport state with no
+/// deadline either. Be exact about the rest of the file, since this bead is
+/// about not overclaiming: every `RuntimePlaybackObserverGate` and
+/// `DeinitLatch` waiter here ALREADY carried a limit, so those were RAISED
+/// 1 min -> 3 min rather than added. A regression on the ungated paths
+/// produced NO DIAGNOSTIC AT ALL: the test task never returned and the run
+/// said nothing about which test wedged.
 ///
 /// What the trait actually buys, stated precisely: a REPORTED failure naming
 /// the test and the deadline it blew, plus an unwind of every
@@ -702,18 +707,26 @@ struct RuntimeShutdownLifecycleTests {
         // join. That is sufficient here, and is the point: the old budget
         // could not prove shutdown had started at all. The poll scales with
         // load instead of racing it.
-        let shutdownReachedTheJoin = await pollUntil(timeout: starvationPollBudget) {
+        //
+        // The name says CANCEL, not JOIN, deliberately: `isCancelled` flips
+        // at :3265 and the join is at :3274, so this control proves shutdown
+        // reached the cancel — claiming "reached the join" would be exactly
+        // the kind of overclaim this bead exists to remove.
+        let shutdownReachedObserverCancel = await pollUntil(
+            timeout: starvationPollBudget
+        ) {
             observerTask.isCancelled
         }
         #expect(
-            shutdownReachedTheJoin,
-            "shutdown() must reach its playback-state observer cancel/join — without this the negative assertion below is vacuous"
+            shutdownReachedObserverCancel,
+            "shutdown() must reach its playback-state observer cancel — without this the negative assertion below is vacuous"
         )
 
-        // Now the negative means something: shutdown has cancelled the
-        // observer and is waiting on it, and it still has not exited because
-        // its body is parked in `bodyGate.hold()`. The gate's continuation is
-        // resumed only by `release()` below, so this cannot flip on its own.
+        // Now the negative means something: shutdown has demonstrably run far
+        // enough to cancel the observer, and the observer still has not
+        // exited because its body is parked in `bodyGate.hold()`. The gate's
+        // continuation is resumed only by `release()` below, so this cannot
+        // flip on its own.
         #expect(
             !runtime._playbackStateObserverDidExitForTesting(),
             "The held body must still own the observer until its downstream hop returns"

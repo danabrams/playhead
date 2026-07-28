@@ -138,6 +138,14 @@ func pollUntil(
 /// backstop trip still means "hang", not "two polls expired". A satisfied poll
 /// exits on its first read, so the budget is only ever spent on the failing
 /// path and costs nothing when the code is correct.
+///
+/// THE TWO-POLL CEILING IS LOAD-BEARING, so treat it as a rule and not a
+/// description. Three expiries (180 s) reach the backstop exactly, and the
+/// backstop's documented meaning is "a real hang" — a third poll would make
+/// the instrument lie about its own failures. If a test genuinely needs a
+/// third, raise that test's `.timeLimit` in the same change. Today the only
+/// two-poll test is
+/// `PlaybackServiceActorIsolationTests.tearDownOwnsEveryLongLivedResource`.
 let starvationPollBudget: Duration = .seconds(60)
 
 // MARK: - Migration test helpers
