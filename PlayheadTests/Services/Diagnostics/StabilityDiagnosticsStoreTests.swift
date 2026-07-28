@@ -217,6 +217,48 @@ struct StabilityDiagnosticsStoreTests {
         }
     }
 
+    @Test("the buffer carries .completeUntilFirstUserAuthentication after every write")
+    func fileProtectionClass() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = StabilityDiagnosticsStore(directory: directory)
+
+        // Write TWICE: `.atomic` replaces the inode, so a protection
+        // attribute applied only at create time would silently stop
+        // applying on the next append. The second write is the one that
+        // would regress.
+        await store.append([record(at: 1)])
+        await store.append([record(at: 2)])
+
+        let fileURL = directory.appendingPathComponent(StabilityDiagnosticsStore.filename)
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let actual = attributes[.protectionKey] as? FileProtectionType
+
+        // The simulator does not always vend the attribute back. Where
+        // it does, it must be the expected class; where it does not,
+        // the source-level assertion below is the standing proof. This
+        // mirrors how `PlayheadTests/E2E/Privacy/FileProtectionTests`
+        // handles the same platform gap.
+        if let actual {
+            #expect(
+                actual == .completeUntilFirstUserAuthentication,
+                "stability buffer carries \(actual); MetricKit can deliver during a locked background launch"
+            )
+        }
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/Diagnostics/StabilityDiagnosticsStore.swift"
+        )
+        let code = SwiftSourceInspector.strippingComments(source)
+        #expect(
+            code.contains("FileProtectionType.completeUntilFirstUserAuthentication"),
+            """
+            the store must set the protection class explicitly. `.complete` (the stricter \
+            class) would make the buffer unreadable during the locked background launch \
+            MetricKit can deliver into; no class at all inherits the container default.
+            """
+        )
+    }
+
     @Test("the buffer lives in Application Support, not Caches — the OS must not evict crash records")
     func defaultLocationIsApplicationSupport() throws {
         // The default (nil-directory) store resolves its own path; the
