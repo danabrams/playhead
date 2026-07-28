@@ -395,7 +395,20 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         let startedAt: Double
         let finishedAt: Double?
         let outcome: String
-        let deferReason: String?
+        /// Bytes the fire's ranged pre-check spent, parsed out of the run
+        /// ledger's free-form annotation. `nil` when the row predates the
+        /// annotation or does not match its shape.
+        ///
+        /// The ledger stores this as the string `"precheckBytes=N
+        /// fullFetchBytes=M"` because `background_task_runs` has no bytes
+        /// column. It is projected into INTEGERS here rather than shipped as
+        /// text: `DiagnosticTextSanitizer`'s allowlist has no `=`, so passing
+        /// the raw annotation through would drop it entirely — and a
+        /// `no_eligible_work` fire that transferred zero bytes is exactly the
+        /// signal that told playhead-p70f the 299.6 MB did NOT come from the
+        /// lagged sweep.
+        let precheckBytes: Int?
+        let fullFetchBytes: Int?
         let jobsSeen: Int?
         let jobsAdmitted: Int?
         let jobsCompleted: Int?
@@ -405,7 +418,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case startedAt = "started_at"
             case finishedAt = "finished_at"
             case outcome
-            case deferReason = "defer_reason"
+            case precheckBytes = "precheck_bytes"
+            case fullFetchBytes = "full_fetch_bytes"
             case jobsSeen = "jobs_seen"
             case jobsAdmitted = "jobs_admitted"
             case jobsCompleted = "jobs_completed"

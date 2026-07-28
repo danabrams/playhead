@@ -331,7 +331,8 @@ enum DiagnosticsBundleBuilder {
                     startedAt: run.startedAt,
                     finishedAt: run.finishedAt,
                     outcome: run.outcome.rawValue,
-                    deferReason: run.deferReason.flatMap(allowlistedRediffToken),
+                    precheckBytes: rediffAnnotationValue(run.deferReason, key: "precheckBytes"),
+                    fullFetchBytes: rediffAnnotationValue(run.deferReason, key: "fullFetchBytes"),
                     jobsSeen: run.jobsSeen,
                     jobsAdmitted: run.jobsAdmitted,
                     jobsCompleted: run.jobsCompleted,
@@ -347,25 +348,34 @@ enum DiagnosticsBundleBuilder {
         )
     }
 
-    /// Character cap on the one rediff string field that ships.
-    static let rediffDetailCharCap = 120
+    /// Longest `deferReason` this parser will scan. The rediff annotation is
+    /// two `key=integer` pairs; anything longer is not it.
+    static let rediffAnnotationCharCap = 120
 
-    /// The rediff sweep's `deferReason` is app-generated and closed-shape
-    /// (`"precheckBytes=N fullFetchBytes=M"`). It ships only when every
-    /// character passes `DiagnosticTextSanitizer`'s allowlist AND it is within
-    /// the cap; anything else is OMITTED rather than truncated, because a
-    /// half-sanitized string is a worse artifact than a missing one.
+    /// Pull ONE `key=<integer>` value out of the rediff sweep's run-ledger
+    /// annotation (`"precheckBytes=N fullFetchBytes=M"`), or `nil`.
     ///
-    /// The day-0 records' `lastDetail` is deliberately NOT exported at all: it
-    /// is `String(describing: error)`, and a `URLError` carries the enclosure
-    /// URL — a content-identifying string that would be a stronger disclosure
-    /// than the raw `episodeId` legal checklist item (a) already forbids. The
-    /// closed `last_exit` enum is what a support engineer actually needs; the
-    /// free text stays on device in `rediff_day_zero_attempts`.
-    private static func allowlistedRediffToken(_ raw: String) -> String? {
-        guard raw.count <= rediffDetailCharCap,
-              DiagnosticTextSanitizer.isAllowed(raw) else { return nil }
-        return raw
+    /// NO free text crosses this boundary — the return type is `Int?`. Two
+    /// reasons the annotation is parsed rather than forwarded:
+    ///   * `DiagnosticTextSanitizer`'s allowlist has no `=`, so the raw string
+    ///     would be rejected wholesale and the bandwidth signal lost;
+    ///   * `deferReason` is a free-form column shared with other entry points,
+    ///     so "forward whatever is in it" is not a bound anyone maintains.
+    ///
+    /// The day-0 records' `lastDetail` is likewise NOT exported: it is
+    /// `String(describing: error)`, and a `URLError` carries the enclosure URL
+    /// — a content-identifying string that would be a stronger disclosure than
+    /// the raw `episodeId` legal checklist item (a) already forbids. The closed
+    /// `last_exit` enum is what a support engineer needs; the free text stays
+    /// on device in `rediff_day_zero_attempts`.
+    private static func rediffAnnotationValue(_ raw: String?, key: String) -> Int? {
+        guard let raw, raw.count <= rediffAnnotationCharCap else { return nil }
+        for token in raw.split(separator: " ") {
+            let parts = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, parts[0] == key else { continue }
+            return Int(parts[1])
+        }
+        return nil
     }
 
     // MARK: - OptIn bundle
