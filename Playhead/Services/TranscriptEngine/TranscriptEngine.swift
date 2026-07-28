@@ -504,16 +504,23 @@ actor SpeechRecognitionRequestGate {
     }
 
     private func release() {
-        guard !waiters.isEmpty else {
-            isHeld = false
+        // Anything still queued is by construction unresolved: `abandon`
+        // removes a waiter from the queue before resolving it, and both run on
+        // the gate with no `await` in between. The `outcome == nil` skip is
+        // therefore dead code today — and it stays, because it is the one
+        // place where being wrong is unrecoverable. Handing the permit to an
+        // already-resolved waiter would resume nobody and leave `isHeld` true
+        // for the lifetime of the process: strictly worse than the bug this
+        // bead fixes. Skipping to the next candidate (and freeing the permit
+        // when none is left) turns that from a wedge into a no-op.
+        while !waiters.isEmpty {
+            let waiter = waiters.removeFirst()
+            guard waiter.outcome == nil else { continue }
+            resolve(waiter, granted: true)
             return
         }
 
-        // Anything still queued is by construction unresolved: `abandon`
-        // removes a waiter from the queue before resolving it, and both run on
-        // the gate. So this hand-off can never be dropped on the floor, which
-        // is what would leak the permit.
-        resolve(waiters.removeFirst(), granted: true)
+        isHeld = false
     }
 
     /// The single resolution point. Actor isolation is the once guard: the
