@@ -478,6 +478,13 @@ struct PlayheadApp: App {
                     )
                 }
                 .task {
+                    // playhead-jw63.3: the launch-time analytics tick. The
+                    // scene starts `.active`, so `.onChange(of: scenePhase)`
+                    // never fires for it — without this, a first launch
+                    // would never record the install that the retention
+                    // ladder is measured against.
+                    AnalyticsService.shared.applicationDidBecomeActive()
+
                     let stateStream = await runtime.playbackService.observeStates()
                     var lastStatus: PlaybackState.Status = .idle
                     var lastPeriodicCheckpoint: TimeInterval?
@@ -497,6 +504,11 @@ struct PlayheadApp: App {
                                     modelContainer: modelContainer,
                                     trigger: .periodic
                                 )
+                                // playhead-jw63.3: bound how much listening
+                                // time a force-quit can lose to the same 15 s
+                                // this checkpoint already bounds position
+                                // loss to. Local integer write, no network.
+                                AnalyticsService.shared.commitListeningInterval()
                                 lastPeriodicCheckpoint = state.currentTime
                             }
 
@@ -508,6 +520,21 @@ struct PlayheadApp: App {
 
                         default:
                             break
+                        }
+
+                        // playhead-jw63.3: listening time accrues only
+                        // across `.playing`. Every way listening actually
+                        // stops — user pause, a phone call, headphones out,
+                        // a buffering stall, end of episode — arrives here
+                        // as a transition out of `.playing`, so this one
+                        // hook covers all of them. Backgrounding is not one
+                        // of them, and must not be: audio in your ears with
+                        // the screen off is listening.
+                        if state.status != lastStatus {
+                            AnalyticsService.shared.playbackStatusChanged(
+                                isPlaying: state.status == .playing,
+                                durationSeconds: state.duration
+                            )
                         }
 
                         lastStatus = state.status
@@ -570,8 +597,16 @@ struct PlayheadApp: App {
                 Task {
                     await runtime.backgroundProcessingService.appDidEnterBackground()
                 }
+                // playhead-jw63.3: commit listening seconds accrued so far.
+                // Local write only — analytics never opens a socket on the
+                // way to the background, and never asks iOS for a window.
+                AnalyticsService.shared.applicationDidEnterBackground()
             case .active:
                 Self.logger.info("Scene phase: active")
+                // playhead-jw63.3: advance the local return-bucket ladder
+                // and, at most once a day, consider an upload. Foreground
+                // only, background QoS, never a wake.
+                AnalyticsService.shared.applicationDidBecomeActive()
             case .inactive:
                 break
             @unknown default:
