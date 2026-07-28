@@ -31,6 +31,24 @@
 // `RuntimeShutdownLifecycleTests.lifecycleInvalidationDoesNotJoinStalledCacheTask`),
 // so 3 minutes clears contention — a trip means a real hang, not a busy
 // machine — while staying far below the gate's outer timeout.
+//
+// playhead-xc6b — EVERY TEST HERE MUST TEAR DOWN ITS SERVICE.
+//
+// `PlaybackService` has no `deinit`, and its remote-command targets are
+// removed only by `tearDown()` -> `removeRemoteCommandTargets()`. Because
+// `MPRemoteCommandCenter.shared()` is PROCESS-GLOBAL, a test that drops its
+// service without tearing down leaves ~7 command targets registered — plus a
+// mutation of the shared `preferredIntervals` / `supportedPlaybackRates` —
+// for the remaining life of the test host. 24 of the 32 tests in this file
+// did exactly that. The leak does not retain the service (the closures
+// capture `[weak self]` and `RemoteCommandHandler` holds `weak service`), so
+// it is unbounded GLOBAL-TOKEN growth rather than object retention — which
+// is why the dealloc test still passed while this accumulated.
+//
+// The one deliberate exception is
+// `interruptionObserverDoesNotCreateRetainCycle`, which must NOT tear down:
+// tear-down joins the interruption observer, and that observer is the
+// reference graph the test exists to check.
 
 @preconcurrency import AVFoundation
 import Foundation
@@ -315,6 +333,7 @@ struct PlaybackServiceActorIsolationTests {
         )
         let snapshot = await service.snapshot()
         #expect(snapshot.status == .idle)
+        await service.tearDown()
     }
 
     @Test("State observation stream yields from actor without assertion",
@@ -335,6 +354,7 @@ struct PlaybackServiceActorIsolationTests {
             break
         }
         #expect(received)
+        await service.tearDown()
     }
 
     @Test("Concurrent snapshot calls don't trigger executor assertion",
@@ -357,6 +377,7 @@ struct PlaybackServiceActorIsolationTests {
                 #expect(state.status == .idle)
             }
         }
+        await service.tearDown()
     }
 
     @Test("A detach token rejects a stale queued item installation",
@@ -548,6 +569,7 @@ struct PlaybackServiceActorIsolationTests {
             await service.snapshot().currentTime != 42,
             "The old item's completion must not overwrite the replacement item's state"
         )
+        await service.tearDown()
     }
 
     @Test("Newest overlapping user seek wins on the same item",
@@ -651,6 +673,7 @@ struct PlaybackServiceActorIsolationTests {
             "The old cue completion must not publish into the replacement"
         )
         #expect(await service._testingPlayerVolume == originalVolume)
+        await service.tearDown()
     }
 
     @Test("A failed item seek releases the active transition duck",
@@ -683,6 +706,7 @@ struct PlaybackServiceActorIsolationTests {
             await service.snapshot().currentTime != 120,
             "A failed seek must not publish the cue target"
         )
+        await service.tearDown()
     }
 
     @Test("Listen disarm invalidates an in-flight transition for the same cue",
@@ -725,6 +749,7 @@ struct PlaybackServiceActorIsolationTests {
             await service.snapshot().currentTime != 119,
             "The invalidated cue transition must not defeat Listen"
         )
+        await service.tearDown()
     }
 
     @Test("Cue removal cannot cancel an overlapping user seek",
@@ -785,6 +810,7 @@ struct PlaybackServiceActorIsolationTests {
             await service.snapshot().currentTime == 42,
             "The cancelled automatic skip must not overwrite the user seek"
         )
+        await service.tearDown()
     }
 
     @Test("Listen disarm invalidates an in-flight merged-pod transition",
@@ -836,6 +862,7 @@ struct PlaybackServiceActorIsolationTests {
             await service.snapshot().currentTime != 150,
             "The merged-pod transition must not skip past the restored first ad"
         )
+        await service.tearDown()
     }
 
     @Test("Listen disarm invalidates a detected transition before queued execution",
@@ -879,6 +906,7 @@ struct PlaybackServiceActorIsolationTests {
         #expect(await seekRecorder.count() == 0)
         #expect(await service.snapshot().currentTime != 120)
         #expect(await service._testingPlayerVolume == originalVolume)
+        await service.tearDown()
     }
 
     @Test("Removing a cue invalidates its detected transition before queued execution",
@@ -924,6 +952,7 @@ struct PlaybackServiceActorIsolationTests {
         #expect(await seekRecorder.count() == 0)
         #expect(await service.snapshot().currentTime != 120)
         #expect(await service._testingPlayerVolume == originalVolume)
+        await service.tearDown()
     }
 
     @Test("Tear down invalidates a detected transition before queued execution",
@@ -1170,6 +1199,7 @@ struct PlaybackServiceActorIsolationTests {
             await service.snapshot().currentTime != 9_999,
             "A queued periodic tick from A must not publish into B"
         )
+        await service.tearDown()
     }
 
     @Test("Listen disarm removes every cue overlapping the banner span",
@@ -1203,6 +1233,7 @@ struct PlaybackServiceActorIsolationTests {
         let remaining = await service._testingSkipCues
         #expect(remaining.count == 1)
         #expect(CMTimeGetSeconds(remaining[0].start) == 200)
+        await service.tearDown()
     }
 
     @Test("A stale item generation cannot disarm replacement cues",
@@ -1244,6 +1275,7 @@ struct PlaybackServiceActorIsolationTests {
             await service._testingSkipCues.count == 1,
             "The replacement item's cue must survive a stale Listen actor hop"
         )
+        await service.tearDown()
     }
 
     @Test("A replaced item cannot publish an already-queued status callback",
@@ -1282,6 +1314,7 @@ struct PlaybackServiceActorIsolationTests {
             await service.snapshot().duration != 9_999,
             "A queued callback from the old item must not publish its duration as B's"
         )
+        await service.tearDown()
     }
 }
 
@@ -1308,6 +1341,7 @@ struct ProgressiveLoaderDecouplingTests {
         let snapshot = await service.snapshot()
         // Status will be loading or failed (no real delegate), but no crash.
         #expect(snapshot.status != .idle)
+        await service.tearDown()
     }
 
     @Test("ProgressiveResourceLoader operates independently of PlaybackServiceActor",
@@ -1354,6 +1388,7 @@ struct ProgressiveLoaderDecouplingTests {
         let snapshot = await service.snapshot()
         #expect(snapshot.status != .idle)
         _ = loader // Keep alive
+        await service.tearDown()
     }
 
     @Test("Simultaneous actor access and loader callbacks don't conflict",
@@ -1459,6 +1494,7 @@ struct PlaybackServiceCallbackIsolationTests {
         // MPNowPlayingInfoCenter.default().
         let title = nowPlaying.info?[MPMediaItemPropertyTitle] as? String
         #expect(title == "Test Episode")
+        await service.tearDown()
     }
 
     @Test("MPMediaItemArtwork provider callable from main thread",
@@ -1487,7 +1523,7 @@ struct PlaybackServiceCallbackIsolationTests {
             return artwork?.image(at: CGSize(width: 1, height: 1))
         }
         #expect(rendered != nil)
-        _ = service
+        await service.tearDown()
     }
 
     @Test("loadItem triggers KVO without executor assertion", .timeLimit(.minutes(3)))
@@ -1529,6 +1565,7 @@ struct PlaybackServiceCallbackIsolationTests {
         }
         #expect(sawNonIdle,
                 "loadItem must drive a KVO status change off .idle")
+        await service.tearDown()
     }
 
     @Test("State updates after play don't crash",
@@ -1560,6 +1597,7 @@ struct PlaybackServiceCallbackIsolationTests {
 
         let snapshot = await service.snapshot()
         #expect(snapshot.status == .playing)
+        await service.tearDown()
     }
 
     @Test("Concurrent metadata and snapshot access",
@@ -1594,5 +1632,6 @@ struct PlaybackServiceCallbackIsolationTests {
 
         // If we reach here, concurrent artwork closure creation didn't
         // interfere with actor-serialized snapshot access.
+        await service.tearDown()
     }
 }
