@@ -251,10 +251,20 @@ enum MetricKitDiagnosticProjector {
 
         var frames: [StabilityCallStackFrame] = []
         var total = 0
+        // Stop walking once we are well past the cap, so a runaway or
+        // cyclic tree cannot spin here. `frame_count` claims to be the
+        // observed depth up to this bound and no more.
+        //
+        // Saturating rather than `maxFrames * 8`: an absurd `maxFrames`
+        // would otherwise TRAP on overflow, and a crash in the crash
+        // reporter is the one failure mode this whole subsystem exists
+        // to avoid.
+        let walkLimit = maxFrames > Int.max / 8 ? Int.max : maxFrames * 8
+
         // Explicit stack (depth-first, roots in order) rather than
-        // recursion: MetricKit frame trees are attacker-agnostic but
-        // arbitrarily deep, and a runaway recursion in the diagnostics
-        // path would turn a crash report into a second crash.
+        // recursion: MetricKit frame trees can be deep, and recursing to
+        // their depth is how the test host was already brought down once
+        // (JSONSerialization's recursive writer on a 200-deep fixture).
         var pending: [(node: [String: Any], depth: Int)] = roots
             .compactMap { $0 as? [String: Any] }
             .reversed()
@@ -265,10 +275,7 @@ enum MetricKitDiagnosticProjector {
             if frames.count < maxFrames {
                 frames.append(frame(from: node, depth: depth))
             }
-            // Guard against a pathological tree: stop walking once we
-            // are far past the cap. `total` stays honest up to this
-            // bound, which is all `frame_count` claims to be.
-            guard total < maxFrames * 8 else { break }
+            guard total < walkLimit else { break }
             if let subFrames = node["subFrames"] as? [Any] {
                 for sub in subFrames.compactMap({ $0 as? [String: Any] }).reversed() {
                     pending.append((sub, depth + 1))

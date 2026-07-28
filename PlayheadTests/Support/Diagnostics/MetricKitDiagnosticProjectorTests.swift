@@ -167,6 +167,24 @@ struct MetricKitDiagnosticProjectorTests {
         #expect(record.framesTruncated)
     }
 
+    @Test("an absurd frame cap does not trap the walk-limit arithmetic")
+    func absurdFrameCapDoesNotTrap() throws {
+        // The walk limit is derived from `maxFrames`; computing it as a
+        // plain `maxFrames * 8` traps on overflow, and a trap inside the
+        // crash reporter is the one failure this subsystem exists to
+        // avoid. Before the saturating guard this test crashed the host.
+        let data = try MetricKitPayloadFixture.payloadData(
+            MetricKitPayloadFixture.payload(crashes: [MetricKitPayloadFixture.crashDiagnostic()])
+        )
+        let records = MetricKitDiagnosticProjector.records(
+            fromPayloadJSON: data,
+            receivedAt: Self.receivedAt,
+            maxFrames: .max
+        )
+        #expect(records.first?.frames.count == 3)
+        #expect(records.first?.framesTruncated == false)
+    }
+
     @Test("a diagnostic with no call stack still produces a record")
     func missingCallStackStillCaptured() throws {
         var diagnostic = MetricKitPayloadFixture.crashDiagnostic()
