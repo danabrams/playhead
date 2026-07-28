@@ -1390,6 +1390,120 @@ actor SkipOrchestrator {
         }
     }
 
+    /// playhead-1mq1.2.1: strong ad evidence localized INSIDE a span the user
+    /// is reverting, resolved into the partition that decides what the revert
+    /// is allowed to teach. See `RevertEvidencePartition` for the rule.
+    ///
+    /// SUSPENSION CONTRACT — every caller must resolve this in the SYNCHRONOUS
+    /// prefix of its gesture, before the first `await`, and pass the resulting
+    /// partition down. It reads live actor state (`activeEvidenceCatalog`,
+    /// `windows`, `suggestWindows`), so resolving it after the store hop would
+    /// let a replacement episode's evidence decide what the previous episode's
+    /// correction may teach — the defect class playhead-i08e and
+    /// playhead-o4qr closed on the identity fields.
+    ///
+    /// `excluded` is the set of window IDs this gesture is itself reverting.
+    /// They must not vouch for themselves: "this window says it is an ad" is
+    /// precisely the claim the user just contradicted.
+    private func revertNegativeAttribution(
+        span: RevertEvidencePartition.Interval,
+        analysisAssetId: String,
+        excludingWindowIds excluded: Set<String>
+    ) -> RevertEvidencePartition.Partition {
+        var evidence: [RevertEvidencePartition.Interval] = []
+
+        // OCCURRENCES, deliberately not `coverageStartTime`/`coverageEndTime`.
+        // Those bracket the FIRST and LAST occurrence of a deduped
+        // (category, text) pair, so a sponsor URL read twice in an episode has
+        // a "coverage" span covering most of it. Clipping that hull into the
+        // reverted window would mark editorial content as ad evidence and —
+        // the dangerous direction — push the evidence-free remainder INTO the
+        // real ad, attributing a negative to exactly the audio this guard
+        // exists to protect. What the entry actually observed is its
+        // representative occurrence plus the two endpoint timestamps.
+        if let catalog = activeEvidenceCatalog,
+           catalog.analysisAssetId == analysisAssetId {
+            for entry in catalog.entries
+            where RevertEvidencePartition.strongLexicalCategories
+                .contains(entry.category) {
+                evidence.append(
+                    RevertEvidencePartition.Interval(
+                        startTime: min(entry.startTime, entry.endTime),
+                        endTime: max(entry.startTime, entry.endTime)
+                    )
+                )
+                guard entry.count > 1 else { continue }
+                evidence.append(
+                    RevertEvidencePartition.Interval(
+                        startTime: entry.firstTime,
+                        endTime: entry.firstTime
+                    )
+                )
+                evidence.append(
+                    RevertEvidencePartition.Interval(
+                        startTime: entry.lastTime,
+                        endTime: entry.lastTime
+                    )
+                )
+            }
+        }
+
+        // A DIFFERENT live ad window overlapping part of the reverted span is
+        // subspan-scoped detection evidence: it was produced independently of
+        // the material under correction, so admitting it is not the circular
+        // reading excluded above.
+        for (id, managed) in windows
+        where !excluded.contains(id)
+            && managed.adWindow.analysisAssetId == analysisAssetId
+            && managed.decisionState != .reverted
+            && managed.decisionState != .suppressed
+            && managed.snappedStart < span.endTime
+            && managed.snappedEnd > span.startTime {
+            evidence.append(
+                RevertEvidencePartition.Interval(
+                    startTime: managed.snappedStart,
+                    endTime: managed.snappedEnd
+                )
+            )
+        }
+        for (id, suggested) in suggestWindows
+        where !excluded.contains(id)
+            && suggested.analysisAssetId == analysisAssetId
+            && suggested.startTime < span.endTime
+            && suggested.endTime > span.startTime {
+            evidence.append(
+                RevertEvidencePartition.Interval(
+                    startTime: suggested.startTime,
+                    endTime: suggested.endTime
+                )
+            )
+        }
+
+        return RevertEvidencePartition.resolve(
+            span: span,
+            adEvidence: evidence
+        )
+    }
+
+    /// Convenience for the single-window revert seams.
+    ///
+    /// The span is the PRODUCER row's own bounds, deliberately not the snapped
+    /// display bounds: `revokeRecurrenceEvidence` fetches its feature windows
+    /// over exactly this range, so partitioning over the same range keeps the
+    /// attribution filter an exact identity whenever the partition is CLEAN.
+    private func revertNegativeAttribution(
+        for window: AdWindow
+    ) -> RevertEvidencePartition.Partition {
+        revertNegativeAttribution(
+            span: RevertEvidencePartition.Interval(
+                startTime: window.startTime,
+                endTime: window.endTime
+            ),
+            analysisAssetId: window.analysisAssetId,
+            excludingWindowIds: [window.id]
+        )
+    }
+
     /// Broadcast the current set of applied segments to all listeners.
     private func broadcastAppliedSegments() {
         let applied = windows.values
@@ -3011,10 +3125,19 @@ actor SkipOrchestrator {
         )
     }
 
+    /// - Parameter negativeAttribution: playhead-1mq1.2.1. The evidence
+    ///   partition for the reverted span, resolved by the caller BEFORE its
+    ///   first suspension (see `revertNegativeAttribution`). It scopes the
+    ///   FUZZY similarity sweep below — the one part of this method that can
+    ///   reach rows the user never saw. The exact source tombstone and the
+    ///   exact matched-entry revocation are unaffected: both are retractions
+    ///   of a specific row this window is durably tied to, not labels applied
+    ///   to audio.
     private func revokeRecurrenceEvidence(
         for window: AdWindow,
         showId: String?,
-        source: CatalogRevocationSource
+        source: CatalogRevocationSource,
+        negativeAttribution: RevertEvidencePartition.Partition
     ) async throws {
         let sourceKey = RecurrenceSourceKey(window)
         pendingCatalogLearning.removeValue(forKey: sourceKey)
@@ -3054,11 +3177,26 @@ actor SkipOrchestrator {
         var matchingRepeatedFingerprint: RepeatedAdFingerprint?
         var firstFailure: Error?
         do {
-            let featureWindows = try await store.fetchFeatureWindows(
+            let allFeatureWindows = try await store.fetchFeatureWindows(
                 assetId: window.analysisAssetId,
                 from: window.startTime,
                 to: window.endTime
             )
+            // playhead-1mq1.2.1: PER-SUBINTERVAL, NEVER WHOLESALE. The
+            // fingerprints below drive `compatibleMatches` /
+            // `RepeatedAdCacheService.revokeMatches`, which delete every row in
+            // this show that resembles them. Derived over a MIXED window that
+            // is mostly a real ad, they revoke the legitimately learned copy
+            // for that ad. Only feature windows lying ENTIRELY inside an
+            // attributable subspan may contribute, so material that straddles
+            // the evidenced ad's edge cannot leak in. A CLEAN partition
+            // attributes the whole span and this filter is the identity.
+            let featureWindows = allFeatureWindows.filter { feature in
+                negativeAttribution.allowsNegativeAttribution(
+                    startTime: feature.startTime,
+                    endTime: feature.endTime
+                )
+            }
             let fingerprint = AcousticFingerprint.fromFeatureWindows(
                 featureWindows
             )
@@ -3313,11 +3451,15 @@ actor SkipOrchestrator {
         let sourceShowId = activePodcastId
         pendingListenRewindWindowIds.remove(windowId)
         if let managed = windows[windowId] {
+            let negativeAttribution = revertNegativeAttribution(
+                for: managed.adWindow
+            )
             do {
                 try await revokeRecurrenceEvidence(
                     for: managed.adWindow,
                     showId: sourceShowId,
-                    source: .listenRevert
+                    source: .listenRevert,
+                    negativeAttribution: negativeAttribution
                 )
             } catch {
                 // `AdDetectionService.recordListenRewind` already completed
@@ -3378,6 +3520,15 @@ actor SkipOrchestrator {
             return false
         }
 
+        // playhead-1mq1.2.1: resolve what this revert may teach while the actor
+        // is still synchronous. Every learning effect below — the fuzzy
+        // recurrence sweep before persistence and the hard-negative ingest
+        // after it — reads this captured partition, so a replacement episode's
+        // evidence catalog can never redirect the answer.
+        let sourceNegativeAttribution = revertNegativeAttribution(
+            for: requestedManaged.adWindow
+        )
+
         // Revoke recurrence material before making the correction terminal.
         // The source/creative tombstones prevent a delayed learner from
         // reopening the gap. If a separate store fails, leave the durable
@@ -3387,7 +3538,8 @@ actor SkipOrchestrator {
             try await revokeRecurrenceEvidence(
                 for: requestedManaged.adWindow,
                 showId: sourceShowId,
-                source: .listenRevert
+                source: .listenRevert,
+                negativeAttribution: sourceNegativeAttribution
             )
         } catch {
             logger.warning("Listen revert revocation failed")
@@ -3488,7 +3640,8 @@ actor SkipOrchestrator {
         // must not become a NULL-show negative that every show reads back).
         ingestNegativeFingerprint(
             text: requestedManaged.adWindow.evidenceText,
-            podcastId: sourceShowId
+            podcastId: sourceShowId,
+            negativeAttribution: sourceNegativeAttribution
         )
 
         // playhead-xsdz.11: a Listen revert of an auto-skip is the canonical
@@ -3630,12 +3783,31 @@ actor SkipOrchestrator {
             return false
         }
 
+        // playhead-1mq1.2.1: partition every target before the first
+        // suspension, excluding this transaction's OWN window set — a window
+        // the same gesture is reverting must not vouch for its neighbour.
+        let revertedWindowIds = Set(exactTargets.map(\.id))
+        let revocationTargets = exactTargets.map { target in
+            (
+                window: target,
+                negativeAttribution: revertNegativeAttribution(
+                    span: RevertEvidencePartition.Interval(
+                        startTime: target.startTime,
+                        endTime: target.endTime
+                    ),
+                    analysisAssetId: target.analysisAssetId,
+                    excludingWindowIds: revertedWindowIds
+                )
+            )
+        }
+
         do {
-            for target in exactTargets {
+            for target in revocationTargets {
                 try await revokeRecurrenceEvidence(
-                    for: target,
+                    for: target.window,
                     showId: sourceShowId,
-                    source: .manualVeto
+                    source: .manualVeto,
+                    negativeAttribution: target.negativeAttribution
                 )
             }
         } catch {
@@ -3922,11 +4094,15 @@ actor SkipOrchestrator {
         let sourceEpisodeId = activeEpisodeId
         let sourceLifecycleGeneration = episodeLifecycleGeneration
         let sourceShowId = validatedShow.showId
+        let sourceNegativeAttribution = revertNegativeAttribution(
+            for: requestedManaged.adWindow
+        )
         do {
             try await revokeRecurrenceEvidence(
                 for: requestedManaged.adWindow,
                 showId: sourceShowId,
-                source: .bannerAutoSkipDenied
+                source: .bannerAutoSkipDenied,
+                negativeAttribution: sourceNegativeAttribution
             )
         } catch {
             logger.warning("Banner feedback revocation failed")
@@ -4067,11 +4243,15 @@ actor SkipOrchestrator {
         guard requestedManaged.decisionState != .reverted,
               requestedManaged.decisionState != .suppressed else { return false }
 
+        let sourceNegativeAttribution = revertNegativeAttribution(
+            for: requestedManaged.adWindow
+        )
         do {
             try await revokeRecurrenceEvidence(
                 for: requestedManaged.adWindow,
                 showId: sourceShowId,
-                source: .manualVeto
+                source: .manualVeto,
+                negativeAttribution: sourceNegativeAttribution
             )
         } catch {
             logger.warning("Manual veto revocation failed")
@@ -4282,8 +4462,26 @@ actor SkipOrchestrator {
     /// the negative bank, and it is reached ONLY from reversion paths — never
     /// from the auto-skip-eligible path. The bank therefore ingests confirmed
     /// FPs exclusively.
-    private func ingestNegativeFingerprint(text: String?, podcastId: String?) {
+    ///
+    /// playhead-1mq1.2.1 MIXED-WIDTH GUARD: `text` is the WHOLE window's ad
+    /// copy and there is no time index into it, so it cannot be sliced down to
+    /// the part the user actually rejected. When the reverted window is MIXED
+    /// — strong ad evidence in a proper part of it, substantial evidence-free
+    /// remainder — this seam therefore DEFERS rather than guessing. Ingesting
+    /// would bank a real ad's copy as a confirmed false positive and suppress
+    /// that ad on this show forever; the gesture cannot distinguish
+    /// "not an ad" from "wrong edges", so the safe reading of an ambiguous
+    /// correction is to learn nothing from it. The receipt, the trust penalty
+    /// and the controller sample are unaffected — see playhead-o4qr's
+    /// ACCEPT THE RECEIPT, REFUSE THE LEARNING split, of which this is the
+    /// same shape one axis over (span instead of show).
+    private func ingestNegativeFingerprint(
+        text: String?,
+        podcastId: String?,
+        negativeAttribution: RevertEvidencePartition.Partition
+    ) {
         guard let bank = negativeFingerprintBank else { return }
+        guard negativeAttribution.allowsWholeSpanNegativeLabel else { return }
         // playhead-o4qr: REFUSE THE LEARNING half of the anonymous-correction
         // contract, enforced here rather than at the call site so the bank has
         // ONE gate no future seam can route around. A nil/empty show writes a
@@ -4741,11 +4939,15 @@ actor SkipOrchestrator {
         // `.reverted` below to cover cross-launch replay.
         // Persist `userDismissedBanner = 1` and flip the row to `.reverted`
         // so the vetoed suggestion does not resurface on the next launch.
+        let sourceNegativeAttribution = revertNegativeAttribution(
+            for: suggested
+        )
         do {
             try await revokeRecurrenceEvidence(
                 for: suggested,
                 showId: sourcePodcastId,
-                source: .bannerSuggestionDenied
+                source: .bannerSuggestionDenied,
+                negativeAttribution: sourceNegativeAttribution
             )
             let correction = makeSuggestDenialCorrection(
                 window: suggested,
