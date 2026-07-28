@@ -255,7 +255,17 @@ struct DiagnosticsBundleShapeTests {
         // string passed `DiagnosticTextSanitizer`'s allowlist, and it
         // carries NO episode reference, not even a hash. The proof
         // lives in `StabilityDiagnosticScrubbingTests` (legal item e).
-        "stability_diagnostics"
+        "stability_diagnostics",
+        // playhead-bfq7: per-episode banner-card tally. Always encoded
+        // (empty array when no card has been presented) so the shape
+        // audit must accept the key. Privacy review:
+        // `DefaultBundle.BannerTallySummary` is a closed shape of four
+        // integers, two timestamps, and the SAME salted
+        // `episode_id_hash` the scheduler-event tail carries — no
+        // title, feed URL, advertiser, product, window id, or
+        // transcript text. The proof lives in
+        // `BannerTallyDiagnosticsPrivacyTests` (legal item g).
+        "banner_tallies"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

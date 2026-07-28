@@ -36,6 +36,13 @@
 //       crash + hang records. `StabilityDiagnosticRecord` is a closed
 //       shape with no free-text field; the allowlist that produces it
 //       lives in `MetricKitDiagnosticProjector`.
+//   (g) `banner_tallies` (playhead-bfq7) carries per-episode banner
+//       card counts. Closed shape: one salted `episode_id_hash` (same
+//       `EpisodeIdHasher` path as the scheduler-event tail) plus four
+//       integers and two timestamps. No title, feed URL, advertiser,
+//       product, window id, or transcript text — the raw episode id
+//       stays behind in `BannerTallyStore` and is hashed by the
+//       builder. Proof lives in `BannerTallyDiagnosticsPrivacyTests`.
 
 import Foundation
 
@@ -125,6 +132,19 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// trace has nothing to correlate to an episode.
     let stabilityDiagnostics: [StabilityDiagnosticRecord]
 
+    /// playhead-bfq7: one row per episode listening session that put at
+    /// least one banner card on screen, oldest first. ALWAYS encoded
+    /// (empty array when no card has been presented) so a support
+    /// engineer can distinguish "no banners" from "this bundle predates
+    /// the tally". Legacy bundles missing the key decode as `[]`.
+    ///
+    /// Privacy: every field is an integer, a timestamp, or the salted
+    /// `episode_id_hash` — the same install-scoped hex the
+    /// scheduler-event tail uses (legal checklist item a). The raw
+    /// episode id never reaches this struct; `DiagnosticsBundleBuilder`
+    /// hashes it on the way in.
+    let bannerTallies: [BannerTallySummary]
+
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
         case osVersion = "os_version"
@@ -138,6 +158,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case musicBedProfiles = "music_bed_profiles"
         case learnedDeviceProfiles = "learned_device_profiles"
         case stabilityDiagnostics = "stability_diagnostics"
+        case bannerTallies = "banner_tallies"
     }
 
     init(
@@ -152,7 +173,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
         musicBedProfiles: [MusicBedProfileSummary] = [],
         learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
-        stabilityDiagnostics: [StabilityDiagnosticRecord] = []
+        stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
+        bannerTallies: [BannerTallySummary] = []
     ) {
         self.appVersion = appVersion
         self.osVersion = osVersion
@@ -166,6 +188,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.musicBedProfiles = musicBedProfiles
         self.learnedDeviceProfiles = learnedDeviceProfiles
         self.stabilityDiagnostics = stabilityDiagnostics
+        self.bannerTallies = bannerTallies
     }
 
     /// Decode-time tolerance for older bundles that pre-date the
@@ -203,6 +226,9 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         ) ?? []
         self.stabilityDiagnostics = try container.decodeIfPresent(
             [StabilityDiagnosticRecord].self, forKey: .stabilityDiagnostics
+        ) ?? []
+        self.bannerTallies = try container.decodeIfPresent(
+            [BannerTallySummary].self, forKey: .bannerTallies
         ) ?? []
     }
 
@@ -271,6 +297,39 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case storedHashCount = "stored_hash_count"
             case isConfirmed = "is_confirmed"
             case versionStamp = "version_stamp"
+        }
+    }
+
+    /// playhead-bfq7: banner cards presented during ONE listening
+    /// session of one episode. A replay of the same episode produces a
+    /// second row rather than extending this one, so `banner_count` is
+    /// never inflated by re-listening.
+    ///
+    /// `banner_count` is the number the audit reads;
+    /// `suggest_count` is the share attributable to the tier that
+    /// `markOnly` spans route to. The two per-tier counts always sum to
+    /// `banner_count`.
+    ///
+    /// Deliberately absent: the episode title, the feed URL, the
+    /// advertiser/product shown on the card, the orchestrator window
+    /// ids, and the session key. Those exist on the local side of this
+    /// projection (the `os_log` breadcrumb names the episode and the
+    /// window) and stay there.
+    struct BannerTallySummary: Codable, Sendable, Equatable {
+        let episodeIdHash: String
+        let bannerCount: Int
+        let autoSkippedCount: Int
+        let suggestCount: Int
+        let firstShownAt: Double
+        let lastShownAt: Double
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case episodeIdHash = "episode_id_hash"
+            case bannerCount = "banner_count"
+            case autoSkippedCount = "auto_skipped_count"
+            case suggestCount = "suggest_count"
+            case firstShownAt = "first_shown_at"
+            case lastShownAt = "last_shown_at"
         }
     }
 }

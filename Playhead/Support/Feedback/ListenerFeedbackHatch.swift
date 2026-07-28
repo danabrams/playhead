@@ -163,6 +163,7 @@ enum ListenerFeedbackHatch {
                 modelContext: modelContext
             ),
             stabilityFetch: DiagnosticsHatch.stabilityFetch,
+            bannerTalliesFetch: DiagnosticsHatch.bannerTalliesFetch,
             optInSink: SwiftDataDiagnosticsOptInSink(context: modelContext),
             optInEpisodes: []
         )
