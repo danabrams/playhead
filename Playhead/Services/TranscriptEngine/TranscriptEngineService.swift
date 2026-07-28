@@ -707,13 +707,23 @@ actor TranscriptEngineService {
     /// still open simply re-parks, which is the behaviour that function is
     /// already documented and used for.
     ///
-    /// `onCancel` cannot arrive before this waiter is queued: the append below
-    /// and the suspension it creates are one uninterrupted actor job, so the
-    /// hop cannot be serviced until the continuation is already in the list.
+    /// The cancellation check inside the continuation body is what makes this
+    /// airtight rather than merely very likely. `onCancel` fires synchronously
+    /// on the canceller's thread and has to hop back here to reach
+    /// `appendWaiters`, and that hop cannot be serviced until this actor job
+    /// suspends — which happens only *after* the append. So a cancel that
+    /// lands before the park would otherwise have nothing to resume. Checking
+    /// under isolation, before parking, removes the whole ordering argument:
+    /// an already-cancelled loop never parks in the first place. (Same shape
+    /// as `BoundedContinuation`'s resolve-before-attach phase.)
     private func waitForMoreShards() async {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                appendWaiters.append(continuation)
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    appendWaiters.append(continuation)
+                }
             }
         } onCancel: {
             Task { [weak self] in
