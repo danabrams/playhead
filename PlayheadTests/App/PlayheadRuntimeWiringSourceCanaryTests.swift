@@ -965,10 +965,13 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
     ///   2. The PRE-persist guard gained leading
     ///      `RecurrenceMaterialIdentity.canonicalIdentifier(...)` clauses,
     ///      so `guard currentAnalysisAssetId == ...` stopped matching it.
-    ///      The pre-persist check now matches the identity PREDICATE and
-    ///      is order-independent; the post-persist revalidation still
-    ///      requires the literal `guard`, and now also requires the
-    ///      show-identity clause o4qr added to it.
+    ///      The pre-persist check is now clause-order-independent but
+    ///      still structural: the predicate must sit between the entry
+    ///      guard's `guard` and its `else`, so it must be a condition of
+    ///      the early-return guard rather than incidental text. The
+    ///      post-persist revalidation still requires the literal `guard`,
+    ///      and now also requires the show-identity clause o4qr added to
+    ///      it.
     func testUserMarkLiveInjectionRevalidatesPlaybackAfterPersistence() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
@@ -987,12 +990,23 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         }
         let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
 
-        // The pre-persist check matches the bare predicate: o4qr moved it
-        // behind canonical-identity clauses, and the invariant is that the
-        // identity is verified before the write, not that it is verified
-        // first within the guard.
+        // The pre-persist check is still pinned STRUCTURALLY, just not to a
+        // clause order: o4qr moved the identity predicate behind the
+        // canonical-identity clauses, so it is no longer the head of the
+        // `guard`. Requiring it to sit between the entry guard's `guard`
+        // keyword and that guard's `else` proves it is a condition of the
+        // early-return guard — not merely text that happens to precede the
+        // write — while staying indifferent to which clause comes first.
         let identityPredicate = "currentAnalysisAssetId == expectedAssetId"
-        guard let initialCheck = stripped.range(of: identityPredicate),
+        guard let entryGuard = stripped.range(of: "guard "),
+              let entryGuardElse = stripped.range(
+                  of: "else",
+                  range: entryGuard.upperBound..<stripped.endIndex
+              ),
+              let initialCheck = stripped.range(
+                  of: identityPredicate,
+                  range: entryGuard.upperBound..<entryGuardElse.lowerBound
+              ),
               let persist = stripped.range(
                   of: "adDetectionService.recordUserMarkedAd"
               ),
@@ -1013,7 +1027,10 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         XCTAssertLessThan(
             initialCheck.lowerBound,
             persist.lowerBound,
-            "The captured playback identity must be verified BEFORE the durable user-mark write"
+            """
+            The captured playback identity must be verified by the entry \
+            guard, BEFORE the durable user-mark write.
+            """
         )
         let guardedSlice = stripped[guardRange.lowerBound..<injection.lowerBound]
         XCTAssertTrue(guardedSlice.contains("currentEpisodeId == expectedEpisodeId"))
