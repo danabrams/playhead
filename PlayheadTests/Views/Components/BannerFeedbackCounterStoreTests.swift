@@ -121,8 +121,8 @@ final class BannerFeedbackCounterStoreTests: XCTestCase {
     /// reach exactly one egress path, the one that is allow-listed and
     /// tested. `analytics` is added to the path markers so the new
     /// subsystem is *in* scope rather than accidentally out of it, and the
-    /// single sanctioned file is named explicitly. Anything else that
-    /// touches these tokens on an egress path is still a defect.
+    /// sanctioned files are named explicitly. Anything else that touches
+    /// these tokens on an egress path is still a defect.
     func testAggregateFeedbackReachesOnlyTheSanctionedEgressPath()
         throws
     {
@@ -143,6 +143,9 @@ final class BannerFeedbackCounterStoreTests: XCTestCase {
         // `TelemetryEnvelopeV1AllowList` and pinned by
         // `AnalyticsEgressSentinelTests`.
         let sanctionedEgressPaths: Set<String> = [
+            // Declares the counter vocabulary that may be uploaded.
+            "Services/Analytics/AnalyticsEnvelope.swift",
+            // Reads the aggregate and hands it to the envelope.
             "Services/Analytics/AnalyticsService.swift",
         ]
         let forbiddenAggregateTokens = [
@@ -177,7 +180,13 @@ final class BannerFeedbackCounterStoreTests: XCTestCase {
                 sanctionedPathsSeen.insert(relativePath)
                 continue
             }
+            // Whole-line comments are prose, not egress. A file that
+            // explains why it must not touch these counters should not fail
+            // for saying so.
             let source = try String(contentsOf: fileURL, encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
             for token in forbiddenAggregateTokens {
                 XCTAssertFalse(
                     source.contains(token),
