@@ -4131,6 +4131,250 @@ struct FoundationModelClassifierTests {
         #expect(snapshot.respondCalls.isEmpty, "never reach a session call when every atom alone overflows")
     }
 
+    // MARK: - playhead-9q10: a partially-examined chunked window is not a clean scan
+    //
+    // `subdividedCoarseOutput` tallied `refusalCount`, logged it, and threw it
+    // away — the only gate was `succeededCount > 0`. So a window whose middle
+    // chunk refused and whose remaining chunks came back clean persisted as a
+    // confident, fully-scanned `.noAds` over audio nobody screened. That is the
+    // false clean playhead-qbib eliminated at WINDOW granularity, one level
+    // down and worse: a refused window is at least a failure row that
+    // `SemanticScanCoverage` counts as a hole, whereas this persisted as a
+    // SUCCESS row, and nothing downstream ever revisits a success.
+
+    /// THE REGRESSION. Chunk 2 of 3 refuses; chunks 1 and 3 come back clean.
+    @Test("playhead-9q10: a chunked window with a refused atom is not recorded as cleanly scanned")
+    func coarsePassSubdivisionWithholdsCleanVerdictWhenAChunkRefuses() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 77,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"],
+                startTime: 100,
+                endTime: 130
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: [nil, .refusal, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(snapshot.respondCalls.count == 3, "every chunk is still attempted")
+        // Nothing may claim this segment was screened and found clean.
+        #expect(
+            !output.windows.contains { $0.screening.disposition == .noAds },
+            "a chunk was never examined — no window may claim the segment is clean"
+        )
+        #expect(output.windows.isEmpty)
+        // It is an honest hole instead, carrying its own coordinates so
+        // `SemanticScanCoverage` can subtract it from the scanned denominator.
+        #expect(output.failedWindows.count == 1)
+        let hole = try #require(output.failedWindows.first)
+        #expect(hole.lineRefs == [77])
+        #expect(hole.startTime == 100)
+        #expect(hole.endTime == 130)
+        #expect(!hole.status.didExamineWindow, "a hole must never read as examined")
+        #expect(output.status == .exceededContextWindow)
+    }
+
+    /// The gate is qbib's `didExamineWindow`, not "was it a refusal". The old
+    /// `refusalCount` ignored every other way a chunk produces no verdict, so a
+    /// mid-window decoding failure was an even quieter false clean.
+    @Test("playhead-9q10: a chunk that fails to decode also blocks the clean claim")
+    func coarsePassSubdivisionWithholdsCleanVerdictWhenAChunkFailsToDecode() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 78,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            coarseFailures: [nil, .decodingFailure, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(snapshot.respondCalls.count == 3)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindows.count == 1)
+        #expect(output.failedWindows.allSatisfy { !$0.status.didExamineWindow })
+    }
+
+    /// The deliberate exception: a `containsAd` aggregate is NOT a clean claim.
+    /// It routes the window to passB refinement, and the short-circuit that
+    /// produced it leaves later chunks unattempted by design — recording those
+    /// as holes would stall the coverage cursor on this window forever, since
+    /// every re-scan short-circuits at the same chunk.
+    @Test("playhead-9q10: a containsAd aggregate still stands over a refused chunk")
+    func coarsePassSubdivisionKeepsContainsAdOverRefusedChunk() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 79,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            responses: [CoarseScreeningSchema(disposition: .containsAd, support: nil)],
+            coarseFailures: [.refusal, nil, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 1)
+        #expect(output.windows.first?.screening.disposition == .containsAd)
+        #expect(output.failedWindows.isEmpty)
+        #expect(snapshot.respondCalls.count == 2, "containsAd still short-circuits the remaining chunks")
+    }
+
+    /// RECOVERY. A safety-blocked CHUNK is the same shape of block qbib
+    /// recovers at window level, so it gets one permissive retry before the
+    /// whole window is conceded — which is what turns this bead's new hole back
+    /// into real coverage.
+    @available(iOS 26.0, *)
+    @Test("playhead-9q10: a safety-blocked chunk recovered permissively restores the window")
+    func coarsePassSubdivisionRecoversRefusedChunkPermissively() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 80,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"],
+                startTime: 100,
+                endTime: 130
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            coarseFailures: [nil, .refusal, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+        let attempts = PermissiveAttemptBox()
+        let permissive = PermissiveAdClassifier()
+        await permissive.installClassifyOverrideForTesting { windowSegments in
+            attempts.record(windowSegments.flatMap { $0.atoms.map(\.atomKey.atomOrdinal) })
+            return CoarseScreeningSchema(disposition: .noAds, support: nil)
+        }
+
+        let output = try await classifier.coarsePassA(
+            segments: segments,
+            sensitiveRouter: SensitiveWindowRouter.noop,
+            permissiveClassifier: permissive
+        )
+
+        // Exactly the blocked CHUNK is retried — not the whole segment.
+        #expect(attempts.snapshot() == [[80_001]])
+        #expect(output.status == .success)
+        #expect(output.failedWindows.isEmpty, "a recovered chunk is not a coverage hole")
+        let recovered = try #require(output.windows.first)
+        #expect(recovered.screening.disposition == .noAds)
+        #expect(recovered.startTime == 100)
+        #expect(recovered.endTime == 130)
+        #expect(output.permissiveFailureCounts == .zero)
+    }
+
+    /// The cap: subdivision does not earn a larger permissive allowance just
+    /// because it has more chunks. Four blocked chunks still cost at most the
+    /// `coarseSafetyRecoveryMaxAttemptsPerWindow` calls qbib allows any window,
+    /// drawn from the same whole-pass budget.
+    @available(iOS 26.0, *)
+    @Test("playhead-9q10: chunk-level permissive recovery stays inside the qbib per-window cap")
+    func coarsePassSubdivisionPermissiveRecoveryIsBoundedByTheWindowCap() async throws {
+        let fourAtomRule: @Sendable (String) -> Int = { prompt in
+            let markers = ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc", "deltaTOKENddd"]
+            switch markers.filter({ prompt.contains($0) }).count {
+            case 0: return 50
+            case 1: return 200
+            default: return 700
+            }
+        }
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 81,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc", "deltaTOKENddd"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: fourAtomRule,
+            coarseFailures: [.refusal, .refusal, .refusal, .refusal]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+        let attempts = PermissiveAttemptBox()
+        let permissive = PermissiveAdClassifier()
+        await permissive.installClassifyOverrideForTesting { windowSegments in
+            attempts.record(windowSegments.flatMap { $0.atoms.map(\.atomKey.atomOrdinal) })
+            throw PermissiveClassificationError.failed(
+                reason: .permissiveRefusal,
+                underlyingDescription: "9q10-chunk-still-blocked"
+            )
+        }
+
+        let output = try await classifier.coarsePassA(
+            segments: segments,
+            sensitiveRouter: SensitiveWindowRouter.noop,
+            permissiveClassifier: permissive
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(snapshot.respondCalls.count == 4, "every chunk is still attempted once on the standard path")
+        #expect(
+            attempts.snapshot().count
+                == FoundationModelClassifier.coarseSafetyRecoveryMaxAttemptsPerWindow,
+            "the 4th blocked chunk gets no permissive retry — the window cap is already spent"
+        )
+        #expect(attempts.snapshot() == [[81_000], [81_001], [81_002]])
+        #expect(output.permissiveFailureCounts.refusal == 3)
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindows.count == 1)
+        #expect(output.failedWindows.allSatisfy { !$0.status.didExamineWindow })
+    }
+
     // bd-3h7: graceful degradation for refusal. Window 1 of 3 refuses
     // (simulating Apple's safety classifier rejecting specific content
     // topics), and the pass must continue to windows 2 and 3 instead of
