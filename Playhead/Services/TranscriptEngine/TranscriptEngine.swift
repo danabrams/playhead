@@ -340,22 +340,35 @@ actor SpeechRecognitionRequestGate {
 
     /// Ceiling on how long one recognizer call may hold the permit.
     ///
-    /// WHY 120 SECONDS. This has to bound a *hung* call without ever tripping
-    /// on a merely slow one, and it is calibrated from both ends:
+    /// WHY 120 SECONDS. This has to bound a *hung* call while leaving a merely
+    /// slow one alone, and it is calibrated from both ends:
     ///
     /// - From below, by the work. A shard is 30 s of audio
     ///   (`AnalysisAudioService.defaultShardDuration`), and on-device
     ///   `SpeechAnalyzer` transcribes one in a small fraction of real time.
-    ///   120 s is four times the shard's own wall-clock duration, so the
-    ///   watchdog only fires for a call that has stopped progressing
-    ///   altogether — not for one that is slow under thermal pressure, a cold
-    ///   asset install, or `.utility` priority in the background.
+    ///   120 s is four times the shard's own wall-clock duration. Note what
+    ///   is NOT inside the permit: locale asset installation happens in
+    ///   `loadModel()` → `AppleSpeechAssetBootstrapper.prepare()`, which the
+    ///   gate never wraps, so a cold first launch cannot spend the budget.
+    ///   What the permit does cover is one `SpeechAnalyzer` session —
+    ///   `prepareToAnalyze`, `analyzeSequence`, `finalizeAndFinish` and the
+    ///   result collector — for a single 30 s buffer.
     /// - From above, by the tightest caller. `AnalysisJobRunner` gives the
-    ///   *entire* transcription stage 300 s before it declares
+    ///   *entire* transcription stage 300 s (`Task.sleep(for: .seconds(300))`
+    ///   racing the `.completed` event) before it falls through to
     ///   `transcription:zeroCoverage`. A per-call ceiling at or above that
-    ///   would protect nothing, because the caller would already have given
-    ///   up. At 120 s the permit is free again with more than half the stage
-    ///   budget left for the remaining shards.
+    ///   would protect nothing: the stage would already have given up, and a
+    ///   wedged holder would still own the permit for the next job.
+    ///
+    /// 4x realtime is a wide margin, not a proof. Sustained `.background` QoS
+    /// starvation could in principle stretch a live call past 120 s, so the
+    /// cost of a false positive is bounded deliberately rather than argued
+    /// away: `runTranscriptionLoop` catches the resulting
+    /// `transcriptionFailed` in its per-shard `catch` and `continue`s, so a
+    /// spurious fire costs one shard's coverage, not the job. The abandoned
+    /// call is also cancelled, and a merely-slow call — unlike a wedged one —
+    /// honours that, so the window in which it can still overlap the next
+    /// recognizer request is short.
     static let defaultHolderDeadline: Duration = .seconds(120)
 
     private static let logger = Logger(subsystem: "com.playhead", category: "SpeechRequestGate")
