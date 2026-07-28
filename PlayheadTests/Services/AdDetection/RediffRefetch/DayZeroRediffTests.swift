@@ -122,7 +122,12 @@ struct DayZeroRediffTriggerTests {
             kWayFetchCount: kWayFetchCount,
             reachabilityProvider: { reachability },
             chargeStateProvider: { isCharging },
-            deepScanOptInProvider: { deepScanOptIn }
+            deepScanOptInProvider: { deepScanOptIn },
+            // No store in this suite — opt OUT of day-0 idempotency explicitly
+            // (the parameters are required precisely so this is a visible
+            // choice, not an inherited default).
+            attemptRecordProvider: { _ in nil },
+            suppressionRecorder: { _, _, _ in }
         )
     }
 
@@ -290,7 +295,9 @@ struct DayZeroRediffTriggerTests {
             kWayFetchCount: RediffActivation.dayZeroKWayFetchCount,
             reachabilityProvider: { reachRead.mark(); return .wifi },
             chargeStateProvider: { chargeRead.mark(); return true },
-            deepScanOptInProvider: { false }
+            deepScanOptInProvider: { false },
+            attemptRecordProvider: { _ in nil },   // no store in this suite —
+            suppressionRecorder: { _, _, _ in }     // opt OUT of idempotency, explicitly
         )
         let summary = await fire(trigger)
 
@@ -371,7 +378,9 @@ struct DayZeroRediffTriggerTests {
             service: service, enabled: true, kWayFetchCount: 1,
             reachabilityProvider: { .wifi },
             chargeStateProvider: { true },
-            deepScanOptInProvider: { false }
+            deepScanOptInProvider: { false },
+            attemptRecordProvider: { _ in nil },   // no store in this suite —
+            suppressionRecorder: { _, _, _ in }     // opt OUT of idempotency, explicitly
         )
         await fire(trigger)
         #expect(!FileManager.default.fileExists(atPath: bCopy.path),

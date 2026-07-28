@@ -506,7 +506,9 @@ struct RediffActivationWiringTests {
             service: service, enabled: true, kWayFetchCount: 2,
             reachabilityProvider: { .wifi },
             chargeStateProvider: { false },          // unplugged
-            deepScanOptInProvider: { false }         // settings opt-in OFF
+            deepScanOptInProvider: { false },        // settings opt-in OFF
+            attemptRecordProvider: { _ in nil },   // no store in this suite —
+            suppressionRecorder: { _, _, _ in }     // opt OUT of idempotency, explicitly
         )
         let summary = await trigger.triggerIfEligible(
             analysisAssetId: assetId,

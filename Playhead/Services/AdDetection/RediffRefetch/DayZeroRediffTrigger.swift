@@ -99,8 +99,17 @@ struct DayZeroRediffTrigger: Sendable {
         reachabilityProvider: @escaping @Sendable () async -> TransportSnapshot.Reachability,
         chargeStateProvider: @escaping @Sendable () async -> Bool,
         deepScanOptInProvider: @escaping @Sendable () -> Bool = { false },
-        attemptRecordProvider: @escaping @Sendable (String) async -> RediffDayZeroAttemptRecord? = { _ in nil },
-        suppressionRecorder: @escaping @Sendable (String, RediffDayZeroExit, Double) async -> Void = { _, _, _ in }
+        // DELIBERATELY NOT DEFAULTED (review round 1). The `nil`-returning /
+        // no-op pair reproduces the pre-p70f "always attempt" behavior exactly
+        // — i.e. the ~108 MB-per-replay bleed this bead exists to stop. As
+        // defaults they were a silent footgun: nothing in the suite constructs
+        // a real `PlayheadRuntime`, so deleting the wiring there would have
+        // restored the bleed with every test still green. Required parameters
+        // turn that regression into a compile error, which is a stronger
+        // guarantee than any test could give. Callers that genuinely have no
+        // store pass the opt-outs explicitly and say why.
+        attemptRecordProvider: @escaping @Sendable (String) async -> RediffDayZeroAttemptRecord?,
+        suppressionRecorder: @escaping @Sendable (String, RediffDayZeroExit, Double) async -> Void
     ) {
         self.service = service
         self.enabled = enabled
