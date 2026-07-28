@@ -109,16 +109,23 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
     /// unsupported, device thermally deferred, task cancelled) would fail
     /// every remaining window identically, so continuing just burns FM calls
     /// and battery — those still stop the pass and resume from a checkpoint.
+    ///
+    /// Statuses that are not failures at all report `.notAFailure` rather than
+    /// being lumped in with `.pass`. Call sites are shaped
+    /// `if scope == .window { tolerate } else { abort }`, so bucketing
+    /// `.success` or `.noAds` as `.pass` would make a non-failure abort a pass
+    /// if one ever reached that switch.
     var failureScope: SemanticScanFailureScope {
         switch self {
         case .exceededContextWindow, .decodingFailure, .refusal,
              .guardrailViolation, .rateLimited, .permissiveRefusal,
              .permissiveDecodingFailure, .permissiveContextOverflow:
             .window
-        case .queued, .running, .success, .noAds, .unavailable,
-             .unsupportedLocale, .assetsUnavailable, .thermalDeferred,
-             .cancelled, .failedTransient:
+        case .unavailable, .unsupportedLocale, .assetsUnavailable,
+             .thermalDeferred, .cancelled, .failedTransient:
             .pass
+        case .queued, .running, .success, .noAds:
+            .notAFailure
         }
     }
 
@@ -339,6 +346,10 @@ enum SemanticScanFailureScope: String, Codable, Sendable, Hashable, CaseIterable
     /// The failure is a property of the device, model, or session. Stop the
     /// pass with partial results and resume from a checkpoint.
     case pass
+    /// Not a failure — a lifecycle or success status. Never reachable from an
+    /// error mapping; modelled explicitly so a non-failure can never be
+    /// mistaken for a reason to abort.
+    case notAFailure
 }
 
 enum SemanticScanRetryPolicy: String, Codable, Sendable, Hashable, CaseIterable {

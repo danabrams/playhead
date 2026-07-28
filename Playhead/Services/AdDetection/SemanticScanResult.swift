@@ -177,13 +177,20 @@ struct SemanticScanResult: Sendable, Equatable {
 /// `semantic_scan_results` rows.
 ///
 /// Every downstream ratio — coverage %, precision measurement, the
-/// playhead-0sro watermark invariants — divides by "how much audio did we
-/// actually screen". Before this type existed there was no way to ask that
+/// playhead-0sro watermark invariants — SHOULD divide by "how much audio did
+/// we actually screen". Before this type existed there was no way to ask that
 /// question: a refused window and a window screened clean both persisted a
 /// row, so a truncated scan that reported success was indistinguishable from
 /// a complete one. `examinedSeconds` answers "we looked"; `unexaminedSeconds`
 /// / `unexaminedRanges` answer "we could not look" — including audio no
 /// window ever reached, when `episodeDuration` is supplied.
+///
+/// Scope note (playhead-qbib): today the only production consumer is the
+/// run-completion breadcrumb in `BackfillJobRunner.logCoarseCoverage`. Wiring
+/// it into the coverage/precision reporting and the 0sro watermark is
+/// deliberately NOT part of this bead — those consumers still compute their
+/// own denominators, and moving them is a measurement change, not a
+/// robustness fix.
 ///
 /// Ranges are half-open in spirit but modelled as `ClosedRange` because a
 /// window's `[start, end]` is inclusive of both transcript boundaries. Zero-
@@ -201,25 +208,21 @@ struct SemanticScanCoverage: Sendable, Equatable {
     /// are the ranges a consumer must not describe as "no ads here".
     let unexaminedRanges: [ClosedRange<Double>]
 
-    /// Total audio the pass either screened or tried to screen.
-    var attemptedSeconds: Double { examinedSeconds + unexaminedSeconds }
+    /// Total audio this accounting covers. With no `episodeDuration` that is
+    /// "screened + tried to screen"; with one it also includes audio no
+    /// window ever reached, i.e. "screened + should have screened".
+    var accountedSeconds: Double { examinedSeconds + unexaminedSeconds }
 
-    /// Fraction of `attemptedSeconds` that produced a real verdict. `1.0`
-    /// when nothing was attempted, so an empty pass never reads as a hole.
+    /// Fraction of `accountedSeconds` that produced a real verdict. `1.0`
+    /// when nothing was accounted for, so an empty pass never reads as a hole.
     var examinedFraction: Double {
-        let total = attemptedSeconds
+        let total = accountedSeconds
         guard total > 0 else { return 1 }
         return examinedSeconds / total
     }
 
     /// True when every second accounted for produced a verdict.
     var isComplete: Bool { unexaminedRanges.isEmpty }
-
-    static let empty = SemanticScanCoverage(
-        examinedSeconds: 0,
-        unexaminedSeconds: 0,
-        unexaminedRanges: []
-    )
 
     /// Compute coverage for one scan pass.
     ///
@@ -232,7 +235,10 @@ struct SemanticScanCoverage: Sendable, Equatable {
     ///   - episodeDuration: when supplied, audio in `0 ... episodeDuration`
     ///     that no row covers at all is reported as unexamined. This is what
     ///     catches a pass that stopped at 1425.9s of a 3578s episode: the
-    ///     rows it did write all look fine on their own.
+    ///     rows it did write all look fine on their own. Note the window is
+    ///     measured from zero, so an episode whose first scanned window starts
+    ///     after t=0 reports that lead-in as a hole — which is correct: no
+    ///     window looked there.
     static func compute(
         rows: [SemanticScanResult],
         scanPass: String = "passA",

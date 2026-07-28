@@ -1501,7 +1501,21 @@ actor BackfillJobRunner {
             // fully covered. Subtracting the failed plan indices is what stops
             // a partially-recovered window from inflating the coverage cursor
             // — the cursor must never advance past audio nobody screened.
-            let failedPlanIndices = Set(coarse.failedWindows.map(\.planWindowIndex))
+            //
+            // Attribute each failure to a plan the SAME structural way
+            // successes are attributed (line-ref subset), falling back to the
+            // index the classifier recorded. Matching structurally keeps the
+            // two independently-built plan lists from having to agree by raw
+            // position: if they ever drifted, an index-only match would
+            // silently no-op and let the cursor advance past a hole — the
+            // exact failure this bead exists to prevent.
+            let failedPlanIndices = Set(
+                coarse.failedWindows.map { failure in
+                    coarsePlans.first(where: { plan in
+                        Set(failure.lineRefs).isSubset(of: Set(plan.lineRefs))
+                    })?.windowIndex ?? failure.planWindowIndex
+                }
+            )
             let fullyCoveredPlanIndices = succeededPlanIndices.subtracting(failedPlanIndices)
             // playhead-pmp9: honest coverage cursor. Walk plans in TIME order;
             // advance the cursor across an unbroken run of successes from the
@@ -1670,6 +1684,13 @@ actor BackfillJobRunner {
                 if !refinement.failedWindowStatuses.isEmpty || !refinement.windows.isEmpty {
                     let succeededWindowIndices = Set(refinement.windows.map(\.windowIndex))
                     let remainingPlans = zoomPlans.filter { !succeededWindowIndices.contains($0.windowIndex) }
+                    // playhead-qbib: passB deliberately KEEPS the positional
+                    // zip that the coarse side dropped. Refinement never splits
+                    // a plan, so every zoom plan yields exactly zero or one
+                    // status entry and both lists stay in plan order. The
+                    // coarse side needed per-failure coordinates because
+                    // bounded permissive shrink can produce two outcomes for
+                    // one plan; this loop cannot.
                     for (plan, status) in zip(remainingPlans, refinement.failedWindowStatuses) {
                         if let failureResult = makeRefinementFailureScanResult(
                             plan: plan,

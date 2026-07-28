@@ -72,6 +72,17 @@ struct SemanticScanStatusTests {
         ] {
             #expect(status.failureScope == .pass, "\(status.rawValue) must stop the pass")
         }
+
+        // Not failures at all. Every call site reads `scope == .window` and
+        // aborts otherwise, so these must not be lumped in with `.pass`.
+        for status in [SemanticScanStatus.success, .noAds, .queued, .running] {
+            #expect(status.failureScope == .notAFailure, "\(status.rawValue) is not a failure")
+        }
+
+        // The mapping is total: no status is left unclassified.
+        #expect(SemanticScanStatus.allCases.allSatisfy { status in
+            SemanticScanFailureScope.allCases.contains(status.failureScope)
+        })
     }
 
     @Test("playhead-qbib: only refusal and guardrail violation are safety blocks")
@@ -113,7 +124,7 @@ struct SemanticScanStatusTests {
         #expect(coverage.examinedSeconds == 150)
         #expect(coverage.unexaminedSeconds == 150)
         #expect(coverage.unexaminedRanges == [100 ... 250])
-        #expect(coverage.attemptedSeconds == 300)
+        #expect(coverage.accountedSeconds == 300)
         #expect(coverage.examinedFraction == 0.5)
         #expect(!coverage.isComplete)
     }

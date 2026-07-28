@@ -926,6 +926,12 @@ struct FoundationModelClassifier: Sendable {
     private enum CoarsePermissiveAttempt {
         case screened(CoarseScreeningSchema)
         case blocked(PermissiveClassificationError.Reason)
+        /// The task was cancelled mid-attempt — a BG-window expiry, not a
+        /// safety block. The window was never judged, so recording it as a
+        /// permissive refusal would both mis-state why coverage is missing and
+        /// give it `.persistFailure` recovery instead of
+        /// `.resumeFromCheckpoint`.
+        case cancelled
     }
 
     /// playhead-qbib: everything one window's bounded recovery produced.
@@ -1142,11 +1148,14 @@ struct FoundationModelClassifier: Sendable {
     static let coarseSafetyRecoveryMinimumPassAttempts = 3
 
     /// playhead-qbib: whole-pass ceiling on permissive recovery calls. Scaled
-    /// to the plan count so recovery can at most DOUBLE a clean pass's FM
-    /// cost, no matter how many windows the safety layer blocks. Once spent,
-    /// later blocked windows are recorded as honest holes rather than
-    /// retried — this app already fights for background windows and an
-    /// unbounded retry storm is worse than a truthful coverage gap.
+    /// to the plan count so that on any episode of realistic length recovery
+    /// at most DOUBLES the pass's FM cost, no matter how many windows the
+    /// safety layer blocks. (The `coarseSafetyRecoveryMinimumPassAttempts`
+    /// floor is deliberately more generous on 1–2-window episodes, where
+    /// doubling would not buy a single recovery.) Once spent, later blocked
+    /// windows are recorded as honest holes rather than retried — this app
+    /// already fights for background windows and an unbounded retry storm is
+    /// worse than a truthful coverage gap.
     static func coarseSafetyRecoveryPassBudget(planCount: Int) -> Int {
         max(coarseSafetyRecoveryMinimumPassAttempts, planCount)
     }
@@ -1905,9 +1914,62 @@ struct FoundationModelClassifier: Sendable {
         totalWindows: Int
     ) async -> CoarsePermissiveRecovery {
         var recovery = CoarsePermissiveRecovery()
-        let planSegments = plan.lineRefs.compactMap { segmentByIndex[$0] }
+        // playhead-qbib: resolve each line ref exactly ONCE, and keep the
+        // unresolvable ones visible.
+        //
+        // Deduplicating matters because this codebase deliberately tolerates a
+        // duplicated `segmentIndex` (see the "coarse pass tolerates duplicate
+        // segmentIndex without crashing" test): a plan of `[5, 5]` would
+        // otherwise split into two IDENTICAL halves that collide on one
+        // deterministic persistence key — silently overwriting each other —
+        // and burn a second FM call re-reading the same bytes.
+        //
+        // Unresolvable refs matter because the recovered + failed sets must
+        // account for the WHOLE plan. Dropping them would let a plan whose
+        // halves both recovered look fully covered while some of its audio was
+        // never classified, advancing the resume cursor past a hole.
+        var seenLineRefs = Set<Int>()
+        var planSegments: [AdTranscriptSegment] = []
+        var unresolvedLineRefs: [Int] = []
+        for lineRef in plan.lineRefs where seenLineRefs.insert(lineRef).inserted {
+            if let segment = segmentByIndex[lineRef] {
+                planSegments.append(segment)
+            } else {
+                unresolvedLineRefs.append(lineRef)
+            }
+        }
+        if !unresolvedLineRefs.isEmpty {
+            recovery.failures.append(
+                CoarseWindowFailure(
+                    planWindowIndex: plan.windowIndex,
+                    lineRefs: unresolvedLineRefs,
+                    startTime: plan.startTime,
+                    endTime: plan.endTime,
+                    status: blockedStatus,
+                    coversWholePlan: false
+                )
+            )
+        }
+        // The resolved part of the plan, as its own attributable range. Equal
+        // to the whole plan in every reachable case; distinct only when a line
+        // ref could not be resolved above.
+        let resolvedLineRefs = planSegments.map(\.segmentIndex)
+        let resolvedCoversWholePlan = unresolvedLineRefs.isEmpty && resolvedLineRefs == plan.lineRefs
+        let resolvedStartTime = planSegments.map(\.startTime).min() ?? plan.startTime
+        let resolvedEndTime = planSegments.map(\.endTime).max() ?? plan.endTime
         guard !planSegments.isEmpty, attemptBudget > 0 else {
-            recovery.failures.append(CoarseWindowFailure(plan: plan, status: blockedStatus))
+            if !resolvedLineRefs.isEmpty || unresolvedLineRefs.isEmpty {
+                recovery.failures.append(
+                    CoarseWindowFailure(
+                        planWindowIndex: plan.windowIndex,
+                        lineRefs: resolvedLineRefs.isEmpty ? plan.lineRefs : resolvedLineRefs,
+                        startTime: resolvedStartTime,
+                        endTime: resolvedEndTime,
+                        status: blockedStatus,
+                        coversWholePlan: resolvedCoversWholePlan
+                    )
+                )
+            }
             return recovery
         }
 
@@ -1924,15 +1986,15 @@ struct FoundationModelClassifier: Sendable {
 
         // Attempt 1: the whole window, permissive guardrails.
         let wholeStart = clock.now
+        recovery.attemptsSpent += 1
         switch await classifyPermissively(segments: planSegments, permissive: permissive) {
         case let .screened(screening):
-            recovery.attemptsSpent = 1
             recovery.recovered.append(
                 FMCoarseWindowOutput(
                     windowIndex: 0,
-                    lineRefs: plan.lineRefs,
-                    startTime: plan.startTime,
-                    endTime: plan.endTime,
+                    lineRefs: resolvedLineRefs,
+                    startTime: resolvedStartTime,
+                    endTime: resolvedEndTime,
                     transcriptQuality: plan.transcriptQuality,
                     screening: screening,
                     latencyMillis: Self.latencyMillis(since: wholeStart, clock: clock)
@@ -1947,12 +2009,35 @@ struct FoundationModelClassifier: Sendable {
                 """
             )
             return recovery
+        case .cancelled:
+            // BG-window expiry: nothing was judged. Record the honest status
+            // (`.resumeFromCheckpoint`, not `.persistFailure`) and stop —
+            // the pass loop's cancellation check escalates from here.
+            recovery.failures.append(
+                CoarseWindowFailure(
+                    planWindowIndex: plan.windowIndex,
+                    lineRefs: resolvedLineRefs,
+                    startTime: resolvedStartTime,
+                    endTime: resolvedEndTime,
+                    status: .cancelled,
+                    coversWholePlan: resolvedCoversWholePlan
+                )
+            )
+            return recovery
         case let .blocked(reason):
-            recovery.attemptsSpent = 1
             recovery.permissiveCounts.increment(reason: reason)
             let fallbackStatus = Self.permissiveStatus(for: reason)
             guard planSegments.count >= 2, attemptBudget >= 2 else {
-                recovery.failures.append(CoarseWindowFailure(plan: plan, status: fallbackStatus))
+                recovery.failures.append(
+                    CoarseWindowFailure(
+                        planWindowIndex: plan.windowIndex,
+                        lineRefs: resolvedLineRefs,
+                        startTime: resolvedStartTime,
+                        endTime: resolvedEndTime,
+                        status: fallbackStatus,
+                        coversWholePlan: resolvedCoversWholePlan
+                    )
+                )
                 logger.error(
                     """
                     fm.classifier.coarse_pass_qbib_recovery_exhausted \
@@ -1993,20 +2078,22 @@ struct FoundationModelClassifier: Sendable {
     ) async {
         let midpoint = planSegments.count / 2
         let halves = [Array(planSegments[..<midpoint]), Array(planSegments[midpoint...])]
+        var cancelled = false
         for half in halves where !half.isEmpty {
             let lineRefs = half.map(\.segmentIndex)
             let startTime = half.map(\.startTime).min() ?? plan.startTime
             let endTime = half.map(\.endTime).max() ?? plan.endTime
-            guard recovery.attemptsSpent < attemptBudget else {
-                // Budget exhausted mid-split: the half was never attempted, so
-                // it is a hole carrying the status that blocked its parent.
+            guard !cancelled, recovery.attemptsSpent < attemptBudget else {
+                // Never attempted — either the budget ran out mid-split or the
+                // task was cancelled. Either way it is a hole, carrying the
+                // status that explains WHY we could not look.
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
                         lineRefs: lineRefs,
                         startTime: startTime,
                         endTime: endTime,
-                        status: fallbackStatus,
+                        status: cancelled ? .cancelled : fallbackStatus,
                         coversWholePlan: false
                     )
                 )
@@ -2037,6 +2124,18 @@ struct FoundationModelClassifier: Sendable {
                     disposition=\(screening.disposition.rawValue, privacy: .public)
                     """
                 )
+            case .cancelled:
+                cancelled = true
+                recovery.failures.append(
+                    CoarseWindowFailure(
+                        planWindowIndex: plan.windowIndex,
+                        lineRefs: lineRefs,
+                        startTime: startTime,
+                        endTime: endTime,
+                        status: .cancelled,
+                        coversWholePlan: false
+                    )
+                )
             case let .blocked(reason):
                 recovery.permissiveCounts.increment(reason: reason)
                 recovery.failures.append(
@@ -2064,9 +2163,14 @@ struct FoundationModelClassifier: Sendable {
     }
 
     /// playhead-qbib: one permissive classification attempt, with every
-    /// throw normalised to a `PermissiveClassificationError.Reason`.
-    /// Cancellation is deliberately NOT swallowed as a block — it rethrows
-    /// through the outer pass loop's own cancellation handling.
+    /// throw normalised to a `CoarsePermissiveAttempt`.
+    ///
+    /// Cancellation is deliberately NOT collapsed into a block.
+    /// `PermissiveAdClassifier.classify` rethrows `CancellationError`
+    /// untouched (its Cycle 4 M-1 fix) precisely so callers can tell "the
+    /// safety layer said no" from "we ran out of background time"; the
+    /// recovery loop stops on `.cancelled` and the pass loop's own
+    /// `Task.checkCancellation()` owns the escalation.
     @available(iOS 26.0, *)
     private func classifyPermissively(
         segments: [AdTranscriptSegment],
@@ -2074,6 +2178,8 @@ struct FoundationModelClassifier: Sendable {
     ) async -> CoarsePermissiveAttempt {
         do {
             return .screened(try await permissive.classify(window: segments))
+        } catch is CancellationError {
+            return .cancelled
         } catch let error as PermissiveClassificationError {
             return .blocked(error.reason)
         } catch {
@@ -2177,7 +2283,11 @@ struct FoundationModelClassifier: Sendable {
     /// Note that the `.success` guard below is now reachable far more often:
     /// before qbib a single mid-episode guardrail set the whole pass status
     /// to `.guardrailViolation`, which made this function return `[]` and
-    /// suppressed passB for the ENTIRE episode.
+    /// suppressed passB for the ENTIRE episode. The guard still discards zoom
+    /// work for every examined window when the pass aborts `.pass`-scoped
+    /// (assets gone, thermal defer) — the same "pass status suppresses
+    /// per-window work" shape, deliberately left alone here because those
+    /// aborts mean the device cannot serve the refinement calls either.
     func planAdaptiveZoom(
         coarse: FMCoarseScanOutput,
         segments: [AdTranscriptSegment],

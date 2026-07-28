@@ -2179,6 +2179,43 @@ struct FoundationModelClassifierTests {
         #expect(Set(output.failedWindows.flatMap(\.lineRefs)) == [0, 1, 2, 3])
     }
 
+    /// A BG-window expiry during recovery is NOT a safety block. Recording it
+    /// as a permissive refusal would both mis-state why the audio is missing
+    /// and give the window `.persistFailure` recovery instead of
+    /// `.resumeFromCheckpoint` — the window would never be re-attempted.
+    @available(iOS 26.0, *)
+    @Test("playhead-qbib: cancellation during recovery is recorded as cancelled, not refused")
+    func cancellationDuringRecoveryIsNotRecordedAsRefusal() async throws {
+        let segments = qbibRecoverySegments(count: 4, windowed: false)
+        let recorder = qbibRecoveryRecorder(
+            coarseFailures: [.refusal],
+            contextSize: 4096,
+            tokensPerLine: 1
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let attempts = PermissiveAttemptBox()
+        let permissive = PermissiveAdClassifier()
+        await permissive.installClassifyOverrideForTesting { windowSegments in
+            attempts.record(windowSegments.map(\.segmentIndex))
+            throw CancellationError()
+        }
+
+        let output = try await classifier.coarsePassA(
+            segments: segments,
+            sensitiveRouter: SensitiveWindowRouter.noop,
+            permissiveClassifier: permissive
+        )
+
+        // Recovery stops at the first cancellation — no shrink, no budget burn.
+        #expect(attempts.snapshot() == [[0, 1, 2, 3]])
+        #expect(output.permissiveFailureCounts == .zero)
+        let hole = try #require(output.failedWindows.first)
+        #expect(hole.status == .cancelled)
+        #expect(hole.status.retryPolicy == .resumeFromCheckpoint)
+        #expect(output.failedWindows.count == 1)
+        #expect(hole.lineRefs == [0, 1, 2, 3])
+    }
+
     @Test("playhead-qbib: the pass recovery budget can at most double a clean pass")
     func recoveryPassBudgetIsBounded() {
         // Short episodes still get a usable floor...
