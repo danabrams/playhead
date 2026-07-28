@@ -946,6 +946,61 @@ struct RediffDayZeroAttemptStoreTests {
                 "an exhausted budget from a different generation must not outlive it")
     }
 
+    /// REVIEW ROUND 1. `noteRediffDayZeroSuppression` has an INSERT arm as well
+    /// as an ON CONFLICT arm, and only the conflict arm was covered. The insert
+    /// arm is reachable — the in-flight guard can fire before any attempt for
+    /// the asset has completed — and it is the one that decides whether a
+    /// first-ever suppression leaves the asset eligible or accidentally seeds a
+    /// row that suppresses it.
+    @Test("a FIRST-EVER suppression seeds a row that leaves the asset eligible")
+    func firstSuppressionSeedsAnEligibleRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1"))
+        #expect(try await store.fetchRediffDayZeroAttempt(assetId: "a1") == nil)
+
+        try await store.noteRediffDayZeroSuppression(assetId: "a1", reason: .alreadyInFlight, at: 4_000)
+
+        let read = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(read?.suppressedCount == 1)
+        #expect(read?.lastSuppressedAt == 4_000)
+        #expect(read?.attemptCount == 0, "a suppression is not an attempt, even the first one")
+        #expect(read?.policyGeneration == DayZeroRediffAttemptPolicy.currentGeneration)
+        #expect(DayZeroRediffAttemptPolicy.decide(record: read, now: 4_001).isAttempt == true,
+                "seeding a suppression row must not lock the asset out of its first real attempt")
+    }
+
+    /// REVIEW ROUND 1. `fetchRecentBackgroundTaskRuns(entryPoint:limit:)` is new
+    /// in this diff and had NO caller in any test — the builder's own
+    /// `entryPoint` filter masks a wrong `WHERE`, but a wrong `ORDER BY` or
+    /// `LIMIT` would silently ship the OLDEST fires and nothing would notice.
+    /// This is the query behind "is the lagged BGTask being granted windows at
+    /// all?", the fact that told p70f the 299.6 MB was not the sweep's.
+    @Test("the rediff background-run query filters by entry point, newest first, and honors the limit")
+    func backgroundRunQueryIsScopedOrderedAndLimited() async throws {
+        let store = try await makeTestStore()
+        func run(_ entry: BackgroundTaskRunEntryPoint, at startedAt: Double) -> BackgroundTaskRunRecord {
+            BackgroundTaskRunRecord(
+                runId: "\(entry.rawValue)-\(Int(startedAt))", entryPoint: entry,
+                taskIdentifier: "com.playhead.app.\(entry.rawValue)",
+                startedAt: startedAt, outcome: .noEligibleWork,
+                deferReason: "precheckBytes=0 fullFetchBytes=0"
+            )
+        }
+        for at in [100.0, 300.0, 200.0] { try await store.insertBackgroundTaskRun(run(.rediffRefetch, at: at)) }
+        for at in [150.0, 350.0] { try await store.insertBackgroundTaskRun(run(.backfill, at: at)) }
+
+        let all = try await store.fetchRecentBackgroundTaskRuns(entryPoint: .rediffRefetch, limit: 10)
+        #expect(all.map(\.startedAt) == [300, 200, 100], "scoped to the rediff lane, newest first")
+        #expect(all.allSatisfy { $0.entryPoint == .rediffRefetch })
+
+        let capped = try await store.fetchRecentBackgroundTaskRuns(entryPoint: .rediffRefetch, limit: 2)
+        #expect(capped.map(\.startedAt) == [300, 200], "the limit keeps the NEWEST, not the oldest")
+
+        #expect(try await store.fetchRecentBackgroundTaskRuns(entryPoint: .rediffRefetch, limit: 0).isEmpty)
+        // A lane that has never fired reads empty rather than borrowing another's.
+        #expect(try await store.fetchRecentBackgroundTaskRuns(entryPoint: .preAnalysisRecovery, limit: 10).isEmpty)
+    }
+
     @Test("an unknown persisted exit decodes as RETRYABLE, never as a permanent park")
     func unknownExitIsConservative() async throws {
         let store = try await makeTestStore()
