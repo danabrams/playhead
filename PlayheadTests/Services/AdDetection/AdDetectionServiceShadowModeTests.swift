@@ -706,7 +706,15 @@ struct FusionEligibilityGatePersistenceTests {
                 suppressionThreshold: 0.25,
                 hotPathLookahead: 90.0,
                 detectorVersion: "ux6r-test-v1",
-                fmBackfillMode: .off
+                fmBackfillMode: .off,
+                // playhead-2350: the extent gate is held OFF here. This suite
+                // pins the ux6r property that an ELIGIBLE gate round-trips
+                // through a store reopen (and that a markOnly one does too);
+                // the Squarespace fixture is lexical-seeded with unanchored
+                // edges, so under the shipped default no eligible row exists to
+                // round-trip and the test would pass vacuously. The 2350 gate is
+                // covered by UnanchoredExtentAutoSkipGateTests.
+                unanchoredExtentBlocksAutoSkip: false
             )
         )
     }

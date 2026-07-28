@@ -547,7 +547,16 @@ struct BackfillOrchestratorWiringTests {
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "test-v1",
-            fmBackfillMode: .off
+            fmBackfillMode: .off,
+            // playhead-2350: the extent gate is held OFF here. This test's
+            // observable is the orchestrator DECISION LOG, which is only written
+            // on the auto-skip evaluation path — a span demoted to `.markOnly`
+            // is routed to the suggest tier at ingest and never reaches
+            // `evaluateWindow`. The fixture is lexical-seeded (unanchored on
+            // both edges, as this test itself asserts below), so under the
+            // shipped default the log would be legitimately empty and the
+            // step-17 wiring regression check would lose its signal.
+            unanchoredExtentBlocksAutoSkip: false
         )
         let service = AdDetectionService(
             store: store,
