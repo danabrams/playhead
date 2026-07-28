@@ -1,6 +1,24 @@
 {
   "default" : {
     "app_version" : "1.0.0",
+    "banner_tallies" : [
+      {
+        "auto_skipped_count" : 0,
+        "banner_count" : 2,
+        "episode_id_hash" : "b144870be8198c1b66c95148abfae7449654b8cf13352ae5097b770ae1df0abe",
+        "first_shown_at" : 1700000000,
+        "last_shown_at" : 1700000000,
+        "suggest_count" : 2
+      },
+      {
+        "auto_skipped_count" : 1,
+        "banner_count" : 3,
+        "episode_id_hash" : "d40dd3e75454df1bcc83f23160d7f95a327432f9b07047c8982f2668848b9eb9",
+        "first_shown_at" : 1700000000,
+        "last_shown_at" : 1700000001,
+        "suggest_count" : 2
+      }
+    ],
     "build_type" : "release",
     "chapter_phase_events" : [
 

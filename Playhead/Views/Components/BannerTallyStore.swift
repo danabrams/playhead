@@ -33,7 +33,11 @@
 //     exposure callbacks and in-place coalescing updates of the
 //     currently visible card each count ONCE. It is the same boundary
 //     the durable `banners_shown` aggregate (playhead-jw63.1) already
-//     uses, so the two can never disagree.
+//     uses, so the two agree card-for-card — with exactly one
+//     documented exception: a presentation carrying no episode
+//     reference increments the aggregate but opens no row here (see
+//     `recordPresentation`). Production always stamps one, so that
+//     exception is latent rather than expected.
 //
 // Re-presentation semantics, stated precisely: a card that is
 // dismissed and later presented again as a genuinely new presentation
@@ -56,11 +60,26 @@
 // Rows never merge across app launches either, because the active
 // session key is in-memory only.
 //
+// The cost of that choice, stated so nobody misreads a bundle: ONE
+// listen can produce more than one row. `playEpisode` bumps the
+// lifecycle generation on every entry — including a re-tap of the
+// already-playing episode — and a relaunch always opens a fresh
+// session. So rows sharing an `episode_id_hash` may be several listens
+// OR one listen split at a lifecycle boundary; `first_shown_at` /
+// `last_shown_at` are what separate the two. Cards are never
+// double-counted either way: the per-episode answer is the SUM of the
+// rows sharing a hash.
+//
 // ----- Privacy -----
 //
-// The os_log breadcrumb is LOCAL and names the episode plainly, using
-// the same `.public` annotation every identifier in `SkipOrchestrator`
-// uses. The persisted row also holds the RAW episode id, because it
+// The os_log breadcrumb is LOCAL and names the episode plainly. That
+// matches the established convention for local episode-scoped logging
+// — `AnalysisCoordinator`, `AnalysisStoreWorkJournalRecorder` and
+// `EpisodeSurfaceStatusObserver` all mark an episode id `.public` at
+// their `os_log` call sites. (`SkipOrchestrator` is NOT the precedent
+// to copy here: it marks WINDOW ids `.public` but routes episode ids
+// through `episodeIdHasher` first.) The persisted row also holds the
+// RAW episode id, because it
 // never leaves the device in that form: `DiagnosticsBundleBuilder`
 // projects it through `EpisodeIdHasher` (legal checklist item a) on
 // the way into the bundle, exactly as the work-journal tail does. No
@@ -159,12 +178,16 @@ final class BannerTallyStore {
     /// Every retained session row, oldest first. This is what the
     /// diagnostics hatches hand to the bundle builder.
     var sessions: [BannerTallySession] {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode(
-                  [BannerTallySession].self,
-                  from: data
-              )
-        else {
+        guard let data = defaults.data(forKey: storageKey) else { return [] }
+        guard let decoded = try? JSONDecoder().decode(
+            [BannerTallySession].self,
+            from: data
+        ) else {
+            // Distinguish "nothing recorded yet" from "the blob went
+            // bad": the next write replaces it, so a silent `[]` would
+            // discard up to `maxSessions` rows invisibly. Surface it in
+            // the same Console stream the live breadcrumb uses.
+            logger.error("banner tally blob unreadable — treating as empty")
             return []
         }
         return decoded
@@ -192,25 +215,29 @@ final class BannerTallyStore {
     /// than no row, because it would silently pool unrelated cards.
     @discardableResult
     func recordPresentation(of item: AdSkipBannerItem) -> Int {
-        let scope = Scope(
-            episodeId: item.episodeId,
-            playbackLifecycleGeneration: item.playbackLifecycleGeneration
-        )
-        if scope != activeScope {
-            activeScope = scope
-            activeSessionKey = UUID().uuidString
-        }
+        var index = 0
 
-        let index: Int
-        if let episodeId = item.episodeId, !episodeId.isEmpty,
-           let sessionKey = activeSessionKey {
-            index = appendToSession(
-                sessionKey: sessionKey,
+        // Resolve the scope ONLY for a persistable card. Rotating
+        // `activeScope` on an unscoped item would clobber the live
+        // session: the next real card for the same episode would then
+        // compare unequal, open a second row, and restart the index at
+        // 1 mid-listen.
+        if let episodeId = item.episodeId, !episodeId.isEmpty {
+            let scope = Scope(
                 episodeId: episodeId,
-                tier: item.tier
+                playbackLifecycleGeneration: item.playbackLifecycleGeneration
             )
-        } else {
-            index = 0
+            if scope != activeScope || activeSessionKey == nil {
+                activeScope = scope
+                activeSessionKey = UUID().uuidString
+            }
+            if let sessionKey = activeSessionKey {
+                index = appendToSession(
+                    sessionKey: sessionKey,
+                    episodeId: episodeId,
+                    tier: item.tier
+                )
+            }
         }
 
         emitBreadcrumb(for: item, index: index)
@@ -264,20 +291,23 @@ final class BannerTallyStore {
                 lastShownAt: timestamp
             )
             rows.append(updated)
-            // Cap from the OLD end: the session being counted right now
-            // is the one the audit is about, so it must never be the
-            // row that gets evicted.
-            if rows.count > Self.maxSessions {
-                rows.removeFirst(rows.count - Self.maxSessions)
-            }
         }
 
         persist(rows)
         return updated.bannerCount
     }
 
+    /// Applies the cap unconditionally rather than only on append, so a
+    /// blob that is already over the limit (a future cap reduction, a
+    /// hand-edited defaults domain) is trimmed on the next write too.
+    /// Trims from the OLD end: the session being counted right now is
+    /// the one the audit is about, so it must never be evicted.
     private func persist(_ rows: [BannerTallySession]) {
-        guard let data = try? JSONEncoder().encode(rows) else { return }
+        var capped = rows
+        if capped.count > Self.maxSessions {
+            capped.removeFirst(capped.count - Self.maxSessions)
+        }
+        guard let data = try? JSONEncoder().encode(capped) else { return }
         defaults.set(data, forKey: storageKey)
     }
 
@@ -289,10 +319,12 @@ final class BannerTallyStore {
     /// presented card is a handful per episode, which does not threaten
     /// the level's budget.
     ///
-    /// Identifiers are marked `.public` to match every `os_log` call
-    /// site in `SkipOrchestrator`; numeric interpolations are public by
-    /// default. This is a LOCAL surface — nothing here is an egress
-    /// path, so the episode id is named plainly.
+    /// Identifiers are marked `.public` to match the existing
+    /// episode-scoped `os_log` call sites (`AnalysisCoordinator`,
+    /// `AnalysisStoreWorkJournalRecorder`,
+    /// `EpisodeSurfaceStatusObserver`); numeric interpolations are
+    /// public by default. This is a LOCAL surface — nothing here is an
+    /// egress path, so the episode id is named plainly.
     private func emitBreadcrumb(for item: AdSkipBannerItem, index: Int) {
         let start = Self.finiteForLog(item.adStartTime)
         let end = Self.finiteForLog(item.adEndTime)

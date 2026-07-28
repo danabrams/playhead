@@ -158,6 +158,42 @@ final class BannerTallyStoreTests: XCTestCase {
         )
     }
 
+    /// An unscoped card must not rotate the live scope: doing so would
+    /// split one listen across two rows and restart the index at 1
+    /// mid-episode — an ambiguous number in exactly the place the audit
+    /// reads.
+    func testAnUnscopedCardMidSessionDoesNotSplitTheSession() {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = makeStore(defaults)
+
+        XCTAssertEqual(store.recordPresentation(of: item(windowId: "w1")), 1)
+        XCTAssertEqual(
+            store.recordPresentation(of: item(windowId: "w2", episodeId: nil)),
+            0
+        )
+        XCTAssertEqual(
+            store.recordPresentation(of: item(windowId: "w3")),
+            2,
+            "the live session must survive an unscoped card"
+        )
+        XCTAssertEqual(store.sessions.count, 1)
+    }
+
+    func testAnEmptyEpisodeIdIsTreatedLikeAMissingOne() {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = makeStore(defaults)
+
+        XCTAssertEqual(store.recordPresentation(of: item(windowId: "w1")), 1)
+        XCTAssertEqual(
+            store.recordPresentation(of: item(windowId: "w2", episodeId: "")),
+            0
+        )
+        XCTAssertEqual(store.recordPresentation(of: item(windowId: "w3")), 2)
+        XCTAssertEqual(store.sessions.count, 1)
+    }
+
     func testRowsPersistAcrossStoreInstances() {
         let (defaults, suiteName) = makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

@@ -151,7 +151,9 @@ final class AdBannerQueue {
     private let feedbackCounterStore: BannerFeedbackCounterStore?
     /// playhead-bfq7: per-episode card tally. Shares the exact
     /// presentation boundary the durable `banners_shown` aggregate uses
-    /// (`recordBannerShown(for:)`), so the two counts can never diverge.
+    /// (`recordBannerShown(for:)`), so the two agree card-for-card
+    /// except for a presentation with no episode reference, which the
+    /// tally deliberately does not attribute to a row.
     /// `nil` in previews and in tests that do not assert on the tally.
     private let tallyStore: BannerTallyStore?
     private var isAutoDismissPaused = false

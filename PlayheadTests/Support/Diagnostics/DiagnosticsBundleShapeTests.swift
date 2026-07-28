@@ -92,6 +92,25 @@ private enum BundleShapeFixtures {
         )
     }
 
+    /// playhead-bfq7: one banner-tally row per canonical episode id.
+    /// Seeding these with the SAME raw ids the journal entries use is
+    /// what makes the fixture's raw-episode-id VALUE sweep cover the
+    /// tally too — an unhashed id here would show up as a literal
+    /// `ep-fsy3-default-1` in the fixture bytes.
+    static func bannerTallies() -> [BannerTallySession] {
+        rawDefaultEpisodeIds.enumerated().map { idx, id in
+            BannerTallySession(
+                sessionKey: "fsy3-session-\(idx)",
+                episodeId: id,
+                bannerCount: idx + 2,
+                autoSkippedCount: idx,
+                suggestCount: 2,
+                firstShownAt: now,
+                lastShownAt: now.addingTimeInterval(Double(idx))
+            )
+        }
+    }
+
     static func eligibility() -> AnalysisEligibility {
         AnalysisEligibility(
             hardwareSupported: true,
@@ -114,7 +133,8 @@ private enum BundleShapeFixtures {
             buildType: .release,
             eligibility: eligibility(),
             workJournalEntries: defaultBundleEntries(),
-            installID: installID
+            installID: installID,
+            bannerTallies: bannerTallies()
         )
         let file = DiagnosticsBundleFile(
             generatedAt: now,
@@ -135,7 +155,8 @@ private enum BundleShapeFixtures {
             buildType: .release,
             eligibility: eligibility(),
             workJournalEntries: defaultBundleEntries(),
-            installID: installID
+            installID: installID,
+            bannerTallies: bannerTallies()
         )
         let optIn = DiagnosticsBundleBuilder.buildOptIn(episodes: [optInEpisode()])
         let file = DiagnosticsBundleFile(
@@ -169,11 +190,27 @@ private enum BundleShapeFixtures {
 
     /// Read the on-disk fixture if present; regenerate-and-write
     /// (idempotent — same inputs always produce the same bytes) when
-    /// missing. Either path returns the same canonical bytes.
+    /// missing OR when its schema has drifted.
+    ///
+    /// playhead-bfq7 added the schema-drift arm. Read-if-present alone
+    /// had a silent failure mode that actually bit: a bead adds a
+    /// top-level field to `DefaultBundle`, the checked-in fixture keeps
+    /// the OLD shape, and every audit below — including the raw-episode-id
+    /// value sweep — quietly runs against a bundle that is no longer the
+    /// one that ships, while the artifact the file comment offers to
+    /// legal review misrepresents it. The fixtures are also build
+    /// resources, so "just delete it and rerun" breaks the build rather
+    /// than regenerating.
+    ///
+    /// The check is deliberately narrow: a MISSING KEY relative to live
+    /// output means the schema moved and the fixture must be refreshed.
+    /// Value-level drift still leaves the frozen bytes in place, so the
+    /// fixture keeps its job as a byte-stable reference.
     static func loadOrGenerate(filename: String, generator: () throws -> Data) throws -> Data {
         let directory = fixtureDirectoryURL()
         let url = directory.appendingPathComponent(filename, isDirectory: false)
-        if let data = try? Data(contentsOf: url) {
+        if let data = try? Data(contentsOf: url),
+           !(try isSchemaStale(onDisk: data, generator: generator)) {
             return data
         }
         // Regenerate — try to write to disk so the next run is a plain
@@ -194,6 +231,28 @@ private enum BundleShapeFixtures {
         } catch {
             return try generator()
         }
+    }
+
+    /// True when the live bundle emits a top-level `default` key the
+    /// on-disk fixture lacks. Unreadable/undecodable bytes also count as
+    /// stale — a fixture nobody can parse audits nothing.
+    private static func isSchemaStale(
+        onDisk data: Data,
+        generator: () throws -> Data
+    ) throws -> Bool {
+        guard let onDiskKeys = defaultSubtreeKeys(in: data) else { return true }
+        guard let liveKeys = defaultSubtreeKeys(in: try generator()) else { return false }
+        return !liveKeys.subtracting(onDiskKeys).isEmpty
+    }
+
+    private static func defaultSubtreeKeys(in data: Data) -> Set<String>? {
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: [])
+                as? [String: Any],
+              let defaultSubtree = root["default"] as? [String: Any]
+        else {
+            return nil
+        }
+        return Set(defaultSubtree.keys)
     }
 }
 

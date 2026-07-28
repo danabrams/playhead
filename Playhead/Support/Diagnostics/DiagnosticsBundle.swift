@@ -301,9 +301,16 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     }
 
     /// playhead-bfq7: banner cards presented during ONE listening
-    /// session of one episode. A replay of the same episode produces a
-    /// second row rather than extending this one, so `banner_count` is
-    /// never inflated by re-listening.
+    /// session of one episode.
+    ///
+    /// HOW TO READ IT: the per-episode answer is the SUM of the rows
+    /// sharing an `episode_id_hash`. More than one row can belong to a
+    /// single listen — the playback lifecycle turns over on a re-tap of
+    /// the already-playing episode and on every relaunch — so a row is
+    /// a lower bound on a listen, never a duplicate of one. No card is
+    /// counted twice under any of those splits; `first_shown_at` /
+    /// `last_shown_at` are what separate "listened three times" from
+    /// "one listen split three ways".
     ///
     /// `banner_count` is the number the audit reads;
     /// `suggest_count` is the share attributable to the tier that

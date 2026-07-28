@@ -353,6 +353,15 @@ screen. It exists so a listener can answer "how many cards did that
 episode show me?" from an exported bundle rather than by counting cards
 by hand during playback.
 
+**How to read it (not a legal point, but the number is the whole
+purpose):** the per-episode answer is the **sum** of the rows sharing
+an `episode_id_hash`. A row is one playback lifecycle, and the
+lifecycle turns over on a re-tap of the already-playing episode and on
+every relaunch — so one listen can appear as several rows. No card is
+counted twice under any of those splits; `first_shown_at` /
+`last_shown_at` separate "listened three times" from "one listen split
+three ways".
+
 This is the first counter that is **both per-episode and on an egress
 surface**, so it is the first one that could carry an episode reference
 off the device. Two facts make it safe:
