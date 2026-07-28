@@ -171,6 +171,17 @@ struct PlaybackServiceSeekValidationTests {
     }
 }
 
+/// playhead-xc6b: budget for the positive controls and barriers below.
+///
+/// `pollUntil`'s 30 s default is sized for a busy machine, not a starved one,
+/// and the documented executor-starvation signature on this box reaches
+/// ~98-131 s of queueing delay under a saturated gate. These polls are only
+/// ever spent on the FAILING path — a satisfied poll exits on its first read
+/// — so a longer budget costs nothing when the code is correct and stops a
+/// merely-starved run from reddening. It stays under the suites'
+/// `.timeLimit(.minutes(3))` hang backstop, which remains the outer bound.
+private let pollBudgetUnderStarvation: Duration = .seconds(90)
+
 /// playhead-xc6b: POSITIVE CONTROL for the audio-session interruption
 /// observer, used by the two tests whose real subject is that observer.
 ///
@@ -204,7 +215,7 @@ private func driveInterruptionObserverUntilLive(
             playbackSpeed: 1
         )
     )
-    return await pollUntil {
+    return await pollUntil(timeout: pollBudgetUnderStarvation) {
         center.post(
             name: AVAudioSession.interruptionNotification,
             object: nil,
@@ -232,7 +243,7 @@ private final class InterruptionWitness: @unchecked Sendable {
     }
 
     func start(center: NotificationCenter) {
-        task = Task { @PlaybackServiceActor [self] in
+        let started = Task { @PlaybackServiceActor [self] in
             for await _ in center.notifications(
                 named: AVAudioSession.interruptionNotification
             ) {
@@ -240,11 +251,21 @@ private final class InterruptionWitness: @unchecked Sendable {
                 break
             }
         }
+        lock.lock()
+        task = started
+        lock.unlock()
     }
 
+    /// Always call this — the witness's `for await` never terminates on its
+    /// own if no notification ever arrives, so an abandoned witness would
+    /// outlive the test. Callers use `defer`, which also covers the
+    /// cancellation and error paths.
     func stop() {
-        task?.cancel()
+        lock.lock()
+        let pending = task
         task = nil
+        lock.unlock()
+        pending?.cancel()
     }
 
     private func markReceived() {
@@ -290,7 +311,7 @@ private func postInterruptionUntilWitnessed(
     defer { witness.stop() }
     let rawType = type.rawValue
     let rawOptions = options.rawValue
-    return await pollUntil {
+    return await pollUntil(timeout: pollBudgetUnderStarvation) {
         var userInfo: [AnyHashable: Any] = [
             AVAudioSessionInterruptionTypeKey: rawType,
         ]

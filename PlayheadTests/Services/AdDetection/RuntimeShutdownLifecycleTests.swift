@@ -679,7 +679,9 @@ struct RuntimeShutdownLifecycleTests {
         // the playback-state observer task and only afterwards awaits it, so
         // observing the cancellation proves shutdown has actually entered and
         // reached the join. The poll scales with load instead of racing it.
-        let shutdownReachedTheJoin = await pollUntil { observerTask.isCancelled }
+        let shutdownReachedTheJoin = await pollUntil(timeout: .seconds(90)) {
+            observerTask.isCancelled
+        }
         #expect(
             shutdownReachedTheJoin,
             "shutdown() must reach its playback-state observer cancel/join — without this the negative assertion below is vacuous"
@@ -1077,7 +1079,7 @@ struct RuntimeShutdownLifecycleTests {
             // exactness assertion race the older invocation's
             // `Task.isCancelled` check: a regression that let the superseded
             // seek persist would land `[90, 90]` just after the read.
-            let bothFinished = await pollUntil {
+            let bothFinished = await pollUntil(timeout: .seconds(90)) {
                 await persistence.invocationsFinished() == 2
             }
             #expect(
