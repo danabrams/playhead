@@ -8106,41 +8106,14 @@ actor AdDetectionService {
     /// "wired and queried but no match cleared the floor"; positive
     /// values surface in the corpus export so NARL can measure the
     /// fingerprint-store firing rate.
-    /// playhead-hdgk: derive the per-edge auto-skip anchor tiers for a fusion
-    /// span from the two authoritative decision-build sources, start and end
-    /// resolved INDEPENDENTLY:
-    ///   • `.rediffByteExact` — the span carries `.rediffSlot` width ownership
-    ///     (the byte-exact rediff differ set BOTH edges; the refiners are
-    ///     bypassed for width-owned spans, so this is whole-span by
-    ///     construction — see the `isWidthOwnership` guards in `runBackfill`).
-    ///   • `.stingerSnapped` — the `StingerRefiner` snapped this specific edge
-    ///     (`trace.startSnapped` / `trace.endSnapped`).
-    ///   • `.unanchored` — neither. The conservative default.
-    ///
-    /// A `nil` trace (stinger flag OFF, or the span bypassed the refiner)
-    /// contributes no snap, so both edges fall through to `.unanchored` unless
-    /// rediff owns the width. Deliberately splice-agnostic: `.spliceSlot` is
-    /// acoustic width, NOT byte-exact, so a splice-owned edge stays
-    /// `.unanchored` (it does not qualify for the tight rediff margin). A
-    /// post-fusion geometry rewrite invalidates both earlier edge claims and
-    /// forces the conservative pair regardless of their original source.
-    ///
-    /// playhead-2350: the derivation itself now lives on `SpanExtentSupport`, so
-    /// the edge-padding tiers and the unanchored-edge auto-skip block cannot
-    /// drift apart. This stays as the (persistence-facing) tuple view.
-    static func deriveFusionEdgeAnchors(
-        anchorProvenance: [AnchorRef],
-        stingerTrace: StingerRefinementTrace?,
-        geometryWasRewritten: Bool = false
-    ) -> (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor) {
-        let support = SpanExtentSupport.derive(
-            anchorProvenance: anchorProvenance,
-            stingerTrace: stingerTrace,
-            geometryWasRewritten: geometryWasRewritten
-        )
-        return (start: support.startAnchor, end: support.endAnchor)
-    }
-
+    /// playhead-hdgk / playhead-2350: the per-edge auto-skip anchor tiers a
+    /// fusion span persists are derived by `SpanExtentSupport.derive`, which is
+    /// also the input to the unanchored-edge auto-skip block — one derivation,
+    /// so the persisted tiers and the gate cannot drift apart. `runBackfill`'s
+    /// emission loop calls it once per span and passes `startAnchor` / `endAnchor`
+    /// into `buildFusionAdWindow` below. (A `static` tuple-returning wrapper used
+    /// to live here; it was removed once the emission loop stopped calling it,
+    /// rather than left as a second spelling of the same rule.)
     private func buildFusionAdWindow(
         span: DecodedSpan,
         decision: DecisionResult,

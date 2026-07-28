@@ -21,7 +21,18 @@
 //
 // Deliberately NOT in scope (playhead-4xqf owns it): inferring wider boundaries.
 // This type never moves an edge. It only reports how much the existing edges are
-// worth, so a span whose edges the pipeline invented cannot auto-skip.
+// worth.
+//
+// SCOPE OF THE INVARIANT — read this before assuming it is global. The block is
+// applied in `AdDetectionService.runBackfill`'s emission loop, so it covers the
+// FUSED verdict only. The hot path (`runHotPath` / the segment-aggregator
+// promotion) stamps `AdWindow.eligibilityGate` from `precisionGateLabel`, whose
+// `"autoSkip"` literal is not a `SkipEligibilityGate` raw value and therefore
+// rides the orchestrator's legacy nil-gate contract straight into the auto-skip
+// path — and `buildAdWindow` never sets the edge-anchor columns, so those rows
+// are `.unanchored` by construction. Closing that hole is a separate change
+// against a different producer; it is tracked as an adjacent finding on
+// playhead-2350, not fixed here.
 
 import Foundation
 

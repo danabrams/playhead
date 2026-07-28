@@ -468,7 +468,7 @@ struct BackfillEvidenceFusion: Sendable {
         // playhead-xsdz.62: BYTE-EXACT rediff-confirmed kind. A span whose WIDTH
         // is owned by the byte-exact rediff oracle
         // (`span.carriesRediffByteExactWidth == anchorProvenance.contains(.rediffSlot)`,
-        // the SAME one definition `DecodedSpan`/`deriveFusionEdgeAnchors` use) is
+        // the SAME one definition `DecodedSpan`/`SpanExtentSupport.derive` use) is
         // a DAI-inserted ad by deterministic definition — the origin literally
         // served different ad bytes on a re-fetch — so it contributes a DISTINCT
         // corroborating KIND to the fusion quorum. This gives rediff-confirmed

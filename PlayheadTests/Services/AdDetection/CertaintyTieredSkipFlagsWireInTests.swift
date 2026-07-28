@@ -123,9 +123,18 @@ struct CertaintyTieredSkipFlagsWireInTests {
         )
     }
 
-    /// Base config with the flags OMITTED — proves "no config change" carries
-    /// the production-OFF state. `fmBackfillMode: .off` keeps the pipeline
-    /// deterministic (no FoundationModels dependence in the harness).
+    /// Base config with the three WRAJ flags OMITTED — proves "no config change"
+    /// carries the production-OFF state for them. `fmBackfillMode: .off` keeps
+    /// the pipeline deterministic (no FoundationModels dependence in the
+    /// harness).
+    ///
+    /// playhead-2350 caveat: this is no longer the *whole* default config — it
+    /// pins `unanchoredExtentBlocksAutoSkip: false` against that flag's shipped
+    /// `true` (see the call site below for why). The (c) sweep is therefore a
+    /// wraj-flags-omitted-vs-explicit comparison, not a default-vs-explicit one;
+    /// both arms carry the same 2350 opt-out, so the sweep stays symmetric and
+    /// the property it proves — that omitting the wraj trio equals passing their
+    /// defaults — is unchanged.
     private func makeBaseConfig() -> AdDetectionConfig {
         AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -247,7 +256,7 @@ struct CertaintyTieredSkipFlagsWireInTests {
 
     // MARK: - (c) Default-OFF byte-identity at the decision seam
 
-    @Test("Default config: runBackfill is byte-identical to explicit-default (false/0.9/90.0) flags")
+    @Test("Omitted wraj flags: runBackfill is byte-identical to explicit-default (false/0.9/90.0) flags")
     func defaultConfigMatchesExplicitDefaults() async throws {
         let assetId = "asset-wraj-byteid"
         let storeDefault = try await makeSeededStore(assetId: assetId)

@@ -120,6 +120,12 @@ struct UnanchoredExtentAutoSkipGateTests {
     /// The production auto-skip promotion, verbatim from `runBackfill`'s emission
     /// loop: a `.detectOnly` policy is promoted to `.autoSkipEligible` only when
     /// the gate is `.eligible` AND presence clears the threshold.
+    ///
+    /// This is a local copy of the rule, so it can drift from the real promotion
+    /// (which also handles `.logOnly` and the per-show threshold offset). It is
+    /// used only to make the fixture assertions read in the vocabulary of the
+    /// bug report; the end-to-end arm in section (6) exercises the REAL
+    /// promotion through `runBackfill`, and that is what would catch a drift.
     private static func promotedPolicyAction(
         for decision: DecisionResult,
         threshold: Double = 0.80
@@ -244,32 +250,25 @@ struct UnanchoredExtentAutoSkipGateTests {
                 "trimmed/merged/split geometry is nobody's observation, however strong the original anchors")
     }
 
-    @Test("deriveFusionEdgeAnchors and SpanExtentSupport.derive stay one definition")
-    func edgeAnchorDerivationHasOneDefinition() {
-        var trace = StingerRefinementTrace()
-        trace.startSnapped = true
-        let cases: [(provenance: [AnchorRef], trace: StingerRefinementTrace?, rewritten: Bool)] = [
-            ([], nil, false),
-            ([.rediffSlot], nil, false),
-            ([.spliceSlot], trace, false),
-            ([], trace, false),
-            ([.rediffSlot], trace, true)
-        ]
-        for probe in cases {
-            let tuple = AdDetectionService.deriveFusionEdgeAnchors(
-                anchorProvenance: probe.provenance,
-                stingerTrace: probe.trace,
-                geometryWasRewritten: probe.rewritten
+    @Test("The persisted edge tiers and the gate's tiers are the same derivation")
+    func persistedAnchorsMatchTheGatesView() async throws {
+        // Not a tautology over `SpanExtentSupport.derive`: this reads what
+        // `runBackfill` PERSISTED on the `ad_windows` row and checks it against
+        // the gate's own verdict on the same span. If a future change ever
+        // re-derives the persisted anchors from a second source, these two
+        // disagree here rather than in production.
+        let windows = try await runBackfill(assetId: "asset-2350-anchor-parity", blocking: true)
+        try #require(!windows.isEmpty)
+        for window in windows {
+            let persisted = SpanExtentSupport(
+                startAnchor: AutoSkipEdgeAnchor(rawValue: window.startEdgeAnchor) ?? .unanchored,
+                endAnchor: AutoSkipEdgeAnchor(rawValue: window.endEdgeAnchor) ?? .unanchored
             )
-            let support = SpanExtentSupport.derive(
-                anchorProvenance: probe.provenance,
-                stingerTrace: probe.trace,
-                geometryWasRewritten: probe.rewritten
+            let isEligible = window.eligibilityGate == SkipEligibilityGate.eligible.rawValue
+            #expect(
+                !isEligible || persisted.isFullyAnchored,
+                "an eligible row must carry two anchored edges; got \(window.startEdgeAnchor)/\(window.endEdgeAnchor)"
             )
-            #expect(tuple.start == support.startAnchor,
-                    "the persisted start tier must equal the tier the gate reads")
-            #expect(tuple.end == support.endAnchor,
-                    "the persisted end tier must equal the tier the gate reads")
         }
     }
 
@@ -372,11 +371,17 @@ struct UnanchoredExtentAutoSkipGateTests {
         }
         #expect(swept >= 10, "the sweep must actually cover the sign-off interval (covered \(swept) edges)")
 
-        // Reason 2 — independent, and it holds even under the STRONGEST
-        // hypothetical anchoring (both edges byte-exact): the span ends
-        // 3537.95, i.e. 37.93 s from the episode end, inside the 90 s post-roll
-        // guard. Run it through the real `DecisionMapper` so this is the
-        // production rule, not a restatement of it.
+        // Reason 2 — a SECOND, independent demotion that survives even the
+        // STRONGEST hypothetical anchoring (both edges byte-exact): the span
+        // ends 3537.95, i.e. 37.93 s from the episode end, inside the 90 s
+        // post-roll guard. Run through the real `DecisionMapper` rather than a
+        // restatement of the rule.
+        //
+        // HONEST SCOPE: the post-roll guard is armed by
+        // `certaintyTieredEnabled`, which production still ships OFF (it is
+        // Dan's Gate-2 decision). So this second reason is latent today, not
+        // live. Reason 1 above — the extent gate — is the one that holds under
+        // the SHIPPED config, and it holds unconditionally.
         let outro = Self.span(
             id: "span-outro-hypothetically-anchored",
             start: 3493.02,

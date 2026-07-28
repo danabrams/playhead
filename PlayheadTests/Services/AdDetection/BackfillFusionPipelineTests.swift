@@ -550,12 +550,20 @@ struct BackfillOrchestratorWiringTests {
             fmBackfillMode: .off,
             // playhead-2350: the extent gate is held OFF here. This test's
             // observable is the orchestrator DECISION LOG, which is only written
-            // on the auto-skip evaluation path — a span demoted to `.markOnly`
-            // is routed to the suggest tier at ingest and never reaches
-            // `evaluateWindow`. The fixture is lexical-seeded (unanchored on
-            // both edges, as this test itself asserts below), so under the
-            // shipped default the log would be legitimately empty and the
-            // step-17 wiring regression check would lose its signal.
+            // for windows that reach `evaluateWindow`. Step 17 forwards
+            // `AdDecisionResult`s, and `receiveAdDecisionResults` hard-filters to
+            // `eligibilityGate == .eligible` — a demoted span is dropped there
+            // and never becomes a managed window (it is not registered as a
+            // suggestion on that path either; the suggest tier is the
+            // `receiveAdWindows` behaviour). The fixture is lexical-seeded
+            // (unanchored on both edges, as this test itself asserts below), so
+            // under the shipped default the log would be legitimately empty and
+            // this step-17 wiring regression check would lose its signal.
+            //
+            // Coverage note: that leaves the step-17 wiring unpinned under the
+            // SHIPPED config. Pinning it there needs an anchored fixture (a
+            // rediff-owned span), which this harness cannot mint — worth a
+            // follow-up rather than a weaker assertion here.
             unanchoredExtentBlocksAutoSkip: false
         )
         let service = AdDetectionService(

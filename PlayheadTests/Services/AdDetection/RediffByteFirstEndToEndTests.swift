@@ -268,7 +268,7 @@ struct RediffByteFirstEndToEndTests {
         // Closes the end-to-end wiring gap the function-level derivation pin
         // (FusionEdgeAnchorDerivationTests) and the default-path round-trip
         // (BackfillFusionPipelineTests) leave open: that a REAL `.rediffSlot`
-        // span flowing through `runBackfill` → `deriveFusionEdgeAnchors` →
+        // span flowing through `runBackfill` → `SpanExtentSupport.derive` →
         // `buildFusionAdWindow` → `ad_windows` actually persists the
         // `rediffByteExact` tier (not the default `unanchored`). A call-site
         // that dropped, swapped, or hardcoded the derived anchors would pass

@@ -185,11 +185,15 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
 
         let families = sortedSources.map { $0.rawValue }
 
-        // playhead-2350: `skipEligible` needs no extra extent term — an
-        // unanchored span was already demoted off `.eligible` by
-        // `DecisionResult.withExtentSupport`, so the gate check below is
-        // extent-aware by construction. The anchors are recorded alongside it
-        // so the reason is legible in replay.
+        // playhead-2350: `skipEligible` deliberately carries no extra extent
+        // term. When the gate is armed (the shipped default) an unanchored span
+        // was already demoted off `.eligible` by
+        // `DecisionResult.withExtentSupport`, so the check below is extent-aware
+        // without restating the rule. With the gate disabled this can report
+        // `skipEligible: true` beside `extentFullyAnchored: false` — which is
+        // the honest trace of that configuration, not a contradiction: the
+        // explanation records what the pipeline decided, and the anchors say why
+        // it could have decided otherwise.
         let isSkipEligible = policyAction == .autoSkipEligible
             && decision.eligibilityGate == .eligible
 
