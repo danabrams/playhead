@@ -73,53 +73,42 @@
 # Exits non-zero if any mutation survives, if the tree is dirty at start, if a
 # batch fails to build, or if restoration is not byte-exact.
 #
-# LAST GREEN END-TO-END RUN
-#   2026-07-27 — 26/26 KILLED, 0 survivors, 0 errors, exit 0.
-#   10 builds (1 baseline + 9 batches), 17m21s wall clock.
-# That run predates the playhead-o4qr merge and NO LONGER DESCRIBES THIS FILE.
+# LAST WHOLE-BATTERY RUN — the single provenance line
+#   2026-07-28 (playhead-auz3). 35 live entries — COUNTED, not carried over;
+#   every earlier status block here quoted a figure ("26", "31", "33") that was
+#   already wrong when written, and a reader naturally trusts it. If you change
+#   the array, recount. 19 batches, run END TO END:
+#   34 KILLED, 1 SURVIVED (M17, a known and deliberately unpinned rail — see
+#   below), 0 unevaluated. 21 builds, 13m24s wall clock.
 #
-# STATUS AFTER playhead-1mq1.2.1 (2026-07-28)
-#   The MUTATIONS array holds 33 live entries — COUNTED, because the two status
-#   blocks below each quote a number ("26", and "31" in the merge note) that was
-#   already wrong when written and that a reader naturally trusts. If you change
-#   the array, recount rather than adjusting the nearest figure by hand.
+#   Composition, stated because it is not one invocation: the whole battery in
+#   one pass (20 builds, 12m40s) came back 30 KILLED / 1 SURVIVED / 4 ERROR —
+#   batch 8 failed to COMPILE on N04's stale EDIT and took N02, N03 and N06
+#   down with it. The EDIT was re-cut (see the note above N04) and batch 8
+#   re-run immediately, behind that same run's green baseline: 1 build, 44s,
+#   4/4 KILLED. Nothing else changed between the two.
 #
-#   Added: P01 and P02, for the mixed-width attribution guard. Re-cut: M14's and
-#   O04's EDITs, for `revokeRecurrenceEvidence`'s and `ingestNegativeFingerprint`'s
-#   new `negativeAttribution` argument — the defects they describe are unchanged,
-#   which is the sanctioned reason to rewrite an EDIT.
+#   This block replaced three overlapping status blocks that each described a
+#   DIFFERENT subset of batches as verified, so a reader had to intersect them
+#   to discover that no whole-battery verdict existed at all. Keep it to ONE
+#   provenance line. If you re-run part of the battery, say so here and say
+#   which part — do not add a second status block.
 #
-#   Verified in that pass: full `--dry-run` clean (every anchor applies exactly
-#   once, 0 errors); baseline green on the focused suites; batch 17 → P01
-#   KILLED; batch 18 → P02 KILLED.
+#   Settled by this run, previously open:
+#     • Batches never re-run after `FOCUSED_SUITES` grew the two
+#       characterization @Suite structs (playhead-ugy4) — all now re-run.
+#     • M14 and O04, whose EDITs playhead-1mq1.2.1 re-cut and dry-run verified
+#       but never re-KILLED. Both KILLED here.
+#     • S06 and S07 added (playhead-auz3). Both SURVIVED against the fixtures
+#       as they stood — that was the point, it is what proved the two tests
+#       vacuous — and both KILLED once the fixtures were repaired.
 #
-#   NOT verified: batches 1–16 were not re-run. That matters most for M14 and
-#   O04 — their anchors were proved to still APPLY, which is not the same claim
-#   as still KILLING. Re-run batches 4 and 16 before trusting them.
-#
-#   P01 SURVIVED on its first probe and the survivor was a MISSING BARRIER, not
-#   a missing guard: "the hard-negative bank stayed empty" was being read
-#   straight after `drainOrchestratorEffects`, which orders only work enqueued
-#   on the ORCHESTRATOR, so the read beat the ingest's hop to the bank actor
-#   and passed for the wrong reason. The fixture now issues a CLEAN sentinel
-#   revert second and asserts the resulting count, which is what made the
-#   mutation killable. Worth remembering for any future "no learning happened"
-#   assertion on the bank.
-#
-# STATUS AFTER THE playhead-o4qr MERGE (2026-07-27)
-#   The battery is 26 mutations, not 31: five entries were relocated to the
-#   KNOWN GAP block (see the MERGE NOTE above `MUTATIONS`). All 26 anchors are
-#   dry-run verified to apply exactly once against the merged source.
-#
-#   Batches 1–7 were re-run: 15 mutations, 14 KILLED, 1 SURVIVED (M17).
-#
-#   M17 SURVIVED and the survivor is REAL, but it is an unpinned rail rather
-#   than a live defect, so read the next paragraph before "fixing" anything.
+# THE ONE STANDING SURVIVOR — M17. Read this before "fixing" it.
 #   Production attribution is correct by construction: both seams pass the
 #   `sourceShowId` captured at gesture time into `makeManualCorrectionVetoEvent`
-#   and never read `activePodcastId`. What changed is the OBSERVATION POINT. On
-#   main the receipt was written by `persistManualCorrectionVeto` AFTER the
-#   revert barrier, so parking there and swapping episodes made a
+#   and never read `activePodcastId`. What changed is the OBSERVATION POINT.
+#   Before playhead-o4qr the receipt was written by `persistManualCorrectionVeto`
+#   AFTER the revert barrier, so parking there and swapping episodes made a
 #   live-attributed receipt visible. o4qr mints the event and commits it inside
 #   the atomic transaction BEFORE that barrier (SkipOrchestrator.swift: mint,
 #   then `persistRevertedAdWindowsIfCurrent`, then the barrier), so by the time
@@ -131,69 +120,44 @@
 #   not the one that precedes the live-state guard. One barrier cannot pin both
 #   under this structure, because the durable write now sits above the effects:
 #   the current placement is what makes M07/M12/M14/M15/M16 killable. Adding a
-#   second, pre-mint barrier is the fix; it is a new test seam, deliberately not
-#   done as part of a merge.
+#   second, pre-mint barrier is the fix. It is a new test seam, and it stays a
+#   COVERAGE decision for a human rather than something a passing run absorbs.
 #
-#   Batches 8–12 were NOT re-run, for two different reasons, and BOTH must be
-#   cleared before this file can claim a whole-battery green again:
-#     • batches 8 and 9 contain N06 and N07, whose only victim
-#       (`anonymousRevertRecordsNoControllerSample`) is currently RED — o4qr's
-#       `exactFeedbackShowIdentity` refuses a revert whose show id is nil or
-#       empty while the episode has one, which is the contract collision the
-#       merge report flags for decision. Running them now would credit both
-#       mutations off a pre-existing failure, which is precisely the
-#       miscrediting the baseline exists to prevent.
-#     • batches 10–12 (S01–S05) are the suggest-tier rails; untouched by the
-#       merge resolution and simply not re-run, for build budget.
+# THE CONTRACT THIS BATTERY PINS (playhead-o4qr, Dan's decision)
+#   ACCEPT THE RECEIPT, REFUSE THE LEARNING. A correction whose show identity is
+#   unusable (nil, empty, non-canonical, or disagreeing with the live episode)
+#   still commits its durable receipt and still returns true; what it withholds
+#   is every show-KEYED effect — trust penalty, hard-negative bank, per-show
+#   threshold controller, show-scoped recurrence revocation. O01-O05 pin the
+#   decision itself; N07 covers the controller surface the others cannot see.
+#   `T_ANON_SILENT` is the display name of its subject test — if that test is
+#   retitled again, the constant must follow or N06, N07 and O01-O04 all go
+#   silently un-creditable.
 #
-#   The baseline is likewise BLOCKED until that red test is resolved: it refuses
-#   to start while any focused-suite test is already failing. Batches 1–7 were
-#   therefore run with PLAYHEAD_MB_SKIP_BASELINE=1, which is sound only because
-#   none of them names the red test. Do not extend that shortcut to 8/9.
-#
-# THE CONTRACT COLLISION IS RESOLVED (playhead-o4qr, 2026-07-27)
-#   Dan's decision: ACCEPT THE RECEIPT, REFUSE THE LEARNING. A correction whose
-#   show identity is unusable (nil, empty, non-canonical, or disagreeing with
-#   the live episode) still commits its durable receipt and still returns true;
-#   what it withholds is every show-KEYED effect — trust penalty, hard-negative
-#   bank, per-show threshold controller, show-scoped recurrence revocation.
-#
-#   Consequences for this file, all already applied below:
-#     • `T_ANON_SILENT` was RETITLED. The test grew three more clauses, so its
-#       @Test display name changed; the constant had to follow or N06/N07 and
-#       the new O-series would all be silently un-creditable.
-#     • Batches 8 and 9 are UNBLOCKED — their victim is green again, so N06 and
-#       N07 can finally be credited honestly rather than off a red test.
-#     • Five new entries, O01–O05, pin the decision itself: three learning
-#       surfaces N07 cannot see (bank, trust, revocation scope) plus BOTH
-#       seams' receipt half. See the note above them for the batching.
-#     • Two pre-existing tests pinned the OLD refusal and were re-pointed:
-#       `revertWindowRemovesCue` (now O02's second victim) and
-#       `autoSkipNoWinsBlockedAppliedPersistenceRace`, whose show probe moved
-#       to `staleShowBannerNoKeepsReceiptAndRecordsNoLearning` (O05's victim).
-#     • N06's EDIT was rewritten (its expectation was not) — see the entry.
-#
-# RESULTS, 2026-07-27, after the decision landed
-#   Batches 8, 9, 13, 14, 15, 16 run — 12 mutations, 12 KILLED, 0 survivors.
-#   Batch 14 was run WITH the baseline (baseline green); the rest with
-#   PLAYHEAD_MB_SKIP_BASELINE=1 behind that same green baseline and an
-#   independent focused-suite pass (116/116).
-#
-#   Batches 1-7 and 10-12 were NOT re-run this session, for build budget. All
-#   31 anchors are `--dry-run` verified to apply exactly once against the
-#   current source, so the file is not silently rotten — but batches 1-7's last
-#   real verdicts (14 KILLED / M17 SURVIVED) predate the decision, and 10-12
-#   still have not been re-run since the merge. A whole-battery green cannot be
-#   claimed until they are.
-#
-#   Two survivors were found and BOTH were fixed at the source of the problem
-#   rather than by touching an expectation:
-#     • O02 survived because the test observing it watched
-#       `falseSkipSignalHandlerForTesting` behind `drainOrchestratorEffects`,
-#       which orders only the task's first segment. The probe was rebuilt on
-#       the trust store (`awaitTrustFalseSkipSignals`); O02 now KILLED.
-#     • N06 survived because its edit had become an equivalent mutant. The EDIT
-#       was rewritten to the shape the defect now takes; N06 now KILLED.
+# FIVE THINGS THIS FILE LEARNED THE HARD WAY
+#   • A survivor is a MISSING TEST. Every survivor found so far was fixed at the
+#     source of the problem, never by touching an expectation.
+#   • `--dry-run` proves an anchor still APPLIES. It does not prove the mutant
+#     still COMPILES, and it does not prove the mutant still KILLS. N04 sat
+#     dry-run-clean and build-broken for a whole bead (playhead-1mq1.2.1 →
+#     playhead-auz3); M14 and O04 sat dry-run-clean and unverified beside it.
+#   • A batch aborts on its first failed anchor, so one rotten entry costs the
+#     whole batch. That is why the five unrepresentable o4qr mutations live in
+#     the KNOWN GAP block instead of ERRORing in `MUTATIONS`.
+#   • "No learning happened" assertions need a BARRIER, not a drain. P01
+#     survived because "the hard-negative bank stayed empty" was read straight
+#     after `drainOrchestratorEffects`, which orders only work enqueued on the
+#     ORCHESTRATOR — the read beat the ingest's hop to the bank actor and passed
+#     for the wrong reason. Its fixture now issues a CLEAN sentinel revert
+#     second and asserts the resulting count. O02 survived for the sibling
+#     reason and was rebuilt on the trust store (`awaitTrustFalseSkipSignals`).
+#   • An assertion must be able to OBSERVE the outcome it forbids. Both
+#     playhead-ugy4 and playhead-auz3 found tests whose only probe was
+#     `confirmedWindows()`, which filters to `.confirmed`, while the duplicate
+#     promotion they forbade lands as `.applied`. `activeWindowIDs()` is the
+#     dictionary the promotion actually writes into. Fixtures that cannot reach
+#     the seam (no durable row, or an asset row whose episodeId disagrees with
+#     `beginEpisode`) fail the same way, one layer earlier.
 
 set -uo pipefail
 
@@ -296,6 +260,13 @@ T_STALE_IDENTITY="episode-bound suggest actions reject stale banner identities"
 T_FUSION_CLEARS_SUGGEST="Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)"
 T_DECLINE_NO_CONFIRM="declineSuggestedSkip drops the window without confirming it"
 
+# playhead-auz3. Two more of the same class, found while fixing ugy4 and
+# deliberately left out of its stated seven. Both were PROVED vacuous by
+# mutation before repair: S06 and S07 each SURVIVED against the fixtures as
+# they stood.
+T_GATE_FLIP_CLEARS_SUGGEST="Gate flip from markOnly clears suggest entry — accept after flip is a no-op (playhead-rfu-sad)"
+T_DIRECT_REPLACEMENT_CLEARS_ACCEPTED="direct episode replacement clears accepted-suggestion race guards"
+
 # playhead-1mq1.2.1. The mixed-width fixture: an auto window whose WIDTH was
 # wrong, reverted in one tap. Both learning surfaces it can poison are asserted
 # in this one test, which is why P01 and P02 need separate batches.
@@ -382,8 +353,9 @@ MUTATIONS=(
 
   # playhead-ugy4. S01 gets a batch to itself: a stale Yes that can reach a
   # promotion reddens EVERY suggest-tier test whose id survives in
-  # `lastSuggestRevisionByWindowId`, including S04's and S05's expectations —
-  # sharing a batch would credit those two off S01's blast radius.
+  # `lastSuggestRevisionByWindowId` — S04's, S05's and (measured 2026-07-28,
+  # once playhead-auz3 repaired its fixture) S06's expectations. Sharing a
+  # batch would credit those three off S01's blast radius.
   "S01|10|ORCH|$T_ADWINDOW_STALE_YES;$T_DECISION_STALE_YES;$T_EXPLICIT_RETIRE_STALE_YES;$T_LATE_INVENTORY_STALE_YES"
 
   # S02 is safe here: every accept in S04's and S05's tests goes through the
@@ -433,6 +405,20 @@ MUTATIONS=(
   # a batch.
   "P01|17|ORCH|$T_MIXED_WIDTH"
   "P02|18|ORCH|$T_MIXED_WIDTH"
+
+  # playhead-auz3. S06 and S07 share a batch, and the disjointness is checked
+  # rather than assumed — both directions, because either one aliasing the
+  # other's victim would print a false KILL:
+  #   • S06 (delete the AdWindow-path gate-flip clear) is INERT in S07's test:
+  #     that fixture's only same-id redelivery arrives in a NEW episode whose
+  #     `beginEpisode` has already emptied `suggestWindows`, so the deleted
+  #     call had nothing to remove.
+  #   • S07 (stop clearing `recentlyAcceptedSuggestIds` at `beginEpisode`) is
+  #     INERT in S06's test: it calls `beginEpisode` once, before any accept,
+  #     so the set it stops clearing is empty at that point.
+  # Distinct seams (`receiveAdWindows` vs `beginEpisode`), distinct victims.
+  "S06|19|ORCH|$T_GATE_FLIP_CLEARS_SUGGEST"
+  "S07|19|ORCH|$T_DIRECT_REPLACEMENT_CLEARS_ACCEPTED"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -488,6 +474,8 @@ describe_mutation() {
     S03) echo "declineSuggestedSkip: delete the active-episode guard on the episode-bound form" ;;
     S04) echo "receiveAdDecisionResults: delete the symmetric suggest clear on a same-id eligible result" ;;
     S05) echo "declineSuggestedSkip: read the suggest entry instead of removing it" ;;
+    S06) echo "receiveAdWindows: delete the gate-flip suggest clear on a same-id non-markOnly revision" ;;
+    S07) echo "beginEpisode: stop clearing recentlyAcceptedSuggestIds on a direct episode replacement" ;;
     O01) echo "ingestNegativeFingerprint: drop the anonymous-show refusal (a NULL-show hard negative every show reads back)" ;;
     O02) echo "revertWindow: fall the trust penalty back to activePodcastId when the correction has no usable show" ;;
     O03) echo "revertWindow: restore the outright refusal, so an anonymous correction loses its durable receipt" ;;
@@ -913,6 +901,17 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # EDIT re-cut playhead-auz3 for `ingestNegativeFingerprint`'s
+  # `negativeAttribution` argument (playhead-1mq1.2.1); the defect is unchanged,
+  # which is the sanctioned reason to rewrite an EDIT. The CLEAN partition from
+  # `revertNegativeAttribution(for:)` is what makes the ingest reach the bank —
+  # a MIXED one would be refused by P01's guard and the mutation would be inert.
+  #
+  # Worth remembering: this rot was INVISIBLE to `--dry-run`. The anchor still
+  # matched exactly once, so 1mq1.2.1's dry-run swept clean while the mutated
+  # tree no longer COMPILED, and the first real run took the whole batch — N02,
+  # N03 and N06 as well — down with it. Dry-run proves an anchor applies; only a
+  # build proves the result is still a valid mutant.
   N04)
     snippet OLD <<'EOF'
             scheduleConfirmedRecurrenceLearning(
@@ -932,7 +931,10 @@ EOF
             )
             ingestNegativeFingerprint(
                 text: managed.adWindow.evidenceText,
-                podcastId: activePodcastId
+                podcastId: activePodcastId,
+                negativeAttribution: revertNegativeAttribution(
+                    for: managed.adWindow
+                )
             )
             return true
 EOF
@@ -1092,6 +1094,49 @@ EOF
         }
 
         guard isExplicitDenial else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-auz3. The AdWindow-path twin of S04. Same defect, other ingress:
+  # a window first stamped `markOnly` re-arrives with the gate cleared, and
+  # without this clear `suggestWindows[id]` survives alongside the new managed
+  # entry, so a still-visible suggest banner can re-fire `acceptSuggestedSkip`
+  # and mint a SECOND, UUID-keyed durable window for one span.
+  S06)
+    snippet OLD <<'EOF'
+            if retireSuggestedWindowIfPresent(windowId: adWindow.id) {
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            // mutation S06: symmetric suggest clear deleted.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-auz3. `recentlyAcceptedSuggestIds` is the tap-then-flip guard: an
+  # id the user already promoted is terminal for the rest of that playback
+  # lifecycle (`hasTerminalSuggestResolution`). A direct episode replacement —
+  # `beginEpisode` with no `endEpisode` between — must reset it, or a producer
+  # that reuses a stable window id in the NEXT episode is silently suppressed.
+  # The trailing edge-padding comment is load-bearing for UNIQUENESS, not for
+  # the defect: `endEpisode` clears the same four sets in the same order, so a
+  # shorter anchor matches twice and the patcher (correctly) refuses.
+  S07)
+    snippet OLD <<'EOF'
+        vetoedSuggestWindowIds.removeAll()
+        recentlyAcceptedSuggestIds.removeAll()
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
+        // playhead-98co: per-episode edge-padding state.
+EOF
+    snippet NEW <<'EOF'
+        vetoedSuggestWindowIds.removeAll()
+        // mutation S07: beginEpisode no longer clears the accepted-suggest guard.
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
+        // playhead-98co: per-episode edge-padding state.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
