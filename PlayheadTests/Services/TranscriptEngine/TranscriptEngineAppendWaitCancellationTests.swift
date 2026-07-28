@@ -4,11 +4,20 @@
 // The drain loop checks `Task.isCancelled` one line before it parks on the
 // append waiter, so a cancel landing in that window parks anyway — and a
 // parked `withCheckedContinuation` cannot be unwound by cancellation
-// (playhead-xc6b), so the loop stays suspended for the lifetime of the
-// process. Nothing else in the pipeline advances behind it:
-// `AnalysisWorkScheduler` awaits `runTask.value`, so a stuck transcription
-// loop means `currentRunningTask` never clears and no further analysis job
-// starts.
+// (playhead-xc6b), so the loop stays suspended until some later
+// `startTranscription` / `stop` / `stopTranscription` happens to call
+// `resumeAllAppendWaiters()`.
+//
+// WHAT THAT COSTS — stated at its real size, because an inflated claim is
+// worth less than an accurate one. The parked loop never emits `.completed`,
+// so `AnalysisJobRunner` waits out its full 300 s ceiling on that event
+// (`Task.sleep(for: .seconds(300))` racing the stream, AnalysisJobRunner.swift)
+// and returns `.failed("transcription:zeroCoverage")`. So the job is lost and
+// `AnalysisWorkScheduler`'s `currentRunningTask` is pinned for five minutes —
+// NOT, as an earlier version of this comment claimed, forever: the runner's own
+// timeout clears it, and the next `startTranscription` unparks the stale loop.
+// A five-minute stall plus a zero-coverage failure per occurrence is the honest
+// blast radius, and it is quite enough to fix.
 //
 // Today every `activeTask?.cancel()` in the service is hand-paired with a
 // `resumeAllAppendWaiters()`. These tests deliberately do NOT go through those

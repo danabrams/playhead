@@ -907,6 +907,10 @@ struct TranscriptEngineShardFailureIsolationTests {
         // end some other way: shard 2 is ordered after shard 1.
         let transcribed = recognizer.transcribedShardIds
         #expect(transcribed.contains(2), "shard after the failure must still be transcribed")
+        // Fixture liveness, not a claim about the engine: it proves the
+        // injected failure actually fired. Without it a mis-set
+        // `failingShardId` would leave nothing throwing at all and both
+        // assertions above would pass while exercising none of this.
         #expect(!transcribed.contains(1))
     }
 }
