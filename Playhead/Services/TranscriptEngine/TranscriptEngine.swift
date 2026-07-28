@@ -315,9 +315,8 @@ protocol SpeechRecognizer: Sendable {
 ///    `CancellationError`. Such a waiter never held the permit, so it must not
 ///    release one — handing the gate to nobody would wedge it permanently,
 ///    which is strictly worse than the bug being fixed.
-/// 2. A holder is bounded by a watchdog, so a wedged call degrades one shard
-///    instead of the whole app's ASR. (Landing separately — this commit is
-///    the waiter half.)
+/// 2. A holder is raced against `holderDeadline`, so a wedged call degrades
+///    one shard instead of the whole app's ASR.
 ///
 /// Internal rather than file-private so both bounds can be tested against a
 /// dedicated instance rather than the shared process-wide one.
@@ -339,11 +338,38 @@ actor SpeechRecognitionRequestGate {
         var outcome: Bool?
     }
 
+    /// Ceiling on how long one recognizer call may hold the permit.
+    ///
+    /// WHY 120 SECONDS. This has to bound a *hung* call without ever tripping
+    /// on a merely slow one, and it is calibrated from both ends:
+    ///
+    /// - From below, by the work. A shard is 30 s of audio
+    ///   (`AnalysisAudioService.defaultShardDuration`), and on-device
+    ///   `SpeechAnalyzer` transcribes one in a small fraction of real time.
+    ///   120 s is four times the shard's own wall-clock duration, so the
+    ///   watchdog only fires for a call that has stopped progressing
+    ///   altogether — not for one that is slow under thermal pressure, a cold
+    ///   asset install, or `.utility` priority in the background.
+    /// - From above, by the tightest caller. `AnalysisJobRunner` gives the
+    ///   *entire* transcription stage 300 s before it declares
+    ///   `transcription:zeroCoverage`. A per-call ceiling at or above that
+    ///   would protect nothing, because the caller would already have given
+    ///   up. At 120 s the permit is free again with more than half the stage
+    ///   budget left for the remaining shards.
+    static let defaultHolderDeadline: Duration = .seconds(120)
+
+    private static let logger = Logger(subsystem: "com.playhead", category: "SpeechRequestGate")
+
     private var isHeld = false
     private var waiters: [Waiter] = []
+    private let holderDeadline: Duration
 
-    func withExclusiveAccess<T>(
-        _ operation: @Sendable () async throws -> T
+    init(holderDeadline: Duration = SpeechRecognitionRequestGate.defaultHolderDeadline) {
+        self.holderDeadline = holderDeadline
+    }
+
+    func withExclusiveAccess<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         guard await acquire() else {
             // Cancelled while queued. We never owned the permit, so there is
@@ -353,13 +379,83 @@ actor SpeechRecognitionRequestGate {
 
         do {
             try Task.checkCancellation()
-            let result = try await operation()
+            let result = try await Self.runUnderWatchdog(operation, deadline: holderDeadline)
             release()
             return result
         } catch {
             release()
             throw error
         }
+    }
+
+    /// Run one recognizer call so that the permit is guaranteed to come back.
+    ///
+    /// Static, therefore nonisolated — deliberately. Every `Task` below must
+    /// start on the cooperative pool; written inside an isolated method they
+    /// would inherit the gate's isolation and queue behind it.
+    ///
+    /// Nothing here changes what the Speech call does, only how long it may
+    /// hold the permit. Two failure modes are separated:
+    ///
+    /// - **Cancellation** is forwarded into `work` and then *waited out*. The
+    ///   permit is not released until the recognizer call has actually
+    ///   unwound, because releasing early is precisely the overlap this gate
+    ///   exists to prevent (`SFSpeechErrorDomain Code=16`). This is why the
+    ///   bounded wait sits inside its own unstructured `Task`:
+    ///   `withBoundedCheckedContinuation` also resolves on cancellation, and
+    ///   an unstructured task does not inherit cancellation, so inside it only
+    ///   the hard deadline can resolve the wait.
+    /// - **A hung call** cannot be unwound at all — that is the whole failure
+    ///   class (playhead-xc6b): a continuation parked with no resume left has
+    ///   no suspension point to throw at. So on the deadline the call is
+    ///   abandoned: this shard fails loudly and the permit is freed, instead
+    ///   of every later transcription in the process parking behind it.
+    private static func runUnderWatchdog<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T,
+        deadline: Duration
+    ) async throws -> T {
+        let work = Task { try await operation() }
+
+        let reportAbandonment: @Sendable (BoundedContinuationFallback) -> Void = { _ in
+            logger.error("""
+                Speech request exceeded its \(deadline) watchdog deadline — \
+                abandoning it and freeing the request gate
+                """)
+        }
+
+        let bounded = Task {
+            await withBoundedCheckedContinuation(
+                timeout: deadline,
+                fallback: false,
+                onFallback: reportAbandonment
+            ) { resume in
+                Task {
+                    _ = try? await work.value
+                    resume(true)
+                }
+            }
+        }
+
+        let completed = await withTaskCancellationHandler {
+            // `Task<Bool, Never>.value` is not a cancellation point, which is
+            // what keeps us waiting for `work` to finish unwinding.
+            await bounded.value
+        } onCancel: {
+            work.cancel()
+        }
+
+        guard completed else {
+            // Best effort — a call that is merely slow will notice, a wedged
+            // one will not, and we do not wait to find out which.
+            work.cancel()
+            throw TranscriptEngineError.transcriptionFailed(
+                "Speech request exceeded its \(deadline) watchdog deadline and was abandoned"
+            )
+        }
+
+        // `work` has already finished; this rethrows its original error
+        // unchanged so callers keep matching on `TranscriptEngineError`.
+        return try await work.value
     }
 
     /// Returns `true` when the caller owns the permit and is responsible for
@@ -620,7 +716,7 @@ actor SpeechService {
     }
 
     private func performRecognizerRequest<T: Sendable>(
-        _ operation: @Sendable () async throws -> T
+        _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         guard serializesRecognizerRequests else {
             try Task.checkCancellation()

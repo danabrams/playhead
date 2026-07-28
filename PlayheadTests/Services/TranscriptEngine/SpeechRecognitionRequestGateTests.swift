@@ -66,6 +66,44 @@ private func yieldToScheduler(milliseconds: Int = 120) async {
     try? await Task.sleep(for: .milliseconds(milliseconds))
 }
 
+/// Single-writer boolean observation, recorded from inside a gated operation.
+private actor ObservedFlag {
+    private(set) var isSet = false
+    func set() { isSet = true }
+}
+
+/// A recognizer call that never returns, modelled the way the real one fails:
+/// a `withCheckedContinuation` with no cancellation handler and no resume
+/// left. `Task.cancel()` cannot unwind this — that is the entire point.
+private actor WedgedCall {
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var entered = 0
+
+    func park() async {
+        entered += 1
+        let waiting = entryWaiters
+        entryWaiters = []
+        for continuation in waiting { continuation.resume() }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    func awaitEntry() async {
+        guard entered == 0 else { return }
+        await withCheckedContinuation { entryWaiters.append($0) }
+    }
+
+    /// Let the abandoned call finish at end of test. Not part of any claim —
+    /// it exists so a `CheckedContinuation` is never destroyed unresumed,
+    /// which would log a `SWIFT TASK CONTINUATION MISUSE` canary and leave a
+    /// zombie task behind for the rest of the suite.
+    func unwedge() {
+        let pending = parked
+        parked = []
+        for continuation in pending { continuation.resume() }
+    }
+}
+
 // MARK: - Waiter cancellation
 
 @Suite("SpeechRecognitionRequestGate — waiter cancellation")
@@ -250,5 +288,145 @@ struct SpeechRecognitionRequestGateWaiterTests {
         }
         #expect(try await after.value == 2)
         #expect(await tracker.maximum == 1)
+    }
+}
+
+// MARK: - Holder watchdog
+
+@Suite("SpeechRecognitionRequestGate — holder watchdog")
+struct SpeechRecognitionRequestGateWatchdogTests {
+
+    @Test("A holder that never returns is abandoned instead of holding forever",
+          .timeLimit(.minutes(1)))
+    func wedgedHolderIsAbandoned() async throws {
+        let gate = SpeechRecognitionRequestGate(holderDeadline: .milliseconds(250))
+        let wedge = WedgedCall()
+
+        let wedged = Task {
+            try await gate.withExclusiveAccess {
+                await wedge.park()
+                return 1
+            }
+        }
+        await wedge.awaitEntry()
+
+        await #expect(throws: TranscriptEngineError.self) {
+            _ = try await wedged.value
+        }
+
+        await wedge.unwedge()
+    }
+
+    @Test("A never-finishing holder does not wedge a subsequent acquire",
+          .timeLimit(.minutes(1)))
+    func wedgedHolderDoesNotWedgeALaterAcquire() async throws {
+        let gate = SpeechRecognitionRequestGate(holderDeadline: .milliseconds(250))
+        let wedge = WedgedCall()
+
+        let wedged = Task {
+            try await gate.withExclusiveAccess {
+                await wedge.park()
+                return 1
+            }
+        }
+        await wedge.awaitEntry()
+
+        // Queued BEFORE the watchdog fires: this is the waiter that used to be
+        // parked for the lifetime of the process.
+        let queuedBehind = Task {
+            try await gate.withExclusiveAccess { 2 }
+        }
+        #expect(try await queuedBehind.value == 2)
+
+        // And a caller that arrives AFTER the abandonment must also get in.
+        let arrivingLater = Task {
+            try await gate.withExclusiveAccess { 3 }
+        }
+        #expect(try await arrivingLater.value == 3)
+
+        _ = try? await wedged.value
+        await wedge.unwedge()
+    }
+
+    @Test("The watchdog does not fire for a call that merely takes a while",
+          .timeLimit(.minutes(1)))
+    func slowButFinishingCallIsNotAbandoned() async throws {
+        let gate = SpeechRecognitionRequestGate(holderDeadline: .seconds(30))
+        let mayFinish = TestSignal()
+        let entered = TestSignal()
+
+        let holder = Task {
+            try await gate.withExclusiveAccess {
+                await entered.signal()
+                await mayFinish.wait()
+                return 7
+            }
+        }
+        await entered.wait()
+        await yieldToScheduler()
+        await mayFinish.signal()
+        #expect(try await holder.value == 7)
+    }
+
+    @Test("Cancellation reaches the recognizer call and the permit is not freed until it unwinds",
+          .timeLimit(.minutes(1)))
+    func cancellationIsForwardedAndAwaited() async throws {
+        let gate = SpeechRecognitionRequestGate(holderDeadline: .seconds(30))
+        let tracker = OverlapTracker()
+        let entered = TestSignal()
+        let unwinding = TestSignal()
+        let mayUnwind = TestSignal()
+        let observedCancellation = ObservedFlag()
+
+        let holder = Task {
+            try await gate.withExclusiveAccess {
+                await tracker.enter()
+                await entered.signal()
+                // Returns as soon as the operation itself is cancelled. The
+                // operation runs in an unstructured task, so this only fires
+                // if the gate forwarded cancellation into it.
+                try? await Task.sleep(for: .seconds(10))
+                if Task.isCancelled { await observedCancellation.set() }
+                await unwinding.signal()
+                await mayUnwind.wait()
+                await tracker.exit()
+                throw CancellationError()
+            }
+        }
+        await entered.wait()
+        holder.cancel()
+        await unwinding.wait()
+        #expect(await observedCancellation.isSet)
+
+        // The operation is still unwinding. Releasing the permit now would
+        // let a second recognizer request overlap it, which is the
+        // `SFSpeechErrorDomain Code=16` this gate exists to prevent.
+        let next = Task {
+            try await gate.withExclusiveAccess {
+                await tracker.enter()
+                await tracker.exit()
+                return 1
+            }
+        }
+        await yieldToScheduler()
+        #expect(await tracker.maximum == 1)
+
+        await mayUnwind.signal()
+        await #expect(throws: CancellationError.self) {
+            _ = try await holder.value
+        }
+        #expect(try await next.value == 1)
+        #expect(await tracker.maximum == 1)
+    }
+
+    @Test("The shipping deadline bounds a hung call without bounding a slow one")
+    func shippingDeadlineIsCalibrated() {
+        // A shard is 30 s of audio and the tightest caller
+        // (`AnalysisJobRunner`) gives the whole transcription stage 300 s.
+        // The per-call ceiling has to sit strictly between "much longer than a
+        // shard" and "well inside the stage budget" or it protects nothing.
+        let deadline = SpeechRecognitionRequestGate.defaultHolderDeadline
+        #expect(deadline >= .seconds(4 * AnalysisAudioService.defaultShardDuration))
+        #expect(deadline < .seconds(300))
     }
 }
