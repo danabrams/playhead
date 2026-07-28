@@ -324,7 +324,22 @@ struct DiagnosticsBundleShapeTests {
         // title, feed URL, advertiser, product, window id, or
         // transcript text. The proof lives in
         // `BannerTallyDiagnosticsPrivacyTests` (legal item g).
-        "banner_tallies"
+        "banner_tallies",
+        // playhead-p70f: the rediff re-fetch lane (bandwidth ledger,
+        // lagged attempt states, day-0 attempt records, and the lane's
+        // BGTask fires). Always encoded so a support engineer can tell
+        // "the lane did nothing" from "this bundle predates the lane".
+        // Privacy review: every per-asset row carries the install-scoped
+        // `asset_id_hash` produced by the SAME `EpisodeIdHasher` the
+        // scheduler-event and banner tails use — never the raw
+        // `analysisAssetId`. Everything else is an integer, a timestamp,
+        // or a closed enum rawValue: the day-0 records' `lastDetail`
+        // (which is `String(describing: error)` and can carry the
+        // enclosure URL) is deliberately NOT projected, and the run
+        // ledger's free-form `deferReason` is PARSED into two integers
+        // rather than forwarded. The proof lives in
+        // `DiagnosticsBundleRediffTests`.
+        "rediff_diagnostics"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's
