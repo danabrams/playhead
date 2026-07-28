@@ -485,9 +485,13 @@ actor SpeechRecognitionRequestGate {
 
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                // Still executing on the gate, so `resolve` cannot be running
-                // concurrently — but it may already have run, which is why the
-                // outcome is replayed here rather than assumed absent.
+                // Defence in depth, and — like `release()`'s skip below —
+                // unreachable today: `resolve` runs only on this actor, and
+                // nothing between the `append` above and this body releases
+                // the actor, so `outcome` is still nil every time. Replaying it
+                // rather than asserting its absence is the cheap half of that
+                // bet: if the ordering ever stops holding, a waiter resolved
+                // early wakes with the right answer instead of parking forever.
                 if let outcome = waiter.outcome {
                     continuation.resume(returning: outcome)
                 } else {
@@ -498,11 +502,12 @@ actor SpeechRecognitionRequestGate {
             // `onCancel` runs on whichever thread called `cancel()`, so it has
             // to hop back onto the gate to touch `waiters`. Two properties make
             // that hop safe. It cannot arrive *before* the waiter is queued:
-            // the append above and the suspension below are one uninterrupted
-            // actor job, so this message cannot be serviced until the waiter is
-            // already in the queue. And it cannot starve: the gate never awaits
-            // while isolated — `withExclusiveAccess` suspends across
-            // `operation()`, which frees the actor for exactly this message.
+            // the append above and the park below are one uninterrupted actor
+            // job, so this message cannot be serviced until the waiter is
+            // already in the queue. And it cannot starve: the gate never holds
+            // its executor across the recognizer call — `withExclusiveAccess`
+            // suspends into the nonisolated `runUnderWatchdog`, which frees the
+            // actor for exactly this message.
             Task { await self.abandon(waiter) }
         }
     }
