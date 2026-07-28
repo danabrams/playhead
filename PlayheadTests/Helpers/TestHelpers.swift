@@ -122,6 +122,32 @@ func pollUntil(
     return try await condition()
 }
 
+/// playhead-xc6b: poll budget for the positive-control / barrier waits in the
+/// executor-starvation-sensitive suites (`PlaybackServiceActorTests`,
+/// `RuntimeShutdownLifecycleTests`).
+///
+/// `pollUntil`'s 30 s default is sized for a busy machine, not a starved one.
+/// MEASURED on this box, 2026-07-28: in a full `PlayheadFastTests` run, tests
+/// carrying a 60 s `.timeLimit` blew it at **119-134 s elapsed** — on
+/// `main@89bf541a` as well as on the branch, so it is the host, not a change.
+/// A 30 s poll can therefore expire on a merely-starved run and turn a correct
+/// implementation red, trading a fail-OPEN vacuity for a fail-CLOSED flake.
+///
+/// 60 s, with at most two such polls in any one test, stays under those suites'
+/// `.timeLimit(.minutes(3))` hang backstop with 60 s of headroom — so a
+/// backstop trip still means "hang", not "two polls expired". A satisfied poll
+/// exits on its first read, so the budget is only ever spent on the failing
+/// path and costs nothing when the code is correct.
+///
+/// THE TWO-POLL CEILING IS LOAD-BEARING, so treat it as a rule and not a
+/// description. Three expiries (180 s) reach the backstop exactly, and the
+/// backstop's documented meaning is "a real hang" — a third poll would make
+/// the instrument lie about its own failures. If a test genuinely needs a
+/// third, raise that test's `.timeLimit` in the same change. Today the only
+/// two-poll test is
+/// `PlaybackServiceActorIsolationTests.tearDownOwnsEveryLongLivedResource`.
+let starvationPollBudget: Duration = .seconds(60)
+
 // MARK: - Migration test helpers
 
 /// H11 (cycle 2): writes `_meta.schema_version = '<version>'` directly into a

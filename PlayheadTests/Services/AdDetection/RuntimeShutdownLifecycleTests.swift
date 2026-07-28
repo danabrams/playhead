@@ -124,9 +124,34 @@ enum RuntimeSeekEffectStage: CaseIterable, Equatable, Sendable {
 
 private actor RuntimeSeekPersistenceProbe {
     private var positions: [TimeInterval] = []
+    private var finishedInvocations = 0
 
     func append(_ position: TimeInterval) {
         positions.append(position)
+    }
+
+    /// playhead-xc6b: recorded on EVERY exit path of the persistence handler,
+    /// including the superseded invocation that bails on `Task.isCancelled`.
+    /// Waiting for both invocations to finish lets the caller's
+    /// `snapshot() == [90]` bound the recorded positions from ABOVE as well as
+    /// below.
+    ///
+    /// Honest scope, checked rather than assumed: today the barrier is
+    /// BELT-AND-BRACES, not load-bearing. `requestPlaybackPositionPersistence`
+    /// does `await task.value` (PlayheadRuntime.swift:3396), so the seek does
+    /// not return until its handler invocation has finished — which means the
+    /// count is already 2 before the caller reads, and the poll is satisfied
+    /// on its first probe. It is kept because that guarantee lives in
+    /// production code the test does not own: a future restructure to
+    /// fire-and-forget persistence would silently reopen the window, and this
+    /// makes the test state its own requirement locally instead of inheriting
+    /// it.
+    func noteInvocationFinished() {
+        finishedInvocations += 1
+    }
+
+    func invocationsFinished() -> Int {
+        finishedInvocations
     }
 
     func snapshot() -> [TimeInterval] {
@@ -198,7 +223,44 @@ private actor FirstAcceptedRuntimeSeekGate {
     }
 }
 
-@Suite("playhead-7h2: runtime shutdown lifecycle")
+/// playhead-xc6b — HANG BACKSTOPS ARE MANDATORY IN THIS SUITE.
+///
+/// Every test here is behavioural: it asserts STATE (a task cancelled, a
+/// row flipped, a stream finished) and merely uses a wall-clock deadline
+/// as its synchronisation primitive. Those assertions stay valid under
+/// load, so these tests belong in the default gate — they are NOT
+/// measurement tests and must never be migrated behind `PerfGate`.
+///
+/// What they did lack is a finite backstop. Before playhead-xc6b, 8 of the
+/// 18 tests in this file carried no `.timeLimit` at all. Two of those eight
+/// park on a `FirstAcceptedRuntimeSeekGate` continuation
+/// (`newestRuntimeSeekSuppressesOlderDownstreamEffects`,
+/// `newestSeekWinsAcrossInEffectSuspension`), which has no deadline of its
+/// own; the other six await runtime seek hooks and transport state with no
+/// deadline either. Be exact about the rest of the file, since this bead is
+/// about not overclaiming: every `RuntimePlaybackObserverGate` and
+/// `DeinitLatch` waiter here ALREADY carried a limit, so those were RAISED
+/// 1 min -> 3 min rather than added. A regression on the ungated paths
+/// produced NO DIAGNOSTIC AT ALL: the test task never returned and the run
+/// said nothing about which test wedged.
+///
+/// What the trait actually buys, stated precisely: a REPORTED failure naming
+/// the test and the deadline it blew, plus an unwind of every
+/// cancellation-aware wait. It cannot force a body parked on a
+/// `withCheckedContinuation` with no cancellation handler — which is what the
+/// gate actors above use — to return. So it bounds the DIAGNOSIS reliably and
+/// the process only when the wait is cancellable. That is still the
+/// difference between "the gate hung" and "this test hung".
+///
+/// The suite-level trait below arms every test in the suite, including ones
+/// added later; each test also carries the trait explicitly so the coverage
+/// is greppable rather than inherited-and-assumed. Three minutes is chosen
+/// against MEASUREMENT, not taste: in a full `PlayheadFastTests` run on this
+/// box (2026-07-28) tests carrying a 60 s limit blew it at 119-134 s elapsed,
+/// on `main@89bf541a` as well as on this branch. 3 minutes therefore sits
+/// clear of observed contention — a trip means a real hang, not a busy
+/// machine — while staying far below the gate's outer timeout.
+@Suite("playhead-7h2: runtime shutdown lifecycle", .timeLimit(.minutes(3)))
 struct RuntimeShutdownLifecycleTests {
 
     // MARK: - 1. Explicit shutdown stops the observer (idempotency +
@@ -206,7 +268,7 @@ struct RuntimeShutdownLifecycleTests {
 
     @MainActor
     @Test("shutdown() after startup drives a clean exit and is idempotent",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func shutdownStopsObserverAndIsIdempotent() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: false)
         guard let observer = runtime._shadowRetryObserverForTesting() else {
@@ -262,7 +324,7 @@ struct RuntimeShutdownLifecycleTests {
 
     @MainActor
     @Test("shutdown() racing startup leaves the observer unarmed",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func shutdownDuringStartupLeavesObserverUnarmed() async throws {
         // Construct a non-preview runtime and IMMEDIATELY shut it down,
         // without yielding or polling for the observer loop to be
@@ -337,7 +399,7 @@ struct RuntimeShutdownLifecycleTests {
 
     @MainActor
     @Test("deinit releases the runtime even while the observer loop is still running",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func deinitReleasesRuntimeWithoutCycleWhenShutdownSkipped() async throws {
         // The deinit fallback on `PlayheadRuntime` is documented as a
         // best-effort safety net whose only useful action is
@@ -494,7 +556,7 @@ struct RuntimeShutdownLifecycleTests {
     /// the `for await` loop terminates promptly.
     @MainActor
     @Test("shutdown() cancels the RepeatedAdCache kill-switch observer task",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func shutdownCancelsRepeatedAdCacheKillSwitchObserver() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: false)
         guard let task = runtime._repeatedAdCacheKillSwitchObserverTaskForTesting() else {
@@ -517,7 +579,7 @@ struct RuntimeShutdownLifecycleTests {
 
     @MainActor
     @Test("replacement boundary clears prior transport cues without a resolved asset",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func replacementBoundaryClearsCuesBeforeAssetResolution() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         await runtime.playbackService.setSkipCues([
@@ -552,7 +614,7 @@ struct RuntimeShutdownLifecycleTests {
 
     @MainActor
     @Test("shutdown balances playback-owned download protection",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func shutdownReleasesPlaybackProtection() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let episodeId = "shutdown-protected-episode"
@@ -572,7 +634,7 @@ struct RuntimeShutdownLifecycleTests {
     @MainActor
     @Test(
         "shutdown tears down playback observers and finishes state streams",
-        .timeLimit(.minutes(1))
+        .timeLimit(.minutes(3))
     )
     func shutdownTearsDownPlaybackTransport() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
@@ -594,9 +656,9 @@ struct RuntimeShutdownLifecycleTests {
     @MainActor
     @Test(
         "shutdown joins a playback-state body already suspended downstream",
-        .timeLimit(.minutes(1))
+        .timeLimit(.minutes(3))
     )
-    func shutdownJoinsPlaybackStateConsumer() async {
+    func shutdownJoinsPlaybackStateConsumer() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let bodyGate = RuntimePlaybackObserverGate()
         runtime._setPlaybackStateObserverHookForTesting {
@@ -614,12 +676,57 @@ struct RuntimeShutdownLifecycleTests {
         )
         await bodyGate.waitUntilStarted()
 
+        // playhead-xc6b: capture the observer handle BEFORE shutdown nils it.
+        // It is the positive control for the negative assertion below.
+        let observerTask = try #require(
+            runtime._playbackStateObserverTaskForTesting(),
+            "the runtime must have installed a playback-state observer to join"
+        )
+
         let shutdown = Task { @MainActor in
             await runtime.shutdown()
         }
-        for _ in 0..<5 {
-            await Task.yield()
+
+        // playhead-xc6b — FAIL-OPEN FIX. This used to be `for _ in 0..<5 {
+        // await Task.yield() }`. A fixed yield budget is the wrong shape for
+        // a NEGATIVE assertion: under a saturated gate the shutdown task may
+        // not have been scheduled at all when the budget expires, so
+        // "the observer has not exited" was true for the trivial reason that
+        // NOTHING HAD HAPPENED YET. The suite got weaker under load, not just
+        // flakier.
+        //
+        // The repo idiom for proving a negative honestly (see
+        // `drainOrchestratorEffects` / `awaitTrustFalseSkipSignals` in
+        // TestHelpers.swift) is: establish a POSITIVE control that must be
+        // observed first, then assert the negative behind that barrier. The
+        // control here is `observerTask.isCancelled`. Precisely: `shutdown()`
+        // cancels the playback-state observer task at PlayheadRuntime.swift
+        // :3265 and joins it at :3274, with an `await` on the playback
+        // LIFECYCLE task in between — so observing the cancellation proves
+        // shutdown entered and reached its CANCEL step, not literally the
+        // join. That is sufficient here, and is the point: the old budget
+        // could not prove shutdown had started at all. The poll scales with
+        // load instead of racing it.
+        //
+        // The name says CANCEL, not JOIN, deliberately: `isCancelled` flips
+        // at :3265 and the join is at :3274, so this control proves shutdown
+        // reached the cancel — claiming "reached the join" would be exactly
+        // the kind of overclaim this bead exists to remove.
+        let shutdownReachedObserverCancel = await pollUntil(
+            timeout: starvationPollBudget
+        ) {
+            observerTask.isCancelled
         }
+        #expect(
+            shutdownReachedObserverCancel,
+            "shutdown() must reach its playback-state observer cancel — without this the negative assertion below is vacuous"
+        )
+
+        // Now the negative means something: shutdown has demonstrably run far
+        // enough to cancel the observer, and the observer still has not
+        // exited because its body is parked in `bodyGate.hold()`. The gate's
+        // continuation is resumed only by `release()` below, so this cannot
+        // flip on its own.
         #expect(
             !runtime._playbackStateObserverDidExitForTesting(),
             "The held body must still own the observer until its downstream hop returns"
@@ -634,7 +741,8 @@ struct RuntimeShutdownLifecycleTests {
     }
 
     @MainActor
-    @Test("user-mark write rejects a playback context replaced after the tap")
+    @Test("user-mark write rejects a playback context replaced after the tap",
+          .timeLimit(.minutes(3)))
     func staleUserMarkContextIsRejected() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let generationA = runtime._setUserMarkPlaybackContextForTesting(
@@ -697,7 +805,8 @@ struct RuntimeShutdownLifecycleTests {
     }
 
     @MainActor
-    @Test("episode-bound Listen rejects a different current podcast")
+    @Test("episode-bound Listen rejects a different current podcast",
+          .timeLimit(.minutes(3)))
     func listenRewindRejectsMismatchedPodcast() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         try await runtime.analysisStore.migrate()
@@ -740,7 +849,8 @@ struct RuntimeShutdownLifecycleTests {
     }
 
     @MainActor
-    @Test("invalid runtime seeks do not mutate the transport state seam")
+    @Test("invalid runtime seeks do not mutate the transport state seam",
+          .timeLimit(.minutes(3)))
     func invalidRuntimeSeeksFailClosed() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         _ = runtime._setUserMarkPlaybackContextForTesting(
@@ -769,6 +879,7 @@ struct RuntimeShutdownLifecycleTests {
     @MainActor
     @Test(
         "scrub and skip controls reject replacement/replay after context capture",
+        .timeLimit(.minutes(3)),
         arguments: RuntimeSeekRaceAction.allCases
     )
     func staleUserSeekContextIsRejected(
@@ -819,7 +930,8 @@ struct RuntimeShutdownLifecycleTests {
     }
 
     @MainActor
-    @Test("transport rejection suppresses every runtime seek side effect")
+    @Test("transport rejection suppresses every runtime seek side effect",
+          .timeLimit(.minutes(3)))
     func rejectedTransportSeekHasNoDownstreamEffects() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         _ = runtime._setUserMarkPlaybackContextForTesting(
@@ -846,7 +958,8 @@ struct RuntimeShutdownLifecycleTests {
     }
 
     @MainActor
-    @Test("newest same-lifecycle runtime seek owns every downstream effect")
+    @Test("newest same-lifecycle runtime seek owns every downstream effect",
+          .timeLimit(.minutes(3)))
     func newestRuntimeSeekSuppressesOlderDownstreamEffects() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         _ = runtime._setUserMarkPlaybackContextForTesting(
@@ -910,6 +1023,7 @@ struct RuntimeShutdownLifecycleTests {
     @MainActor
     @Test(
         "newer seek wins when the older seek is suspended inside every downstream effect",
+        .timeLimit(.minutes(3)),
         arguments: RuntimeSeekEffectStage.allCases
     )
     func newestSeekWinsAcrossInEffectSuspension(
@@ -951,15 +1065,24 @@ struct RuntimeShutdownLifecycleTests {
                 await gate.holdFirstInvocation()
             }
         case .persistence:
-            runtime.setPlaybackPositionPersistenceHandler { _ in
+            // playhead-xc6b: `[weak runtime]`. This closure is STORED ON the
+            // runtime (`playbackPositionPersistenceHandler`); capturing
+            // `runtime` strongly made the runtime own a closure that owns the
+            // runtime, so neither ever deallocated — once per parameter case.
+            //
+            // `noteInvocationFinished()` runs on every exit path so the test
+            // can wait for BOTH invocations (the superseded one and the
+            // winner) to have finished before reading the probe. Without it
+            // the `== [90]` assertion below raced the older invocation's
+            // cancellation check and could observe `[90, 90]`.
+            runtime.setPlaybackPositionPersistenceHandler { [weak runtime] _ in
                 await gate.holdFirstInvocation()
-                guard !Task.isCancelled,
-                      let captured =
-                        await runtime.capturePlaybackPosition()
-                else {
-                    return
+                if !Task.isCancelled,
+                   let runtime,
+                   let captured = await runtime.capturePlaybackPosition() {
+                    await persistence.append(captured.position)
                 }
-                await persistence.append(captured.position)
+                await persistence.noteInvocationFinished()
             }
         }
 
@@ -984,6 +1107,19 @@ struct RuntimeShutdownLifecycleTests {
         #expect(await runtime.playbackService.snapshot().currentTime == 90)
         #expect(runtime._committedUserSeekCountForTesting() == 1)
         if stage == .persistence {
+            // playhead-xc6b: wait for BOTH handler invocations to finish
+            // before reading. Exactly two are invoked — the superseded seek's
+            // (held by the gate, released above) and the winner's — and both
+            // are already inside the handler by this point, so this cannot
+            // hang on a third that never comes. See the probe's own doc for
+            // why this is belt-and-braces today and kept anyway.
+            let bothFinished = await pollUntil(timeout: starvationPollBudget) {
+                await persistence.invocationsFinished() == 2
+            }
+            #expect(
+                bothFinished,
+                "both persistence handler invocations must finish before the recorded positions can be bounded from above"
+            )
             #expect(await persistence.snapshot() == [90])
         }
         await runtime.shutdown()
@@ -1044,7 +1180,8 @@ struct RuntimeShutdownLifecycleTests {
     }
 
     @MainActor
-    @Test("progressive cache cancellation follows transport quiescence")
+    @Test("progressive cache cancellation follows transport quiescence",
+          .timeLimit(.minutes(3)))
     func progressiveCancellationFollowsPause() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let generation = runtime._setUserMarkPlaybackContextForTesting(
@@ -1101,7 +1238,7 @@ struct RuntimeShutdownLifecycleTests {
     @MainActor
     @Test(
         "a cache task cancelled before its first turn cannot enter the streaming lane",
-        .timeLimit(.minutes(1))
+        .timeLimit(.minutes(3))
     )
     func cancelledCacheTaskRejectsEntryBeforeDownloadManager() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
