@@ -7240,11 +7240,21 @@ struct SkipOrchestratorRevertTests {
 
         let reusedID = "producer-stable-window-id"
         let firstEpisodeSuggestion = makeSuggestWindow(id: reusedID)
+        // playhead-auz3: without the durable row the accept below fails inside
+        // `persistAcceptedSuggestionIfCurrent`, and its catch path removes the
+        // id from `recentlyAcceptedSuggestIds` while episode 1 is still live —
+        // i.e. the guard is already empty before `beginEpisode` runs, and this
+        // test would stay green with the clear it is named for deleted.
+        try await store.insertAdWindow(firstEpisodeSuggestion)
         await orchestrator.receiveAdWindows([firstEpisodeSuggestion])
-        await orchestrator.acceptSuggestedSkip(
+        let accepted = await orchestrator.acceptSuggestedSkip(
             windowId: reusedID,
             ifCurrentEpisodeId: "episode-1",
             ifPlaybackLifecycleGeneration: 51
+        )
+        #expect(
+            accepted,
+            "Fixture premise: episode 1's Yes must actually commit, so the id is really sitting in the accepted-suggest guard when the replacement lands"
         )
 
         // Production can switch episodes by calling beginEpisode directly;

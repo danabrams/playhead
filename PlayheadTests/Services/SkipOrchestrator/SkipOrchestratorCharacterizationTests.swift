@@ -1645,7 +1645,14 @@ struct SkipOrchestratorSuggestTierTests {
         )
 
         // 1. Window arrives as markOnly → enters suggestWindows.
+        // playhead-auz3: the durable row is what step 4's accept validates
+        // against. Without it `persistAcceptedSuggestionIfCurrent` refuses
+        // before the gate-flip clear can matter, so the "no-op" this test
+        // names would be proved by the missing fixture row rather than by
+        // production. (The asset row above already agrees with
+        // `beginEpisode`'s episodeId, which is the other half of that check.)
         let markOnly = makeMarkOnlyAdWindow(id: "ad-gate-flip")
+        try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
 
         // 2. Same id re-arrives, this time WITHOUT a markOnly stamp
@@ -1695,6 +1702,12 @@ struct SkipOrchestratorSuggestTierTests {
         }
         #expect(matching.count == 1,
             "Stale acceptSuggestedSkip after gate flip must be a no-op; got \(matching.count) windows on the same span")
+        // playhead-auz3: `confirmedWindows()` filters to `.confirmed`, and the
+        // duplicate this test is named for lands as `.applied` — so the two
+        // assertions above structurally cannot observe it. `activeWindowIDs()`
+        // is the dictionary `acceptSuggestedSkip` actually writes into.
+        #expect(await orchestrator.activeWindowIDs() == ["ad-gate-flip"],
+            "A late accept on the cleared suggest entry must not add a UUID-keyed managed window")
     }
 
     @Test("Tap before flip — accepted suggest id ignores a late non-markOnly ingest (playhead-rfu-sad)")
