@@ -303,14 +303,53 @@ protocol SpeechRecognizer: Sendable {
 /// still overlap a restarted one unless we hold an explicit permit across the
 /// full async recognizer call. Overlap triggers `SFSpeechErrorDomain Code=16`
 /// ("Maximum number of simultaneous requests reached") on `prepareToAnalyze`.
-private actor SpeechRecognitionRequestGate {
+///
+/// playhead-8m2w: the permit used to be unbounded in both directions. A queued
+/// waiter had no way out, and a holder had no ceiling — so a single Speech call
+/// that never returned left `isHeld` true for the lifetime of the process and
+/// parked every later transcription behind it. `SpeechService.requestGate` is
+/// one process-wide instance, so that is *all* transcription in the app, with
+/// no recovery short of a restart. Two independent bounds close it:
+///
+/// 1. A cancelled waiter leaves the queue and `withExclusiveAccess` throws
+///    `CancellationError`. Such a waiter never held the permit, so it must not
+///    release one — handing the gate to nobody would wedge it permanently,
+///    which is strictly worse than the bug being fixed.
+/// 2. A holder is bounded by a watchdog, so a wedged call degrades one shard
+///    instead of the whole app's ASR. (Landing separately — this commit is
+///    the waiter half.)
+///
+/// Internal rather than file-private so both bounds can be tested against a
+/// dedicated instance rather than the shared process-wide one.
+actor SpeechRecognitionRequestGate {
+
+    /// One parked `acquire()`. A reference type so the cancellation path and
+    /// the hand-off path can name the same waiter.
+    ///
+    /// `@unchecked Sendable` is load-bearing and audited: every read and write
+    /// happens while executing on `SpeechRecognitionRequestGate`. That is what
+    /// makes `resolve` a once guard *without* a second hand-written one — the
+    /// actor is the serialization primitive. (Same shape as
+    /// `BackgroundProcessingService.WaiterSlot`.)
+    private final class Waiter: @unchecked Sendable {
+        /// Non-nil only between parking and resolution.
+        var continuation: CheckedContinuation<Bool, Never>?
+        /// `true` once the permit was handed over, `false` once the waiter
+        /// gave up, `nil` while undecided. The once guard reads this.
+        var outcome: Bool?
+    }
+
     private var isHeld = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [Waiter] = []
 
     func withExclusiveAccess<T>(
         _ operation: @Sendable () async throws -> T
     ) async throws -> T {
-        await acquire()
+        guard await acquire() else {
+            // Cancelled while queued. We never owned the permit, so there is
+            // deliberately no `release()` on this path.
+            throw CancellationError()
+        }
 
         do {
             try Task.checkCancellation()
@@ -323,15 +362,49 @@ private actor SpeechRecognitionRequestGate {
         }
     }
 
-    private func acquire() async {
-        guard !isHeld else {
-            await withCheckedContinuation { continuation in
-                waiters.append(continuation)
-            }
-            return
+    /// Returns `true` when the caller owns the permit and is responsible for
+    /// releasing it, `false` when the caller gave up while queued and owns
+    /// nothing.
+    private func acquire() async -> Bool {
+        guard isHeld else {
+            isHeld = true
+            return true
         }
 
-        isHeld = true
+        let waiter = Waiter()
+        waiters.append(waiter)
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                // Still executing on the gate, so `resolve` cannot be running
+                // concurrently — but it may already have run, which is why the
+                // outcome is replayed here rather than assumed absent.
+                if let outcome = waiter.outcome {
+                    continuation.resume(returning: outcome)
+                } else {
+                    waiter.continuation = continuation
+                }
+            }
+        } onCancel: {
+            // `onCancel` runs on whichever thread called `cancel()`, so it has
+            // to hop back onto the gate to touch `waiters`. Two properties make
+            // that hop safe. It cannot arrive *before* the waiter is queued:
+            // the append above and the suspension below are one uninterrupted
+            // actor job, so this message cannot be serviced until the waiter is
+            // already in the queue. And it cannot starve: the gate never awaits
+            // while isolated — `withExclusiveAccess` suspends across
+            // `operation()`, which frees the actor for exactly this message.
+            Task { await self.abandon(waiter) }
+        }
+    }
+
+    /// Cancellation path: the waiter gives up its place in the queue.
+    /// A no-op if the permit was already handed to it, in which case the
+    /// waiter wakes owning the permit and `withExclusiveAccess`'s
+    /// `Task.checkCancellation()` releases it back on the very next line.
+    private func abandon(_ waiter: Waiter) {
+        waiters.removeAll { $0 === waiter }
+        resolve(waiter, granted: false)
     }
 
     private func release() {
@@ -340,8 +413,22 @@ private actor SpeechRecognitionRequestGate {
             return
         }
 
-        let waiter = waiters.removeFirst()
-        waiter.resume()
+        // Anything still queued is by construction unresolved: `abandon`
+        // removes a waiter from the queue before resolving it, and both run on
+        // the gate. So this hand-off can never be dropped on the floor, which
+        // is what would leak the permit.
+        resolve(waiters.removeFirst(), granted: true)
+    }
+
+    /// The single resolution point. Actor isolation is the once guard: the
+    /// first call decides `outcome` and every later call returns immediately,
+    /// so a `CheckedContinuation` can never be resumed twice.
+    private func resolve(_ waiter: Waiter, granted: Bool) {
+        guard waiter.outcome == nil else { return }
+        waiter.outcome = granted
+        guard let continuation = waiter.continuation else { return }
+        waiter.continuation = nil
+        continuation.resume(returning: granted)
     }
 }
 
