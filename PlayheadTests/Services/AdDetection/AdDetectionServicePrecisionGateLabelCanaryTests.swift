@@ -27,6 +27,21 @@
 // schema migration plan and a coordinated update of every consumer
 // that round-trips the value.
 //
+// playhead-y87g (2026-07-28): the matchers below were widened from
+// `return "<literal>"` to "the literal in a value-producing position".
+// `b072e72f` (playhead-o4qr) changed `precisionGateLabel`'s return type
+// from `String?` to the `PrecisionGateResult` struct so the same call
+// could also carry the catalog match and its persisted similarity, so
+// every `return "autoSkip"` became `PrecisionGateResult(label:
+// "autoSkip", ...)`. The pinned invariant — which literals this
+// producer emits — was NOT changed by that refactor, only the syntax
+// carrying them; the canary was left matching the old syntax and had
+// been red on main ever since. The widened pattern accepts either
+// shape so a future re-inline does not re-break it, while still
+// requiring the exact literal in a position that produces the persisted
+// value (a mention in a comment or an unrelated identifier will not
+// satisfy it, and the negative assertion still bites).
+//
 // XCTest so the canary is filterable from the test plan
 // (`xctestplan selectedTests/skippedTests` silently ignores Swift
 // Testing identifiers — see project memory
@@ -38,11 +53,16 @@ import XCTest
 final class AdDetectionServicePrecisionGateLabelCanaryTests: XCTestCase {
 
     /// Cycle-3 missing-test: pin that `precisionGateLabel`'s body
-    /// returns the literal `"autoSkip"` for the auto-skip-eligible
+    /// emits the literal `"autoSkip"` for the auto-skip-eligible
     /// classification and the literal `"markOnly"` for the
-    /// medium-confidence classification, and that it does NOT return
+    /// medium-confidence classification, and that it never emits
     /// `"eligible"` (the stale doc-comment claim that was reconciled in
     /// cycle-3).
+    ///
+    /// "Emits" means the literal appears in a value-producing position:
+    /// either returned directly (`return "autoSkip"`) or carried out on
+    /// the `PrecisionGateResult.label` field (`label: "autoSkip"`), which
+    /// is the shape since playhead-o4qr. See the file header.
     func testPrecisionGateLabelReturnsAutoSkipNotEligible() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
@@ -71,15 +91,24 @@ final class AdDetectionServicePrecisionGateLabelCanaryTests: XCTestCase {
         // contents intact — strip comments only, NOT string literals.
         let strippedComments = SwiftSourceInspector.strippingComments(body)
 
-        // Positive: `return "autoSkip"` must be present.
+        // A literal counts only in a value-producing position: returned
+        // directly, or assigned to `PrecisionGateResult.label` (the shape
+        // since playhead-o4qr). Both forms persist the literal into
+        // `ad_windows.eligibilityGate`; neither a comment mention nor an
+        // unrelated identifier does.
+        func emissionPattern(of literal: String) -> String {
+            #"(?:return\s+|label:\s*)""# + literal + #"""#
+        }
+
+        // Positive: the `"autoSkip"` emission must be present.
         let autoSkipReturnRegex = try NSRegularExpression(
-            pattern: #"return\s+"autoSkip""#
+            pattern: emissionPattern(of: "autoSkip")
         )
         let strippedRange = NSRange(strippedComments.startIndex..., in: strippedComments)
         XCTAssertNotNil(
             autoSkipReturnRegex.firstMatch(in: strippedComments, range: strippedRange),
             """
-            `AdDetectionService.precisionGateLabel(...)` no longer returns \
+            `AdDetectionService.precisionGateLabel(...)` no longer emits \
             the literal `"autoSkip"` for the auto-skip-eligible \
             classification. The cross-launch preload routing in \
             `SkipOrchestrator.receiveAdWindows` and the \
@@ -89,33 +118,33 @@ final class AdDetectionServicePrecisionGateLabelCanaryTests: XCTestCase {
             """
         )
 
-        // Positive: `return "markOnly"` must be present.
+        // Positive: the `"markOnly"` emission must be present.
         let markOnlyReturnRegex = try NSRegularExpression(
-            pattern: #"return\s+"markOnly""#
+            pattern: emissionPattern(of: "markOnly")
         )
         XCTAssertNotNil(
             markOnlyReturnRegex.firstMatch(in: strippedComments, range: strippedRange),
             """
-            `AdDetectionService.precisionGateLabel(...)` no longer returns \
+            `AdDetectionService.precisionGateLabel(...)` no longer emits \
             the literal `"markOnly"` for the uiCandidate classification. \
             The suggest-tier routing in `SkipOrchestrator.receiveAdWindows` \
             depends on this literal.
             """
         )
 
-        // Negative: `return "eligible"` must NOT appear. The historical
+        // Negative: an `"eligible"` emission must NOT appear. The historical
         // doc-comment in `AutoSkipPrecisionGate.swift` claimed this was
         // the raw value; cycle-3 reconciled the doc to match the
         // producer. A regression that swaps the producer to "eligible"
         // (e.g. to align with `SkipEligibilityGate.eligible.rawValue`)
         // would break the cycle-2 routing contract.
         let eligibleReturnRegex = try NSRegularExpression(
-            pattern: #"return\s+"eligible""#
+            pattern: emissionPattern(of: "eligible")
         )
         XCTAssertNil(
             eligibleReturnRegex.firstMatch(in: strippedComments, range: strippedRange),
             """
-            `AdDetectionService.precisionGateLabel(...)` now returns the \
+            `AdDetectionService.precisionGateLabel(...)` now emits the \
             literal `"eligible"` — but the cross-launch preload routing in \
             `SkipOrchestrator.receiveAdWindows`, the persisted \
             `ad_windows.eligibilityGate` column, and the cycle-2/3 \

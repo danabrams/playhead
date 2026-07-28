@@ -945,44 +945,87 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         }
     }
 
+    /// Pins the two-phase playback-identity binding in
+    /// `PlayheadRuntime.injectUserMarkedAd`: the captured identity is
+    /// checked once BEFORE the durable write, and re-checked AFTER it —
+    /// across the persistence suspension — before any live cue is
+    /// published. Without the second check an autoplay transition that
+    /// lands mid-write injects episode A's span into episode B's
+    /// orchestrator.
+    ///
+    /// playhead-y87g (2026-07-28): re-anchored, not relaxed. Two things
+    /// changed in `b072e72f` (playhead-o4qr) and neither touched the
+    /// invariant:
+    ///   1. `revertAdWindows` was added ABOVE `injectUserMarkedAd` with
+    ///      the same `ifCurrentAnalysisAssetId expectedAssetId:` external
+    ///      label, so the old signature anchor silently extracted the
+    ///      wrong function's body — the canary was asserting against
+    ///      `revertAdWindows`, which has no persistence step at all. The
+    ///      anchor is now the unique `func injectUserMarkedAd(`.
+    ///   2. The PRE-persist guard gained leading
+    ///      `RecurrenceMaterialIdentity.canonicalIdentifier(...)` clauses,
+    ///      so `guard currentAnalysisAssetId == ...` stopped matching it.
+    ///      The pre-persist check now matches the identity PREDICATE and
+    ///      is order-independent; the post-persist revalidation still
+    ///      requires the literal `guard`, and now also requires the
+    ///      show-identity clause o4qr added to it.
     func testUserMarkLiveInjectionRevalidatesPlaybackAfterPersistence() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
         )
-        let signature = "ifCurrentAnalysisAssetId expectedAssetId: String"
-        guard let body = SwiftSourceInspector.firstBody(
-            in: source,
-            after: signature
-        ) else {
+        // `func injectUserMarkedAd(` is unique in PlayheadRuntime.swift;
+        // the `skipOrchestrator.injectUserMarkedAd(` call site is not a
+        // declaration and cannot be latched onto by mistake.
+        let signature = "func injectUserMarkedAd("
+        guard source.range(of: signature) != nil,
+              let body = SwiftSourceInspector.firstBody(
+                  in: source,
+                  after: signature
+              ) else {
             XCTFail("Could not locate PlayheadRuntime.injectUserMarkedAd")
             return
         }
         let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
 
-        guard let initialGuard = stripped.range(
-            of: "guard currentAnalysisAssetId == expectedAssetId"
-        ),
-        let persist = stripped.range(
-            of: "adDetectionService.recordUserMarkedAd"
-        ),
-        let guardRange = stripped.range(
-            of: "guard currentAnalysisAssetId == expectedAssetId",
-            range: persist.upperBound..<stripped.endIndex
-        ),
-        let injection = stripped.range(
-            of: "skipOrchestrator.injectUserMarkedAd",
-            range: guardRange.upperBound..<stripped.endIndex
-        ) else {
+        // The pre-persist check matches the bare predicate: o4qr moved it
+        // behind canonical-identity clauses, and the invariant is that the
+        // identity is verified before the write, not that it is verified
+        // first within the guard.
+        let identityPredicate = "currentAnalysisAssetId == expectedAssetId"
+        guard let initialCheck = stripped.range(of: identityPredicate),
+              let persist = stripped.range(
+                  of: "adDetectionService.recordUserMarkedAd"
+              ),
+              let guardRange = stripped.range(
+                  of: "guard " + identityPredicate,
+                  range: persist.upperBound..<stripped.endIndex
+              ),
+              let injection = stripped.range(
+                  of: "skipOrchestrator.injectUserMarkedAd",
+                  range: guardRange.upperBound..<stripped.endIndex
+              ) else {
             XCTFail(
                 "User-mark persistence must be followed by a playback identity guard before live injection"
             )
             return
         }
 
-        XCTAssertLessThan(initialGuard.lowerBound, persist.lowerBound)
+        XCTAssertLessThan(
+            initialCheck.lowerBound,
+            persist.lowerBound,
+            "The captured playback identity must be verified BEFORE the durable user-mark write"
+        )
         let guardedSlice = stripped[guardRange.lowerBound..<injection.lowerBound]
         XCTAssertTrue(guardedSlice.contains("currentEpisodeId == expectedEpisodeId"))
         XCTAssertTrue(guardedSlice.contains("playEpisodeGeneration == expectedGeneration"))
+        XCTAssertTrue(
+            guardedSlice.contains("hasExactCurrentPodcastIdentity(podcastId)"),
+            """
+            The post-persistence revalidation no longer re-checks the show \
+            identity. playhead-o4qr added it so a show-keyed live cue cannot \
+            be published against a different show than the gesture captured.
+            """
+        )
     }
 
     func testPlaybackUsesDownloadManagerCanonicalCacheURL() throws {
