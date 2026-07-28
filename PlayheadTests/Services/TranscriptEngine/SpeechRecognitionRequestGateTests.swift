@@ -11,6 +11,12 @@
 // Every test here is written so that a REGRESSION HANGS rather than
 // mis-asserts: the assertions are about mutual exclusion and about which task
 // completed, and the liveness claim is carried by the test returning at all.
+//
+// That design only works if the hang is bounded, so every async test carries
+// `.timeLimit(.minutes(1))`. Swift Testing has no default per-test timeout —
+// without the trait a regression would wedge the whole gate run instead of
+// failing one test, and the process-wide gate this file models is exactly the
+// kind of thing that wedges.
 
 import Foundation
 import Testing
@@ -109,7 +115,8 @@ private actor WedgedCall {
 @Suite("SpeechRecognitionRequestGate — waiter cancellation")
 struct SpeechRecognitionRequestGateWaiterTests {
 
-    @Test("A waiter cancelled while queued unblocks with CancellationError")
+    @Test("A waiter cancelled while queued unblocks with CancellationError",
+          .timeLimit(.minutes(1)))
     func cancelledWaiterUnblocks() async throws {
         let gate = SpeechRecognitionRequestGate()
         let holderEntered = TestSignal()
@@ -141,7 +148,8 @@ struct SpeechRecognitionRequestGateWaiterTests {
         #expect(try await holder.value == 1)
     }
 
-    @Test("A cancelled waiter does not release a permit it never held")
+    @Test("A cancelled waiter does not release a permit it never held",
+          .timeLimit(.minutes(1)))
     func cancelledWaiterDoesNotReleaseThePermit() async throws {
         let gate = SpeechRecognitionRequestGate()
         let tracker = OverlapTracker()
@@ -192,7 +200,8 @@ struct SpeechRecognitionRequestGateWaiterTests {
         #expect(await tracker.maximum == 1)
     }
 
-    @Test("Cancelling one waiter leaves the rest of the queue intact")
+    @Test("Cancelling one waiter leaves the rest of the queue intact",
+          .timeLimit(.minutes(1)))
     func cancellingOneWaiterDoesNotStrandTheOthers() async throws {
         let gate = SpeechRecognitionRequestGate()
         let tracker = OverlapTracker()
@@ -244,7 +253,8 @@ struct SpeechRecognitionRequestGateWaiterTests {
         #expect(await tracker.maximum == 1)
     }
 
-    @Test("A waiter cancelled after the permit was handed to it releases it")
+    @Test("A waiter cancelled after the permit was handed to it releases it",
+          .timeLimit(.minutes(1)))
     func waiterCancelledAfterGrantStillReleases() async throws {
         let gate = SpeechRecognitionRequestGate()
         let tracker = OverlapTracker()
