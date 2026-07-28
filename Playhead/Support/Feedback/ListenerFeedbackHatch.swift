@@ -135,6 +135,13 @@ enum ListenerFeedbackHatch {
     ///
     /// `optInEpisodes: []` matches both existing hatches — dogfood ships the
     /// default (non-opt-in) bundle.
+    ///
+    /// The `presenter` argument is required by the coordinator's initializer
+    /// but is never exercised on this path: the feedback channel calls only
+    /// `buildAndEncode()` and `applyOptInReset(for:)`, and presents through
+    /// its own envelope. We hand it the SAME presenter instance rather than a
+    /// second one so there is no ambiguity about which object owns the mail
+    /// composer if a future caller does reach `exportAndPresent()`.
     static func makeExportCoordinator(
         runtime: PlayheadRuntime,
         modelContext: ModelContext,

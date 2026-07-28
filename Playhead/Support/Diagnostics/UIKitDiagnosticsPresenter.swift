@@ -333,7 +333,10 @@ extension UIKitDiagnosticsPresenter: ListenerFeedbackPresenting {
         // The attachment is optional here, and a failed write must NOT sink
         // the note: on any I/O error we share the text alone. The text is the
         // listener's message; the bundle is a nice-to-have that support can
-        // ask for separately.
+        // ask for separately. (The body's "Attached: …" line is composed
+        // upstream and would then over-promise by one sentence — an
+        // acceptable cosmetic mismatch, and strictly better than discarding
+        // a note that was already written.)
         var subdirectory: URL?
         var fileURL: URL?
         if let attachment = envelope.attachment {

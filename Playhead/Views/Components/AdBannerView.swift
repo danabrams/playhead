@@ -865,6 +865,14 @@ struct AdBannerView: View {
     /// mutates nothing, and requiring the card to still be current would
     /// disable the channel exactly when something has gone wrong.
     ///
+    /// Known bound: the auto-dismiss timer is NOT paused while the menu is
+    /// open (SwiftUI's `.contextMenu` exposes no presentation callback to
+    /// hang that on). A long press landing in the last half-second of the
+    /// 8 s / 12 s dwell can therefore close the menu with the card. No state
+    /// is left inconsistent — the handler simply never fires — and the
+    /// Settings entry is the always-available path, so this is a bounded
+    /// miss rather than a dead end.
+    ///
     /// `nil` in previews and isolated tests — the menu is then not attached
     /// at all, so a long press behaves as it did before this bead.
     var onTellUsWhatHappened: ((AdSkipBannerItem) -> Void)?
