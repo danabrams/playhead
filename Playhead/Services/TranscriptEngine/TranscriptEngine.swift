@@ -403,9 +403,22 @@ actor SpeechRecognitionRequestGate {
 
     /// Run one recognizer call so that the permit is guaranteed to come back.
     ///
-    /// Static, therefore nonisolated — deliberately. Every `Task` below must
-    /// start on the cooperative pool; written inside an isolated method they
-    /// would inherit the gate's isolation and queue behind it.
+    /// Static, therefore nonisolated — deliberately, but as HYGIENE, not as a
+    /// load-bearing invariant, and the distinction is measured rather than
+    /// argued. `Task { }` inherits its lexical context's isolation, so written
+    /// inside an isolated method every `Task` below would start on the gate
+    /// instead of the cooperative pool. Keeping the recognizer call and the
+    /// watchdog plumbing off the gate's executor is worth having; nothing here
+    /// *depends* on it. Round 4 rewrote this as an isolated instance method and
+    /// all 14 of the bead's tests still passed, because the gate's executor is
+    /// never busy for long — every method on it returns without blocking.
+    ///
+    /// Contrast `BoundedContinuationGate.armTimeout`, which carries the same
+    /// KEEP-THIS-NONISOLATED note for a reason that *is* load-bearing: its
+    /// timer has to fire on behalf of a caller that is already stuck, so a
+    /// timer queued behind that caller's executor could never fire. The gate
+    /// has no equivalent stuck-executor mode, which is exactly why the same
+    /// note here is weaker.
     ///
     /// Nothing here changes what the Speech call does, only how long it may
     /// hold the permit. Two failure modes are separated:
@@ -505,9 +518,14 @@ actor SpeechRecognitionRequestGate {
             // the append above and the park below are one uninterrupted actor
             // job, so this message cannot be serviced until the waiter is
             // already in the queue. And it cannot starve: the gate never holds
-            // its executor across the recognizer call — `withExclusiveAccess`
-            // suspends into the nonisolated `runUnderWatchdog`, which frees the
-            // actor for exactly this message.
+            // its executor across the recognizer call, because
+            // `withExclusiveAccess` SUSPENDS at `await bounded.value` inside
+            // `runUnderWatchdog` and a Swift actor is released at every
+            // suspension point. It is the suspension that frees the actor for
+            // this message, NOT `runUnderWatchdog` happening to be nonisolated
+            // — measured in round 4, where isolating that function left
+            // `cancelledWaiterUnblocks`, which needs exactly this hop while a
+            // holder is parked inside its operation, green in 0.12 s.
             Task { await self.abandon(waiter) }
         }
     }
