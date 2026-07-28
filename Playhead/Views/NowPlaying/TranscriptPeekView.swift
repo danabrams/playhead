@@ -106,8 +106,10 @@ struct TranscriptPeekView: View {
             }
 
             // playhead-m1l9: coverage-free affordance for a post-roll / tail
-            // the fast transcript hasn't reached — the chunk-selection "Mark
-            // ad" flow can't reach it because there are no chunks to tap.
+            // with no transcript under it — the chunk-selection "Mark ad" flow
+            // can't reach it because there are no chunks to tap. playhead-7tn8:
+            // that includes a stretch the pass DID scan and found no speech in
+            // (a music-bedded ad), not just one it hasn't reached yet.
             if !peekViewModel.isLoading,
                let tailSpan = peekViewModel.untranscribedTailMarkSpan(
                    currentTime: currentTime,
@@ -356,8 +358,9 @@ private extension TranscriptPeekView {
 
     // MARK: Untranscribed-tail mark footer (playhead-m1l9)
 
-    /// Pinned footer offering a coverage-free mark for a post-roll / tail the
-    /// fast transcript hasn't reached yet. Routes to the same
+    /// Pinned footer offering a coverage-free mark for a post-roll / tail with
+    /// no transcript rows under it — whether the fast pass hasn't reached it
+    /// yet or scanned it and found no speech (playhead-7tn8). Routes to the same
     /// `injectUserMarkedAd` path the player "Hearing an ad" button uses,
     /// seeding a span from the playhead to the episode end.
     func untranscribedTailFooter(span: (start: Double, end: Double)) -> some View {
