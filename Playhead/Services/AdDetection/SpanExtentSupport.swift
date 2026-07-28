@@ -16,7 +16,8 @@
 // A span with strong presence evidence and invented edges is a BANNER, never a
 // skip. This type is the extent half of the verdict: it says how well each edge
 // is INDEPENDENTLY supported, and it is the sole input to the unanchored-edge
-// auto-skip block applied in `DecisionResult.withExtentSupport(_:blocking:)`.
+// auto-skip block applied in
+// `DecisionResult.withExtentSupport(_:blockingUnanchoredAutoSkip:)`.
 //
 // Deliberately NOT in scope (playhead-4xqf owns it): inferring wider boundaries.
 // This type never moves an edge. It only reports how much the existing edges are
@@ -33,7 +34,12 @@ import Foundation
 /// mistake this bead fixes. The measured per-tier edge error that motivates the
 /// ordering lives in `docs/autoskip-edge-padding-derivation-2026-07-20.md`
 /// (`AutoSkipEdgePadding`'s margins are derived from the same evidence).
-enum ExtentAnchorTier: Int, Sendable, Equatable, Hashable, Comparable, CaseIterable {
+// Conformances are deliberately minimal: no `CaseIterable` and no `Codable`.
+// The tier is derived from `AutoSkipEdgeAnchor` on demand and is not persisted
+// (the per-edge anchor raw values already are, on the `ad_windows` row), so a
+// speculative conformance would only be a shape to maintain. Add one when a
+// caller actually needs it. Mirrors the playhead-fqc8 `PromotionTrack` call.
+enum ExtentAnchorTier: Int, Sendable, Hashable, Comparable {
     /// No independent support: the edge is where an FM/lexical/aggregator seed
     /// happened to land. The pipeline invented it.
     case none = 0
