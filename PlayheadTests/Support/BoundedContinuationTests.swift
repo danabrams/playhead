@@ -35,13 +35,22 @@ private final class FallbackRecorder: @unchecked Sendable {
 private final class ResumeBox: @unchecked Sendable {
     private let lock = NSLock()
     private var resume: (@Sendable (String) -> Void)?
+    private var fires = 0
+
+    /// How many times the stored resume closure was actually invoked.
+    /// Asserted by the late-reply test so "no trap occurred" is backed
+    /// by proof the late replies really were delivered.
+    var fireCount: Int { lock.withLock { fires } }
 
     func store(_ closure: @escaping @Sendable (String) -> Void) {
         lock.withLock { resume = closure }
     }
 
     func fire(_ value: String) {
-        let closure = lock.withLock { resume }
+        let closure = lock.withLock { () -> (@Sendable (String) -> Void)? in
+            if resume != nil { fires += 1 }
+            return resume
+        }
         closure?(value)
     }
 }
@@ -152,23 +161,31 @@ struct BoundedContinuationTests {
 
         // The daemon finally answers — long after we gave up. A second
         // resume of the same CheckedContinuation would trap the process,
-        // so reaching the assertion below IS the assertion.
+        // so surviving these two calls IS the assertion; `fireCount`
+        // proves they were genuinely delivered to the resume closure
+        // rather than silently dropped by the test double.
         box.fire("late")
         box.fire("later")
-        #expect(value == "fallback")
+        #expect(box.fireCount == 2)
     }
 
     @Test("The callback may be invoked repeatedly and concurrently while the timeout races it",
           .timeLimit(.minutes(2)))
     func concurrentResumesAndTimeoutCannotDoubleResume() async {
-        // Maximum race pressure: a zero-length timeout fires at
-        // essentially the same instant four detached tasks each call the
-        // resume closure. Only one of those five resolutions may reach
-        // the continuation. If the once guard is wrong, this loop traps
-        // the test bundle rather than failing an expectation.
+        // Maximum race pressure: a near-zero timeout fires at essentially
+        // the same instant four detached tasks each call the resume
+        // closure. Only one of those five resolutions may reach the
+        // continuation. If the once guard is wrong, this loop traps the
+        // test bundle rather than failing an expectation.
+        //
+        // The timeout is jittered across 0/25/50/75 µs — the same order
+        // of magnitude as detached-task spawn latency, so the winner
+        // genuinely varies. A fixed `.zero` resolves a large share of
+        // iterations before `body` even runs, which under-exercises the
+        // simultaneous five-way race.
         for iteration in 0..<200 {
             let value = await withBoundedCheckedContinuation(
-                timeout: .zero,
+                timeout: .microseconds((iteration % 4) * 25),
                 fallback: -1
             ) { resume in
                 for replica in 0..<4 {

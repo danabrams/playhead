@@ -193,13 +193,23 @@ struct BackfillSchedulerBoundingTests {
             ),
             "handleBackfillTask's signature drifted — update this canary"
         )
+        // `firstBody` returns "" (not nil) on an unbalanced brace, which
+        // would make every check below vacuously true.
+        try #require(!body.isEmpty, "handleBackfillTask's body did not parse")
+
         let code = SwiftSourceInspector.strippingComments(body)
-        let topLevel = Self.textAtBraceDepthZero(code)
+        let topLevel = Self.elidingTaskClosureBodies(code)
         let arming = try #require(
             topLevel.range(of: "task.expirationHandler"),
             "handleBackfillTask no longer installs an expirationHandler"
         )
         let beforeArming = String(topLevel[topLevel.startIndex..<arming.lowerBound])
+
+        // Positive controls: prove the helper actually found and elided
+        // the task closures, so a silent parse failure cannot make the
+        // assertion below pass by looking at nothing.
+        #expect(topLevel.contains(Self.elisionMarker))
+        #expect(beforeArming.contains("let workTask = Task"))
 
         #expect(!beforeArming.contains("await "),
                 """
@@ -221,11 +231,16 @@ struct BackfillSchedulerBoundingTests {
             ),
             "the BGTaskScheduler conformance moved — update this canary"
         )
+        try #require(!body.isEmpty, "the BGTaskScheduler extension body did not parse")
         let code = SwiftSourceInspector.strippingComments(body)
 
         #expect(code.contains("withBoundedCheckedContinuation"))
+        #expect(code.contains("fallback: []"),
+                "the bridge must fail OPEN to no-pending-requests; callers treat it as advisory")
         #expect(!code.contains("await withCheckedContinuation"),
                 "the dasd bridge must stay bounded — a bare continuation here can park forever")
+        #expect(!code.contains("withUnsafeContinuation"),
+                "an unsafe continuation would drop the double-resume trap that proves the once guard")
     }
 
     @Test("The production bridge timeout is short relative to the BGTask budget")
@@ -240,18 +255,86 @@ struct BackfillSchedulerBoundingTests {
 
     // MARK: - Helpers
 
-    /// Returns only the characters of `source` that sit at brace depth
-    /// zero, i.e. the statements of the function body itself with every
-    /// nested closure body elided. Double-quoted string literals are
-    /// skipped so a brace inside a message cannot shift the depth.
+    private static let elisionMarker = "/*task-body-elided*/"
+
+    /// Returns `source` with the body of every `Task { … }` /
+    /// `Task.detached { … }` closure replaced by ``elisionMarker``, and
+    /// EVERYTHING ELSE left intact — including the bodies of `if`,
+    /// `guard else`, `for`, `switch` and `do`.
+    ///
+    /// That asymmetry is the whole point. The invariant under test is
+    /// "no suspension point runs before the expiration handler is
+    /// armed". A nested `Task` body is the only legitimate place for an
+    /// `await` in that prefix, because it runs as a separate job; an
+    /// `await` inside any other kind of brace suspends `handleBackfillTask`
+    /// itself and is exactly the regression this canary exists to catch.
+    /// A cheaper "keep only brace-depth zero" filter would have elided
+    /// those too and passed on the very edit it is guarding against.
+    ///
+    /// Deliberately fails CLOSED: a `Task(priority:) { … }` form would
+    /// not be recognised and its `await`s would be reported, which turns
+    /// into a loud canary failure that someone updates — not a silent
+    /// hole. Double-quoted string literals are skipped so a brace inside
+    /// a log message cannot shift the depth.
     ///
     /// `source` is expected to have had comments stripped already.
-    private static func textAtBraceDepthZero(_ source: String) -> String {
+    private static func elidingTaskClosureBodies(_ source: String) -> String {
+        let characters = Array(source)
         var out = ""
-        var depth = 0
+        var index = 0
         var inString = false
         var escaped = false
-        for character in source {
+
+        while index < characters.count {
+            let character = characters[index]
+            if inString {
+                out.append(character)
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+                index += 1
+                continue
+            }
+            if character == "\"" {
+                inString = true
+                out.append(character)
+                index += 1
+                continue
+            }
+            if character == "{", opensTaskClosure(out) {
+                index = indexAfterMatchingBrace(characters, openingAt: index)
+                out.append(elisionMarker)
+                continue
+            }
+            out.append(character)
+            index += 1
+        }
+        return out
+    }
+
+    /// True when the text emitted so far ends with a `Task` reference,
+    /// i.e. the `{` that follows opens a task closure rather than a
+    /// control-flow block.
+    private static func opensTaskClosure(_ emitted: String) -> Bool {
+        let trimmed = emitted.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasSuffix("Task") || trimmed.hasSuffix("Task.detached")
+    }
+
+    /// Index just past the `}` matching the `{` at `start`.
+    private static func indexAfterMatchingBrace(
+        _ characters: [Character],
+        openingAt start: Int
+    ) -> Int {
+        var depth = 0
+        var index = start
+        var inString = false
+        var escaped = false
+        while index < characters.count {
+            let character = characters[index]
             if inString {
                 if escaped {
                     escaped = false
@@ -260,19 +343,16 @@ struct BackfillSchedulerBoundingTests {
                 } else if character == "\"" {
                     inString = false
                 }
-                continue
-            }
-            switch character {
-            case "\"":
+            } else if character == "\"" {
                 inString = true
-            case "{":
+            } else if character == "{" {
                 depth += 1
-            case "}":
+            } else if character == "}" {
                 depth -= 1
-            default:
-                if depth == 0 { out.append(character) }
+                if depth == 0 { return index + 1 }
             }
+            index += 1
         }
-        return out
+        return characters.count
     }
 }

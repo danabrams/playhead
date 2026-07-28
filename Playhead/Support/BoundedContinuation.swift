@@ -89,9 +89,13 @@ enum BoundedContinuationFallback: String {
 ///     is running inside — a timeout longer than the caller's own budget
 ///     protects nothing.
 ///   - fallback: Value to resume with on timeout or cancellation.
-///   - onFallback: Optional hook invoked (off the caller's isolation)
-///     exactly once when, and only when, the fallback is used. Intended
-///     for logging or telemetry; it must not block.
+///   - onFallback: Optional hook invoked exactly once when, and only
+///     when, the fallback is used. It runs synchronously on whichever
+///     thread lost patience — the cooperative pool for a timeout, or
+///     the caller of `Task.cancel()` for a cancellation, which for a
+///     BGTask is iOS's expiration-handler queue. Intended for logging
+///     or telemetry; it MUST NOT block and must not assume any
+///     particular isolation.
 ///   - body: Starts the underlying work, handing it a resume closure.
 ///     The resume closure is safe to call any number of times from any
 ///     thread; only the first call is honoured. `body` is always
@@ -180,10 +184,25 @@ private final class BoundedContinuationGate<T: Sendable>: @unchecked Sendable {
     }
 
     /// Start the hard-timeout timer. No-op once the result is decided.
+    ///
+    /// KEEP THIS METHOD NONISOLATED. `Task { }` inherits the isolation of
+    /// its lexical context, so the timer below runs on the cooperative
+    /// pool precisely because `BoundedContinuationGate` is a plain
+    /// nonisolated class. Move this helper onto an actor (or a
+    /// `@MainActor` type) and the timeout becomes a job queued behind
+    /// whatever that executor is busy with — which, for a caller that is
+    /// itself stuck, is exactly the starvation this whole file exists to
+    /// prevent.
+    ///
+    /// The timer is also deliberately UNSTRUCTURED: parent cancellation
+    /// must not cancel it, because `onCancel` and the timeout are
+    /// independent routes out of the same suspension.
     func armTimeout(_ timeout: Duration) {
         // Build the task outside the lock; `Task` bodies can start on
         // another thread immediately and would otherwise contend on a
-        // lock this call still holds.
+        // lock this call still holds. With `timeout: .zero` that race is
+        // routine, and it is handled: the body's `resolve` finds no
+        // stored handle, and the switch below then cancels the local one.
         let task = Task { [self] in
             try? await Task.sleep(for: timeout)
             settleWithFallback(.timedOut)

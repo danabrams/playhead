@@ -1164,12 +1164,30 @@ actor BackgroundProcessingService {
         // task is completed, and a reschedule lost to that suspension
         // means no next backfill window. Sequencing it as the work
         // task's first statement preserves reschedule-before-complete on
-        // every exit path (including the QualityProfile fast-defer),
+        // every exit path OF THE WORK TASK (the QualityProfile
+        // fast-defer, the cancellation return, and the normal return),
         // while the work task's own body provably cannot begin until
         // this actor-isolated method returns — i.e. until after the
-        // expiration handler is installed.
+        // expiration handler is installed. It is NOT ordered against the
+        // expiration path's own `markComplete`: an expiration landing in
+        // the microseconds between this method returning and the
+        // reschedule completing could still complete the task first.
+        // That window is far smaller than the pre-fix one and cannot
+        // hang, so it is accepted rather than serialised.
         //
-        // `SourceCanary`/ordering coverage:
+        // ACCEPTED CONSEQUENCE of living inside a cancellable task: if
+        // expiration cancels the work task while the reschedule is
+        // querying, the bounded bridge fails open to "nothing pending"
+        // and both identifiers are re-submitted. That defeats the
+        // playhead-txq3 / playhead-i6oi pending guard for one fire and
+        // age-resets the charged sibling's `earliestBeginDate` by 60s.
+        // It is the right trade here — this handler runs BECAUSE the
+        // plain identifier just dispatched (so it is genuinely no longer
+        // pending and re-arming is correct), and a redundant submit is
+        // strictly better than skipping the re-arm on the one path where
+        // re-arming matters most.
+        //
+        // Source-canary + ordering coverage:
         // `BackfillSchedulerBoundingTests`.
         let runLedger = self.runLedger
         let workTask = Task {
