@@ -149,6 +149,11 @@ final class AdBannerQueue {
     private let coalesceGap: TimeInterval
     private let autoDismissSleep: @Sendable (TimeInterval) async -> Void
     private let feedbackCounterStore: BannerFeedbackCounterStore?
+    /// playhead-bfq7: per-episode card tally. Shares the exact
+    /// presentation boundary the durable `banners_shown` aggregate uses
+    /// (`recordBannerShown(for:)`), so the two counts can never diverge.
+    /// `nil` in previews and in tests that do not assert on the tally.
+    private let tallyStore: BannerTallyStore?
     private var isAutoDismissPaused = false
 
     /// Production hosts opt into an episode-scoped generation before
@@ -195,13 +200,15 @@ final class AdBannerQueue {
         autoDismissSleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
             try? await Task.sleep(for: .seconds(seconds))
         },
-        feedbackCounterStore: BannerFeedbackCounterStore? = nil
+        feedbackCounterStore: BannerFeedbackCounterStore? = nil,
+        tallyStore: BannerTallyStore? = nil
     ) {
         self.autoDismissSeconds = autoDismissSeconds
         self.suggestAutoDismissSeconds = suggestAutoDismissSeconds
         self.coalesceGap = coalesceGap
         self.autoDismissSleep = autoDismissSleep
         self.feedbackCounterStore = feedbackCounterStore
+        self.tallyStore = tallyStore
     }
 
     // MARK: - Public API
@@ -546,6 +553,11 @@ final class AdBannerQueue {
 
         didRecordShownForCurrentPresentation = true
         feedbackCounterStore?.recordBannerShown()
+        // playhead-bfq7: instrumentation only — it shares this method's
+        // existing presentation guard and returns a value nothing here
+        // branches on, so it cannot move a presentation, a tier, or a
+        // dismissal.
+        tallyStore?.recordPresentation(of: item)
         return true
     }
 
