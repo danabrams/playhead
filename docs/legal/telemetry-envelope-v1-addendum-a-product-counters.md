@@ -1,12 +1,15 @@
 # Telemetry Envelope V1 — Addendum A: product counters
 
-- **Status:** PENDING LEGAL REVIEW — **not approved, not in effect**
-- **Date:** 2026-07-27
+- **Status:** APPROVED BY FOUNDER 2026-07-28 — **not activated.** Upload stays
+  disabled for v1 by product decision, not by a pending approval. See §4.
+- **Date:** 2026-07-27; approved 2026-07-28
 - **Applies to:** `docs/legal/telemetry-envelope-v1.md` (Version 1)
 - **Bead:** playhead-jw63.3
-- **Author:** drafted by engineering; awaiting counsel signoff
+- **Author:** drafted by engineering; approved by Dan Abrams as principal.
+  **This is a founder self-approval, not a review by qualified counsel.**
+  External legal review is deliberately deferred — see §4.1.
 - **Enforcer:** `Playhead/Services/Analytics/`, gated by
-  `AnalyticsUploadGate.legalSignoffRecorded`
+  `AnalyticsUploadGate.legalSignoffRecorded` (still `false` — see §4.2)
 
 ---
 
@@ -18,16 +21,20 @@ them, so under the envelope as written they may not be uploaded. §3 also
 says engineers must not add fields to a telemetry uploader "without updating
 this envelope first".
 
-This addendum is that update, proposed rather than applied. Envelope v1 is
-left byte-for-byte unchanged; a cross-reference in its §5 points here.
-Nothing in this addendum is in effect until §4 below is signed.
+This addendum is that update. Envelope v1 is left byte-for-byte unchanged; a
+cross-reference in its §5 points here. It was **approved by the founder on
+2026-07-28** (§4) — approved, but deliberately **not activated**.
 
 **Current state of the implementation:** the counters accumulate on-device
 and nothing is transmitted. `AnalyticsUploadGate.legalSignoffRecorded` is
 `false`, the production writer is `DisabledAnalyticsRecordWriter`, and
 `AnalyticsEnvelopeAllowListTests.uploadGateIsClosed` fails if either
-changes. This satisfies envelope §7's requirement that non-local transport
-paths stay behind an internal-only flag while the envelope is unsigned.
+changes.
+
+Read that state correctly: the gate is shut by **product decision**, not by a
+pending approval. Envelope §7's "unsigned envelope" condition no longer
+applies, so the flag is now the v1 activation switch rather than a legal
+blocker. §4.3 explains why it stays shut, and what flipping it requires.
 
 ## 1. Proposed allow-list additions
 
@@ -88,10 +95,81 @@ record to be dropped rather than sent.
 | §6.5 k-anonymity | The device cannot know cohort size, so suppression is applied on the read side: `scripts/analytics-rollup.sh` refuses to print a cell whose contributing-record count is below `k` (default 20, the value proposed to counsel in §6.5). |
 | §7 gate until signoff | `AnalyticsUploadGate.legalSignoffRecorded = false`; the production writer is the disabled one; a test fails if either flips without this document being signed. |
 
-## 4. Legal signoff
+## 4. Approval
 
-Engineering MUST NOT self-sign. Until this block is completed,
-`AnalyticsUploadGate.legalSignoffRecorded` stays `false`.
+### 4.1 Why this is a founder approval and not counsel review
+
+The original rule here read "Engineering MUST NOT self-sign." That rule
+exists so an implementer cannot wave through their own data collection, and
+it still holds: engineering did not approve this. It was approved by the
+founder, who is the accountable party rather than the implementer.
+
+External counsel is **deliberately deferred**, with reasoning recorded so a
+later reader can judge whether the call was sound:
+
+- The collection is close to the least sensitive telemetry this app could
+  ship — nine integers, no device identifier, no episode content, retention
+  computed on-device.
+- The material legal surface for an App Store release is not these counters.
+  It is (a) the accuracy of the privacy nutrition label, (b) a privacy policy
+  matching actual behaviour, and (c) user-facing claims being true. The
+  strongest such claim already shipped — the About screen's "Your podcasts
+  never leave your device" — and these counters do not contradict it: no
+  audio, no transcripts, no episode content is uploaded.
+- Playhead is pre-revenue. Counsel is planned at first paid release, when a
+  mistake costs refunds and delisting rather than embarrassment, and when the
+  privacy policy and nutrition label need review anyway.
+
+**Consequence to respect:** the word "anonymous" must not appear in
+user-facing copy about this collection. Say concretely what is sent. §5.5
+below explains why that precision matters given CloudKit's platform metadata.
+
+### 4.2 Approval record
+
+```
+---------------------------------------------------------------
+TELEMETRY ENVELOPE V1 — ADDENDUM A — APPROVAL
+
+Reviewed by:            Dan Abrams — founder, principal
+                        (NOT qualified counsel; see §4.1)
+
+Approved:               2026-07-28
+
+Scope of approval:      [x] §1 Allow-list additions (12 fields)
+                        [x] §2 Cohort key restricted to duration bucket
+                        [x] §3 Rule-by-rule mapping
+                        [x] Server-side retention: 90 days
+                        [x] k-anonymity floor: k = 20
+
+Conditions / caveats:   1. APPROVED BUT NOT ACTIVATED. Upload remains
+                           disabled for v1 as a product decision.
+                           `legalSignoffRecorded` stays false.
+                        2. Activation is a submission-time decision, taken
+                           alongside the App Store Connect privacy nutrition
+                           label and support URL.
+                        3. "Anonymous" is barred from user-facing copy about
+                           this collection.
+                        4. Qualified-counsel review required before first
+                           PAID release.
+
+Next review date:       At App Store submission, and again at first paid
+                        release (counsel).
+---------------------------------------------------------------
+```
+
+### 4.3 Why the gate stays shut anyway
+
+Approval removes the *legal* blocker. Upload stays off for v1 on product
+grounds: at v1 user counts the k ≥ 20 floor would suppress most rollup rows,
+so uploading would carry the CloudKit creator-identity question (§5.5) live
+while returning little that is readable. Local accumulation plus the
+diagnostics bundle — which the playhead-jw63.5 feedback channel already
+ships — gives real numbers from the founder's device and any dogfooder who
+sends a bundle, at zero upload surface.
+
+To activate later: answer nothing further, flip
+`AnalyticsUploadGate.legalSignoffRecorded` to `true`, and record the
+activation date in this section **in the same commit**.
 
 ```
 ---------------------------------------------------------------
@@ -117,11 +195,52 @@ Next review date:       _________________________________________
 ---------------------------------------------------------------
 ```
 
-Once signed: record the approving counsel's name in the header, change the
-status line to `LEGAL APPROVED — <date>`, and flip
-`AnalyticsUploadGate.legalSignoffRecorded` to `true` **in the same commit**.
+## 5. Questions — answered by the founder 2026-07-28
 
-## 5. Open questions for counsel
+These were drafted as open questions for counsel. They are now **answered as
+founder decisions**, per §4.1. Each answer records what was decided and what
+would change it, so counsel can revisit them at first paid release without
+re-deriving the context.
+
+**Q1 — anonymous-increment sufficiency: ACCEPTED as designed.** Server-side
+summation satisfies §1(a); the payload carries no per-device identifier, so
+§1(b) holds absolutely. A pre-transmission k-floor is rejected: a device
+cannot enforce one without asking the server how many peers it has, and that
+query is exactly the linkage this design avoids. The floor is enforced on the
+read side instead (Q2).
+
+**Q2 — k floor: k = 20**, as proposed in §6.5. `scripts/analytics-rollup.sh`
+reads it from one constant; changing it is a one-line edit.
+
+**Q3 — retention ratio fidelity: EXCLUDE the install-week bucket**, adopting
+engineering's conservative default. The reported figure is therefore a
+*window* ratio, not a cohort ratio — stable when install volume is stable and
+lagging when it swings. That imprecision is accepted in exchange for not
+adding a linkage surface to a small population. Whoever reads the number must
+know this; it is recorded in `RetentionBucketTracker.swift`'s header.
+
+**Q4 — CloudKit as a first-party Apple service: no different treatment** from
+a self-hosted endpoint under §2.1. Apple sees container writes the way any
+transport provider sees traffic.
+
+**Q5 — platform-stamped creator identity: ACCEPTED as the §4.3 case**, with
+the mitigation already implemented. CloudKit attaches `creatorUserRecordID`
+to public-database records, derived from the writing device's iCloud account.
+Our payload carries no identifier and record names are fresh UUIDs, so
+nothing *we* write links two records — but CloudKit's own metadata does.
+This is treated as unavoidable transport metadata (§4.3), not as an
+application-layer iCloud identifier (§4.6), because application code neither
+stores nor forwards it: `scripts/analytics-rollup.sh` reads only the nine
+counter fields, so no account-linked view is ever materialized.
+
+**This is the one answer most likely to be wrong**, and it is the reason
+"anonymous" is barred from user-facing copy (§4.1). If counsel later
+disagrees, the remedy is a different `AnalyticsRecordWriting` implementation
+— one whose transport does not authenticate the writer. **The payload does
+not change**, so the blast radius is one class. It is also moot while upload
+stays disabled (§4.3).
+
+## 6. Original open questions as drafted for counsel
 
 1. **Aggregate-only, one device at a time.** Each record carries one
    device's delta with no identifier. Aggregation across devices happens
