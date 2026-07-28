@@ -44,6 +44,7 @@ final class DiagnosticsExportCoordinator {
     private let musicBedProfilesFetch: DiagnosticsMusicBedProfilesFetch
     private let learnedDeviceProfilesFetch: DiagnosticsLearnedDeviceProfilesFetch
     private let stabilityFetch: DiagnosticsStabilityFetch
+    private let bannerTalliesFetch: DiagnosticsBannerTalliesFetch
     private let optInSink: DiagnosticsOptInSink
     private let optInEpisodes: [DiagnosticsEpisodeInput]
 
@@ -79,6 +80,13 @@ final class DiagnosticsExportCoordinator {
     ///     never crashed yields an empty array, and the builder still
     ///     emits the `stability_diagnostics` key so key presence stays
     ///     grep-stable.
+    ///   - bannerTalliesFetch: playhead-bfq7 — async read of the local
+    ///     per-episode banner-card tally, oldest session first.
+    ///     Defaults to "no rows"; production wires it to
+    ///     `BannerTallyStore.shared.sessions`. A device that has been
+    ///     shown no cards yields an empty array, and the builder still
+    ///     emits the `banner_tallies` key so key presence stays
+    ///     grep-stable.
     ///   - optInSink: adapter that mutates `Episode.diagnosticsOptIn`.
     ///   - optInEpisodes: per-episode inputs for the OptIn bundle. Only
     ///     entries with `diagnosticsOptIn == true` ship; the builder
@@ -92,6 +100,7 @@ final class DiagnosticsExportCoordinator {
         musicBedProfilesFetch: @escaping DiagnosticsMusicBedProfilesFetch = { [] },
         learnedDeviceProfilesFetch: @escaping DiagnosticsLearnedDeviceProfilesFetch = { [] },
         stabilityFetch: @escaping DiagnosticsStabilityFetch = { [] },
+        bannerTalliesFetch: @escaping DiagnosticsBannerTalliesFetch = { [] },
         optInSink: DiagnosticsOptInSink,
         optInEpisodes: [DiagnosticsEpisodeInput] = []
     ) {
@@ -102,6 +111,7 @@ final class DiagnosticsExportCoordinator {
         self.musicBedProfilesFetch = musicBedProfilesFetch
         self.learnedDeviceProfilesFetch = learnedDeviceProfilesFetch
         self.stabilityFetch = stabilityFetch
+        self.bannerTalliesFetch = bannerTalliesFetch
         self.optInSink = optInSink
         self.optInEpisodes = optInEpisodes
     }
@@ -139,6 +149,7 @@ final class DiagnosticsExportCoordinator {
         let musicBedProfileSnapshots = await musicBedProfilesFetch()
         let learnedDeviceProfiles = try await learnedDeviceProfilesFetch()
         let stabilityDiagnostics = await stabilityFetch()
+        let bannerTallies = await bannerTalliesFetch()
 
         let defaultBundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: environment.appVersion,
@@ -151,7 +162,8 @@ final class DiagnosticsExportCoordinator {
             chapterPhaseEvents: chapterPhaseEvents,
             musicBedProfileSnapshots: musicBedProfileSnapshots,
             learnedDeviceProfiles: learnedDeviceProfiles,
-            stabilityDiagnostics: stabilityDiagnostics
+            stabilityDiagnostics: stabilityDiagnostics,
+            bannerTallies: bannerTallies
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 

@@ -260,6 +260,17 @@ typealias DiagnosticsLearnedDeviceProfilesFetch = @Sendable () async throws -> [
 /// wires it to `StabilityDiagnosticsStore.shared.recent()`.
 typealias DiagnosticsStabilityFetch = @Sendable () async -> [StabilityDiagnosticRecord]
 
+/// playhead-bfq7 — async read of the local per-episode banner-card
+/// tally. Non-throwing for the same reason as
+/// `DiagnosticsStabilityFetch`: `BannerTallyStore` swallows its own
+/// storage failures and returns `[]`, and an export that fails because
+/// a counter could not be read is worse than one that ships without it.
+/// Rows carry the RAW episode id — `DiagnosticsBundleBuilder` is what
+/// hashes it, so this closure must never be routed anywhere else.
+/// Defaults to "no rows"; production wires it to
+/// `BannerTallyStore.shared.sessions`.
+typealias DiagnosticsBannerTalliesFetch = @Sendable () async -> [BannerTallySession]
+
 /// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
 /// that actually shipped in the bundle. Abstracted so the coordinator
 /// remains pure-logic and the SwiftData/ModelContext dependency lives in
