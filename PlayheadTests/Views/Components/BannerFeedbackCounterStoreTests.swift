@@ -109,7 +109,21 @@ final class BannerFeedbackCounterStoreTests: XCTestCase {
         )
     }
 
-    func testAggregateFeedbackHasNoEncoderOrTelemetryEgressConsumer()
+    /// playhead-jw63.3 amended this canary rather than deleting it.
+    ///
+    /// When jw63.1 landed, the banner counters had no egress at all and this
+    /// test said so: no file on any export / telemetry / diagnostics / sync
+    /// path could so much as name them. jw63.3 deliberately changes that —
+    /// the three counters are now uploaded, as anonymous aggregate
+    /// increments, through one envelope-enforced path.
+    ///
+    /// The invariant that survives is the one worth keeping: the counters
+    /// reach exactly one egress path, the one that is allow-listed and
+    /// tested. `analytics` is added to the path markers so the new
+    /// subsystem is *in* scope rather than accidentally out of it, and the
+    /// sanctioned files are named explicitly. Anything else that touches
+    /// these tokens on an egress path is still a defect.
+    func testAggregateFeedbackReachesOnlyTheSanctionedEgressPath()
         throws
     {
         var repoRoot = URL(fileURLWithPath: #filePath)
@@ -122,7 +136,17 @@ final class BannerFeedbackCounterStoreTests: XCTestCase {
         )
         let egressPathMarkers = [
             "export", "telemetry", "diagnostic", "logger", "sync",
-            "sharing", "share", "upload", "replay",
+            "sharing", "share", "upload", "replay", "analytics",
+        ]
+        // The one place allowed to read the banner aggregate on its way
+        // out: playhead-jw63.3's coordinator, whose payload is gated by
+        // `TelemetryEnvelopeV1AllowList` and pinned by
+        // `AnalyticsEgressSentinelTests`.
+        let sanctionedEgressPaths: Set<String> = [
+            // Declares the counter vocabulary that may be uploaded.
+            "Services/Analytics/AnalyticsEnvelope.swift",
+            // Reads the aggregate and hands it to the envelope.
+            "Services/Analytics/AnalyticsService.swift",
         ]
         let forbiddenAggregateTokens = [
             "BannerFeedbackCounterStore",
@@ -139,6 +163,7 @@ final class BannerFeedbackCounterStoreTests: XCTestCase {
             )
         )
 
+        var sanctionedPathsSeen: Set<String> = []
         for case let fileURL as URL in enumerator
         where fileURL.pathExtension == "swift" {
             let relativePath = fileURL.path
@@ -151,15 +176,36 @@ final class BannerFeedbackCounterStoreTests: XCTestCase {
             else {
                 continue
             }
+            if sanctionedEgressPaths.contains(relativePath) {
+                sanctionedPathsSeen.insert(relativePath)
+                continue
+            }
+            // Whole-line comments are prose, not egress. A file that
+            // explains why it must not touch these counters should not fail
+            // for saying so.
             let source = try String(contentsOf: fileURL, encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
             for token in forbiddenAggregateTokens {
                 XCTAssertFalse(
                     source.contains(token),
                     "\(relativePath) must not encode, upload, log, sync, "
                         + "share, or export aggregate banner feedback "
-                        + "token \(token)"
+                        + "token \(token) — only "
+                        + sanctionedEgressPaths.sorted().joined(separator: ", ")
+                        + " may"
                 )
             }
         }
+
+        // An exemption for a file that no longer exists is an exemption
+        // nobody is checking. Fail if the allow-list has gone stale.
+        XCTAssertEqual(
+            sanctionedPathsSeen,
+            sanctionedEgressPaths,
+            "the sanctioned-egress allow-list names a file that is no "
+                + "longer on an egress path"
+        )
     }
 }

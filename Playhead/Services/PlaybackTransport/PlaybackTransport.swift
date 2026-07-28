@@ -746,7 +746,14 @@ final class PlaybackService: NSObject, Sendable {
     }
 
     /// Skip forward by the given number of seconds (default 30).
+    ///
+    /// playhead-jw63.3: this is the remote-command surface — lock screen,
+    /// Control Centre, CarPlay, AirPods, Watch. It is disjoint from
+    /// `PlayheadRuntime.skipForward()`, which computes its own target, so
+    /// counting here and there counts each listener reach exactly once. Ad
+    /// auto-skip does not pass through this function.
     func skipForward(_ seconds: TimeInterval = PlaybackService.skipForwardSeconds) async {
+        AnalyticsRecorder.manualSkipForwardReach(durationSeconds: _state.duration)
         let newTime = min(_state.currentTime + seconds, _state.duration)
         await seek(to: newTime)
     }

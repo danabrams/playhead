@@ -4169,6 +4169,13 @@ final class PlayheadRuntime {
         ) else {
             return false
         }
+        // playhead-jw63.3: the in-app +30s button. Counted here, past the
+        // liveness guard, so a stale or superseded request is not a reach.
+        // This is a local integer increment behind an unfair lock — no I/O,
+        // no actor hop, nothing the seek waits on.
+        AnalyticsRecorder.manualSkipForwardReach(
+            durationSeconds: transportContext.state.duration
+        )
         let target = min(
             transportContext.state.currentTime
                 + PlaybackService.skipForwardSeconds,

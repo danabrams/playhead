@@ -129,6 +129,12 @@ The SLIs referenced in §2.1 are defined in [`docs/slis/phase-0-slis.md`](../sli
 
 The four eligibility booleans in §2.1 are the **only** eligibility-related data permitted to leave the device in Version 1. Free-form resolution hint strings, reason enums beyond the four booleans, and any per-show / per-episode eligibility detail are **not permitted** under this envelope. The 2fd contract also defines `modelAvailableNow: Bool`; see §6.1 below — that field is **deferred** pending legal review and is not on the V1 allow-list.
 
+### 5.5 playhead-jw63.3 product counters (Addendum A — proposed, unsigned)
+
+[`telemetry-envelope-v1-addendum-a-product-counters.md`](telemetry-envelope-v1-addendum-a-product-counters.md) proposes adding nine product counters (banner feedback, manual +30s reaches, listening seconds, D1/D7/D30 return buckets) to the §2.1 automatic-upload allow-list.
+
+**This cross-reference changes nothing in §2–§4.** Those counters are *not* on the V1 allow-list and may not be uploaded. Per §7, the implementation in `Playhead/Services/Analytics/` accumulates them locally and keeps every transport path behind `AnalyticsUploadGate.legalSignoffRecorded`, which is `false`. The addendum requires its own signoff before anything is sent.
+
 ## 6. Ambiguities flagged for legal review
 
 These are open questions the draft surfaces for counsel. Each is a point where engineering has made a **conservative default** (exclude rather than include) pending review.
