@@ -40,6 +40,10 @@ import Testing
 
 private actor LoaderDriver {
     let loader: ProgressiveResourceLoader
+    /// playhead-xc6b: counts completed toggles so the concurrency test can
+    /// assert the loader side actually ran its full workload. Without it a
+    /// `toggleSuspendResume` that silently did nothing still "passed".
+    private(set) var completedToggles = 0
 
     init(loader: ProgressiveResourceLoader) {
         self.loader = loader
@@ -49,6 +53,7 @@ private actor LoaderDriver {
         for _ in 0..<times {
             loader.suspend()
             loader.resume()
+            completedToggles += 1
         }
     }
 }
@@ -145,6 +150,52 @@ struct PlaybackServiceSeekValidationTests {
         #expect(!(await service.seek(to: target)))
         #expect(await service.snapshot().currentTime == 17)
         await service.tearDown()
+    }
+}
+
+/// playhead-xc6b: POSITIVE CONTROL for the audio-session interruption
+/// observer, used by the two tests whose real subject is that observer.
+///
+/// `PlaybackService` installs the observer from a retained setup hop
+/// (`observeInterruptionsAsync()` inside `setupTask`), and it only becomes a
+/// live subscriber once its `for await` has actually registered with the
+/// NotificationCenter. Both steps are asynchronous and neither is exposed as
+/// a flag, so the only honest proof that the observer exists is to DRIVE it:
+/// put the service in `.playing`, post a `.began` interruption, and wait for
+/// the resulting `pause()` to land.
+///
+/// The post is repeated on every poll iteration on purpose:
+/// `NotificationCenter.notifications(named:)` only delivers notifications
+/// posted AFTER its registration, so a single pre-registration post would be
+/// dropped and never redelivered.
+///
+/// Fails closed. If the observer was never installed, or is subscribed to a
+/// different center, the poll expires and the caller's `#expect` reddens
+/// instead of the test quietly proceeding on an assumption. Call this BEFORE
+/// `loadItem`, so item-status KVO cannot race the observed `.paused`.
+private func driveInterruptionObserverUntilLive(
+    _ service: PlaybackService,
+    center: NotificationCenter
+) async -> Bool {
+    await service._testingInjectState(
+        PlaybackState(
+            status: .playing,
+            currentTime: 1,
+            duration: 100,
+            rate: 1,
+            playbackSpeed: 1
+        )
+    )
+    return await pollUntil {
+        center.post(
+            name: AVAudioSession.interruptionNotification,
+            object: nil,
+            userInfo: [
+                AVAudioSessionInterruptionTypeKey:
+                    AVAudioSession.InterruptionType.began.rawValue,
+            ]
+        )
+        return await service.snapshot().status == .paused
     }
 }
 
@@ -832,6 +883,19 @@ struct PlaybackServiceActorIsolationTests {
             nowPlayingInfo: FakeNowPlayingInfoProvider(),
             notificationCenter: center
         )
+
+        // playhead-xc6b: prove the interruption observer is INSTALLED AND
+        // SUBSCRIBED before we tear it down. Without this the test could tear
+        // down before `setupTask` ever reached `observeInterruptionsAsync()`,
+        // in which case "a joined interruption observer cannot resume a
+        // torn-down service" was asserted about an observer that never
+        // existed. Runs before `loadItem` so item-status KVO cannot race the
+        // observed `.paused`.
+        #expect(
+            await driveInterruptionObserverUntilLive(service, center: center),
+            "the interruption observer must be live before tear down, or the post-teardown assertion is vacuous"
+        )
+
         let item = AVPlayerItem(
             asset: AVURLAsset(
                 url: URL(
@@ -887,9 +951,29 @@ struct PlaybackServiceActorIsolationTests {
                     AVAudioSession.InterruptionOptions.shouldResume.rawValue,
             ]
         )
-        for _ in 0..<5 {
-            await Task.yield()
-        }
+        // playhead-xc6b — FAIL-OPEN FIX. This used to be
+        // `for _ in 0..<5 { await Task.yield() }`, a fixed budget guarding a
+        // NEGATIVE assertion. Under load that fails OPEN: "the service did
+        // not resume" could be true simply because the notification had not
+        // been processed YET, so the assertion passed vacuously and the suite
+        // got WEAKER under load rather than merely flakier.
+        //
+        // Replaced with the repo's prove-a-negative idiom (see
+        // `drainOrchestratorEffects` / `awaitTrustFalseSkipSignals` in
+        // TestHelpers.swift): a positive control first, then a barrier.
+        //   * The control is at the top of this test — the observer was
+        //     driven and demonstrably reacted to a post on THIS center, so
+        //     the stimulus below is known to be well formed and the observer
+        //     is known to have existed for `tearDown()` to join.
+        //   * The barrier is the read itself. `center.post` is synchronous,
+        //     so by the time it returns any live async-sequence subscriber
+        //     has been handed the value and its continuation enqueued on
+        //     @PlaybackServiceActor; the `snapshot()` below enqueues after
+        //     that and same-priority actor jobs run in enqueue order, so the
+        //     read is queued BEHIND any resume the observer would have
+        //     issued. (Same honest limit as the helpers above: FIFO on the
+        //     default actor executor is an implementation property, not a
+        //     language guarantee.)
         #expect(
             await service.snapshot().status == .paused,
             "a joined interruption observer cannot resume a torn-down service"
@@ -919,22 +1003,53 @@ struct PlaybackServiceActorIsolationTests {
         .timeLimit(.minutes(3))
     )
     func interruptionObserverDoesNotCreateRetainCycle() async {
+        // playhead-xc6b: this test deliberately does NOT call `tearDown()`.
+        // Tear-down cancels and joins the interruption observer, which is the
+        // very reference graph under test — tearing down first would make the
+        // service release for a reason that has nothing to do with the
+        // observer, and the test would pass while proving nothing.
         let center = NotificationCenter()
+        weak var weakService: PlaybackService?
+
+        // playhead-xc6b — FAIL-OPEN FIX + ASSERTIONS. Previously this was
+        // `for _ in 0..<5 { await Task.yield() }` with the comment "let the
+        // retained setup hop install the interruption sequence", and the test
+        // carried ZERO `#expect`s. Both defects compound: under load the
+        // yield budget can expire before `setupTask` reaches
+        // `observeInterruptionsAsync()`, so the latch fires trivially because
+        // THE OBSERVER WAS NEVER INSTALLED — no observer, no possible cycle,
+        // vacuous pass, and nothing in the test could say so.
+        //
+        // The positive control drives the observer until it demonstrably
+        // reacts, so the reference graph under test is known to exist before
+        // the service is dropped. Then the negative — "nothing the observer
+        // owns retains the service" — is asserted twice: the latch resumes at
+        // the exact moment of deallocation (a real cycle keeps it silent and
+        // the `.timeLimit` trips), and the weak reference is checked after.
         func makeObservedServiceLatch() async -> DeallocLatch {
             let service = await PlaybackService(
                 audioSession: FakeAudioSessionProvider(),
                 nowPlayingInfo: FakeNowPlayingInfoProvider(),
                 notificationCenter: center
             )
-            // Let the retained setup hop install the interruption sequence.
-            for _ in 0..<5 {
-                await Task.yield()
-            }
+            weakService = service
+            #expect(
+                await driveInterruptionObserverUntilLive(service, center: center),
+                "the interruption observer must be installed and subscribed, or this test proves nothing about a cycle through it"
+            )
             return attachDeallocLatch(to: service)
         }
 
         let deallocated = await makeObservedServiceLatch()
+        // Event-driven and unbounded by design: resumes exactly when the
+        // service deallocates. A genuine cycle through the interruption
+        // observer leaves the latch silent and the test fails on its
+        // `.timeLimit` backstop instead of hanging the gate host.
         await deallocated.wait()
+        #expect(
+            weakService == nil,
+            "a live interruption observer must not retain the playback service it observes for"
+        )
     }
 
     @Test("A replaced item rejects a queued periodic-time callback",
@@ -1181,21 +1296,44 @@ struct ProgressiveLoaderDecouplingTests {
         // This simulates the Siri scenario: AVFoundation fires delegate
         // callbacks on loader.queue while the interruption handler runs
         // on PlaybackServiceActor.
-        await withTaskGroup(of: Void.self) { group in
+        //
+        // playhead-xc6b: the snapshots are COUNTED and CHECKED rather than
+        // discarded. This test previously ended `_ = loader` with no `#expect`
+        // at all, so it could only fail by crashing or timing out — a version
+        // of `toggleSuspendResume` that did nothing, or a task group that
+        // exited before either side ran, passed identically.
+        let idleSnapshots = await withTaskGroup(of: Int.self) { group in
             // Actor-side: rapid snapshot reads (simulating KVO storm).
             group.addTask {
+                var idleCount = 0
                 for _ in 0..<50 {
-                    _ = await service.snapshot()
+                    if await service.snapshot().status == .idle {
+                        idleCount += 1
+                    }
                 }
+                return idleCount
             }
 
             group.addTask {
                 await loaderDriver.toggleSuspendResume(times: 50)
+                return 0
             }
+            return await group.reduce(0, +)
         }
 
-        // If we get here without crashing, the decoupling works.
-        _ = loader
+        // Both workloads must have run to completion, and every actor-side
+        // read must have observed a consistent state: no media was ever
+        // loaded, so `.idle` is the only legal status. A torn read or an
+        // executor conflict shows up here rather than only as a crash.
+        #expect(
+            idleSnapshots == 50,
+            "every concurrent snapshot must observe the consistent .idle state"
+        )
+        #expect(
+            await loaderDriver.completedToggles == 50,
+            "the loader side must complete its full suspend/resume workload alongside the actor reads"
+        )
+        await service.tearDown()
     }
 }
 
