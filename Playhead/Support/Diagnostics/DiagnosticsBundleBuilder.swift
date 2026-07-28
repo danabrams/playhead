@@ -124,7 +124,8 @@ enum DiagnosticsBundleBuilder {
         installID: UUID,
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
         musicBedProfileSnapshots: [ShowMusicBedProfileSnapshot] = [],
-        learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = []
+        learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
+        stabilityDiagnostics: [StabilityDiagnosticRecord] = []
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -196,7 +197,12 @@ enum DiagnosticsBundleBuilder {
             workJournalTail: Array(workJournalTail),
             chapterPhaseEvents: chapterPhaseEvents,
             musicBedProfiles: musicBedProfiles,
-            learnedDeviceProfiles: learnedDeviceProfiles
+            learnedDeviceProfiles: learnedDeviceProfiles,
+            // playhead-jw63.4: passed through unchanged. The store has
+            // already applied the ring-buffer cap and the projector has
+            // already applied the allowlist, so re-deriving either here
+            // would only create a second place for them to disagree.
+            stabilityDiagnostics: stabilityDiagnostics
         )
     }
 

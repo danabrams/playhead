@@ -185,6 +185,15 @@ typealias DiagnosticsMusicBedProfilesFetch = @Sendable () async -> [ShowMusicBed
 /// `learned_device_profiles` key for grep stability.
 typealias DiagnosticsLearnedDeviceProfilesFetch = @Sendable () async throws -> [LearnedDeviceProfileDiagnosticRecord]
 
+/// playhead-jw63.4 — async fetch closure for the local MetricKit crash +
+/// hang ring buffer. Non-throwing on purpose: `StabilityDiagnosticsStore`
+/// swallows its own I/O errors and returns `[]`, because a diagnostics
+/// export that fails because the crash log could not be read is a worse
+/// outcome than one that ships without it. Defaults to "no records" so
+/// every existing coordinator call site keeps compiling; production
+/// wires it to `StabilityDiagnosticsStore.shared.recent()`.
+typealias DiagnosticsStabilityFetch = @Sendable () async -> [StabilityDiagnosticRecord]
+
 /// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
 /// that actually shipped in the bundle. Abstracted so the coordinator
 /// remains pure-logic and the SwiftData/ModelContext dependency lives in

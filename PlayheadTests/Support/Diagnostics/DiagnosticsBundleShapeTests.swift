@@ -247,7 +247,15 @@ struct DiagnosticsBundleShapeTests {
         // key. Privacy review: the record carries device-class bucket
         // strings + math telemetry — NO episodeId, NO PII — so it stays
         // in the default subtree alongside other device-class fields.
-        "learned_device_profiles"
+        "learned_device_profiles",
+        // playhead-jw63.4: the local MetricKit crash + hang ring buffer.
+        // Always encoded (empty array on a device that has never
+        // crashed) so the shape audit must accept the key. Privacy
+        // review: `StabilityDiagnosticRecord` is a closed shape — every
+        // string passed `DiagnosticTextSanitizer`'s allowlist, and it
+        // carries NO episode reference, not even a hash. The proof
+        // lives in `StabilityDiagnosticScrubbingTests` (legal item e).
+        "stability_diagnostics"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

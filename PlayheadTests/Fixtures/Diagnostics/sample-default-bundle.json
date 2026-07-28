@@ -17,6 +17,9 @@
     "learned_device_profiles" : [
 
     ],
+    "music_bed_profiles" : [
+
+    ],
     "os_version" : "iOS 26.0",
     "scheduler_events" : [
       {
@@ -29,6 +32,9 @@
         "event_type" : "acquired",
         "timestamp" : 1700000000
       }
+    ],
+    "stability_diagnostics" : [
+
     ],
     "work_journal_tail" : [
       {
