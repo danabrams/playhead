@@ -5,6 +5,32 @@
 // PlaybackServiceActor-isolated methods are called from the wrong
 // context — typically during Siri or phone call interruptions when
 // AVFoundation fires KVO/delegate callbacks on arbitrary threads.
+//
+// playhead-xc6b — HANG BACKSTOPS ARE MANDATORY IN EVERY SUITE HERE.
+//
+// These tests are BEHAVIOURAL, not measurement: not one of them asserts a
+// latency, and every assertion (a status observed, a volume restored, a
+// generation rejected) stays valid on a saturated machine. They belong in
+// the default gate and must never be migrated behind `PerfGate` — doing so
+// would delete real coverage to fix a problem PerfGate does not solve.
+//
+// What they lacked was a finite deadline. Before playhead-xc6b, 30 of the
+// 32 tests in this file had no `.timeLimit` at all, while awaiting
+// `ControlledItemSeek` / `ControlledSeekSequence` continuation gates and
+// `AsyncStream` iterators that carry no deadline of their own. A regression
+// on those paths HUNG THE GATE HOST indefinitely instead of failing a test
+// — strictly worse than a flake, since a hang burns the whole run and
+// reports nothing.
+//
+// Every suite below carries `.timeLimit(.minutes(3))` so tests added later
+// inherit a backstop, and every test carries it explicitly so the coverage
+// is greppable rather than inherited-and-assumed. Three minutes is chosen
+// deliberately: the documented executor-starvation signature on this box
+// reaches ~98-131 s of queueing delay under a saturated gate (the same
+// reasoning already recorded on
+// `RuntimeShutdownLifecycleTests.lifecycleInvalidationDoesNotJoinStalledCacheTask`),
+// so 3 minutes clears contention — a trip means a real hang, not a busy
+// machine — while staying far below the gate's outer timeout.
 
 @preconcurrency import AVFoundation
 import Foundation
@@ -93,10 +119,11 @@ private actor ControlledSeekSequence {
     }
 }
 
-@Suite("PlaybackService seek validation")
+@Suite("PlaybackService seek validation", .timeLimit(.minutes(3)))
 struct PlaybackServiceSeekValidationTests {
     @Test(
         "Invalid absolute seeks fail closed without publishing state",
+        .timeLimit(.minutes(3)),
         arguments: [Double.nan, .infinity, -.infinity, -0.001]
     )
     func invalidAbsoluteSeek(_ target: Double) async {
@@ -135,10 +162,11 @@ private actor ItemSeekRecorder {
 
 // MARK: - Actor Isolation
 
-@Suite("PlaybackServiceActor – Isolation")
+@Suite("PlaybackServiceActor – Isolation", .timeLimit(.minutes(3)))
 struct PlaybackServiceActorIsolationTests {
 
-    @Test("PlaybackService methods are callable from PlaybackServiceActor")
+    @Test("PlaybackService methods are callable from PlaybackServiceActor",
+          .timeLimit(.minutes(3)))
     func basicActorAccess() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -149,7 +177,8 @@ struct PlaybackServiceActorIsolationTests {
         #expect(snapshot.status == .idle)
     }
 
-    @Test("State observation stream yields from actor without assertion")
+    @Test("State observation stream yields from actor without assertion",
+          .timeLimit(.minutes(3)))
     func stateObservation() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -168,7 +197,8 @@ struct PlaybackServiceActorIsolationTests {
         #expect(received)
     }
 
-    @Test("Concurrent snapshot calls don't trigger executor assertion")
+    @Test("Concurrent snapshot calls don't trigger executor assertion",
+          .timeLimit(.minutes(3)))
     func concurrentSnapshots() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -189,7 +219,8 @@ struct PlaybackServiceActorIsolationTests {
         }
     }
 
-    @Test("A detach token rejects a stale queued item installation")
+    @Test("A detach token rejects a stale queued item installation",
+          .timeLimit(.minutes(3)))
     func detachTokenRejectsStaleLoad() async throws {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -243,7 +274,8 @@ struct PlaybackServiceActorIsolationTests {
         await service.tearDown()
     }
 
-    @Test("A detached item cannot resurrect Now Playing through stale rate delivery")
+    @Test("A detached item cannot resurrect Now Playing through stale rate delivery",
+          .timeLimit(.minutes(3)))
     func detachedItemRejectsStaleRateNowPlayingUpdate() async {
         let nowPlaying = FakeNowPlayingInfoProvider()
         let service = await PlaybackService(
@@ -282,7 +314,8 @@ struct PlaybackServiceActorIsolationTests {
         await service.tearDown()
     }
 
-    @Test("Replacement metadata survives controls before its item installs")
+    @Test("Replacement metadata survives controls before its item installs",
+          .timeLimit(.minutes(3)))
     func replacementMetadataSurvivesItemlessLoadingGap() async throws {
         let nowPlaying = FakeNowPlayingInfoProvider()
         let service = await PlaybackService(
@@ -334,7 +367,8 @@ struct PlaybackServiceActorIsolationTests {
         await service.tearDown()
     }
 
-    @Test("A replaced item cannot publish an old seek after actor reentrancy")
+    @Test("A replaced item cannot publish an old seek after actor reentrancy",
+          .timeLimit(.minutes(3)))
     func replacedItemRejectsStaleSeekCompletion() async {
         let controlledSeek = ControlledItemSeek()
         let service = await PlaybackService(
@@ -376,7 +410,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("Newest overlapping user seek wins on the same item")
+    @Test("Newest overlapping user seek wins on the same item",
+          .timeLimit(.minutes(3)))
     func newestSameItemSeekWinsWhenOlderCompletionArrivesLast() async {
         let controlledSeeks = ControlledSeekSequence()
         let service = await PlaybackService(
@@ -429,7 +464,8 @@ struct PlaybackServiceActorIsolationTests {
         await service.tearDown()
     }
 
-    @Test("A replaced item cannot receive stale skip-transition completion")
+    @Test("A replaced item cannot receive stale skip-transition completion",
+          .timeLimit(.minutes(3)))
     func replacedItemRejectsStaleSkipTransitionCompletion() async {
         let controlledSeek = ControlledItemSeek()
         let service = await PlaybackService(
@@ -477,7 +513,8 @@ struct PlaybackServiceActorIsolationTests {
         #expect(await service._testingPlayerVolume == originalVolume)
     }
 
-    @Test("A failed item seek releases the active transition duck")
+    @Test("A failed item seek releases the active transition duck",
+          .timeLimit(.minutes(3)))
     func failedItemSeekRestoresVolume() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -508,7 +545,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("Listen disarm invalidates an in-flight transition for the same cue")
+    @Test("Listen disarm invalidates an in-flight transition for the same cue",
+          .timeLimit(.minutes(3)))
     func listenDisarmInvalidatesInFlightTransition() async {
         let controlledSeek = ControlledItemSeek()
         let service = await PlaybackService(
@@ -549,7 +587,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("Cue removal cannot cancel an overlapping user seek")
+    @Test("Cue removal cannot cancel an overlapping user seek",
+          .timeLimit(.minutes(3)))
     func cueRemovalDoesNotCancelOverlappingUserSeek() async {
         let controlledSeeks = ControlledSeekSequence()
         let service = await PlaybackService(
@@ -608,7 +647,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("Listen disarm invalidates an in-flight merged-pod transition")
+    @Test("Listen disarm invalidates an in-flight merged-pod transition",
+          .timeLimit(.minutes(3)))
     func listenDisarmInvalidatesMergedPodTransition() async {
         let controlledSeek = ControlledItemSeek()
         let service = await PlaybackService(
@@ -658,7 +698,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("Listen disarm invalidates a detected transition before queued execution")
+    @Test("Listen disarm invalidates a detected transition before queued execution",
+          .timeLimit(.minutes(3)))
     func listenDisarmInvalidatesReservedTransition() async throws {
         let seekRecorder = ItemSeekRecorder()
         let service = await PlaybackService(
@@ -700,7 +741,8 @@ struct PlaybackServiceActorIsolationTests {
         #expect(await service._testingPlayerVolume == originalVolume)
     }
 
-    @Test("Removing a cue invalidates its detected transition before queued execution")
+    @Test("Removing a cue invalidates its detected transition before queued execution",
+          .timeLimit(.minutes(3)))
     func cueRemovalInvalidatesReservedTransition() async throws {
         let seekRecorder = ItemSeekRecorder()
         let service = await PlaybackService(
@@ -744,7 +786,8 @@ struct PlaybackServiceActorIsolationTests {
         #expect(await service._testingPlayerVolume == originalVolume)
     }
 
-    @Test("Tear down invalidates a detected transition before queued execution")
+    @Test("Tear down invalidates a detected transition before queued execution",
+          .timeLimit(.minutes(3)))
     func tearDownInvalidatesReservedTransition() async throws {
         let seekRecorder = ItemSeekRecorder()
         let service = await PlaybackService(
@@ -780,7 +823,8 @@ struct PlaybackServiceActorIsolationTests {
         #expect(await service._testingPlayerVolume == originalVolume)
     }
 
-    @Test("Tear down joins setup, releases the current item, and ignores later interruptions")
+    @Test("Tear down joins setup, releases the current item, and ignores later interruptions",
+          .timeLimit(.minutes(3)))
     func tearDownOwnsEveryLongLivedResource() async {
         let center = NotificationCenter()
         let service = await PlaybackService(
@@ -852,7 +896,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("A state subscriber added after tear down hydrates once and finishes")
+    @Test("A state subscriber added after tear down hydrates once and finishes",
+          .timeLimit(.minutes(3)))
     func postTearDownStateSubscriberFinishes() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -871,7 +916,7 @@ struct PlaybackServiceActorIsolationTests {
 
     @Test(
         "Interruption observation does not retain a released playback service",
-        .timeLimit(.minutes(1))
+        .timeLimit(.minutes(3))
     )
     func interruptionObserverDoesNotCreateRetainCycle() async {
         let center = NotificationCenter()
@@ -892,7 +937,8 @@ struct PlaybackServiceActorIsolationTests {
         await deallocated.wait()
     }
 
-    @Test("A replaced item rejects a queued periodic-time callback")
+    @Test("A replaced item rejects a queued periodic-time callback",
+          .timeLimit(.minutes(3)))
     func replacedItemRejectsStalePeriodicTimeDelivery() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -925,7 +971,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("Listen disarm removes every cue overlapping the banner span")
+    @Test("Listen disarm removes every cue overlapping the banner span",
+          .timeLimit(.minutes(3)))
     func listenDisarmRemovesEveryOverlappingCue() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -957,7 +1004,8 @@ struct PlaybackServiceActorIsolationTests {
         #expect(CMTimeGetSeconds(remaining[0].start) == 200)
     }
 
-    @Test("A stale item generation cannot disarm replacement cues")
+    @Test("A stale item generation cannot disarm replacement cues",
+          .timeLimit(.minutes(3)))
     func staleItemGenerationCannotDisarmReplacementCues() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -997,7 +1045,8 @@ struct PlaybackServiceActorIsolationTests {
         )
     }
 
-    @Test("A replaced item cannot publish an already-queued status callback")
+    @Test("A replaced item cannot publish an already-queued status callback",
+          .timeLimit(.minutes(3)))
     func replacedItemRejectsStaleStatusDelivery() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -1037,10 +1086,11 @@ struct PlaybackServiceActorIsolationTests {
 
 // MARK: - Progressive Loader Decoupling
 
-@Suite("PlaybackService – Progressive Loader Decoupling")
+@Suite("PlaybackService – Progressive Loader Decoupling", .timeLimit(.minutes(3)))
 struct ProgressiveLoaderDecouplingTests {
 
-    @Test("loadItem accepts externally-created player item")
+    @Test("loadItem accepts externally-created player item",
+          .timeLimit(.minutes(3)))
     func loadItemAcceptsExternalItem() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -1059,7 +1109,8 @@ struct ProgressiveLoaderDecouplingTests {
         #expect(snapshot.status != .idle)
     }
 
-    @Test("ProgressiveResourceLoader operates independently of PlaybackServiceActor")
+    @Test("ProgressiveResourceLoader operates independently of PlaybackServiceActor",
+          .timeLimit(.minutes(3)))
     func loaderIndependentOfActor() async throws {
         let dir = try makeTempDir(prefix: "LoaderDecouple")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1104,7 +1155,8 @@ struct ProgressiveLoaderDecouplingTests {
         _ = loader // Keep alive
     }
 
-    @Test("Simultaneous actor access and loader callbacks don't conflict")
+    @Test("Simultaneous actor access and loader callbacks don't conflict",
+          .timeLimit(.minutes(3)))
     func simultaneousAccessAndCallbacks() async throws {
         let dir = try makeTempDir(prefix: "SimultaneousAccess")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1149,7 +1201,7 @@ struct ProgressiveLoaderDecouplingTests {
 
 // MARK: - Callback Isolation
 
-@Suite("PlaybackService – Callback Isolation")
+@Suite("PlaybackService – Callback Isolation", .timeLimit(.minutes(3)))
 struct PlaybackServiceCallbackIsolationTests {
 
     /// 1×1 pixel test image, cheap to create and sufficient for artwork tests.
@@ -1158,7 +1210,8 @@ struct PlaybackServiceCallbackIsolationTests {
             .image { $0.fill(CGRect(x: 0, y: 0, width: 1, height: 1)) }
     }
 
-    @Test("setNowPlayingMetadata with artwork doesn't crash from actor")
+    @Test("setNowPlayingMetadata with artwork doesn't crash from actor",
+          .timeLimit(.minutes(3)))
     func setNowPlayingMetadataWithArtwork() async {
         let nowPlaying = FakeNowPlayingInfoProvider()
         let service = await PlaybackService(
@@ -1184,7 +1237,8 @@ struct PlaybackServiceCallbackIsolationTests {
         #expect(title == "Test Episode")
     }
 
-    @Test("MPMediaItemArtwork provider callable from main thread")
+    @Test("MPMediaItemArtwork provider callable from main thread",
+          .timeLimit(.minutes(3)))
     func artworkProviderCallableFromMain() async {
         let nowPlaying = FakeNowPlayingInfoProvider()
         let service = await PlaybackService(
@@ -1212,7 +1266,7 @@ struct PlaybackServiceCallbackIsolationTests {
         _ = service
     }
 
-    @Test("loadItem triggers KVO without executor assertion", .timeLimit(.minutes(1)))
+    @Test("loadItem triggers KVO without executor assertion", .timeLimit(.minutes(3)))
     func loadItemKVOSafe() async throws {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),
@@ -1253,7 +1307,8 @@ struct PlaybackServiceCallbackIsolationTests {
                 "loadItem must drive a KVO status change off .idle")
     }
 
-    @Test("State updates after play don't crash")
+    @Test("State updates after play don't crash",
+          .timeLimit(.minutes(3)))
     func stateUpdatesAfterPlay() async {
         let nowPlaying = FakeNowPlayingInfoProvider()
         let service = await PlaybackService(
@@ -1283,7 +1338,8 @@ struct PlaybackServiceCallbackIsolationTests {
         #expect(snapshot.status == .playing)
     }
 
-    @Test("Concurrent metadata and snapshot access")
+    @Test("Concurrent metadata and snapshot access",
+          .timeLimit(.minutes(3)))
     func concurrentMetadataAndSnapshot() async {
         let service = await PlaybackService(
             audioSession: FakeAudioSessionProvider(),

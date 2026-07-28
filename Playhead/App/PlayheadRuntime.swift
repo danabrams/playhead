@@ -2860,6 +2860,21 @@ final class PlayheadRuntime {
         playbackStateObserverHookForTesting.withLock { $0 = hook }
     }
 
+    /// playhead-xc6b: DEBUG-only accessor for the playback-state observer
+    /// task, so a test can capture the handle BEFORE `shutdown()` nils it
+    /// out and then observe `isCancelled` as a POSITIVE CONTROL that
+    /// `shutdown()` really reached its cancel/join step.
+    ///
+    /// This exists because the negative assertion in
+    /// `RuntimeShutdownLifecycleTests.shutdownJoinsPlaybackStateConsumer`
+    /// ("the held body still owns the observer") was previously guarded by
+    /// a fixed `Task.yield()` budget, which FAILS OPEN under load: if the
+    /// shutdown task had not been scheduled yet, "the observer has not
+    /// exited" was true for the trivial reason that nothing had happened.
+    func _playbackStateObserverTaskForTesting() -> Task<Void, Never>? {
+        playbackStateObserverTask
+    }
+
     func _playbackStateObserverDidExitForTesting() -> Bool {
         playbackStateObserverDidExit.withLock { $0 }
     }
