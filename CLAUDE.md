@@ -90,19 +90,42 @@ Each bead worktree runs `xcodebuild -derivedDataPath .derivedData`, producing ~2
 Run from the repo root after PR merge. Substitute `<slug>` (e.g. `bd-r835`) and `<branch>` (e.g. `bead/playhead-r835`).
 
 ```bash
-cd /Users/dabrams/playhead && git checkout main && git pull --ff-only
-BR=<branch>; WT=/Users/dabrams/playhead/.worktrees/<slug>
-git merge-base --is-ancestor "$BR" origin/main || { echo "NOT MERGED — abort"; exit 1; }
+cd /Users/dabrams/playhead && git checkout main
+git pull --ff-only || git pull --rebase   # see the divergence trap below
+BR=<branch>; WT=/Users/dabrams/playhead/.worktrees/<slug>; PR=<pr-number>
+# Merged-ness. PR state is the AUTHORITY on this repo because PRs are SQUASH-merged.
+[ "$(gh pr view "$PR" --json state -q .state)" = MERGED ] || { echo "NOT MERGED — abort"; exit 1; }
 [ -z "$(git -C "$WT" status --porcelain)" ] || { echo "DIRTY — stash or commit first"; exit 1; }
 bd close playhead-<slug>
 git worktree remove "$WT"
 [ -d "$WT/.derivedData" ] && rm -rf "$WT/.derivedData" && echo "removed $WT/.derivedData"
 git worktree prune -v
-git push origin --delete "$BR"   # do this BEFORE `git branch -d` (see below)
-git branch -d "$BR"
+git push origin --delete "$BR"
+git branch -D "$BR"   # -D is CORRECT after a squash merge; see below
 ```
 
-Two traps this sequence exists to avoid (both hit on 2026-07-26):
+**The squash-merge trap (hit on 2026-07-28 closing playhead-8m2w).** This repo squash-merges PRs, so
+the branch tip is **never** an ancestor of `main` — the squash is a brand-new commit with a different
+hash and no parent link to the branch. Two consequences that make the older sequence unusable:
+
+- `git merge-base --is-ancestor "$BR" origin/main` **always reports NOT MERGED** after a squash, for
+  branches that are fully merged. Use the PR's state instead; that is the only thing that actually
+  knows a squash happened.
+- `git branch -d` **always refuses** for the same reason, and no amount of deleting the remote first
+  will help — the refusal is not about the remote lagging, it is about the commits genuinely not
+  being reachable from `main`. So `-D` is correct **here**, and the PR-state check above is what
+  replaces `-d`'s refusal as the safety net. Do not drop that check: without it `-D` is a real
+  footgun. (If a future PR is merged with a true merge commit rather than squashed, `-d` will
+  succeed on its own — prefer it when it does.)
+
+**The diverged-main trap (same close).** `git pull --ff-only` aborts with "Not possible to
+fast-forward" whenever local `main` carries a commit that was never pushed — easy to accumulate,
+since main-branch commits (docs, scripts, CLAUDE.md edits) do not go through a bead worktree. Inspect
+with `git log --oneline origin/main..main` and `main..origin/main` before doing anything. If the
+divergence is your own unpushed commits and the tree is clean, `git pull --rebase` replays them on
+top of the merge; then push. Do **not** reach for `--force` or reset — check what diverged first.
+
+Two further traps this sequence exists to avoid (both hit on 2026-07-26):
 
 - **Don't test merged-ness with `git branch --merged main | grep -qx "  <branch>"`.** A branch checked
   out in a linked worktree is listed as `+ bead/foo`, not `  bead/foo` — and at close time every bead
@@ -111,7 +134,9 @@ Two traps this sequence exists to avoid (both hit on 2026-07-26):
   Compare against `origin/main`, not `main`, so you also prove the merge was actually pushed.
 - **`git branch -d` refuses while the remote branch still predates the merge**, with a confusing "not
   fully merged" error even though it is merged to HEAD. Delete the remote branch first and `-d`
-  succeeds — never reach for `-D` to silence this, since `-d`'s refusal is the safety net.
+  succeeds. This is a *different* cause from the squash-merge refusal above, and the remedies differ:
+  here `-d` genuinely succeeds once the remote is gone, so use it; after a squash it never will.
+  Either way the PR-state check is what authorises the delete — never let `-D` stand alone.
 
 ### Safety rails
 
