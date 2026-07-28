@@ -52,6 +52,16 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
 
     /// `store.fetchAsset` returned nil — no `analysis_assets` row for the id.
     /// Formerly `AdDetectionService.mintByteExactDayZeroMarks`'s "no asset row".
+    ///
+    /// THE ONE EXIT THAT CANNOT BE PERSISTED. `rediff_day_zero_attempts` is
+    /// keyed `analysisAssetId … REFERENCES analysis_assets(id)` and the store
+    /// runs with `PRAGMA foreign_keys = ON`, so by construction there is no row
+    /// to hang the record off — the insert fails the FK check and the recorder
+    /// logs it instead. That is a tautology of a per-asset table, not an
+    /// oversight, and it is bounded: this exit is free (no fetch), the ledger
+    /// is untouched, and the os_log breadcrumb still names it. Pinned by
+    /// `RediffDayZeroAttemptStoreTests.assetRowMissingCannotBePersisted` so
+    /// nobody later reads the taxonomy and assumes a DB pull would show it.
     case assetRowMissing = "asset_row_missing"
 
     /// `store.fetchAsset` THREW. Distinct from `assetRowMissing`: a store
@@ -251,6 +261,11 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
     /// Unix seconds of the most recent suppression, `nil` when never suppressed.
     let lastSuppressedAt: Double?
     let lastDetail: String?
+    /// Which `DayZeroRediffAttemptPolicy` generation spent this budget. A
+    /// record from a DIFFERENT generation is not evidence about THIS build's
+    /// day-0, so the budget starts over — see
+    /// `DayZeroRediffAttemptPolicy.currentGeneration`.
+    let policyGeneration: Int
 
     init(
         analysisAssetId: String,
@@ -267,7 +282,8 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         totalFullFetchBytes: Int = 0,
         suppressedCount: Int = 0,
         lastSuppressedAt: Double? = nil,
-        lastDetail: String? = nil
+        lastDetail: String? = nil,
+        policyGeneration: Int = DayZeroRediffAttemptPolicy.currentGeneration
     ) {
         self.analysisAssetId = analysisAssetId
         self.attemptCount = attemptCount
@@ -284,6 +300,7 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         self.suppressedCount = suppressedCount
         self.lastSuppressedAt = lastSuppressedAt
         self.lastDetail = lastDetail
+        self.policyGeneration = policyGeneration
     }
 }
 
@@ -303,7 +320,9 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
 /// store, a clock, or a network.
 enum DayZeroRediffAttemptPolicy {
 
-    /// Hard ceiling on day-0 attempts per asset. Day-0 is an OPTIMISTIC probe;
+    /// Hard ceiling on day-0 attempts per asset PER `currentGeneration`, and
+    /// only attempts that actually spent bandwidth count (see `advance`).
+    /// Day-0 is an OPTIMISTIC probe;
     /// when it has failed this many times the lagged ≥3-day sweep is the
     /// backstop and is strictly cheaper (it pre-checks with a ~128 KB ranged
     /// sample before committing to a full fetch, which day-0 cannot do).
@@ -315,6 +334,32 @@ enum DayZeroRediffAttemptPolicy {
 
     /// Ceiling on the doubling, so attempt 3's window stays bounded.
     static let maxBackoff: TimeInterval = 7 * 24 * 60 * 60
+
+    /// The generation of day-0 behavior this build implements.
+    ///
+    /// WHY THIS EXISTS. `maxAttempts` is a HARD, permanent cap: once an asset
+    /// has spent it, `decide` suppresses forever. That is the right bandwidth
+    /// policy — but on its own it is also a trap, because playhead-p70f
+    /// deliberately did NOT fix the reason day-0 mints nothing. Without an
+    /// escape hatch, every episode the owner plays across three sessions burns
+    /// its budget on a failure mode that is about to be fixed, and when the fix
+    /// lands those episodes stay permanently dead: the owner would repair the
+    /// mint and observe no change at all.
+    ///
+    /// So the budget is scoped to a GENERATION rather than to all time. A
+    /// record stamped with a different generation describes a build whose
+    /// outcome-determining day-0 behavior this one no longer has, and is
+    /// therefore not evidence about this build — the budget starts over.
+    ///
+    /// **BUMP THIS whenever day-0's outcome-determining behavior changes** —
+    /// the mint, the byte gate, the k-way persona staging, or the B-copy floor.
+    /// Bumping costs at most `maxAttempts` fresh attempts per asset that is
+    /// actually replayed; NOT bumping silently withholds the fix from every
+    /// episode that already exhausted its budget.
+    ///
+    /// `.marked` is exempt and stays terminal across generations: the marks are
+    /// already persisted, so a re-fetch would spend ~108 MB to mint nothing.
+    static let currentGeneration = 1
 
     /// The decision, with the reason attached so the caller can RECORD a
     /// suppression rather than silently doing nothing (the original sin).
@@ -349,7 +394,9 @@ enum DayZeroRediffAttemptPolicy {
     ///   the mint's own overlap filter would drop everything anyway; re-fetching
     ///   would spend ~108 MB to mint zero windows. This is the single most
     ///   valuable suppression.
-    /// - attempt budget exhausted ⇒ suppress permanently.
+    /// - record from an OLDER generation ⇒ the budget starts over (see
+    ///   `currentGeneration`); `.marked` is checked first and stays terminal.
+    /// - attempt budget exhausted ⇒ suppress until the generation changes.
     /// - inside the backoff window ⇒ suppress until it elapses.
     static func decide(
         record: RediffDayZeroAttemptRecord?,
@@ -358,6 +405,12 @@ enum DayZeroRediffAttemptPolicy {
         guard let record else { return .attempt(attemptNumber: 1) }
         guard record.lastExit.isRetryable else {
             return .suppress(reason: record.lastExit, nextEligibleAt: nil)
+        }
+        // Deliberately AFTER the `.marked` check and BEFORE the budget check:
+        // a stale generation resets the budget, but never resurrects an asset
+        // whose marks are already on disk.
+        guard record.policyGeneration == currentGeneration else {
+            return .attempt(attemptNumber: 1)
         }
         guard record.attemptCount < maxAttempts else {
             return .suppress(reason: .suppressedByBackoff, nextEligibleAt: nil)
@@ -372,6 +425,25 @@ enum DayZeroRediffAttemptPolicy {
     /// Fold one attempt's outcome into the durable record. Additive over the
     /// prior row: `attemptCount` and `totalFullFetchBytes` accumulate so the
     /// per-asset bleed is visible without joining anything.
+    ///
+    /// TWO THINGS THE BUDGET DELIBERATELY IGNORES.
+    ///
+    /// 1. A FREE exit (`exit.spentBandwidth == false`) moves neither
+    ///    `attemptCount` nor `lastAttemptAt`. The budget and the escalating
+    ///    backoff exist to bound BANDWIDTH; an exit that spent none must not
+    ///    consume either. This is load-bearing, not tidiness: playhead-p70f
+    ///    change 3 hoisted the A-side checks ahead of the fetch, and on the
+    ///    streaming play path day-0 fires BEFORE `downloadComplete()`, so
+    ///    `.aSideNotAnchored` is a routine, transient, zero-cost decline. Were
+    ///    it to consume the budget, three streaming starts would permanently
+    ///    lock out an episode day-0 had never even attempted — and the exit's
+    ///    own documentation ("deliberately RETRYABLE… the backoff, not this
+    ///    flag, is what stops it spinning") would be false. `lastExit` and the
+    ///    per-B census still update, so the decline stays diagnosable.
+    ///
+    /// 2. A record from an older `currentGeneration` contributes no attempt
+    ///    count: this build's day-0 has not spent anything yet. Cumulative
+    ///    bytes and suppression history are historical facts and still carry.
     static func advance(
         record: RediffDayZeroAttemptRecord?,
         assetId: String,
@@ -379,10 +451,12 @@ enum DayZeroRediffAttemptPolicy {
         fullFetchBytes: Int,
         at now: Double
     ) -> RediffDayZeroAttemptRecord {
-        RediffDayZeroAttemptRecord(
+        let budgeted = record?.policyGeneration == currentGeneration ? record : nil
+        let spentBandwidth = outcome.exit.spentBandwidth
+        return RediffDayZeroAttemptRecord(
             analysisAssetId: assetId,
-            attemptCount: (record?.attemptCount ?? 0) + 1,
-            lastAttemptAt: now,
+            attemptCount: (budgeted?.attemptCount ?? 0) + (spentBandwidth ? 1 : 0),
+            lastAttemptAt: spentBandwidth ? now : (budgeted?.lastAttemptAt ?? now),
             lastExit: outcome.exit,
             lastMarkCount: outcome.markCount,
             lastBSideCount: outcome.bSideCount,
@@ -397,7 +471,8 @@ enum DayZeroRediffAttemptPolicy {
             // replays were declined.
             suppressedCount: record?.suppressedCount ?? 0,
             lastSuppressedAt: record?.lastSuppressedAt,
-            lastDetail: outcome.detail.map { String($0.prefix(detailCharCap)) }
+            lastDetail: outcome.detail.map { String($0.prefix(detailCharCap)) },
+            policyGeneration: currentGeneration
         )
     }
 

@@ -11,6 +11,7 @@
 // Pure over `(record, now)` — no store, no clock, no network.
 
 import Foundation
+import SQLite3
 import Testing
 
 @testable import Playhead
@@ -126,6 +127,102 @@ struct RediffDayZeroAccountabilityTests {
         let spent = Self.record(attempts: Policy.maxAttempts, at: 1_000, exit: .noDivergentSlot)
         let decision = Policy.decide(record: spent, now: 1_000 + 365 * Self.day)
         #expect(decision == .suppress(reason: .suppressedByBackoff, nextEligibleAt: nil))
+    }
+
+    // MARK: - The budget only counts BANDWIDTH (review round 1)
+
+    /// The budget exists to bound ~108 MB fetches. A pre-fetch exit spends
+    /// nothing, so it must consume neither an attempt nor a backoff window.
+    ///
+    /// This is not hypothetical. `runDayZeroRefetch` now runs the A-side checks
+    /// BEFORE the fetch (change 3), and on the STREAMING play path day-0 fires
+    /// before `downloadComplete()` — so `.aSideNotAnchored` is the routine,
+    /// transient, zero-cost decline. If it consumed the budget, three streaming
+    /// starts would permanently lock out an episode day-0 never attempted.
+    @Test("a FREE pre-fetch exit consumes no attempt and no backoff window")
+    func freeExitDoesNotConsumeTheAttemptBudget() {
+        var folded: RediffDayZeroAttemptRecord?
+        for tick in 1...(Policy.maxAttempts + 3) {
+            folded = Policy.advance(
+                record: folded, assetId: "a",
+                outcome: .blocked(.aSideNotAnchored),
+                fullFetchBytes: 0, at: Double(tick)
+            )
+        }
+        #expect(folded?.attemptCount == 0, "a zero-byte exit is not an attempt")
+        #expect(folded?.totalFullFetchBytes == 0)
+        // …and the exit is still NAMED, so the decline stays diagnosable.
+        #expect(folded?.lastExit == .aSideNotAnchored)
+        // The asset is still immediately eligible — the A-side that
+        // materializes during the next play gets its chance.
+        #expect(Policy.decide(record: folded, now: 10) == .attempt(attemptNumber: 1))
+    }
+
+    @Test("a free exit AFTER a real attempt does not push the backoff window forward")
+    func freeExitDoesNotExtendTheBackoffWindow() {
+        let real = Policy.advance(
+            record: nil, assetId: "a",
+            outcome: RediffDayZeroMintOutcome(exit: .noDivergentSlot, bSideCount: 2, bSidesAccepted: 2),
+            fullFetchBytes: 108_000_000, at: 1_000
+        )
+        #expect(real.attemptCount == 1)
+        // A streaming replay 23 h later blocks for free…
+        let blocked = Policy.advance(
+            record: real, assetId: "a",
+            outcome: .blocked(.aSideNotAnchored), fullFetchBytes: 0, at: 1_000 + 23 * Self.hour
+        )
+        #expect(blocked.attemptCount == 1, "still one real attempt")
+        #expect(blocked.lastAttemptAt == 1_000, "the free block is not an attempt time")
+        // …and the ORIGINAL 24 h window still expires on schedule.
+        #expect(Policy.decide(record: blocked, now: 1_000 + Self.day) == .attempt(attemptNumber: 2))
+    }
+
+    // MARK: - Exhaustion is recoverable when day-0 itself changes
+
+    /// THE TRAP THIS CLOSES. playhead-p70f deliberately does NOT fix why day-0
+    /// mints nothing, so every replayed episode burns its budget on a failure
+    /// mode that is about to be repaired. Without a generation stamp the owner
+    /// would fix the mint and observe no change at all.
+    @Test("an EXHAUSTED asset becomes eligible again when the day-0 generation moves")
+    func exhaustedBudgetIsRecoverableAcrossGenerations() {
+        let exhausted = RediffDayZeroAttemptRecord(
+            analysisAssetId: "a", attemptCount: Policy.maxAttempts, lastAttemptAt: 1_000,
+            lastExit: .noDivergentSlot, totalFullFetchBytes: 324_000_000,
+            policyGeneration: Policy.currentGeneration
+        )
+        #expect(Policy.decide(record: exhausted, now: 1_000 + 365 * Self.day).isAttempt == false)
+
+        // The SAME row read by a build whose day-0 behavior has moved on.
+        let stale = RediffDayZeroAttemptRecord(
+            analysisAssetId: "a", attemptCount: Policy.maxAttempts, lastAttemptAt: 1_000,
+            lastExit: .noDivergentSlot, totalFullFetchBytes: 324_000_000,
+            policyGeneration: Policy.currentGeneration - 1
+        )
+        #expect(Policy.decide(record: stale, now: 1_000 + 60) == .attempt(attemptNumber: 1),
+                "fixing the mint must actually reach the episodes that failed under the old one")
+
+        // And the budget genuinely restarts, rather than folding onto the old count.
+        let folded = Policy.advance(
+            record: stale, assetId: "a",
+            outcome: RediffDayZeroMintOutcome(exit: .noDivergentSlot, bSideCount: 2, bSidesAccepted: 2),
+            fullFetchBytes: 108_000_000, at: 2_000
+        )
+        #expect(folded.attemptCount == 1, "a new generation earns a whole budget, not one more attempt")
+        #expect(folded.policyGeneration == Policy.currentGeneration)
+        #expect(folded.totalFullFetchBytes == 432_000_000, "cumulative cost is a fact and still carries")
+    }
+
+    @Test("a MARKED asset stays terminal even across a generation change")
+    func markedSurvivesGenerationChange() {
+        let marked = RediffDayZeroAttemptRecord(
+            analysisAssetId: "a", attemptCount: 1, lastAttemptAt: 1_000,
+            lastExit: .marked, lastMarkCount: 2,
+            policyGeneration: Policy.currentGeneration - 1
+        )
+        // The marks are already on disk; re-fetching would spend ~108 MB to
+        // mint nothing, so the generation reset must NOT reach this case.
+        #expect(Policy.decide(record: marked, now: 1_000 + 365 * Self.day)
+                == .suppress(reason: .marked, nextEligibleAt: nil))
     }
 
     @Test("a SUCCESSFUL day-0 never re-fetches, no matter how much time passes")
@@ -666,6 +763,9 @@ struct RediffDayZeroAttemptStoreTests {
         // …versus a pre-fetch block that cost nothing.
         #expect(byAsset["a2"]?.lastExit == .aSideNotAnchored)
         #expect(byAsset["a2"]?.totalFullFetchBytes == 0)
+        #expect(byAsset["a2"]?.attemptCount == 0,
+                "a zero-byte block is recorded but must not consume the bandwidth budget")
+        #expect(byAsset["a1"]?.attemptCount == 1, "a run that fetched IS an attempt")
         // A pre-fetch block spends nothing, so it must NOT inflate the
         // bandwidth-spent counter.
         let totals = try await store.fetchRediffBandwidthTotals()
@@ -715,6 +815,137 @@ struct RediffDayZeroAttemptStoreTests {
                 "day-0 accountability must not resurrect the poisoning bug")
     }
 
+    /// REVIEW ROUND 1. The recorder folds an attempt with a read-modify-write
+    /// (`fetch` → `advance` → `upsert`) while `noteRediffDayZeroSuppression`
+    /// increments the same row in place. If the upsert wrote the suppression
+    /// columns back from its own stale snapshot, a suppression landing between
+    /// the two would be lost — and that interleaving is the EXPECTED one, since
+    /// an `.alreadyInFlight` suppression happens precisely while the attempt it
+    /// collided with is in flight.
+    @Test("an attempt upsert must not clobber a suppression recorded since it read")
+    func attemptUpsertDoesNotClobberSuppressionCount() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1"))
+        let stale = RediffDayZeroAttemptRecord(
+            analysisAssetId: "a1", attemptCount: 1, lastAttemptAt: 1_000,
+            lastExit: .noDivergentSlot, totalFullFetchBytes: 108_000_000
+        )
+        try await store.upsertRediffDayZeroAttempt(stale)
+
+        // A concurrent suppression lands…
+        try await store.noteRediffDayZeroSuppression(assetId: "a1", reason: .alreadyInFlight, at: 1_500)
+        #expect(try await store.fetchRediffDayZeroAttempt(assetId: "a1")?.suppressedCount == 1)
+
+        // …and the in-flight attempt now writes back a record folded from the
+        // snapshot it read BEFORE the suppression (suppressedCount == 0).
+        try await store.upsertRediffDayZeroAttempt(DayZeroRediffAttemptPolicy.advance(
+            record: stale, assetId: "a1",
+            outcome: RediffDayZeroMintOutcome(exit: .noAcceptedByteDiff, bSideCount: 2, bSidesGateRejected: 2),
+            fullFetchBytes: 108_000_000, at: 2_000
+        ))
+
+        let read = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(read?.suppressedCount == 1, "the suppression survived the attempt's write-back")
+        #expect(read?.lastSuppressedAt == 1_500)
+        // …and the attempt itself still landed.
+        #expect(read?.attemptCount == 2)
+        #expect(read?.lastExit == .noAcceptedByteDiff)
+    }
+
+    /// REVIEW ROUND 1. `suppressionDoesNotConsumeBudget` proves the STORE
+    /// primitive is safe, but nothing proved the RECORDER routes
+    /// `.alreadyInFlight` to it rather than through the attempt fold. That
+    /// routing is the whole reason a duplicate kickoff does not look like a
+    /// third failed attempt.
+    @Test("the RECORDER routes .alreadyInFlight to the suppression counter, not the attempt fold")
+    func alreadyInFlightIsRoutedToSuppression() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1"))
+        try await store.upsertRediffDayZeroAttempt(RediffDayZeroAttemptRecord(
+            analysisAssetId: "a1", attemptCount: 1, lastAttemptAt: 1_000,
+            lastExit: .noDivergentSlot, totalFullFetchBytes: 108_000_000
+        ))
+        let recorder = AnalysisStoreRediffRefetchRecorder(store: store, config: .production, now: { 2_000 })
+
+        await recorder.recordOutcome(.dayZeroUnmarked(
+            assetId: "a1", cost: .zero, mint: .blocked(.alreadyInFlight)
+        ))
+
+        let read = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(read?.suppressedCount == 1, "a duplicate kickoff is a SUPPRESSION")
+        #expect(read?.lastSuppressedAt == 2_000)
+        #expect(read?.attemptCount == 1, "…and must not consume the attempt budget")
+        #expect(read?.lastExit == .noDivergentSlot,
+                "…nor overwrite the exit of the attempt it collided with")
+        #expect(read?.lastAttemptAt == 1_000)
+    }
+
+    /// REVIEW ROUND 1. `.assetRowMissing` is the one exit that structurally
+    /// cannot be persisted: the table is FK'd to `analysis_assets` and there is
+    /// no asset row by definition. Pinned so the taxonomy's documentation stays
+    /// honest — the recorder must SWALLOW the failure (never propagate), leave
+    /// no row, and cost nothing.
+    @Test("recording .assetRowMissing for an unknown asset is swallowed, not persisted")
+    func assetRowMissingCannotBePersisted() async throws {
+        let store = try await makeTestStore()
+        let recorder = AnalysisStoreRediffRefetchRecorder(store: store, config: .production, now: { 500 })
+
+        await recorder.recordOutcome(.dayZeroUnmarked(
+            assetId: "ghost-asset", cost: .zero, mint: .blocked(.assetRowMissing)
+        ))
+
+        #expect(try await store.fetchRediffDayZeroAttempt(assetId: "ghost-asset") == nil,
+                "an FK'd per-asset table cannot hold a row for an asset that does not exist")
+        // The free exit still must not inflate the byte-spend counter.
+        let totals = try await store.fetchRediffBandwidthTotals()
+        #expect(totals.dayZeroUnmarkedCount == 0)
+        #expect(totals.fullFetchBytesTotal == 0)
+    }
+
+    /// REVIEW ROUND 1, END-TO-END. The pure-policy proof
+    /// (`freeExitDoesNotConsumeTheAttemptBudget`) is only worth something if
+    /// the recorder actually routes a free exit through it.
+    @Test("a pre-fetch block recorded three times leaves the asset ELIGIBLE, not locked out")
+    func repeatedFreeBlocksNeverExhaustTheBudget() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1"))
+        let recorder = AnalysisStoreRediffRefetchRecorder(store: store, config: .production, now: { 500 })
+
+        for _ in 0..<(DayZeroRediffAttemptPolicy.maxAttempts + 2) {
+            await recorder.recordOutcome(.dayZeroUnmarked(
+                assetId: "a1", cost: .zero, mint: .blocked(.aSideNotAnchored)
+            ))
+        }
+
+        let read = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(read?.attemptCount == 0, "zero-byte declines are not attempts")
+        #expect(read?.lastExit == .aSideNotAnchored, "…but the decline is still recorded")
+        #expect(DayZeroRediffAttemptPolicy.decide(record: read, now: 9_999).isAttempt == true,
+                "a streaming A-side that materializes later must still get its chance")
+    }
+
+    @Test("the policy generation round-trips and a foreign generation reopens the budget")
+    func policyGenerationRoundTrips() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a1"))
+        try await store.upsertRediffDayZeroAttempt(RediffDayZeroAttemptRecord(
+            analysisAssetId: "a1", attemptCount: DayZeroRediffAttemptPolicy.maxAttempts,
+            lastAttemptAt: 1_000, lastExit: .noDivergentSlot
+        ))
+        let atHead = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(atHead?.policyGeneration == DayZeroRediffAttemptPolicy.currentGeneration)
+        #expect(DayZeroRediffAttemptPolicy.decide(record: atHead, now: 9_999_999).isAttempt == false)
+
+        // A row written by a build with different day-0 behavior.
+        try await store.execForTesting(
+            "UPDATE rediff_day_zero_attempts SET policyGeneration = 0 WHERE analysisAssetId = 'a1'"
+        )
+        let stale = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(stale?.policyGeneration == 0)
+        #expect(DayZeroRediffAttemptPolicy.decide(record: stale, now: 9_999_999).isAttempt == true,
+                "an exhausted budget from a different generation must not outlive it")
+    }
+
     @Test("an unknown persisted exit decodes as RETRYABLE, never as a permanent park")
     func unknownExitIsConservative() async throws {
         let store = try await makeTestStore()
@@ -730,6 +961,142 @@ struct RediffDayZeroAttemptStoreTests {
         let read = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
         #expect(read?.lastExit.isRetryable == true,
                 "an unreadable exit must back off, never permanently park an episode")
+    }
+}
+
+// MARK: - V38 against a POPULATED pre-V38 database (review round 1)
+
+/// The V38 tests the implementer shipped all run against a database that was
+/// born at head. The owner's device is not: it carries a populated
+/// `rediff_bandwidth_ledger` written by a V28..V37 build, with 299.6 MB already
+/// in it. These reconstruct that exact shape — the ledger in its pre-V38 column
+/// set, with real totals, and no `rediff_day_zero_attempts` table at all — and
+/// prove the upgrade is additive, idempotent, and loses nothing.
+@Suite("AnalysisStore — V38 day-0 attempts upgrade path (playhead-p70f)")
+struct RediffDayZeroV38MigrationTests {
+
+    private func makeAsset(id: String) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id, episodeId: "ep-\(id)", assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil, sourceURL: "file:///tmp/\(id).mp3",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil, episodeDurationSec: 100
+        )
+    }
+
+    /// Rewrites the on-disk schema back to its V37 shape THROUGH THE STORE'S OWN
+    /// CONNECTION (no second sqlite handle racing the WAL): drop the V38 table
+    /// outright and rebuild the ledger without `dayZeroUnmarkedCount`, carrying
+    /// its rows across so the totals under test are genuinely pre-existing data.
+    private func rewindToV37(_ store: AnalysisStore) async throws {
+        try await store.execForTesting("DROP TABLE IF EXISTS rediff_day_zero_attempts")
+        try await store.execForTesting("ALTER TABLE rediff_bandwidth_ledger RENAME TO rediff_bandwidth_ledger_v37tmp")
+        try await store.execForTesting("""
+            CREATE TABLE rediff_bandwidth_ledger (
+                id                  INTEGER PRIMARY KEY CHECK (id = 1),
+                precheckBytesTotal  INTEGER NOT NULL DEFAULT 0,
+                fullFetchBytesTotal INTEGER NOT NULL DEFAULT 0,
+                unchangedCount      INTEGER NOT NULL DEFAULT 0,
+                rotatedCount        INTEGER NOT NULL DEFAULT 0,
+                failedCount         INTEGER NOT NULL DEFAULT 0,
+                parkedCount         INTEGER NOT NULL DEFAULT 0,
+                lastUpdatedAt       REAL
+            )
+            """)
+        try await store.execForTesting("""
+            INSERT INTO rediff_bandwidth_ledger
+            (id, precheckBytesTotal, fullFetchBytesTotal, unchangedCount,
+             rotatedCount, failedCount, parkedCount, lastUpdatedAt)
+            SELECT id, precheckBytesTotal, fullFetchBytesTotal, unchangedCount,
+                   rotatedCount, failedCount, parkedCount, lastUpdatedAt
+            FROM rediff_bandwidth_ledger_v37tmp
+            """)
+        try await store.execForTesting("DROP TABLE rediff_bandwidth_ledger_v37tmp")
+        try await store.execForTesting("UPDATE _meta SET value = '37' WHERE key = 'schema_version'")
+    }
+
+    private func reopen(_ dir: URL) async throws -> AnalysisStore {
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        return store
+    }
+
+    @Test("THE UPGRADE: a populated V37 ledger reaches V38 with its bytes intact")
+    func populatedV37DatabaseUpgrades() async throws {
+        let (bootstrap, dir) = try await makeTestStoreWithDirectory()
+        try await bootstrap.insertAsset(makeAsset(id: "a1"))
+        // The device shape: ~300 MB spent, every outcome counter at zero.
+        try await bootstrap.accumulateRediffBandwidth(
+            precheckBytes: 0, fullFetchBytes: 299_600_000,
+            unchangedCount: 0, rotatedCount: 0, failedCount: 0, parkedCount: 0,
+            at: 1_700_000_000
+        )
+        try await rewindToV37(bootstrap)
+
+        // Pre-migration state is genuinely pre-V38.
+        #expect(!(try probeTableExists(in: dir, table: "rediff_day_zero_attempts")))
+        #expect(!(try probeColumnExists(in: dir, table: "rediff_bandwidth_ledger", column: "dayZeroUnmarkedCount")))
+
+        let upgraded = try await reopen(dir)
+
+        #expect(try await upgraded.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(try probeTableExists(in: dir, table: "rediff_day_zero_attempts"))
+        #expect(try probeColumnExists(in: dir, table: "rediff_bandwidth_ledger", column: "dayZeroUnmarkedCount"))
+        #expect(try probeColumnExists(in: dir, table: "rediff_day_zero_attempts", column: "policyGeneration"))
+
+        // NOTHING was lost, and the new counter starts honest.
+        let totals = try await upgraded.fetchRediffBandwidthTotals()
+        #expect(totals.fullFetchBytesTotal == 299_600_000, "the pre-existing ledger row survived the ALTER")
+        #expect(totals.lastUpdatedAt == 1_700_000_000)
+        #expect(totals.dayZeroUnmarkedCount == 0, "a backfilled column must not invent history")
+
+        // …and both new writes work against the upgraded schema.
+        try await upgraded.upsertRediffDayZeroAttempt(RediffDayZeroAttemptRecord(
+            analysisAssetId: "a1", attemptCount: 1, lastAttemptAt: 2_000, lastExit: .noDivergentSlot
+        ))
+        #expect(try await upgraded.fetchRediffDayZeroAttempt(assetId: "a1")?.lastExit == .noDivergentSlot)
+        try await upgraded.accumulateRediffBandwidth(
+            precheckBytes: 0, fullFetchBytes: 108_000_000,
+            unchangedCount: 0, rotatedCount: 0, failedCount: 0, parkedCount: 0,
+            dayZeroUnmarkedCount: 1, at: 1_700_000_100
+        )
+        let after = try await upgraded.fetchRediffBandwidthTotals()
+        #expect(after.fullFetchBytesTotal == 299_600_000 + 108_000_000, "the new write ACCUMULATES onto the old total")
+        #expect(after.dayZeroUnmarkedCount == 1)
+    }
+
+    @Test("the V38 step is idempotent — re-running it neither throws nor disturbs data")
+    func v38IsIdempotent() async throws {
+        let (bootstrap, dir) = try await makeTestStoreWithDirectory()
+        try await bootstrap.insertAsset(makeAsset(id: "a1"))
+        try await bootstrap.accumulateRediffBandwidth(
+            precheckBytes: 1_000, fullFetchBytes: 54_000_000,
+            unchangedCount: 0, rotatedCount: 0, failedCount: 0, parkedCount: 0,
+            dayZeroUnmarkedCount: 2, at: 900
+        )
+        try await bootstrap.upsertRediffDayZeroAttempt(RediffDayZeroAttemptRecord(
+            analysisAssetId: "a1", attemptCount: 2, lastAttemptAt: 800,
+            lastExit: .noAcceptedByteDiff, totalFullFetchBytes: 54_000_000
+        ))
+
+        // Reopen at HEAD (the migration short-circuits) …
+        let head = try await reopen(dir)
+        #expect(try await head.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        // … and again after a rewind that leaves the V38 objects in place, so
+        // `CREATE TABLE IF NOT EXISTS` + `addColumnIfNeeded` re-run for real.
+        try await head.execForTesting("UPDATE _meta SET value = '37' WHERE key = 'schema_version'")
+        let rerun = try await reopen(dir)
+
+        #expect(try await rerun.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        let totals = try await rerun.fetchRediffBandwidthTotals()
+        #expect(totals.fullFetchBytesTotal == 54_000_000)
+        #expect(totals.dayZeroUnmarkedCount == 2, "a re-run must not reset the counter")
+        let row = try await rerun.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(row?.attemptCount == 2, "a re-run must not drop the attempt history")
+        #expect(row?.lastExit == .noAcceptedByteDiff)
+        #expect(row?.policyGeneration == DayZeroRediffAttemptPolicy.currentGeneration)
     }
 }
 

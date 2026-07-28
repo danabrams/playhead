@@ -368,6 +368,11 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         let totalFullFetchBytes: Int
         let suppressedCount: Int
         let lastSuppressedAt: Double?
+        /// Which `DayZeroRediffAttemptPolicy.currentGeneration` spent this
+        /// asset's attempt budget. `attempt_count` at the cap with a generation
+        /// BELOW the shipping build's means the asset is eligible again; equal
+        /// to it means day-0 is done with this asset until the generation moves.
+        let policyGeneration: Int
 
         enum CodingKeys: String, CodingKey {
             case assetIdHash = "asset_id_hash"
@@ -384,6 +389,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case totalFullFetchBytes = "total_full_fetch_bytes"
             case suppressedCount = "suppressed_count"
             case lastSuppressedAt = "last_suppressed_at"
+            case policyGeneration = "policy_generation"
         }
     }
 

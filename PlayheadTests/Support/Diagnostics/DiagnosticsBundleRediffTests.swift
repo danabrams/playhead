@@ -107,6 +107,11 @@ struct DiagnosticsBundleRediffTests {
         #expect(row.lastBSidesAccepted == 0)
         #expect(row.totalFullFetchBytes == 299_600_000)
         #expect(row.suppressedCount == 4)
+        // Review round 1: the budget is generation-scoped, so a support
+        // engineer reading `attempt_count == 3` needs to know WHICH generation
+        // spent it — an exhausted budget stamped below the shipping build's
+        // generation is already eligible again.
+        #expect(row.policyGeneration == DayZeroRediffAttemptPolicy.currentGeneration)
     }
 
     // MARK: - Privacy

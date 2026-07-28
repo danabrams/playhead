@@ -262,10 +262,16 @@ enum DiagnosticsBundleBuilder {
     ///
     /// This is the ONLY place a raw `analysisAssetId` is dropped: every row's
     /// id goes through `EpisodeIdHasher` (legal checklist item a), exactly as
-    /// the banner-tally and music-bed projections do. `lastDetail` is the only
-    /// free-text field and is run through `DiagnosticTextSanitizer` before it
-    /// is truncated — it originates from `String(describing: error)`, which on
-    /// a URL error carries the enclosure URL.
+    /// the banner-tally and music-bed projections do.
+    ///
+    /// The day-0 rows' `lastDetail` — the only free text in the snapshot — is
+    /// NOT projected at all rather than sanitized: it originates from
+    /// `String(describing: error)`, which on a `URLError` carries the enclosure
+    /// URL, and no allowlist is a safe bound on an arbitrary error dump. The
+    /// closed `last_exit` enum is what a support engineer needs; the free text
+    /// stays on device. `DiagnosticsBundleRediffTests.detailIsNotExported` is
+    /// the proof, and every other projected field is an integer, a timestamp,
+    /// or a closed enum `rawValue`.
     private static func projectRediff(
         _ snapshot: DiagnosticsRediffSnapshot,
         installID: UUID
@@ -318,7 +324,8 @@ enum DiagnosticsBundleBuilder {
                     lastFullFetchBytes: row.lastFullFetchBytes,
                     totalFullFetchBytes: row.totalFullFetchBytes,
                     suppressedCount: row.suppressedCount,
-                    lastSuppressedAt: row.lastSuppressedAt
+                    lastSuppressedAt: row.lastSuppressedAt,
+                    policyGeneration: row.policyGeneration
                 )
             }
 

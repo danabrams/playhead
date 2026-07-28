@@ -5657,10 +5657,21 @@ actor AnalysisStore {
                 totalFullFetchBytes    INTEGER NOT NULL DEFAULT 0,
                 suppressedCount        INTEGER NOT NULL DEFAULT 0,
                 lastSuppressedAt       REAL,
-                lastDetail             TEXT
+                lastDetail             TEXT,
+                policyGeneration       INTEGER NOT NULL DEFAULT 0
             );
         """)
         try exec("CREATE INDEX IF NOT EXISTS idx_rediff_day_zero_attempts_last ON rediff_day_zero_attempts(lastAttemptAt DESC);")
+        // Belt-and-braces for a table already present from an earlier build of
+        // this same (unreleased) migration: `CREATE TABLE IF NOT EXISTS` is a
+        // no-op there, so the column has to be asserted separately. `DEFAULT 0`
+        // is deliberately NOT `currentGeneration` — a row this build did not
+        // write must read as a foreign generation and get a fresh budget.
+        try addColumnIfNeeded(
+            table: "rediff_day_zero_attempts",
+            column: "policyGeneration",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
         if try tableExists("rediff_bandwidth_ledger") {
             try addColumnIfNeeded(
                 table: "rediff_bandwidth_ledger",
@@ -5671,18 +5682,26 @@ actor AnalysisStore {
         try setSchemaVersion(38)
     }
 
-    /// Upsert one asset's day-0 attempt record (the whole row is replaced —
+    /// Upsert one asset's day-0 attempt record.
     /// `DayZeroRediffAttemptPolicy.advance` has already folded the prior row's
-    /// `attemptCount` / `totalFullFetchBytes` / suppression history into the
-    /// value).
+    /// `attemptCount` / `totalFullFetchBytes` into the value.
+    ///
+    /// The two SUPPRESSION columns are seeded on insert and then left alone on
+    /// conflict — `noteRediffDayZeroSuppression` owns them and increments them
+    /// in place. `advance` reads them and writes them back, so persisting them
+    /// here would be a read-modify-write over a counter another writer is
+    /// incrementing, and the interleaving is not hypothetical: an
+    /// `.alreadyInFlight` suppression is recorded PRECISELY while the attempt
+    /// it collided with is between its own read and its own write.
     func upsertRediffDayZeroAttempt(_ record: RediffDayZeroAttemptRecord) throws {
         let sql = """
             INSERT INTO rediff_day_zero_attempts
             (analysisAssetId, attemptCount, lastAttemptAt, lastExit, lastMarkCount,
              lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
              lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
-             totalFullFetchBytes, suppressedCount, lastSuppressedAt, lastDetail)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             totalFullFetchBytes, suppressedCount, lastSuppressedAt, lastDetail,
+             policyGeneration)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(analysisAssetId) DO UPDATE SET
                 attemptCount = excluded.attemptCount,
                 lastAttemptAt = excluded.lastAttemptAt,
@@ -5695,9 +5714,8 @@ actor AnalysisStore {
                 lastDivergentSlotCount = excluded.lastDivergentSlotCount,
                 lastFullFetchBytes = excluded.lastFullFetchBytes,
                 totalFullFetchBytes = excluded.totalFullFetchBytes,
-                suppressedCount = excluded.suppressedCount,
-                lastSuppressedAt = excluded.lastSuppressedAt,
-                lastDetail = excluded.lastDetail
+                lastDetail = excluded.lastDetail,
+                policyGeneration = excluded.policyGeneration
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -5726,6 +5744,7 @@ actor AnalysisStore {
         } else {
             sqlite3_bind_null(stmt, 15)
         }
+        bind(stmt, 16, record.policyGeneration)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -5748,8 +5767,8 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO rediff_day_zero_attempts
             (analysisAssetId, attemptCount, lastAttemptAt, lastExit,
-             suppressedCount, lastSuppressedAt)
-            VALUES (?, 0, ?, ?, 1, ?)
+             suppressedCount, lastSuppressedAt, policyGeneration)
+            VALUES (?, 0, ?, ?, 1, ?, ?)
             ON CONFLICT(analysisAssetId) DO UPDATE SET
                 suppressedCount = suppressedCount + 1,
                 lastSuppressedAt = excluded.lastSuppressedAt
@@ -5760,6 +5779,7 @@ actor AnalysisStore {
         bind(stmt, 2, now)
         bind(stmt, 3, reason.rawValue)
         bind(stmt, 4, now)
+        bind(stmt, 5, DayZeroRediffAttemptPolicy.currentGeneration)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -5792,7 +5812,8 @@ actor AnalysisStore {
         SELECT analysisAssetId, attemptCount, lastAttemptAt, lastExit, lastMarkCount,
                lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
                lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
-               totalFullFetchBytes, lastDetail, suppressedCount, lastSuppressedAt
+               totalFullFetchBytes, lastDetail, suppressedCount, lastSuppressedAt,
+               policyGeneration
         FROM rediff_day_zero_attempts
         """
 
@@ -5818,7 +5839,11 @@ actor AnalysisStore {
             totalFullFetchBytes: Int(sqlite3_column_int64(stmt, 11)),
             suppressedCount: Int(sqlite3_column_int64(stmt, 13)),
             lastSuppressedAt: sqlite3_column_type(stmt, 14) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 14),
-            lastDetail: sqlite3_column_type(stmt, 12) == SQLITE_NULL ? nil : text(stmt, 12)
+            lastDetail: sqlite3_column_type(stmt, 12) == SQLITE_NULL ? nil : text(stmt, 12),
+            // Read POSITIONALLY, never defaulted: a row written before this
+            // column existed reads 0, which is a foreign generation, which is
+            // what earns it a fresh attempt budget.
+            policyGeneration: Int(sqlite3_column_int64(stmt, 15))
         )
     }
 

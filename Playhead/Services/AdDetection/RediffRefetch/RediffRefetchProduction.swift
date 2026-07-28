@@ -190,7 +190,14 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
             )
             try await store.upsertRediffDayZeroAttempt(advanced)
         } catch {
-            Self.logger.warning("rediff DAY-0 attempt record failed assetId=\(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
+            // EXPECTED for exactly one exit: `.assetRowMissing`. The table is
+            // FK'd to `analysis_assets` and the store runs `foreign_keys = ON`,
+            // so "there is no asset row" is precisely the case that cannot have
+            // an asset-keyed row. Every other exit reaching here is a genuine
+            // store failure. Either way the attempt is FREE at this point (the
+            // record write is the last step) and the os_log line below is the
+            // surviving evidence.
+            Self.logger.warning("rediff DAY-0 attempt record failed assetId=\(assetId, privacy: .public) exit=\(mint.exit.rawValue, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
 
