@@ -455,6 +455,28 @@ struct NowPlayingView: View {
                         )
                         return false
                     }
+                },
+                // playhead-jw63.5: banner-context entry into the feedback
+                // channel, reached by long-pressing the card. Adds no
+                // visible control, so the one-tap Yes/No stays the primary
+                // (and cheapest) way to answer. The note carries the
+                // moment's offset plus a SALTED reference token — never the
+                // episode title, never anything about its content.
+                onTellUsWhatHappened: { item in
+                    Task { @MainActor in
+                        let reference = listenerFeedbackReference(
+                            modelContext: modelContext,
+                            episodeId: item.episodeId
+                        )
+                        _ = try? await runListenerFeedback(
+                            runtime: runtime,
+                            modelContext: modelContext,
+                            context: .moment(
+                                atSeconds: item.adStartTime,
+                                reference: reference
+                            )
+                        )
+                    }
                 }
             )
         }

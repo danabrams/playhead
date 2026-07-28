@@ -166,6 +166,20 @@ final class DiagnosticsExportCoordinator {
         return (data, filename, subject)
     }
 
+    /// playhead-jw63.5 — apply legal checklist item (d) for a bundle that
+    /// this coordinator BUILT but did not itself present.
+    ///
+    /// The listener-feedback channel reuses `buildAndEncode()` for its
+    /// optional attachment and presents through its own envelope, so the
+    /// reset that `exportAndPresent()` performs inline would otherwise be
+    /// skipped on that path — leaving `Episode.diagnosticsOptIn` set after
+    /// the bundle had already left the device. Exposed as a named seam
+    /// (rather than by widening `applyOptInResetIfNeeded`'s access) so the
+    /// only two callers are both obvious in source.
+    func applyOptInReset(for result: DiagnosticsMailComposeResult) {
+        applyOptInResetIfNeeded(for: result)
+    }
+
     // MARK: - Reset policy application
 
     /// Uses `DiagnosticsOptInResetPolicy` to decide whether the opted-in

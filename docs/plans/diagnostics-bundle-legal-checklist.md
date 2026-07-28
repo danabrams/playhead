@@ -277,3 +277,65 @@ directly, with no Playhead code involved.
 `offset_into_binary_text_segment` with `atos -l 0`. Records carry their
 OWN `app_version` / `app_build_version` because MetricKit delivers up to
 24 h late, often after the user has taken an update.
+
+## (f) Delivery surfaces: the in-app feedback channel
+
+Added by playhead-jw63.5. The bundle gains **no field** in this bead —
+`DiagnosticsBundle.swift` is untouched, so (a)–(e) hold verbatim. What
+changes is that the same bytes now have a **second** way off the device,
+and that a **new prose surface** travels beside them.
+
+**Two things this section exists to pin.**
+
+1. **The bundle's reset policy follows the bytes, not the button.**
+   `DiagnosticsExportCoordinator.applyOptInResetIfNeeded` used to be
+   reachable only from `exportAndPresent()`. The feedback channel reuses
+   `buildAndEncode()` for its optional attachment and presents through
+   its own envelope, so without a second call site an opted-in episode's
+   `diagnosticsOptIn` flag would survive a bundle that had already left
+   the device. `applyOptInReset(for:)` is the named seam for that, and
+   `ListenerFeedbackCoordinator` invokes it **only when a bundle actually
+   shipped** — never for a note sent without one, and never for a build
+   that failed. Verified by
+   `ListenerFeedbackCoordinatorTests.resetObserverFiresOnlyWithAttachment`
+   and `.resetObserverForwardsResult` (a `.cancelled` composer result
+   reaches the policy, which PRESERVES the flag per (d)).
+
+2. **The prefilled mail body is held to the bundle's bar.** It is
+   composed by `ListenerFeedbackComposer.body(...)` from a closed set of
+   inputs — app version, OS version, device class, an optional playback
+   offset, and an optional **salted hash prefix**. The reference token is
+   the first eight hex characters of the same
+   `SHA-256(installID || episodeId)` the bundle emits as
+   `episode_id_hash` (c), which is what lets a note correlate with a
+   bundle without either naming the episode. No title, no transcript, no
+   feed URL, no advertiser, no path.
+
+   **Verified by** `PlayheadTests/Support/Feedback/ListenerFeedbackRedactionTests.swift`:
+   - `momentNoteCarriesNoSentinels` — sweeps the whole envelope (subject,
+     body, shareText, recipients, attachment filename) for a show title,
+     transcript text, a feed URL, a container path, an advertiser, and a
+     raw episode id. Non-vacuous: it also asserts the moment line and the
+     reference ARE present.
+   - `onlyReferenceIsEpisodeDerived` — the raw episode id is absent and
+     the emitted token is a prefix of the (c) hash.
+   - `bodyContainsNoLocators` — no `://`, `http`, `/var/`, `/Users/`, `@`.
+   - `bodyCarriesOnlyKnownFacts` — the body is exactly three non-blank
+     lines, enumerated. Adding an interpolation to the body is therefore
+     a deliberate edit made against this list, the same way adding a
+     field to a stability record is (e).
+
+**Consent vs. content.** The checklist governs CONTENT. Whether the
+bundle rides along is a separate, product-level decision: it is **opt-in
+per send, default OFF** (`ListenerFeedbackDefaults.attachDiagnosticsDefault`),
+so a "this felt wrong" note stays a note unless the listener says
+otherwise. That is a stricter posture than the checklist requires.
+
+**Egress.** None added. Both surfaces are user-initiated and terminate
+in a composer or a share sheet the listener must confirm; nothing is
+uploaded. The share-sheet fallback (used when Mail is not configured)
+is deliberately MORE permissive than the diagnostics-export fallback —
+Copy, Messages, and AirDrop stay available — because the failure mode
+there is a listener with no way to reach us at all. The artifact routed
+that way is the listener's own sentence plus, only if they opted in, the
+same audited bundle.

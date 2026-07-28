@@ -263,6 +263,119 @@ final class UIKitDiagnosticsPresenter: DiagnosticsExportPresenter {
     }
 }
 
+// MARK: - Listener feedback (playhead-jw63.5)
+
+/// The feedback channel presents through the SAME presenter: same host
+/// resolution, same `MailComposeDelegateProxy`, same per-export tmp
+/// subdirectory lifecycle. Only the envelope differs (addressed + prefilled)
+/// and the fallback's exclusion list (see
+/// `DiagnosticsExportService.feedbackFallbackExcludedActivities`).
+///
+/// The `.mail` / `.shareSheet` choice is made UPSTREAM by
+/// `ListenerFeedbackComposer.delivery(canSendMail:)` against an injected
+/// availability reading, so both branches are assertable on the simulator.
+/// This extension still degrades on its own if composer construction
+/// declines after that decision was taken — identical to the diagnostics
+/// path's nil-composer handling.
+extension UIKitDiagnosticsPresenter: ListenerFeedbackPresenting {
+
+    func present(
+        envelope: ListenerFeedbackEnvelope,
+        delivery: ListenerFeedbackDelivery,
+        completion: @escaping @MainActor (Result<DiagnosticsMailComposeResult, Error>) -> Void
+    ) {
+        guard let host = hostProvider() else {
+            completion(.failure(DiagnosticsExportError.missingHostViewController))
+            return
+        }
+        switch delivery {
+        case .mail:
+            presentFeedbackMail(envelope: envelope, host: host, completion: completion)
+        case .shareSheet:
+            presentFeedbackShare(envelope: envelope, host: host, completion: completion)
+        }
+    }
+
+    private func presentFeedbackMail(
+        envelope: ListenerFeedbackEnvelope,
+        host: UIViewController,
+        completion: @escaping @MainActor (Result<DiagnosticsMailComposeResult, Error>) -> Void
+    ) {
+        let proxy = MailComposeDelegateProxy { [weak self] result in
+            guard let self else {
+                completion(.success(result))
+                return
+            }
+            self.activeDelegate = nil
+            completion(.success(result))
+        }
+        activeDelegate = proxy
+
+        guard let composer = DiagnosticsExportService.makeFeedbackMailComposer(
+            envelope: envelope,
+            delegate: proxy
+        ) else {
+            // Availability said yes moments ago and construction still
+            // declined. Never dead-end the listener: route to the share
+            // sheet, exactly as the diagnostics path does.
+            activeDelegate = nil
+            presentFeedbackShare(envelope: envelope, host: host, completion: completion)
+            return
+        }
+        host.present(composer, animated: true)
+    }
+
+    private func presentFeedbackShare(
+        envelope: ListenerFeedbackEnvelope,
+        host: UIViewController,
+        completion: @escaping @MainActor (Result<DiagnosticsMailComposeResult, Error>) -> Void
+    ) {
+        // The attachment is optional here, and a failed write must NOT sink
+        // the note: on any I/O error we share the text alone. The text is the
+        // listener's message; the bundle is a nice-to-have that support can
+        // ask for separately. (The body's "Attached: …" line is composed
+        // upstream and would then over-promise by one sentence — an
+        // acceptable cosmetic mismatch, and strictly better than discarding
+        // a note that was already written.)
+        var subdirectory: URL?
+        var fileURL: URL?
+        if let attachment = envelope.attachment {
+            if let written = try? Self.writeBundleToFreshSubdirectory(
+                data: attachment.data,
+                filename: attachment.filename
+            ) {
+                subdirectory = written.subdirectory
+                fileURL = written.fileURL
+            }
+        }
+
+        let activity = DiagnosticsExportService.makeFeedbackFallback(
+            text: envelope.shareText,
+            fileURL: fileURL
+        )
+        activity.completionWithItemsHandler = { _, completed, _, _ in
+            let mapped: DiagnosticsMailComposeResult = completed ? .sent : .cancelled
+            Task { @MainActor in
+                if let subdirectory {
+                    Self.removeSubdirectory(subdirectory)
+                }
+                completion(.success(mapped))
+            }
+        }
+
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = host.view
+            popover.sourceRect = CGRect(
+                x: host.view.bounds.midX,
+                y: host.view.bounds.midY,
+                width: 0, height: 0
+            )
+            popover.permittedArrowDirections = []
+        }
+        host.present(activity, animated: true)
+    }
+}
+
 // MARK: - Mail compose delegate proxy
 
 /// NSObject bridge that adapts the Objective-C
