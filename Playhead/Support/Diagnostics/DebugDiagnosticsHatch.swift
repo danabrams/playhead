@@ -113,6 +113,7 @@ func runDebugDiagnosticsExport(
         learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
         stabilityFetch: DebugDiagnosticsHatch.stabilityFetch,
         bannerTalliesFetch: DebugDiagnosticsHatch.bannerTalliesFetch,
+        rediffFetch: DebugDiagnosticsHatch.makeRediffFetch(store: runtime.analysisStore),
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -200,6 +201,41 @@ enum DebugDiagnosticsHatch {
     /// bundle has the same shape as a Release one.
     static let bannerTalliesFetch: DiagnosticsBannerTalliesFetch = {
         await MainActor.run { BannerTallyStore.shared.sessions }
+    }
+
+    // MARK: Rediff-lane adapter (playhead-p70f)
+
+    /// Cap on the `background_task_runs` rows fetched for the rediff entry
+    /// point. Matches `DiagnosticsBundleBuilder.rediffBackgroundRunCap`.
+    static let rediffBackgroundRunFetchLimit = 25
+
+    /// Cap on per-asset rediff rows fetched. Matches
+    /// `DiagnosticsBundleBuilder.rediffRowCap`, with headroom so the
+    /// builder's own sort picks the newest rather than the store's.
+    static let rediffRowFetchLimit = 200
+
+    /// Adapter from the four rediff tables to the `DiagnosticsRediffFetch`
+    /// closure the coordinator consumes (playhead-p70f change 4).
+    ///
+    /// Every read is independently `try?`-guarded and falls back to the empty
+    /// value: a diagnostics export that fails because one rediff counter could
+    /// not be read is a worse outcome than one that ships the other three.
+    /// Rows carry the RAW `analysisAssetId`; the builder hashes it.
+    static func makeRediffFetch(store: AnalysisStore) -> DiagnosticsRediffFetch {
+        { [store] in
+            async let bandwidth = try? await store.fetchRediffBandwidthTotals()
+            async let states = try? await store.fetchRediffRefetchStates()
+            async let dayZero = try? await store.fetchRediffDayZeroAttempts(limit: rediffRowFetchLimit)
+            async let runs = try? await store.fetchRecentBackgroundTaskRuns(
+                entryPoint: .rediffRefetch, limit: rediffBackgroundRunFetchLimit
+            )
+            return DiagnosticsRediffSnapshot(
+                bandwidth: await bandwidth ?? RediffBandwidthTotals(),
+                refetchStates: await states ?? [],
+                dayZeroAttempts: await dayZero ?? [],
+                backgroundRuns: await runs ?? []
+            )
+        }
     }
 
     // MARK: Environment construction

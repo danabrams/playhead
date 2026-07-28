@@ -263,10 +263,11 @@ struct RediffActivationWiringTests {
         // A mark was produced → summary + poisoning-safe RESOLVED state.
         #expect(summary.rotatedCount == 1)
         #expect(summary.fullFetchBytes == 2 * 54_000_000)
-        guard case let .dayZeroMarked(_, cost, markCount, newState) = recorder.outcomes.first else {
+        guard case let .dayZeroMarked(_, cost, mint, newState) = recorder.outcomes.first else {
             Issue.record("expected .dayZeroMarked, got \(String(describing: recorder.outcomes.first))"); return
         }
-        #expect(markCount == 1)
+        #expect(mint.markCount == 1)
+        #expect(mint.exit == .marked)
         #expect(cost.precheckBytes == 0, "day-0 spends no pre-check bytes")
         #expect(newState.resolved)
 
@@ -311,9 +312,12 @@ struct RediffActivationWiringTests {
         let summary = await refetch.runDayZeroRefetch(for: candidate, kWayFetchCount: 1)
 
         #expect(summary.rotatedCount == 0, "a single-persona diff mints nothing")
-        guard case let .dayZeroUnmarked(_, cost, _) = recorder.outcomes.first else {
+        guard case let .dayZeroUnmarked(_, cost, mint) = recorder.outcomes.first else {
             Issue.record("expected .dayZeroUnmarked, got \(String(describing: recorder.outcomes.first))"); return
         }
+        // playhead-p70f: K=1 is below the collision-recovery floor, and the exit
+        // now SAYS so instead of collapsing into an anonymous zero.
+        #expect(mint.exit == .tooFewBCopies)
         #expect(cost.fullFetchBytes == 54_000_000, "bytes still accounted")
         #expect(try await store.fetchAdWindows(assetId: assetId).isEmpty, "no marks minted")
         // The MINT path itself never touches `rediff_refetch_state` (state is the

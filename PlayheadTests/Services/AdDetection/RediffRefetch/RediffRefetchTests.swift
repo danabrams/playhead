@@ -1282,9 +1282,25 @@ final class SpyDayZeroMinter: RediffDayZeroMinting, @unchecked Sendable {
     /// Marks to report per call. Default `1` (a marked day-0 run); set `0` to
     /// exercise the poisoning-safe unmarked path (no resolve, no state advance).
     var markCountToReturn = 1
-    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> Int {
+    /// playhead-p70f: the exit reported when `markCountToReturn == 0`. Defaults
+    /// to `.noDivergentSlot` (the clean "diffed fine, nothing diverged" case).
+    var unmarkedExitToReturn: RediffDayZeroExit = .noDivergentSlot
+    /// playhead-p70f: when non-nil, `dayZeroPrefetchBlocker` reports it — the
+    /// service must then decline BEFORE any fetch.
+    var prefetchBlockerToReturn: RediffDayZeroExit?
+    private(set) var prefetchBlockerCalls: [String] = []
+    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> RediffDayZeroMintOutcome {
         calls.append((assetId, bSideURLs))
-        return markCountToReturn
+        return RediffDayZeroMintOutcome(
+            markCount: markCountToReturn,
+            exit: markCountToReturn > 0 ? .marked : unmarkedExitToReturn,
+            bSideCount: bSideURLs.count,
+            bSidesAccepted: bSideURLs.count
+        )
+    }
+    func dayZeroPrefetchBlocker(assetId: String) async -> RediffDayZeroExit? {
+        prefetchBlockerCalls.append(assetId)
+        return prefetchBlockerToReturn
     }
 }
 

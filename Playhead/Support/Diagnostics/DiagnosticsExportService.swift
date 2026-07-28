@@ -271,6 +271,17 @@ typealias DiagnosticsStabilityFetch = @Sendable () async -> [StabilityDiagnostic
 /// `BannerTallyStore.shared.sessions`.
 typealias DiagnosticsBannerTalliesFetch = @Sendable () async -> [BannerTallySession]
 
+/// playhead-p70f — async read of the rediff re-fetch lane's telemetry
+/// (`rediff_bandwidth_ledger`, `rediff_refetch_state`,
+/// `rediff_day_zero_attempts`, and the `background_task_runs` rows whose
+/// entry point is `rediff_refetch`). Non-throwing for the same reason as
+/// `DiagnosticsStabilityFetch`: an export that fails because a rediff
+/// counter could not be read is worse than one that ships without it, so
+/// the production adapter swallows store errors and returns `.empty`.
+/// Rows carry the RAW `analysisAssetId` — `DiagnosticsBundleBuilder` is
+/// what hashes it, so this closure must never be routed anywhere else.
+typealias DiagnosticsRediffFetch = @Sendable () async -> DiagnosticsRediffSnapshot
+
 /// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
 /// that actually shipped in the bundle. Abstracted so the coordinator
 /// remains pure-logic and the SwiftData/ModelContext dependency lives in

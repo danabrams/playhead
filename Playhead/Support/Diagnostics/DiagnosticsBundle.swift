@@ -145,6 +145,24 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// hashes it on the way in.
     let bannerTallies: [BannerTallySummary]
 
+    /// playhead-p70f: the rediff re-fetch lane's telemetry — the cumulative
+    /// bandwidth ledger, the per-asset lagged attempt states, the per-asset
+    /// DAY-0 attempt records, and the lagged sweep's background-task fires.
+    ///
+    /// WHY IT IS HERE: this file contained ZERO rediff references, so three
+    /// tables of decisive telemetry were being written on device and never
+    /// exported. Establishing that day-0 had spent 299.6 MB while producing no
+    /// ad windows required pulling the raw SQLite database off the phone. It
+    /// should have taken a support bundle.
+    ///
+    /// Privacy: `analysisAssetId` is a local, install-scoped identifier, but it
+    /// is hashed through `EpisodeIdHasher` on the way in anyway — the same
+    /// treatment `music_bed_profiles` gives show identifiers (legal checklist
+    /// item a). Everything else in the shape is an integer, a timestamp, or a
+    /// closed enum rawValue. `last_detail` is the one free-text field and is
+    /// sanitized + truncated by the builder.
+    let rediffDiagnostics: RediffDiagnostics
+
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
         case osVersion = "os_version"
@@ -159,6 +177,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case learnedDeviceProfiles = "learned_device_profiles"
         case stabilityDiagnostics = "stability_diagnostics"
         case bannerTallies = "banner_tallies"
+        case rediffDiagnostics = "rediff_diagnostics"
     }
 
     init(
@@ -174,8 +193,10 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         musicBedProfiles: [MusicBedProfileSummary] = [],
         learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
         stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
-        bannerTallies: [BannerTallySummary] = []
+        bannerTallies: [BannerTallySummary] = [],
+        rediffDiagnostics: RediffDiagnostics = .empty
     ) {
+        self.rediffDiagnostics = rediffDiagnostics
         self.appVersion = appVersion
         self.osVersion = osVersion
         self.deviceClass = deviceClass
@@ -230,6 +251,166 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.bannerTallies = try container.decodeIfPresent(
             [BannerTallySummary].self, forKey: .bannerTallies
         ) ?? []
+        self.rediffDiagnostics = try container.decodeIfPresent(
+            RediffDiagnostics.self, forKey: .rediffDiagnostics
+        ) ?? .empty
+    }
+
+    // MARK: - playhead-p70f: rediff lane telemetry
+
+    /// The rediff re-fetch lane, as a support engineer needs to read it.
+    ///
+    /// The four members answer, in order: "how much bandwidth has this lane
+    /// spent and what did it produce?", "where is each episode in the lagged
+    /// sweep's retry/backoff state machine?", "what happened on each play-time
+    /// day-0 attempt, and how much did each episode cost?", and "is the lagged
+    /// BGTask being granted any windows at all?".
+    struct RediffDiagnostics: Codable, Sendable, Equatable {
+        let bandwidth: RediffBandwidthSummary
+        let refetchStates: [RediffRefetchStateSummary]
+        let dayZeroAttempts: [RediffDayZeroAttemptSummary]
+        let backgroundRuns: [RediffBackgroundRunSummary]
+
+        static let empty = RediffDiagnostics(
+            bandwidth: RediffBandwidthSummary(),
+            refetchStates: [],
+            dayZeroAttempts: [],
+            backgroundRuns: []
+        )
+
+        enum CodingKeys: String, CodingKey {
+            case bandwidth
+            case refetchStates = "refetch_states"
+            case dayZeroAttempts = "day_zero_attempts"
+            case backgroundRuns = "background_runs"
+        }
+    }
+
+    /// Cumulative `rediff_bandwidth_ledger` totals.
+    ///
+    /// HOW TO READ IT: `full_fetch_bytes_total` large with every outcome
+    /// counter at zero is the playhead-p70f defect — bandwidth spent with no
+    /// recorded result. `day_zero_unmarked_count` exists so that state is no
+    /// longer expressible: a day-0 run that spends bytes and mints nothing
+    /// increments it.
+    struct RediffBandwidthSummary: Codable, Sendable, Equatable {
+        var precheckBytesTotal: Int64 = 0
+        var fullFetchBytesTotal: Int64 = 0
+        var unchangedCount: Int = 0
+        var rotatedCount: Int = 0
+        var failedCount: Int = 0
+        var parkedCount: Int = 0
+        var dayZeroUnmarkedCount: Int = 0
+        var lastUpdatedAt: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case precheckBytesTotal = "precheck_bytes_total"
+            case fullFetchBytesTotal = "full_fetch_bytes_total"
+            case unchangedCount = "unchanged_count"
+            case rotatedCount = "rotated_count"
+            case failedCount = "failed_count"
+            case parkedCount = "parked_count"
+            case dayZeroUnmarkedCount = "day_zero_unmarked_count"
+            case lastUpdatedAt = "last_updated_at"
+        }
+    }
+
+    /// One `rediff_refetch_state` row — the LAGGED sweep's per-episode retry
+    /// state. `resolved` means the lane is done with the episode.
+    struct RediffRefetchStateSummary: Codable, Sendable, Equatable {
+        let assetIdHash: String
+        let unchangedAttempts: Int
+        let lastAttemptAt: Double?
+        let resolved: Bool
+        let lastFailureClass: String?
+        let sameClassFailureStreak: Int
+        let updatedAt: Double
+
+        enum CodingKeys: String, CodingKey {
+            case assetIdHash = "asset_id_hash"
+            case unchangedAttempts = "unchanged_attempts"
+            case lastAttemptAt = "last_attempt_at"
+            case resolved
+            case lastFailureClass = "last_failure_class"
+            case sameClassFailureStreak = "same_class_failure_streak"
+            case updatedAt = "updated_at"
+        }
+    }
+
+    /// One `rediff_day_zero_attempts` row — the play-time lane's per-episode
+    /// history.
+    ///
+    /// HOW TO READ IT: `last_exit` names which of the formerly silent mint
+    /// exits fired. When it is `no_accepted_byte_diff`, compare
+    /// `last_b_sides_gate_rejected` against `last_b_side_count`: equal means
+    /// the byte aligner rejected every copy (it is an MP3-frame parser, so
+    /// non-MP3 bytes behind a normalized `.mp3` suffix look exactly like this),
+    /// which is a different diagnosis from `no_divergent_slot` (copies diffed
+    /// cleanly and agreed). `total_full_fetch_bytes` is the cumulative cost of
+    /// this ONE episode; `suppressed_count` is how many replays were declined
+    /// without spending anything.
+    ///
+    /// The on-device row's `lastDetail` (an error description that can carry
+    /// the enclosure URL) is deliberately NOT projected here — see
+    /// `DiagnosticsBundleBuilder.allowlistedRediffToken`.
+    struct RediffDayZeroAttemptSummary: Codable, Sendable, Equatable {
+        let assetIdHash: String
+        let attemptCount: Int
+        let lastAttemptAt: Double
+        let lastExit: String
+        let lastMarkCount: Int
+        let lastBSideCount: Int
+        let lastBSidesAccepted: Int
+        let lastBSidesGateRejected: Int
+        let lastBSidesUnreadable: Int
+        let lastDivergentSlotCount: Int
+        let lastFullFetchBytes: Int
+        let totalFullFetchBytes: Int
+        let suppressedCount: Int
+        let lastSuppressedAt: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case assetIdHash = "asset_id_hash"
+            case attemptCount = "attempt_count"
+            case lastAttemptAt = "last_attempt_at"
+            case lastExit = "last_exit"
+            case lastMarkCount = "last_mark_count"
+            case lastBSideCount = "last_b_side_count"
+            case lastBSidesAccepted = "last_b_sides_accepted"
+            case lastBSidesGateRejected = "last_b_sides_gate_rejected"
+            case lastBSidesUnreadable = "last_b_sides_unreadable"
+            case lastDivergentSlotCount = "last_divergent_slot_count"
+            case lastFullFetchBytes = "last_full_fetch_bytes"
+            case totalFullFetchBytes = "total_full_fetch_bytes"
+            case suppressedCount = "suppressed_count"
+            case lastSuppressedAt = "last_suppressed_at"
+        }
+    }
+
+    /// One `background_task_runs` row with `entryPoint = 'rediff_refetch'` —
+    /// the LAGGED sweep's BGTask fires. A device where this array is nearly
+    /// empty while other entry points have hundreds of rows is being starved of
+    /// windows, not failing.
+    struct RediffBackgroundRunSummary: Codable, Sendable, Equatable {
+        let startedAt: Double
+        let finishedAt: Double?
+        let outcome: String
+        let deferReason: String?
+        let jobsSeen: Int?
+        let jobsAdmitted: Int?
+        let jobsCompleted: Int?
+        let expiration: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case startedAt = "started_at"
+            case finishedAt = "finished_at"
+            case outcome
+            case deferReason = "defer_reason"
+            case jobsSeen = "jobs_seen"
+            case jobsAdmitted = "jobs_admitted"
+            case jobsCompleted = "jobs_completed"
+            case expiration
+        }
     }
 
     /// Projected scheduler event derived from a `WorkJournalEntry` (per

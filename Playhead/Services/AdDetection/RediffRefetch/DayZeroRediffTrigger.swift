@@ -80,6 +80,17 @@ struct DayZeroRediffTrigger: Sendable {
     /// The user's "deep-scan" opt-in — lets a day-0 fetch run unplugged on WiFi.
     /// Defaults to `false` (no opt-in) until a settings toggle is wired.
     let deepScanOptInProvider: @Sendable () -> Bool
+    /// playhead-p70f change 2: the DURABLE per-asset day-0 history this trigger
+    /// consults before spending anything. Production reads
+    /// `AnalysisStore.fetchRediffDayZeroAttempt`. The `nil`-returning default
+    /// reproduces the pre-p70f "always attempt" behavior for callers that have
+    /// no store.
+    let attemptRecordProvider: @Sendable (String) async -> RediffDayZeroAttemptRecord?
+    /// playhead-p70f: records that a kickoff was DECLINED without spending
+    /// bytes. A suppression that leaves no trace is indistinguishable from a
+    /// trigger that never fired, which is the mistake this whole bead exists to
+    /// correct.
+    let suppressionRecorder: @Sendable (String, RediffDayZeroExit, Double) async -> Void
 
     init(
         service: RediffRefetchService,
@@ -87,7 +98,9 @@ struct DayZeroRediffTrigger: Sendable {
         kWayFetchCount: Int = RediffActivation.dayZeroKWayFetchCount,
         reachabilityProvider: @escaping @Sendable () async -> TransportSnapshot.Reachability,
         chargeStateProvider: @escaping @Sendable () async -> Bool,
-        deepScanOptInProvider: @escaping @Sendable () -> Bool = { false }
+        deepScanOptInProvider: @escaping @Sendable () -> Bool = { false },
+        attemptRecordProvider: @escaping @Sendable (String) async -> RediffDayZeroAttemptRecord? = { _ in nil },
+        suppressionRecorder: @escaping @Sendable (String, RediffDayZeroExit, Double) async -> Void = { _, _, _ in }
     ) {
         self.service = service
         self.enabled = enabled
@@ -95,6 +108,8 @@ struct DayZeroRediffTrigger: Sendable {
         self.reachabilityProvider = reachabilityProvider
         self.chargeStateProvider = chargeStateProvider
         self.deepScanOptInProvider = deepScanOptInProvider
+        self.attemptRecordProvider = attemptRecordProvider
+        self.suppressionRecorder = suppressionRecorder
     }
 
     /// Fire an immediate day-0 rediff for the just-started episode IF the flag is
@@ -144,9 +159,25 @@ struct DayZeroRediffTrigger: Sendable {
             return SweepSummary()
         }
 
+        // playhead-p70f change 2 — THE BANDWIDTH BLEED FIX. Before this, the
+        // trigger consulted NO prior state: `attemptState` was hardcoded
+        // `.initial`, `kickOffDayZeroRediff` fired from both play paths with no
+        // per-episode guard, and an unmarked run wrote nothing for a later run
+        // to read. Replaying one episode cost ~108 MB every time, forever.
+        //
+        // The check runs AFTER the WiFi/charging gate (so a cellular play never
+        // even touches the store) but BEFORE anything is fetched.
+        let prior = await attemptRecordProvider(analysisAssetId)
+        if case let .suppress(reason, _) = DayZeroRediffAttemptPolicy.decide(record: prior, now: now) {
+            await suppressionRecorder(analysisAssetId, reason, now)
+            return SweepSummary()
+        }
+
         // `downloadedAt` / `attemptState` are unused by the day-0 path (no ≥24h
         // gate, no pre-check); a fresh `.initial` state is what a day-0 rotation
-        // resolves or a day-0 failure advances from.
+        // resolves or a day-0 failure advances from. Day-0's OWN attempt history
+        // lives in `rediff_day_zero_attempts` (read just above), deliberately
+        // NOT in the lagged `rediff_refetch_state` this field feeds.
         let candidate = RediffRefetchCandidate(
             assetId: analysisAssetId,
             enclosureURL: enclosureURL,

@@ -461,21 +461,31 @@ enum RediffRefetchPolicy {
         /// carried no state — the xsdz.28 R2 no-backoff loop).
         case failed(assetId: String, cost: BandwidthCost, failureClass: FailureClass, newState: AttemptState, error: String)
         /// playhead-xsdz.36.4 DAY-0: a play-time byte-exact rediff that PRODUCED
-        /// marks. `markCount` mark-only banners were persisted; the full-fetch
-        /// bytes are accounted, and `newState` is `.markResolved` (day-0 K≥3 is a
-        /// superset of the lagged K=1 sweep, so a day-0 MARK may resolve the
-        /// shared state). Distinct from `.rotated` so dogfood telemetry can
-        /// separate the day-0 mint from the lagged revalidate consume.
-        case dayZeroMarked(assetId: String, cost: BandwidthCost, markCount: Int, newState: AttemptState)
+        /// marks. `mint.markCount` mark-only banners were persisted; the
+        /// full-fetch bytes are accounted, and `newState` is `.markResolved`
+        /// (day-0 K≥2 is a superset of the lagged K=1 sweep, so a day-0 MARK may
+        /// resolve the shared state). Distinct from `.rotated` so dogfood
+        /// telemetry can separate the day-0 mint from the lagged revalidate
+        /// consume.
+        case dayZeroMarked(assetId: String, cost: BandwidthCost, mint: RediffDayZeroMintOutcome, newState: AttemptState)
         /// playhead-xsdz.36.4 DAY-0: a play-time rediff that produced NO marks
-        /// (nothing byte-exact/≥2-persona-robust — e.g. an incomplete A-side at
-        /// play time, a re-encoding CDN, or a chroma-only fallback) OR threw. The
-        /// bytes spent are STILL accounted, but — the POISONING FIX — NO attempt
-        /// state is written: an empty/failed day-0 run must NOT resolve or advance
-        /// the shared `rediff_refetch_state`, so the lagged sweep still recovers
-        /// those ads later. `error` is nil for a clean no-mark run, non-nil when a
-        /// fetch/read/persist threw.
-        case dayZeroUnmarked(assetId: String, cost: BandwidthCost, error: String?)
+        /// OR threw. The bytes spent are STILL accounted, but — the POISONING
+        /// FIX — NO `rediff_refetch_state` is written: an empty/failed day-0 run
+        /// must NOT resolve or advance the shared lagged state, so the lagged
+        /// sweep still recovers those ads later.
+        ///
+        /// playhead-p70f: `mint` replaces the old `error: String?`. That single
+        /// optional string was the whole reason 299.6 MB of day-0 fetches left
+        /// no usable trace: it was `nil` for nine structurally different no-mark
+        /// exits AND for a clean "diffed fine, nothing diverged" run, so the
+        /// database could not tell them apart. `mint.exit` now names exactly
+        /// which one fired and `mint`'s per-B-side counters say whether the byte
+        /// aligner even got traction. `mint.detail` carries what `error` did.
+        ///
+        /// The poisoning fix is UNCHANGED and is now structurally enforced: the
+        /// absence of an `AttemptState` on this case is what makes it impossible
+        /// to write `rediff_refetch_state` from an unmarked day-0 run.
+        case dayZeroUnmarked(assetId: String, cost: BandwidthCost, mint: RediffDayZeroMintOutcome)
     }
 }
 

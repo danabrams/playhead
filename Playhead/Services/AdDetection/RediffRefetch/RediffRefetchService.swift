@@ -526,7 +526,27 @@ actor RediffRefetchService {
         kWayFetchCount: Int = RediffActivation.dayZeroKWayFetchCount
     ) async -> SweepSummary {
         var summary = SweepSummary()
-        guard enabled, dayZeroMinter != nil else { return summary }
+        guard enabled else { return summary }
+        guard dayZeroMinter != nil else {
+            // No marking path at all. Record it rather than returning silently —
+            // a silent return is what made the 299.6 MB invisible.
+            await recorder.recordOutcome(.dayZeroUnmarked(
+                assetId: candidate.assetId, cost: .zero, mint: .blocked(.minterUnavailable)))
+            return summary
+        }
+        // playhead-p70f change 2 (in-process half): `kickOffDayZeroRediff` fires
+        // from BOTH play paths and the "Download & Analyze" preparation kickoff,
+        // none of which coordinate. Without this guard two of them racing on one
+        // episode each spend a full ~108 MB k-way fetch. Actor-serialized, so
+        // the check-and-claim is atomic.
+        guard dayZeroInFlight.insert(candidate.assetId).inserted else {
+            logger.info("rediff DAY-0 already in flight asset=\(candidate.assetId, privacy: .public) — declining the duplicate kickoff")
+            await recorder.recordOutcome(.dayZeroUnmarked(
+                assetId: candidate.assetId, cost: .zero, mint: .blocked(.alreadyInFlight)))
+            return summary
+        }
+        defer { dayZeroInFlight.remove(candidate.assetId) }
+
         summary.candidateCount = 1
         summary.eligibleProcessed = 1
         let result = await fetchMintAndRecord(
@@ -544,6 +564,11 @@ actor RediffRefetchService {
         return summary
     }
 
+    /// playhead-p70f: assets with a day-0 attempt in flight RIGHT NOW in this
+    /// process. Complements the durable per-asset backoff, which cannot see a
+    /// concurrent attempt that has not written its record yet.
+    private var dayZeroInFlight: Set<String> = []
+
     /// The DAY-0 mint arm (playhead-xsdz.36.4): fetch K distinct-persona B-copies
     /// → DELETE every copy on every exit → hand them to the `dayZeroMinter` for
     /// the byte-EXACT ≥2-persona-robust mark mint → record the poisoning-safe
@@ -558,6 +583,17 @@ actor RediffRefetchService {
     ) async -> CandidateResult {
         // Guarded by `runDayZeroRefetch`; re-asserted so this arm is self-safe.
         guard let dayZeroMinter else {
+            return CandidateResult(cost: .zero, rotated: false, failed: false)
+        }
+        // playhead-p70f change 3: the FREE local checks run BEFORE the ~108 MB
+        // fetch. Four of the mint's exits are pure local reads (asset row,
+        // `store.fetchAsset`, the anchored-A-side test, the A-side mmap) and all
+        // four used to run only AFTER the download had been billed. A doomed
+        // attempt now costs nothing.
+        if let blocker = await dayZeroMinter.dayZeroPrefetchBlocker(assetId: candidate.assetId) {
+            logger.info("rediff DAY-0 blocked BEFORE fetch asset=\(candidate.assetId, privacy: .public) exit=\(blocker.rawValue, privacy: .public) — 0 bytes spent")
+            await recorder.recordOutcome(.dayZeroUnmarked(
+                assetId: candidate.assetId, cost: .zero, mint: .blocked(blocker)))
             return CandidateResult(cost: .zero, rotated: false, failed: false)
         }
         var fullFetchBytes = 0
@@ -579,12 +615,12 @@ actor RediffRefetchService {
                 fullFetchBytes += full.byteCount
             }
 
-            let markCount = await dayZeroMinter.mintByteExactDayZeroMarks(
+            let mint = await dayZeroMinter.mintByteExactDayZeroMarks(
                 assetId: candidate.assetId,
                 bSideURLs: fetchedFileURLs
             )
             let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: fullFetchBytes)
-            if markCount > 0 {
+            if mint.markCount > 0 {
                 // A day-0 MARK resolves the shared state (terminal, no lagged
                 // re-fetch) — a deliberate bandwidth tradeoff. Day-0's K=3 fetch
                 // breadth exceeds the lagged K=1 sweep, but day-0 also applies a
@@ -596,21 +632,32 @@ actor RediffRefetchService {
                 // eaten content) and the saved re-fetch bandwidth is the priority.
                 let newState = RediffRefetchPolicy.markResolved(candidate.attemptState, at: sweepNow)
                 await recorder.recordOutcome(.dayZeroMarked(
-                    assetId: candidate.assetId, cost: cost, markCount: markCount, newState: newState))
+                    assetId: candidate.assetId, cost: cost, mint: mint, newState: newState))
                 return CandidateResult(cost: cost, rotated: true, failed: false)
             } else {
-                // POISONING FIX: no marks ⇒ bandwidth accounted, NO state advance
-                // (the asset stays a lagged candidate — nothing resolved).
+                // POISONING FIX: no marks ⇒ bandwidth accounted, NO
+                // `rediff_refetch_state` advance (the asset stays a lagged
+                // candidate — nothing resolved). playhead-p70f: the run still
+                // leaves a durable, EXIT-NAMED day-0 attempt record, which is a
+                // different table and is read by no lagged query.
                 await recorder.recordOutcome(.dayZeroUnmarked(
-                    assetId: candidate.assetId, cost: cost, error: nil))
+                    assetId: candidate.assetId, cost: cost, mint: mint))
                 return CandidateResult(cost: cost, rotated: false, failed: false)
             }
         } catch {
             // POISONING FIX: a day-0 fetch error also advances NO lagged state —
             // bytes spent are accounted; the lagged sweep runs later unimpeded.
+            //
+            // playhead-p70f: this catch used to record a `.dayZeroUnmarked` whose
+            // only distinguishing mark was a non-nil `error` string that nothing
+            // persisted, so a THROWN fetch and a clean no-divergence run were
+            // indistinguishable in the database — and neither incremented
+            // `failedCount`. It now carries `.fetchFailed` explicitly.
             let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: fullFetchBytes)
             await recorder.recordOutcome(.dayZeroUnmarked(
-                assetId: candidate.assetId, cost: cost, error: String(describing: error)))
+                assetId: candidate.assetId,
+                cost: cost,
+                mint: .blocked(.fetchFailed, detail: String(describing: error))))
             return CandidateResult(cost: cost, rotated: false, failed: true)
         }
     }

@@ -170,10 +170,11 @@ struct DayZeroRediffTriggerTests {
         #expect(Set(remover.removed) == Set(expected))
         // Bandwidth accounted; a MARK ⇒ .dayZeroMarked (resolved) — day-0 K≥2
         // (distinct personas) still lets a mark resolve the shared state.
-        guard case let .dayZeroMarked(_, cost, markCount, newState) = recorder.outcomes.first else {
+        guard case let .dayZeroMarked(_, cost, mint, newState) = recorder.outcomes.first else {
             Issue.record("expected .dayZeroMarked, got \(String(describing: recorder.outcomes.first))"); return
         }
-        #expect(markCount == 1)
+        #expect(mint.markCount == 1)
+        #expect(mint.exit == .marked)
         #expect(cost.fullFetchBytes == 2 * 54_000_000)
         #expect(cost.precheckBytes == 0, "day-0 does no pre-check — zero pre-check bytes")
         #expect(newState.resolved)
@@ -201,11 +202,14 @@ struct DayZeroRediffTriggerTests {
         #expect(Set(remover.removed) == Set(expected))
         // The outcome is .dayZeroUnmarked: bytes accounted, NO AttemptState — the
         // asset stays a lagged candidate (fetchRediffCandidateSeeds still sees it).
-        guard case let .dayZeroUnmarked(_, cost, error) = recorder.outcomes.first else {
+        guard case let .dayZeroUnmarked(_, cost, mint) = recorder.outcomes.first else {
             Issue.record("expected .dayZeroUnmarked, got \(String(describing: recorder.outcomes.first))"); return
         }
         #expect(cost.fullFetchBytes == 2 * 54_000_000, "bytes spent are still accounted")
-        #expect(error == nil, "a clean no-mark run carries no error")
+        #expect(mint.detail == nil, "a clean no-mark run carries no error detail")
+        // playhead-p70f: the exit is NAMED. Before, this was an anonymous
+        // `error: nil` that a thrown fetch produced identically.
+        #expect(mint.exit == .noDivergentSlot)
         #expect(summary.rotatedCount == 0, "no mark ⇒ nothing resolved")
         #expect(summary.failedCount == 0, "a clean no-mark run is not a failure")
     }

@@ -164,6 +164,9 @@ enum ListenerFeedbackHatch {
             ),
             stabilityFetch: DiagnosticsHatch.stabilityFetch,
             bannerTalliesFetch: DiagnosticsHatch.bannerTalliesFetch,
+            // playhead-p70f: the feedback attachment must stay byte-identical
+            // to "Send diagnostics", so it sources the rediff lane too.
+            rediffFetch: DiagnosticsHatch.makeRediffFetch(store: runtime.analysisStore),
             optInSink: SwiftDataDiagnosticsOptInSink(context: modelContext),
             optInEpisodes: []
         )

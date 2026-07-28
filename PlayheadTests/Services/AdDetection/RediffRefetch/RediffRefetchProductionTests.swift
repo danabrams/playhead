@@ -96,7 +96,7 @@ struct RediffRefetchStateV28MigrationTests {
         // recently 36 → 37 (playhead-0sro fast-transcript watermark
         // reconcile, data-only). The V28 rediff_refetch_state tables probed
         // below are unchanged by any of it.
-        #expect(AnalysisStore.currentSchemaVersion == 37)
+        #expect(AnalysisStore.currentSchemaVersion == 38)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())
@@ -402,13 +402,23 @@ struct RediffRefetchRecorderTests {
         await recorder.recordOutcome(.dayZeroUnmarked(
             assetId: "a1",
             cost: RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: 108_000_000),
-            error: nil
+            mint: RediffDayZeroMintOutcome(exit: .noDivergentSlot, bSideCount: 2, bSidesAccepted: 2)
         ))
         #expect(try await store.fetchRediffRefetchState(assetId: "a1") == nil,
                 "an unmarked day-0 run advances NO attempt state (poisoning-safe)")
         var totals = try await store.fetchRediffBandwidthTotals()
         #expect(totals.fullFetchBytesTotal == 108_000_000, "bytes are still accounted")
         #expect(totals.rotatedCount == 0)
+        // playhead-p70f: the counter that used to be structurally unreachable
+        // from day-0. Before this, ALL FOUR counters stayed 0 while the byte
+        // total climbed — which is how 299.6 MB read as "nothing happened".
+        #expect(totals.dayZeroUnmarkedCount == 1,
+                "a day-0 run that spent bytes and minted nothing MUST move a counter")
+        // …and the per-asset record names WHICH exit fired.
+        let a1Attempt = try await store.fetchRediffDayZeroAttempt(assetId: "a1")
+        #expect(a1Attempt?.lastExit == .noDivergentSlot)
+        #expect(a1Attempt?.attemptCount == 1)
+        #expect(a1Attempt?.totalFullFetchBytes == 108_000_000)
 
         // A marked day-0 run: resolves the shared state (day-0 K≥3 supersets the
         // lagged K=1 sweep) AND accounts bandwidth.
@@ -416,7 +426,8 @@ struct RediffRefetchRecorderTests {
         await recorder.recordOutcome(.dayZeroMarked(
             assetId: "a2",
             cost: RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: 162_000_000),
-            markCount: 2,
+            mint: RediffDayZeroMintOutcome(markCount: 2, exit: .marked, bSideCount: 2,
+                                           bSidesAccepted: 2, divergentSlotCount: 2),
             newState: resolvedState
         ))
         #expect(try await store.fetchRediffRefetchState(assetId: "a2")?.attemptState == resolvedState)
@@ -424,6 +435,13 @@ struct RediffRefetchRecorderTests {
         totals = try await store.fetchRediffBandwidthTotals()
         #expect(totals.fullFetchBytesTotal == 108_000_000 + 162_000_000)
         #expect(totals.rotatedCount == 1, "a marked day-0 counts as one rotation-equivalent")
+        #expect(totals.dayZeroUnmarkedCount == 1, "a MARKED run does not move the unmarked counter")
+        // A marked run is terminal for day-0 — the record says so, and
+        // `DayZeroRediffAttemptPolicy` reads it to never re-fetch this asset.
+        let a2Attempt = try await store.fetchRediffDayZeroAttempt(assetId: "a2")
+        #expect(a2Attempt?.lastExit == .marked)
+        #expect(a2Attempt?.lastMarkCount == 2)
+        #expect(DayZeroRediffAttemptPolicy.decide(record: a2Attempt, now: 9_999_999).isAttempt == false)
     }
 }
 
