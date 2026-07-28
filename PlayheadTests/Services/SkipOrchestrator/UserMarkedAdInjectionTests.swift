@@ -398,15 +398,48 @@ struct UserMarkedAdPersistenceTests {
                 "falseNegative source must persist as correctionType.falseNegative")
     }
 
+    /// playhead-y87g (2026-07-28): this test was red on main since the
+    /// commit that introduced it (`b072e72f`, playhead-o4qr), for two
+    /// independent reasons — both fixture defects, not product defects.
+    ///
+    /// 1. WINDOW DURATION. The same commit hardened
+    ///    `AcousticFingerprint.fromFeatureWindows` to accept only the
+    ///    calibrated feature cohort — `MusicDetectionConfig
+    ///    .supportedWindowDurations` is `[1.0, 2.0, 4.0]` — but the
+    ///    fixture kept building 6-second windows. Every fingerprint
+    ///    therefore came back `.zero`, which correctly suppresses BOTH
+    ///    the catalog insert and the recurrence write, so the catalog was
+    ///    empty and `#require(catalog.allEntries().first)` failed in
+    ///    0.04s. The windows are now 4 seconds wide, so the assertions
+    ///    below finally exercise the learning path they were written for.
+    ///
+    /// 2. MALFORMED SHOW IDENTITY. The loop below expected the gesture to
+    ///    SUCCEED for a blank / whitespace-padded `podcastId`. The
+    ///    product refuses it: `recordUserMarkedAd`'s precondition admits
+    ///    `nil` (anonymous) but not a non-canonical spelling, matching
+    ///    `PlayheadRuntime.injectUserMarkedAd`'s
+    ///    `hasExactCurrentPodcastIdentity` precondition and
+    ///    `RecurrenceMaterialIdentity.canonicalIdentifier`'s stated
+    ///    rationale — silently trimming malformed identity retargets
+    ///    evidence into a different persisted namespace. " podcast-2 " is
+    ///    not an absent show, it is a WRONG-namespace show, and accepting
+    ///    it would have written that spelling into the durable
+    ///    `correction_events.podcastId`. The loop now pins refusal, and
+    ///    the anonymous (`nil`) case is asserted separately because that
+    ///    is the case the "accept the receipt, refuse the learning"
+    ///    policy actually governs.
     @Test("user-marked ad learns only with an exact canonical show and full provenance")
     func userMarkLearnsCatalogWithAuthoritativeProvenance() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // 4-second windows: `AcousticFingerprint.fromFeatureWindows`
+        // fingerprints only `MusicDetectionConfig.supportedWindowDurations`
+        // ([1.0, 2.0, 4.0]) and returns `.zero` for anything else.
         let features = (0..<10).map { index in
             FeatureWindow(
                 analysisAssetId: "asset-1",
-                startTime: 30 + Double(index) * 6,
-                endTime: 36 + Double(index) * 6,
+                startTime: 30 + Double(index) * 4,
+                endTime: 34 + Double(index) * 4,
                 rms: 0.55,
                 spectralFlux: 0.25,
                 musicProbability: 0.40,
@@ -459,26 +492,59 @@ struct UserMarkedAdPersistenceTests {
         #expect(recurrence.sourceAssetId == "asset-1")
         #expect(recurrence.sourceWindowId == "user-mark-catalog-source")
 
+        // A malformed show identity is refused outright: no receipt, no
+        // learning. Trimming it would retarget show-keyed evidence into a
+        // different persisted namespace.
         for (podcastId, windowId) in [
             (" \n\t", "user-mark-blank-show"),
             (" podcast-2 ", "user-mark-noncanonical-show"),
         ] {
             #expect(
-                await service.recordUserMarkedAd(
+                !(await service.recordUserMarkedAd(
                     analysisAssetId: "asset-1",
                     startTime: 30,
                     endTime: 90,
                     podcastId: podcastId,
                     windowId: windowId
-                )
+                )),
+                "a non-canonical show spelling must not be accepted"
             )
             await service._waitForUserMarkedAdDerivedWorkForTesting()
+            #expect(
+                try await store.fetchAdWindow(id: windowId) == nil,
+                "a refused mark must leave no durable window behind"
+            )
             #expect(
                 try await catalog.count() == 1,
                 "malformed show identity must not change the catalog"
             )
             #expect(try await repeatedStorage.totalCount() == 1)
         }
+
+        // The anonymous case is the one the "accept the receipt, refuse
+        // the learning" policy governs: an absent show identity still
+        // commits the durable user-facing receipt, but every show-keyed
+        // effect is withheld.
+        #expect(
+            await service.recordUserMarkedAd(
+                analysisAssetId: "asset-1",
+                startTime: 30,
+                endTime: 90,
+                podcastId: nil,
+                windowId: "user-mark-anonymous-show"
+            ),
+            "an anonymous correction must still commit its receipt"
+        )
+        await service._waitForUserMarkedAdDerivedWorkForTesting()
+        #expect(
+            try await store.fetchAdWindow(id: "user-mark-anonymous-show")
+                != nil
+        )
+        #expect(
+            try await catalog.count() == 1,
+            "an anonymous correction must not produce show-keyed learning"
+        )
+        #expect(try await repeatedStorage.totalCount() == 1)
     }
 
     @Test("A correction write failure rolls back the companion user-marked window")
