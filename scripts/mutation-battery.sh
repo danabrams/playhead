@@ -15,7 +15,8 @@
 #
 # Each entry names one mutation: the exact source edit that reproduces a real
 # defect, and the test(s) that MUST go red when it is applied. The script
-# applies the mutation, runs only the three focused suites, checks the expected
+# applies the mutation, runs only the focused suites (`FOCUSED_SUITES` below —
+# six of them now, not the three this line used to promise), checks the expected
 # tests actually failed, and restores the tree with `git checkout --`.
 #
 #   KILLED   — the expected test(s) failed. The rail works.
@@ -78,16 +79,23 @@
 # That run predates the playhead-o4qr merge and NO LONGER DESCRIBES THIS FILE.
 #
 # STATUS AFTER playhead-1mq1.2.1 (2026-07-28)
-#   28 mutations: P01 and P02 added for the mixed-width attribution guard, and
-#   M14's and O04's EDITs were re-cut for `revokeRecurrenceEvidence`'s and
-#   `ingestNegativeFingerprint`'s new `negativeAttribution` argument — the
-#   defects they describe are unchanged, which is the sanctioned reason to
-#   rewrite an EDIT.
+#   The MUTATIONS array holds 33 live entries — COUNTED, because the two status
+#   blocks below each quote a number ("26", and "31" in the merge note) that was
+#   already wrong when written and that a reader naturally trusts. If you change
+#   the array, recount rather than adjusting the nearest figure by hand.
 #
-#   Verified: full `--dry-run` clean (28/28 anchors apply exactly once, 0
-#   errors); baseline green on the focused suites; batch 17 → P01 KILLED;
-#   batch 18 → P02 KILLED. Batches 1–16 were NOT re-run in that pass, so the
-#   whole-battery claim below still stands unrefreshed.
+#   Added: P01 and P02, for the mixed-width attribution guard. Re-cut: M14's and
+#   O04's EDITs, for `revokeRecurrenceEvidence`'s and `ingestNegativeFingerprint`'s
+#   new `negativeAttribution` argument — the defects they describe are unchanged,
+#   which is the sanctioned reason to rewrite an EDIT.
+#
+#   Verified in that pass: full `--dry-run` clean (every anchor applies exactly
+#   once, 0 errors); baseline green on the focused suites; batch 17 → P01
+#   KILLED; batch 18 → P02 KILLED.
+#
+#   NOT verified: batches 1–16 were not re-run. That matters most for M14 and
+#   O04 — their anchors were proved to still APPLY, which is not the same claim
+#   as still KILLING. Re-run batches 4 and 16 before trusting them.
 #
 #   P01 SURVIVED on its first probe and the survivor was a MISSING BARRIER, not
 #   a missing guard: "the hard-negative bank stayed empty" was being read

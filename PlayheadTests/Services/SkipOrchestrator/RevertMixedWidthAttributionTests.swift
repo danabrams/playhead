@@ -276,8 +276,14 @@ struct RevertMixedWidthAttributionTests {
         // ingest to the bank and pass for the wrong reason. (Measured: with the
         // guard deleted, it did — the mutation battery's P01 survived until
         // this window existed.) So a CLEAN revert is issued SECOND on the same
-        // bank; once its entry has landed, a mixed-window ingest issued before
-        // it would already be there too, and the count discriminates.
+        // bank and the count discriminates.
+        //
+        // Honest about what that buys: the two ingests are independent
+        // unstructured Tasks hopping to the same actor, so this is not a FIFO
+        // proof — it bounds the count from above in PRACTICE, across a whole
+        // second gesture plus `awaitNegativeBankEntries`' poll and re-read.
+        // That is wide enough to have flipped P01 from SURVIVED to KILLED, but
+        // do not read it as an ordering guarantee.
         let sentinel = makeSkipTestAdWindow(
             id: "ad-signoff-sentinel",
             assetId: assetId,
@@ -591,20 +597,86 @@ struct RevertMixedWidthAttributionTests {
         )
     }
 
-    @Test("A remainder below the minimum is not a width complaint")
-    func trivialRemainderIsClean() {
+    /// The near-miss the first cut of this guard shipped with: filtering the
+    /// remainders BEFORE deciding CLEAN vs MIXED meant a window whose evidence
+    /// left a sliver was called CLEAN and handed back whole — real ad included.
+    /// Coverage is the CLEAN test; a short remainder means "learn nothing",
+    /// never "learn everything".
+    @Test("A remainder below the minimum defers rather than restoring the whole span")
+    func trivialRemainderDefersInsteadOfAttributingEverything() {
         let span = RevertEvidencePartition.Interval(
             startTime: 100,
             endTime: 160
         )
         // Haloed, this anchor reaches 101..160 — a 1s remainder, under the
-        // 3s floor.
+        // 3s floor, so nothing is attributable and the span is NOT covered.
         let partition = RevertEvidencePartition.resolve(
             span: span,
             adEvidence: [.init(startTime: 109, endTime: 155)]
         )
+        #expect(
+            partition.isMixed,
+            "evidence in a proper part of the window is the width-is-wrong signature"
+        )
+        #expect(!partition.allowsWholeSpanNegativeLabel)
+        #expect(
+            partition.negativeAttributionSpans.isEmpty,
+            "an unusable remainder attributes nothing — it does not restore the span"
+        )
+        #expect(
+            !partition.allowsNegativeAttribution(startTime: 100, endTime: 160)
+        )
+        #expect(
+            !partition.allowsNegativeAttribution(startTime: 120, endTime: 130)
+        )
+    }
+
+    /// The other half of the same near-miss: an anchor that reaches the window
+    /// only through its halo is evidence about audio OUTSIDE it. Admitting it
+    /// contributed a sliver at the edge, which flipped the partition to MIXED
+    /// and retired the hard-negative bank for a window the same partition had
+    /// just declared essentially evidence-free.
+    @Test("An anchor entirely outside the reverted span is not internal evidence")
+    func externalAnchorIsNotInternalEvidence() {
+        let span = RevertEvidencePartition.Interval(
+            startTime: 100,
+            endTime: 160
+        )
+        let partition = RevertEvidencePartition.resolve(
+            span: span,
+            // Ends 2s before the window opens — inside the 8s halo, outside
+            // the window.
+            adEvidence: [.init(startTime: 94, endTime: 98)]
+        )
         #expect(!partition.isMixed)
+        #expect(partition.adEvidence.isEmpty)
         #expect(partition.negativeAttributionSpans == [span])
+        #expect(
+            partition.allowsNegativeAttribution(startTime: 100, endTime: 160),
+            """
+            Evidence about audio outside the span says nothing about the span. \
+            The halo widens real internal evidence; it must not import external \
+            evidence and disable learning.
+            """
+        )
+    }
+
+    /// An anchor that genuinely touches the window still counts, so the guard
+    /// above is a boundary correction rather than a hole.
+    @Test("An anchor overlapping the span's edge by any amount is internal evidence")
+    func edgeOverlappingAnchorCounts() {
+        let span = RevertEvidencePartition.Interval(
+            startTime: 100,
+            endTime: 200
+        )
+        let partition = RevertEvidencePartition.resolve(
+            span: span,
+            adEvidence: [.init(startTime: 96, endTime: 100.5)]
+        )
+        #expect(partition.isMixed)
+        #expect(
+            !partition.allowsNegativeAttribution(startTime: 100, endTime: 105)
+        )
     }
 
     @Test("Two separated ad regions leave the content between them attributable")
@@ -662,8 +734,16 @@ struct RevertMixedWidthAttributionTests {
         )
     }
 
-    @Test("A malformed span fails open rather than silently disabling revocation")
-    func malformedSpanFailsOpen() {
+    /// Pins the ASYMMETRY rather than a slogan. A malformed span leaves the
+    /// bank on exactly its pre-guard path, but `allowsNegativeAttribution`
+    /// compares against a reversed interval and answers false for everything,
+    /// so the fuzzy sweep is skipped. That is the conservative direction on the
+    /// surface that can delete learned rows, and it is harmless in production
+    /// because the store query over the same malformed range returns no rows
+    /// either — but it is not "fails open" on both surfaces, and the test says
+    /// so.
+    @Test("A malformed span leaves the bank untouched and skips the fuzzy sweep")
+    func malformedSpanIsCleanForTheBankAndInertForTheSweep() {
         let span = RevertEvidencePartition.Interval(
             startTime: 200,
             endTime: 100
@@ -673,6 +753,45 @@ struct RevertMixedWidthAttributionTests {
             adEvidence: [.init(startTime: 120, endTime: 140)]
         )
         #expect(!partition.isMixed)
+        #expect(partition.allowsWholeSpanNegativeLabel)
+        #expect(partition.negativeAttributionSpans == [span])
+        #expect(
+            !partition.allowsNegativeAttribution(startTime: 120, endTime: 140),
+            "a reversed interval contains nothing, so no material is attributable"
+        )
+    }
+
+    @Test("A non-finite span is refused the same way")
+    func nonFiniteSpanIsRefused() {
+        let span = RevertEvidencePartition.Interval(
+            startTime: .nan,
+            endTime: 100
+        )
+        let partition = RevertEvidencePartition.resolve(
+            span: span,
+            adEvidence: [.init(startTime: 10, endTime: 20)]
+        )
+        #expect(!partition.isMixed)
+        #expect(
+            !partition.allowsNegativeAttribution(startTime: 10, endTime: 20)
+        )
+    }
+
+    @Test("Non-finite evidence candidates are discarded, not propagated")
+    func nonFiniteEvidenceIsDiscarded() {
+        let span = RevertEvidencePartition.Interval(
+            startTime: 0,
+            endTime: 200
+        )
+        let partition = RevertEvidencePartition.resolve(
+            span: span,
+            adEvidence: [
+                .init(startTime: .nan, endTime: 50),
+                .init(startTime: 60, endTime: .infinity),
+            ]
+        )
+        #expect(!partition.isMixed)
+        #expect(partition.adEvidence.isEmpty)
         #expect(partition.negativeAttributionSpans == [span])
     }
 }

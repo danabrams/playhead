@@ -16,13 +16,18 @@
 // layer down, inside `SkipOrchestrator`. The view-layer instance was removed by
 // the o4qr merge (`TranscriptPeekPresentationContext` — an immutable identity
 // record captured in the synchronous Button action) but nothing pinned it, so
-// it could return in one careless line. These rails pin it in both directions:
+// it could return in one careless line. Two rails, and they are NOT two proofs
+// of the same claim — read the division of labour literally:
 //
-//   • a SOURCE canary, because "no late read exists" is a statement about code
-//     shape and cannot be observed behaviourally — the failure it prevents is
-//     the reintroduction of the read, not a wrong value from the current one;
-//   • a BEHAVIOURAL race, because the captured value only means anything if the
-//     seam behind it honours it across a mid-gesture episode replacement.
+//   • the SOURCE canary is the only thing pinning the VIEW layer. "No late read
+//     exists" is a statement about code shape and cannot be observed
+//     behaviourally; the failure it prevents is the reintroduction of the read,
+//     not a wrong value from the current one.
+//   • the BEHAVIOURAL race drives `SkipOrchestrator` directly and never
+//     constructs `NowPlayingView` or `TranscriptPeekPresentationContext`. It
+//     proves the seam BEHIND the capture honours it across a mid-gesture
+//     episode replacement — necessary for the capture to be worth anything, but
+//     not itself evidence about the view.
 //
 // XCTest for the canary so it stays filterable from the test plan (see project
 // memory `xctestplan_swift_testing_limitation`), matching the neighbouring

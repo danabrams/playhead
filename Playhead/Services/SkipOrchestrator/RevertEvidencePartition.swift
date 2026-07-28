@@ -109,10 +109,13 @@ enum RevertEvidencePartition {
         /// CLEAN partition.
         let adEvidence: [Interval]
         /// The spans a negative label may be attributed to. `[span]` when
-        /// CLEAN; the evidence-free remainders when MIXED.
+        /// CLEAN; the substantial evidence-free remainders when MIXED —
+        /// possibly EMPTY, when the only remainders were too short to learn
+        /// anything from. Empty means "attribute nothing", never "attribute
+        /// everything".
         let negativeAttributionSpans: [Interval]
-        /// True when the evidence sits in a proper part of the window and a
-        /// substantial remainder is left over — the width-is-wrong signature.
+        /// True when the evidence sits in a proper part of the window — the
+        /// width-is-wrong signature.
         let isMixed: Bool
 
         /// A whole-span negative label is admissible only for a CLEAN
@@ -137,10 +140,15 @@ enum RevertEvidencePartition {
     /// Partition a reverted span against the strong ad evidence found inside
     /// it.
     ///
-    /// A malformed span resolves CLEAN over itself: the callers validate their
-    /// own bounds, and failing open here keeps a corrupt row on exactly the
-    /// path it had before this guard existed rather than silently disabling
-    /// revocation for it.
+    /// A malformed span (reversed, zero-width, or non-finite) resolves CLEAN
+    /// over itself. Stated precisely, because the two consumers then diverge
+    /// and the earlier wording claimed more than the code does: the bank sees
+    /// `allowsWholeSpanNegativeLabel == true` and behaves exactly as it did
+    /// before this guard existed, while `allowsNegativeAttribution` compares
+    /// against a reversed/NaN interval and answers false for every input, so
+    /// the fuzzy sweep is skipped. That asymmetry is harmless — the store query
+    /// over the same malformed range returns no rows either way — and it is
+    /// the conservative direction on the surface that can delete learned rows.
     static func resolve(
         span: Interval,
         adEvidence: [Interval]
@@ -164,12 +172,18 @@ enum RevertEvidencePartition {
             )
         }
 
-        let remainders = complement(of: evidence, in: span)
-            .filter { $0.duration >= minimumNegativeSubspanDuration }
-        guard !remainders.isEmpty else {
-            // Evidence covers the window. The user contradicted all of it, so
-            // the whole span stays attributable — this is the case the
-            // hard-negative bank was built for.
+        // COVERAGE is the CLEAN test, not "no remainder worth learning from".
+        // Those are different questions and conflating them re-opened the bead:
+        // a window whose evidence left a 2.9s head remainder has evidence in a
+        // PROPER part of it — the width-is-wrong signature — yet a filter-first
+        // reading called it CLEAN and handed the whole span, real ad included,
+        // straight back to the negative surfaces. The margin against the bead's
+        // own fixture was about four seconds of anchor placement.
+        let gaps = complement(of: evidence, in: span)
+        guard !gaps.isEmpty else {
+            // Evidence covers the window end to end. The user contradicted all
+            // of it, so the whole span stays attributable — this is the case
+            // the hard-negative bank was built for.
             return Partition(
                 span: span,
                 adEvidence: evidence,
@@ -178,10 +192,16 @@ enum RevertEvidencePartition {
             )
         }
 
+        // MIXED. Remainders too short to carry usable copy or a meaningful
+        // fingerprint are dropped rather than promoted, so this list may come
+        // out empty — which reads as "defer entirely", the same answer MIXED
+        // already gives the bank.
         return Partition(
             span: span,
             adEvidence: evidence,
-            negativeAttributionSpans: remainders,
+            negativeAttributionSpans: gaps.filter {
+                $0.duration >= minimumNegativeSubspanDuration
+            },
             isMixed: true
         )
     }
@@ -193,11 +213,19 @@ enum RevertEvidencePartition {
         candidates: [Interval]
     ) -> [Interval] {
         let clipped: [Interval] = candidates.compactMap { candidate in
+            // The RAW observation must overlap the span. Admitting one that
+            // only reaches it through the halo let an anchor sitting entirely
+            // OUTSIDE the window contribute a sliver at its edge — enough to
+            // make the partition MIXED and retire the hard-negative bank for a
+            // revert whose window the same partition had just declared
+            // essentially evidence-free. Evidence about audio outside the span
+            // says nothing about the span; the halo widens real internal
+            // evidence, it does not import external evidence.
             guard candidate.startTime.isFinite,
                   candidate.endTime.isFinite,
                   candidate.endTime >= candidate.startTime,
-                  candidate.startTime - evidenceHalo <= span.endTime,
-                  candidate.endTime + evidenceHalo >= span.startTime
+                  candidate.startTime <= span.endTime,
+                  candidate.endTime >= span.startTime
             else {
                 return nil
             }
