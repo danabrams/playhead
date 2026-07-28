@@ -17,6 +17,16 @@
 // without the trait a regression would wedge the whole gate run instead of
 // failing one test, and the process-wide gate this file models is exactly the
 // kind of thing that wedges.
+//
+// ONE TEST IS DELIBERATELY NOT WRITTEN THAT WAY.
+// `SpeechRecognitionRequestPermitScopeTests` runs against the real
+// process-wide `SpeechService.requestGate` rather than a dedicated instance,
+// because what it pins is the shipping wiring. Hanging is not an option there:
+// a parked call on the SHARED permit stalls every other test in the process
+// that transcribes through it, so a regression would look like a suite-wide
+// outage instead of one red test. It fails on an assertion, released by a
+// bounded valve, and the valve is sized so it can only ever fire in the
+// regression case — see the note on `LoadDuringTranscribeRecognizer`.
 
 import Foundation
 import os

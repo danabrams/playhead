@@ -823,8 +823,15 @@ private final class ShardFailingRecognizer: SpeechRecognizer, @unchecked Sendabl
     func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
         guard _loaded.withLock({ $0 }) else { throw TranscriptEngineError.modelNotLoaded }
         if shard.id == failingShardId {
-            // Byte-for-byte the shape `SpeechRecognitionRequestGate`'s watchdog
-            // throws when it abandons a hung recognizer call.
+            // The same CASE `SpeechRecognitionRequestGate`'s watchdog throws
+            // when it abandons a hung recognizer call. The case is the whole
+            // coupling: `runTranscriptionLoop`'s catch ladder discriminates on
+            // type alone, so `.transcriptionFailed` is what decides continue
+            // -vs- return. The reason string is illustrative and deliberately
+            // NOT byte-identical — production interpolates the deadline, and
+            // pinning that text here would be a second copy of a string no
+            // production branch reads. What pins the case itself is
+            // `wedgedHolderIsAbandoned`, which matches on it directly.
             throw TranscriptEngineError.transcriptionFailed(
                 "Speech request exceeded its watchdog deadline and was abandoned"
             )
