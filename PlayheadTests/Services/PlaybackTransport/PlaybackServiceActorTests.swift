@@ -199,6 +199,95 @@ private func driveInterruptionObserverUntilLive(
     }
 }
 
+/// playhead-xc6b: a subscriber that mirrors the one `PlaybackService`
+/// installs — an async notification sequence consumed on
+/// `@PlaybackServiceActor` — used purely as a delivery barrier.
+private final class InterruptionWitness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var received = false
+    private var task: Task<Void, Never>?
+
+    var hasReceived: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return received
+    }
+
+    func start(center: NotificationCenter) {
+        task = Task { @PlaybackServiceActor [self] in
+            for await _ in center.notifications(
+                named: AVAudioSession.interruptionNotification
+            ) {
+                markReceived()
+                break
+            }
+        }
+    }
+
+    func stop() {
+        task?.cancel()
+        task = nil
+    }
+
+    private func markReceived() {
+        lock.lock()
+        received = true
+        lock.unlock()
+    }
+}
+
+/// playhead-xc6b: post an interruption and return only once a WITNESS
+/// subscriber has demonstrably received it.
+///
+/// This is the barrier half of the prove-a-negative idiom, and it exists
+/// because the obvious cheaper version does not work. `center.post` is
+/// synchronous, so it is tempting to argue that a following actor read is
+/// automatically queued behind whatever a live observer was resumed to do.
+/// MEASURED, THAT ARGUMENT IS FALSE: with a live observer and an installed
+/// item, a single post followed immediately by `snapshot()` still read the
+/// PRE-resume state. Resumption of the notification sequence is not
+/// completed inside `post`.
+///
+/// So we enqueue a subscriber of our own, of the same kind and on the same
+/// executor, and wait for IT to be resumed and run. `PlaybackService`'s
+/// observer registered earlier, so for any given post its continuation is
+/// resumed first and its actor job is enqueued first; observing the
+/// witness's job therefore proves the service observer's job already ran,
+/// and a read issued afterwards is behind both.
+///
+/// Posts are repeated because `notifications(named:)` only delivers
+/// notifications posted after its own registration — a single pre-
+/// registration post would be dropped and never redelivered.
+///
+/// Honest limit, the same one carried by `drainOrchestratorEffects`:
+/// same-priority FIFO on an actor's default executor is an implementation
+/// property, not a language guarantee.
+private func postInterruptionUntilWitnessed(
+    _ center: NotificationCenter,
+    type: AVAudioSession.InterruptionType,
+    options: AVAudioSession.InterruptionOptions = []
+) async -> Bool {
+    let witness = InterruptionWitness()
+    witness.start(center: center)
+    defer { witness.stop() }
+    let rawType = type.rawValue
+    let rawOptions = options.rawValue
+    return await pollUntil {
+        var userInfo: [AnyHashable: Any] = [
+            AVAudioSessionInterruptionTypeKey: rawType,
+        ]
+        if rawOptions != 0 {
+            userInfo[AVAudioSessionInterruptionOptionKey] = rawOptions
+        }
+        center.post(
+            name: AVAudioSession.interruptionNotification,
+            object: nil,
+            userInfo: userInfo
+        )
+        return witness.hasReceived
+    }
+}
+
 private actor ItemSeekRecorder {
     private var callCount = 0
 
@@ -941,17 +1030,8 @@ struct PlaybackServiceActorIsolationTests {
             "a cancelled runtime prefetch must not resurrect a torn-down item"
         )
         #expect(!(await service._testingHasCurrentPlayerItem))
-        center.post(
-            name: AVAudioSession.interruptionNotification,
-            object: nil,
-            userInfo: [
-                AVAudioSessionInterruptionTypeKey:
-                    AVAudioSession.InterruptionType.ended.rawValue,
-                AVAudioSessionInterruptionOptionKey:
-                    AVAudioSession.InterruptionOptions.shouldResume.rawValue,
-            ]
-        )
-        // playhead-xc6b — FAIL-OPEN FIX. This used to be
+
+        // playhead-xc6b — FAIL-OPEN FIX. This used to be a bare `post` plus
         // `for _ in 0..<5 { await Task.yield() }`, a fixed budget guarding a
         // NEGATIVE assertion. Under load that fails OPEN: "the service did
         // not resume" could be true simply because the notification had not
@@ -963,17 +1043,23 @@ struct PlaybackServiceActorIsolationTests {
         // TestHelpers.swift): a positive control first, then a barrier.
         //   * The control is at the top of this test — the observer was
         //     driven and demonstrably reacted to a post on THIS center, so
-        //     the stimulus below is known to be well formed and the observer
-        //     is known to have existed for `tearDown()` to join.
-        //   * The barrier is the read itself. `center.post` is synchronous,
-        //     so by the time it returns any live async-sequence subscriber
-        //     has been handed the value and its continuation enqueued on
-        //     @PlaybackServiceActor; the `snapshot()` below enqueues after
-        //     that and same-priority actor jobs run in enqueue order, so the
-        //     read is queued BEHIND any resume the observer would have
-        //     issued. (Same honest limit as the helpers above: FIFO on the
-        //     default actor executor is an implementation property, not a
-        //     language guarantee.)
+        //     the stimulus is known to be well formed and an observer is
+        //     known to have existed for `tearDown()` to join.
+        //   * The barrier is `postInterruptionUntilWitnessed`, which returns
+        //     only after a subscriber of the same kind, on the same executor,
+        //     has been resumed and run. This is NOT belt-and-braces: a plain
+        //     post followed by an immediate `snapshot()` was measured reading
+        //     the pre-resume state even with a live observer, so without the
+        //     witness this assertion would still be racing rather than
+        //     asserting.
+        #expect(
+            await postInterruptionUntilWitnessed(
+                center,
+                type: .ended,
+                options: .shouldResume
+            ),
+            "the resume stimulus must be delivered, or the assertion below is vacuous"
+        )
         #expect(
             await service.snapshot().status == .paused,
             "a joined interruption observer cannot resume a torn-down service"
