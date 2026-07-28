@@ -1412,20 +1412,37 @@ actor SkipOrchestrator {
     ) -> RevertEvidencePartition.Partition {
         var evidence: [RevertEvidencePartition.Interval] = []
 
+        // OCCURRENCES, deliberately not `coverageStartTime`/`coverageEndTime`.
+        // Those bracket the FIRST and LAST occurrence of a deduped
+        // (category, text) pair, so a sponsor URL read twice in an episode has
+        // a "coverage" span covering most of it. Clipping that hull into the
+        // reverted window would mark editorial content as ad evidence and —
+        // the dangerous direction — push the evidence-free remainder INTO the
+        // real ad, attributing a negative to exactly the audio this guard
+        // exists to protect. What the entry actually observed is its
+        // representative occurrence plus the two endpoint timestamps.
         if let catalog = activeEvidenceCatalog,
            catalog.analysisAssetId == analysisAssetId {
             for entry in catalog.entries
             where RevertEvidencePartition.strongLexicalCategories
-                .contains(entry.category)
-                && entry.coverageStartTime <= span.endTime
-                && entry.coverageEndTime >= span.startTime {
+                .contains(entry.category) {
                 evidence.append(
                     RevertEvidencePartition.Interval(
-                        startTime: entry.coverageStartTime,
-                        endTime: max(
-                            entry.coverageEndTime,
-                            entry.coverageStartTime
-                        )
+                        startTime: min(entry.startTime, entry.endTime),
+                        endTime: max(entry.startTime, entry.endTime)
+                    )
+                )
+                guard entry.count > 1 else { continue }
+                evidence.append(
+                    RevertEvidencePartition.Interval(
+                        startTime: entry.firstTime,
+                        endTime: entry.firstTime
+                    )
+                )
+                evidence.append(
+                    RevertEvidencePartition.Interval(
+                        startTime: entry.lastTime,
+                        endTime: entry.lastTime
                     )
                 )
             }

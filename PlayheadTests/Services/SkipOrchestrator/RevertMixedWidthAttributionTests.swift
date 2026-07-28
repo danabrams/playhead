@@ -109,6 +109,14 @@ private func haiksAdEvidenceCatalog(
                 startTime: 3508.0,
                 endTime: 3510.2
             ),
+            // Deliberately a REPEATED anchor: the same vanity URL was also read
+            // in the pre-roll at 120s. That makes this entry's
+            // `coverageStartTime`/`coverageEndTime` hull span nearly the whole
+            // episode, and reading the hull instead of the occurrences would
+            // mark the entire reverted window as ad evidence — which flips it
+            // to CLEAN and banks the ad's copy after all. The hazard runs the
+            // other way too on other geometries: a hull clipped into the window
+            // can push the evidence-free remainder INTO the real ad.
             EvidenceEntry(
                 evidenceRef: 1,
                 category: .url,
@@ -116,7 +124,10 @@ private func haiksAdEvidenceCatalog(
                 normalizedText: "haiks.com/themove",
                 atomOrdinal: 44,
                 startTime: 3521.4,
-                endTime: 3523.9
+                endTime: 3523.9,
+                count: 2,
+                firstTime: 120.0,
+                lastTime: 3523.9
             ),
             EvidenceEntry(
                 evidenceRef: 2,
