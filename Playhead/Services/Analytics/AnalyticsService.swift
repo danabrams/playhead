@@ -227,11 +227,12 @@ final class AnalyticsService {
             }
             return true
         } catch {
+            let expiry = Self.pendingDeltaExpiry
             store.mutate { state in
                 state.lastAttemptAt = instant
                 state.consecutiveFailures += 1
                 let pendingSince = state.oldestUnsentAt ?? instant
-                if instant.timeIntervalSince(pendingSince) >= Self.pendingDeltaExpiry {
+                if instant.timeIntervalSince(pendingSince) >= expiry {
                     // Old enough that nobody will miss it. Drop rather than
                     // carry it forever.
                     state.uploaded = state.uploaded.merging(totals)

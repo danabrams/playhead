@@ -3,9 +3,22 @@
 //
 // Transport is the CloudKit **public** database: write-only, anonymous,
 // no user record types, no queries from the device, no subscriptions, no
-// push. The device's CloudKit identity is not attached to a public-database
-// record it does not own a reference to, and nothing here reads anything
-// back — a read path is how an analytics system becomes a profile store.
+// push. Nothing here reads anything back — a read path is how an analytics
+// system becomes a profile store.
+//
+// One thing the application layer does NOT control, stated plainly because
+// it qualifies the "unlinkable" claim: CloudKit stamps every
+// public-database record with server-side system metadata including
+// `creatorUserRecordID`, derived from the writer's iCloud account. Our
+// payload carries no identifier and our record names are fresh UUIDs, but
+// the platform's own metadata does link records written by one account.
+// This is the same class of unavoidable transport-layer metadata as
+// envelope §4.3's treatment of IP addresses. Two consequences, both
+// deliberate: the rollup (`scripts/analytics-rollup.sh`) reads only the
+// nine counter fields and never a system field, and the question is put to
+// counsel explicitly in Addendum A §5. If counsel is not satisfied, the
+// answer is a different transport, not a different payload — which is why
+// `AnalyticsRecordWriting` is a one-method protocol.
 //
 // The gate below is not a feature flag. `docs/legal/telemetry-envelope-v1.md`
 // §7 requires that until counsel signs the envelope, downstream enforcers

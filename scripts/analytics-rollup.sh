@@ -106,11 +106,28 @@ if not isinstance(rows, list):
     sys.exit("analytics-rollup: expected a list of records")
 
 
+ENVELOPE_FIELDS = ["envelope_version", "payload_schema", "cohort_duration_bucket"]
+READABLE = set(METRICS) | set(ENVELOPE_FIELDS)
+
+
 def fields(row):
-    """cktool renders fields as {name: {value: v, type: t}}; accept flat too."""
+    """Project a record down to the nine counters and three envelope fields.
+
+    CloudKit stamps public-database records with system metadata including
+    `creatorUserRecordID`, which links records written by one iCloud
+    account. We cannot stop the server writing it; we can refuse to read
+    it. This projection is that refusal — anything not on the addendum's
+    allow-list is dropped before the row reaches the aggregation, so no
+    account-linked view is ever materialized, even in memory.
+
+    cktool renders fields as {name: {value: v, type: t}}; a hand-saved
+    export may be flat. Both are accepted.
+    """
     section = row.get("fields", row) if isinstance(row, dict) else {}
     flat = {}
     for key, value in section.items():
+        if key not in READABLE:
+            continue
         if isinstance(value, dict) and "value" in value:
             flat[key] = value["value"]
         else:

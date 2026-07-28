@@ -84,7 +84,7 @@ record to be dropped rather than sent.
 | §1.3 no per-user behavior history | No event stream, no timestamps, no session timeline, no per-episode completion. Only cumulative counters, uploaded as deltas. |
 | §3 default-deny | `TelemetryEnvelopeV1AllowList.validate` rejects any unrecognized key or value, whole-record. Enforced again at rest: unknown keys are dropped when the on-disk blob is decoded. |
 | §4.2 no listening history | Listening time is a single running integer of seconds, not a session log. |
-| §4.6 no advertising / user identifiers | No IDFA/IDFV/push token/iCloud user id/device name. Record names are fresh UUIDs per record, so two uploads from one device are unlinkable. Retention is computed on-device and uploaded as a counter; the install date never leaves the device. |
+| §4.6 no advertising / user identifiers | No IDFA/IDFV/push token/iCloud user id/device name in the payload. Record names are fresh UUIDs, so nothing we write links two uploads. Retention is computed on-device and uploaded as a counter; the install date never leaves the device. **Caveat:** CloudKit stamps `creatorUserRecordID` server-side — see §5.5, the open question this addendum most needs answered. |
 | §6.5 k-anonymity | The device cannot know cohort size, so suppression is applied on the read side: `scripts/analytics-rollup.sh` refuses to print a cell whose contributing-record count is below `k` (default 20, the value proposed to counsel in §6.5). |
 | §7 gate until signoff | `AnalyticsUploadGate.legalSignoffRecorded = false`; the production writer is the disabled one; a test fails if either flips without this document being signed. |
 
@@ -142,3 +142,19 @@ status line to `LEGAL APPROVED — <date>`, and flip
 4. **CloudKit public database.** Apple sees the container writes. Does
    "automatic upload" to a first-party Apple service need any different
    treatment from a self-hosted endpoint under §2.1?
+5. **Platform-stamped creator identity — the most important question here.**
+   CloudKit attaches server-side system metadata to every public-database
+   record, including `creatorUserRecordID`, derived from the writing
+   device's iCloud account. The application payload carries no identifier
+   and record names are fresh UUIDs, so nothing *we* write links two
+   records — but CloudKit's own metadata does, and that metadata is visible
+   to whoever queries the container (us). Envelope §4.6 prohibits iCloud
+   user identifiers in application-layer data; §4.3 accepts IP addresses as
+   unavoidable transport metadata provided application code neither stores
+   nor forwards them. Engineering reads this as the §4.3 case and has
+   applied the matching mitigation: `scripts/analytics-rollup.sh` reads
+   only the nine counter fields and never a system field, so no
+   account-linked view is ever materialized. Counsel: is that sufficient,
+   or does the anonymity claim require a transport that does not
+   authenticate the writer at all? If the latter, the fix is a different
+   `AnalyticsRecordWriting` implementation — the payload does not change.

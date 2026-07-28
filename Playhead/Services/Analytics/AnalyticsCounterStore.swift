@@ -217,7 +217,11 @@ struct AnalyticsPersistentState: Codable, Equatable, Sendable {
 // MARK: - Store
 
 /// Thread-safe, `UserDefaults`-backed home for `AnalyticsPersistentState`.
-final class AnalyticsCounterStore: Sendable {
+///
+/// `@unchecked` for one reason: `UserDefaults` is not marked `Sendable`
+/// although it is documented thread-safe. Everything this type owns beyond
+/// it is either immutable or lives inside the lock.
+final class AnalyticsCounterStore: @unchecked Sendable {
     /// Process-wide instance. Under XCTest it binds to a volatile, unique
     /// suite so a test run can never accumulate into — or read — the real
     /// user's counters, mirroring how `PlayheadRuntime` swaps in
@@ -263,7 +267,7 @@ final class AnalyticsCounterStore: Sendable {
     /// Read-modify-write under the lock. A failed encode leaves the on-disk
     /// blob untouched and the in-memory cache authoritative — analytics
     /// losing a count is never worth propagating an error to a caller.
-    func mutate(_ body: (inout AnalyticsPersistentState) -> Void) {
+    func mutate(_ body: @Sendable (inout AnalyticsPersistentState) -> Void) {
         cache.withLock { cached in
             var working = cached ?? loadFromDefaults()
             body(&working)
