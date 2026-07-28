@@ -269,8 +269,11 @@ final class TranscriptPeekViewModel {
     /// the max chunk end. That flow assembles a span by tapping rows, so it
     /// stops where the rows stop — this is TRANSCRIPT EVIDENCE ("how far did
     /// we find speech?"), not scan reach.
+    /// With no chunks at all this is 0 — the same sentinel the pre-7tn8 gate
+    /// used, so a playhead at exactly 0.0 on a transcript-less episode keeps
+    /// its old (no-affordance) behavior.
     var lastTranscribedTime: TimeInterval {
-        chunks.map(\.endTime).max() ?? 0
+        chunks.lazy.map(\.endTime).max() ?? 0
     }
 
     /// The furthest time the fast pass has SCANNED ("how far did we look?"):
@@ -309,11 +312,12 @@ final class TranscriptPeekViewModel {
 
     /// Classify `time` against the two coverage questions. See ``TailCoverage``.
     func tailCoverage(at time: TimeInterval) -> TailCoverage {
-        // Transcript audio envelopes are half-open [start, end), so a time
-        // exactly at the last chunk end is already past the evidence.
-        if time <= lastTranscribedTime {
-            return .transcribed
-        }
+        // Both boundaries are INCLUSIVE of their region: a time landing exactly
+        // on the last chunk end is still `.transcribed`, and one landing
+        // exactly on the watermark is still `.scannedWithoutSpeech`. That
+        // reproduces the pre-7tn8 `currentTime > lastCoveredTime` gate — a
+        // playhead sitting on the edge is not yet in the tail.
+        guard time > lastTranscribedTime else { return .transcribed }
         return time <= lastCoveredTime ? .scannedWithoutSpeech : .notYetScanned
     }
 

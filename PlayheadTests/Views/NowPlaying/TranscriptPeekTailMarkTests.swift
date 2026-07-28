@@ -4,9 +4,15 @@
 // Dogfood bug (THEMOVE, 2026-07-22): the user wanted to mark a POST-ROLL ad
 // but the fast transcript hadn't reached the episode end, so the post-roll
 // was both UNCOVERED and UNMARKABLE. The chunk-selection "Mark ad" flow can
-// only assemble a span from transcript chunks that exist (chunks extend only
-// to `fastTranscriptCoverageEndTime`); with no chunks in the tail there was
-// nothing to tap and `submitMarkedChunks` early-returned.
+// only assemble a span from transcript chunks that exist; with no chunks in
+// the tail there was nothing to tap and `submitMarkedChunks` early-returned.
+//
+// playhead-7tn8 corrects a premise this file used to state: chunks do NOT
+// "extend only to `fastTranscriptCoverageEndTime`". The watermark is a SCAN
+// mark and can run PAST the last chunk, because a shard that yields zero
+// segments still advances it. Believing otherwise is what suppressed the
+// affordance on music-bedded post-rolls — see
+// `silentShardPostRollIsStillMarkable`.
 //
 // The fix surfaces a coverage-FREE affordance from the transcript peek's
 // untranscribed tail that routes to the SAME `injectUserMarkedAd` /
@@ -41,7 +47,7 @@ private enum TailMark {
     /// Fast-pass chunks covering [0, transcribedEnd) at 600s (10 min) each,
     /// with a trailing partial row when `transcribedEnd` is not a multiple of
     /// the width. NONE extend past `transcribedEnd`.
-    static func coveredChunks(assetId: String, coverageEnd transcribedEnd: Double) -> [TranscriptChunk] {
+    static func coveredChunks(assetId: String, transcribedEnd: Double) -> [TranscriptChunk] {
         let width = 600.0
         var bounds: [(start: Double, end: Double)] = []
         var cursor = 0.0
@@ -90,7 +96,7 @@ private enum TailMark {
         transcribedEnd: Double,
         scannedEnd: Double
     ) async -> TranscriptPeekViewModel {
-        let chunks = coveredChunks(assetId: assetId, coverageEnd: transcribedEnd)
+        let chunks = coveredChunks(assetId: assetId, transcribedEnd: transcribedEnd)
         let source = FixedTranscriptPeekDataSource(
             snapshot: snapshot(chunks: chunks, coverageEnd: scannedEnd)
         )
@@ -195,7 +201,7 @@ struct TranscriptPeekTailMarkTests {
         // Persist the covered chunks so the no-chunk-in-mark assertion is
         // load-bearing (chunks exist up to coverage, none in the tail).
         try await store.insertTranscriptChunks(
-            TailMark.coveredChunks(assetId: assetId, coverageEnd: coverageEnd)
+            TailMark.coveredChunks(assetId: assetId, transcribedEnd: coverageEnd)
         )
         let service = TailMark.service(store: store)
 
@@ -313,6 +319,8 @@ struct TranscriptPeekTailMarkTests {
                 "3450s was looked at and yielded no speech — the genuine blind spot")
         #expect(vm.tailCoverage(at: 3590) == .scannedWithoutSpeech,
                 "the whole 3400→3600 stretch is scanned-but-silent")
+        #expect(vm.tailCoverage(at: scannedEnd) == .scannedWithoutSpeech,
+                "a playhead exactly ON the watermark is still inside what we looked at")
         #expect(vm.tailCoverage(at: scannedEnd + 10) == .notYetScanned,
                 "past the watermark is a DIFFERENT state — transient, segments may still arrive")
         #expect(vm.tailCoverage(at: 3000) == .transcribed,
@@ -341,7 +349,7 @@ struct TranscriptPeekTailMarkTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeTestAsset(id: assetId))
         try await store.insertTranscriptChunks(
-            TailMark.coveredChunks(assetId: assetId, coverageEnd: transcribedEnd)
+            TailMark.coveredChunks(assetId: assetId, transcribedEnd: transcribedEnd)
         )
         let service = TailMark.service(store: store)
         await service.recordUserMarkedAd(
