@@ -271,9 +271,14 @@ struct BackfillRateLimitDeferTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         // A guardrail violation is a terminal graceful failure whose taxonomy
-        // pmp9 does NOT touch — it aborts the pass (guardrail is not in the
-        // tolerate list) with no retry. The job must behave exactly as before:
-        // persist a failure row, mark COMPLETE, never defer.
+        // pmp9 does NOT touch — there is no retry and no backoff. The job must
+        // persist a failure row, mark COMPLETE, and never defer.
+        //
+        // playhead-qbib: what changed is the BLAST RADIUS, not the defer
+        // taxonomy. A guardrail is now a per-window outcome, so the two
+        // windows after it are still scanned instead of being silently
+        // dropped; the assertion below moved from "1 coarse call (the pass
+        // aborted)" to "3 coarse calls (every planned window was attempted)".
         let fmRuntime = TestFMRuntime(
             coarseFailures: [.guardrailViolation],
             contextSize: Self.contextSize,
@@ -292,9 +297,16 @@ struct BackfillRateLimitDeferTests {
 
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
         #expect(scans.contains { $0.status == .guardrailViolation })
-        // Guardrail is NOT retried (persistFailure policy) and aborts the pass
-        // on the first window — a single coarse call, no backoff loop.
-        #expect(await fmRuntime.coarseCallCount == 1)
+        // Guardrail is NOT retried (persistFailure policy) — no backoff loop,
+        // exactly one call per planned window.
+        #expect(await fmRuntime.coarseCallCount == 3)
+        // playhead-qbib: the two windows AFTER the guardrail were still
+        // scanned. Every planned window is accounted for, and the guardrailed
+        // one is reported as audio we could not look at.
+        let passA = scans.filter { $0.scanPass == "passA" }
+        #expect(passA.count == 3)
+        #expect(passA.filter { $0.status.didExamineWindow }.count == 2)
+        #expect(passA.filter { $0.status == .guardrailViolation }.count == 1)
     }
 
     // MARK: - playhead-t1kq: a BG-window EXPIRY (task cancellation) checkpoints the honest cursor
