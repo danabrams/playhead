@@ -550,9 +550,16 @@ struct BackfillJobRunnerTests {
         #expect(row.retryCount == 0)
     }
 
+    /// POSTROLL (playhead-qbib): the runner-level regression that a
+    /// mid-episode coarse guardrail cannot suppress scanning of everything
+    /// after it. This test used to pin the OPPOSITE contract — the pass
+    /// aborted on window 2 of 3, persisted 2 rows, and reported the job
+    /// complete with the final third of the episode never screened. The
+    /// blocking-failure row is still asserted; what changed is that it no
+    /// longer costs the postroll.
     @available(iOS 26.0, *)
-    @Test("partial coarse guardrail persists success rows and a blocking failure row")
-    func partialCoarseGuardrailPersistsBlockingFailureRow() async throws {
+    @Test("playhead-qbib: a mid-episode coarse guardrail still scans the postroll window")
+    func partialCoarseGuardrailStillScansPostroll() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let fmRuntime = TestFMRuntime(
@@ -573,20 +580,33 @@ struct BackfillJobRunnerTests {
         let result = try await runner.runPendingBackfill(for: makeInputs())
 
         #expect(!result.admittedJobIds.isEmpty)
-        #expect(result.scanResultIds.count == 2)
-        #expect(await fmRuntime.coarseCallCount == 2)
+        // Three planned windows, three FM calls: the guardrail costs its own
+        // window and nothing else.
+        #expect(await fmRuntime.coarseCallCount == 3)
+        #expect(result.scanResultIds.count == 3)
 
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
-        #expect(scans.count == 2)
-        #expect(scans.filter { $0.scanPass == "passA" && $0.status == .success }.count == 1)
-        #expect(scans.filter { $0.scanPass == "passA" && $0.status == .guardrailViolation }.count == 1)
+        let passA = scans.filter { $0.scanPass == "passA" }
+        #expect(passA.count == 3)
+        #expect(passA.filter { $0.status == .success }.count == 2)
+        #expect(passA.filter { $0.status == .guardrailViolation }.count == 1)
 
-        let success = try #require(scans.first { $0.scanPass == "passA" && $0.status == .success })
-        #expect(success.disposition == .noAds)
-
-        let failure = try #require(scans.first { $0.scanPass == "passA" && $0.status == .guardrailViolation })
+        let failure = try #require(passA.first { $0.status == .guardrailViolation })
         #expect(failure.disposition == .abstain)
-        #expect(failure.windowFirstAtomOrdinal > success.windowLastAtomOrdinal)
+
+        // The postroll — the LAST window of the episode — was screened, and it
+        // sits after the guardrailed window in time.
+        let lastWindow = try #require(passA.max(by: { $0.windowEndTime < $1.windowEndTime }))
+        #expect(lastWindow.status == .success)
+        #expect(lastWindow.windowStartTime >= failure.windowEndTime)
+        #expect(lastWindow.windowEndTime == 90, "coverage must reach transcript end")
+
+        // DENOMINATOR: the guardrailed window is reported as audio we could
+        // NOT look at, not as audio screened clean.
+        let coverage = SemanticScanCoverage.compute(rows: scans, episodeDuration: 90)
+        #expect(!coverage.isComplete)
+        #expect(coverage.unexaminedRanges == [failure.windowStartTime ... failure.windowEndTime])
+        #expect(coverage.examinedSeconds == 90 - (failure.windowEndTime - failure.windowStartTime))
     }
 
     @available(iOS 26.0, *)
@@ -643,6 +663,15 @@ struct BackfillJobRunnerTests {
         let failure = try #require(passBScans.first { $0.status == .guardrailViolation })
         #expect(failure.disposition == .abstain)
         #expect(result.scanResultIds.count == scans.count)
+
+        // playhead-qbib: a passB window that found no ads still has to say
+        // WHERE it looked. These coordinates used to be derived solely from
+        // the returned spans, so a no-ad window persisted `0.0 - 0.0` — a row
+        // that cannot locate itself is useless to every consumer downstream.
+        let noAdWindow = try #require(passBScans.first { $0.status == .success })
+        #expect(noAdWindow.disposition == .noAds)
+        #expect(noAdWindow.windowEndTime > noAdWindow.windowStartTime)
+        #expect(noAdWindow.windowEndTime <= 90)
     }
 
     @Test("admission throttling defers the job and records the reason")

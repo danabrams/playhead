@@ -69,6 +69,68 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
         }
     }
 
+    /// playhead-qbib: does this status mean the window was actually
+    /// EXAMINED and a verdict obtained ("we looked"), or that the attempt
+    /// produced no verdict at all ("we could not look")?
+    ///
+    /// This is the load-bearing distinction for every scanned-duration
+    /// denominator downstream: coverage %, precision measurement, and the
+    /// playhead-0sro watermark invariants all divide by "how much audio did
+    /// we actually screen". A refused or guardrailed window is NOT a window
+    /// that was scanned and found clean — counting it as scanned silently
+    /// shrinks the denominator and inflates every ratio computed from it.
+    ///
+    /// Only `.success` and `.noAds` are examinations. `.noAds` is the
+    /// permissive path's "I looked and there is nothing here" verdict, which
+    /// is a real examination even though it lives in the failed-window
+    /// accounting list for count-completeness.
+    var didExamineWindow: Bool {
+        switch self {
+        case .success, .noAds:
+            true
+        case .queued, .running, .unavailable, .unsupportedLocale,
+             .exceededContextWindow, .decodingFailure, .refusal,
+             .guardrailViolation, .assetsUnavailable, .rateLimited,
+             .thermalDeferred, .cancelled, .failedTransient,
+             .permissiveRefusal, .permissiveDecodingFailure,
+             .permissiveContextOverflow:
+            false
+        }
+    }
+
+    /// playhead-qbib: how far does this failure generalize — is it a property
+    /// of THIS window's content/prompt, or of the device/model/session?
+    ///
+    /// A `.window`-scoped failure must never end a pass. The phone evidence
+    /// that opened this bead was a single mid-episode guardrail violation
+    /// aborting the remaining coarse pass at 1425.9s of a ~3578s episode,
+    /// leaving the postroll unscanned while the run still reported success.
+    /// A `.pass`-scoped failure (model gone, assets missing, locale
+    /// unsupported, device thermally deferred, task cancelled) would fail
+    /// every remaining window identically, so continuing just burns FM calls
+    /// and battery — those still stop the pass and resume from a checkpoint.
+    var failureScope: SemanticScanFailureScope {
+        switch self {
+        case .exceededContextWindow, .decodingFailure, .refusal,
+             .guardrailViolation, .rateLimited, .permissiveRefusal,
+             .permissiveDecodingFailure, .permissiveContextOverflow:
+            .window
+        case .queued, .running, .success, .noAds, .unavailable,
+             .unsupportedLocale, .assetsUnavailable, .thermalDeferred,
+             .cancelled, .failedTransient:
+            .pass
+        }
+    }
+
+    /// playhead-qbib: was this window blocked by Apple's safety layer rather
+    /// than by a size/shape/rate problem? These are the two statuses the
+    /// coarse pass retries through `PermissiveAdClassifier`, whose
+    /// `.permissiveContentTransformations` guardrails are the documented
+    /// mitigation for exactly this class of block.
+    var isSafetyBlock: Bool {
+        self == .refusal || self == .guardrailViolation
+    }
+
     static func from(error: Error) -> SemanticScanStatus {
         if error is CancellationError {
             return .cancelled
@@ -265,6 +327,18 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
         }
     }
     #endif
+}
+
+/// playhead-qbib: blast radius of a scan failure. See
+/// `SemanticScanStatus.failureScope` for the per-status mapping and the
+/// rationale.
+enum SemanticScanFailureScope: String, Codable, Sendable, Hashable, CaseIterable {
+    /// The failure is a property of this window. Record it with honest
+    /// coordinates and keep scanning the rest of the episode.
+    case window
+    /// The failure is a property of the device, model, or session. Stop the
+    /// pass with partial results and resume from a checkpoint.
+    case pass
 }
 
 enum SemanticScanRetryPolicy: String, Codable, Sendable, Hashable, CaseIterable {

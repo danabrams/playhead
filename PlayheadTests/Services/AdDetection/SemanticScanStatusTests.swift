@@ -41,6 +41,165 @@ struct SemanticScanStatusTests {
         #expect(SemanticScanStatus.guardrailViolation.retryPolicy == .persistFailure)
     }
 
+    // MARK: - playhead-qbib: per-window vs per-pass failure scope
+
+    @Test("playhead-qbib: safety blocks and shape failures are window-scoped, device failures are pass-scoped")
+    func failureScopeContract() {
+        // Window-scoped: a property of THIS window's content or prompt. One
+        // poisoned window must never end the pass.
+        for status in [
+            SemanticScanStatus.refusal,
+            .guardrailViolation,
+            .exceededContextWindow,
+            .decodingFailure,
+            .rateLimited,
+            .permissiveRefusal,
+            .permissiveDecodingFailure,
+            .permissiveContextOverflow
+        ] {
+            #expect(status.failureScope == .window, "\(status.rawValue) must not abort the pass")
+        }
+
+        // Pass-scoped: a property of the device / model / session. Every
+        // remaining window would fail identically.
+        for status in [
+            SemanticScanStatus.unavailable,
+            .unsupportedLocale,
+            .assetsUnavailable,
+            .thermalDeferred,
+            .cancelled,
+            .failedTransient
+        ] {
+            #expect(status.failureScope == .pass, "\(status.rawValue) must stop the pass")
+        }
+    }
+
+    @Test("playhead-qbib: only refusal and guardrail violation are safety blocks")
+    func safetyBlockContract() {
+        #expect(SemanticScanStatus.refusal.isSafetyBlock)
+        #expect(SemanticScanStatus.guardrailViolation.isSafetyBlock)
+        for status in SemanticScanStatus.allCases where status != .refusal && status != .guardrailViolation {
+            #expect(!status.isSafetyBlock, "\(status.rawValue) is not a safety block")
+        }
+    }
+
+    @Test("playhead-qbib: only success and noAds count as an examined window")
+    func didExamineWindowContract() {
+        #expect(SemanticScanStatus.success.didExamineWindow)
+        #expect(SemanticScanStatus.noAds.didExamineWindow)
+        for status in SemanticScanStatus.allCases where status != .success && status != .noAds {
+            #expect(
+                !status.didExamineWindow,
+                "\(status.rawValue) produced no verdict — it must not count as scanned"
+            )
+        }
+    }
+
+    // MARK: - playhead-qbib: honest scanned-duration denominator
+
+    /// DENOMINATOR: a refused window and a window screened clean both persist
+    /// a row. Only the status distinguishes them, and this is the assertion
+    /// that a consumer can act on that distinction.
+    @Test("playhead-qbib: coverage separates scanned-clean from could-not-scan")
+    func coverageSeparatesCleanFromUnscanned() {
+        let rows = [
+            makeCoverageRow(id: "w0", start: 0, end: 100, status: .success),
+            makeCoverageRow(id: "w1", start: 100, end: 250, status: .guardrailViolation),
+            makeCoverageRow(id: "w2", start: 250, end: 300, status: .noAds)
+        ]
+
+        let coverage = SemanticScanCoverage.compute(rows: rows)
+
+        #expect(coverage.examinedSeconds == 150)
+        #expect(coverage.unexaminedSeconds == 150)
+        #expect(coverage.unexaminedRanges == [100 ... 250])
+        #expect(coverage.attemptedSeconds == 300)
+        #expect(coverage.examinedFraction == 0.5)
+        #expect(!coverage.isComplete)
+    }
+
+    /// The exact phone failure: rows stop at 1425.9s of a ~3578s episode and
+    /// every row that WAS written looks fine. Only measuring against episode
+    /// end reveals the truncation.
+    @Test("playhead-qbib: coverage reports the unscanned tail through episode end")
+    func coverageReportsTruncatedTail() {
+        let rows = [
+            makeCoverageRow(id: "w0", start: 0, end: 700, status: .success),
+            makeCoverageRow(id: "w1", start: 700, end: 1425.9, status: .success)
+        ]
+
+        let coverage = SemanticScanCoverage.compute(rows: rows, episodeDuration: 3578)
+
+        #expect(coverage.examinedSeconds == 1425.9)
+        #expect(coverage.unexaminedRanges == [1425.9 ... 3578])
+        #expect(!coverage.isComplete)
+        // Without the episode duration the truncated run looks perfect —
+        // which is precisely why the denominator has to be measured against
+        // episode end and not against the rows the run happened to write.
+        #expect(SemanticScanCoverage.compute(rows: rows).isComplete)
+    }
+
+    @Test("playhead-qbib: a window recovered by a smaller retry is not a coverage hole")
+    func coverageSubtractsRecoveredRanges() {
+        let rows = [
+            // The whole window was blocked...
+            makeCoverageRow(id: "w0", start: 0, end: 200, status: .refusal),
+            // ...then both halves came back through the permissive retry.
+            makeCoverageRow(id: "w0a", start: 0, end: 100, status: .success),
+            makeCoverageRow(id: "w0b", start: 100, end: 200, status: .noAds)
+        ]
+
+        let coverage = SemanticScanCoverage.compute(rows: rows, episodeDuration: 200)
+
+        #expect(coverage.unexaminedRanges.isEmpty)
+        #expect(coverage.examinedSeconds == 200)
+        #expect(coverage.isComplete)
+    }
+
+    @Test("playhead-qbib: coverage ignores passB rows and degenerate coordinates")
+    func coverageIgnoresOtherPassesAndZeroWidthRows() {
+        let rows = [
+            makeCoverageRow(id: "a", start: 0, end: 100, status: .success),
+            makeCoverageRow(id: "b", start: 0, end: 0, status: .refusal),
+            makeCoverageRow(id: "c", start: 0, end: 100, status: .refusal, scanPass: "passB")
+        ]
+
+        let coverage = SemanticScanCoverage.compute(rows: rows)
+
+        #expect(coverage.isComplete)
+        #expect(coverage.examinedSeconds == 100)
+    }
+
+    private func makeCoverageRow(
+        id: String,
+        start: Double,
+        end: Double,
+        status: SemanticScanStatus,
+        scanPass: String = "passA"
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: id,
+            analysisAssetId: "asset-qbib",
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 1,
+            windowStartTime: start,
+            windowEndTime: end,
+            scanPass: scanPass,
+            transcriptQuality: .good,
+            disposition: status.didExamineWindow ? .noAds : .abstain,
+            spansJSON: "[]",
+            status: status,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: 1,
+            prewarmHit: false,
+            scanCohortJSON: "{}",
+            transcriptVersion: "tx-qbib"
+        )
+    }
+
     @Test("usability probe cache is keyed by OS build and boot epoch")
     func probeCacheKeys() {
         let suiteName = "SemanticScanStatusTests.\(UUID().uuidString)"

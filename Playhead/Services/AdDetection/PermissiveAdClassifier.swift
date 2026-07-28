@@ -677,6 +677,23 @@ actor PermissiveAdClassifier {
     /// the regular hook (so the existing rail tests keep their exact
     /// injection path) but BEFORE the real FoundationModels call.
     var arbitraryFaultInjectionForTesting: ((_ path: String) -> Error?)?
+
+    /// playhead-qbib: test-only SUCCESS injection for `classify`.
+    ///
+    /// The two hooks above can only make `classify` THROW. That leaves the
+    /// coarse safety-recovery success path — the whole-window retry and each
+    /// shrunken half — unexercisable anywhere FoundationModels is
+    /// unavailable, which includes the simulator the gate runs on. A test
+    /// that silently skips is not a test that passes, so this hook returns a
+    /// screening and short-circuits before the real model call. It runs
+    /// AFTER both fault hooks so existing fault-injection tests keep their
+    /// exact injection path.
+    ///
+    /// The closure may also THROW, which is what makes per-window behaviour
+    /// testable: the two fault hooks above are blind to which window they are
+    /// blocking, so they cannot express "this half recovers, that half stays
+    /// blocked" — the exact shape bounded context shrink has to produce.
+    var classifyOverrideForTesting: ((_ segments: [AdTranscriptSegment]) throws -> CoarseScreeningSchema?)?
     #endif
 
     init(logger: Logger = Logger(subsystem: "com.playhead", category: "PermissiveAdClassifier")) {
@@ -706,6 +723,15 @@ actor PermissiveAdClassifier {
     ) {
         self.arbitraryFaultInjectionForTesting = closure
     }
+
+    /// playhead-qbib companion to the fault hooks: make `classify` SUCCEED
+    /// with a caller-supplied screening so the coarse recovery success path
+    /// is testable without a live model.
+    func installClassifyOverrideForTesting(
+        _ closure: ((_ segments: [AdTranscriptSegment]) throws -> CoarseScreeningSchema?)?
+    ) {
+        self.classifyOverrideForTesting = closure
+    }
     #endif
 
     /// Classify a window of transcript segments through the permissive
@@ -734,6 +760,9 @@ actor PermissiveAdClassifier {
         }
         if let arbitraryFault = arbitraryFaultInjectionForTesting?("classify") {
             throw arbitraryFault
+        }
+        if let overridden = try classifyOverrideForTesting?(segments) {
+            return overridden
         }
         #endif
 

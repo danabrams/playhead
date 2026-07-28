@@ -173,6 +173,140 @@ struct SemanticScanResult: Sendable, Equatable {
     }
 }
 
+/// playhead-qbib: honest scanned-duration accounting over persisted
+/// `semantic_scan_results` rows.
+///
+/// Every downstream ratio — coverage %, precision measurement, the
+/// playhead-0sro watermark invariants — divides by "how much audio did we
+/// actually screen". Before this type existed there was no way to ask that
+/// question: a refused window and a window screened clean both persisted a
+/// row, so a truncated scan that reported success was indistinguishable from
+/// a complete one. `examinedSeconds` answers "we looked"; `unexaminedSeconds`
+/// / `unexaminedRanges` answer "we could not look" — including audio no
+/// window ever reached, when `episodeDuration` is supplied.
+///
+/// Ranges are half-open in spirit but modelled as `ClosedRange` because a
+/// window's `[start, end]` is inclusive of both transcript boundaries. Zero-
+/// and negative-width rows are ignored: they carry no coverage information
+/// (and a `0.0 ... 0.0` row is the passB coordinate bug this bead fixed).
+struct SemanticScanCoverage: Sendable, Equatable {
+    /// Union of the time ranges of rows whose status says a verdict was
+    /// actually obtained (`SemanticScanStatus.didExamineWindow`).
+    let examinedSeconds: Double
+    /// Union of attempted-or-expected time that produced no verdict, with
+    /// `examinedSeconds` subtracted out. A window that refused and was then
+    /// recovered by a smaller retry is NOT a hole.
+    let unexaminedSeconds: Double
+    /// The individual holes behind `unexaminedSeconds`, in time order. These
+    /// are the ranges a consumer must not describe as "no ads here".
+    let unexaminedRanges: [ClosedRange<Double>]
+
+    /// Total audio the pass either screened or tried to screen.
+    var attemptedSeconds: Double { examinedSeconds + unexaminedSeconds }
+
+    /// Fraction of `attemptedSeconds` that produced a real verdict. `1.0`
+    /// when nothing was attempted, so an empty pass never reads as a hole.
+    var examinedFraction: Double {
+        let total = attemptedSeconds
+        guard total > 0 else { return 1 }
+        return examinedSeconds / total
+    }
+
+    /// True when every second accounted for produced a verdict.
+    var isComplete: Bool { unexaminedRanges.isEmpty }
+
+    static let empty = SemanticScanCoverage(
+        examinedSeconds: 0,
+        unexaminedSeconds: 0,
+        unexaminedRanges: []
+    )
+
+    /// Compute coverage for one scan pass.
+    ///
+    /// - Parameters:
+    ///   - rows: persisted scan rows for a single asset. Rows from other
+    ///     passes are filtered out — passB rows are localized extent
+    ///     attempts inside already-screened passA windows, so mixing them in
+    ///     would double-count.
+    ///   - scanPass: the pass to account for. `passA` is the coverage lane.
+    ///   - episodeDuration: when supplied, audio in `0 ... episodeDuration`
+    ///     that no row covers at all is reported as unexamined. This is what
+    ///     catches a pass that stopped at 1425.9s of a 3578s episode: the
+    ///     rows it did write all look fine on their own.
+    static func compute(
+        rows: [SemanticScanResult],
+        scanPass: String = "passA",
+        episodeDuration: Double? = nil
+    ) -> SemanticScanCoverage {
+        let passRows = rows.filter { $0.scanPass == scanPass && $0.windowEndTime > $0.windowStartTime }
+        let examined = merge(
+            passRows
+                .filter(\.status.didExamineWindow)
+                .map { $0.windowStartTime ... $0.windowEndTime }
+        )
+        var unexamined = merge(
+            passRows
+                .filter { !$0.status.didExamineWindow }
+                .map { $0.windowStartTime ... $0.windowEndTime }
+        )
+        if let episodeDuration, episodeDuration > 0 {
+            let attempted = merge(passRows.map { $0.windowStartTime ... $0.windowEndTime })
+            unexamined = merge(unexamined + subtract(cuts: attempted, from: [0 ... episodeDuration]))
+        }
+        let holes = subtract(cuts: examined, from: unexamined)
+        return SemanticScanCoverage(
+            examinedSeconds: total(of: examined),
+            unexaminedSeconds: total(of: holes),
+            unexaminedRanges: holes
+        )
+    }
+
+    private static func total(of ranges: [ClosedRange<Double>]) -> Double {
+        ranges.reduce(0) { $0 + ($1.upperBound - $1.lowerBound) }
+    }
+
+    /// Sort and coalesce overlapping/touching ranges into a disjoint union.
+    private static func merge(_ ranges: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
+        let sorted = ranges.sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<Double>] = []
+        for range in sorted {
+            guard let last = merged.last else {
+                merged.append(range)
+                continue
+            }
+            if range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound ... Swift.max(last.upperBound, range.upperBound)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    /// Remove every second covered by `cuts` from `ranges`. Both inputs are
+    /// merged first so the walk only has to handle disjoint, ordered spans.
+    private static func subtract(
+        cuts: [ClosedRange<Double>],
+        from ranges: [ClosedRange<Double>]
+    ) -> [ClosedRange<Double>] {
+        let orderedCuts = merge(cuts)
+        var remaining: [ClosedRange<Double>] = []
+        for range in merge(ranges) {
+            var cursor = range.lowerBound
+            for cut in orderedCuts where cut.upperBound > range.lowerBound && cut.lowerBound < range.upperBound {
+                if cut.lowerBound > cursor {
+                    remaining.append(cursor ... cut.lowerBound)
+                }
+                cursor = Swift.max(cursor, cut.upperBound)
+            }
+            if cursor < range.upperBound {
+                remaining.append(cursor ... range.upperBound)
+            }
+        }
+        return remaining
+    }
+}
+
 enum EvidenceSourceType: String, Codable, Sendable, Hashable, CaseIterable {
     case fm
     case lexical
