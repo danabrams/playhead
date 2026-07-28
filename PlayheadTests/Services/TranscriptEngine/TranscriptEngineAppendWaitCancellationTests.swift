@@ -27,6 +27,14 @@
 // place a cancel inside it. The handler already covers that ordering on its
 // own, so the in-body check is defence in depth rather than a second
 // independently-testable guarantee — see the note on `waitForMoreShards()`.
+//
+// The post-cancel assertion is on `appendWaiterCountForTesting`, deliberately
+// NOT on `isActive`. `isActive` is `activeTask != nil && !activeTask.isCancelled`,
+// so `cancel()` alone makes it false whether or not the loop ever woke up — a
+// tautology in these tests, not an observation. The waiter count is a real one:
+// it is non-zero at the park and only `resumeAllAppendWaiters()`, which drains
+// the list before it resumes, brings it back to zero. A regression that resumed
+// a waiter without removing it — the double-resume shape — would leave it at 1.
 
 import Foundation
 import Testing
@@ -78,7 +86,7 @@ struct TranscriptEngineAppendWaitCancellationTests {
 
         // Before playhead-8m2w this never returned.
         await task.value
-        #expect(await engine.isActive == false)
+        #expect(await engine.appendWaiterCountForTesting == 0)
     }
 
     @Test("A cancel after the loop RE-parks is not a park-forever either",
@@ -120,7 +128,7 @@ struct TranscriptEngineAppendWaitCancellationTests {
 
         task.cancel()
         await task.value
-        #expect(await engine.isActive == false)
+        #expect(await engine.appendWaiterCountForTesting == 0)
     }
 
     @Test("A cancelled drain loop emits no .completed", .timeLimit(.minutes(1)))

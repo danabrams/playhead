@@ -253,9 +253,17 @@ struct SpeechRecognitionRequestGateWaiterTests {
         #expect(await tracker.maximum == 1)
     }
 
-    @Test("A waiter cancelled after the permit was handed to it releases it",
+    // NAME SAYS ONLY WHAT IT PROVES. An earlier name — "a waiter cancelled
+    // after the permit was handed to it releases it" — claimed one specific
+    // ordering, and this test cannot force one: no seam places a `cancel()`
+    // between `release()`'s hand-off and the waiter waking. Measured in round
+    // 2: with the whole waiter-cancellation handler deleted, the three tests
+    // above time out and this one still passes, because the racer then simply
+    // waits its turn. What it does prove — in either order, which is the point
+    // — is that the gate is still usable afterwards.
+    @Test("A cancel racing the permit hand-off leaves the gate usable either way",
           .timeLimit(.minutes(1)))
-    func waiterCancelledAfterGrantStillReleases() async throws {
+    func cancelRacingTheHandOffLeavesTheGateUsable() async throws {
         let gate = SpeechRecognitionRequestGate()
         let tracker = OverlapTracker()
         let holderEntered = TestSignal()
