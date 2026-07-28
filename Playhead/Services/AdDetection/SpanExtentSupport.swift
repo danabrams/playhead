@@ -106,14 +106,13 @@ struct SpanExtentSupport: Sendable, Equatable, Hashable {
         return edges
     }
 
-    /// Ordinal encoding of `tier` in `[0, 1]` for LOGGING and MEASUREMENT only
-    /// (decision logs and the replay harness want a number per verdict).
-    ///
-    /// NOT a probability and NOT calibrated — no decision path may compare it
-    /// against a threshold. `isFullyAnchored` / `tier` are the decision inputs.
-    var ordinalConfidence: Double {
-        Double(tier.rawValue) / Double(ExtentAnchorTier.deterministic.rawValue)
-    }
+    // No scalar `extentConfidence` is exposed, deliberately. Extent confidence
+    // is `tier` — an ordinal — because the pipeline has no calibrated per-edge
+    // boundary likelihood to report. A 0.0/0.5/1.0 stand-in would read like a
+    // probability, and the first thing anyone does with a probability is compare
+    // it to a threshold, which is precisely the presence-shaped reasoning this
+    // bead removed from the extent half of the verdict. Add one when there is a
+    // real measurement behind it.
 
     /// Derive extent support for a fusion span from the two authoritative
     /// decision-build sources, start and end resolved INDEPENDENTLY:

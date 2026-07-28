@@ -177,13 +177,13 @@ struct UnanchoredExtentAutoSkipGateTests {
         #expect(both.isFullyAnchored)
         #expect(both.unanchoredEdges.isEmpty)
 
-        // Ordinal encoding is for logs/measurement only; pin the endpoints so a
-        // future consumer cannot mistake a rescaling for a behavior change.
-        #expect(SpanExtentSupport.unanchored.ordinalConfidence == 0.0)
-        #expect(
-            SpanExtentSupport(startAnchor: .rediffByteExact, endAnchor: .rediffByteExact)
-                .ordinalConfidence == 1.0
+        let deterministic = SpanExtentSupport(
+            startAnchor: .rediffByteExact,
+            endAnchor: .rediffByteExact
         )
+        #expect(deterministic.tier == .deterministic)
+        #expect(SpanExtentSupport.unanchored.tier == .none)
+        #expect(SpanExtentSupport.unanchored.unanchoredEdges == ["start", "end"])
     }
 
     // MARK: - (2) What counts as an anchored edge
