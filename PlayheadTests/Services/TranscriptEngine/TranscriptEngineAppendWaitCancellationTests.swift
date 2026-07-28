@@ -19,6 +19,14 @@
 //
 // A regression here HANGS rather than mis-asserts: `await task.value` is the
 // liveness claim, and the `.timeLimit` trait is the backstop.
+//
+// What these tests pin is the cancellation HANDLER on the park. They cannot
+// distinguish it from the `Task.isCancelled` check inside the continuation
+// body: that check guards a window a few instructions wide, between the drain
+// loop's pre-park cancellation check and the park itself, and no test seam can
+// place a cancel inside it. The handler already covers that ordering on its
+// own, so the in-body check is defence in depth rather than a second
+// independently-testable guarantee — see the note on `waitForMoreShards()`.
 
 import Foundation
 import Testing
@@ -73,30 +81,43 @@ struct TranscriptEngineAppendWaitCancellationTests {
         #expect(await engine.isActive == false)
     }
 
-    @Test("Cancelling before the loop parks is still not a park-forever",
+    @Test("A cancel after the loop RE-parks is not a park-forever either",
           .timeLimit(.minutes(1)))
-    func cancelRacingTheParkStillExits() async throws {
+    func cancelAfterAReparkStillExits() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeTestAsset(id: "asset-cancel-race"))
+        try await store.insertAsset(makeTestAsset(id: "asset-repark"))
         let speech = SpeechService(
             recognizer: StubSpeechRecognizer(),
             serializesRecognizerRequests: false
         )
         try await speech.loadFastModel()
         let engine = TranscriptEngineService(speechService: speech, store: store)
+        let snapshot = PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
 
         await engine.startTranscription(
-            shards: [makeShard(id: 0, episodeID: "ep-asset-cancel-race")],
-            analysisAssetId: "asset-cancel-race",
-            snapshot: PlaybackSnapshot(playheadTime: 0, playbackRate: 1.0, isPlaying: true)
+            shards: [makeShard(id: 0, episodeID: "ep-asset-repark")],
+            analysisAssetId: "asset-repark",
+            snapshot: snapshot
         )
         let task = try #require(await engine.activeTaskForTesting())
+        await awaitParked(on: engine)
 
-        // Cancel immediately, without waiting for the loop to reach the park.
-        // Whichever side wins — the pre-park `Task.isCancelled` check, or the
-        // cancellation handler on the park itself — the loop must exit. This
-        // is the check-then-park window the bead names, driven from the side
-        // that used to lose it.
+        // Wake the loop with real work so it drains and parks a SECOND time.
+        // `appendShards` drains `appendWaiters` synchronously, so the count is
+        // back to zero when it returns and the next non-zero reading is
+        // unambiguously the re-park.
+        //
+        // This is the property the first test cannot see: the cancellation
+        // handler is installed per park and `withTaskCancellationHandler`
+        // removes its record when the park returns, so a fix that only armed
+        // once would strand the loop here.
+        await engine.appendShards(
+            [makeShard(id: 1, episodeID: "ep-asset-repark", startTime: 30)],
+            analysisAssetId: "asset-repark",
+            snapshot: snapshot
+        )
+        await awaitParked(on: engine)
+
         task.cancel()
         await task.value
         #expect(await engine.isActive == false)

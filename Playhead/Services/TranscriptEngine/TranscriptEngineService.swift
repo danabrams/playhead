@@ -707,15 +707,24 @@ actor TranscriptEngineService {
     /// still open simply re-parks, which is the behaviour that function is
     /// already documented and used for.
     ///
-    /// The cancellation check inside the continuation body is what makes this
-    /// airtight rather than merely very likely. `onCancel` fires synchronously
-    /// on the canceller's thread and has to hop back here to reach
-    /// `appendWaiters`, and that hop cannot be serviced until this actor job
-    /// suspends — which happens only *after* the append. So a cancel that
-    /// lands before the park would otherwise have nothing to resume. Checking
-    /// under isolation, before parking, removes the whole ordering argument:
-    /// an already-cancelled loop never parks in the first place. (Same shape
-    /// as `BoundedContinuation`'s resolve-before-attach phase.)
+    /// The handler is the load-bearing half, and it is airtight on its own.
+    /// `onCancel` fires on the canceller's thread and has to hop back here to
+    /// reach `appendWaiters`, but that hop *cannot be serviced until this
+    /// actor job suspends* — which happens only after the append. So the
+    /// waiter is always already in the list by the time the hop drains it,
+    /// including for a cancel that lands before the park:
+    /// `withTaskCancellationHandler` invokes `onCancel` immediately when the
+    /// task is already cancelled at install time, so that ordering schedules
+    /// the same hop.
+    ///
+    /// The `Task.isCancelled` check inside the continuation body is defence in
+    /// depth, not a hole being plugged. What it buys is independence from that
+    /// already-cancelled-fires-immediately contract, and one less actor hop on
+    /// the common path: an already-cancelled loop never parks in the first
+    /// place. (Same shape as `BoundedContinuation`'s settle-before-attach
+    /// phase.) It is deliberately kept even though no test can distinguish it
+    /// from the handler alone — the window it covers is a few instructions
+    /// wide and not reachable from a test seam.
     private func waitForMoreShards() async {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
