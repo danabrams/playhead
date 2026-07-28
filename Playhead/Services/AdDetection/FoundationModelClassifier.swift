@@ -664,11 +664,22 @@ struct FMCoarseScanOutput: Sendable, Equatable {
     var failedWindowStatuses: [SemanticScanStatus] { failedWindows.map(\.status) }
 
     /// Cycle 2 C2: per-reason counts of permissive bypass failures
-    /// observed during this pass. Always a subset of
+    /// observed during this pass. At WINDOW granularity this is a subset of
     /// `failedWindowStatuses` — a permissive refusal increments the
     /// counter AND appends a `.refusal` SemanticScanStatus to the
     /// failed-window list. The runner aggregates these into its
     /// run-completion telemetry log.
+    ///
+    /// playhead-9q10 narrows that correspondence, deliberately: chunk-level
+    /// permissive recovery inside `subdividedCoarseOutput` increments these
+    /// counters for a blocked ATOM CHUNK, but a subdivided plan collapses all
+    /// of its chunk outcomes into at most ONE window-level row. So a blocked
+    /// chunk can increment a counter while the plan's row carries a different
+    /// status — or, when the surviving chunks aggregate to `containsAd`, while
+    /// the plan produces no failure row at all. The counter still answers its
+    /// own question truthfully ("how many permissive attempts did this pass
+    /// have blocked"); it is the per-window CORRESPONDENCE that cannot survive
+    /// N chunks folding into one row. Do not reintroduce a subset assertion.
     let permissiveFailureCounts: PermissiveFailureCounts
 
     init(
@@ -944,6 +955,32 @@ struct FoundationModelClassifier: Sendable {
         var permissiveCounts = PermissiveFailureCounts.zero
         /// Permissive FM calls actually issued, charged against the pass budget.
         var attemptsSpent = 0
+    }
+
+    /// playhead-9q10: everything one subdivided (context-overflow) window
+    /// produced.
+    ///
+    /// `output` is nil whenever the chunk evidence does not support a
+    /// window-level verdict — see `subdividedCoarseOutput` for the cases. The
+    /// permissive counters ride along so a chunk recovered (or blocked) by
+    /// qbib's permissive path is charged against the SAME whole-pass budget
+    /// and rolled into the SAME telemetry as a window-level recovery.
+    private struct CoarseSubdivisionOutcome {
+        var output: FMCoarseWindowOutput?
+        var permissiveCounts = PermissiveFailureCounts.zero
+        /// Permissive FM calls actually issued, charged against the pass budget.
+        var attemptsSpent = 0
+    }
+
+    /// playhead-9q10: what one atom chunk of a subdivided window produced.
+    ///
+    /// `unexamined` carries the status so the aggregate can ask qbib's
+    /// question — `SemanticScanStatus.didExamineWindow`, "was a verdict
+    /// actually obtained" — instead of re-deriving "did we look" from an
+    /// ad-hoc refusal counter that ignored every other way a chunk can fail.
+    private enum SubdividedChunkOutcome {
+        case examined(CoarseDisposition)
+        case unexamined(SemanticScanStatus)
     }
 
     private enum RefinementResponseOutcome {
@@ -1606,28 +1643,41 @@ struct FoundationModelClassifier: Sendable {
                 // Aggregation precedence: containsAd > uncertain > abstain
                 // > noAds — "more permissive" matches coarse's recall role.
                 if plan.lineRefs.count == 1,
-                   let segment = segmentByIndex[plan.lineRefs[0]],
-                   let recovered = await subdividedCoarseOutput(
-                       for: plan,
-                       segment: segment,
-                       budget: budget,
-                       clock: clock,
-                       windowIndex: planIndex + 1,
-                       totalWindows: totalWindows
-                   )
-                {
-                    windows.append(
-                        FMCoarseWindowOutput(
-                            windowIndex: windows.count,
-                            lineRefs: recovered.lineRefs,
-                            startTime: recovered.startTime,
-                            endTime: recovered.endTime,
-                            transcriptQuality: recovered.transcriptQuality,
-                            screening: recovered.screening,
-                            latencyMillis: recovered.latencyMillis
-                        )
+                   let segment = segmentByIndex[plan.lineRefs[0]] {
+                    let subdivision = await subdividedCoarseOutput(
+                        for: plan,
+                        segment: segment,
+                        budget: budget,
+                        permissive: permissiveClassifier,
+                        // playhead-9q10: a safety-blocked CHUNK gets exactly the
+                        // allowance qbib gives a safety-blocked WINDOW — at most
+                        // `coarseSafetyRecoveryMaxAttemptsPerWindow`, drawn from
+                        // the same whole-pass budget. Subdivision does not earn a
+                        // larger allowance just because it has more chunks.
+                        attemptBudget: min(
+                            Self.coarseSafetyRecoveryMaxAttemptsPerWindow,
+                            recoveryAttemptsRemaining
+                        ),
+                        clock: clock,
+                        windowIndex: planIndex + 1,
+                        totalWindows: totalWindows
                     )
-                    continue
+                    recoveryAttemptsRemaining -= subdivision.attemptsSpent
+                    permissiveCounts = permissiveCounts + subdivision.permissiveCounts
+                    if let recovered = subdivision.output {
+                        windows.append(
+                            FMCoarseWindowOutput(
+                                windowIndex: windows.count,
+                                lineRefs: recovered.lineRefs,
+                                startTime: recovered.startTime,
+                                endTime: recovered.endTime,
+                                transcriptQuality: recovered.transcriptQuality,
+                                screening: recovered.screening,
+                                latencyMillis: recovered.latencyMillis
+                            )
+                        )
+                        continue
+                    }
                 }
                 failedWindows.append(CoarseWindowFailure(plan: plan, status: .exceededContextWindow))
                 logger.error(
@@ -4347,19 +4397,60 @@ struct FoundationModelClassifier: Sendable {
     /// aggregates the sub-dispositions via permissive precedence
     /// (containsAd > uncertain > abstain > noAds).
     ///
-    /// Returns `nil` when subdivision cannot help — either the segment has
-    /// a single atom (no cut point), an atom alone exceeds budget, or all
-    /// sub-runs errored. The caller treats `nil` as the legacy abandonment
-    /// path so no window-level accounting regresses.
+    /// Returns a nil `output` when subdivision cannot produce a verdict the
+    /// evidence supports:
+    ///
+    /// - the segment has a single atom (no cut point), an atom alone exceeds
+    ///   budget, or every sub-run failed — subdivision cannot help;
+    /// - **playhead-9q10**: at least one chunk was never EXAMINED
+    ///   (`SemanticScanStatus.didExamineWindow`) and the surviving chunks
+    ///   would aggregate to a non-`containsAd` verdict. The old code counted
+    ///   refusals into `refusalCount`, gated only on `succeededCount > 0`, and
+    ///   then DISCARDED the count — so a window whose middle chunk refused and
+    ///   whose remaining chunks came back clean persisted as a confident,
+    ///   fully-scanned `.noAds` over audio nobody screened. That is the false
+    ///   clean qbib eliminated at window granularity, one level down and
+    ///   worse: a refused window is at least a failure row that
+    ///   `SemanticScanCoverage` counts as a hole, whereas this persisted as a
+    ///   SUCCESS row, and nothing downstream ever revisits a success.
+    ///
+    /// The caller treats a nil `output` as the legacy abandonment path: the
+    /// whole plan becomes a `CoarseWindowFailure`, i.e. an honest hole with its
+    /// own coordinates that `SemanticScanCoverage` counts as unexamined and the
+    /// shadow retry observer can re-attempt. Conceding examined chunks back to
+    /// the hole costs a re-scan; the alternative costs the truth.
+    ///
+    /// **Why nil rather than a PARTIAL-coverage row carrying only the examined
+    /// sub-ranges** (the richer fix the bead asked for, if it fit): a passA
+    /// row's identity is `AnalysisStore.semanticScanReuseKeyHash`, keyed on the
+    /// window's FIRST/LAST ATOM ORDINAL — and both `makeScanResult` and
+    /// `attemptedRange` derive those ordinals from the SEGMENT, not from the
+    /// output's own time bounds. Every sub-range row of a single-segment plan
+    /// therefore hashes identically: two examined sub-rows collide under
+    /// `UNIQUE(reuseKeyHash)` (last write wins), and — worse — the hole row is
+    /// silently DROPPED by the H-1 "a cached success must never be demoted"
+    /// guard in `insertSemanticScanResult`. Sub-window partial coverage needs
+    /// atom-granular row identity first; synthesising it today would reproduce
+    /// this bead's own defect through the persistence layer.
+    ///
+    /// A `containsAd` aggregate is still returned whole-window. It is not a
+    /// clean claim, it routes the window to passB refinement, and the
+    /// short-circuit that produced it deliberately leaves later chunks
+    /// unattempted — recording those as holes would stall the coverage cursor
+    /// on the same window forever, since every re-scan short-circuits again.
+    @available(iOS 26.0, *)
     private func subdividedCoarseOutput(
         for plan: CoarsePassWindowPlan,
         segment: AdTranscriptSegment,
         budget: Int,
+        permissive: PermissiveAdClassifier?,
+        attemptBudget: Int,
         clock: ContinuousClock,
         windowIndex: Int,
         totalWindows: Int
-    ) async -> FMCoarseWindowOutput? {
-        guard segment.atoms.count > 1 else { return nil }
+    ) async -> CoarseSubdivisionOutcome {
+        var outcome = CoarseSubdivisionOutcome()
+        guard segment.atoms.count > 1 else { return outcome }
 
         let windowStart = clock.now
         let validLineRefs: Set<Int> = [segment.segmentIndex]
@@ -4387,7 +4478,7 @@ struct FoundationModelClassifier: Sendable {
             if current.isEmpty {
                 // A single atom alone already exceeds budget — subdivision
                 // can't descend below one atom, so give up.
-                return nil
+                return outcome
             }
             chunks.append(current)
             current = [atom]
@@ -4395,47 +4486,86 @@ struct FoundationModelClassifier: Sendable {
                 Self.buildPrompt(for: [subSegment(from: current)], redactor: redactor)
             )) ?? Int.max
             if aloneTokens > budget {
-                return nil
+                return outcome
             }
         }
         if !current.isEmpty {
             chunks.append(current)
         }
-        guard chunks.count >= 2 else { return nil }
+        guard chunks.count >= 2 else { return outcome }
 
         var anyContainsAd = false
         var anyUncertain = false
         var anyAbstain = false
         var succeededCount = 0
-        var refusalCount = 0
-        for atoms in chunks {
-            let prompt = Self.buildPrompt(for: [subSegment(from: atoms)], redactor: redactor)
-            let sessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
-            do {
-                let response = try await sessionBox.respondCoarse(prompt)
-                let screening = sanitize(schema: response, validLineRefs: validLineRefs)
+        // playhead-9q10: every chunk that produced NO verdict, with the status
+        // that says why. This replaces `refusalCount`, which both ignored the
+        // non-refusal ways a chunk can fail (decode failure, guardrail
+        // violation, rate limit, cancellation) and was discarded before the
+        // aggregate disposition was built.
+        var unexaminedStatuses: [SemanticScanStatus] = []
+        chunkLoop: for atoms in chunks {
+            switch await classifySubdividedChunk(
+                subSegment: subSegment(from: atoms),
+                validLineRefs: validLineRefs,
+                permissive: permissive,
+                attemptBudget: attemptBudget,
+                into: &outcome
+            ) {
+            case let .examined(chunkDisposition):
                 succeededCount += 1
-                switch screening.disposition {
+                switch chunkDisposition {
                 case .containsAd: anyContainsAd = true
                 case .uncertain: anyUncertain = true
                 case .abstain: anyAbstain = true
                 case .noAds: break
                 }
-                if anyContainsAd { break }
-            } catch {
-                if SemanticScanStatus.from(error: error) == .refusal {
-                    refusalCount += 1
-                }
+                if anyContainsAd { break chunkLoop }
+            case let .unexamined(status):
+                unexaminedStatuses.append(status)
+                // A `.pass`-scoped failure is a property of the device, model
+                // or session, not of this chunk's content — cancellation (a
+                // BG-window expiry), assets evicted, thermal deferral — so
+                // every remaining chunk would fail identically and each one
+                // still costs a fresh prewarmed session. Stop. `.window`-scoped
+                // failures (refusal, guardrail, decode, rate limit) are
+                // per-chunk and the loop keeps going. This is the same
+                // `SemanticScanStatus.failureScope` question the pass loop asks
+                // of a whole window, asked one level down. Escalation is not
+                // ours: the pass loop's own `Task.checkCancellation()` owns it.
+                if status.failureScope == .pass { break chunkLoop }
             }
         }
 
-        guard succeededCount > 0 else { return nil }
+        guard succeededCount > 0 else { return outcome }
 
         let disposition: CoarseDisposition
         if anyContainsAd { disposition = .containsAd }
         else if anyUncertain { disposition = .uncertain }
         else if anyAbstain { disposition = .abstain }
         else { disposition = .noAds }
+
+        // playhead-9q10: the false-clean gate. A window that would claim
+        // anything other than "there are ads here" must have examined every
+        // chunk it is about to speak for. See the doc comment for why this
+        // concedes the whole window rather than persisting the examined
+        // sub-ranges.
+        if disposition != .containsAd, !unexaminedStatuses.isEmpty {
+            logger.error(
+                """
+                fm.classifier.coarse_pass_window_subdivided_unexamined \
+                window=\(windowIndex, privacy: .public) \
+                totalWindows=\(totalWindows, privacy: .public) \
+                segmentIndex=\(segment.segmentIndex, privacy: .public) \
+                chunks=\(chunks.count, privacy: .public) \
+                examined=\(succeededCount, privacy: .public) \
+                unexamined=\(unexaminedStatuses.count, privacy: .public) \
+                unexaminedStatus=\(Self.aggregateGracefulFailureStatus(unexaminedStatuses).rawValue, privacy: .public) \
+                withheldDisposition=\(disposition.rawValue, privacy: .public)
+                """
+            )
+            return outcome
+        }
 
         logger.debug(
             """
@@ -4446,12 +4576,13 @@ struct FoundationModelClassifier: Sendable {
             atomCount=\(segment.atoms.count, privacy: .public) \
             chunks=\(chunks.count, privacy: .public) \
             succeeded=\(succeededCount, privacy: .public) \
-            refusals=\(refusalCount, privacy: .public) \
+            unexamined=\(unexaminedStatuses.count, privacy: .public) \
+            permissiveAttempts=\(outcome.attemptsSpent, privacy: .public) \
             disposition=\(disposition.rawValue, privacy: .public)
             """
         )
 
-        return FMCoarseWindowOutput(
+        outcome.output = FMCoarseWindowOutput(
             windowIndex: 0,
             lineRefs: plan.lineRefs,
             startTime: plan.startTime,
@@ -4460,6 +4591,57 @@ struct FoundationModelClassifier: Sendable {
             screening: CoarseScreeningSchema(disposition: disposition, support: nil),
             latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
         )
+        return outcome
+    }
+
+    /// playhead-9q10: classify ONE atom chunk of a subdivided window, reusing
+    /// qbib's permissive recovery at chunk granularity.
+    ///
+    /// A chunk blocked by Apple's safety layer is the same shape of block
+    /// `recoverCoarseWindowPermissively` handles at window level, and
+    /// `PermissiveAdClassifier`'s `.permissiveContentTransformations` guardrails
+    /// are the documented mitigation, so it is worth one retry before conceding
+    /// the whole window. Recovering the blocked chunk is what turns this bead's
+    /// new hole back into real coverage.
+    ///
+    /// Budget: `attemptBudget` arrives already clamped by the caller to
+    /// `min(coarseSafetyRecoveryMaxAttemptsPerWindow, remaining pass budget)`,
+    /// and `outcome.attemptsSpent` is charged back against the pass. A
+    /// subdivided window therefore costs at most the same 3 permissive calls
+    /// qbib allows any other window, however many chunks it has, and never
+    /// starves a later window of the shared pass budget by more than that.
+    /// No recursion: a chunk that is still blocked stays unexamined.
+    @available(iOS 26.0, *)
+    private func classifySubdividedChunk(
+        subSegment: AdTranscriptSegment,
+        validLineRefs: Set<Int>,
+        permissive: PermissiveAdClassifier?,
+        attemptBudget: Int,
+        into outcome: inout CoarseSubdivisionOutcome
+    ) async -> SubdividedChunkOutcome {
+        let prompt = Self.buildPrompt(for: [subSegment], redactor: redactor)
+        let sessionBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
+        do {
+            let response = try await sessionBox.respondCoarse(prompt)
+            return .examined(sanitize(schema: response, validLineRefs: validLineRefs).disposition)
+        } catch {
+            let status = SemanticScanStatus.from(error: error)
+            guard status.isSafetyBlock,
+                  let permissive,
+                  outcome.attemptsSpent < attemptBudget else {
+                return .unexamined(status)
+            }
+            outcome.attemptsSpent += 1
+            switch await classifyPermissively(segments: [subSegment], permissive: permissive) {
+            case let .screened(screening):
+                return .examined(screening.disposition)
+            case let .blocked(reason):
+                outcome.permissiveCounts.increment(reason: reason)
+                return .unexamined(Self.permissiveStatus(for: reason))
+            case .cancelled:
+                return .unexamined(.cancelled)
+            }
+        }
     }
 
     private func runCoarseRetry(
