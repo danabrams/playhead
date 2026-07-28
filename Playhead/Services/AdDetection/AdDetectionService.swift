@@ -715,6 +715,26 @@ struct AdDetectionConfig: Sendable {
     /// is off. DEFAULT `90.0`.
     let postRollGuardSeconds: Double
 
+    /// playhead-2350: SAFETY gate — a fusion span with an UNANCHORED start or end
+    /// edge may not be auto-skipped. DEFAULT `true`, and deliberately so: this is
+    /// not a feature flag, it is the fix for a live trust bug. The 2026-07-25
+    /// THEMOVE Catalyst replay shipped four windows with `eligibilityGate ==
+    /// .eligible` — one of them starting 12.72 s inside the host's sign-off —
+    /// whose every edge was `.unanchored`, i.e. invented by the pipeline.
+    ///
+    /// When `true`, `runBackfill`'s emission loop stamps
+    /// `DecisionResult.extentSupport` and demotes an `.eligible` span whose
+    /// extent is not fully anchored to `.markOnly` (banner, per Dan's
+    /// certainty-tiered skip policy). The demotion NEVER promotes and NEVER
+    /// touches a score.
+    ///
+    /// Set to `false` ONLY to disable the safety gate — a kill switch, and the
+    /// opt-out for the few suites that must observe a pre-2350 demotion seam on
+    /// a fixture whose spans are unanchored by construction. It can only ever
+    /// make MORE spans auto-skippable, so flipping it off in production
+    /// reintroduces the bug.
+    let unanchoredExtentBlocksAutoSkip: Bool
+
     /// playhead-xsdz.66: pre-roll start-at-zero clamp threshold, in seconds. When
     /// the episode's FIRST ad window starts within this many seconds of t=0 — the
     /// pre-roll position — `runBackfill` extends its start edge to exactly 0.0
@@ -833,6 +853,7 @@ struct AdDetectionConfig: Sendable {
         certaintyTieredSkipEnabled: Bool = false,
         hostReadConfidenceFloor: Double = 0.9,
         postRollGuardSeconds: Double = 90.0,
+        unanchoredExtentBlocksAutoSkip: Bool = true,
         preRollStartClampSeconds: Double = 20.0
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
@@ -907,6 +928,7 @@ struct AdDetectionConfig: Sendable {
         self.certaintyTieredSkipEnabled = certaintyTieredSkipEnabled
         self.hostReadConfidenceFloor = hostReadConfidenceFloor
         self.postRollGuardSeconds = postRollGuardSeconds
+        self.unanchoredExtentBlocksAutoSkip = unanchoredExtentBlocksAutoSkip
         self.preRollStartClampSeconds = preRollStartClampSeconds
     }
 
@@ -969,6 +991,7 @@ struct AdDetectionConfig: Sendable {
         certaintyTieredSkipEnabled: false,  // playhead-wraj: certainty-tiered auto-skip gate ships OFF; enablement is Dan's Gate-2 decision (2026-07-19 gate-delta measurement 32/32 at T=0.9 + 90s post-roll)
         hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); inert while certaintyTieredSkipEnabled is false
         postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
+        unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
         preRollStartClampSeconds: 20.0  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
     )
 
@@ -5496,7 +5519,41 @@ actor AdDetectionService {
             try Task.checkCancellation()
 
             let refinedSpan = pending.refinedSpan
-            let decision = pending.decision
+            // playhead-2350 (PRESENCE vs EXTENT): derive the span's EXTENT
+            // support HERE — this is the first point at which both the boundary
+            // refiners and the span finalizer have finished touching the
+            // geometry, so it is the only place an edge claim is final. The two
+            // authoritative sources are the refined span's width provenance
+            // (`.rediffSlot`) and the stinger snap trace keyed by the SAME
+            // `refinedSpan.id` the trace re-key block below reads; a finalizer
+            // geometry rewrite invalidates both (`finalizerRewroteGeometry`).
+            //
+            // Flag-OFF for stinger + rediff: no span carries `.rediffSlot` and
+            // `lastStingerRefinementTraceBySpanId` is empty (top-of-run reset),
+            // so extent resolves `.unanchored` on both edges — which is the
+            // honest answer, and under `unanchoredExtentBlocksAutoSkip` (default
+            // ON) makes such a span mark-only rather than auto-skippable.
+            let extentSupport = SpanExtentSupport.derive(
+                anchorProvenance: refinedSpan.anchorProvenance,
+                stingerTrace: lastStingerRefinementTraceBySpanId[refinedSpan.id],
+                geometryWasRewritten: pending.finalizerRewroteGeometry
+            )
+            // Stamp EXTENT onto the PRESENCE-derived verdict and apply the
+            // unanchored-edge auto-skip block. Everything below in this
+            // iteration — the `policyAction` promotion, the persisted
+            // `AdWindow.eligibilityGate`, the `AdDecisionResult` forwarded to
+            // SkipOrchestrator, `decision_events`, the explanation trace and
+            // the NARL decision log — reads THIS `decision`, so the demotion is
+            // recorded consistently everywhere the old verdict was.
+            let decision = pending.decision.withExtentSupport(
+                extentSupport,
+                blockingUnanchoredAutoSkip: config.unanchoredExtentBlocksAutoSkip
+            )
+            if decision.eligibilityGate != pending.decision.eligibilityGate {
+                logger.info(
+                    "[2350] span \(refinedSpan.id, privacy: .public) extent unanchored on \(extentSupport.unanchoredEdges.joined(separator: "+"), privacy: .public) — \(pending.decision.eligibilityGate.rawValue, privacy: .public)→\(decision.eligibilityGate.rawValue, privacy: .public) (presence skipConfidence \(decision.skipConfidence, format: .fixed(precision: 2)) unchanged)"
+                )
+            }
             let ledger = pending.ledger
             let effectiveLedger = pending.effectiveLedger
             let spanTopCatalogSimilarity = pending.spanTopCatalogSimilarity
@@ -5588,17 +5645,15 @@ actor AdDetectionService {
                 spanCatalogWasEvaluated
                     ? Double(spanTopCatalogSimilarity)
                     : nil
-            // playhead-hdgk: derive the per-edge anchor tier from the two
-            // authoritative sources in scope here — the refined span's width
-            // provenance (`.rediffSlot`) and the stinger snap trace keyed by
-            // the SAME `refinedSpan.id` the trace-re-key block below reads.
-            // Flag-OFF: `lastStingerRefinementTraceBySpanId` is empty (top-of-
-            // run reset) and no span carries `.rediffSlot`, so both edges
-            // resolve `.unanchored` — byte-identical to pre-hdgk.
-            let edgeAnchors = Self.deriveFusionEdgeAnchors(
-                anchorProvenance: refinedSpan.anchorProvenance,
-                stingerTrace: lastStingerRefinementTraceBySpanId[refinedSpan.id],
-                geometryWasRewritten: pending.finalizerRewroteGeometry
+            // playhead-hdgk: persist the per-edge anchor tier so the auto-skip
+            // edge-padding policy can classify this span by its real provenance
+            // on ingest. playhead-2350 folded the derivation into
+            // `extentSupport` at the top of this iteration (the gate and the
+            // persisted tiers must be the same observation); this is the
+            // persistence-facing view of it.
+            let edgeAnchors = (
+                start: extentSupport.startAnchor,
+                end: extentSupport.endAnchor
             )
             let window = buildFusionAdWindow(
                 span: refinedSpan,
@@ -5843,7 +5898,18 @@ actor AdDetectionService {
                             event.policyAction
                                 == SkipPolicyAction.autoSkipEligible.rawValue
                             && finalGate
-                                == SkipEligibilityGate.eligible.rawValue
+                                == SkipEligibilityGate.eligible.rawValue,
+                        // playhead-2350: the pre-roll clamp rewrites GEOMETRY,
+                        // not extent PROVENANCE (and only ever caps the result
+                        // to mark-only), so the recorded anchors carry forward
+                        // verbatim. Rebuilding them as nil here would erase the
+                        // one field that says WHY a span was banner-only.
+                        startEdgeAnchor:
+                            explanation.actionRationale.startEdgeAnchor,
+                        endEdgeAnchor:
+                            explanation.actionRationale.endEdgeAnchor,
+                        extentFullyAnchored:
+                            explanation.actionRationale.extentFullyAnchored
                     )
                 )
                 finalExplanationJSON = (try? JSONEncoder().encode(finalized))
@@ -8057,25 +8123,21 @@ actor AdDetectionService {
     /// `.unanchored` (it does not qualify for the tight rediff margin). A
     /// post-fusion geometry rewrite invalidates both earlier edge claims and
     /// forces the conservative pair regardless of their original source.
+    ///
+    /// playhead-2350: the derivation itself now lives on `SpanExtentSupport`, so
+    /// the edge-padding tiers and the unanchored-edge auto-skip block cannot
+    /// drift apart. This stays as the (persistence-facing) tuple view.
     static func deriveFusionEdgeAnchors(
         anchorProvenance: [AnchorRef],
         stingerTrace: StingerRefinementTrace?,
         geometryWasRewritten: Bool = false
     ) -> (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor) {
-        guard !geometryWasRewritten else {
-            return (start: .unanchored, end: .unanchored)
-        }
-        let rediffOwnsWidth = anchorProvenance.contains(.rediffSlot)
-        return (
-            start: AutoSkipEdgeAnchor.derive(
-                rediffByteExact: rediffOwnsWidth,
-                stingerSnapped: stingerTrace?.startSnapped ?? false
-            ),
-            end: AutoSkipEdgeAnchor.derive(
-                rediffByteExact: rediffOwnsWidth,
-                stingerSnapped: stingerTrace?.endSnapped ?? false
-            )
+        let support = SpanExtentSupport.derive(
+            anchorProvenance: anchorProvenance,
+            stingerTrace: stingerTrace,
+            geometryWasRewritten: geometryWasRewritten
         )
+        return (start: support.startAnchor, end: support.endAnchor)
     }
 
     private func buildFusionAdWindow(

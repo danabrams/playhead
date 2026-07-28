@@ -133,9 +133,19 @@ struct CertaintyTieredSkipFlagsWireInTests {
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1",
-            fmBackfillMode: .off
+            fmBackfillMode: .off,
             // certaintyTieredSkipEnabled / hostReadConfidenceFloor /
             // postRollGuardSeconds omitted → default false / 0.9 / 90.0.
+            //
+            // playhead-2350: the extent gate is disabled across THIS suite only.
+            // The Squarespace fixture's span is lexical-seeded — no rediff slot,
+            // no stinger snap — so under the shipped default (ON) it demotes to
+            // `.markOnly` on unanchored edges before wraj ever runs, and the
+            // eligible baseline these arms shrink would be empty for a reason
+            // that has nothing to do with the flags under test. Disabling it
+            // here keeps the wraj demotion the sole observable. The 2350 gate
+            // itself is covered by UnanchoredExtentAutoSkipGateTests.
+            unanchoredExtentBlocksAutoSkip: false
         )
     }
 
@@ -156,7 +166,11 @@ struct CertaintyTieredSkipFlagsWireInTests {
             fmBackfillMode: .off,
             certaintyTieredSkipEnabled: enabled,
             hostReadConfidenceFloor: floor,
-            postRollGuardSeconds: guardSeconds
+            postRollGuardSeconds: guardSeconds,
+            // playhead-2350: see `makeBaseConfig()` — the extent gate is held
+            // off across this suite so the wraj demotion stays the sole
+            // observable on a fixture whose span is unanchored by construction.
+            unanchoredExtentBlocksAutoSkip: false
         )
     }
 

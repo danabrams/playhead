@@ -788,14 +788,26 @@ enum PromotionTrack: String, Sendable, Equatable, Hashable {
 
 // MARK: - DecisionResult
 
-/// The output of `DecisionMapper`: three orthogonal decision signals.
+/// The output of `DecisionMapper`: orthogonal decision signals.
 ///
 /// `eligibilityGate` can block action without affecting the honesty of `skipConfidence`.
+///
+/// **PRESENCE vs EXTENT (playhead-2350).** `proposalConfidence` and
+/// `skipConfidence` answer exactly one question: *is there an ad here?* They are
+/// PRESENCE confidences, summed from evidence that fired somewhere inside the
+/// span, and they say NOTHING about whether the span's edges are where the ad's
+/// edges are. The EXTENT half of the verdict lives in `extentSupport`, which
+/// carries per-edge provenance and never mixes into a score. Consumers that ask
+/// "may this be auto-skipped?" must consult BOTH — presence via the score and
+/// the gate, extent via `extentSupport.isFullyAnchored` — which is what
+/// `withExtentSupport(_:blockingUnanchoredAutoSkip:)` enforces.
 struct DecisionResult: Sendable, Equatable {
-    /// Raw confidence estimate from summing all ledger entry weights, capped at 1.0.
+    /// PRESENCE. Raw confidence estimate from summing all ledger entry weights,
+    /// capped at 1.0. Not a statement about the span's boundaries.
     let proposalConfidence: Double
-    /// Calibrated score for SkipOrchestrator (0–1 scale). Derived from proposalConfidence
-    /// via a linear map. Not clamped by the eligibility gate.
+    /// PRESENCE. Calibrated score for SkipOrchestrator (0–1 scale). Derived from
+    /// proposalConfidence via a linear map. Not clamped by the eligibility gate,
+    /// and — like `proposalConfidence` — not a statement about the boundaries.
     let skipConfidence: Double
     /// Whether this span is actionable. A blocked gate does not reduce the score.
     let eligibilityGate: SkipEligibilityGate
@@ -803,17 +815,66 @@ struct DecisionResult: Sendable, Equatable {
     /// `.standard`; promoted to `.classifierSeedQualified` only when the quorum
     /// described on `PromotionTrack` is satisfied. Score fields are unaffected.
     let promotionTrack: PromotionTrack
+    /// EXTENT (playhead-2350). Per-edge anchor provenance for this span's
+    /// geometry. Defaults to `.unanchored` — the conservative value for any
+    /// producer that has not derived extent support — and is stamped for real by
+    /// `AdDetectionService.runBackfill`'s emission loop, which is the first (and
+    /// only) point where BOTH the boundary refiners and the span finalizer have
+    /// finished touching the geometry.
+    let extentSupport: SpanExtentSupport
 
     init(
         proposalConfidence: Double,
         skipConfidence: Double,
         eligibilityGate: SkipEligibilityGate,
-        promotionTrack: PromotionTrack = .standard
+        promotionTrack: PromotionTrack = .standard,
+        extentSupport: SpanExtentSupport = .unanchored
     ) {
         self.proposalConfidence = proposalConfidence
         self.skipConfidence = skipConfidence
         self.eligibilityGate = eligibilityGate
         self.promotionTrack = promotionTrack
+        self.extentSupport = extentSupport
+    }
+
+    /// playhead-2350: stamp the EXTENT half of the verdict and, when it shows an
+    /// unanchored edge, block auto-skip.
+    ///
+    /// Contract — the same additive, post-gate shape as the certainty-tiered
+    /// demotions in `DecisionMapper.map()`:
+    ///   • NEVER promotes. Only an already-`.eligible` gate is touched
+    ///     (`markOnly.severity > eligible.severity`), so `.markOnly` and every
+    ///     `.blockedBy*` verdict survives unchanged and this composes
+    ///     commutatively with the other demoters.
+    ///   • NEVER modifies `proposalConfidence` / `skipConfidence`. Presence stays
+    ///     honest; only actionability changes. A demoted span keeps its banner.
+    ///   • Demotes to `.markOnly` — the mark-only/banner tier of Dan's
+    ///     certainty-tiered skip policy, not a hard block: the ad IS there, we
+    ///     just cannot prove where it starts or stops.
+    ///
+    /// - Parameter support: the derived extent support for this span.
+    /// - Parameter blockingUnanchoredAutoSkip: when `false`, the extent is
+    ///   recorded but no demotion is applied. Production passes `true`; the flag
+    ///   exists so `AdDetectionConfig.unanchoredExtentBlocksAutoSkip` can be
+    ///   turned off (a kill switch, and the opt-out used by the handful of
+    ///   suites that pin a pre-2350 demotion seam).
+    func withExtentSupport(
+        _ support: SpanExtentSupport,
+        blockingUnanchoredAutoSkip: Bool
+    ) -> DecisionResult {
+        var gate = eligibilityGate
+        if blockingUnanchoredAutoSkip,
+           !support.isFullyAnchored,
+           SkipEligibilityGate.markOnly.severity > gate.severity {
+            gate = .markOnly
+        }
+        return DecisionResult(
+            proposalConfidence: proposalConfidence,
+            skipConfidence: skipConfidence,
+            eligibilityGate: gate,
+            promotionTrack: promotionTrack,
+            extentSupport: support
+        )
     }
 }
 
