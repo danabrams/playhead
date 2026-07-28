@@ -296,6 +296,13 @@ T_STALE_IDENTITY="episode-bound suggest actions reject stale banner identities"
 T_FUSION_CLEARS_SUGGEST="Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)"
 T_DECLINE_NO_CONFIRM="declineSuggestedSkip drops the window without confirming it"
 
+# playhead-auz3. Two more of the same class, found while fixing ugy4 and
+# deliberately left out of its stated seven. Both were PROVED vacuous by
+# mutation before repair: S06 and S07 each SURVIVED against the fixtures as
+# they stood.
+T_GATE_FLIP_CLEARS_SUGGEST="Gate flip from markOnly clears suggest entry — accept after flip is a no-op (playhead-rfu-sad)"
+T_DIRECT_REPLACEMENT_CLEARS_ACCEPTED="direct episode replacement clears accepted-suggestion race guards"
+
 # playhead-1mq1.2.1. The mixed-width fixture: an auto window whose WIDTH was
 # wrong, reverted in one tap. Both learning surfaces it can poison are asserted
 # in this one test, which is why P01 and P02 need separate batches.
@@ -433,6 +440,20 @@ MUTATIONS=(
   # a batch.
   "P01|17|ORCH|$T_MIXED_WIDTH"
   "P02|18|ORCH|$T_MIXED_WIDTH"
+
+  # playhead-auz3. S06 and S07 share a batch, and the disjointness is checked
+  # rather than assumed — both directions, because either one aliasing the
+  # other's victim would print a false KILL:
+  #   • S06 (delete the AdWindow-path gate-flip clear) is INERT in S07's test:
+  #     that fixture's only same-id redelivery arrives in a NEW episode whose
+  #     `beginEpisode` has already emptied `suggestWindows`, so the deleted
+  #     call had nothing to remove.
+  #   • S07 (stop clearing `recentlyAcceptedSuggestIds` at `beginEpisode`) is
+  #     INERT in S06's test: it calls `beginEpisode` once, before any accept,
+  #     so the set it stops clearing is empty at that point.
+  # Distinct seams (`receiveAdWindows` vs `beginEpisode`), distinct victims.
+  "S06|19|ORCH|$T_GATE_FLIP_CLEARS_SUGGEST"
+  "S07|19|ORCH|$T_DIRECT_REPLACEMENT_CLEARS_ACCEPTED"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -488,6 +509,8 @@ describe_mutation() {
     S03) echo "declineSuggestedSkip: delete the active-episode guard on the episode-bound form" ;;
     S04) echo "receiveAdDecisionResults: delete the symmetric suggest clear on a same-id eligible result" ;;
     S05) echo "declineSuggestedSkip: read the suggest entry instead of removing it" ;;
+    S06) echo "receiveAdWindows: delete the gate-flip suggest clear on a same-id non-markOnly revision" ;;
+    S07) echo "beginEpisode: stop clearing recentlyAcceptedSuggestIds on a direct episode replacement" ;;
     O01) echo "ingestNegativeFingerprint: drop the anonymous-show refusal (a NULL-show hard negative every show reads back)" ;;
     O02) echo "revertWindow: fall the trust penalty back to activePodcastId when the correction has no usable show" ;;
     O03) echo "revertWindow: restore the outright refusal, so an anonymous correction loses its durable receipt" ;;
@@ -1092,6 +1115,49 @@ EOF
         }
 
         guard isExplicitDenial else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-auz3. The AdWindow-path twin of S04. Same defect, other ingress:
+  # a window first stamped `markOnly` re-arrives with the gate cleared, and
+  # without this clear `suggestWindows[id]` survives alongside the new managed
+  # entry, so a still-visible suggest banner can re-fire `acceptSuggestedSkip`
+  # and mint a SECOND, UUID-keyed durable window for one span.
+  S06)
+    snippet OLD <<'EOF'
+            if retireSuggestedWindowIfPresent(windowId: adWindow.id) {
+                logger.debug(
+                    "AdWindow \(adWindow.id, privacy: .public) gate flipped from markOnly — cleared suggest entry"
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            // mutation S06: symmetric suggest clear deleted.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-auz3. `recentlyAcceptedSuggestIds` is the tap-then-flip guard: an
+  # id the user already promoted is terminal for the rest of that playback
+  # lifecycle (`hasTerminalSuggestResolution`). A direct episode replacement —
+  # `beginEpisode` with no `endEpisode` between — must reset it, or a producer
+  # that reuses a stable window id in the NEXT episode is silently suppressed.
+  # The trailing edge-padding comment is load-bearing for UNIQUENESS, not for
+  # the defect: `endEpisode` clears the same four sets in the same order, so a
+  # shorter anchor matches twice and the patcher (correctly) refuses.
+  S07)
+    snippet OLD <<'EOF'
+        vetoedSuggestWindowIds.removeAll()
+        recentlyAcceptedSuggestIds.removeAll()
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
+        // playhead-98co: per-episode edge-padding state.
+EOF
+    snippet NEW <<'EOF'
+        vetoedSuggestWindowIds.removeAll()
+        // mutation S07: beginEpisode no longer clears the accepted-suggest guard.
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
+        // playhead-98co: per-episode edge-padding state.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
