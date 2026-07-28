@@ -34,11 +34,12 @@ import Foundation
 /// mistake this bead fixes. The measured per-tier edge error that motivates the
 /// ordering lives in `docs/autoskip-edge-padding-derivation-2026-07-20.md`
 /// (`AutoSkipEdgePadding`'s margins are derived from the same evidence).
-// Conformances are deliberately minimal: no `CaseIterable` and no `Codable`.
-// The tier is derived from `AutoSkipEdgeAnchor` on demand and is not persisted
-// (the per-edge anchor raw values already are, on the `ad_windows` row), so a
-// speculative conformance would only be a shape to maintain. Add one when a
-// caller actually needs it. Mirrors the playhead-fqc8 `PromotionTrack` call.
+///
+/// Conformances are deliberately minimal — no `CaseIterable`, no `Codable`. The
+/// tier is derived from `AutoSkipEdgeAnchor` on demand and is not persisted (the
+/// per-edge anchor raw values already are, on the `ad_windows` row), so a
+/// speculative conformance would only be a shape to maintain. Add one when a
+/// caller actually needs it. Mirrors the playhead-fqc8 `PromotionTrack` call.
 enum ExtentAnchorTier: Int, Sendable, Hashable, Comparable {
     /// No independent support: the edge is where an FM/lexical/aggregator seed
     /// happened to land. The pipeline invented it.
