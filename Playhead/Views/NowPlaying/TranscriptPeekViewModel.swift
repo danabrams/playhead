@@ -62,10 +62,10 @@ final class TranscriptPeekViewModel {
     private(set) var isLoading: Bool = true
 
     /// `AnalysisAsset.fastTranscriptCoverageEndTime` for the asset, or nil
-    /// when not yet computed. The chunk-selection mark flow can only reach
-    /// transcript that exists (chunks extend only to this watermark); this
-    /// drives the coverage-free "mark the untranscribed tail" affordance
-    /// (playhead-m1l9).
+    /// when not yet computed. This is the SCAN watermark: how far the fast
+    /// pass has looked, which is not the same as how far it found speech
+    /// (playhead-7tn8). It separates "not yet scanned" from "scanned, found
+    /// nothing" for the untranscribed-tail mark affordance (playhead-m1l9).
     private(set) var fastTranscriptCoverageEndTime: TimeInterval?
 
     // MARK: - Configuration
@@ -266,25 +266,80 @@ final class TranscriptPeekViewModel {
     private static let maxTailMarkWidth: TimeInterval = 300.0
 
     /// The furthest transcript time the chunk-selection mark flow can reach:
-    /// the max chunk end and the fast-transcript coverage watermark. The
-    /// "Mark ad" chunk-tap flow can only assemble a span from chunks that
-    /// exist, so anything past this point is unreachable by that flow.
+    /// the max chunk end. That flow assembles a span by tapping rows, so it
+    /// stops where the rows stop — this is TRANSCRIPT EVIDENCE ("how far did
+    /// we find speech?"), not scan reach.
+    var lastTranscribedTime: TimeInterval {
+        chunks.map(\.endTime).max() ?? 0
+    }
+
+    /// The furthest time the fast pass has SCANNED ("how far did we look?"):
+    /// the evidence end unioned with the coverage watermark. The watermark can
+    /// legitimately run past the last chunk, because a shard that yields zero
+    /// segments still advances coverage (`TranscriptEngineService`) — we
+    /// looked at that audio and found no speech in it.
+    ///
+    /// playhead-7tn8: this is deliberately NOT what gates the tail-mark
+    /// affordance any more. It stays because the scan question is real and
+    /// distinct — it is what separates a transient not-yet-analyzed tail from
+    /// a genuine silent blind spot in ``tailCoverage(at:)``.
     var lastCoveredTime: TimeInterval {
-        max(chunks.map(\.endTime).max() ?? 0, fastTranscriptCoverageEndTime ?? 0)
+        max(lastTranscribedTime, fastTranscriptCoverageEndTime ?? 0)
+    }
+
+    /// What is known about the audio under a given playback time.
+    ///
+    /// Coverage answers two different questions and playhead-7tn8 turns on
+    /// keeping them apart: the watermark answers "did we LOOK here?", the
+    /// chunks answer "did we FIND SPEECH here?".
+    enum TailCoverage: Equatable, Sendable {
+        /// Transcript rows reach this time — the chunk-selection "Mark ad"
+        /// flow works, so the tail affordance is not needed.
+        case transcribed
+        /// Inside the scan watermark but past the last chunk: we looked and
+        /// found no speech. A music-bedded ad produces exactly this, and no
+        /// deterministic or lexical signal can bite on it — the listener is
+        /// the only witness, so the affordance must be offered.
+        case scannedWithoutSpeech
+        /// Past the scan watermark: analysis has not reached here yet. Kept
+        /// distinct from ``scannedWithoutSpeech`` — this one is transient and
+        /// segments may still arrive.
+        case notYetScanned
+    }
+
+    /// Classify `time` against the two coverage questions. See ``TailCoverage``.
+    func tailCoverage(at time: TimeInterval) -> TailCoverage {
+        // Transcript audio envelopes are half-open [start, end), so a time
+        // exactly at the last chunk end is already past the evidence.
+        if time <= lastTranscribedTime {
+            return .transcribed
+        }
+        return time <= lastCoveredTime ? .scannedWithoutSpeech : .notYetScanned
     }
 
     /// A coverage-FREE ad-mark span for the untranscribed tail, or nil when
     /// the tail affordance does not apply.
     ///
     /// The chunk-selection "Mark ad" flow can only build a mark from existing
-    /// transcript chunks, which extend only to `lastCoveredTime`. When a
-    /// post-roll runs past that watermark to the episode end, there are no
+    /// transcript chunks, which extend only to `lastTranscribedTime`. When a
+    /// post-roll runs past the last chunk to the episode end, there are no
     /// chunks to tap and the ad is unmarkable (playhead-m1l9). This returns
     /// `[currentTime, episodeDuration]` so the untranscribed tail can be
     /// marked without any chunks — routed through the same coverage-free
     /// `injectUserMarkedAd` path the player "Hearing an ad" button uses.
     ///
-    /// Returns nil unless the playhead sits PAST the transcript coverage
+    /// playhead-7tn8: the gate keys on TRANSCRIPT EVIDENCE, not scan reach.
+    /// Keying it on `lastCoveredTime` suppressed the affordance in exactly the
+    /// case it exists for — a music-bedded post-roll, where the shards were
+    /// scanned, produced zero segments, advanced the watermark past the last
+    /// chunk, and left the listener as the only witness that the ad happened.
+    /// A scanned-but-silent stretch is often just music, so the affordance can
+    /// appear over non-ad audio; that is accepted deliberately, because it is
+    /// OPT-IN and only fires when someone actually heard an ad. Weight the
+    /// resulting correction through the existing certainty tiering rather than
+    /// suppressing the report.
+    ///
+    /// Returns nil unless the playhead sits PAST the transcript evidence
     /// (otherwise the ordinary chunk-selection flow already works) AND the
     /// remaining span to the episode end is post-roll-sized (a meaningful
     /// span that isn't a large over-mark). The bounded-window player button
@@ -295,8 +350,10 @@ final class TranscriptPeekViewModel {
     ) -> (start: Double, end: Double)? {
         guard episodeDuration > 0 else { return nil }
         // The playhead must be in the untranscribed tail — territory the
-        // chunk-selection flow cannot reach.
-        guard currentTime > lastCoveredTime else { return nil }
+        // chunk-selection flow cannot reach. Both uncovered states qualify:
+        // `.scannedWithoutSpeech` is the silent-shard blind spot this bead
+        // reopened, `.notYetScanned` is m1l9's original post-roll case.
+        guard tailCoverage(at: currentTime) != .transcribed else { return nil }
         // A post-roll-sized span must remain to the episode end.
         let remaining = episodeDuration - currentTime
         guard remaining >= Self.minTailMarkWidth,
