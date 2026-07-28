@@ -104,15 +104,61 @@ protocol BackgroundTaskScheduling: Sendable {
 }
 
 extension BGTaskScheduler: BackgroundTaskScheduling {
+    /// playhead-c25o: hard ceiling on the `getPendingTaskRequests`
+    /// round-trip.
+    ///
+    /// `getPendingTaskRequests` is an XPC call to `dasd`. It normally
+    /// answers in single-digit milliseconds, so this budget is two to
+    /// three orders of magnitude of headroom — it exists to bound a
+    /// *lost* reply, not a slow one.
+    ///
+    /// WHY 2 SECONDS AND NOT MORE: a timeout longer than the caller's own
+    /// budget protects nothing. The tightest caller is
+    /// `appDidEnterBackground()`, which runs on the `.background`
+    /// scenePhase transition where iOS gives the app on the order of five
+    /// seconds before suspension. Next tightest is the feed-refresh
+    /// `BGAppRefreshTask` window (~30 s), which reaches this bridge
+    /// through `runRefreshOnce`'s backfill hop. Two seconds sits well
+    /// inside both, and is negligible against the backfill
+    /// `BGProcessingTask` window (minutes).
+    static let pendingTaskRequestsTimeout: Duration = .seconds(2)
+
     func pendingTaskRequestIdentifiers() async -> [String] {
         // Bridge the completion-handler API explicitly: within this
         // extension the sync `getPendingTaskRequests(completionHandler:)`
         // overload shadows the synthesized async form, so call it directly.
         // Project to `[String]` INSIDE the completion so only a Sendable
         // value crosses the continuation boundary (region isolation).
-        await withCheckedContinuation { continuation in
+        //
+        // playhead-c25o: the bridge is BOUNDED. A bare
+        // `withCheckedContinuation` here is resumed only by an
+        // out-of-process daemon reply; a lost reply parked this call
+        // forever, and it is awaited from inside BGTask handlers. The
+        // consequence was not a slow path but a dead one: no
+        // `setTaskCompleted`, no armed `expirationHandler` (see
+        // `handleBackfillTask`), so iOS terminated the process and
+        // penalised future scheduling — and the caller's
+        // `backfillRescheduleInFlight` / `rescheduleInFlight` `defer`
+        // never ran, latching ALL further rescheduling off for the
+        // process lifetime.
+        //
+        // We fail OPEN to "nothing pending". Every caller treats this
+        // result as advisory — it only suppresses an age-resetting
+        // duplicate submit (playhead-txq3 / playhead-y5mk) — so a wrong
+        // empty answer costs one redundant re-submit, which is vastly
+        // cheaper than the process death it replaces.
+        let reportFallback: @Sendable (BoundedContinuationFallback) -> Void = { reason in
+            Logger(subsystem: "com.playhead", category: "BackgroundProcessing").error(
+                "getPendingTaskRequests did not answer (\(reason.rawValue, privacy: .public)) — failing open to no-pending-requests (playhead-c25o)"
+            )
+        }
+        return await withBoundedCheckedContinuation(
+            timeout: Self.pendingTaskRequestsTimeout,
+            fallback: [],
+            onFallback: reportFallback
+        ) { resume in
             getPendingTaskRequests { requests in
-                continuation.resume(returning: requests.map(\.identifier))
+                resume(requests.map(\.identifier))
             }
         }
     }
@@ -1097,11 +1143,39 @@ actor BackgroundProcessingService {
             )
         }
 
-        // Schedule the next occurrence.
-        await scheduleBackfillIfNeeded()
-
+        // playhead-c25o: NOTHING above this line may `await`.
+        //
+        // Everything from the top of this method down to the
+        // `task.expirationHandler =` assignment below must run in one
+        // uninterrupted actor-synchronous stretch, so the OS can never
+        // reclaim the task while the handler is unarmed. This method used
+        // to `await scheduleBackfillIfNeeded()` right here — a call that
+        // suspends on an out-of-process `getPendingTaskRequests` reply.
+        // A lost reply parked the handler forever with no expiration
+        // handler installed and no `setTaskCompleted`, so iOS killed the
+        // process and penalised future scheduling. The bridge is now
+        // bounded (see `BGTaskScheduler.pendingTaskRequestIdentifiers`),
+        // and belt-and-braces, the reschedule no longer runs before the
+        // handler is armed.
+        //
+        // It moved INTO the work task rather than after the assignment
+        // because the reschedule must still happen BEFORE any
+        // `setTaskCompleted` — iOS may suspend the process the moment a
+        // task is completed, and a reschedule lost to that suspension
+        // means no next backfill window. Sequencing it as the work
+        // task's first statement preserves reschedule-before-complete on
+        // every exit path (including the QualityProfile fast-defer),
+        // while the work task's own body provably cannot begin until
+        // this actor-isolated method returns — i.e. until after the
+        // expiration handler is installed.
+        //
+        // `SourceCanary`/ordering coverage:
+        // `BackfillSchedulerBoundingTests`.
         let runLedger = self.runLedger
         let workTask = Task {
+            // Schedule the next occurrence.
+            await self.scheduleBackfillIfNeeded()
+
             // Check constraints before starting.
             await self.updateBatteryState()
             let snapshot = await self.capabilitiesService.currentSnapshot
