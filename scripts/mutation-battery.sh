@@ -77,6 +77,27 @@
 #   10 builds (1 baseline + 9 batches), 17m21s wall clock.
 # That run predates the playhead-o4qr merge and NO LONGER DESCRIBES THIS FILE.
 #
+# STATUS AFTER playhead-1mq1.2.1 (2026-07-28)
+#   28 mutations: P01 and P02 added for the mixed-width attribution guard, and
+#   M14's and O04's EDITs were re-cut for `revokeRecurrenceEvidence`'s and
+#   `ingestNegativeFingerprint`'s new `negativeAttribution` argument — the
+#   defects they describe are unchanged, which is the sanctioned reason to
+#   rewrite an EDIT.
+#
+#   Verified: full `--dry-run` clean (28/28 anchors apply exactly once, 0
+#   errors); baseline green on the focused suites; batch 17 → P01 KILLED;
+#   batch 18 → P02 KILLED. Batches 1–16 were NOT re-run in that pass, so the
+#   whole-battery claim below still stands unrefreshed.
+#
+#   P01 SURVIVED on its first probe and the survivor was a MISSING BARRIER, not
+#   a missing guard: "the hard-negative bank stayed empty" was being read
+#   straight after `drainOrchestratorEffects`, which orders only work enqueued
+#   on the ORCHESTRATOR, so the read beat the ingest's hop to the bank actor
+#   and passed for the wrong reason. The fixture now issues a CLEAN sentinel
+#   revert second and asserts the resulting count, which is what made the
+#   mutation killable. Worth remembering for any future "no learning happened"
+#   assertion on the bank.
+#
 # STATUS AFTER THE playhead-o4qr MERGE (2026-07-27)
 #   The battery is 26 mutations, not 31: five entries were relocated to the
 #   KNOWN GAP block (see the MERGE NOTE above `MUTATIONS`). All 26 anchors are
@@ -193,6 +214,8 @@ FOCUSED_SUITES=(
   # named for their topic rather than the file.
   -only-testing:PlayheadTests/SkipOrchestratorAdDecisionContractTests
   -only-testing:PlayheadTests/SkipOrchestratorSuggestTierTests
+  # playhead-1mq1.2.1: the mixed-width attribution rails (P01/P02).
+  -only-testing:PlayheadTests/RevertMixedWidthAttributionTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -264,6 +287,11 @@ T_LATE_INVENTORY_STALE_YES="late inventory context retires a newly-invalid sugge
 T_STALE_IDENTITY="episode-bound suggest actions reject stale banner identities"
 T_FUSION_CLEARS_SUGGEST="Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)"
 T_DECLINE_NO_CONFIRM="declineSuggestedSkip drops the window without confirming it"
+
+# playhead-1mq1.2.1. The mixed-width fixture: an auto window whose WIDTH was
+# wrong, reverted in one tap. Both learning surfaces it can poison are asserted
+# in this one test, which is why P01 and P02 need separate batches.
+T_MIXED_WIDTH="THEMOVE: reverting 3493.02-3536.90 lands no negative label on the true ad 3505.74-3536.10"
 
 # playhead-o4qr MERGE NOTE — READ BEFORE "FIXING" M01/M02/M03/M04/M06.
 #
@@ -389,6 +417,14 @@ MUTATIONS=(
 
   "O03|15|ORCH|$T_ANON_SILENT"
   "O04|16|ORCH|$T_ANON_SILENT"
+
+  # playhead-1mq1.2.1 — a revert says the BOUNDARIES were wrong, not that there
+  # is no ad inside. Both mutations restore the pre-guard reading, and both
+  # redden the same fixture (it asserts the bank clause and the catalog clause
+  # together, because they are one defect observed twice), so they cannot share
+  # a batch.
+  "P01|17|ORCH|$T_MIXED_WIDTH"
+  "P02|18|ORCH|$T_MIXED_WIDTH"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -448,6 +484,8 @@ describe_mutation() {
     O02) echo "revertWindow: fall the trust penalty back to activePodcastId when the correction has no usable show" ;;
     O03) echo "revertWindow: restore the outright refusal, so an anonymous correction loses its durable receipt" ;;
     O04) echo "revertWindow: attribute recurrence REVOCATION to activePodcastId when the correction has no usable show" ;;
+    P01) echo "ingestNegativeFingerprint: drop the mixed-width guard (a whole-span hard negative over a window that is mostly a real ad)" ;;
+    P02) echo "revokeRecurrenceEvidence: fingerprint the WHOLE reverted span again instead of the attributable subspans" ;;
     O05) echo "denyAutoSkippedBanner: restore the outright refusal, so a banner No naming another show loses its receipt" ;;
     *)   echo "(no description)" ;;
   esac
@@ -705,18 +743,23 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # Anchor re-cut for playhead-1mq1.2.1, which added the third argument. The
+  # DEFECT is unchanged — the guard still moves the ingest below the lifecycle
+  # check — which is the sanctioned reason to rewrite an EDIT.
   M14)
     snippet OLD <<'EOF'
         ingestNegativeFingerprint(
             text: requestedManaged.adWindow.evidenceText,
-            podcastId: sourceShowId
+            podcastId: sourceShowId,
+            negativeAttribution: sourceNegativeAttribution
         )
 EOF
     snippet NEW <<'EOF'
         if episodeLifecycleGeneration == sourceLifecycleGeneration {
             ingestNegativeFingerprint(
                 text: requestedManaged.adWindow.evidenceText,
-                podcastId: sourceShowId
+                podcastId: sourceShowId,
+                negativeAttribution: sourceNegativeAttribution
             )
         }
 EOF
@@ -1122,16 +1165,50 @@ EOF
   # show leaves both stores on their show-free exact-source branches. Handing
   # it `activePodcastId` re-arms the show-scoped branch and lets an
   # unattributable gesture retract this show's creative evidence.
+  # Anchor re-cut for playhead-1mq1.2.1's extra argument; same defect.
   O04)
     snippet OLD <<'EOF'
                 for: requestedManaged.adWindow,
                 showId: sourceShowId,
-                source: .manualVeto
+                source: .manualVeto,
+                negativeAttribution: sourceNegativeAttribution
 EOF
     snippet NEW <<'EOF'
                 for: requestedManaged.adWindow,
                 showId: activePodcastId,
-                source: .manualVeto
+                source: .manualVeto,
+                negativeAttribution: sourceNegativeAttribution
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-1mq1.2.1, surface 1 of 2: the hard-negative copy bank. The window's
+  # `evidenceText` has no time index, so on a MIXED revert it is the REAL ad's
+  # copy — banking it as a confirmed false positive suppresses that ad on this
+  # show forever. Deleting the guard is the pre-bead behaviour verbatim.
+  P01)
+    snippet OLD <<'EOF'
+        guard negativeAttribution.allowsWholeSpanNegativeLabel else { return }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # playhead-1mq1.2.1, surface 2 of 2: the FUZZY recurrence sweep. Restoring the
+  # whole-span fingerprint re-arms `compatibleMatches` /
+  # `RepeatedAdCacheService.revokeMatches` against a fingerprint taken over
+  # audio that is mostly the ad, so the revert deletes the legitimately learned
+  # row for the very ad the listener did not dispute.
+  P02)
+    snippet OLD <<'EOF'
+            let featureWindows = allFeatureWindows.filter { feature in
+                negativeAttribution.allowsNegativeAttribution(
+                    startTime: feature.startTime,
+                    endTime: feature.endTime
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            let featureWindows = allFeatureWindows
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

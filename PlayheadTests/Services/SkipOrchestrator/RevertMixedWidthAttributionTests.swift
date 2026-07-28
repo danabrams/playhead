@@ -152,6 +152,12 @@ struct RevertMixedWidthAttributionTests {
     private let adCopy =
         "this episode is sponsored by haiks go to haiks dot com slash themove and use code themove at checkout"
 
+    /// A second, textually disjoint copy used by the bank barrier below. It
+    /// shares no distinctive token with `adCopy`, so "which one survived" is
+    /// decidable from the stored tokens.
+    private let sentinelCopy =
+        "welcome back everyone to another edition of the weekly rider mailbag segment"
+
     // MARK: Acceptance criterion 4 — the fixture
 
     @Test(
@@ -252,8 +258,27 @@ struct RevertMixedWidthAttributionTests {
             decisionState: "confirmed",
             evidenceText: adCopy
         )
+        // The BANK BARRIER. "The bank stayed empty" is not directly observable:
+        // `ingestNegativeFingerprint` fires a Task that hops to the bank actor,
+        // and `drainOrchestratorEffects` only orders behind work enqueued on
+        // the ORCHESTRATOR, so a read issued straight afterwards can beat the
+        // ingest to the bank and pass for the wrong reason. (Measured: with the
+        // guard deleted, it did — the mutation battery's P01 survived until
+        // this window existed.) So a CLEAN revert is issued SECOND on the same
+        // bank; once its entry has landed, a mixed-window ingest issued before
+        // it would already be there too, and the count discriminates.
+        let sentinel = makeSkipTestAdWindow(
+            id: "ad-signoff-sentinel",
+            assetId: assetId,
+            startTime: 600,
+            endTime: 660,
+            confidence: 0.9,
+            decisionState: "confirmed",
+            evidenceText: sentinelCopy
+        )
         try await store.insertAdWindow(window)
-        await orchestrator.receiveAdWindows([window])
+        try await store.insertAdWindow(sentinel)
+        await orchestrator.receiveAdWindows([window, sentinel])
 
         // Criterion 1: the gesture still succeeds and playback state is
         // restored. This is the user-visible half and it must not regress.
@@ -287,17 +312,33 @@ struct RevertMixedWidthAttributionTests {
         #expect(receipts.first?.source == .listenRevert)
         #expect(receipts.first?.podcastId == podcastId)
 
-        // Criterion 2/4: no whole-span negative label.
-        await drainOrchestratorEffects(orchestrator)
+        // Criterion 2/4: no whole-span negative label. Barrier first.
         #expect(
-            try await negativeBank.allEntries().isEmpty,
+            await orchestrator.recordListenRevert(
+                windowId: "ad-signoff-sentinel",
+                podcastId: podcastId
+            )
+        )
+        let negatives = try await awaitNegativeBankEntries(
+            negativeBank,
+            orchestrator: orchestrator,
+            expected: 1
+        )
+        #expect(
+            negatives.count == 1,
             """
             The reverted window contains a real ad from \(trueAdStart) to \
             \(trueAdEnd). Its copy is the window's `evidenceText`, so banking \
             that text as a confirmed false positive labels ~30s of TRUE ad as \
             negative and suppresses this ad on this show forever. A gesture \
-            that cannot say "wrong edges" must not be read as "not an ad".
+            that cannot say "wrong edges" must not be read as "not an ad". \
+            Two entries means the mixed window banked one alongside the \
+            sentinel.
             """
+        )
+        #expect(
+            negatives.first?.tokensJoined.contains("haiks") == false,
+            "the surviving negative must be the sentinel's copy, not the ad's"
         )
 
         // Criterion 3: catalog evidence is not negated wholesale.
