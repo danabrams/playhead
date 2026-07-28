@@ -133,7 +133,17 @@ enum AutoSkipEdgePadding {
     /// (smartless) + 0.3 s tol. (The 44-gold ted +30.92 was adjudicated as
     /// a gold under-label via the 2026-07-16 requalify — derivation §4.)
     static let endMarginStingerSnappedSeconds = 0.75
-    /// End margin, unanchored tier: worst late unsnapped end across BOTH
+    /// End margin, unanchored tier — **unreachable for fusion spans since
+    /// playhead-2350**, kept because the tier itself still exists and the
+    /// derivation is real. 98co's measured verdict was that an unanchored END is
+    /// survivable (ending early replays ad tail) so long as the START is
+    /// anchored. 2350 is stricter on a different axis: a span with ANY
+    /// unanchored edge is demoted to mark-only in fusion and therefore never
+    /// reaches this policy at all. Strictly safer, and deliberate — but if the
+    /// anchored-start/unanchored-end combination is ever readmitted, re-derive
+    /// this number rather than assuming it still holds.
+    ///
+    /// Worst late unsnapped end across BOTH
     /// measured builds — +7.55 s (conan, gold v6, 07-16 xsdz39bank build)
     /// and +9.92 s (smartless 05-21, 07-17 danshows build) — + 0.3 s tol,
     /// 0.25 s grid → 10.25. This tier's tail is build-sensitive

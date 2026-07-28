@@ -2111,10 +2111,11 @@ struct EstimateTranscriptQualityTests {
 
 // MARK: - Fusion edge-anchor derivation (playhead-hdgk)
 
-/// Pins `AdDetectionService.deriveFusionEdgeAnchors` — the exact per-edge tier
-/// derivation `buildFusionAdWindow` uses — against the real decision-build
-/// inputs (`[AnchorRef]` width provenance + `StingerRefinementTrace`), start
-/// and end resolved independently.
+/// Pins `SpanExtentSupport.derive` — the single per-edge tier derivation, used
+/// both for the anchors `buildFusionAdWindow` persists and for the playhead-2350
+/// unanchored-edge auto-skip block — against the real decision-build inputs
+/// (`[AnchorRef]` width provenance + `StingerRefinementTrace`), start and end
+/// resolved independently.
 @Suite("Fusion edge-anchor derivation (playhead-hdgk)")
 struct FusionEdgeAnchorDerivationTests {
 
@@ -2127,74 +2128,74 @@ struct FusionEdgeAnchorDerivationTests {
 
     @Test("rediff-both: a .rediffSlot-owned span byte-exacts BOTH edges")
     func rediffBothEdges() {
-        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+        let anchors = SpanExtentSupport.derive(
             anchorProvenance: [.rediffSlot],
             stingerTrace: nil
         )
-        #expect(anchors.start == .rediffByteExact)
-        #expect(anchors.end == .rediffByteExact)
+        #expect(anchors.startAnchor == .rediffByteExact)
+        #expect(anchors.endAnchor == .rediffByteExact)
     }
 
     @Test("rediff ownership outranks a (defensively present) stinger trace on both edges")
     func rediffOutranksStinger() {
-        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+        let anchors = SpanExtentSupport.derive(
             anchorProvenance: [.rediffSlot, .fmConsensus(regionId: "r", consensusStrength: 0.9)],
             stingerTrace: trace(startSnapped: true, endSnapped: true)
         )
-        #expect(anchors.start == .rediffByteExact)
-        #expect(anchors.end == .rediffByteExact)
+        #expect(anchors.startAnchor == .rediffByteExact)
+        #expect(anchors.endAnchor == .rediffByteExact)
     }
 
     @Test("stinger-start-only: startSnapped → stinger start, unsnapped end → unanchored")
     func stingerStartOnly() {
-        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+        let anchors = SpanExtentSupport.derive(
             anchorProvenance: [.fmConsensus(regionId: "r", consensusStrength: 0.9)],
             stingerTrace: trace(startSnapped: true, endSnapped: false)
         )
-        #expect(anchors.start == .stingerSnapped)
-        #expect(anchors.end == .unanchored)
+        #expect(anchors.startAnchor == .stingerSnapped)
+        #expect(anchors.endAnchor == .unanchored)
     }
 
     @Test("stinger-end-only: endSnapped → stinger end, unsnapped start → unanchored")
     func stingerEndOnly() {
-        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+        let anchors = SpanExtentSupport.derive(
             anchorProvenance: [],
             stingerTrace: trace(startSnapped: false, endSnapped: true)
         )
-        #expect(anchors.start == .unanchored)
-        #expect(anchors.end == .stingerSnapped)
+        #expect(anchors.startAnchor == .unanchored)
+        #expect(anchors.endAnchor == .stingerSnapped)
     }
 
     @Test("neither: no rediff ownership and a nil trace → both edges unanchored")
     func neitherSource() {
-        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+        let anchors = SpanExtentSupport.derive(
             anchorProvenance: [.fmConsensus(regionId: "r", consensusStrength: 0.9)],
             stingerTrace: nil
         )
-        #expect(anchors.start == .unanchored)
-        #expect(anchors.end == .unanchored)
+        #expect(anchors.startAnchor == .unanchored)
+        #expect(anchors.endAnchor == .unanchored)
     }
 
     @Test("splice ownership is NOT byte-exact: a .spliceSlot-only span stays unanchored")
     func spliceIsNotRediff() {
         // Acoustic splice width is not byte-exact, so it must not qualify for
         // the tight rediff margin — the derivation keys on `.rediffSlot` only.
-        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+        let anchors = SpanExtentSupport.derive(
             anchorProvenance: [.spliceSlot],
             stingerTrace: nil
         )
-        #expect(anchors.start == .unanchored)
-        #expect(anchors.end == .unanchored)
+        #expect(anchors.startAnchor == .unanchored)
+        #expect(anchors.endAnchor == .unanchored)
     }
 
     @Test("a finalizer geometry rewrite invalidates all earlier exact edge anchors")
     func rewrittenGeometryClearsEarlierAnchors() {
-        let anchors = AdDetectionService.deriveFusionEdgeAnchors(
+        let anchors = SpanExtentSupport.derive(
             anchorProvenance: [.rediffSlot],
             stingerTrace: trace(startSnapped: true, endSnapped: true),
             geometryWasRewritten: true
         )
-        #expect(anchors.start == .unanchored)
-        #expect(anchors.end == .unanchored)
+        #expect(anchors.startAnchor == .unanchored)
+        #expect(anchors.endAnchor == .unanchored)
     }
 }

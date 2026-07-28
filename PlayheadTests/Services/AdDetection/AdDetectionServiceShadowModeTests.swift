@@ -695,7 +695,18 @@ struct FusionEligibilityGatePersistenceTests {
         }
     }
 
-    private func makeService(store: AnalysisStore) -> AdDetectionService {
+    /// - Parameter blocksUnanchoredExtent: playhead-2350's safety gate. Defaults
+    ///   to the SHIPPED value so tests get production behaviour unless they say
+    ///   otherwise. Only `eligibleFusionWindowSurvivesReopen` opts out: it needs
+    ///   a genuinely `.eligible` row to prove the gate round-trips a store
+    ///   reopen, and the Squarespace fixture is lexical-seeded with unanchored
+    ///   edges, so under the shipped default no such row exists and the test
+    ///   would pass vacuously. The 2350 gate itself is covered by
+    ///   `UnanchoredExtentAutoSkipGateTests`.
+    private func makeService(
+        store: AnalysisStore,
+        blocksUnanchoredExtent: Bool = true
+    ) -> AdDetectionService {
         AdDetectionService(
             store: store,
             classifier: RuleBasedClassifier(),
@@ -706,7 +717,8 @@ struct FusionEligibilityGatePersistenceTests {
                 suppressionThreshold: 0.25,
                 hotPathLookahead: 90.0,
                 detectorVersion: "ux6r-test-v1",
-                fmBackfillMode: .off
+                fmBackfillMode: .off,
+                unanchoredExtentBlocksAutoSkip: blocksUnanchoredExtent
             )
         )
     }
@@ -778,7 +790,9 @@ struct FusionEligibilityGatePersistenceTests {
         do {
             let store = try await AnalysisStore.open(directory: dir)
             try await store.insertAsset(makeAsset(id: assetId))
-            let service = makeService(store: store)
+            // See `makeService` — this is the one caller that needs the 2350
+            // gate off, because an eligible row is the subject of the test.
+            let service = makeService(store: store, blocksUnanchoredExtent: false)
             try await service.runBackfill(
                 chunks: makeAdChunks(assetId: assetId),
                 analysisAssetId: assetId,

@@ -30,7 +30,7 @@ struct DecodedSpan: Sendable, Codable, Equatable, Identifiable {
     /// span's width (`.rediffSlot` in `anchorProvenance`) — the
     /// 100%-deterministic DAI-divergence marker (the origin literally served
     /// different ad bytes). This reads the SAME `.contains(.rediffSlot)` that
-    /// `AdDetectionService.deriveFusionEdgeAnchors` uses to stamp the
+    /// `SpanExtentSupport.derive` uses to stamp the
     /// `.rediffByteExact` edge anchor, so the "byte-exact rediff" concept has one
     /// definition.
     ///
@@ -43,7 +43,7 @@ struct DecodedSpan: Sendable, Codable, Equatable, Identifiable {
     ///
     /// Deliberately splice-AGNOSTIC: `.spliceSlot` is ACOUSTIC width, NOT
     /// byte-exact, so a splice-owned span is NOT exempt (mirrors
-    /// `deriveFusionEdgeAnchors`, which sets `.rediffByteExact` only for
+    /// `SpanExtentSupport.derive`, which sets `.rediffByteExact` only for
     /// `.rediffSlot`). FM / lexical-only spans (no `.rediffSlot`) stay demotable.
     var carriesRediffByteExactWidth: Bool {
         anchorProvenance.contains(.rediffSlot)

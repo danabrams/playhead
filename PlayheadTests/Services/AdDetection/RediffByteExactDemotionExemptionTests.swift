@@ -47,7 +47,7 @@ struct RediffByteExactDemotionExemptionTests {
     }
 
     /// A `.spliceSlot` span is ACOUSTIC width, not byte-exact — it is NOT exempt.
-    /// Pins the deliberate splice-agnosticism (mirrors `deriveFusionEdgeAnchors`,
+    /// Pins the deliberate splice-agnosticism (mirrors `SpanExtentSupport.derive`,
     /// which sets `.rediffByteExact` only for `.rediffSlot`): were the predicate
     /// broadened to `isWidthOwnership`, splice would leak into the exemption.
     @Test("carriesRediffByteExactWidth is FALSE for a .spliceSlot (acoustic) span")

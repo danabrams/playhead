@@ -123,9 +123,18 @@ struct CertaintyTieredSkipFlagsWireInTests {
         )
     }
 
-    /// Base config with the flags OMITTED — proves "no config change" carries
-    /// the production-OFF state. `fmBackfillMode: .off` keeps the pipeline
-    /// deterministic (no FoundationModels dependence in the harness).
+    /// Base config with the three WRAJ flags OMITTED — proves "no config change"
+    /// carries the production-OFF state for them. `fmBackfillMode: .off` keeps
+    /// the pipeline deterministic (no FoundationModels dependence in the
+    /// harness).
+    ///
+    /// playhead-2350 caveat: this is no longer the *whole* default config — it
+    /// pins `unanchoredExtentBlocksAutoSkip: false` against that flag's shipped
+    /// `true` (see the call site below for why). The (c) sweep is therefore a
+    /// wraj-flags-omitted-vs-explicit comparison, not a default-vs-explicit one;
+    /// both arms carry the same 2350 opt-out, so the sweep stays symmetric and
+    /// the property it proves — that omitting the wraj trio equals passing their
+    /// defaults — is unchanged.
     private func makeBaseConfig() -> AdDetectionConfig {
         AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -133,9 +142,19 @@ struct CertaintyTieredSkipFlagsWireInTests {
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1",
-            fmBackfillMode: .off
+            fmBackfillMode: .off,
             // certaintyTieredSkipEnabled / hostReadConfidenceFloor /
             // postRollGuardSeconds omitted → default false / 0.9 / 90.0.
+            //
+            // playhead-2350: the extent gate is disabled across THIS suite only.
+            // The Squarespace fixture's span is lexical-seeded — no rediff slot,
+            // no stinger snap — so under the shipped default (ON) it demotes to
+            // `.markOnly` on unanchored edges before wraj ever runs, and the
+            // eligible baseline these arms shrink would be empty for a reason
+            // that has nothing to do with the flags under test. Disabling it
+            // here keeps the wraj demotion the sole observable. The 2350 gate
+            // itself is covered by UnanchoredExtentAutoSkipGateTests.
+            unanchoredExtentBlocksAutoSkip: false
         )
     }
 
@@ -156,7 +175,11 @@ struct CertaintyTieredSkipFlagsWireInTests {
             fmBackfillMode: .off,
             certaintyTieredSkipEnabled: enabled,
             hostReadConfidenceFloor: floor,
-            postRollGuardSeconds: guardSeconds
+            postRollGuardSeconds: guardSeconds,
+            // playhead-2350: see `makeBaseConfig()` — the extent gate is held
+            // off across this suite so the wraj demotion stays the sole
+            // observable on a fixture whose span is unanchored by construction.
+            unanchoredExtentBlocksAutoSkip: false
         )
     }
 
@@ -233,7 +256,7 @@ struct CertaintyTieredSkipFlagsWireInTests {
 
     // MARK: - (c) Default-OFF byte-identity at the decision seam
 
-    @Test("Default config: runBackfill is byte-identical to explicit-default (false/0.9/90.0) flags")
+    @Test("Omitted wraj flags: runBackfill is byte-identical to explicit-default (false/0.9/90.0) flags")
     func defaultConfigMatchesExplicitDefaults() async throws {
         let assetId = "asset-wraj-byteid"
         let storeDefault = try await makeSeededStore(assetId: assetId)

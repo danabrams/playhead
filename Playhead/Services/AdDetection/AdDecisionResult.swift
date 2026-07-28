@@ -96,7 +96,8 @@ struct SourceEvidence: Sendable, Codable, Equatable {
 
 /// Links the threshold, gate, and policy to the final skip eligibility determination.
 struct ActionRationale: Sendable, Codable, Equatable {
-    /// The skip confidence threshold used for auto-skip promotion.
+    /// The skip confidence threshold used for auto-skip promotion. Compared
+    /// against the PRESENCE score only — extent never enters a threshold.
     let threshold: Double
     /// The eligibility gate value at decision time.
     let gate: String
@@ -104,6 +105,35 @@ struct ActionRationale: Sendable, Codable, Equatable {
     let policyAction: String
     /// Whether the decision was ultimately skip-eligible.
     let skipEligible: Bool
+    /// playhead-2350: EXTENT provenance of the leading edge
+    /// (`AutoSkipEdgeAnchor.rawValue`). `nil` on rows written before the split
+    /// existed. Recorded — never thresholded — so replay can tell a demoted
+    /// "we know it's an ad but not where it ends" verdict apart from a
+    /// low-presence one.
+    let startEdgeAnchor: String?
+    /// playhead-2350: EXTENT provenance of the trailing edge.
+    let endEdgeAnchor: String?
+    /// playhead-2350: whether BOTH edges were independently supported — the
+    /// precondition for auto-skip. `nil` on pre-2350 rows.
+    let extentFullyAnchored: Bool?
+
+    init(
+        threshold: Double,
+        gate: String,
+        policyAction: String,
+        skipEligible: Bool,
+        startEdgeAnchor: String? = nil,
+        endEdgeAnchor: String? = nil,
+        extentFullyAnchored: Bool? = nil
+    ) {
+        self.threshold = threshold
+        self.gate = gate
+        self.policyAction = policyAction
+        self.skipEligible = skipEligible
+        self.startEdgeAnchor = startEdgeAnchor
+        self.endEdgeAnchor = endEdgeAnchor
+        self.extentFullyAnchored = extentFullyAnchored
+    }
 }
 
 // MARK: - DecisionExplanation
@@ -155,6 +185,15 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
 
         let families = sortedSources.map { $0.rawValue }
 
+        // playhead-2350: `skipEligible` deliberately carries no extra extent
+        // term. When the gate is armed (the shipped default) an unanchored span
+        // was already demoted off `.eligible` by
+        // `DecisionResult.withExtentSupport`, so the check below is extent-aware
+        // without restating the rule. With the gate disabled this can report
+        // `skipEligible: true` beside `extentFullyAnchored: false` — which is
+        // the honest trace of that configuration, not a contradiction: the
+        // explanation records what the pipeline decided, and the anchors say why
+        // it could have decided otherwise.
         let isSkipEligible = policyAction == .autoSkipEligible
             && decision.eligibilityGate == .eligible
 
@@ -162,7 +201,10 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
             threshold: skipThreshold,
             gate: decision.eligibilityGate.rawValue,
             policyAction: policyAction.rawValue,
-            skipEligible: isSkipEligible
+            skipEligible: isSkipEligible,
+            startEdgeAnchor: decision.extentSupport.startAnchor.rawValue,
+            endEdgeAnchor: decision.extentSupport.endAnchor.rawValue,
+            extentFullyAnchored: decision.extentSupport.isFullyAnchored
         )
 
         return DecisionExplanation(

@@ -140,7 +140,15 @@ struct SelfPromoSuppressionWireInTests {
             hotPathLookahead: 90.0,
             detectorVersion: "fl4j-test",
             fmBackfillMode: .off,
-            selfPromoSuppressionEnabled: selfPromoEnabled
+            selfPromoSuppressionEnabled: selfPromoEnabled,
+            // playhead-2350: the extent gate is held OFF across this suite. The
+            // fixtures here are lexical-seeded — no rediff slot, no stinger
+            // snap — so under the shipped default (ON) every span demotes to
+            // `.markOnly` on unanchored edges and the eligible baseline the
+            // self-promo demotion is measured against collapses for a reason
+            // that has nothing to do with the flag under test. The 2350 gate is
+            // covered by UnanchoredExtentAutoSkipGateTests.
+            unanchoredExtentBlocksAutoSkip: false
         )
         return AdDetectionService(
             store: store,
@@ -222,7 +230,10 @@ struct SelfPromoSuppressionWireInTests {
             hotPathLookahead: 90.0,
             detectorVersion: "fl4j-test",
             fmBackfillMode: .off,
-            selfPromoSuppressionEnabled: false
+            selfPromoSuppressionEnabled: false,
+            // playhead-2350: matches `makeService`'s opt-out so the two arms of
+            // this byte-identity sweep differ ONLY in the self-promo flag.
+            unanchoredExtentBlocksAutoSkip: false
         )
         let serviceDefault = AdDetectionService(
             store: storeDefault,
