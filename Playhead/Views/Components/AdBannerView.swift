@@ -849,6 +849,26 @@ struct AdBannerView: View {
     /// production, tests swap in a `RecordingHapticPlayer`.
     var hapticPlayer: any HapticPlaying = SystemHapticPlayer()
 
+    /// playhead-jw63.5: banner-context entry into the feedback channel.
+    ///
+    /// Reached by LONG-PRESSING the card, never by a visible control. That
+    /// is the whole design: the banner is the moment a listener actually
+    /// feels "this was wrong", so it is the highest-value place to start a
+    /// note — but the card already carries Yes / No / Listen / Always skip /
+    /// evidence / dismiss, and the one-tap Yes/No (playhead-jw63.1) is the
+    /// signal we most want. A seventh visible control would compete with it
+    /// and cost every listener attention to ignore. A context menu costs
+    /// zero pixels and zero taps on the primary path, and is the standard
+    /// iOS idiom for "more about this specific thing".
+    ///
+    /// No lifecycle/identity guard: unlike every other action here this one
+    /// mutates nothing, and requiring the card to still be current would
+    /// disable the channel exactly when something has gone wrong.
+    ///
+    /// `nil` in previews and isolated tests — the menu is then not attached
+    /// at all, so a long press behaves as it did before this bead.
+    var onTellUsWhatHappened: ((AdSkipBannerItem) -> Void)?
+
     /// playhead-vjxc: Tracks whether the user has tapped the disclosure
     /// chevron to expand the evidence detail. Keyed by banner id so the
     /// expansion never carries over when the queue advances to the next
@@ -1657,12 +1677,31 @@ struct AdBannerView: View {
         )
         .animation(Motion.standard, value: isExpanded)
         .accessibilityElement(children: .contain)
+        .modifier(
+            BannerFeedbackChannelMenu(
+                label: ListenerFeedbackCopy.bannerMenuLabel,
+                action: Self.showsFeedbackChannelAffordance(
+                    hasHandler: onTellUsWhatHappened != nil
+                ) ? { onTellUsWhatHappened?(item) } : nil
+            )
+        )
         .onAppear {
             // Count and haptic only when the card is actually presented.
             if isPresentationExposed {
                 handleBannerAppear(for: item)
             }
         }
+    }
+
+    /// Whether the long-press feedback entry is attached to this card.
+    ///
+    /// Pure and separated from the view body so the coexistence rule with
+    /// playhead-jw63.1 is assertable: the affordance depends ONLY on whether
+    /// a handler is wired — never on tier, feedback state, or the claim
+    /// flags that gate Yes/No — so it can neither disable nor be disabled by
+    /// the one-tap choice.
+    static func showsFeedbackChannelAffordance(hasHandler: Bool) -> Bool {
+        hasHandler
     }
 
     @ViewBuilder
@@ -2179,6 +2218,33 @@ private struct BannerButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
             .animation(Motion.quick, value: configuration.isPressed)
+    }
+}
+
+// MARK: - Feedback Channel Menu (playhead-jw63.5)
+
+/// Attaches the long-press "Something felt wrong" entry — and, when no
+/// handler is wired, attaches nothing at all.
+///
+/// The conditional matters: `.contextMenu` with an empty builder still
+/// arms a long press and then presents an empty menu, which would be a
+/// worse regression than the missing feature. Previews and isolated banner
+/// tests leave the handler `nil`, so they keep their pre-bead behaviour.
+private struct BannerFeedbackChannelMenu: ViewModifier {
+    let label: String
+    let action: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let action {
+            content.contextMenu {
+                Button(action: action) {
+                    Label(label, systemImage: "envelope")
+                }
+            }
+        } else {
+            content
+        }
     }
 }
 

@@ -99,6 +99,14 @@ struct SettingsView: View {
     @State private var dogfoodDiagnosticsExportResult: DogfoodDiagnosticsExportResult?
     @State private var dogfoodDiagnosticsExportError: String?
 
+    /// playhead-jw63.5: in-app feedback channel. `feedbackAttachDiagnostics`
+    /// is the per-send opt-in for the diagnostics bundle — default OFF, so a
+    /// "this felt wrong" note stays a note unless the listener says otherwise.
+    @AppStorage(ListenerFeedbackDefaults.attachDiagnosticsKey)
+    private var feedbackAttachDiagnostics = ListenerFeedbackDefaults.attachDiagnosticsDefault
+    @State private var feedbackInProgress = false
+    @State private var feedbackNotice: String?
+
     /// playhead-btoa.4: persisted toggle that drives the per-row
     /// `PipelineProgressStripView` on the Activity screen. Default is
     /// `false`; the same `@AppStorage` key (`debug.showPipelineStrip`)
@@ -158,6 +166,11 @@ struct SettingsView: View {
                         storageSection
                         opmlSection
                         purchasesSection
+                        // playhead-jw63.5: the always-available way to tell
+                        // us anything. Sits directly above About so the
+                        // version the listener is looking at and the way to
+                        // write about it are adjacent.
+                        feedbackSection
                         aboutSection
                         // playhead-btoa.4: always-visible debug-toggles
                         // section. Currently holds only the Activity
@@ -2043,6 +2056,95 @@ private extension SettingsView {
             modelContext: modelContext
         )
         #endif
+    }
+}
+
+// MARK: - playhead-jw63.5: Feedback Section
+
+private extension SettingsView {
+
+    /// The always-available entry point: one row to write, one switch to
+    /// decide whether a diagnostics file rides along.
+    ///
+    /// Every string comes from `ListenerFeedbackCopy` (test-pinned, and
+    /// bound by the external-copy rule); nothing is inlined here.
+    var feedbackSection: some View {
+        Section {
+            Button {
+                Task { await sendListenerFeedbackFromSettings() }
+            } label: {
+                HStack {
+                    Label(
+                        ListenerFeedbackCopy.sendRowLabel,
+                        systemImage: "envelope"
+                    )
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.accent)
+                    Spacer()
+                    if feedbackInProgress {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(feedbackInProgress)
+            .listRowBackground(AppColors.surface)
+            .accessibilityIdentifier("Settings.feedback.send")
+
+            VStack(alignment: .leading, spacing: Spacing.xxs) {
+                Toggle(isOn: $feedbackAttachDiagnostics) {
+                    Text(ListenerFeedbackCopy.attachDiagnosticsToggleLabel)
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.textPrimary)
+                }
+                .tint(AppColors.accent)
+
+                Text(ListenerFeedbackCopy.attachDiagnosticsCaption)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+            .listRowBackground(AppColors.surface)
+
+            if let notice = feedbackNotice {
+                Text(notice)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textTertiary)
+                    .textSelection(.enabled)
+                    .listRowBackground(AppColors.surface)
+                    .accessibilityIdentifier("Settings.feedback.notice")
+            }
+        } header: {
+            sectionHeader(ListenerFeedbackCopy.sectionHeader)
+        } footer: {
+            Text(ListenerFeedbackCopy.sectionFooter)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    /// Present the composer and record a truthful one-line outcome.
+    ///
+    /// A thrown error means nothing could be presented at all (no host view
+    /// controller). That is exactly the dead-end this bead exists to avoid,
+    /// so it surfaces `unavailableNotice`, which names the address in
+    /// selectable text.
+    @MainActor
+    func sendListenerFeedbackFromSettings() async {
+        feedbackInProgress = true
+        feedbackNotice = nil
+        defer { feedbackInProgress = false }
+
+        do {
+            let outcome = try await runListenerFeedback(
+                runtime: runtime,
+                modelContext: modelContext,
+                context: .general,
+                attachDiagnostics: feedbackAttachDiagnostics
+            )
+            feedbackNotice = ListenerFeedbackComposer.notice(for: outcome)
+        } catch {
+            feedbackNotice = ListenerFeedbackCopy.unavailableNotice
+        }
     }
 }
 

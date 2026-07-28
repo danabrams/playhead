@@ -75,6 +75,38 @@ final class DiagnosticsExportService {
         composer.addAttachmentData(data, mimeType: attachmentMIMEType, fileName: filename)
         return composer
     }
+
+    /// playhead-jw63.5 — the same composer, addressed and prefilled.
+    ///
+    /// The diagnostics export composer above is deliberately recipient-less
+    /// and body-less: it is a support artifact the engineer already asked
+    /// for. The feedback channel's promise is ten seconds, so this variant
+    /// fills in recipient, subject, and body, and attaches the bundle only
+    /// when the listener opted in. Everything else — construction, the
+    /// `canSendMail()` precondition, delegate ownership — is identical, so a
+    /// change to the mail plumbing lands on both paths at once.
+    ///
+    /// Returns `nil` on the same condition as `makeMailComposer`; the caller
+    /// falls through to `makeFeedbackFallback(text:fileURL:)`.
+    static func makeFeedbackMailComposer(
+        envelope: ListenerFeedbackEnvelope,
+        delegate: MFMailComposeViewControllerDelegate
+    ) -> MFMailComposeViewController? {
+        guard MFMailComposeViewController.canSendMail() else { return nil }
+        let composer = MFMailComposeViewController()
+        composer.mailComposeDelegate = delegate
+        composer.setToRecipients(envelope.recipients)
+        composer.setSubject(envelope.subject)
+        composer.setMessageBody(envelope.body, isHTML: false)
+        if let attachment = envelope.attachment {
+            composer.addAttachmentData(
+                attachment.data,
+                mimeType: attachment.mimeType,
+                fileName: attachment.filename
+            )
+        }
+        return composer
+    }
     #endif
 
     // MARK: - iPad / no-mail fallback
@@ -112,6 +144,40 @@ final class DiagnosticsExportService {
             applicationActivities: nil
         )
         controller.excludedActivityTypes = mailOnlyFallbackExcludedActivities
+        return controller
+    }
+
+    /// playhead-jw63.5 — excluded from the FEEDBACK share-sheet fallback.
+    ///
+    /// Deliberately far shorter than `mailOnlyFallbackExcludedActivities`,
+    /// and the difference is the whole point of the fallback. The diagnostics
+    /// export is mail-only by spec because support needs an email artifact.
+    /// The feedback channel's failure mode is the opposite: a listener with
+    /// no mail account who is told "there is no way to tell us" has simply
+    /// been dead-ended. So Copy, Messages, and AirDrop all stay available —
+    /// the artifact is the listener's own sentence, and any route that gets
+    /// it to us beats none. Only targets that cannot carry text at all
+    /// (camera roll, contact card, reading list, printer) are removed.
+    static let feedbackFallbackExcludedActivities: [UIActivity.ActivityType] = [
+        .addToReadingList,
+        .assignToContact,
+        .print,
+        .saveToCameraRoll
+    ]
+
+    /// Share-sheet fallback for the feedback channel. `text` is the
+    /// envelope's `shareText` (subject + prefilled body); `fileURL` is the
+    /// opt-in diagnostics bundle, or `nil`.
+    static func makeFeedbackFallback(text: String, fileURL: URL?) -> UIActivityViewController {
+        var items: [Any] = [text]
+        if let fileURL {
+            items.append(fileURL)
+        }
+        let controller = UIActivityViewController(
+            activityItems: items,
+            applicationActivities: nil
+        )
+        controller.excludedActivityTypes = feedbackFallbackExcludedActivities
         return controller
     }
 
