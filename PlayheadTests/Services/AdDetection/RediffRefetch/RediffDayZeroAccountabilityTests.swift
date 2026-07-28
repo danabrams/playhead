@@ -1216,6 +1216,49 @@ struct RediffDayZeroMintExitTests {
         #expect(outcome.bSideCount == 2)
     }
 
+    /// REVIEW ROUND 1 — a SURVIVING MUTATION. `missingBCopyCountsAsUnreadable`
+    /// above exercises only the `isAnchoredRegularFile` guard; deleting the
+    /// OTHER `unreadable += 1` — the one in the mmap `catch` — changed no test.
+    /// The two branches are different failures (never staged vs staged but
+    /// unmappable) and both feed the census that separates "the aligner had
+    /// nothing to work with" from "the copies agreed", so both must count.
+    ///
+    /// An unreadable-but-anchored file is built with `chmod 000`: `stat` still
+    /// reports a non-empty regular file (so the guard passes) while the mmap
+    /// fails. `bSidesAccepted == 1` is the control — if the chmod ever stopped
+    /// blocking, that expectation fails too and this test stops silently
+    /// asserting the wrong thing.
+    @Test("an anchored B-copy that cannot be mmapped ALSO counts as unreadable")
+    func unmappableBCopyCountsAsUnreadable() async throws {
+        let dir = try makeTempDir(prefix: "RediffP70fUnmappable")
+        let unreadable = dir.appendingPathComponent("b1.mp3")
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: unreadable.path)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let aURL = dir.appendingPathComponent("a.mp3")
+        try writeMP3(to: aURL)
+        let b0 = dir.appendingPathComponent("b0.mp3")
+        try FileManager.default.copyItem(at: aURL, to: b0)
+        try FileManager.default.copyItem(at: aURL, to: unreadable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadable.path)
+
+        // The staged file still looks anchored to the guard — this is the
+        // branch `missingBCopyCountsAsUnreadable` cannot reach.
+        #expect(AdDetectionService.isAnchoredRegularFile(unreadable))
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: aURL.absoluteString)
+        let service = makeService(store: store)
+
+        let outcome = await service.mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [b0, unreadable])
+
+        #expect(outcome.bSidesAccepted == 1, "control: the readable copy still diffs")
+        #expect(outcome.bSidesUnreadable == 1, "a failed mmap is a census entry, not a silent skip")
+        #expect(outcome.bSidesGateRejected == 0, "an unreadable copy is NOT a gate rejection")
+        #expect(outcome.bSideCount == 2)
+    }
+
     @Test("CHANGE 3: the pre-fetch blocker names the same exits the mint would, for FREE")
     func prefetchBlockerMatchesMintExits() async throws {
         let store = try await makeTestStore()
