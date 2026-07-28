@@ -32,6 +32,10 @@
 //   (d) Feature summaries are restricted to `OptInBundle.FeatureSummary`
 //       (mean / max only); the input shape physically cannot carry a
 //       raw feature vector.
+//   (g) Banner tallies (playhead-bfq7) reach the bundle only through
+//       `DefaultBundle.BannerTallySummary`, whose episode reference is
+//       produced here by `EpisodeIdHasher`. The raw episode id stops
+//       at this function.
 
 import Foundation
 
@@ -125,7 +129,8 @@ enum DiagnosticsBundleBuilder {
         chapterPhaseEvents: [ChapterPhaseEvent] = [],
         musicBedProfileSnapshots: [ShowMusicBedProfileSnapshot] = [],
         learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
-        stabilityDiagnostics: [StabilityDiagnosticRecord] = []
+        stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
+        bannerTallies: [BannerTallySession] = []
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -186,6 +191,26 @@ enum DiagnosticsBundleBuilder {
             )
         }
 
+        // playhead-bfq7: this is the ONLY projection of a
+        // `BannerTallySession`, and it is where the raw episode id is
+        // dropped. The store keeps the raw id (it is local-only); the
+        // bundle gets the same install-scoped hash the scheduler-event
+        // and work-journal tails use (legal checklist item a). Nothing
+        // else about the card — title, feed, advertiser, window id,
+        // session key — is carried across.
+        let bannerTallySummaries = bannerTallies.map { session in
+            DefaultBundle.BannerTallySummary(
+                episodeIdHash: EpisodeIdHasher.hash(
+                    installID: installID, episodeId: session.episodeId
+                ),
+                bannerCount: session.bannerCount,
+                autoSkippedCount: session.autoSkippedCount,
+                suggestCount: session.suggestCount,
+                firstShownAt: session.firstShownAt.timeIntervalSince1970,
+                lastShownAt: session.lastShownAt.timeIntervalSince1970
+            )
+        }
+
         return DefaultBundle(
             appVersion: appVersion,
             osVersion: osVersion,
@@ -202,7 +227,8 @@ enum DiagnosticsBundleBuilder {
             // already applied the ring-buffer cap and the projector has
             // already applied the allowlist, so re-deriving either here
             // would only create a second place for them to disagree.
-            stabilityDiagnostics: stabilityDiagnostics
+            stabilityDiagnostics: stabilityDiagnostics,
+            bannerTallies: bannerTallySummaries
         )
     }
 

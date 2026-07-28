@@ -97,6 +97,7 @@ func runReleaseDiagnosticsExport(
         musicBedProfilesFetch: musicBedProfilesFetch,
         learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
         stabilityFetch: ReleaseDiagnosticsHatch.stabilityFetch,
+        bannerTalliesFetch: ReleaseDiagnosticsHatch.bannerTalliesFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -158,6 +159,17 @@ enum ReleaseDiagnosticsHatch {
     /// adapters this is a stored closure rather than a factory.
     static let stabilityFetch: DiagnosticsStabilityFetch = {
         await StabilityDiagnosticsStore.shared.recent()
+    }
+
+    // MARK: Banner-tally adapter (playhead-bfq7)
+
+    /// Reads the local per-episode banner-card tally, oldest session
+    /// first. Like `stabilityFetch` this is a stored closure rather
+    /// than a factory: `BannerTallyStore.shared` is the process-wide
+    /// handle the production banner queue writes into, so there is no
+    /// runtime or ModelContext dependency to thread through.
+    static let bannerTalliesFetch: DiagnosticsBannerTalliesFetch = {
+        await MainActor.run { BannerTallyStore.shared.sessions }
     }
 
     // MARK: Environment construction

@@ -2,6 +2,9 @@
 
 Scope: playhead-fsy3 Scope 2 — verification artifact tying each item of
 the four-part legal checklist (a)-(d) to the test that proves it.
+Later sections extend it: (e) stability diagnostics (playhead-jw63.4),
+(f) delivery surfaces (playhead-jw63.5), (g) banner tallies
+(playhead-bfq7).
 
 The diagnostics bundle is the only user-driven path that exfiltrates
 state off the device. Two-tier shape:
@@ -339,3 +342,75 @@ Copy, Messages, and AirDrop stay available — because the failure mode
 there is a listener with no way to reach us at all. The artifact routed
 that way is the listener's own sentence plus, only if they opted in, the
 same audited bundle.
+
+---
+
+## (g) Banner tallies: per-episode card counts, salted reference only
+
+Added by playhead-bfq7. `DefaultBundle.banner_tallies` carries one row
+per episode listening session that put at least one banner card on
+screen. It exists so a listener can answer "how many cards did that
+episode show me?" from an exported bundle rather than by counting cards
+by hand during playback.
+
+**How to read it (not a legal point, but the number is the whole
+purpose):** the per-episode answer is the **sum** of the rows sharing
+an `episode_id_hash`. A row is one playback lifecycle, and the
+lifecycle turns over on a re-tap of the already-playing episode and on
+every relaunch — so one listen can appear as several rows. No card is
+counted twice under any of those splits; `first_shown_at` /
+`last_shown_at` separate "listened three times" from "one listen split
+three ways".
+
+This is the first counter that is **both per-episode and on an egress
+surface**, so it is the first one that could carry an episode reference
+off the device. Two facts make it safe:
+
+1. **The raw episode id stops at the builder.** `BannerTallyStore`
+   deliberately persists the RAW id — it is local-only, and the sibling
+   `os_log` breadcrumb names the episode plainly by design (see below).
+   `DiagnosticsBundleBuilder.buildDefault` is the **only** projection of
+   a `BannerTallySession`, and it replaces that id with
+   `EpisodeIdHasher.hash(installID:episodeId:)` — the same salted hex
+   (c) that the scheduler-event and work-journal tails already use, so a
+   tally correlates with those tails without either naming the episode.
+
+2. **The row is a closed shape.** `DefaultBundle.BannerTallySummary` is
+   `episode_id_hash`, `banner_count`, `auto_skipped_count`,
+   `suggest_count`, `first_shown_at`, `last_shown_at`. Nothing else.
+   Not carried: the episode title, the feed URL, the advertiser or
+   product printed on the card, the orchestrator window ids, the local
+   session key, or any transcript text.
+
+**The `os_log` surface is NOT governed by this checklist.** The live
+breadcrumb (`subsystem:com.playhead category:BannerTally`) names the
+episode and the window id in cleartext. That is deliberate and stays
+local: it is written to the device log, never read back by the app, and
+never attached to an export. When in doubt the rule is "less in the
+bundle, more in the log", and that is the split taken here.
+
+**Verified by** `PlayheadTests/Support/Diagnostics/BannerTallyDiagnosticsPrivacyTests.swift`:
+
+- `sentinelsAreHashedAway` — a store row whose episode id is stuffed
+  with an episode title, a feed URL and transcript text projects into a
+  bundle whose encoded bytes contain none of them, nor any fragment of
+  them, nor the advertiser/product/window fields of the cards that
+  produced it, nor the local session key. Non-vacuous: it also asserts
+  the hostile row was still COUNTED.
+- `episodeReferenceIsTheSaltedHash` — the reference that does ship is
+  byte-equal to `EpisodeIdHasher.hash(installID:episodeId:)` and matches
+  `^[0-9a-f]{64}$`.
+- `encodedSummaryShapeIsClosed` — the encoded key set equals a FROZEN
+  literal list (not `CodingKeys.allCases`, which would be circular).
+  Adding any field to the summary is therefore a deliberate edit made
+  against this checklist, the same way adding a field to a stability
+  record is (e).
+- `tallyReachesTheBundleWithItsTierBreakdown` — the number actually
+  survives store → fetch → builder → encoded bytes, and two distinct
+  episodes do not collapse onto one reference.
+- `keyIsPresentWhenEmpty` / `legacyBundlesStayDecodable` — the key is
+  always encoded, and a bundle predating it decodes as `[]`.
+
+**Egress.** None added. The tally rides the bundle the listener already
+chooses to send through (f)'s feedback channel or the diagnostics
+export; nothing is uploaded.

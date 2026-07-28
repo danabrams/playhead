@@ -112,6 +112,7 @@ func runDebugDiagnosticsExport(
         musicBedProfilesFetch: musicBedProfilesFetch,
         learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
         stabilityFetch: DebugDiagnosticsHatch.stabilityFetch,
+        bannerTalliesFetch: DebugDiagnosticsHatch.bannerTalliesFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -189,6 +190,16 @@ enum DebugDiagnosticsHatch {
     /// so a DEBUG build's bundle has the same shape as a Release one.
     static let stabilityFetch: DiagnosticsStabilityFetch = {
         await StabilityDiagnosticsStore.shared.recent()
+    }
+
+    // MARK: Banner-tally adapter (playhead-bfq7)
+
+    /// Reads the local per-episode banner-card tally, oldest session
+    /// first. Kept in lock-step with
+    /// `ReleaseDiagnosticsHatch.bannerTalliesFetch` so a DEBUG build's
+    /// bundle has the same shape as a Release one.
+    static let bannerTalliesFetch: DiagnosticsBannerTalliesFetch = {
+        await MainActor.run { BannerTallyStore.shared.sessions }
     }
 
     // MARK: Environment construction

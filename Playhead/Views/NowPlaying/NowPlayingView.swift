@@ -129,10 +129,18 @@ struct BannerFeedbackProductionActions {
     /// suggest-exit route installed as one composition step. Tests inject an
     /// isolated store and narrow sinks into this same path, avoiding
     /// source-text canaries for production wiring.
+    ///
+    /// playhead-bfq7: `tallyStore` is optional so existing test call
+    /// sites keep their isolation (no shared `UserDefaults` write);
+    /// production passes the process-wide handle.
     func makeQueue(
-        feedbackCounterStore: BannerFeedbackCounterStore
+        feedbackCounterStore: BannerFeedbackCounterStore,
+        tallyStore: BannerTallyStore? = nil
     ) -> AdBannerQueue {
-        let queue = AdBannerQueue(feedbackCounterStore: feedbackCounterStore)
+        let queue = AdBannerQueue(
+            feedbackCounterStore: feedbackCounterStore,
+            tallyStore: tallyStore
+        )
         queue.onSuggestExitWithoutSkip = onSuggestExitWithoutSkip
         return queue
     }
@@ -287,7 +295,10 @@ struct NowPlayingView: View {
         )
         self.bannerFeedbackActions = actions
         self._bannerQueue = State(
-            wrappedValue: actions.makeQueue(feedbackCounterStore: .shared)
+            wrappedValue: actions.makeQueue(
+                feedbackCounterStore: .shared,
+                tallyStore: .shared
+            )
         )
     }
 
