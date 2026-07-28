@@ -1771,7 +1771,18 @@ struct FoundationModelClassifierTests {
         }
 
         let output = try await classifier.coarsePassA(segments: segments)
+        // The fixture builds exactly one window and it is guardrailed, so the
+        // whole pass has nothing to report but that guardrail. playhead-qbib
+        // added the per-window record underneath: the guardrail is now a
+        // window OUTCOME with its own coordinates, not just a pass verdict.
         #expect(output.status == .guardrailViolation)
+        #expect(output.failedWindows.count == 1)
+        let guardrailedWindow = try #require(output.failedWindows.first)
+        #expect(guardrailedWindow.status == .guardrailViolation)
+        #expect(guardrailedWindow.lineRefs == Array(0..<6))
+        #expect(guardrailedWindow.startTime == 0)
+        #expect(guardrailedWindow.endTime == 30)
+        #expect(guardrailedWindow.coversWholePlan)
 
         let diagnostics = captured.snapshot()
         // Expect at least one submit event and one error event for the same window.
@@ -1923,6 +1934,14 @@ struct FoundationModelClassifierTests {
             // instead — it still aborts the pass and preserves the
             // "partial results on mid-pass unrecoverable failure"
             // contract this test locks in.
+            //
+            // playhead-qbib: `.guardrailViolation` is a per-window outcome
+            // too now (a mid-episode guardrail must never truncate the rest
+            // of the episode — see
+            // `coarsePassContinuesPastMidEpisodeGuardrailToPostroll`). The
+            // abort contract this test pins is still real, so it moves to
+            // `.unknownTransient`, which maps to the pass-scoped
+            // `.failedTransient`.
             contextSize: 431,
             coarseSchemaTokens: 4,
             refinementSchemaTokens: 8,
@@ -1932,8 +1951,8 @@ struct FoundationModelClassifierTests {
             responses: [
                 CoarseScreeningSchema(disposition: .noAds, support: nil)
             ],
-            // First call: nil → succeed. Second call: .guardrailViolation → unrecoverable.
-            coarseFailures: [nil, .guardrailViolation]
+            // First call: nil → succeed. Second call: .unknownTransient → unrecoverable.
+            coarseFailures: [nil, .unknownTransient]
         )
         let classifier = FoundationModelClassifier(
             runtime: recorder.runtime,
@@ -1942,10 +1961,362 @@ struct FoundationModelClassifierTests {
 
         let output = try await classifier.coarsePassA(segments: segments)
 
-        #expect(output.status == .guardrailViolation)
+        #expect(output.status == .failedTransient)
         // First window MUST be retained even though a later window failed.
         #expect(output.windows.count >= 1)
         #expect(output.windows.first?.lineRefs.contains(0) == true)
+        // A pass-scoped abort stops BEFORE the third window, so it is neither
+        // a success nor a recorded failure — the runner persists the honest
+        // "we stopped here" row for it.
+        #expect(output.windows.count == 1)
+        #expect(output.failedWindows.isEmpty)
+    }
+
+    // MARK: - playhead-qbib: safety blocks degrade locally
+
+    /// POSTROLL: the regression that a mid-episode guardrail violation cannot
+    /// suppress postroll scanning. The phone evidence for this bead was a
+    /// single Lagoon guardrail at ~1425.9s of a ~3578s episode ending the
+    /// coarse pass, so nothing after it — including the postroll — was ever
+    /// screened, while the run still reported success.
+    @available(iOS 26.0, *)
+    @Test("playhead-qbib: a mid-episode guardrail cannot suppress postroll scanning")
+    func coarsePassContinuesPastMidEpisodeGuardrailToPostroll() async throws {
+        let segments = (0..<4).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: Double(idx) * 100,
+                endTime: Double(idx + 1) * 100,
+                text: "Window \(idx) text."
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                // The postroll: the window a guardrail used to hide.
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [3], certainty: .strong)
+                )
+            ],
+            // Windows 1 and 3 succeed; window 2 (mid-episode) is guardrailed.
+            coarseFailures: [nil, .guardrailViolation, nil, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        // The pass reached the end of the episode.
+        #expect(output.status == .success)
+        #expect(output.windows.count == 3)
+        let scannedLineRefs = Set(output.windows.flatMap(\.lineRefs))
+        #expect(scannedLineRefs.contains(3), "postroll window must still be scanned")
+        #expect(output.windows.contains { $0.screening.disposition == .containsAd })
+        #expect(output.windows.map(\.endTime).max() == 400)
+
+        // ...and the guardrailed window is recorded as an honest hole with its
+        // own coordinates rather than silently vanishing.
+        #expect(output.failedWindows.count == 1)
+        let hole = try #require(output.failedWindows.first)
+        #expect(hole.status == .guardrailViolation)
+        #expect(hole.lineRefs == [1])
+        #expect(hole.startTime == 100)
+        #expect(hole.endTime == 200)
+        #expect(!hole.status.didExamineWindow)
+
+        // Every plan is accounted for: 3 examined + 1 hole == 4 windows.
+        #expect(output.windows.count + output.failedWindows.count == 4)
+    }
+
+    /// RETRY POLICY, attempt 1: a coarse refusal is retried through the
+    /// permissive classifier on the SAME window before any shrink. The block
+    /// is a guardrail decision, so the first thing worth changing is the
+    /// guardrail configuration, not the content.
+    @available(iOS 26.0, *)
+    @Test("playhead-qbib: a coarse refusal is recovered by the permissive classifier")
+    func coarseRefusalRecoversThroughPermissiveClassifier() async throws {
+        let segments = qbibRecoverySegments()
+        let recorder = qbibRecoveryRecorder(coarseFailures: [.refusal, nil, nil])
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+        let attempts = PermissiveAttemptBox()
+        let permissive = PermissiveAdClassifier()
+        await permissive.installClassifyOverrideForTesting { windowSegments in
+            attempts.record(windowSegments.map(\.segmentIndex))
+            return CoarseScreeningSchema(
+                disposition: .containsAd,
+                support: CoarseSupportSchema(supportLineRefs: [0], certainty: .strong)
+            )
+        }
+
+        let output = try await classifier.coarsePassA(
+            segments: segments,
+            sensitiveRouter: SensitiveWindowRouter.noop,
+            permissiveClassifier: permissive
+        )
+
+        // One permissive call, on the WHOLE window — no shrink was needed.
+        #expect(attempts.snapshot() == [[0]])
+        #expect(output.status == .success)
+        #expect(output.failedWindows.isEmpty, "a recovered window is not a coverage hole")
+        let recovered = try #require(output.windows.first { $0.lineRefs == [0] })
+        #expect(recovered.screening.disposition == .containsAd)
+        // Recovered windows keep the plan's real coordinates.
+        #expect(recovered.startTime == 0)
+        #expect(recovered.endTime == 100)
+    }
+
+    /// RETRY POLICY, attempts 2–3: when the whole window is still blocked, the
+    /// bounded context shrink splits it into two contiguous halves. Splitting
+    /// rather than truncating is what keeps the denominator honest — the half
+    /// that stays blocked remains visible with its own coordinates.
+    @available(iOS 26.0, *)
+    @Test("playhead-qbib: a still-blocked window shrinks into halves and accounts for both")
+    func coarseRefusalShrinksIntoHalvesAndAccountsForBoth() async throws {
+        let segments = qbibRecoverySegments(count: 4, windowed: false)
+        let recorder = qbibRecoveryRecorder(
+            coarseFailures: [.refusal],
+            contextSize: 4096,
+            tokensPerLine: 1
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let attempts = PermissiveAttemptBox()
+        let permissive = PermissiveAdClassifier()
+        await permissive.installClassifyOverrideForTesting { windowSegments in
+            let lineRefs = windowSegments.map(\.segmentIndex)
+            attempts.record(lineRefs)
+            // Whole window and the FIRST half stay blocked; the second half
+            // comes back clean.
+            guard lineRefs == [2, 3] else {
+                throw PermissiveClassificationError.failed(
+                    reason: .permissiveRefusal,
+                    underlyingDescription: "qbib-half-still-blocked"
+                )
+            }
+            return CoarseScreeningSchema(disposition: .noAds, support: nil)
+        }
+
+        let output = try await classifier.coarsePassA(
+            segments: segments,
+            sensitiveRouter: SensitiveWindowRouter.noop,
+            permissiveClassifier: permissive
+        )
+
+        // Whole window, then each half: exactly the documented shrink shape.
+        #expect(attempts.snapshot() == [[0, 1, 2, 3], [0, 1], [2, 3]])
+
+        // The recovered half is a real examined window with ITS OWN bounds.
+        let recovered = try #require(output.windows.first)
+        #expect(recovered.lineRefs == [2, 3])
+        #expect(recovered.startTime == 200)
+        #expect(recovered.endTime == 400)
+
+        // The half that stayed blocked is a hole with ITS OWN bounds — not a
+        // silent disappearance, and not the whole window's bounds.
+        #expect(output.failedWindows.count == 1)
+        let hole = try #require(output.failedWindows.first)
+        #expect(hole.lineRefs == [0, 1])
+        #expect(hole.startTime == 0)
+        #expect(hole.endTime == 200)
+        #expect(!hole.coversWholePlan)
+        #expect(!hole.status.didExamineWindow)
+        #expect(hole.persistenceWindowKey != "window=0", "sub-plan holes need a distinct row key")
+    }
+
+    /// RETRY POLICY, the cap: a window the permissive path can never screen
+    /// costs a fixed, small number of extra FM calls — no recursion below
+    /// halves, no unbounded retry storm on a device already fighting for
+    /// background windows.
+    @available(iOS 26.0, *)
+    @Test("playhead-qbib: a pathological window cannot exceed the recovery attempt cap")
+    func pathologicalWindowIsBoundedByAttemptCap() async throws {
+        let segments = qbibRecoverySegments(count: 4, windowed: false)
+        let recorder = qbibRecoveryRecorder(
+            coarseFailures: [.refusal],
+            contextSize: 4096,
+            tokensPerLine: 1
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let attempts = PermissiveAttemptBox()
+        let permissive = PermissiveAdClassifier()
+        await permissive.installClassifyOverrideForTesting { windowSegments in
+            attempts.record(windowSegments.map(\.segmentIndex))
+            throw PermissiveClassificationError.failed(
+                reason: .permissiveRefusal,
+                underlyingDescription: "qbib-pathological"
+            )
+        }
+
+        let output = try await classifier.coarsePassA(
+            segments: segments,
+            sensitiveRouter: SensitiveWindowRouter.noop,
+            permissiveClassifier: permissive
+        )
+
+        // Whole window, then both halves, then STOP. No quarters, no recursion.
+        #expect(attempts.snapshot() == [[0, 1, 2, 3], [0, 1], [2, 3]])
+        #expect(
+            attempts.snapshot().count
+                == FoundationModelClassifier.coarseSafetyRecoveryMaxAttemptsPerWindow
+        )
+        #expect(output.permissiveFailureCounts.refusal == 3)
+        #expect(output.windows.isEmpty)
+        // Both halves are accounted for as holes; nothing is claimed clean.
+        #expect(output.failedWindows.count == 2)
+        #expect(output.failedWindows.allSatisfy { !$0.status.didExamineWindow })
+        #expect(Set(output.failedWindows.flatMap(\.lineRefs)) == [0, 1, 2, 3])
+    }
+
+    /// A BG-window expiry during recovery is NOT a safety block. Recording it
+    /// as a permissive refusal would both mis-state why the audio is missing
+    /// and give the window `.persistFailure` recovery instead of
+    /// `.resumeFromCheckpoint` — the window would never be re-attempted.
+    @available(iOS 26.0, *)
+    @Test("playhead-qbib: cancellation during recovery is recorded as cancelled, not refused")
+    func cancellationDuringRecoveryIsNotRecordedAsRefusal() async throws {
+        let segments = qbibRecoverySegments(count: 4, windowed: false)
+        let recorder = qbibRecoveryRecorder(
+            coarseFailures: [.refusal],
+            contextSize: 4096,
+            tokensPerLine: 1
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+        let attempts = PermissiveAttemptBox()
+        let permissive = PermissiveAdClassifier()
+        await permissive.installClassifyOverrideForTesting { windowSegments in
+            attempts.record(windowSegments.map(\.segmentIndex))
+            throw CancellationError()
+        }
+
+        let output = try await classifier.coarsePassA(
+            segments: segments,
+            sensitiveRouter: SensitiveWindowRouter.noop,
+            permissiveClassifier: permissive
+        )
+
+        // Recovery stops at the first cancellation — no shrink, no budget burn.
+        #expect(attempts.snapshot() == [[0, 1, 2, 3]])
+        #expect(output.permissiveFailureCounts == .zero)
+        let hole = try #require(output.failedWindows.first)
+        #expect(hole.status == .cancelled)
+        #expect(hole.status.retryPolicy == .resumeFromCheckpoint)
+        #expect(output.failedWindows.count == 1)
+        #expect(hole.lineRefs == [0, 1, 2, 3])
+    }
+
+    @Test("playhead-qbib: the pass recovery budget can at most double a clean pass")
+    func recoveryPassBudgetIsBounded() {
+        // Short episodes still get a usable floor...
+        #expect(FoundationModelClassifier.coarseSafetyRecoveryPassBudget(planCount: 1) == 3)
+        // ...and long ones scale to one recovery attempt per planned window,
+        // which caps recovery at the cost of a second clean pass.
+        #expect(FoundationModelClassifier.coarseSafetyRecoveryPassBudget(planCount: 40) == 40)
+    }
+
+    /// One segment per coarse window, 100s apart, so window coordinates are
+    /// unambiguous in assertions.
+    private func qbibRecoverySegments(count: Int = 3, windowed: Bool = true) -> [AdTranscriptSegment] {
+        (0..<count).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: Double(idx) * 100,
+                endTime: Double(idx + 1) * 100,
+                text: windowed
+                    ? "Window \(idx) text."
+                    : "Segment \(idx) mentions a sponsor."
+            )
+        }
+    }
+
+    private func qbibRecoveryRecorder(
+        coarseFailures: [RuntimeFailure?],
+        contextSize: Int = 431,
+        tokensPerLine: Int = 8
+    ) -> RuntimeRecorder {
+        RuntimeRecorder(
+            contextSize: contextSize,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * tokensPerLine
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ],
+            coarseFailures: coarseFailures
+        )
+    }
+
+    /// The other half of the same defect: a mid-episode guardrail used to make
+    /// `planAdaptiveZoom` return nothing at all, because the pass-level status
+    /// was no longer `.success`. Localized extent work for the WHOLE episode
+    /// was suppressed by one poisoned window.
+    @available(iOS 26.0, *)
+    @Test("playhead-qbib: a mid-episode guardrail no longer suppresses passB planning")
+    func guardrailedWindowStillAllowsAdaptiveZoomForSiblings() async throws {
+        let segments = (0..<4).map { idx in
+            makeSegment(
+                index: idx,
+                startTime: Double(idx) * 100,
+                endTime: Double(idx + 1) * 100,
+                text: "Window \(idx) mentions example dot com and promo code SAVE."
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 431,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { prompt in
+                prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8
+            },
+            responses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [3], certainty: .strong)
+                )
+            ],
+            coarseFailures: [nil, .guardrailViolation, nil, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
+        )
+        let evidenceCatalog = EvidenceCatalog(
+            analysisAssetId: "asset-qbib",
+            transcriptVersion: "transcript-qbib",
+            entries: []
+        )
+
+        let coarse = try await classifier.coarsePassA(segments: segments)
+        let zoomPlans = try await classifier.planAdaptiveZoom(
+            coarse: coarse,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog
+        )
+
+        #expect(!zoomPlans.isEmpty, "the containsAd postroll window must still get a zoom plan")
+        // Localized extent attempts only come from windows coarse actually
+        // examined — the guardrailed window contributes none.
+        let plannedLineRefs = Set(zoomPlans.flatMap(\.lineRefs))
+        #expect(!plannedLineRefs.contains(1))
+        #expect(zoomPlans.allSatisfy { plan in
+            coarse.windows.contains { $0.windowIndex == plan.sourceWindowIndex }
+        })
     }
 
     // H9: cancellation escapes promptly between windows.
@@ -5574,6 +5945,26 @@ private final class DiagnosticCaptureBox: @unchecked Sendable {
 
 /// bd-34e diagnostic capture box: aggregates coarse-pass window submit /
 /// error events emitted by `FoundationModelClassifier.coarsePassDiagnosticObserver`.
+/// playhead-qbib: records every window the permissive classifier was asked
+/// to screen during coarse safety recovery, so the attempt cap and the
+/// context-shrink shape are both directly assertable.
+private final class PermissiveAttemptBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var attempts: [[Int]] = []
+
+    func record(_ lineRefs: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        attempts.append(lineRefs)
+    }
+
+    func snapshot() -> [[Int]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts
+    }
+}
+
 private final class CoarsePassDiagnosticCaptureBox: @unchecked Sendable {
     private let lock = NSLock()
     private var items: [FoundationModelClassifier.CoarsePassWindowDiagnostic] = []
@@ -5785,6 +6176,11 @@ private enum RuntimeFailure: Sendable {
     case decodingFailure
     case guardrailViolation
     case rateLimited
+    // playhead-qbib: an error FoundationModels does not model, which
+    // `SemanticScanStatus.from(error:)` maps to `.failedTransient` — the
+    // pass-scoped status used to exercise the abort path now that refusal
+    // and guardrail violations are per-window outcomes.
+    case unknownTransient
 
     private var defaultDebugDescription: String {
         switch self {
@@ -5802,10 +6198,22 @@ private enum RuntimeFailure: Sendable {
             return "runtime-failure-guardrailViolation"
         case .rateLimited:
             return "runtime-failure-rateLimited"
+        case .unknownTransient:
+            return "runtime-failure-unknownTransient"
         }
     }
 
     var error: Error {
+        // playhead-qbib: deliberately NOT a FoundationModels error — this is
+        // the "we have no idea what happened" shape that maps to
+        // `.failedTransient`.
+        if case .unknownTransient = self {
+            return NSError(
+                domain: "RuntimeFailure",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: defaultDebugDescription]
+            )
+        }
         #if canImport(FoundationModels)
         // playhead-cle1: the iOS-27-only `LanguageModelError.refusal` shape.
         if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *),
@@ -5835,6 +6243,10 @@ private enum RuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
             case .rateLimited:
                 return LanguageModelSession.GenerationError.rateLimited(context)
+            case .unknownTransient:
+                // Unreachable — handled by the early return above. Kept so the
+                // switch stays exhaustive.
+                break
             }
         }
         #endif

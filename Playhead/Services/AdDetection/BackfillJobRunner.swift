@@ -1441,6 +1441,11 @@ actor BackfillJobRunner {
             || coarse.failedWindowStatuses.contains(.rateLimited)
         var coverageContiguousUpperBound: Double? = nil
         var coverageFullyCovered = true
+        // playhead-qbib: every passA row this job writes, kept so the run can
+        // report an HONEST scanned-duration denominator at the end. A window
+        // that refused is not a window that was scanned and found clean, and
+        // before qbib nothing downstream could tell the two apart.
+        var passARows: [SemanticScanResult] = []
 
         for window in coarse.windows {
             try Task.checkCancellation()
@@ -1460,6 +1465,7 @@ actor BackfillJobRunner {
             try await store.insertSemanticScanResult(result)
             scanResultIds.append(result.id)
             counters.persistedScanResultCount += 1
+            passARows.append(result)
             if window.screening.disposition == .containsAd {
                 if let support = window.screening.support?.supportLineRefs, !support.isEmpty {
                     detectedAdLineRefs.formUnion(support)
@@ -1481,7 +1487,7 @@ actor BackfillJobRunner {
         counters.randomAuditSelectedCount += randomAudit.persistedEventIds.count
         counters.persistedEvidenceEventCount += randomAudit.persistedEventIds.count
 
-        if !coarse.failedWindowStatuses.isEmpty || !coarse.windows.isEmpty {
+        if !coarse.failedWindows.isEmpty || !coarse.windows.isEmpty {
             let coarsePlans = try await classifier.planPassA(segments: inputs.segments)
             let succeededPlanIndices = Set(
                 coarse.windows.compactMap { window in
@@ -1490,6 +1496,27 @@ actor BackfillJobRunner {
                     })?.windowIndex
                 }
             )
+            // playhead-qbib: a plan that produced BOTH a recovered window and
+            // an un-recovered remainder (bounded permissive shrink) is not
+            // fully covered. Subtracting the failed plan indices is what stops
+            // a partially-recovered window from inflating the coverage cursor
+            // — the cursor must never advance past audio nobody screened.
+            //
+            // Attribute each failure to a plan the SAME structural way
+            // successes are attributed (line-ref subset), falling back to the
+            // index the classifier recorded. Matching structurally keeps the
+            // two independently-built plan lists from having to agree by raw
+            // position: if they ever drifted, an index-only match would
+            // silently no-op and let the cursor advance past a hole — the
+            // exact failure this bead exists to prevent.
+            let failedPlanIndices = Set(
+                coarse.failedWindows.map { failure in
+                    coarsePlans.first(where: { plan in
+                        Set(failure.lineRefs).isSubset(of: Set(plan.lineRefs))
+                    })?.windowIndex ?? failure.planWindowIndex
+                }
+            )
+            let fullyCoveredPlanIndices = succeededPlanIndices.subtracting(failedPlanIndices)
             // playhead-pmp9: honest coverage cursor. Walk plans in TIME order;
             // advance the cursor across an unbroken run of successes from the
             // start and STOP at the first window that was not successfully
@@ -1497,10 +1524,10 @@ actor BackfillJobRunner {
             // skips unscanned audio even if a later window succeeded past an
             // earlier hole. (Pure arithmetic, no FM work, no persistence — the
             // no-rate-limit path stays byte-identical.)
-            coverageFullyCovered = succeededPlanIndices.count == coarsePlans.count
+            coverageFullyCovered = fullyCoveredPlanIndices.count == coarsePlans.count
             var walkedUpperBound: Double? = nil
             for plan in coarsePlans.sorted(by: { $0.startTime < $1.startTime }) {
-                guard succeededPlanIndices.contains(plan.windowIndex) else { break }
+                guard fullyCoveredPlanIndices.contains(plan.windowIndex) else { break }
                 walkedUpperBound = plan.endTime
             }
             coverageContiguousUpperBound = walkedUpperBound
@@ -1514,25 +1541,35 @@ actor BackfillJobRunner {
             if !coverageFullyCovered {
                 honestCursorBox.lastCoveredUpperBoundSec = walkedUpperBound
             }
-            let remainingPlans = coarsePlans.filter { !succeededPlanIndices.contains($0.windowIndex) }
-            for (plan, status) in zip(remainingPlans, coarse.failedWindowStatuses) {
-                        if let failureResult = makeCoarseFailureScanResult(
-                            plan: plan,
-                            inputs: inputs,
-                            jobId: job.jobId,
-                            jobPhase: job.phase,
-                            status: status,
-                            latencyMs: coarse.latencyMillis,
-                            runMode: runMode
-                        ) {
+            // playhead-qbib: persist one row per RECORDED failure using that
+            // failure's OWN coordinates. The previous code zipped the plan
+            // list against a bare status list positionally, which could only
+            // ever be right while every plan produced exactly one outcome —
+            // and silently mis-attributed coordinates as soon as it did not.
+            for failure in coarse.failedWindows {
+                if let failureResult = makeCoarseFailureScanResult(
+                    failure: failure,
+                    inputs: inputs,
+                    jobId: job.jobId,
+                    jobPhase: job.phase,
+                    latencyMs: coarse.latencyMillis,
+                    runMode: runMode
+                ) {
                     try await store.insertSemanticScanResult(failureResult)
                     scanResultIds.append(failureResult.id)
                     counters.persistedScanResultCount += 1
+                    passARows.append(failureResult)
                 }
             }
 
+            // A `.pass`-scoped abort stops the loop before the remaining plans
+            // are ever attempted. Record the first unattempted plan so the
+            // denominator shows where the pass stopped.
+            let unattemptedPlans = coarsePlans.filter {
+                !succeededPlanIndices.contains($0.windowIndex) && !failedPlanIndices.contains($0.windowIndex)
+            }
             if coarse.status != .success,
-               let blockingPlan = remainingPlans.dropFirst(coarse.failedWindowStatuses.count).first,
+               let blockingPlan = unattemptedPlans.first,
                        let failureResult = makeCoarseFailureScanResult(
                             plan: blockingPlan,
                             inputs: inputs,
@@ -1545,6 +1582,7 @@ actor BackfillJobRunner {
                 try await store.insertSemanticScanResult(failureResult)
                 scanResultIds.append(failureResult.id)
                 counters.persistedScanResultCount += 1
+                passARows.append(failureResult)
             }
         } else if coarse.status != .success,
                   let failureResult = makeFailureScanResult(
@@ -1560,7 +1598,10 @@ actor BackfillJobRunner {
             try await store.insertSemanticScanResult(failureResult)
             scanResultIds.append(failureResult.id)
             counters.persistedScanResultCount += 1
+            passARows.append(failureResult)
         }
+
+        logCoarseCoverage(passARows: passARows, inputs: inputs, jobId: job.jobId)
 
         if coarse.status == .success && !coarse.windows.isEmpty {
             let zoomPlans = try await classifier.planAdaptiveZoom(
@@ -1643,6 +1684,13 @@ actor BackfillJobRunner {
                 if !refinement.failedWindowStatuses.isEmpty || !refinement.windows.isEmpty {
                     let succeededWindowIndices = Set(refinement.windows.map(\.windowIndex))
                     let remainingPlans = zoomPlans.filter { !succeededWindowIndices.contains($0.windowIndex) }
+                    // playhead-qbib: passB deliberately KEEPS the positional
+                    // zip that the coarse side dropped. Refinement never splits
+                    // a plan, so every zoom plan yields exactly zero or one
+                    // status entry and both lists stay in plan order. The
+                    // coarse side needed per-failure coordinates because
+                    // bounded permissive shrink can produce two outcomes for
+                    // one plan; this loop cannot.
                     for (plan, status) in zip(remainingPlans, refinement.failedWindowStatuses) {
                         if let failureResult = makeRefinementFailureScanResult(
                             plan: plan,
@@ -3046,12 +3094,23 @@ actor BackfillJobRunner {
         let lastAtom = inputs.segments.first(where: {
             $0.segmentIndex == windowOutput.lineRefs.last
         })?.lastAtomOrdinal ?? firstAtom
-        let startTime = windowOutput.spans.first.map { span in
-            inputs.segments.first(where: { $0.segmentIndex == span.firstLineRef })?.startTime ?? 0
-        } ?? 0
-        let endTime = windowOutput.spans.last.map { span in
-            inputs.segments.first(where: { $0.segmentIndex == span.lastLineRef })?.endTime ?? 0
-        } ?? 0
+        // playhead-qbib: window coordinates must always be valid. These times
+        // used to be derived SOLELY from the returned spans, so a passB window
+        // that found no ads persisted `0.0 - 0.0` — a row that cannot say
+        // where it looked, which is useless to every downstream consumer and
+        // actively misleading to coverage accounting. Fall back to the
+        // window's own line-ref bounds: the spans describe the ad extent, the
+        // window describes where we looked.
+        let windowLineRefs = Set(windowOutput.lineRefs)
+        let windowSegments = inputs.segments.filter { windowLineRefs.contains($0.segmentIndex) }
+        let windowStartTime = windowSegments.map(\.startTime).min() ?? 0
+        let windowEndTime = windowSegments.map(\.endTime).max() ?? windowStartTime
+        let startTime = windowOutput.spans.first.flatMap { span in
+            inputs.segments.first(where: { $0.segmentIndex == span.firstLineRef })?.startTime
+        } ?? windowStartTime
+        let endTime = windowOutput.spans.last.flatMap { span in
+            inputs.segments.first(where: { $0.segmentIndex == span.lastLineRef })?.endTime
+        } ?? windowEndTime
         return SemanticScanResult(
             // H-3: deterministic id (see makeScanResult for the full
             // note). C-R3-2: transcriptVersion must be included so rows
@@ -3181,6 +3240,64 @@ actor BackfillJobRunner {
             latencyMs: latencyMs,
             runMode: runMode,
             windowKey: "window=\(plan.windowIndex)"
+        )
+    }
+
+    /// playhead-qbib: persist a "we could not look here" row using the
+    /// coordinates of the attempt that actually failed, not of whichever plan
+    /// happened to sit at the same list position.
+    private func makeCoarseFailureScanResult(
+        failure: CoarseWindowFailure,
+        inputs: AssetInputs,
+        jobId: String,
+        jobPhase: BackfillJobPhase,
+        latencyMs: Double,
+        runMode: SemanticScanPhase
+    ) -> SemanticScanResult? {
+        let attemptedLineRefs = Set(failure.lineRefs)
+        let attemptedSegments = inputs.segments.filter { attemptedLineRefs.contains($0.segmentIndex) }
+        return makeFailureScanResult(
+            scanPass: "passA",
+            attemptedSegments: attemptedSegments,
+            inputs: inputs,
+            jobId: jobId,
+            jobPhase: jobPhase,
+            status: failure.status,
+            latencyMs: latencyMs,
+            runMode: runMode,
+            windowKey: failure.persistenceWindowKey
+        )
+    }
+
+    /// playhead-qbib: emit the run's honest coarse-coverage denominator.
+    ///
+    /// The phone evidence behind this bead was a job that persisted 19 rows,
+    /// stopped at 1425.9s of a ~3578s episode, and still reported success.
+    /// Nothing in the logs said the denominator had shrunk. This breadcrumb
+    /// makes a truncated scan self-reporting: `examined` is audio that
+    /// produced a verdict, `unexamined` is audio we attempted or expected but
+    /// could not screen, and `holes` counts the distinct gaps.
+    private func logCoarseCoverage(
+        passARows: [SemanticScanResult],
+        inputs: AssetInputs,
+        jobId: String
+    ) {
+        guard !passARows.isEmpty else { return }
+        let transcriptEnd = inputs.segments.map(\.endTime).max()
+        let coverage = SemanticScanCoverage.compute(
+            rows: passARows,
+            episodeDuration: transcriptEnd
+        )
+        logger.notice(
+            """
+            fm.backfill.coarse_coverage \
+            job=\(jobId, privacy: .public) \
+            examinedSeconds=\(coverage.examinedSeconds, privacy: .public) \
+            unexaminedSeconds=\(coverage.unexaminedSeconds, privacy: .public) \
+            examinedFraction=\(coverage.examinedFraction, privacy: .public) \
+            holes=\(coverage.unexaminedRanges.count, privacy: .public) \
+            transcriptEnd=\(transcriptEnd ?? 0, privacy: .public)
+            """
         )
     }
 
