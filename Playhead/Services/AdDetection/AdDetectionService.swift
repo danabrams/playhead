@@ -5528,11 +5528,12 @@ actor AdDetectionService {
             // `refinedSpan.id` the trace re-key block below reads; a finalizer
             // geometry rewrite invalidates both (`finalizerRewroteGeometry`).
             //
-            // Flag-OFF for stinger + rediff: no span carries `.rediffSlot` and
-            // `lastStingerRefinementTraceBySpanId` is empty (top-of-run reset),
-            // so extent resolves `.unanchored` on both edges — which is the
-            // honest answer, and under `unanchoredExtentBlocksAutoSkip` (default
-            // ON) makes such a span mark-only rather than auto-skippable.
+            // When neither channel fires for a span — no `.rediffSlot` width
+            // ownership and no snap in `lastStingerRefinementTraceBySpanId`
+            // (which is empty outright when the stinger refiner is off) — extent
+            // resolves `.unanchored` on both edges. That is the honest answer,
+            // and under `unanchoredExtentBlocksAutoSkip` (default ON) it makes
+            // the span mark-only rather than auto-skippable.
             let extentSupport = SpanExtentSupport.derive(
                 anchorProvenance: refinedSpan.anchorProvenance,
                 stingerTrace: lastStingerRefinementTraceBySpanId[refinedSpan.id],
