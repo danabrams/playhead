@@ -19,6 +19,7 @@
 // kind of thing that wedges.
 
 import Foundation
+import os
 import Testing
 @testable import Playhead
 
@@ -76,6 +77,79 @@ private func yieldToScheduler(milliseconds: Int = 120) async {
 private actor ObservedFlag {
     private(set) var isSet = false
     func set() { isSet = true }
+}
+
+/// Parks inside `transcribe` — i.e. while the process-wide permit is held —
+/// and records whether a `loadModel()` issued in that window got through.
+///
+/// The safety valve matters: in the regression case nothing else can release
+/// the permit, and this is the ONE shared `SpeechService.requestGate` the whole
+/// test process transcribes through. Parking on it unboundedly would turn one
+/// failing assertion into a stall for every other test that touches the gate.
+private final class LoadDuringTranscribeRecognizer: SpeechRecognizer, @unchecked Sendable {
+    /// Cap on how long `transcribe` will hold the shared permit waiting for a
+    /// reload that a regression would never let through.
+    ///
+    /// It is ONLY reached in the regression case — on the passing path the
+    /// reload resumes `transcribe` directly and this timer is cancelled unused
+    /// — so it is sized against the flake, not against the failure. The real
+    /// gap it has to cover is one actor hop plus a lock, i.e. microseconds; 20 s
+    /// is ~10,000x that, which matters because this box has been observed
+    /// starving tasks for over a minute under a full parallel gate. A short
+    /// valve firing before a merely-late reload would fail a correct build.
+    static let valveDelay: Duration = .seconds(20)
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let released = TestSignal()
+    private let entered = TestSignal()
+
+    private struct State {
+        var loaded = false
+        var loadCount = 0
+        var reloadLandedWhileHoldingPermit = false
+    }
+
+    /// `true` iff the reload completed WHILE `transcribe` was parked holding
+    /// the permit. Snapshotted at wake time on purpose: a regression that
+    /// merely queues the reload behind the permit still runs it eventually,
+    /// once the valve lets `transcribe` go, and a flag set by `loadModel`
+    /// itself would record that late arrival as a pass.
+    var reloadLandedWhileHoldingPermit: Bool {
+        state.withLock { $0.reloadLandedWhileHoldingPermit }
+    }
+
+    /// Suspend until `transcribe` owns the permit.
+    func awaitTranscribeEntry() async { await entered.wait() }
+
+    func loadModel() async throws {
+        let isReload = state.withLock { state -> Bool in
+            state.loaded = true
+            state.loadCount += 1
+            return state.loadCount > 1
+        }
+        // The first load is setup — `transcribe` refuses to run without it.
+        // Only a RELOAD can land in the parked window.
+        guard isReload else { return }
+        await released.signal()
+    }
+
+    func unloadModel() async { state.withLock { $0.loaded = false } }
+    func isModelLoaded() async -> Bool { state.withLock { $0.loaded } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard state.withLock({ $0.loaded }) else { throw TranscriptEngineError.modelNotLoaded }
+        await entered.signal()
+        let valve = Task { [released] in
+            try? await Task.sleep(for: Self.valveDelay)
+            await released.signal()
+        }
+        await released.wait()
+        valve.cancel()
+        state.withLock { $0.reloadLandedWhileHoldingPermit = $0.loadCount > 1 }
+        return []
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
 }
 
 /// A recognizer call that never returns, modelled the way the real one fails:
@@ -518,5 +592,57 @@ struct SpeechRecognitionRequestGateWatchdogTests {
         let deadline = SpeechRecognitionRequestGate.defaultHolderDeadline
         #expect(deadline >= .seconds(4 * AnalysisAudioService.defaultShardDuration))
         #expect(deadline < .seconds(300))
+    }
+}
+
+// MARK: - What the permit covers
+
+/// The 120 s ceiling is argued from the size of ONE `SpeechAnalyzer` session,
+/// and that argument has a second premise besides the shard duration: locale
+/// asset installation runs in `loadModel()` → `AppleSpeechAssetBootstrapper`,
+/// which the permit does not wrap, "so a cold first launch cannot spend the
+/// budget". A first launch that had to download an asset would blow straight
+/// past 120 s, so if model loading were ever routed through
+/// `performRecognizerRequest` the watchdog would abandon legitimate installs
+/// and the calibration would be wrong — not merely undocumented.
+///
+/// Round 4 found that half of the calibration unpinned while the other half
+/// (`defaultShardDuration`) was pinned by `shippingDeadlineIsCalibrated`.
+///
+/// This suite also exercises the SHIPPING wiring rather than a dedicated gate:
+/// `SpeechService(recognizer:)` defaults `serializesRecognizerRequests` to
+/// true, so the permit here is the one process-wide `SpeechService.requestGate`
+/// that production transcribes through.
+@Suite("SpeechRecognitionRequestGate — what the permit covers")
+struct SpeechRecognitionRequestPermitScopeTests {
+
+    @Test("Model loading is outside the permit, so a cold asset install cannot spend the budget",
+          .timeLimit(.minutes(1)))
+    func modelLoadingIsNotSerializedBehindThePermit() async throws {
+        let recognizer = LoadDuringTranscribeRecognizer()
+        let service = SpeechService(recognizer: recognizer)
+        try await service.loadFastModel()
+
+        let transcribing = Task {
+            try await service.transcribe(
+                shard: makeShard(id: 0, startTime: 0, duration: 30)
+            )
+        }
+        // Not a sleep: `transcribe` signals from inside the operation, so this
+        // returns only once the permit is genuinely held.
+        await recognizer.awaitTranscribeEntry()
+
+        // A second load while the permit is held. Ungated, it lands and
+        // releases the parked call. Gated, it queues behind the permit and
+        // only the valve gets `transcribe` moving again — after which this
+        // call still returns, which is why the assertion below reads a
+        // snapshot taken at wake time rather than the fact of the load.
+        try await service.loadFastModel()
+        _ = try await transcribing.value
+
+        #expect(
+            recognizer.reloadLandedWhileHoldingPermit,
+            "loadModel() is queued behind the recognizer permit — a cold locale-asset install would now be raced against the 120 s watchdog"
+        )
     }
 }
