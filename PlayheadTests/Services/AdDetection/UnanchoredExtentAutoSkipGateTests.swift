@@ -544,9 +544,10 @@ struct UnanchoredExtentAutoSkipGateTests {
         #expect(gated.count == control.count,
                 "the gate must only change the verdict, never add or drop a window: \(gated.count) vs \(control.count)")
         for window in gated {
-            #expect(window.eligibilityGate != SkipEligibilityGate.eligible.rawValue,
-                    "window [\(window.startTime)–\(window.endTime)] has anchors "
-                        + "\(window.startEdgeAnchor)/\(window.endEdgeAnchor) and must not be eligible")
+            #expect(
+                window.eligibilityGate != SkipEligibilityGate.eligible.rawValue,
+                "window [\(window.startTime)-\(window.endTime)] with anchors \(window.startEdgeAnchor)/\(window.endEdgeAnchor) must not be eligible"
+            )
         }
         let demoted = gated.filter {
             $0.eligibilityGate == SkipEligibilityGate.markOnly.rawValue
