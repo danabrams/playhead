@@ -340,11 +340,14 @@ struct SpeechRecognitionRequestGateWatchdogTests {
         // WHICH error, not merely which type. `TranscriptEngineError` has four
         // cases and the type check accepts all of them, so on its own it does
         // not distinguish "the watchdog fired" from "something unrelated went
-        // wrong on the way in".
-        #expect(
-            thrown?.description.contains("watchdog deadline") == true,
-            "expected the watchdog abandonment error, got \(String(describing: thrown))"
-        )
+        // wrong on the way in". Pin the case AND the reason: the case is what
+        // callers match on, the reason is the operator-facing artifact that
+        // says the permit was freed by abandonment rather than by completion.
+        if case .transcriptionFailed(let reason) = try #require(thrown) {
+            #expect(reason.contains("watchdog deadline"), "unexpected reason: \(reason)")
+        } else {
+            Issue.record("expected .transcriptionFailed, got \(String(describing: thrown))")
+        }
 
         // THE DEADLINE IS A SCALE, NOT A FLAG. Nothing else in this file reads
         // the clock, so before this line the watchdog could have been wired to
