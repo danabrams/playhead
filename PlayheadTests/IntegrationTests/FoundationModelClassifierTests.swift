@@ -4224,6 +4224,47 @@ struct FoundationModelClassifierTests {
         #expect(output.failedWindows.allSatisfy { !$0.status.didExamineWindow })
     }
 
+    /// `.window`-scoped chunk failures are per-content, so the loop keeps
+    /// going (the two tests above attempt all 3 chunks). A `.pass`-scoped one
+    /// is a property of the device/model/session — every remaining chunk would
+    /// fail identically while still paying for a fresh prewarmed session — so
+    /// it stops. The window is withheld either way.
+    @Test("playhead-9q10: a pass-scoped chunk failure stops the chunk loop")
+    func coarsePassSubdivisionStopsChunkingOnAPassScopedFailure() async throws {
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(
+                index: 82,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"]
+            )
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: subdivisionTokenCountRule,
+            // `.unknownTransient` maps to `.failedTransient`, whose
+            // `failureScope` is `.pass`.
+            coarseFailures: [nil, .unknownTransient, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(
+            snapshot.respondCalls.count == 2,
+            "chunk 3 is never attempted — the failure was a property of the session, not the content"
+        )
+        #expect(SemanticScanStatus.failedTransient.failureScope == .pass, "premise of this test")
+        #expect(output.windows.isEmpty, "the window is still withheld, not claimed clean")
+        #expect(output.failedWindows.count == 1)
+        #expect(output.failedWindows.allSatisfy { !$0.status.didExamineWindow })
+    }
+
     /// The deliberate exception: a `containsAd` aggregate is NOT a clean claim.
     /// It routes the window to passB refinement, and the short-circuit that
     /// produced it leaves later chunks unattempted by design — recording those

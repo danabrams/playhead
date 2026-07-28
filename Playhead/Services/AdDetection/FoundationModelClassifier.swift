@@ -664,11 +664,22 @@ struct FMCoarseScanOutput: Sendable, Equatable {
     var failedWindowStatuses: [SemanticScanStatus] { failedWindows.map(\.status) }
 
     /// Cycle 2 C2: per-reason counts of permissive bypass failures
-    /// observed during this pass. Always a subset of
+    /// observed during this pass. At WINDOW granularity this is a subset of
     /// `failedWindowStatuses` — a permissive refusal increments the
     /// counter AND appends a `.refusal` SemanticScanStatus to the
     /// failed-window list. The runner aggregates these into its
     /// run-completion telemetry log.
+    ///
+    /// playhead-9q10 narrows that correspondence, deliberately: chunk-level
+    /// permissive recovery inside `subdividedCoarseOutput` increments these
+    /// counters for a blocked ATOM CHUNK, but a subdivided plan collapses all
+    /// of its chunk outcomes into at most ONE window-level row. So a blocked
+    /// chunk can increment a counter while the plan's row carries a different
+    /// status — or, when the surviving chunks aggregate to `containsAd`, while
+    /// the plan produces no failure row at all. The counter still answers its
+    /// own question truthfully ("how many permissive attempts did this pass
+    /// have blocked"); it is the per-window CORRESPONDENCE that cannot survive
+    /// N chunks folding into one row. Do not reintroduce a subset assertion.
     let permissiveFailureCounts: PermissiveFailureCounts
 
     init(
@@ -4512,11 +4523,17 @@ struct FoundationModelClassifier: Sendable {
                 if anyContainsAd { break chunkLoop }
             case let .unexamined(status):
                 unexaminedStatuses.append(status)
-                // Cancellation is `.pass`-scoped (a BG-window expiry): every
-                // remaining chunk would fail the same way, so stop burning FM
-                // calls. The pass loop's own `Task.checkCancellation()` owns
-                // the escalation.
-                if status == .cancelled { break chunkLoop }
+                // A `.pass`-scoped failure is a property of the device, model
+                // or session, not of this chunk's content — cancellation (a
+                // BG-window expiry), assets evicted, thermal deferral — so
+                // every remaining chunk would fail identically and each one
+                // still costs a fresh prewarmed session. Stop. `.window`-scoped
+                // failures (refusal, guardrail, decode, rate limit) are
+                // per-chunk and the loop keeps going. This is the same
+                // `SemanticScanStatus.failureScope` question the pass loop asks
+                // of a whole window, asked one level down. Escalation is not
+                // ours: the pass loop's own `Task.checkCancellation()` owns it.
+                if status.failureScope == .pass { break chunkLoop }
             }
         }
 
