@@ -121,6 +121,22 @@ actor StabilityDiagnosticsStore {
     /// a report about instability into a source of it.
     func append(_ records: [StabilityDiagnosticRecord]) {
         guard !records.isEmpty else { return }
+
+        // A read failure is NOT an empty buffer. `loadAll()` collapses
+        // both into `[]`, and the write below is `.atomic` — so without
+        // this guard a single unreadable read (a file still under data
+        // protection during a locked background launch, a transient I/O
+        // error) would replace fifty real incidents with one. That is
+        // unrecoverable loss in the subsystem whose entire job is not
+        // losing incidents. Refuse the append instead: the existing
+        // buffer survives, and the next launch retries.
+        if let url = fileURL(),
+           fileManager.fileExists(atPath: url.path),
+           (try? Data(contentsOf: url)) == nil {
+            logger.error("stability buffer unreadable — skipping append rather than truncating it")
+            return
+        }
+
         let merged = (loadAll() + records).suffix(Self.maxRecords)
         write(Array(merged))
     }

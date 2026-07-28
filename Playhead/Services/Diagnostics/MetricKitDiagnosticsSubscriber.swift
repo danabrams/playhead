@@ -122,15 +122,20 @@ enum MetricKitDiagnosticsInstaller {
     /// there, so registering only adds a launch-path dependency with no
     /// upside) and on Mac Catalyst (a different delivery path this bead
     /// does not cover).
+    /// `store` is optional rather than defaulted to `.shared` so the
+    /// singleton is resolved AFTER the `shouldInstall` guard. A default
+    /// argument is evaluated at the call site, which would instantiate
+    /// the store on every launch — including the thousands of XCTest
+    /// host launches that immediately bail out.
     @MainActor
     static func install(
-        store: StabilityDiagnosticsStore = .shared,
+        store: StabilityDiagnosticsStore? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         guard shouldInstall(environment: environment) else { return }
         #if canImport(MetricKit) && os(iOS) && !targetEnvironment(macCatalyst) && !targetEnvironment(simulator)
         guard subscriber == nil else { return }
-        let subscriber = MetricKitDiagnosticsSubscriber(store: store)
+        let subscriber = MetricKitDiagnosticsSubscriber(store: store ?? .shared)
         Self.subscriber = subscriber
         MXMetricManager.shared.add(subscriber)
         #endif

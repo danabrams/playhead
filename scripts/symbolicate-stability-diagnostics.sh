@@ -114,7 +114,8 @@ for i, r in enumerate(records):
     if r.get('frames_truncated'):
         summary.append('frames=%d/%d(truncated)' % (len(r.get('frames', [])),
                                                     r.get('frame_count', 0)))
-    print('#\t%d\t%s' % (i, ' '.join(summary)))
+    print('#\t%d\t%s\t%s' % (i, ' '.join(summary),
+                              r.get('platform_architecture') or 'arm64e'))
     for f in r.get('frames', []):
         print('\t'.join([
             str(i),
@@ -155,6 +156,7 @@ self_test () {
         "app_build_version": "42",
         "os_version": "iPhone OS 27.0 (25A123)",
         "device_type": "iPhone17,1",
+        "platform_architecture": "arm64e",
         "hang_duration_ms": 3300,
         "frames_truncated": true,
         "frame_count": 40,
@@ -180,6 +182,10 @@ JSON
     || { echo "SELF-TEST FAIL: truncation not surfaced"; exit 1; }
   printf '%s' "$out" | grep -q '123456' \
     || { echo "SELF-TEST FAIL: frame offset not surfaced"; exit 1; }
+  # The architecture must reach the header line, or atos picks the
+  # wrong slice of a fat dSYM.
+  printf '%s' "$out" | grep -q 'arm64e' \
+    || { echo "SELF-TEST FAIL: platform_architecture not surfaced"; exit 1; }
   echo "SELF-TEST OK"
 }
 
@@ -199,9 +205,13 @@ main () {
     echo "note: no dSYMs found under $dsym_dir — printing raw offsets only" >&2
   fi
 
+  local arch="arm64e"
   extract_records "$bundle" | while IFS=$'\t' read -r a b c d e; do
     if [ "$a" = "#" ]; then
       printf '\n=== record %s: %s\n' "$b" "$c"
+      # Field 4 of a header line is the record's platform_architecture.
+      # atos picks the wrong slice of a fat dSYM without it.
+      [ -n "$d" ] && arch="$d"
       continue
     fi
     local depth="$b" name="$c" uuid="$d" offset="$e"
@@ -209,7 +219,7 @@ main () {
     [ -n "$uuid" ] && dwarf="$(awk -F'\t' -v u="$uuid" '$1==u {print $2; exit}' "$UUID_INDEX")"
     if [ -n "$dwarf" ]; then
       local symbol
-      symbol="$(atos -o "$dwarf" -l 0 "$offset" 2>/dev/null || true)"
+      symbol="$(atos -o "$dwarf" -arch "$arch" -l 0 "$offset" 2>/dev/null || true)"
       [ -n "$symbol" ] || symbol="<atos failed>"
       printf '  %2s  %-24s %s\n' "$depth" "$name" "$symbol"
     else

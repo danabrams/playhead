@@ -173,6 +173,83 @@ struct StabilityDiagnosticsStoreTests {
         #expect(all.map(\.receivedAt) == [1, 2])
     }
 
+    @Test("an unreadable buffer is left alone, not silently replaced by the new records")
+    func unreadableBufferIsNotTruncated() async throws {
+        let directory = temporaryDirectory()
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: directory.appendingPathComponent(
+                    StabilityDiagnosticsStore.filename
+                ).path
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = StabilityDiagnosticsStore(directory: directory)
+        await store.append((1...5).map { record(at: Double($0)) })
+
+        // Make the file exist but be unreadable. `loadAll()` collapses a
+        // read FAILURE and an empty buffer into the same `[]`, and the
+        // write is `.atomic` — so without an explicit guard the next
+        // append would replace five real incidents with one.
+        let fileURL = directory.appendingPathComponent(StabilityDiagnosticsStore.filename)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000], ofItemAtPath: fileURL.path
+        )
+        try #require(
+            (try? Data(contentsOf: fileURL)) == nil,
+            "test is vacuous unless the file really is unreadable (are we running as root?)"
+        )
+
+        await store.append([record(at: 99)])
+
+        // Restore and confirm the original five survived intact.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644], ofItemAtPath: fileURL.path
+        )
+        let all = await StabilityDiagnosticsStore(directory: directory).all()
+        #expect(all.map(\.receivedAt) == [1, 2, 3, 4, 5])
+    }
+
+    @Test("decode re-sanitises: a row written by a laxer build cannot smuggle text out at export")
+    func decodeReSanitisesLegacyRows() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent(StabilityDiagnosticsStore.filename)
+
+        // Hand-written row of the shape an OLDER build with a laxer
+        // sanitiser could have left behind. The buffer survives app
+        // updates, so the exporter reads bytes this binary never wrote.
+        let poisoned = """
+        {"kind":"crash","received_at":5,\
+        "objc_exception_name":"\(MetricKitPayloadFixture.sentinelEpisodeTitle)",\
+        "os_version":"\(MetricKitPayloadFixture.sentinelTranscript)",\
+        "device_type":"Épisodé17,1",\
+        "frames":[{"binary_name":"has spaces here",\
+        "binary_uuid":"not-a-uuid","offset_into_binary_text_segment":7,"depth":0}]}
+        """
+        try Data((poisoned + "\n").utf8).write(to: fileURL)
+
+        let all = await StabilityDiagnosticsStore(directory: directory).all()
+        let record = try #require(all.first)
+        #expect(record.kind == .crash, "the row must still LOAD — scrubbing is not dropping")
+        #expect(record.objcExceptionName == nil)
+        #expect(record.osVersion == nil)
+        #expect(record.deviceType == nil)
+        #expect(record.frames.first?.binaryName == nil)
+        #expect(record.frames.first?.binaryUUID == nil)
+        // The useful, safe parts survive.
+        #expect(record.frames.first?.offsetIntoBinaryTextSegment == 7)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let encoded = String(decoding: try encoder.encode(all), as: UTF8.self)
+        for sentinel in MetricKitPayloadFixture.allSentinels {
+            #expect(!encoded.contains(sentinel))
+        }
+    }
+
     @Test("a record missing newer optional fields still decodes — the buffer survives app updates")
     func toleratesOlderSchemaRows() async throws {
         let directory = temporaryDirectory()

@@ -57,28 +57,39 @@ enum MetricKitPayloadFixture {
 
     // MARK: - Frames
 
+    /// Canonical uppercase form — what a record is expected to CARRY.
     static let appBinaryUUID = "A1B2C3D4-E5F6-4708-9A0B-1C2D3E4F5061"
     static let systemBinaryUUID = "B1B2C3D4-E5F6-4708-9A0B-1C2D3E4F5062"
+
+    /// What the payload SUPPLIES. Deliberately lowercase so the
+    /// normalisation assertion is not satisfied by the input already
+    /// being in the expected form — that made the old test vacuous.
+    static let appBinaryUUIDAsSupplied = "a1b2c3d4-e5f6-4708-9a0b-1c2d3e4f5061"
+    static let systemBinaryUUIDAsSupplied = "b1b2c3d4-e5f6-4708-9a0b-1c2d3e4f5062"
+
+    /// Not a UUID at all — a frame carrying this must end up with
+    /// `binary_uuid == nil` rather than passing the string through.
+    static let malformedBinaryUUID = "not-a-uuid-at-all"
 
     /// A three-deep linear chain: root → sub → sub, the shape a real
     /// crash stack has.
     static func frameChain() -> [String: Any] {
         [
-            "binaryUUID": systemBinaryUUID,
+            "binaryUUID": systemBinaryUUIDAsSupplied,
             "offsetIntoBinaryTextSegment": 4_096,
             "binaryName": "libdyld.dylib",
             "address": 6_442_455_040,
             "sampleCount": 1,
             "subFrames": [
                 [
-                    "binaryUUID": appBinaryUUID,
+                    "binaryUUID": appBinaryUUIDAsSupplied,
                     "offsetIntoBinaryTextSegment": 123_456,
                     "binaryName": "Playhead",
                     "address": 4_303_876_096,
                     "sampleCount": 1,
                     "subFrames": [
                         [
-                            "binaryUUID": appBinaryUUID,
+                            "binaryUUID": appBinaryUUIDAsSupplied,
                             "offsetIntoBinaryTextSegment": 789_012,
                             "binaryName": "Playhead",
                             "address": 4_303_999_999,
@@ -87,6 +98,50 @@ enum MetricKitPayloadFixture {
                     ]
                 ]
             ]
+        ]
+    }
+
+    /// A BRANCHING tree: one root with two children, the first of which
+    /// has a child of its own. Pre-order depth-first must visit
+    /// `root, a, a1, b` — a linear chain cannot distinguish that from
+    /// the reverse, which is how a child-order inversion hid.
+    ///
+    ///   root
+    ///    ├── childA
+    ///    │    └── childA1
+    ///    └── childB
+    static func branchingCallStackTree() -> [String: Any] {
+        let childA1: [String: Any] = [
+            "binaryUUID": appBinaryUUIDAsSupplied,
+            "offsetIntoBinaryTextSegment": 11,
+            "binaryName": "childA1",
+            "sampleCount": 1
+        ]
+        let childA: [String: Any] = [
+            "binaryUUID": appBinaryUUIDAsSupplied,
+            "offsetIntoBinaryTextSegment": 10,
+            "binaryName": "childA",
+            "sampleCount": 1,
+            "subFrames": [childA1]
+        ]
+        let childB: [String: Any] = [
+            "binaryUUID": appBinaryUUIDAsSupplied,
+            "offsetIntoBinaryTextSegment": 20,
+            "binaryName": "childB",
+            "sampleCount": 1
+        ]
+        let root: [String: Any] = [
+            // Also the malformed-UUID probe: this frame must survive
+            // with `binary_uuid == nil` rather than carrying the string.
+            "binaryUUID": malformedBinaryUUID,
+            "offsetIntoBinaryTextSegment": 1,
+            "binaryName": "root",
+            "sampleCount": 1,
+            "subFrames": [childA, childB]
+        ]
+        return [
+            "callStackPerThread": true,
+            "callStacks": [["threadAttributed": true, "callStackRootFrames": [root]]]
         ]
     }
 
@@ -150,6 +205,16 @@ enum MetricKitPayloadFixture {
     // MARK: - Metadata
 
     /// Benign metadata common to every diagnostic kind.
+    ///
+    /// The three kind-specific measurement keys are present on EVERY
+    /// diagnostic, deliberately. Real payloads carry only the one that
+    /// applies, but if the fixture did the same then the projector's
+    /// `kind == .hang` / `.diskWriteException` / `.appLaunch` gates
+    /// could all be deleted and every test would still pass — the
+    /// "must be nil on a crash" assertions would be satisfied by the
+    /// key simply being absent. Seeding all three makes those
+    /// assertions bite. Per-kind builders override with the value the
+    /// kind's own test asserts.
     static func baseMetadata() -> [String: Any] {
         [
             "appVersion": "1.0.0",
@@ -159,7 +224,10 @@ enum MetricKitPayloadFixture {
             "platformArchitecture": "arm64e",
             "isTestFlightApp": true,
             "regionFormat": "US",
-            "lowPowerModeEnabled": false
+            "lowPowerModeEnabled": false,
+            "hangDuration": "9999 ms",
+            "writesCaused": "9999 MB",
+            "launchDuration": "9999 ms"
         ]
     }
 
@@ -231,6 +299,17 @@ enum MetricKitPayloadFixture {
         return [
             "version": "1.0.0",
             "diagnosticMetaData": metadata,
+            "callStackTree": callStackTree()
+        ]
+    }
+
+    /// `MXCPUExceptionDiagnostic`. Carries no bespoke measurement in the
+    /// current record shape — it exists so the `.cpuException` kind is
+    /// actually produced by a test, which it was not before.
+    static func cpuExceptionDiagnostic() -> [String: Any] {
+        [
+            "version": "1.0.0",
+            "diagnosticMetaData": baseMetadata(),
             "callStackTree": callStackTree()
         ]
     }

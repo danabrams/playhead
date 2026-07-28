@@ -142,6 +142,37 @@ final class MetricKitDiagnosticsWiringSourceCanaryTests: XCTestCase {
         )
     }
 
+    // MARK: - 4. Export wiring
+
+    /// `DiagnosticsExportCoordinator.stabilityFetch` DEFAULTS to
+    /// `{ [] }`, so dropping the argument at either hatch compiles, runs,
+    /// and ships an app whose `stability_diagnostics` block is
+    /// permanently empty — with a fully green gate, because no test
+    /// constructs either hatch's coordinator (they need a live
+    /// PlayheadRuntime + ModelContext).
+    func testBothHatchesPassTheStabilityFetchToTheCoordinator() throws {
+        for (path, symbol) in [
+            ("Playhead/Support/Diagnostics/ReleaseDiagnosticsHatch.swift",
+             "stabilityFetch: ReleaseDiagnosticsHatch.stabilityFetch"),
+            ("Playhead/Support/Diagnostics/DebugDiagnosticsHatch.swift",
+             "stabilityFetch: DebugDiagnosticsHatch.stabilityFetch")
+        ] {
+            let code = try source(path)
+            XCTAssertTrue(
+                code.contains(symbol),
+                """
+                \(path) no longer passes `stabilityFetch` to DiagnosticsExportCoordinator. \
+                The parameter defaults to { [] }, so this omission is silent: the app would \
+                export an empty stability_diagnostics block forever and every test would pass.
+                """
+            )
+            XCTAssertTrue(
+                code.contains("StabilityDiagnosticsStore.shared.recent()"),
+                "\(path) must source records from the live shared store"
+            )
+        }
+    }
+
     // MARK: - Installation predicate (this part IS executable)
 
     func testShouldInstallIsFalseUnderXCTest() {

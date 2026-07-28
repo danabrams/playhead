@@ -218,10 +218,11 @@ enum MetricKitDiagnosticProjector {
     // MARK: - Call-stack projection
 
     /// Flattened stack plus the pre-truncation frame count.
-    struct CallStackProjection: Sendable, Equatable {
+    struct CallStackProjection: Sendable {
         let frames: [StabilityCallStackFrame]
-        /// Frames walked before the cap was applied. Equals
-        /// `frames.count` when nothing was dropped.
+        /// Frames walked before the cap was applied, saturating at the
+        /// internal walk bound (`maxFrames * 8`). Equals `frames.count`
+        /// when nothing was dropped.
         let totalFrames: Int
         let truncated: Bool
 

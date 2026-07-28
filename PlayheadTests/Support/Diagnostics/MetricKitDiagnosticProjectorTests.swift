@@ -47,10 +47,53 @@ struct MetricKitDiagnosticProjectorTests {
         #expect(record.deviceType == "iPhone17,1")
         #expect(record.platformArchitecture == "arm64e")
         #expect(record.isTestFlight == true)
-        // Kind-specific measurements stay nil on a crash.
+        // Kind-specific measurements stay nil on a crash. The fixture
+        // seeds all three keys with sentinel values (see
+        // `MetricKitPayloadFixture.baseMetadata`), so these assertions
+        // fail if the projector's per-kind gates are removed — without
+        // the seeding they passed on mere key absence.
         #expect(record.hangDurationMs == nil)
         #expect(record.writesCausedMb == nil)
         #expect(record.launchDurationMs == nil)
+    }
+
+    @Test("each kind reads only its OWN measurement, even when all three keys are present")
+    func measurementsAreGatedByKind() throws {
+        let records = try project(
+            MetricKitPayloadFixture.payload(
+                crashes: [MetricKitPayloadFixture.crashDiagnostic()],
+                hangs: [MetricKitPayloadFixture.hangDiagnostic()],
+                diskWrites: [MetricKitPayloadFixture.diskWriteDiagnostic()],
+                cpuExceptions: [MetricKitPayloadFixture.cpuExceptionDiagnostic()],
+                appLaunches: [MetricKitPayloadFixture.appLaunchDiagnostic()]
+            )
+        )
+        #expect(records.count == 5)
+        for record in records {
+            #expect((record.hangDurationMs != nil) == (record.kind == .hang))
+            #expect((record.writesCausedMb != nil) == (record.kind == .diskWriteException))
+            #expect((record.launchDurationMs != nil) == (record.kind == .appLaunch))
+            // The 9999 sentinels from baseMetadata must never win.
+            #expect(record.hangDurationMs != 9_999)
+            #expect(record.writesCausedMb != 9_999)
+            #expect(record.launchDurationMs != 9_999)
+        }
+    }
+
+    // MARK: - Kind coverage
+
+    @Test("payloadKeyOrder and payloadKeys agree, and cover every declared kind")
+    func kindTablesAreConsistent() {
+        #expect(
+            Set(MetricKitDiagnosticProjector.payloadKeyOrder)
+                == Set(MetricKitDiagnosticProjector.payloadKeys.keys),
+            "a key in the lookup table but missing from the ORDER array is silently never projected"
+        )
+        #expect(
+            Set(MetricKitDiagnosticProjector.payloadKeys.values)
+                == Set(StabilityDiagnosticKind.allCases),
+            "every declared StabilityDiagnosticKind must be reachable from a payload key"
+        )
     }
 
     @Test("a hang payload produces a hang record with the main-thread hang duration in ms")
@@ -97,14 +140,28 @@ struct MetricKitDiagnosticProjectorTests {
             crashes: [MetricKitPayloadFixture.crashDiagnostic()],
             hangs: [MetricKitPayloadFixture.hangDiagnostic()],
             diskWrites: [MetricKitPayloadFixture.diskWriteDiagnostic()],
+            cpuExceptions: [MetricKitPayloadFixture.cpuExceptionDiagnostic()],
             appLaunches: [MetricKitPayloadFixture.appLaunchDiagnostic()]
         )
-        // Repeat: Dictionary iteration order varies per process, so a
-        // single pass could pass by luck.
-        for _ in 0..<5 {
-            let kinds = try project(payload).map(\.kind)
-            #expect(kinds == [.crash, .hang, .diskWriteException, .appLaunch])
-        }
+        let kinds = try project(payload).map(\.kind)
+        #expect(kinds == [.crash, .hang, .diskWriteException, .cpuException, .appLaunch])
+
+        // Structural, not statistical. An earlier version of this test
+        // looped five times "because Dictionary order varies per
+        // process" — but Swift's per-process hash seed is FIXED within a
+        // run, so repeating in-process proved nothing and would have
+        // made the test pass or fail on the luck of the launch. The
+        // ordering guarantee lives in the explicit array, so assert the
+        // array.
+        #expect(
+            MetricKitDiagnosticProjector.payloadKeyOrder == [
+                "crashDiagnostics",
+                "hangDiagnostics",
+                "diskWriteExceptionDiagnostics",
+                "cpuExceptionDiagnostics",
+                "appLaunchDiagnostics"
+            ]
+        )
     }
 
     // MARK: - Call stack
@@ -129,12 +186,52 @@ struct MetricKitDiagnosticProjectorTests {
 
     @Test("binaryUUID is normalised to the uppercase canonical form dwarfdump prints")
     func binaryUUIDNormalisation() throws {
+        // The fixture SUPPLIES lowercase; the record must CARRY
+        // uppercase. When the fixture supplied uppercase this test
+        // passed against a pass-through implementation and proved
+        // nothing.
+        #expect(
+            MetricKitPayloadFixture.appBinaryUUIDAsSupplied
+                != MetricKitPayloadFixture.appBinaryUUID,
+            "vacuous unless the supplied form differs from the expected form"
+        )
         let records = try project(
             MetricKitPayloadFixture.payload(crashes: [MetricKitPayloadFixture.crashDiagnostic()])
         )
         let record = try #require(records.first)
         #expect(record.frames.first?.binaryUUID == MetricKitPayloadFixture.systemBinaryUUID)
         #expect(record.frames.last?.binaryUUID == MetricKitPayloadFixture.appBinaryUUID)
+    }
+
+    @Test("a frame with a malformed binaryUUID keeps the frame but drops the UUID")
+    func malformedBinaryUUIDIsDropped() throws {
+        var diagnostic = MetricKitPayloadFixture.crashDiagnostic()
+        diagnostic["callStackTree"] = MetricKitPayloadFixture.branchingCallStackTree()
+        let record = try #require(
+            try project(MetricKitPayloadFixture.payload(crashes: [diagnostic])).first
+        )
+        let root = try #require(record.frames.first)
+        #expect(root.binaryName == "root")
+        #expect(
+            root.binaryUUID == nil,
+            "a non-UUID string must be dropped, never passed through as free text"
+        )
+        // The frame is still useful: the offset survives.
+        #expect(root.offsetIntoBinaryTextSegment == 1)
+    }
+
+    @Test("a branching stack is flattened in pre-order: root, childA, childA1, childB")
+    func branchingStackPreOrder() throws {
+        var diagnostic = MetricKitPayloadFixture.crashDiagnostic()
+        diagnostic["callStackTree"] = MetricKitPayloadFixture.branchingCallStackTree()
+        let record = try #require(
+            try project(MetricKitPayloadFixture.payload(crashes: [diagnostic])).first
+        )
+        // A linear chain cannot tell correct child order from inverted;
+        // this is the only fixture with a node that has two children.
+        #expect(record.frames.map(\.binaryName) == ["root", "childA", "childA1", "childB"])
+        #expect(record.frames.map(\.depth) == [0, 1, 2, 1])
+        #expect(record.frames.map(\.offsetIntoBinaryTextSegment) == [1, 10, 11, 20])
     }
 
     @Test("with no thread flagged attributed, the first stack is used rather than dropping the record")
@@ -164,6 +261,27 @@ struct MetricKitDiagnosticProjectorTests {
         let record = try #require(records.first)
         #expect(record.frames.count == 8)
         #expect(record.frameCount == 40, "frame_count must report the TRUE depth, not the capped one")
+        #expect(record.framesTruncated)
+    }
+
+    @Test("frame_count saturates at the internal walk bound rather than walking forever")
+    func frameCountSaturatesAtWalkBound() throws {
+        var diagnostic = MetricKitPayloadFixture.crashDiagnostic()
+        // 200 levels, but handed in as an OBJECT — the JSON entry point
+        // would recurse 200 deep inside JSONSerialization's writer and
+        // overflow Swift Testing's task stack.
+        diagnostic["callStackTree"] = MetricKitPayloadFixture.deepCallStackTree(depth: 200)
+        let records = MetricKitDiagnosticProjector.records(
+            fromPayloadObject: MetricKitPayloadFixture.payload(crashes: [diagnostic]),
+            receivedAt: Self.receivedAt,
+            maxFrames: 8
+        )
+        let record = try #require(records.first)
+        #expect(record.frames.count == 8)
+        // Walk bound is maxFrames * 8. The tree is deeper than that, so
+        // frame_count reports the bound, not 200 — which is exactly what
+        // the record's doc comment now says it does.
+        #expect(record.frameCount == 64)
         #expect(record.framesTruncated)
     }
 

@@ -27,18 +27,43 @@
 //      dropped (`nil`), never truncated-and-kept — a truncated leak is
 //      still a leak.
 //
-// The allowlist is deliberately hostile to prose and to locators:
+// The allowlist is hostile to locators and to non-Latin text:
 //   * No `/`, `:`, `?`, `#`, `%`, `@` → a URL or a POSIX path cannot
 //     survive intact, and neither can a `file://` locator.
-//   * No `,`, `'`, `"`, `!`, `?`, `;` → English sentence punctuation is
-//     gone, so a natural-language excerpt is rejected rather than
-//     shipped.
-//   * ASCII only → any non-Latin transcript text, smart quotes, or
-//     emoji is rejected outright.
+//   * No `,`, `'`, `"`, `!`, `;` → English sentence punctuation is gone.
+//   * ASCII only → any non-Latin transcript text, smart quote, or emoji
+//     is rejected outright.
 //
-// What survives is the shape of a symbol: `Playhead`, `libswiftCore.dylib`,
-// `NSInvalidArgumentException`, `arm64e`, `iPhone17,1`-minus-the-comma.
-// That is exactly the vocabulary a crash triage needs and nothing more.
+// ----- What the character allowlist does NOT do, stated plainly -----
+//
+// A run of unpunctuated ASCII words is allowlist-clean. `isAllowed`
+// admits the space, because real OS build strings need it
+// (`iPhone OS 27.0 (25A123)`). So the character class alone would NOT
+// reject `SENTINELEPISODE Diary of a CEO 431`. Claiming otherwise would
+// be the worst kind of privacy documentation — a guarantee that reads
+// stronger than it is.
+//
+// What actually closes that gap is the SHAPE bound per field, and the
+// fact that only three of the strings this file sanitises come from an
+// app-influenced source at all:
+//
+//   * `exceptionReason.exceptionName` / `.className` → `identifier(_:)`,
+//     which rejects ANY string containing a space. A class name and an
+//     exception name are single tokens; a sentence is not. This is the
+//     one field an `assertionFailure("… \(episode.title)")` could
+//     plausibly reach, and a space-free token cannot carry a title.
+//   * `terminationReason` → never stored; decomposed into an
+//     allowlisted namespace token and a hex literal.
+//
+// Everything else (`appVersion`, `osVersion`, `deviceType`,
+// `platformArchitecture`, `binaryName`) is supplied by the OS or the
+// bundle, not by application code, and is additionally shape-bounded:
+// `versionToken` caps at four whitespace-separated tokens, which every
+// real OS build string satisfies and a sentence does not.
+//
+// The primary defence remains `MetricKitDiagnosticProjector`'s key
+// allowlist: the free-text fields are never read at all. This file is
+// the second line, and it is honest about being a second line.
 //
 // This type is pure and has no dependencies beyond Foundation so it can
 // be exercised directly from the fast test gate.
@@ -82,6 +107,12 @@ enum DiagnosticTextSanitizer {
     /// (`0x` + 16 hex digits).
     static let terminationCodeMaxLength = 18
 
+    /// Maximum whitespace-separated tokens in a version / OS / device
+    /// token. `iPhone OS 27.0 (25A123)` is exactly four; a sentence is
+    /// not. This is the shape bound that the character allowlist
+    /// deliberately does not provide (see the file header).
+    static let versionMaxTokens = 4
+
     // MARK: - Core predicate
 
     /// True when every character of `value` is in ``allowedCharacters``.
@@ -96,22 +127,38 @@ enum DiagnosticTextSanitizer {
 
     /// Sanitise a symbol-shaped field (binary name, ObjC class name,
     /// exception name). Returns `nil` — meaning "omit this field" — when
-    /// the input is absent, too long, or contains a disallowed
-    /// character.
+    /// the input is absent, too long, contains a disallowed character,
+    /// or contains a SPACE.
+    ///
+    /// The space rejection is the load-bearing part. A Mach-O image
+    /// name, an ObjC class name and an `NSException` name are all single
+    /// tokens; an interpolated assertion message ("no ad span for
+    /// Diary of a CEO 431") is not. Since `exceptionName` / `className`
+    /// are the only strings here that application code can influence,
+    /// "single token" is what keeps a sentence out of a record.
     static func identifier(_ raw: String?) -> String? {
-        guard let raw, raw.count <= identifierMaxLength, isAllowed(raw) else {
+        guard let raw,
+              raw.count <= identifierMaxLength,
+              !raw.contains(" "),
+              isAllowed(raw) else {
             return nil
         }
         return raw
     }
 
-    /// Sanitise a version / device / architecture token. Same allowlist
-    /// as ``identifier(_:)`` with a tighter length cap, kept separate so
-    /// the two caps can diverge without touching call sites.
+    /// Sanitise a version / device / architecture token — an OS- or
+    /// bundle-supplied string like `iPhone OS 27.0 (25A123)`.
+    ///
+    /// Spaces ARE permitted (real OS build strings need them), so the
+    /// shape bound here is the token count: at most
+    /// ``versionMaxTokens``. That is what a build string satisfies and a
+    /// sentence does not.
     static func versionToken(_ raw: String?) -> String? {
         guard let raw, raw.count <= versionMaxLength, isAllowed(raw) else {
             return nil
         }
+        let tokens = raw.split(separator: " ", omittingEmptySubsequences: true)
+        guard tokens.count <= versionMaxTokens else { return nil }
         return raw
     }
 
@@ -123,6 +170,13 @@ enum DiagnosticTextSanitizer {
     /// every other field), it is admitted here behind the exact Apple
     /// model grammar: `<letters><digits>,<digits>`. Prose cannot occupy
     /// that shape, so the channel stays shut.
+    ///
+    /// Every predicate below is ASCII-qualified. `Character.isLetter`
+    /// and `.isNumber` are UNICODE-wide — `É` is a letter and `𝟠` is a
+    /// number — so an unqualified grammar check would have let up to 26
+    /// arbitrary non-ASCII characters through on the comma path, which
+    /// never reaches `isAllowed`. That would falsify the "ASCII only"
+    /// guarantee this file and the legal checklist both assert.
     static func deviceModel(_ raw: String?) -> String? {
         guard let raw, raw.count <= 32 else { return nil }
         let parts = raw.split(separator: ",", omittingEmptySubsequences: false)
@@ -133,13 +187,18 @@ enum DiagnosticTextSanitizer {
         }
         let family = parts[0]
         let variant = parts[1]
-        guard (1...3).contains(variant.count), variant.allSatisfy(\.isNumber) else { return nil }
-        let letters = family.prefix { $0.isLetter }
+        guard (1...3).contains(variant.count),
+              variant.allSatisfy(isASCIIDigit) else { return nil }
+        let letters = family.prefix { $0.isASCII && $0.isLetter }
         let digits = family.dropFirst(letters.count)
         guard (1...20).contains(letters.count),
               (1...3).contains(digits.count),
-              digits.allSatisfy(\.isNumber) else { return nil }
+              digits.allSatisfy(isASCIIDigit) else { return nil }
         return raw
+    }
+
+    private static func isASCIIDigit(_ character: Character) -> Bool {
+        character.isASCII && character.isNumber
     }
 
     /// Validate a MetricKit `binaryUUID` by round-tripping it through
@@ -215,13 +274,24 @@ enum DiagnosticTextSanitizer {
         guard let prefixRange = lower.range(of: "0x") else { return nil }
         var digits = ""
         var index = prefixRange.upperBound
-        while index < lower.endIndex, lower[index].isHexDigit, digits.count < 16 {
+        // ASCII-qualified: `Character.isHexDigit` also matches fullwidth
+        // compatibility forms (`Ａ`), and `lowercased()` keeps them
+        // non-ASCII — which would put non-ASCII characters into
+        // `termination_code` out of the one app-influenced free-text
+        // field we read.
+        while index < lower.endIndex,
+              lower[index].isASCII,
+              lower[index].isHexDigit,
+              digits.count < 16 {
             digits.append(lower[index])
             index = lower.index(after: index)
         }
         guard !digits.isEmpty else { return nil }
         let code = "0x\(digits)"
-        guard code.count <= terminationCodeMaxLength else { return nil }
+        // Belt and braces: the constructed code must itself satisfy the
+        // character allowlist, so this function cannot be the one place
+        // that emits something the invariant forbids.
+        guard code.count <= terminationCodeMaxLength, isAllowed(code) else { return nil }
         return code
     }
 

@@ -91,8 +91,13 @@ struct StabilityDiagnosticScrubbingTests {
         // "Namespace SIGNAL, Code 0x8badf00d <container path>".
         #expect(record.terminationNamespace == "SIGNAL")
         #expect(record.terminationCode == "0x8badf00d")
-        // The path that shared that string is gone.
-        #expect(record.frames.isEmpty == false)
+        // The container path that shared that string is gone — assert it
+        // against the encoded bytes rather than gesturing at it.
+        let encoded = String(decoding: try encode([record]), as: UTF8.self)
+        #expect(!encoded.contains("SENTINELPATH"))
+        #expect(!encoded.contains("/private/var"))
+        // And the record is still CAPTURED, with a usable stack.
+        #expect(!record.frames.isEmpty)
     }
 
     @Test("the ObjC exception NAME survives; the reason MESSAGE does not")
@@ -170,12 +175,36 @@ struct StabilityDiagnosticScrubbingTests {
         )
         let keys = Set(try #require(array.first).keys)
 
+        // FROZEN literal set, not `CodingKeys.allCases`. Comparing
+        // against the type's own keys is circular — adding a
+        // `reason: String` field with a CodingKey would satisfy it. The
+        // point of this test is that adding ANY field is a deliberate,
+        // reviewed edit to a privacy-audited list.
+        let frozen: Set<String> = [
+            "schema_version", "kind", "received_at",
+            "app_version", "app_build_version", "os_version",
+            "device_type", "platform_architecture", "is_test_flight",
+            "signal", "exception_type", "exception_code",
+            "termination_namespace", "termination_code",
+            "objc_exception_name", "objc_exception_class_name",
+            "hang_duration_ms", "writes_caused_mb", "launch_duration_ms",
+            "frame_count", "frames_truncated", "frames"
+        ]
         let declared = Set(
             StabilityDiagnosticRecord.CodingKeys.allCases.map(\.rawValue)
         )
         #expect(
-            keys.isSubset(of: declared),
-            "encoded record carries key(s) outside StabilityDiagnosticRecord.CodingKeys: \(keys.subtracting(declared))"
+            declared == frozen,
+            """
+            StabilityDiagnosticRecord.CodingKeys changed: \
+            added \(declared.subtracting(frozen)), removed \(frozen.subtracting(declared)). \
+            Every field on this type is privacy-audited (legal checklist item e) — update the \
+            checklist and this frozen set together, deliberately.
+            """
+        )
+        #expect(
+            keys.isSubset(of: frozen),
+            "encoded record carries key(s) outside the frozen set: \(keys.subtracting(frozen))"
         )
 
         // Frames too.

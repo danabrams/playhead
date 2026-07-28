@@ -83,7 +83,7 @@ final class PlayheadAppDelegate: NSObject, UIApplicationDelegate {
         // MetricKit delivers its once-a-day payload shortly after
         // launch and drops it if nobody is subscribed yet. Idempotent,
         // and a no-op under XCTest / on the simulator — see
-        // `MetricKitDiagnosticsInstaller.shouldInstall(processInfo:)`.
+        // `MetricKitDiagnosticsInstaller.shouldInstall(environment:)`.
         MetricKitDiagnosticsInstaller.install()
 
         if let manager = DownloadManager.shared {

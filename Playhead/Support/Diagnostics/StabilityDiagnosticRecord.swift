@@ -95,6 +95,36 @@ struct StabilityCallStackFrame: Codable, Sendable, Equatable {
         case offsetIntoBinaryTextSegment = "offset_into_binary_text_segment"
         case depth
     }
+
+    init(
+        binaryName: String?,
+        binaryUUID: String?,
+        offsetIntoBinaryTextSegment: Int,
+        depth: Int
+    ) {
+        self.binaryName = binaryName
+        self.binaryUUID = binaryUUID
+        self.offsetIntoBinaryTextSegment = offsetIntoBinaryTextSegment
+        self.depth = depth
+    }
+
+    /// Re-sanitises on decode for the same reason
+    /// ``StabilityDiagnosticRecord/init(from:)`` does: the ring buffer
+    /// outlives app versions, so the exporter must not trust bytes
+    /// written by an older binary.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.binaryName = DiagnosticTextSanitizer.identifier(
+            try container.decodeIfPresent(String.self, forKey: .binaryName)
+        )
+        self.binaryUUID = DiagnosticTextSanitizer.binaryUUID(
+            try container.decodeIfPresent(String.self, forKey: .binaryUUID)
+        )
+        self.offsetIntoBinaryTextSegment = try container.decodeIfPresent(
+            Int.self, forKey: .offsetIntoBinaryTextSegment
+        ) ?? 0
+        self.depth = try container.decodeIfPresent(Int.self, forKey: .depth) ?? 0
+    }
 }
 
 // MARK: - Record
@@ -147,9 +177,14 @@ struct StabilityDiagnosticRecord: Codable, Sendable, Equatable {
     let launchDurationMs: Int?
 
     // Call stack.
-    /// Total frames observed on the attributed thread BEFORE truncation,
-    /// so a support engineer can tell a genuinely shallow stack from a
+    /// Frames observed on the attributed thread BEFORE truncation, so a
+    /// support engineer can tell a genuinely shallow stack from a
     /// truncated one.
+    ///
+    /// Saturates at the projector's internal walk bound (8x the frame
+    /// cap, i.e. 512 by default) — a tree deeper than that reports the
+    /// bound, not its true depth. `frames_truncated` stays correct
+    /// either way.
     let frameCount: Int
     let framesTruncated: Bool
     let frames: [StabilityCallStackFrame]
@@ -236,32 +271,51 @@ struct StabilityDiagnosticRecord: Codable, Sendable, Equatable {
     /// (the buffer survives upgrades; a strict decoder would silently
     /// discard every pre-upgrade crash — exactly the ones worth
     /// reading).
+    ///
+    /// **Every string is re-sanitised on the way IN, not just on the way
+    /// out of the projector.** The buffer outlives app versions, so the
+    /// bytes the exporter reads were written by some *earlier* build
+    /// whose sanitiser may have been laxer — and the export-time
+    /// invariant ("everything in `stability_diagnostics` passed the
+    /// allowlist") has to hold for the file actually on disk, not for
+    /// the binary that happens to be running. Re-validating here makes
+    /// it unconditional.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
             ?? Self.currentSchemaVersion
         self.kind = try container.decode(StabilityDiagnosticKind.self, forKey: .kind)
         self.receivedAt = try container.decode(Double.self, forKey: .receivedAt)
-        self.appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion)
-        self.appBuildVersion = try container.decodeIfPresent(String.self, forKey: .appBuildVersion)
-        self.osVersion = try container.decodeIfPresent(String.self, forKey: .osVersion)
-        self.deviceType = try container.decodeIfPresent(String.self, forKey: .deviceType)
-        self.platformArchitecture = try container.decodeIfPresent(
-            String.self, forKey: .platformArchitecture
+        self.appVersion = DiagnosticTextSanitizer.versionToken(
+            try container.decodeIfPresent(String.self, forKey: .appVersion)
+        )
+        self.appBuildVersion = DiagnosticTextSanitizer.versionToken(
+            try container.decodeIfPresent(String.self, forKey: .appBuildVersion)
+        )
+        self.osVersion = DiagnosticTextSanitizer.versionToken(
+            try container.decodeIfPresent(String.self, forKey: .osVersion)
+        )
+        self.deviceType = DiagnosticTextSanitizer.deviceModel(
+            try container.decodeIfPresent(String.self, forKey: .deviceType)
+        )
+        self.platformArchitecture = DiagnosticTextSanitizer.versionToken(
+            try container.decodeIfPresent(String.self, forKey: .platformArchitecture)
         )
         self.isTestFlight = try container.decodeIfPresent(Bool.self, forKey: .isTestFlight)
         self.signal = try container.decodeIfPresent(Int.self, forKey: .signal)
         self.exceptionType = try container.decodeIfPresent(Int.self, forKey: .exceptionType)
         self.exceptionCode = try container.decodeIfPresent(Int.self, forKey: .exceptionCode)
-        self.terminationNamespace = try container.decodeIfPresent(
-            String.self, forKey: .terminationNamespace
+        self.terminationNamespace = DiagnosticTextSanitizer.identifier(
+            try container.decodeIfPresent(String.self, forKey: .terminationNamespace)
+        ).flatMap { DiagnosticTextSanitizer.knownTerminationNamespaces.contains($0) ? $0 : nil }
+        self.terminationCode = DiagnosticTextSanitizer.identifier(
+            try container.decodeIfPresent(String.self, forKey: .terminationCode)
         )
-        self.terminationCode = try container.decodeIfPresent(String.self, forKey: .terminationCode)
-        self.objcExceptionName = try container.decodeIfPresent(
-            String.self, forKey: .objcExceptionName
+        self.objcExceptionName = DiagnosticTextSanitizer.identifier(
+            try container.decodeIfPresent(String.self, forKey: .objcExceptionName)
         )
-        self.objcExceptionClassName = try container.decodeIfPresent(
-            String.self, forKey: .objcExceptionClassName
+        self.objcExceptionClassName = DiagnosticTextSanitizer.identifier(
+            try container.decodeIfPresent(String.self, forKey: .objcExceptionClassName)
         )
         self.hangDurationMs = try container.decodeIfPresent(Int.self, forKey: .hangDurationMs)
         self.writesCausedMb = try container.decodeIfPresent(Double.self, forKey: .writesCausedMb)
