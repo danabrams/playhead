@@ -490,4 +490,48 @@ struct TruncatedDecodeDurationTests {
         #expect(abs(persisted - 2933) < 0.001,
                 "the real duration must survive a later mid-download spool (got \(persisted))")
     }
+
+    /// R3, found by a SURVIVING mutation. `persistSpooledEpisodeDuration`
+    /// writes the shard sum to TWO places — the `analysis_assets` row and
+    /// `cachedPersistedEpisodeDuration`, the coverage guard's in-memory
+    /// denominator once `activeShards` is cleared. Every test above pinned the
+    /// database side; moving the cache assignment above the truncation guard
+    /// passed all of them.
+    ///
+    /// It is the same poison. `currentEpisodeDuration()` prefers live shards
+    /// and falls back to this field, so a cached 543 s prefix scores the whole
+    /// episode against the download threshold and produces exactly the >100 %
+    /// ratios of playhead-csbq — just in memory, where no launch sweep can see
+    /// it and no `AudioFileDurationProbe` will ever correct it.
+    @Test("a truncated decode does not poison the in-memory coverage denominator either")
+    func truncatedOutcomeDoesNotPoisonTheDurationCache() async throws {
+        let store = try await makeStore()
+        let coordinator = makeCoordinator(store: store)
+        let assetId = "asset-cache-\(UUID().uuidString)"
+        try await seedAsset(store: store, assetId: assetId)
+
+        await coordinator.persistSpooledEpisodeDuration(
+            assetId: assetId,
+            episodeId: "ep-\(assetId)",
+            outcome: AnalysisDecodeOutcome(
+                shards: shards(totalSeconds: 543),
+                isTruncated: true
+            )
+        )
+        #expect(await coordinator.cachedPersistedEpisodeDurationForTesting() == nil,
+                "the guard's fallback denominator must stay unknown, not become the download threshold")
+
+        // And the complete decode that follows still populates it, so the
+        // guard is not simply left blind.
+        await coordinator.persistSpooledEpisodeDuration(
+            assetId: assetId,
+            episodeId: "ep-\(assetId)",
+            outcome: AnalysisDecodeOutcome(
+                shards: shards(totalSeconds: 2933),
+                isTruncated: false
+            )
+        )
+        let cached = try #require(await coordinator.cachedPersistedEpisodeDurationForTesting())
+        #expect(abs(cached - 2933) < 0.001, "got \(cached)")
+    }
 }

@@ -1756,6 +1756,16 @@ actor AnalysisCoordinator {
     ) async throws -> (String, String, SessionState) {
         try await resolveSession(episodeId: episodeId, audioURL: audioURL)
     }
+
+    /// R3 test seam: the coverage guard's IN-MEMORY denominator. A truncated
+    /// decode is barred from `analysis_assets.episodeDurationSec`, and this is
+    /// the other place the same number can land — `currentEpisodeDuration()`
+    /// falls back to it once `activeShards` is cleared, so a poisoned value
+    /// here reproduces the >100 % coverage ratios of playhead-csbq without
+    /// ever touching the database.
+    func cachedPersistedEpisodeDurationForTesting() -> Double? {
+        cachedPersistedEpisodeDuration
+    }
 #endif
 
     // MARK: - Capability Changes

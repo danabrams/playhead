@@ -1522,6 +1522,54 @@ struct DuplicateAssetReconcileTests {
                 "a skipped placeholder keeps its children")
     }
 
+    /// R3, found by a SURVIVING mutation. ``AssetMergeRow/isPlaceholder`` is
+    /// the SELF-REFERENCE test, `assetFingerprint == id`, and every fixture in
+    /// this suite gives its non-placeholder rows a 64-hex canonical SHA — so
+    /// loosening the predicate to `!hasCanonicalSHA` (a plausible-looking
+    /// simplification) passed every test.
+    ///
+    /// It is not a simplification, it is a deletion rule. `AnalysisJobReconciler`
+    /// mints Pipeline B rows with `sourceFingerprint: fp.strong ?? fp.weak`, so
+    /// an asset downloaded before a full-file SHA existed carries the WEAK
+    /// fingerprint — `url|etag|length|last-modified` — as its
+    /// `assetFingerprint`. That is a real content identity, not a placeholder,
+    /// and under the loosened predicate the merge would fold it into a sibling
+    /// and delete the row. Only the self-reference cannot arise by accident,
+    /// which is the whole argument for using it.
+    @Test("a row fingerprinted with a weak identity is NOT a placeholder and is never folded away")
+    func weakFingerprintedRowIsNotAPlaceholder() async throws {
+        let weakIdentity = "https://cdn.example.com/ep9.mp3|\"etag-9\"|8388608|"
+        #expect(!AssetMergeRow(
+            rowId: 1, id: "weak-row", assetFingerprint: weakIdentity, createdAt: 1,
+            analysisState: "queued", terminalReason: nil, sourceURL: "file:///a/9f2c.mp3"
+        ).isPlaceholder, "a weak fingerprint is a content identity, not the Pipeline A self-reference")
+        #expect(AssetMergeRow(
+            rowId: 2, id: "self-row", assetFingerprint: "self-row", createdAt: 1,
+            analysisState: "queued", terminalReason: nil, sourceURL: "file:///a/9f2c.mp3"
+        ).isPlaceholder)
+
+        // And end to end: the weak-fingerprinted row must still be standing.
+        let store = try await makeTestStore()
+        let episodeId = "ep-weak-identity"
+        try await insertCanonical(
+            store: store, id: "canon-weak", episodeId: episodeId, fingerprint: canonicalSHA
+        )
+        try await insertCanonical(
+            store: store, id: "weak-identity-row", episodeId: episodeId, fingerprint: weakIdentity
+        )
+        try await insertChunk(
+            store: store, id: "chunk-weak", assetId: "weak-identity-row", index: 0, start: 0, end: 300
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 0,
+                "neither row is a placeholder — there is nothing here to fold")
+        #expect(Set(try await allAssets(store: store, episodeId: episodeId).map(\.id))
+                == ["canon-weak", "weak-identity-row"])
+        #expect(try await store.fetchTranscriptChunks(assetId: "weak-identity-row").count == 1,
+                "and its children are still its own")
+    }
+
     // MARK: - R3: degenerate identifiers
 
     /// R3 finding 2. R2 pinned `"   "` and called the rule "whitespace is not
