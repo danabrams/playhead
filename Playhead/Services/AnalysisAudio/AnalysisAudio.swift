@@ -114,10 +114,14 @@ private struct ShardCache: Sendable {
             .appendingPathComponent("manifest.json")
     }
 
-    /// Check whether cached shards exist for the given episode.
-    static func hasCachedShards(episodeID: String) -> Bool {
-        FileManager.default.fileExists(atPath: manifestPath(episodeID: episodeID).path)
-    }
+    // playhead-8ysk review: `hasCachedShards(episodeID:)` was removed here. It
+    // answered "is there a manifest file" and had no callers anywhere in the
+    // app — the compiler proves that, since `ShardCache` is file-private. Left
+    // in place it was worse than dead: after this bead a manifest can exist
+    // and still be invalid, so the first caller to reach for the obvious-looking
+    // "do we have a cache?" helper would have skipped a decode on an entry
+    // `loadShards` is about to evict. Ask `loadShards(episodeID:sourceURL:)`,
+    // which is the only question with a correct answer.
 
     /// playhead-8ysk: read the manifest in either shape.
     ///
@@ -506,9 +510,15 @@ actor AnalysisAudioService {
     ///
     /// - `currentSourceByteLength == nil` → **serve**. The source is gone or
     ///   unreadable, so the cache is the only remaining answer and there is
-    ///   no better one to recompute. Callers downstream of a completed
-    ///   analysis (boundary refinement, chapter snapshots, the final pass)
-    ///   depend on this: the audio file is evictable, the shards are not.
+    ///   no better one to recompute. The dependent is playhead-0hi9's
+    ///   `cachedDecodeReportsNotTruncated`: a re-spool of an episode whose
+    ///   audio has been evicted must still answer from the cache, because
+    ///   `persistSpooledEpisodeDuration` reads that outcome and would
+    ///   otherwise stop recording a duration for every warm-cache episode.
+    ///   Note this is NOT what keeps the post-analysis consumers alive —
+    ///   boundary refinement and the chapter snapshots read
+    ///   ``AnalysisShardPCMReader``, which goes straight to the manifest and
+    ///   never consults this predicate at all.
     /// - `recordedSourceByteLength == nil` → **discard**. A pre-8ysk manifest
     ///   carries no record of its input, so it can never be shown to match;
     ///   treating "unknown" as "matches" would preserve exactly the immortal

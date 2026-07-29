@@ -52,7 +52,11 @@ struct ShardCacheSourceIdentityTests {
     /// whatever is there. CAF because it round-trips exactly and needs no
     /// encoder — the container is not what is under test here, the cache
     /// key is.
-    private func writeSynthAudio(seconds: TimeInterval, to url: URL) throws {
+    private func writeSynthAudio(
+        seconds: TimeInterval,
+        to url: URL,
+        amplitude: Float = 0.25
+    ) throws {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
@@ -85,7 +89,7 @@ struct ShardCacheSourceIdentityTests {
                     channel[i] = Float(sin(
                         2.0 * Double.pi * 440.0
                             * Double(written + AVAudioFramePosition(i)) / 16_000.0
-                    )) * 0.25
+                    )) * amplitude
                 }
             }
             try file.write(from: buffer)
@@ -137,11 +141,25 @@ struct ShardCacheSourceIdentityTests {
     }
 
     /// The one case where an unvalidatable entry is still served: the source
-    /// is gone. The shard cache outlives the audio file on purpose —
-    /// boundary refinement, chapter snapshots and the final pass all read it
-    /// after the download has been evicted — so "cannot measure" must mean
-    /// "serve", not "discard". Reversing this would silently disable every
-    /// post-eviction consumer.
+    /// is gone. The shard cache outlives the audio file on purpose, so
+    /// "cannot measure" must mean "serve", not "discard".
+    ///
+    /// The dependent is a REAL test, named so a future reader can check the
+    /// claim: playhead-0hi9's `cachedDecodeReportsNotTruncated` deletes the
+    /// audio between two `decodeOutcome` calls and requires the second to be
+    /// answered from the cache — the shape of a re-spool after the download
+    /// has been evicted, which `persistSpooledEpisodeDuration` depends on.
+    /// The post-analysis consumers (boundary refinement, chapter snapshots)
+    /// are NOT dependents: they read `AnalysisShardPCMReader`, which goes
+    /// straight to the manifest and never reaches this predicate.
+    ///
+    /// The second expectation is the one that costs something: an UNSTAMPED
+    /// entry over a vanished source is served, so a pre-8ysk manifest for an
+    /// episode whose audio is gone survives this bead. That is deliberate —
+    /// with no source there is nothing to re-decode from, so discarding it
+    /// would trade a stale answer for no answer — and it self-heals, because
+    /// the moment the audio is back the source is measurable and the
+    /// unstamped entry is discarded by the rule above.
     @Test("an unmeasurable source serves the cache rather than discarding it")
     func unmeasurableSourceStillServesTheCache() {
         #expect(AnalysisAudioService.isShardCacheValid(
@@ -265,6 +283,102 @@ struct ShardCacheSourceIdentityTests {
             served as the staged 30 s cache (got \(decoded)s)
             """
         )
+    }
+
+    /// THE OTHER HALF OF THE PREDICATE, and it was missing (round-1 review).
+    ///
+    /// Every other test in this file, and every test in
+    /// `TruncatedDecodeDurationTests`, asserts that the cache is DISCARDED —
+    /// on a grown source, on an unstamped manifest, on a shrunk source. The
+    /// one existing test that proves a cache HIT
+    /// (`cachedDecodeReportsNotTruncated`) deletes the audio first, so it
+    /// travels the `currentSourceByteLength == nil` fail-open branch and says
+    /// nothing about a stamp that matches.
+    ///
+    /// Measured, not argued: mutating `ShardCache.readManifest` to return
+    /// `(envelope.entries, nil)` — which makes every entry read as unstamped
+    /// and so disables the cache entirely against any readable source — left
+    /// `ShardCacheSourceIdentityTests`, `TruncatedDecodeDurationTests` and
+    /// `AnalysisShardPCMReaderTests` fully green (59 tests, 0 failures). A
+    /// build that re-decodes the whole episode on every single retry was
+    /// indistinguishable from a correct one. That is the failure mode this
+    /// bead is one careless follow-up away from: the fix for an over-serving
+    /// cache is an over-discarding cache, and on device the cost is a full
+    /// re-decode of an hour of audio per scheduler epoch.
+    ///
+    /// The probe is a source that CHANGES CONTENT AT A CONSTANT LENGTH: the
+    /// same duration of the same tone at a different amplitude is byte-for-byte
+    /// the same size of CAF. The stamp therefore still matches, the cache must
+    /// still be served, and the samples that come back must be the ORIGINAL
+    /// quiet ones. A build that re-decoded would hand back the loud ones.
+    @Test("a cache whose stamp still matches is served, not re-decoded")
+    func matchingStampIsServedFromCache() async throws {
+        let url = try makeAudioURL()
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-hit-\(UUID().uuidString)"
+        let controlID = "bd8ysk-hit-control-\(UUID().uuidString)"
+        defer {
+            Task { await service.evictCache(episodeID: episodeID) }
+            Task { await service.evictCache(episodeID: controlID) }
+        }
+
+        try writeSynthAudio(seconds: 45, to: url, amplitude: 0.25)
+        let quietBytes = try #require(AnalysisAudioService.sourceByteLength(of: url))
+        let local = try #require(LocalAudioURL(url))
+
+        func peak(_ shards: [AnalysisShard]) -> Float {
+            shards.flatMap(\.samples).reduce(Float(0)) { Swift.max($0, abs($1)) }
+        }
+
+        let first = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        let quietPeak = peak(first.shards)
+        try #require(quietPeak > 0.2 && quietPeak < 0.4, "fixture peak \(quietPeak), expected ~0.25")
+
+        // Replace the CONTENT without changing the LENGTH.
+        try writeSynthAudio(seconds: 45, to: url, amplitude: 0.9)
+        let loudBytes = try #require(AnalysisAudioService.sourceByteLength(of: url))
+        try #require(
+            loudBytes == quietBytes,
+            "the probe needs a constant-length replacement (\(quietBytes) -> \(loudBytes))"
+        )
+
+        // The replacement really is different audio — decoded under a FRESH
+        // episode id, so no cache can answer. Without this the test would
+        // still pass if `writeSynthAudio` ignored `amplitude` entirely.
+        let control = try await service.decodeOutcome(fileURL: local, episodeID: controlID)
+        let loudPeak = peak(control.shards)
+        try #require(
+            loudPeak > 0.7,
+            "the replacement must decode differently or this test proves nothing (peak \(loudPeak))"
+        )
+
+        let second = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        #expect(
+            peak(second.shards) == quietPeak,
+            """
+            a stamp that still matches must be SERVED: got peak \(peak(second.shards)), \
+            expected the cached \(quietPeak). A re-decode would return \(loudPeak) — \
+            the cache is being discarded when it is valid, so every retry pays a \
+            full re-decode
+            """
+        )
+        #expect(second.shards.count == first.shards.count)
+        #expect(!second.isTruncated)
+
+        // And it does not THRASH: a valid entry survives being served over and
+        // over. Repetition is asserted with the same amplitude probe rather
+        // than by comparing the manifest bytes — an evict-and-re-decode
+        // rewrites `manifest.json` with byte-identical content (same entries,
+        // same source length), so a content comparison would pass against a
+        // cache that churns the whole episode on every read and would be
+        // exactly the vacuous test this bead is about.
+        for pass in 0..<3 {
+            let repeated = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+            #expect(
+                peak(repeated.shards) == quietPeak,
+                "pass \(pass) re-decoded a valid cache (peak \(peak(repeated.shards)))"
+            )
+        }
     }
 
     /// And the entry is EVICTED, not merely bypassed. A stale directory that

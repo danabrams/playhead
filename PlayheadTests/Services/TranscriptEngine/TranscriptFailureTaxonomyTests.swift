@@ -170,6 +170,78 @@ struct TranscriptFailureTaxonomyTests {
     }
 #endif
 
+    /// Round-1 review: `.persistenceFailed` was declared and never produced.
+    /// Sixteen cases were pinned by `vocabularyIsClosedAndStable` and only
+    /// fifteen were reachable, so a store failure — the one that made
+    /// `appendShardsAfterCompletion` an accidental demo of this bead's defect
+    /// — classified as `.unknown`, which is the same unnamed-absence problem
+    /// `asr_failed` had, just moved one layer down.
+    ///
+    /// Only the error TYPE decides the class. `AnalysisStoreError`'s payloads
+    /// are raw SQLite messages and are never read, which is what keeps the
+    /// vocabulary closed on this branch too.
+    @Test(
+        "store errors classify to persistence_failed rather than to the catch-all",
+        arguments: [
+            AnalysisStoreError.insertFailed("FOREIGN KEY constraint failed"),
+            AnalysisStoreError.queryFailed("no such table: transcript_chunks"),
+            AnalysisStoreError.notFound,
+        ]
+    )
+    func storeErrorsClassifyAsPersistenceFailure(error: AnalysisStoreError) {
+        #expect(TranscriptFailureClass.classify(error) == .persistenceFailed)
+        // And it exports no code: the bridged domain is ours, so the value
+        // would only ever be a synthesised case ordinal.
+        #expect(TranscriptFailureReason.classify(error).code == nil)
+    }
+
+    /// Every case in the closed vocabulary must be REACHABLE. A pinned set is
+    /// only a contract if each member can actually be produced; a case no
+    /// emitter can ever assign is a promise to a support engineer that the
+    /// build cannot keep.
+    @Test("no case in the vocabulary is unreachable")
+    func everyVariantHasAProducer() {
+        // Classes raised directly by the loop rather than by classifying an
+        // error — they have no error to route through `classify`.
+        let raisedDirectly: Set<TranscriptFailureClass> = [.noShards, .speechEngineNotReady]
+        // The residual bucket, produced by construction for anything
+        // unrecognised (`unrecognisedBecomesUnknown` pins it).
+        let residual: Set<TranscriptFailureClass> = [.unknown]
+
+        var producible: Set<TranscriptFailureClass> = raisedDirectly.union(residual)
+        var errors: [Error] = [
+            AnalysisStoreError.insertFailed("x"),
+            TranscriptEngineError.modelNotLoaded,
+            TranscriptEngineError.vadFailed("x"),
+            TranscriptEngineError.unsupportedSampleRate(expected: 16_000, actual: 44_100),
+            TranscriptEngineError.transcriptionFailed("x"),
+        ]
+#if canImport(Speech)
+        errors.append(contentsOf: [
+            AppleSpeechBoundaryError.speechAssetsUnsupported(localeIdentifier: "en_US"),
+            AppleSpeechBoundaryError.analyzerFormatUnavailable(localeIdentifier: "en_US"),
+            AppleSpeechBoundaryError.invalidAnalyzerInputTimeline("x"),
+            AppleSpeechBoundaryError.analyzerSessionFailure("x"),
+            AppleSpeechBoundaryError.audioBridgeFailure("converter refused the format"),
+            AppleSpeechBoundaryError.audioBridgeFailure("empty audio shard"),
+            AppleSpeechBoundaryError.audioBridgeFailure("shard 3 is entirely silent"),
+            AppleSpeechBoundaryError.audioBridgeFailure("shard 3 contains NaN and Inf samples"),
+        ] as [Error])
+#endif
+        for error in errors {
+            producible.insert(TranscriptFailureClass.classify(error))
+        }
+
+        let unreachable = Set(TranscriptFailureClass.allCases).subtracting(producible)
+        #expect(
+            unreachable.isEmpty,
+            """
+            no emitter can ever produce \(unreachable.map(\.rawValue).sorted()) — \
+            either wire it up or drop it from the vocabulary
+            """
+        )
+    }
+
     @Test("anything unrecognised becomes .unknown rather than leaking a description")
     func unrecognisedBecomesUnknown() {
         struct Exotic: Error { let secret = "podcast-title-that-must-not-ship" }

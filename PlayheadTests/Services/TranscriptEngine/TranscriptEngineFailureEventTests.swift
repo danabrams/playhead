@@ -82,6 +82,39 @@ private final class FailAfterFirstRecognizer: SpeechRecognizer, @unchecked Senda
     }
 }
 
+/// Succeeds on every shard. Used to reach the PERSISTENCE step, which is the
+/// only way to fail a run without failing ASR.
+private final class AlwaysSucceedingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        let word = TranscriptWord(
+            text: "hello",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            confidence: 0.9
+        )
+        return [TranscriptSegment(
+            id: shard.id,
+            words: [word],
+            text: "hello",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            avgConfidence: 0.9,
+            passType: .fast
+        )]
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
 /// Never loads, so `SpeechService.isReady()` is false.
 private final class NeverReadyRecognizer: SpeechRecognizer, @unchecked Sendable {
     func loadModel() async throws {}
@@ -216,6 +249,117 @@ struct TranscriptEngineFailureEventTests {
         // The fixture really is partial: shard 0 landed, shard 1 threw.
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-partial")
         #expect(!chunks.isEmpty, "the fixture must persist something, or this proves nothing")
+    }
+
+    /// THE ACCIDENTAL DEMO, TURNED INTO A GUARD (round-1 review).
+    ///
+    /// `appendShardsAfterCompletion` never seeded its `analysis_assets` row.
+    /// Every chunk insert therefore hit the foreign key, the run did full ASR
+    /// work and persisted nothing, and the test passed — because the loop
+    /// emitted `.completed` over a total failure. That is this bead's defect,
+    /// running green in the suite for as long as the test existed. Seeding the
+    /// row fixed that test; nothing pinned the SHAPE.
+    ///
+    /// So it is pinned here deliberately, with the row left out on purpose.
+    /// ASR succeeds on every shard, so this can only be reported by the
+    /// persistence path — and it must be reported as `persistence_failed`, not
+    /// as `unknown`. Before the review fix the store's errors reached the
+    /// classifier's residual bucket, so the whole vocabulary said no more about
+    /// this run than `asr_failed` did.
+    @Test(.timeLimit(.minutes(1)))
+    func persistenceFailureIsNamedNotSwallowed() async throws {
+        let store = try await makeTestStore()
+        // Deliberately NO insertAsset — the foreign key is the failure.
+        let speech = SpeechService(
+            recognizer: AlwaysSucceedingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-asset-nofk", startTime: 0, duration: 30),
+                makeShard(id: 1, episodeID: "ep-asset-nofk", startTime: 30, duration: 30),
+            ],
+            analysisAssetId: "asset-nofk",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-nofk")
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-nofk")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("expected .failed, got \(String(describing: terminal))")
+            return
+        }
+        #expect(reason.failureClass == .persistenceFailed,
+                "a store failure must be named, not bucketed as \(reason.failureClass.rawValue)")
+        #expect(reason.failedShardCount == 2)
+
+        // The fixture really is the masked shape: ASR ran, nothing landed.
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-nofk")
+        #expect(chunks.isEmpty, "the fixture must persist nothing, or this proves nothing")
+    }
+
+    /// The loop accumulates failures at TWO sites — the initial pass and the
+    /// drain of shards appended while it ran — and only the first was covered
+    /// (round-1 review). Removing `shardFailures.append` from the drain catch
+    /// left every test green, so a run whose failures all arrived on appended
+    /// shards would have reported `.completed` over a total failure: the exact
+    /// lie this bead removes, still live on the streaming-decoder path that
+    /// produces most real shards.
+    ///
+    /// Driven with no race: the first run is awaited to completion, so the
+    /// second `appendShards` starts a fresh loop with `shards: []` and every
+    /// one of its failures can only have been accumulated in the drain.
+    @Test(.timeLimit(.minutes(1)))
+    func appendedShardFailuresAreAccumulatedToo() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-appended-fail"))
+        let speech = SpeechService(
+            recognizer: AlwaysFailingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+
+        let firstEvents = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(
+                id: 0, episodeID: "ep-asset-appended-fail", startTime: 0, duration: 30
+            )],
+            analysisAssetId: "asset-appended-fail",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-appended-fail")
+        let firstTerminal = await Self.awaitTerminal(
+            on: firstEvents, assetId: "asset-appended-fail"
+        )
+        #expect(firstTerminal == .failed(TranscriptFailureReason(
+            failureClass: .vadFailed, failedShardCount: 1
+        )), "precondition: the initial pass fails on its one shard")
+
+        // A fresh loop whose entire input arrives through the append queue.
+        let appendEvents = await engine.events()
+        await engine.appendShards(
+            [
+                makeShard(id: 1, episodeID: "ep-asset-appended-fail",
+                          startTime: 30, duration: 30),
+                makeShard(id: 2, episodeID: "ep-asset-appended-fail",
+                          startTime: 60, duration: 30),
+            ],
+            analysisAssetId: "asset-appended-fail",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-appended-fail")
+
+        let terminal = await Self.awaitTerminal(on: appendEvents, assetId: "asset-appended-fail")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("appended-shard failures must be reported, got \(String(describing: terminal))")
+            return
+        }
+        #expect(reason.failureClass == .vadFailed)
+        #expect(reason.failedShardCount == 2,
+                "both appended shards failed and both must be counted")
     }
 
     // MARK: - The two silent returns

@@ -140,7 +140,18 @@ enum TranscriptFailureClass: String, Sendable, Hashable, CaseIterable, Codable {
     /// this bead this path returned in silence and the runner waited out its
     /// full 300 s timeout for a `.completed` that could never arrive.
     case speechEngineNotReady = "speech_engine_not_ready"
-    /// Persisting chunks to SQLite failed.
+    /// Persisting chunks to SQLite failed — every `AnalysisStoreError` out of
+    /// `transcribeShard`'s `insertTranscriptChunks` / coverage writes lands
+    /// here.
+    ///
+    /// This is not a hypothetical class. It is the failure that produced this
+    /// bead's most instructive artifact: `appendShardsAfterCompletion` never
+    /// seeded its `analysis_assets` row, so every chunk insert hit the foreign
+    /// key and failed, and the test passed anyway because the loop reported
+    /// `.completed` over a total failure. A run in that state does ASR work,
+    /// writes nothing, and — until this case was wired up (round-1 review) —
+    /// reported `unknown`, which is the same "names an absence" defect as
+    /// `asr_failed` one layer down.
     case persistenceFailed = "persistence_failed"
     /// Anything not yet classified. A rising count here is the signal that
     /// this taxonomy needs another case — never a reason to log free text.
@@ -149,6 +160,16 @@ enum TranscriptFailureClass: String, Sendable, Hashable, CaseIterable, Codable {
     /// Classify a thrown error. Total by construction: everything that is not
     /// recognised is `.unknown`, so no call site can leak a description.
     static func classify(_ error: Error) -> TranscriptFailureClass {
+        // playhead-8ysk review: the store's own errors, which reach this
+        // classifier through `transcribeShard`'s persistence writes. Only the
+        // TYPE is inspected — `AnalysisStoreError`'s payloads are free-form
+        // SQLite messages and none of them is read here, so nothing this
+        // classifier returns can carry one. (Its bridged NSError domain is
+        // `Playhead.AnalysisStoreError`, so `TranscriptFailureReason.classify`
+        // also drops the synthesised case ordinal.)
+        if error is AnalysisStoreError {
+            return .persistenceFailed
+        }
         if let engineError = error as? TranscriptEngineError {
             switch engineError {
             case .modelNotLoaded:
