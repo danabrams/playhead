@@ -746,12 +746,39 @@ struct AdDetectionConfig: Sendable {
     /// deterministic-DAI width win (measured pre-roll width coverage ~57% → ~80%).
     ///
     /// Unlike the OFF-by-default channels above, this clamp ships ON: its DEFAULT
-    /// `20.0` is a live production knob, NOT a dormant flag. 20 s covers the
-    /// typical cold-start miss with margin while staying far below any plausible
-    /// mid-roll (the earliest mid-rolls land minutes in), so a "first" slot that
+    /// `90.0` is a live production knob, NOT a dormant flag. A "first" slot that
     /// starts later than this is treated as a mid-roll and left untouched. Set to
     /// `<= 0` to disable the clamp.
+    ///
+    /// playhead-aqo9 raised this from `20.0` to `90.0` on 2026-07-29. The
+    /// original 20 s was reasoned from the ASR cold-start ramp alone; measured
+    /// against Dan's own corrections it covered pre-roll starts of 11.8 and
+    /// 15.2 s and missed 46.4 and 74.6 s, leaving 121 of the 147.8 free pre-roll
+    /// ad-seconds audible. Across the 36 analysed assets the first VISIBLE
+    /// window's start clusters at 0–87.9 s and then jumps to 300 s, so 90 takes
+    /// the whole cluster while keeping the pre-roll/mid-roll separation the
+    /// original constant was chosen to protect. 90 / 120 / 150 behave
+    /// identically on that corpus (nothing sits between 87.9 and 300), and 45
+    /// buys nothing at all over 20 — so 90 is the smallest constant that
+    /// recovers the full measured win.
     let preRollStartClampSeconds: Double
+
+    /// playhead-aqo9: post-roll end-at-EOF clamp proximity guard, in seconds.
+    /// When the episode's LAST ad window already ends within this many seconds
+    /// of `episodeDuration`, `runBackfill` extends its end edge to exactly the
+    /// episode end (via `PostRollEndClamp`, applied AFTER the per-span decision
+    /// loop, immediately after the pre-roll clamp). The widened result is capped
+    /// to mark-only because the added suffix was not classified.
+    ///
+    /// This is the mirror of `preRollStartClampSeconds` but it is a PROXIMITY
+    /// GUARD, not a ceiling, and the clamp genuinely needs one: unlike t=0, "the
+    /// last window" is the post-roll only when the detector actually found the
+    /// post-roll. Measured on Dan's device, the unguarded form recovered 251 s of
+    /// ad while claiming 3,150 s of show; guarded at 60 s it recovers 76.1 s
+    /// against 3.8 s, a 20:1 ratio. Every value in 45…120 s produced identical
+    /// numbers on that corpus and 180 s fell off a cliff, so 60 sits inside a
+    /// flat plateau rather than on a fitted point. Set to `<= 0` to disable.
+    let postRollEndClampProximitySeconds: Double
 
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
@@ -854,7 +881,8 @@ struct AdDetectionConfig: Sendable {
         hostReadConfidenceFloor: Double = 0.9,
         postRollGuardSeconds: Double = 90.0,
         unanchoredExtentBlocksAutoSkip: Bool = true,
-        preRollStartClampSeconds: Double = 20.0
+        preRollStartClampSeconds: Double = 20.0,
+        postRollEndClampProximitySeconds: Double = 60.0
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -930,6 +958,7 @@ struct AdDetectionConfig: Sendable {
         self.postRollGuardSeconds = postRollGuardSeconds
         self.unanchoredExtentBlocksAutoSkip = unanchoredExtentBlocksAutoSkip
         self.preRollStartClampSeconds = preRollStartClampSeconds
+        self.postRollEndClampProximitySeconds = postRollEndClampProximitySeconds
     }
 
     static let `default` = AdDetectionConfig(
@@ -992,7 +1021,8 @@ struct AdDetectionConfig: Sendable {
         hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); inert while certaintyTieredSkipEnabled is false
         postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
-        preRollStartClampSeconds: 20.0  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
+        preRollStartClampSeconds: 90.0,  // playhead-aqo9: raised 20→90 (2026-07-29). Measured on Dan's device: 20s covered pre-roll starts of 11.8/15.2 and MISSED 46.4/74.6, leaving 121 of 147.8 free ad-seconds audible. First-window starts cluster at 0–87.9s then jump to 300s, so 90 takes the whole cluster and keeps the pre/mid separation. 90/120/150 are identical on that corpus; 45 buys nothing over 20.
+        postRollEndClampProximitySeconds: 60.0  // playhead-aqo9: post-roll end-at-EOF clamp ships ON — mark-only, and the PROXIMITY GUARD is what makes it safe (unguarded: 251s ad vs 3,150s show; at 60s: 76.1s vs 3.8s = 20:1). 45–120 measured identical; 180 falls off a cliff.
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -5860,7 +5890,37 @@ actor AdDetectionService {
             windows: fusionWindows,
             config: .init(maxPreRollStartSeconds: config.preRollStartClampSeconds)
         )
-        // The clamp runs after decisions are assembled, so refresh the
+
+        // ── Post-roll end-at-EOF clamp (playhead-aqo9) ───────────────────────
+        // The mirror of the clamp above, and the larger half of the free-edge
+        // win: a post-roll runs to the end of the file, but the outro's thin
+        // transcript makes the detected end stop short. When the episode's LAST
+        // ad window ALREADY ends within `postRollEndClampProximitySeconds` of
+        // `episodeDuration`, extend its end edge to exactly the episode end.
+        //
+        // The proximity guard is load-bearing in a way the pre-roll ceiling is
+        // not: "the last window" is the post-roll only when the detector found
+        // the post-roll at all. Without the guard, an episode whose last window
+        // is some unrelated mid-roll has everything from there to EOF marked as
+        // an ad (measured: 3,150 s of show claimed across the corpus, 2,813 s of
+        // it from one episode). Trustworthy `.rediffByteExact` /
+        // `.stingerSnapped` ends are EXEMPT, and the INNER (start) edge is never
+        // touched — the bead's scope note 3.
+        //
+        // WIDTH / MARK, same as above: mark-only capped, idempotent, monotonic
+        // (the end only moves rightward), order- and id-preserving. Runs AFTER
+        // the pre-roll clamp and refuses any window that already reaches 0.0, so
+        // the composed pair can never widen a single slot to the whole episode.
+        // Disabled when `postRollEndClampProximitySeconds <= 0` or when
+        // `episodeDuration` is not a positive finite number.
+        fusionWindows = PostRollEndClamp.clamp(
+            windows: fusionWindows,
+            episodeDuration: episodeDuration,
+            config: .init(
+                maxEndDistanceSeconds: config.postRollEndClampProximitySeconds
+            )
+        )
+        // The clamps run after decisions are assembled, so refresh the
         // persisted/runtime decision envelope from the final window geometry.
         // Otherwise DecisionResultArtifact would serialize the detected
         // pre-clamp start while `ad_windows` and live orchestration use 0.0.

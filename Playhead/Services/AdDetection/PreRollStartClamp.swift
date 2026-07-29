@@ -5,12 +5,18 @@
 // WHY
 // ---
 // A pre-roll ad begins at 0:00, but the detector routinely UNDER-measures its
-// first few seconds: the ASR / transcript pipeline has a cold-start ramp, so the
-// anchored presence core (and therefore the marked pre-roll) starts a few seconds
-// late. A pre-roll's start edge is "free" at 0:00 — there is no editorial content
-// before it to clip — so when the episode's FIRST ad slot lands in the pre-roll
-// zone, its start edge is extended to exactly 0.0. This recovers the width the
-// cold-start ramp lost (measured pre-roll width coverage ~57% → ~80%).
+// opening: the ASR / transcript pipeline has a cold-start ramp, and a cold intro
+// sting or music bed can push the anchored presence core (and therefore the
+// marked pre-roll) tens of seconds late. A pre-roll's start edge is "free" at
+// 0:00 — there is no editorial content before it to clip — so when the episode's
+// FIRST ad slot lands in the pre-roll zone, its start edge is extended to exactly
+// 0.0. This recovers the width the ramp lost (measured pre-roll width coverage
+// ~57% → ~80%).
+//
+// playhead-aqo9 (2026-07-29) raised `maxPreRollStartSeconds` from 20 to 90 after
+// measuring the miss against Dan's own on-device corrections: pre-roll truth
+// starts within 5 s of 0:00 in 8/8 pods, and the 20 s ceiling was leaving 121 of
+// the 147.8 recoverable ad-seconds audible. See the property's doc comment.
 //
 // SCOPE (pinned)
 // -------------
@@ -61,17 +67,27 @@ enum PreRollStartClamp {
         /// that starts LATER than this is a mid-roll (there is no pre-roll to
         /// extend) → leave it untouched. `<= 0` disables the clamp entirely.
         ///
-        /// Default `20.0`. A pre-roll begins at 0:00; the detector's cold-start
-        /// miss (ASR warm-up + any intro sting) can push the detected start to
-        /// roughly the low-teens of seconds, so 20 s covers the typical miss with
-        /// margin. It stays far below any plausible mid-roll (the earliest
-        /// mid-rolls land minutes in), so the pre-roll-vs-mid-roll separation is
-        /// clean and the clamp cannot swallow a very-early mid-roll.
+        /// Default `90.0`, MEASURED (playhead-aqo9, 2026-07-29). The original
+        /// `20.0` was reasoned from the ASR cold-start ramp alone and turned out
+        /// to be far too tight: against Dan's own corrections it covered pre-roll
+        /// starts of 11.8 and 15.2 s but missed 46.4 and 74.6 s, leaving 121 of
+        /// the 147.8 free pre-roll ad-seconds audible. The detector's first
+        /// visible window starts late for reasons beyond ASR warm-up — a cold
+        /// intro sting, a music bed, an unlabelled promo — and those cost tens of
+        /// seconds, not a handful.
+        ///
+        /// 90 is where the data puts the boundary, not where the curve was fitted.
+        /// Across the 36 analysed assets the first VISIBLE window's start clusters
+        /// at 0.0–87.9 s and then jumps straight to 300.0 s, so 90 takes the whole
+        /// cluster and still stops well short of anything that is not a pre-roll —
+        /// exactly the separation the original constant existed to protect. 90,
+        /// 120 and 150 are byte-identical on that corpus (nothing lives in the
+        /// gap); 45 recovers nothing at all beyond 20.
         var maxPreRollStartSeconds: Double
 
-        static let `default` = Configuration(maxPreRollStartSeconds: 20.0)
+        static let `default` = Configuration(maxPreRollStartSeconds: 90.0)
 
-        init(maxPreRollStartSeconds: Double = 20.0) {
+        init(maxPreRollStartSeconds: Double = 90.0) {
             self.maxPreRollStartSeconds = maxPreRollStartSeconds
         }
     }

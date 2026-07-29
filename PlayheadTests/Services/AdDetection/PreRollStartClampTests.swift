@@ -154,6 +154,36 @@ struct PreRollStartClampTests {
         #expect(clamped[0].startTime == 0.0)
     }
 
+    /// playhead-aqo9: the ceiling must span the corridor MEASURED against Dan's
+    /// device database, and stop short of the first thing that is not a pre-roll.
+    ///
+    /// Across the 36 analysed assets the first VISIBLE window's start clusters at
+    /// 0.0–87.9 s and then jumps to 300.0 s; the largest start with a corroborated
+    /// pre-roll behind it is 74.58 s (8FECFDDE, whose user-marked pre-roll runs
+    /// 0–90.3 s). The old 20 s ceiling covered 11.8 and 15.2 and missed 46.4 and
+    /// 74.6, leaving 121 of the 147.8 free pre-roll ad-seconds audible. So the
+    /// ceiling has to reach at least 74.6 — and stay well under 300, the earliest
+    /// first-window that is a mid-roll (820134BF, whose true pre-roll at 0–59.8 s
+    /// the detector missed entirely; clamping that window would claim 240 s of
+    /// show).
+    @Test("ceiling spans the measured pre-roll corridor: fires at 74.6s, refuses 300s")
+    func ceilingSpansMeasuredPreRollCorridor() {
+        let n = AdDetectionConfig.default.preRollStartClampSeconds
+        #expect(n >= 74.58,
+                "ceiling \(n) misses the widest corroborated pre-roll start on Dan's device (74.58s)")
+        #expect(n < 300.0,
+                "ceiling \(n) reaches the earliest observed non-pre-roll first window (300s)")
+
+        // The worst measured miss now clamps...
+        let worstMiss = PreRollStartClamp.clamp(windows: [window(start: 74.58, end: 89.82)])
+        #expect(worstMiss[0].startTime == 0.0)
+        #expect(worstMiss[0].endTime == 89.82, "the inner edge stays where the detector put it")
+
+        // ...and the earliest observed genuine mid-roll first-window still does not.
+        let midRoll = PreRollStartClamp.clamp(windows: [window(start: 300.0, end: 330.0)])
+        #expect(midRoll[0].startTime == 300.0)
+    }
+
     /// Boundary: a first slot starting EXACTLY at N is inside the inclusive
     /// pre-roll zone `(0, N]` and is clamped.
     @Test("first slot starting exactly at N is clamped (inclusive bound)")
@@ -364,9 +394,11 @@ struct PreRollStartClampTests {
 
     @Test("a no-op pre-roll clamp preserves still-bound catalog provenance")
     func noOpPreservesCatalogMatchProvenance() {
+        // Start chosen past the ceiling (a mid-roll) so the clamp is a genuine
+        // no-op — playhead-aqo9 raised the ceiling past the old 30 s fixture.
         let original = window(
-            start: 30.0,
-            end: 60.0,
+            start: 400.0,
+            end: 460.0,
             catalogMatch: true
         )
 
