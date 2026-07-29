@@ -642,15 +642,25 @@ actor AnalysisJobRunner {
 
         // Observe the event stream for completion, with a 5-minute timeout
         // to avoid hanging indefinitely if the stream never emits .completed.
-        let transcriptCoverage: Double = await withTaskGroup(of: Double.self) { [weak self] group in
+        // playhead-8ysk: the loop now reports a total failure as `.failed`
+        // instead of falsely reporting `.completed`, so the observer has to
+        // treat it as terminal too — otherwise the runner would wait out the
+        // full 300 s timeout for an event that will never come, turning an
+        // instant named failure into a `task_expired`. The reason travels out
+        // alongside the coverage and is journaled below.
+        let transcriptObservation: (coverage: Double, failure: TranscriptFailureReason?) =
+        await withTaskGroup(
+            of: (Double, TranscriptFailureReason?).self
+        ) { [weak self] group in
             // Timeout task
             group.addTask {
                 try? await Task.sleep(for: .seconds(300))
-                return 0
+                return (0, nil)
             }
             // Event stream task
             group.addTask { [weak self] in
                 var coverage: Double = 0
+                var failure: TranscriptFailureReason?
                 for await event in transcriptStream {
                     if Task.isCancelled { break }
                     if case .completed(let completedAssetId) = event, completedAssetId == assetId {
@@ -660,6 +670,10 @@ actor AnalysisJobRunner {
                         }
                         break
                     }
+                    if case .failed(let failedAssetId, let reason) = event, failedAssetId == assetId {
+                        failure = reason
+                        break
+                    }
                 }
                 // Stream ended without .completed — log and return whatever we have.
                 if coverage == 0 {
@@ -667,13 +681,15 @@ actor AnalysisJobRunner {
                         coverage = asset.fastTranscriptCoverageEndTime ?? 0
                     }
                 }
-                return coverage
+                return (coverage, failure)
             }
             // Return whichever finishes first
-            let result = await group.next() ?? 0
+            let result = await group.next() ?? (0, nil)
             group.cancelAll()
             return result
         }
+        let transcriptCoverage = transcriptObservation.coverage
+        let transcriptFailure = transcriptObservation.failure
 
         PreAnalysisInstrumentation.endStage(transcriptSignpost)
 
@@ -724,14 +740,21 @@ actor AnalysisJobRunner {
                 assetId: assetId,
                 allShards: allShards,
                 existingChunkCount: existingChunkCount,
-                transcriptStageStart: transcriptStageStart
+                transcriptStageStart: transcriptStageStart,
+                failure: transcriptFailure
             )
             return makeOutcome(
                 assetId: assetId,
                 request: request,
                 featureCoverageSec: featureCoverage,
                 transcriptCoverageSec: 0,
-                stopReason: .failed("transcription:zeroCoverage")
+                // playhead-8ysk: name the cause in `analysis_jobs.lastErrorCode`
+                // too. It was a fixed `transcription:zeroCoverage` for every one
+                // of the nine distinguishable causes.
+                stopReason: .failed(
+                    transcriptFailure.map { "transcription:\($0.failureClass.rawValue)" }
+                        ?? "transcription:zeroCoverage"
+                )
             )
         }
 
@@ -1268,12 +1291,44 @@ actor AnalysisJobRunner {
     /// does NOT alter the runner's outcome. The `analysis_jobs` row's
     /// `lastErrorCode = 'transcription:zeroCoverage'` remains the
     /// primary signal; this row is observability gravy.
+    /// playhead-8ysk: the `metadata` keys that make a zero-coverage journal
+    /// row diagnostic rather than merely present.
+    ///
+    /// `failure_class` is a `TranscriptFailureClass` raw value — a closed,
+    /// compile-time vocabulary — and `failure_code` is an integer, so neither
+    /// can carry PII, and both therefore survive the diagnostics-bundle
+    /// projection that (correctly) drops the rest of this blob.
+    ///
+    /// The keys are ABSENT, not empty, when the engine reported no reason:
+    /// "we do not know" and "nothing went wrong" must not look alike in an
+    /// export that a support engineer reads without a device attached.
+    ///
+    /// Hoisted out of `emitTranscriptionTimeoutJournal` so the write side can
+    /// be exercised against the same `DiagnosticsFailureKeys` the bundle
+    /// projection reads. A runner-level test of the surrounding method is not
+    /// tractable — `AnalysisJobRunner` holds a concrete
+    /// `TranscriptEngineService` with no protocol seam and a hardcoded 300 s
+    /// timeout, the same constraint `AnalysisJobRunnerSubscribeBeforeStartTests`
+    /// documents.
+    static func failureExtras(_ failure: TranscriptFailureReason?) -> [String: String] {
+        guard let failure else { return [:] }
+        var extras = [
+            DiagnosticsFailureKeys.failureClass: failure.failureClass.rawValue,
+            DiagnosticsFailureKeys.failedShardCount: String(failure.failedShardCount),
+        ]
+        if let code = failure.code {
+            extras[DiagnosticsFailureKeys.failureCode] = String(code)
+        }
+        return extras
+    }
+
     private func emitTranscriptionTimeoutJournal(
         request: AnalysisRangeRequest,
         assetId: String,
         allShards: [AnalysisShard],
         existingChunkCount: Int,
-        transcriptStageStart: Date
+        transcriptStageStart: Date,
+        failure: TranscriptFailureReason?
     ) async {
         // Resolve the active job's `{generationID, schedulerEpoch}` so
         // the journal row joins the lease lifecycle written by 5uvz.1.
@@ -1305,20 +1360,23 @@ actor AnalysisJobRunner {
         // string-typed siblings under `extras`. Numbers go through
         // `String(format:)` so the JSON column stays self-describing
         // without needing a typed schema bump on the consumer side.
+        var extras: [String: String] = [
+            "stage": "analysisJobRunner.run.transcriptionTimeout",
+            "job_id": request.jobId,
+            "episode_duration": String(format: "%.3f", episodeDuration),
+            "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageEndTime),
+            "chunks_persisted": String(chunksPersisted),
+            "chunk_rate_per_sec": String(format: "%.4f", chunkRatePerSec),
+        ]
+        extras.merge(Self.failureExtras(failure)) { _, new in new }
+
         let metadata = await SliceCompletionInstrumentation.recordFailed(
             cause: .asrFailed,
             deviceClass: DeviceClass.detect(),
             sliceDurationMs: elapsedMs,
             bytesProcessed: 0,
             shardsCompleted: 0,
-            extras: [
-                "stage": "analysisJobRunner.run.transcriptionTimeout",
-                "job_id": request.jobId,
-                "episode_duration": String(format: "%.3f", episodeDuration),
-                "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageEndTime),
-                "chunks_persisted": String(chunksPersisted),
-                "chunk_rate_per_sec": String(format: "%.4f", chunkRatePerSec),
-            ]
+            extras: extras
         )
 
         let entry = WorkJournalEntry(

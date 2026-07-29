@@ -98,6 +98,39 @@ enum DiagnosticsBundleBuilder {
     /// `work_journal_tail`. Per bead spec.
     static let workJournalTailCap = 50
 
+    // MARK: - Failure recovery (playhead-8ysk)
+
+    /// Recover the closed-vocabulary transcription-failure fields from a
+    /// journal row's free-form `metadata` blob.
+    ///
+    /// This is the ONLY thing the builder ever reads out of `metadata`, and
+    /// it is a whitelist in the strongest sense available: `failure_class`
+    /// has to round-trip through `TranscriptFailureClass(rawValue:)` — a set
+    /// of compile-time string literals — or it is dropped, and
+    /// `failure_code` has to parse as an `Int` or it is dropped. A future
+    /// emitter that writes an error message under either key exports
+    /// nothing, which is the property that lets these two fields cross the
+    /// projection boundary that `metadata` as a whole correctly may not.
+    static func extractFailure(
+        fromMetadata metadata: String
+    ) -> (failureClass: String?, failureCode: Int?) {
+        guard let data = metadata.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any]
+        else {
+            return (nil, nil)
+        }
+        let failureClass = (dict[DiagnosticsFailureKeys.failureClass] as? String)
+            .flatMap(TranscriptFailureClass.init(rawValue:))?
+            .rawValue
+        // The writer encodes every extra as a string; accept a JSON number
+        // too so a future typed emitter is not silently dropped.
+        let rawCode = dict[DiagnosticsFailureKeys.failureCode]
+        let failureCode = (rawCode as? String).flatMap(Int.init)
+            ?? (rawCode as? NSNumber)?.intValue
+        return (failureClass, failureCode)
+    }
+
     /// Half of the transcript excerpt window around an ad boundary;
     /// total window is `2 * halfWindow` seconds. Locked in at 30 s by
     /// legal checklist item (b).
@@ -177,7 +210,8 @@ enum DiagnosticsBundleBuilder {
         // this as "last 50 … by insertion order".
         let tailSlice = sortedAsc.suffix(workJournalTailCap)
         let workJournalTail = tailSlice.map { entry -> DefaultBundle.WorkJournalRecord in
-            DefaultBundle.WorkJournalRecord(
+            let failure = extractFailure(fromMetadata: entry.metadata)
+            return DefaultBundle.WorkJournalRecord(
                 id: entry.id,
                 episodeIdHash: EpisodeIdHasher.hash(
                     installID: installID, episodeId: entry.episodeId
@@ -186,7 +220,9 @@ enum DiagnosticsBundleBuilder {
                 schedulerEpoch: entry.schedulerEpoch,
                 timestamp: entry.timestamp,
                 eventType: entry.eventType.rawValue,
-                cause: entry.cause?.rawValue
+                cause: entry.cause?.rawValue,
+                failureClass: failure.failureClass,
+                failureCode: failure.failureCode
             )
         }
 

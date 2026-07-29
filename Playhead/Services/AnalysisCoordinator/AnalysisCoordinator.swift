@@ -1977,6 +1977,20 @@ actor AnalysisCoordinator {
                         self.logger.error("Backfill finalization failed for asset \(assetId): \(error.localizedDescription)")
                     }
                     return
+
+                case .failed(let analysisAssetId, let reason):
+                    // playhead-8ysk: this observer used to see `.completed`
+                    // for a run that produced nothing and would go on to
+                    // finalize a backfill over an empty transcript. A total
+                    // failure is terminal for the session — stop observing,
+                    // and do NOT finalize.
+                    guard analysisAssetId == assetId else { continue }
+                    self.logger.error("""
+                        Transcription failed for asset \(assetId): \
+                        \(reason.failureClass.rawValue) \
+                        across \(reason.failedShardCount) shard(s) — not finalizing backfill
+                        """)
+                    return
                 }
             }
         }
