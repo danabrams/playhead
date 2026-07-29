@@ -323,6 +323,57 @@ struct ShardCacheSourceIdentityTests {
         )
     }
 
+    /// REVIEW R2. The SAME rule applied to a v2 envelope — length stamped,
+    /// modification time not. v2 was written by this branch before r2 added
+    /// the second field, so entries in that shape exist on any device that ran
+    /// it, and they are exactly as unvalidatable as a pre-8ysk bare array:
+    /// their length matches whatever file happens to share it.
+    ///
+    /// This pins the migration explicitly rather than leaving it an accident
+    /// of `Codable` — an optional field that silently defaulted to a matching
+    /// value would resurrect every v2 entry.
+    @Test("a v2 manifest stamped only with a length is discarded like an unstamped one")
+    func v2EnvelopeIsTreatedAsUnstamped() async throws {
+        let url = try makeAudioURL()
+        try writeSynthAudio(seconds: 6, to: url)
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-v2-\(UUID().uuidString)"
+        defer { Task { await service.evictCache(episodeID: episodeID) } }
+
+        let dir = cacheDirectory(episodeID: episodeID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let samples = [Float](repeating: 0, count: 30 * 16_000)
+        let pcm = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        try pcm.write(to: dir.appendingPathComponent("shard_0.pcm"))
+
+        // A v2 envelope whose length is the CURRENT file's, so the only thing
+        // that can reject it is the missing modification time.
+        let bytes = try #require(AnalysisAudioService.sourceByteLength(of: url))
+        let v2 = """
+            {"version":2,"sourceByteLength":\(bytes),\
+            "entries":[{"id":0,"startTime":0,"duration":30}]}
+            """
+        try Data(v2.utf8).write(to: dir.appendingPathComponent("manifest.json"))
+
+        let staged = try #require(
+            AnalysisShardPCMReader.loadSamples(episodeID: episodeID, from: 0, to: 30),
+            "the staged v2 cache must be readable, or this test proves nothing"
+        )
+        #expect(staged.samples.count > 0)
+
+        let local = try #require(LocalAudioURL(url))
+        let outcome = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        let decoded = outcome.shards.map(\.duration).reduce(0, +)
+        #expect(
+            abs(decoded - 6) < 1.0,
+            """
+            a v2 entry whose length happens to match must be re-decoded from \
+            the real 6 s file, not served as the staged 30 s cache (got \
+            \(decoded)s)
+            """
+        )
+    }
+
     /// THE OTHER HALF OF THE PREDICATE, and it was missing (round-1 review).
     ///
     /// Every other test in this file, and every test in

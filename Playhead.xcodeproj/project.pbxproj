@@ -733,6 +733,7 @@
 		94E1E85F112E07664AA54F58 /* EVIScorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0628EFF839DFADD9C12635 /* EVIScorer.swift */; };
 		951B514BA816C00DEEBC1E16 /* TrustScoringService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B540ECDE12AFC60BBC272DC8 /* TrustScoringService.swift */; };
 		9548D5987499538B789EDFF5 /* SpliceSlotShadowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FF0E2A4FF6A96ED27A5F86F /* SpliceSlotShadowTests.swift */; };
+		9559E88E9287E7C093995780 /* TranscriptObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 046FD1D0E0CE5E7A8EA97715 /* TranscriptObservationTests.swift */; };
 		955D15BD5A91F50248F31F21 /* LocaleRegionSupportProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CD78001EB19BF3C6C94B298 /* LocaleRegionSupportProvider.swift */; };
 		9611423D1B4C60EBF01B4EF9 /* StingerBankTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F94391C09328CEBBB7F68E4 /* StingerBankTests.swift */; };
 		965196214CDB210BBB746DDF /* apple-podcasts-flat.opml in Resources */ = {isa = PBXBuildFile; fileRef = A04D6E244E1ACFC4DE341DAE /* apple-podcasts-flat.opml */; };
@@ -1269,6 +1270,7 @@
 		03D691D909373F5C557BE74C /* coreai-models */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "coreai-models"; path = "Vendor/coreai-models"; sourceTree = SOURCE_ROOT; };
 		0431ECEF60C4276EAF613EE6 /* DecisionLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionLoggerTests.swift; sourceTree = "<group>"; };
 		04645E90BD792C594B80EC69 /* PerShowThresholdControlWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerShowThresholdControlWiringTests.swift; sourceTree = "<group>"; };
+		046FD1D0E0CE5E7A8EA97715 /* TranscriptObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptObservationTests.swift; sourceTree = "<group>"; };
 		048FDE8084BDB47810987211 /* FullTranscriptViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullTranscriptViewModel.swift; sourceTree = "<group>"; };
 		0500F9FFBED43D0286596053 /* RevalidationStateStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevalidationStateStoreTests.swift; sourceTree = "<group>"; };
 		05B3F1F41BF2681A24DB0FE2 /* MetadataExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetadataExtractor.swift; sourceTree = "<group>"; };
@@ -2664,6 +2666,7 @@
 				4D5F21E752B9BF6640495257 /* AnalysisJobRunnerRevalidationShortCircuitTests.swift */,
 				10B2FA0D8CE80F1F8DE716B4 /* AnalysisJobRunnerSubscribeBeforeStartTests.swift */,
 				2D2A52D2B333FDBFA1B42ADB /* AnalysisJobRunnerTests.swift */,
+				046FD1D0E0CE5E7A8EA97715 /* TranscriptObservationTests.swift */,
 				4357F477043103DB6B3055AE /* TranscriptShadowGateLoggerTests.swift */,
 			);
 			path = AnalysisJobRunner;
@@ -6102,6 +6105,7 @@
 				E371DCDDBE1DCDE0ADE82B7D /* TranscriptFailureObservationTests.swift in Sources */,
 				28BE31B2D18DF7EF02907AE7 /* TranscriptFailureTaxonomyTests.swift in Sources */,
 				E9F167C2AE2D9AC65CF1C870 /* TranscriptIdentityTests.swift in Sources */,
+				9559E88E9287E7C093995780 /* TranscriptObservationTests.swift in Sources */,
 				78ADDD5ED0D813C42F75E97C /* TranscriptParagraphGroupingTests.swift in Sources */,
 				DE7073F09ABEF33B51F9AD8F /* TranscriptPeekDataSourceTests.swift in Sources */,
 				3E0E9B3416CCD3A1234E0127 /* TranscriptPeekNotAdModeTests.swift in Sources */,

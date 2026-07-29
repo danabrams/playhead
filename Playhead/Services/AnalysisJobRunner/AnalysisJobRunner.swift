@@ -659,29 +659,20 @@ actor AnalysisJobRunner {
             }
             // Event stream task
             group.addTask { [weak self] in
-                var coverage: Double = 0
-                var failure: TranscriptFailureReason?
-                for await event in transcriptStream {
-                    if Task.isCancelled { break }
-                    if case .completed(let completedAssetId) = event, completedAssetId == assetId {
-                        // Read coverage from the store after transcription completes.
-                        if let asset = try? await self?.store.fetchAsset(id: assetId) {
-                            coverage = asset.fastTranscriptCoverageEndTime ?? 0
+                // Bind the store out of `self` before the inner closure: a
+                // `[weak self]` capture is a `var`, and a `@Sendable` closure
+                // may not reference one.
+                let store = self?.store
+                return await Self.observeTranscriptEvents(
+                    stream: transcriptStream,
+                    assetId: assetId,
+                    persistedCoverage: {
+                        if let asset = try? await store?.fetchAsset(id: assetId) {
+                            return asset.fastTranscriptCoverageEndTime ?? 0
                         }
-                        break
+                        return 0
                     }
-                    if case .failed(let failedAssetId, let reason) = event, failedAssetId == assetId {
-                        failure = reason
-                        break
-                    }
-                }
-                // Stream ended without .completed — log and return whatever we have.
-                if coverage == 0 {
-                    if let asset = try? await self?.store.fetchAsset(id: assetId) {
-                        coverage = asset.fastTranscriptCoverageEndTime ?? 0
-                    }
-                }
-                return (coverage, failure)
+                )
             }
             // Return whichever finishes first
             let result = await group.next() ?? (0, nil)
@@ -1310,6 +1301,54 @@ actor AnalysisJobRunner {
     /// `TranscriptEngineService` with no protocol seam and a hardcoded 300 s
     /// timeout, the same constraint `AnalysisJobRunnerSubscribeBeforeStartTests`
     /// documents.
+    /// playhead-8ysk (review r2): consume the engine's event stream until this
+    /// asset reaches a terminal event, and report what happened.
+    ///
+    /// Extracted from the `withTaskGroup` child in `run(...)` so it can be
+    /// measured. Round 1 left the runner's `.failed` handling untested and
+    /// said why — the runner holds a concrete `TranscriptEngineService` and a
+    /// hardcoded 300 s timeout, so no test can drive the real stream. Nothing
+    /// about THIS logic needs either: it is a fold over an `AsyncStream` and a
+    /// coverage lookup, both of which a test can supply.
+    ///
+    /// THE `failure == nil` ON THE FALLBACK IS A FIX, NOT A TIDY-UP. The
+    /// fallback exists for an ambiguous ending — the stream closed without a
+    /// terminal event for this asset — where `analysis_assets` is the better
+    /// authority on what got persisted. It must NOT run after an explicit
+    /// `.failed`. The engine has just reported that THIS run produced nothing,
+    /// while `fastTranscriptCoverageEndTime` is cumulative and carries
+    /// coverage from EARLIER passes over the same asset — and a retry of an
+    /// asset that once made progress is the exact shape of this bead's
+    /// incident (147 acquisitions, 9 finalizations). A stale non-zero value
+    /// makes `transcriptCoverage != 0` at the call site, which skips the whole
+    /// zero-coverage branch: no `work_journal` row, no `failure_class`, and
+    /// `lastErrorCode` never names the cause. The named failure would be
+    /// destroyed one layer ABOVE the catch that used to destroy it.
+    nonisolated static func observeTranscriptEvents(
+        stream: AsyncStream<TranscriptEngineEvent>,
+        assetId: String,
+        persistedCoverage: @Sendable () async -> Double
+    ) async -> (coverage: Double, failure: TranscriptFailureReason?) {
+        var coverage: Double = 0
+        var failure: TranscriptFailureReason?
+        for await event in stream {
+            if Task.isCancelled { break }
+            if case .completed(let completedAssetId) = event, completedAssetId == assetId {
+                // Read coverage from the store after transcription completes.
+                coverage = await persistedCoverage()
+                break
+            }
+            if case .failed(let failedAssetId, let reason) = event, failedAssetId == assetId {
+                failure = reason
+                break
+            }
+        }
+        if coverage == 0, failure == nil {
+            coverage = await persistedCoverage()
+        }
+        return (coverage, failure)
+    }
+
     static func failureExtras(_ failure: TranscriptFailureReason?) -> [String: String] {
         guard let failure else { return [:] }
         var extras = [
