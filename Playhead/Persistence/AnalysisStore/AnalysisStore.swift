@@ -87,8 +87,10 @@ struct AnalysisAsset: Sendable {
     let artifactClass: ArtifactClass
     /// playhead-gtt9.1.1: durable total-audio duration persisted at
     /// spool time. `nil` on legacy rows predating the column and on
-    /// placeholder rows created before the pipeline has decoded audio
-    /// yet (`resolveAssetId`). ``AnalysisCoordinator/resolveEpisodeDuration``
+    /// placeholder rows created before the pipeline has decoded audio yet
+    /// (`AnalysisCoordinator.resolveSession` — playhead-0hi9 deleted the
+    /// other placeholder factory, `resolveAssetId`, which had no callers).
+    /// ``AnalysisCoordinator/resolveEpisodeDuration``
     /// treats `nil` or non-positive as "missing" and routes the
     /// coverage guards to their fail-safe shortcuts.
     ///
@@ -7602,8 +7604,10 @@ actor AnalysisStore {
         // playhead-gtt9.1.1: `episodeDurationSec` is bound at insert
         // time only if the caller pre-populated it; spool-time writes
         // go through ``updateEpisodeDuration`` once the shard sum is
-        // known. Placeholder inserts from `resolveAssetId` pass nil
-        // and the column lands NULL.
+        // known. Placeholder inserts from
+        // `AnalysisCoordinator.resolveSession` pass nil and the column
+        // lands NULL. (playhead-0hi9 deleted `resolveAssetId`, the
+        // callerless second placeholder factory this used to name.)
         // playhead-i9dj: `episodeTitle` is bound at insert time when the
         // caller passed it on `AnalysisAsset.episodeTitle`. Existing
         // call-sites that don't yet thread the title leave it `nil`, and
