@@ -119,15 +119,47 @@ private struct ShardCache: Sendable {
         FileManager.default.fileExists(atPath: manifestPath(episodeID: episodeID).path)
     }
 
-    /// Load cached shards from disk.
-    static func loadShards(episodeID: String) -> [AnalysisShard]? {
-        let manifest = manifestPath(episodeID: episodeID)
-        guard let data = try? Data(contentsOf: manifest),
-              let entries = try? JSONDecoder().decode([ShardManifestEntry].self, from: data)
-        else {
+    /// playhead-8ysk: read the manifest in either shape.
+    ///
+    /// Returns the entries plus the source byte length recorded alongside
+    /// them. `sourceByteLength == nil` means a PRE-8ysk manifest — a bare
+    /// JSON array with no record of what it was decoded from. That is
+    /// indistinguishable from "decoded from a file we can no longer name",
+    /// so the caller must treat it as unvalidated.
+    static func readManifest(
+        episodeID: String
+    ) -> (entries: [ShardManifestEntry], sourceByteLength: Int64?)? {
+        guard let data = try? Data(contentsOf: manifestPath(episodeID: episodeID)) else {
+            return nil
+        }
+        if let envelope = try? JSONDecoder().decode(ShardManifest.self, from: data) {
+            return (envelope.entries, envelope.sourceByteLength)
+        }
+        if let legacy = try? JSONDecoder().decode([ShardManifestEntry].self, from: data) {
+            return (legacy, nil)
+        }
+        return nil
+    }
+
+    /// Load cached shards from disk, but only if they were decoded from the
+    /// file that is at `sourceURL` **now** (playhead-8ysk).
+    ///
+    /// A mismatch evicts the directory rather than merely declining to use
+    /// it: the entry is provably stale, nothing else in the app sweeps it,
+    /// and leaving it costs ~230 MB per decoded hour of non-purgeable
+    /// Application Support.
+    static func loadShards(episodeID: String, sourceURL: URL) -> [AnalysisShard]? {
+        guard let manifest = readManifest(episodeID: episodeID) else { return nil }
+
+        guard AnalysisAudioService.isShardCacheValid(
+            recordedSourceByteLength: manifest.sourceByteLength,
+            currentSourceByteLength: AnalysisAudioService.sourceByteLength(of: sourceURL)
+        ) else {
+            removeShards(episodeID: episodeID)
             return nil
         }
 
+        let entries = manifest.entries
         var shards: [AnalysisShard] = []
         for entry in entries {
             let path = shardPath(episodeID: episodeID, shardID: entry.id)
@@ -146,8 +178,17 @@ private struct ShardCache: Sendable {
         return shards
     }
 
-    /// Persist shards to disk.
-    static func saveShards(_ shards: [AnalysisShard], episodeID: String) {
+    /// Persist shards to disk, stamped with the identity of the file they
+    /// were decoded from (playhead-8ysk).
+    ///
+    /// A source whose length cannot be measured is NOT cached at all. An
+    /// unstamped entry can never be invalidated afterwards, and an
+    /// immortal entry is the whole defect this stamp exists to close —
+    /// re-decoding is strictly cheaper than serving a wrong answer forever.
+    static func saveShards(_ shards: [AnalysisShard], episodeID: String, sourceURL: URL) {
+        guard let sourceByteLength = AnalysisAudioService.sourceByteLength(of: sourceURL) else {
+            return
+        }
         let dir = episodeDirectory(episodeID: episodeID)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -164,7 +205,12 @@ private struct ShardCache: Sendable {
         let entries = shards.map { ShardManifestEntry(
             id: $0.id, startTime: $0.startTime, duration: $0.duration
         ) }
-        if let data = try? JSONEncoder().encode(entries) {
+        let envelope = ShardManifest(
+            version: ShardManifest.currentVersion,
+            sourceByteLength: sourceByteLength,
+            entries: entries
+        )
+        if let data = try? JSONEncoder().encode(envelope) {
             try? data.write(to: manifestPath(episodeID: episodeID), options: .atomic)
         }
     }
@@ -224,6 +270,42 @@ private struct ShardManifestEntry: Codable, Sendable {
     let duration: TimeInterval
 }
 
+/// playhead-8ysk: the manifest envelope, which records WHAT THE SHARDS WERE
+/// DECODED FROM as well as what they are.
+///
+/// Before this, the manifest was a bare `[ShardManifestEntry]` and the cache
+/// was keyed on `episodeID` alone. Decoded shards were therefore immortal and
+/// unvalidated: every retry, scheduler epoch and job generation received
+/// byte-identical input, so a retry could not differ from the attempt before
+/// it. It also rendered the download-completeness gate inert — that gate is
+/// byte-exact but it guards the *URL*, and the URL was discarded on a cache
+/// hit.
+///
+/// WHY BYTE LENGTH IS THE KEY. The failure mode is one file growing: the
+/// 8 MiB `DownloadManager.defaultPlayableThreshold` prefix is decoded and
+/// cached, then the download completes and the same URL holds the whole
+/// episode. A prefix and its completion never share a length, so length
+/// alone separates them, and — unlike a modification date — it cannot be
+/// perturbed by a restore-from-backup or a metadata-only touch, so it
+/// produces no spurious re-decodes.
+///
+/// It is deliberately measured from the decode's ACTUAL input rather than
+/// taken from `AnalysisJob.sourceFingerprint`: the fingerprint is what the
+/// scheduler believes about the asset, and the bug is precisely that what is
+/// on disk had diverged from that belief.
+private struct ShardManifest: Codable, Sendable {
+    /// Bumped only if the envelope's shape changes. A reader that cannot
+    /// decode the envelope falls back to the legacy bare-array shape and
+    /// treats it as unstamped.
+    static let currentVersion = 2
+
+    let version: Int
+    /// Length in bytes of the source audio file at the moment these shards
+    /// were persisted.
+    let sourceByteLength: Int64
+    let entries: [ShardManifestEntry]
+}
+
 // MARK: - AnalysisShardPCMReader (playhead-l2f.6)
 
 /// Ranged, read-only PCM access over the persisted analysis-shard cache.
@@ -256,11 +338,12 @@ enum AnalysisShardPCMReader {
         let requestStart = max(0.0, startSeconds)
         guard endSeconds > requestStart else { return nil }
 
-        guard let data = try? Data(
-            contentsOf: ShardCache.manifestPath(episodeID: episodeID)
-        ), let entries = try? JSONDecoder().decode(
-            [ShardManifestEntry].self, from: data
-        ) else {
+        // playhead-8ysk: read through the shared manifest decoder so this
+        // reader keeps working across the v1 (bare array) and v2 (stamped
+        // envelope) shapes. No source-identity check here on purpose — the
+        // refiner has no source URL, and it already treats absent PCM as
+        // "cannot snap" rather than as an error.
+        guard let entries = ShardCache.readManifest(episodeID: episodeID)?.entries else {
             return nil
         }
 
@@ -404,6 +487,43 @@ actor AnalysisAudioService {
             && decodedDuration < assetDuration * (1.0 - truncationTolerance)
     }
 
+    /// playhead-8ysk: length in bytes of a decode's source file, or `nil`
+    /// when it cannot be measured (missing, unreadable, not a regular file).
+    nonisolated static func sourceByteLength(of url: URL) -> Int64? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber
+        else {
+            return nil
+        }
+        return size.int64Value
+    }
+
+    /// playhead-8ysk: may a cached shard set be served for the file that is
+    /// at the decode URL right now?
+    ///
+    /// Hoisted out of `ShardCache.loadShards` so the rule can be exercised
+    /// without an audio fixture, the same way ``isTruncatedDecode`` is.
+    ///
+    /// - `currentSourceByteLength == nil` → **serve**. The source is gone or
+    ///   unreadable, so the cache is the only remaining answer and there is
+    ///   no better one to recompute. Callers downstream of a completed
+    ///   analysis (boundary refinement, chapter snapshots, the final pass)
+    ///   depend on this: the audio file is evictable, the shards are not.
+    /// - `recordedSourceByteLength == nil` → **discard**. A pre-8ysk manifest
+    ///   carries no record of its input, so it can never be shown to match;
+    ///   treating "unknown" as "matches" would preserve exactly the immortal
+    ///   entries this change exists to clear, including the ones already on
+    ///   the owner's device.
+    /// - otherwise → serve iff the lengths are equal.
+    nonisolated static func isShardCacheValid(
+        recordedSourceByteLength: Int64?,
+        currentSourceByteLength: Int64?
+    ) -> Bool {
+        guard let current = currentSourceByteLength else { return true }
+        guard let recorded = recordedSourceByteLength else { return false }
+        return recorded == current
+    }
+
     /// Converter output buffer size in frames per conversion cycle.
     /// 30 s of 16 kHz Float32 mono = 480 000 frames ≈ 1.92 MB. Pre-allocated
     /// once and reused across `converter.convert(...)` calls so the converter
@@ -500,8 +620,9 @@ actor AnalysisAudioService {
         episodeID: String,
         shardDuration: TimeInterval = AnalysisAudioService.defaultShardDuration
     ) async throws -> AnalysisDecodeOutcome {
-        // Return persisted shards if available.
-        if let cached = ShardCache.loadShards(episodeID: episodeID) {
+        // Return persisted shards if available AND if they were decoded from
+        // the file that is at this URL now (playhead-8ysk).
+        if let cached = ShardCache.loadShards(episodeID: episodeID, sourceURL: fileURL.url) {
             return AnalysisDecodeOutcome(shards: cached, isTruncated: false)
         }
 
@@ -1027,8 +1148,22 @@ actor AnalysisAudioService {
         // 9. Persist shards for reuse — but only when the file was fully decoded.
         //     Truncated files (still downloading) must not be cached, otherwise
         //     the partial result is returned permanently even after download completes.
+        //
+        //     playhead-8ysk: `isTruncated` is a NECESSARY but not a SUFFICIENT
+        //     guard here, which is why the entry is also stamped with its
+        //     source's byte length. `isTruncated` compares the decode against
+        //     the duration the CONTAINER declares, and a partially-downloaded
+        //     file does not always declare the whole episode. Measured on this
+        //     machine against 600 s MP3s truncated to a 20 % prefix: with a
+        //     Xing/Info header the partial file still declares 600 s and
+        //     decodes 120 s, so `isTruncated` is true and the cache correctly
+        //     refuses it — but a headerless CBR MP3 (`lame -t`, a shape podcast
+        //     CDNs serve) declares 120.01 s and decodes 120.01 s. The prefix
+        //     looks complete TO ITSELF, `isTruncated` is false, and the partial
+        //     decode is cached. The byte stamp catches that case when the file
+        //     finishes downloading; nothing else does.
         if !isTruncated {
-            ShardCache.saveShards(shards, episodeID: episodeID)
+            ShardCache.saveShards(shards, episodeID: episodeID, sourceURL: fileURL.url)
         }
 
         // 10. Log truncation warning but return partial shards — throwing here
