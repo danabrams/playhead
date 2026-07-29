@@ -995,7 +995,8 @@ actor TranscriptEngineService {
             // `stopped` depending on where the loop was parked, which is an
             // implementation detail no bundle reader can act on. Only
             // `.cancelled` is upgraded — a preempt has its own proximate cause.
-            let named = interruption == .cancelled && stoppedAssetIds.contains(analysisAssetId)
+            let named: TranscriptFailureClass =
+                interruption == .cancelled && stoppedAssetIds.contains(analysisAssetId)
                 ? .stopped
                 : interruption
             let reason = shardFailures.isEmpty
