@@ -146,6 +146,47 @@ private final class SilentThenFailingRecognizer: SpeechRecognizer, @unchecked Se
     }
 }
 
+/// Succeeds for one episode and fails for every other. Lets a single engine —
+/// which is what production actually holds — run a good session and then a bad
+/// one, so the per-run counters' RESET can be measured (playhead-8ysk r4).
+private final class SucceedsForOneEpisodeRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    private let goodEpisodeID: String
+
+    init(goodEpisodeID: String) { self.goodEpisodeID = goodEpisodeID }
+
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard shard.episodeID == goodEpisodeID else {
+            throw TranscriptEngineError.vadFailed("shard \(shard.id) of \(shard.episodeID)")
+        }
+        let word = TranscriptWord(
+            text: "hello",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            confidence: 0.9
+        )
+        return [TranscriptSegment(
+            id: shard.id,
+            words: [word],
+            text: "hello",
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration,
+            avgConfidence: 0.9,
+            passType: .fast
+        )]
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
 /// Never loads, so `SpeechService.isReady()` is false.
 private final class NeverReadyRecognizer: SpeechRecognizer, @unchecked Sendable {
     func loadModel() async throws {}
@@ -550,6 +591,76 @@ struct TranscriptEngineFailureEventTests {
         let afterPass2 = try await store.fetchTranscriptChunks(assetId: "asset-dedup").count
         #expect(afterPass2 == afterPass1,
                 "pass 2 must add no rows, or this fixture does not exercise the dedup path")
+    }
+
+    // MARK: - The counters are PER RUN, on an engine that outlives the run
+
+    /// A GOOD SESSION MUST NOT COVER FOR THE BAD ONE AFTER IT.
+    ///
+    /// Both totals the gate consults — rows inserted and shards finished —
+    /// live on the actor, not on the run, and are correct only because
+    /// `runTranscriptionLoop` zeroes them on entry. Every other test in this
+    /// file builds a fresh `TranscriptEngineService`, so all of them pass
+    /// against a build that never resets: the counters start at zero anyway.
+    ///
+    /// Production does the opposite. `AnalysisCoordinator` and
+    /// `AnalysisJobRunner` each hold ONE engine and drive episode after
+    /// episode through it. Without the reset, an episode that transcribed
+    /// cleanly leaves its totals behind and the NEXT episode's total failure
+    /// reads as "we produced something" — `.completed` over a run that wrote
+    /// nothing, which is precisely the lie this bead removed, restored across
+    /// the session boundary instead of within one.
+    ///
+    /// So: one engine, two sessions, the second failing completely.
+    @Test(.timeLimit(.minutes(1)))
+    func perRunCountersDoNotLeakIntoTheNextSession() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-run-1"))
+        try await store.insertAsset(Self.asset(id: "asset-run-2"))
+
+        let speech = SpeechService(
+            recognizer: SucceedsForOneEpisodeRecognizer(goodEpisodeID: "ep-asset-run-1"),
+            serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        // ONE engine for both sessions — the whole point.
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+
+        // Session 1: succeeds, so it leaves both counters non-zero.
+        let events1 = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-asset-run-1", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-run-1",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-run-1")
+        #expect(await Self.awaitTerminal(on: events1, assetId: "asset-run-1") == .completed)
+        let run1Chunks = try await store.fetchTranscriptChunks(assetId: "asset-run-1")
+        #expect(!run1Chunks.isEmpty,
+                "session 1 must really produce, or there is nothing that could leak")
+
+        // Session 2 on the same engine: every shard fails.
+        let events2 = await engine.events()
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-asset-run-2", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-run-2",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-run-2")
+
+        let terminal = await Self.awaitTerminal(on: events2, assetId: "asset-run-2")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("""
+                session 2 transcribed nothing and reported \
+                \(String(describing: terminal)) — session 1's totals were \
+                counted as session 2's output
+                """)
+            return
+        }
+        #expect(reason.failureClass == .vadFailed)
+        #expect(try await store.fetchTranscriptChunks(assetId: "asset-run-2").isEmpty)
+        // And session 1's work is untouched.
+        #expect(try await store.fetchTranscriptChunks(assetId: "asset-run-1").count == run1Chunks.count)
     }
 
     // MARK: - The third `transcribeShard` call site (review r4)
