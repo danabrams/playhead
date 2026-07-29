@@ -830,7 +830,9 @@ struct ManualVetoReachesPersistedAnalysisTests {
     // its own. And each direction is asserted separately: winning is one
     // property, not being undone is another.
 
-    private func exactTimeSpanScope(
+    // `static` so the nested helper in
+    // `theWinningGestureKeepsItsOwnAttribution` captures nothing at all.
+    private static func exactTimeSpanScope(
         assetId: String,
         start: Double,
         end: Double
@@ -869,7 +871,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         let rewindWroteARow = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: "asset-1",
                     start: 100,
                     end: 160
@@ -898,7 +900,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         let vetoWroteANewRow = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: "asset-1",
                     start: 100,
                     end: 160
@@ -974,7 +976,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         _ = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: "asset-1",
                     start: 100,
                     end: 160
@@ -992,7 +994,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         let rewindWroteANewRow = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: "asset-1",
                     start: 100,
                     end: 160
@@ -1060,7 +1062,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         ) -> CorrectionEvent {
             CorrectionEvent(
                 analysisAssetId: assetId,
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: assetId,
                     start: 100,
                     end: 160
@@ -1168,7 +1170,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         _ = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: "asset-1",
                     start: 100,
                     end: 160
@@ -1183,7 +1185,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         let landedOnTheReceipt = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: "asset-1",
                     start: 100,
                     end: 160
@@ -1244,7 +1246,7 @@ struct ManualVetoReachesPersistedAnalysisTests {
         _ = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
-                scope: exactTimeSpanScope(
+                scope: Self.exactTimeSpanScope(
                     assetId: "asset-1",
                     start: 100,
                     end: 160
