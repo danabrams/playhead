@@ -2126,6 +2126,83 @@ struct AnalysisStoreAdScanCoverageTests {
         #expect(ok.adScanFraction == 1)
     }
 
+    /// The RATIO alone cannot detect a denominator that is wrong by a large
+    /// factor: when the declared duration is a seventh of the real audio, a scan
+    /// that covered roughly `declaredDuration` seconds yields ~1.0 and is
+    /// indistinguishable from a legitimately-complete short episode.
+    ///
+    /// This is asset E8F0F867 from the 2026-04-25 device capture, verbatim:
+    /// declared 552.9 s, fast transcript reaching 3,810 s, ad scan 563.8 s. The
+    /// overshoot guard passes it (563.8 is within 5% of 552.9) and it would light
+    /// a confident ✓ on 14.8% of the audio. The transcript's own reach is the
+    /// witness that the denominator is wrong.
+    @Test("a duration contradicted by the transcript's reach is unmeasurable, not 100%")
+    func durationContradictedByTranscriptReachIsUnmeasurable() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-e8f0f867",
+            episodeDurationSec: 552.9,
+            fastTranscriptCoverageEndTime: 3810
+        ))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-e8f0f867", index: 0, start: 0, end: 563.8)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-e8f0f867"])["a-e8f0f867"]
+        )
+        #expect(summary.adScanCoveredSec == 563.8)
+        // 563.8 / 552.9 = 1.0197 — inside the 5% overshoot tolerance, so the ratio
+        // check alone would clamp it to 1.0 and light the ✓.
+        #expect(563.8 <= 552.9 + AnalysisCoverageSummary
+            .adScanDurationToleranceSec(episodeDurationSec: 552.9))
+        #expect(summary.adScanFraction == nil)
+        #expect(!episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: summary.adScanFraction, isDegradedTerminal: false
+        ))
+
+        // Once the duration is repaired to the real length, the SAME rows measure
+        // honestly again — the guard withholds a number, it does not blacklist an
+        // episode.
+        try await store.insertAsset(makeAsset(
+            id: "a-repaired",
+            episodeDurationSec: 3810,
+            fastTranscriptCoverageEndTime: 3810
+        ))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-repaired", index: 0, start: 0, end: 563.8)
+        )
+        let repaired = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-repaired"])["a-repaired"]
+        )
+        let fraction = try #require(repaired.adScanFraction)
+        #expect(abs(fraction - 563.8 / 3810) < 0.0001)
+        #expect(fraction < episodePreparationCompleteThreshold)
+    }
+
+    /// The reach guard must tolerate ordinary feed-vs-measured drift, or it would
+    /// withhold the fraction on healthy episodes: the final chunk legitimately
+    /// ends a hair past the shard-sum duration.
+    @Test("a transcript reaching a little past the duration is still measurable")
+    func smallTranscriptOvershootStaysMeasurable() async throws {
+        let store = try await makeTestStore()
+        // Reach 1,010 s against a declared 1,000 s — 1% drift, well inside tolerance.
+        try await store.insertAsset(makeAsset(
+            id: "a-drift", episodeDurationSec: 1000, fastTranscriptCoverageEndTime: 1010
+        ))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-drift", index: 0, start: 0, end: 1000)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-drift"])["a-drift"]
+        )
+        #expect(summary.adScanFraction == 1)
+        #expect(episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: summary.adScanFraction, isDegradedTerminal: false
+        ))
+    }
+
     /// Batched reads must not cross-contaminate: each asset gets only its own
     /// windows. A single shared `Set` bug here would let one fully-scanned
     /// episode light the ✓ on every row in the list.

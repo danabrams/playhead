@@ -648,15 +648,34 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     ///     exactly `1.0` would turn a broken denominator into a confident ✓ on a
     ///     fraction of the audio, so a disagreement that large reads as
     ///     unmeasurable instead.
+    ///   * a duration CONTRADICTED by the transcript's own reach. Measured on the
+    ///     2026-04-25 device capture, asset E8F0F867 declares 552.9 s while its
+    ///     fast transcript reaches 3,810 s, and its ad scan examined 563.8 s of
+    ///     that. The ratio alone (563.8 / 552.9) is indistinguishable from a
+    ///     legitimately-complete short episode, so the overshoot check above lets
+    ///     it through and it would render a confident ✓ on 14.8% of the audio. A
+    ///     transcript that reaches far past the declared duration is proof the
+    ///     denominator is wrong — the same judgement
+    ///     ``FastTranscriptCoverageInvariant`` already makes — so the fraction is
+    ///     withheld until the duration is repaired (`PlayheadRuntime`'s
+    ///     duration-backfill sweep).
     var adScanFraction: Double? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
               adScanCoveredSec >= 0,
               let episodeDurationSec,
               episodeDurationSec.isFinite,
-              episodeDurationSec > 0,
-              adScanCoveredSec <= episodeDurationSec
-                + Self.adScanDurationToleranceSec(episodeDurationSec: episodeDurationSec) else {
+              episodeDurationSec > 0 else {
+            return nil
+        }
+        let tolerance = Self.adScanDurationToleranceSec(episodeDurationSec: episodeDurationSec)
+        guard adScanCoveredSec <= episodeDurationSec + tolerance else { return nil }
+        // A transcript reaching far past the declared duration means the
+        // denominator describes different audio than the numerator, even when
+        // their RATIO looks healthy. Under-claim rather than divide by a number
+        // the transcript has already disproved.
+        if let reach = fastTranscriptCoverageEndSec, reach.isFinite,
+           reach > episodeDurationSec + tolerance {
             return nil
         }
         return min(1, adScanCoveredSec / episodeDurationSec)
