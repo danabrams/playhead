@@ -5842,6 +5842,13 @@ actor AnalysisStore {
     private func migrateUniqueEpisodeFingerprintIndexV39IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 39 else { return }
         if try tableExists("analysis_assets") {
+            // `createdAt` is not guaranteed to exist here. Raw-schema test
+            // fixtures (and any pre-v9 database) seed `analysis_assets` without
+            // it, and referencing a missing column aborts the whole migration
+            // transaction — which is app launch. Order by it only when it is
+            // there; `rowid DESC` alone is a correct, if coarser, newest-wins.
+            let hasCreatedAt = try columnExists(table: "analysis_assets", column: "createdAt")
+            let ordering = hasCreatedAt ? "createdAt DESC, rowid DESC" : "rowid DESC"
             try exec("""
                 DELETE FROM analysis_assets
                 WHERE rowid NOT IN (
@@ -5849,7 +5856,7 @@ actor AnalysisStore {
                         SELECT rowid,
                                ROW_NUMBER() OVER (
                                    PARTITION BY episodeId, assetFingerprint
-                                   ORDER BY createdAt DESC, rowid DESC
+                                   ORDER BY \(ordering)
                                ) AS rank
                         FROM analysis_assets
                     )

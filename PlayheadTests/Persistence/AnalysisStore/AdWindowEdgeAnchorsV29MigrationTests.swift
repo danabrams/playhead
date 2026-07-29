@@ -60,7 +60,7 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         // recently 36 → 37 (playhead-0sro fast-transcript watermark
         // reconcile, data-only). The edge-anchor columns probed below are
         // unchanged by any of it.
-        #expect(AnalysisStore.currentSchemaVersion == 38)
+        #expect(AnalysisStore.currentSchemaVersion == 39)
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }

@@ -96,7 +96,7 @@ struct RediffRefetchStateV28MigrationTests {
         // recently 36 → 37 (playhead-0sro fast-transcript watermark
         // reconcile, data-only). The V28 rediff_refetch_state tables probed
         // below are unchanged by any of it.
-        #expect(AnalysisStore.currentSchemaVersion == 38)
+        #expect(AnalysisStore.currentSchemaVersion == 39)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

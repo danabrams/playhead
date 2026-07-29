@@ -600,7 +600,14 @@ struct AnalysisWorkSchedulerDurationProbeTests {
             .filter { $0.episodeId == "ep-6" }
         let newAsset = try #require(assets.first { $0.assetFingerprint == newSHA })
         #expect(newAsset.id != "asset-old-weak")
-        #expect(newAsset.weakFingerprint == nil)
+        // playhead-0hi9: the row the scheduler mints now RECORDS the weak
+        // identity it observed. It used to land NULL, which is precisely what
+        // made `canUpgradeWeakAssetToCanonicalSHA` unable to recognise this
+        // audio on a later pass and let a second row be created for it. The
+        // contract under test here is unchanged — the stale weak asset is not
+        // upgraded and a new row is created — this pins the new row's identity
+        // as well.
+        #expect(newAsset.weakFingerprint == currentWeak)
         let probed = try #require(newAsset.episodeDurationSec)
         #expect(abs(probed - 5.5) < 0.5, "new SHA asset should receive the current file's probed duration")
 
