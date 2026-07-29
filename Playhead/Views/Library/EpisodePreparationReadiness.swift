@@ -162,9 +162,11 @@ func episodePreparationDownloadPermitted(
 ///   1. `.ready` — the episode is honestly, measurably fully ad-scanned.
 ///      Supersedes everything, including the cellular gate (a fully-analyzed
 ///      episode is ready regardless of network).
-///   2. `.partiallyAnalyzed` — the pipeline reached a completion terminal
-///      with nothing running, but coverage falls short (or the terminal is a
-///      degraded one). playhead-pz32: this case used to fold into `.ready`.
+///   2. `.partiallyAnalyzed` — the pipeline reached a completion terminal with
+///      nothing running and no transfer in flight, but MEASURED coverage falls
+///      short (or the terminal is a degraded one). playhead-pz32: this case used
+///      to fold into `.ready`. With coverage unmeasured it falls to actionable
+///      `.idle` instead, because ◐ asserts a measurement.
 ///   3. Resting `.idle` — no intent and nothing active. The ✦ glyph.
 ///   4. Working (intent OR an in-flight download OR active analysis):
 ///      * not downloaded, download in flight → `.downloading`
@@ -216,7 +218,9 @@ func deriveEpisodePreparationReadiness(
         // (`pruneOrphanedScansForCurrentCohort`), which also means the pipeline
         // itself no longer trusts those verdicts. "Nothing is prepared; tap to
         // prepare" is exactly true, and ✦ is the actionable glyph that says it.
-        guard inputs.adScanFraction != nil else {
+        // `isFinite`, not `!= nil`: a NaN would clamp to 0 and render the same
+        // fabricated "0% scanned" as an absent measurement.
+        guard inputs.adScanFraction?.isFinite == true else {
             return EpisodePreparationReadiness(
                 state: .idle,
                 downloadFraction: inputs.isDownloaded ? 1 : download,

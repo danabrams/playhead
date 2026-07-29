@@ -270,6 +270,14 @@ struct EpisodePreparationReadinessTests {
         )
         #expect(readiness.state == .idle)
         #expect(readiness.downloadFraction == 1)
+        // A NaN is an absent measurement too — it would clamp to 0 and render the
+        // same fabricated "0% scanned".
+        #expect(deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: true, analysisTerminatedComplete: true, adScanFraction: .nan)
+        ).state == .idle)
+        #expect(deriveEpisodePreparationReadiness(
+            inputs(isDownloaded: true, analysisTerminatedComplete: true, adScanFraction: .infinity)
+        ).state == .idle)
         // A MEASURED zero is different: it stays ◐, because 0 is a real answer.
         let measuredZero = deriveEpisodePreparationReadiness(
             inputs(

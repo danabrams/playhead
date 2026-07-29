@@ -107,9 +107,23 @@ final class EpisodePreparationStatusModel {
         let assets = (try? await store.fetchLatestAssetByEpisodeIdMap()) ?? [:]
         // playhead-pz32: the ad-scan coverage the readiness predicate keys on
         // comes from the SAME `AnalysisCoverageSummary` read model the Activity
-        // screen consumes — one batched query for every visible row, and one
-        // definition of every coverage quantity for both surfaces.
+        // screen consumes — one definition of every coverage quantity for both
+        // surfaces, so a copied formula can no longer go stale.
+        //
+        // COST, stated honestly: this is new work on this path (the pre-pz32
+        // fraction came free off the already-fetched asset row) and
+        // `fetchCoverageSummariesByAssetIds` runs four prepared statements per
+        // 500-id chunk, including every fast transcript chunk for the assets in
+        // scope. It is bounded by the number of episodes that have an
+        // `analysis_assets` row — NOT by the list length — which is why the id
+        // set is built by `compactMap`ping the assets rather than from
+        // `episodeIds`. Most library rows have never been analysed and cost
+        // nothing here. If that ever stops being true (a user with thousands of
+        // analysed episodes on screen), the fix is to narrow the fetch to the
+        // visible window, not to go back to reading a cheaper wrong number.
         let coverageAssetIds = Set(episodeIds.compactMap { assets[$0]?.id })
+        // A throwing read degrades to "coverage unknown", which under-claims
+        // (not-ready) rather than leaving a stale ✓ standing.
         let summaries = (try? await store.fetchCoverageSummariesByAssetIds(coverageAssetIds)) ?? [:]
         let snapshot = await downloadManager.progressSnapshot()
         let cachedIds = await downloadManager.cachedEpisodeIds(matching: ids)
