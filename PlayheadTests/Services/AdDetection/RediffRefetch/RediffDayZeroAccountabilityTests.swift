@@ -1157,6 +1157,71 @@ struct RediffDayZeroV38MigrationTests {
 
 // MARK: - Real bytes: the diagnosis the p70f trace could not make
 
+/// REVIEW ROUND 2 — turning a convention into a gate.
+///
+/// Round 1 fixed the permanent-lockout trap by scoping the attempt budget to
+/// `DayZeroRediffAttemptPolicy.currentGeneration`, with the rule "bump it when
+/// the mint / byte gate / persona staging changes". That rule was a HUMAN
+/// CONVENTION with no enforcement, and the failure mode it guards is silent and
+/// permanent in the wrong direction: someone finally fixes the reason day-0
+/// mints nothing, forgets to bump, and every asset that already spent its three
+/// attempts stays dead forever — the owner repairs the mint and observes no
+/// change at all, which is indistinguishable from the fix not working.
+///
+/// The asymmetry decides the design. A NEEDLESS bump costs at most
+/// `maxAttempts` extra fetches per asset that is actually replayed. A MISSED
+/// bump is unrecoverable without another release. So this canary pins every
+/// outcome-determining input the policy's own doc comment enumerates, and any
+/// change to one of them fails the gate until a human either bumps the
+/// generation or consciously re-calibrates the canary. It cannot catch a logic
+/// edit INSIDE `gateAndDiffBytes` — nothing cheap can — but it does catch every
+/// knob the doc names, which is where the lockout risk actually lives.
+@Suite("Day-0 policy generation canary (playhead-p70f review round 2)")
+struct DayZeroPolicyGenerationCanaryTests {
+
+    /// The generation these values were calibrated against. Changing any
+    /// expectation below without changing this is the mistake.
+    static let calibratedGeneration = 1
+
+    private static let bumpHint = """
+        Day-0's outcome-determining behavior changed. Either bump \
+        DayZeroRediffAttemptPolicy.currentGeneration (so assets that already \
+        exhausted their 3-attempt budget get the fix) or, if you are certain \
+        this change cannot alter what day-0 concludes, re-calibrate this canary \
+        deliberately. Silently editing the value here is how the fix gets \
+        withheld from every episode the owner already played.
+        """
+
+    @Test("bumping the day-0 generation is ENFORCED, not merely documented")
+    func outcomeDeterminingInputsArePinnedToTheGeneration() {
+        #expect(DayZeroRediffAttemptPolicy.currentGeneration == Self.calibratedGeneration,
+                "\(Self.bumpHint)")
+
+        // The B-copy floor — how many copies the mint refuses to diff below.
+        #expect(RediffSlotOwnership.dayZeroMinKWayBCopies == 2, "\(Self.bumpHint)")
+        // The k-way persona staging — how many copies day-0 actually fetches.
+        #expect(RediffActivation.dayZeroKWayFetchCount == 2, "\(Self.bumpHint)")
+        // The mint's opt-in to non-monotonic segment recovery (9s6q FIX A).
+        #expect(RediffActivation.nonMonotonicSegmentRecoveryEnabled, "\(Self.bumpHint)")
+        // The byte gate, in full: every threshold that decides whether a diff
+        // is accepted and how its slots are shaped.
+        #expect(RediffSlotOwnership.Configuration.default == RediffSlotOwnership.Configuration(
+            minAlignedFractionB: 0.5,
+            minAdSeconds: 5.0,
+            fragmentMergeGapSeconds: 3.0,
+            maxSlotSeconds: 480.0,
+            minCoreCoverage: 0.8
+        ), "\(Self.bumpHint)")
+        // What the mint stamps on a minted window.
+        #expect(AdDetectionService.dayZeroRediffByteExactBoundaryState == "dayZeroRediffByteExact",
+                "\(Self.bumpHint)")
+        #expect(AdDetectionService.dayZeroRediffByteExactMetadataSource == "rediffDayZeroByteExact",
+                "\(Self.bumpHint)")
+        // The exit vocabulary — what day-0 is capable of concluding at all.
+        #expect(RediffDayZeroExit.allCases.count == 14, "\(Self.bumpHint)")
+    }
+}
+
 /// The whole reason `RediffDayZeroExit` exists is that the trace ranked M9
 /// ("diffs ran, produced no divergent slot") most likely but could not
 /// DISTINGUISH it from the byte gate rejecting everything — which is what

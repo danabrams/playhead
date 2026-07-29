@@ -55,6 +55,9 @@
       "day_zero_attempts" : [
 
       ],
+      "read_failures" : [
+
+      ],
       "refetch_states" : [
 
       ]

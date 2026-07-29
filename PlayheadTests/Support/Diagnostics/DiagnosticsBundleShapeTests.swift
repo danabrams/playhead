@@ -252,7 +252,37 @@ private enum BundleShapeFixtures {
         else {
             return nil
         }
-        return Set(defaultSubtree.keys)
+        var paths: Set<String> = []
+        collectKeyPaths(defaultSubtree, prefix: "", into: &paths)
+        return paths
+    }
+
+    /// Every key PATH in the subtree, not just the top level.
+    ///
+    /// REVIEW ROUND 2 (playhead-p70f): the top-level-only version had the same
+    /// silent failure the drift check was written to prevent, one level down.
+    /// `rediff_diagnostics` is a whole nested subtree, so a bead adding or
+    /// renaming a field INSIDE it — as round 2's `read_failures` does — left
+    /// the checked-in fixture stale while the drift check reported it fresh,
+    /// and legal review would have been handed a bundle that no longer matched
+    /// what ships. Array elements collapse onto a single `key[]` prefix so the
+    /// path set stays a shape, not a row count.
+    private static func collectKeyPaths(
+        _ value: Any,
+        prefix: String,
+        into paths: inout Set<String>
+    ) {
+        if let dictionary = value as? [String: Any] {
+            for (key, child) in dictionary {
+                let path = prefix.isEmpty ? key : "\(prefix).\(key)"
+                paths.insert(path)
+                collectKeyPaths(child, prefix: path, into: &paths)
+            }
+        } else if let array = value as? [Any] {
+            for element in array {
+                collectKeyPaths(element, prefix: prefix + "[]", into: &paths)
+            }
+        }
     }
 }
 

@@ -280,7 +280,93 @@ typealias DiagnosticsBannerTalliesFetch = @Sendable () async -> [BannerTallySess
 /// the production adapter swallows store errors and returns `.empty`.
 /// Rows carry the RAW `analysisAssetId` — `DiagnosticsBundleBuilder` is
 /// what hashes it, so this closure must never be routed anywhere else.
+///
+/// A read that FAILS is named in `DiagnosticsRediffSnapshot.readFailures`
+/// rather than silently reported as an empty table — see
+/// `RediffDiagnosticsFetchAdapter`.
 typealias DiagnosticsRediffFetch = @Sendable () async -> DiagnosticsRediffSnapshot
+
+/// The ONE production implementation behind `DiagnosticsRediffFetch`
+/// (playhead-p70f, review round 2).
+///
+/// WHY IT IS SHARED. This body previously existed as two byte-identical
+/// copies, one in `DebugDiagnosticsHatch` (`#if DEBUG`) and one in
+/// `ReleaseDiagnosticsHatch` (`#if !DEBUG`), with `ListenerFeedbackHatch`
+/// reaching whichever one its `DiagnosticsHatch` typealias resolved to. The
+/// test target builds DEBUG, so the Release copy was compiled by NOTHING the
+/// suite can run: a divergence introduced there — a wrong limit, a dropped
+/// read, a stale entry point — would have shipped to users with every test
+/// green, and no test could have been written to catch it. One
+/// unconditionally-compiled implementation removes the failure mode
+/// structurally instead of policing it by review.
+///
+/// WHY THE FAILURES ARE NAMED. Each read is independently guarded so one
+/// unreadable table cannot cost the export the other three. But a bare `try?`
+/// turns a failed read into an EMPTY one, and "empty" is exactly what a lane
+/// that has done nothing looks like — the same conflation between "zero" and
+/// "unknown" that let 299.6 MB read as "nothing happened" and that this bead
+/// exists to eliminate. A partial failure is the dangerous case: an unreadable
+/// `rediff_day_zero_attempts` beside a healthy ledger renders precisely the
+/// misleading picture "bytes spent, no day-0 attempts". So a failed read
+/// contributes its (closed, fixed-vocabulary) name to `readFailures`, which
+/// ships in the bundle. No error text is captured — the identifiers below are
+/// the entire vocabulary, so nothing device-specific can leak through them.
+enum RediffDiagnosticsFetchAdapter {
+
+    /// Cap on the `background_task_runs` rows fetched for the rediff entry
+    /// point. Equal to `DiagnosticsBundleBuilder.rediffBackgroundRunCap` —
+    /// pinned by `DiagnosticsBundleRediffTests`.
+    static let backgroundRunFetchLimit = 25
+
+    /// Cap on per-asset rediff rows fetched. Deliberately ABOVE
+    /// `DiagnosticsBundleBuilder.rediffRowCap` so the builder's own newest-first
+    /// sort, not the store's, decides which rows ship.
+    static let rowFetchLimit = 200
+
+    /// The closed vocabulary of read names that can appear in
+    /// `DiagnosticsRediffSnapshot.readFailures`. Raw values match the
+    /// `rediff_diagnostics` sub-keys they correspond to.
+    enum Read: String, CaseIterable, Sendable {
+        case bandwidth
+        case refetchStates = "refetch_states"
+        case dayZeroAttempts = "day_zero_attempts"
+        case backgroundRuns = "background_runs"
+    }
+
+    static func make(store: AnalysisStore) -> DiagnosticsRediffFetch {
+        { [store] in
+            async let bandwidth: RediffBandwidthTotals? =
+                try? await store.fetchRediffBandwidthTotals()
+            async let states: [RediffRefetchStateRow]? =
+                try? await store.fetchRediffRefetchStates()
+            async let dayZero: [RediffDayZeroAttemptRecord]? =
+                try? await store.fetchRediffDayZeroAttempts(limit: rowFetchLimit)
+            async let runs: [BackgroundTaskRunRecord]? = try? await store.fetchRecentBackgroundTaskRuns(
+                entryPoint: .rediffRefetch, limit: backgroundRunFetchLimit
+            )
+
+            let readBandwidth = await bandwidth
+            let readStates = await states
+            let readDayZero = await dayZero
+            let readRuns = await runs
+
+            // Fixed order, so two exports of the same fault are comparable.
+            var failures: [String] = []
+            if readBandwidth == nil { failures.append(Read.bandwidth.rawValue) }
+            if readStates == nil { failures.append(Read.refetchStates.rawValue) }
+            if readDayZero == nil { failures.append(Read.dayZeroAttempts.rawValue) }
+            if readRuns == nil { failures.append(Read.backgroundRuns.rawValue) }
+
+            return DiagnosticsRediffSnapshot(
+                bandwidth: readBandwidth ?? RediffBandwidthTotals(),
+                refetchStates: readStates ?? [],
+                dayZeroAttempts: readDayZero ?? [],
+                backgroundRuns: readRuns ?? [],
+                readFailures: failures
+            )
+        }
+    }
+}
 
 /// Seam for flipping `Episode.diagnosticsOptIn = false` on the rows
 /// that actually shipped in the bundle. Abstracted so the coordinator

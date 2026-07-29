@@ -270,19 +270,57 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         let refetchStates: [RediffRefetchStateSummary]
         let dayZeroAttempts: [RediffDayZeroAttemptSummary]
         let backgroundRuns: [RediffBackgroundRunSummary]
+        /// Which of the four reads THREW, by the closed
+        /// `RediffDiagnosticsFetchAdapter.Read` vocabulary. Empty is healthy.
+        ///
+        /// WHY IT SHIPS: each read is independently `try?`-guarded so one bad
+        /// table cannot cost the export the other three — but a bare `try?`
+        /// makes an unreadable table look exactly like an empty one, which is
+        /// the "zero is not evidence of success" conflation this whole bead
+        /// exists to remove. An unreadable `day_zero_attempts` beside a healthy
+        /// ledger would otherwise render as "bytes spent, no day-0 attempts",
+        /// i.e. the original bug report. Fixed vocabulary, never error text.
+        let readFailures: [String]
 
         static let empty = RediffDiagnostics(
             bandwidth: RediffBandwidthSummary(),
             refetchStates: [],
             dayZeroAttempts: [],
-            backgroundRuns: []
+            backgroundRuns: [],
+            readFailures: []
         )
+
+        init(
+            bandwidth: RediffBandwidthSummary,
+            refetchStates: [RediffRefetchStateSummary],
+            dayZeroAttempts: [RediffDayZeroAttemptSummary],
+            backgroundRuns: [RediffBackgroundRunSummary],
+            readFailures: [String] = []
+        ) {
+            self.bandwidth = bandwidth
+            self.refetchStates = refetchStates
+            self.dayZeroAttempts = dayZeroAttempts
+            self.backgroundRuns = backgroundRuns
+            self.readFailures = readFailures
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            bandwidth = try container.decode(RediffBandwidthSummary.self, forKey: .bandwidth)
+            refetchStates = try container.decode([RediffRefetchStateSummary].self, forKey: .refetchStates)
+            dayZeroAttempts = try container.decode([RediffDayZeroAttemptSummary].self, forKey: .dayZeroAttempts)
+            backgroundRuns = try container.decode([RediffBackgroundRunSummary].self, forKey: .backgroundRuns)
+            // Absent in bundles minted before review round 2 — decode as
+            // "nothing failed" rather than rejecting the whole bundle.
+            readFailures = try container.decodeIfPresent([String].self, forKey: .readFailures) ?? []
+        }
 
         enum CodingKeys: String, CodingKey {
             case bandwidth
             case refetchStates = "refetch_states"
             case dayZeroAttempts = "day_zero_attempts"
             case backgroundRuns = "background_runs"
+            case readFailures = "read_failures"
         }
     }
 

@@ -61,6 +61,11 @@ struct DiagnosticsRediffSnapshot: Sendable {
     var refetchStates: [RediffRefetchStateRow] = []
     var dayZeroAttempts: [RediffDayZeroAttemptRecord] = []
     var backgroundRuns: [BackgroundTaskRunRecord] = []
+    /// Names (from `RediffDiagnosticsFetchAdapter.Read`) of the reads that
+    /// THREW. Empty is the healthy case. Without this an unreadable table and
+    /// an empty table are the same bundle — the "zero is not evidence" mistake
+    /// this bead exists to correct, reintroduced at the export layer.
+    var readFailures: [String] = []
 
     static let empty = DiagnosticsRediffSnapshot()
 }
@@ -347,11 +352,18 @@ enum DiagnosticsBundleBuilder {
                 )
             }
 
+        // Closed vocabulary only — anything the adapter did not name is
+        // dropped rather than forwarded, so this can never become a text
+        // channel out of the device.
+        let readFailures = snapshot.readFailures
+            .compactMap { RediffDiagnosticsFetchAdapter.Read(rawValue: $0)?.rawValue }
+
         return DefaultBundle.RediffDiagnostics(
             bandwidth: bandwidth,
             refetchStates: Array(refetchStates),
             dayZeroAttempts: Array(dayZeroAttempts),
-            backgroundRuns: Array(backgroundRuns)
+            backgroundRuns: Array(backgroundRuns),
+            readFailures: readFailures
         )
     }
 

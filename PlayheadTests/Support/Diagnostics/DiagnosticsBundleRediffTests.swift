@@ -241,3 +241,151 @@ struct DiagnosticsBundleRediffTests {
         #expect(projected.first?.lastAttemptAt == Double(overCap - 1), "newest first, oldest dropped")
     }
 }
+
+// MARK: - REVIEW ROUND 2, REGION 2: the production fetch adapter
+
+/// The adapter behind `DiagnosticsRediffFetch` used to be TWO byte-identical
+/// copies — one in `DebugDiagnosticsHatch` (`#if DEBUG`), one in
+/// `ReleaseDiagnosticsHatch` (`#if !DEBUG`) — with `ListenerFeedbackHatch`
+/// resolving to whichever its `DiagnosticsHatch` typealias picked. Two facts
+/// made that worse than ordinary duplication:
+///
+///   * the test target builds DEBUG, so the Release copy was compiled by
+///     NOTHING any test can run. A divergence there could not be caught by a
+///     test, only by a reviewer noticing;
+///   * every read is `try?`, so a divergence that turned a read into a failure
+///     would present as an EMPTY table — which is what a lane that has done
+///     nothing looks like.
+///
+/// These run the single shared implementation against a real `AnalysisStore`.
+@Suite("Rediff diagnostics fetch adapter (playhead-p70f review round 2)")
+struct RediffDiagnosticsFetchAdapterTests {
+
+    private func seed(_ store: AnalysisStore) async throws {
+        try await store.insertAsset(AnalysisAsset(
+            id: "a1", episodeId: "ep-a1", assetFingerprint: "fp-a1",
+            weakFingerprint: nil, sourceURL: "file:///tmp/a1.mp3",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil, episodeDurationSec: 100
+        ))
+        try await store.accumulateRediffBandwidth(
+            precheckBytes: 1_000, fullFetchBytes: 299_600_000,
+            unchangedCount: 0, rotatedCount: 0, failedCount: 0, parkedCount: 0,
+            dayZeroUnmarkedCount: 3, at: 1_700_000_000
+        )
+        try await store.upsertRediffDayZeroAttempt(RediffDayZeroAttemptRecord(
+            analysisAssetId: "a1", attemptCount: 2, lastAttemptAt: 1_700_000_000,
+            lastExit: .noAcceptedByteDiff, totalFullFetchBytes: 216_000_000
+        ))
+        try await store.upsertRediffRefetchState(RediffRefetchStateRow(
+            analysisAssetId: "a1", attemptState: .initial, updatedAt: 1_700_000_000
+        ))
+        try await store.insertBackgroundTaskRun(BackgroundTaskRunRecord(
+            runId: "rediff-1", entryPoint: .rediffRefetch,
+            taskIdentifier: "com.playhead.app.rediff_refetch",
+            startedAt: 1_700_000_000, outcome: .noEligibleWork,
+            deferReason: "precheckBytes=1000 fullFetchBytes=299600000"
+        ))
+    }
+
+    @Test("the shared adapter reads all four rediff tables and reports no failures")
+    func adapterReadsEveryTable() async throws {
+        let store = try await makeTestStore()
+        try await seed(store)
+
+        let snapshot = await RediffDiagnosticsFetchAdapter.make(store: store)()
+
+        #expect(snapshot.bandwidth.fullFetchBytesTotal == 299_600_000)
+        #expect(snapshot.bandwidth.dayZeroUnmarkedCount == 3)
+        #expect(snapshot.dayZeroAttempts.count == 1)
+        #expect(snapshot.dayZeroAttempts.first?.lastExit == .noAcceptedByteDiff)
+        #expect(snapshot.refetchStates.count == 1)
+        #expect(snapshot.backgroundRuns.count == 1)
+        #expect(snapshot.readFailures.isEmpty, "healthy store ⇒ nothing to report")
+    }
+
+    /// THE HAZARD REGION 2 ASKED ABOUT: can a swallowed error hide a real
+    /// failure? It could. An unreadable `rediff_day_zero_attempts` beside a
+    /// healthy ledger renders "299.6 MB spent, zero day-0 attempts" — the exact
+    /// original bug report, manufactured by the export layer. So the failure is
+    /// now NAMED, and the other three reads still arrive.
+    @Test("ONE unreadable table is NAMED, and does not cost the export the other three")
+    func partialFailureIsNamedNotSilentlyEmpty() async throws {
+        let store = try await makeTestStore()
+        try await seed(store)
+        try await store.execForTesting("DROP TABLE rediff_day_zero_attempts")
+
+        let snapshot = await RediffDiagnosticsFetchAdapter.make(store: store)()
+
+        #expect(snapshot.readFailures == [RediffDiagnosticsFetchAdapter.Read.dayZeroAttempts.rawValue],
+                "an unreadable table must not be indistinguishable from an empty one")
+        #expect(snapshot.dayZeroAttempts.isEmpty)
+        // Independently guarded: the other three survive.
+        #expect(snapshot.bandwidth.fullFetchBytesTotal == 299_600_000)
+        #expect(snapshot.refetchStates.count == 1)
+        #expect(snapshot.backgroundRuns.count == 1)
+    }
+
+    @Test("read failures reach the exported bundle, in a fixed order and a closed vocabulary")
+    func readFailuresAreExported() throws {
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 27", deviceClass: .iPhone17Pro,
+            buildType: .debug,
+            eligibility: AnalysisEligibility(
+                hardwareSupported: true, appleIntelligenceEnabled: true,
+                regionSupported: true, languageSupported: true,
+                modelAvailableNow: true, capturedAt: Date(timeIntervalSince1970: 1)
+            ),
+            workJournalEntries: [],
+            installID: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+            rediff: DiagnosticsRediffSnapshot(readFailures: [
+                "bandwidth",
+                // Not in the closed vocabulary — must be dropped, so this can
+                // never become a free-text channel off the device.
+                "file:///var/mobile/Containers/episode-9.mp3",
+                "background_runs"
+            ])
+        )
+
+        #expect(bundle.rediffDiagnostics.readFailures == ["bandwidth", "background_runs"])
+        let json = String(
+            decoding: try JSONEncoder().encode(bundle.rediffDiagnostics), as: UTF8.self
+        )
+        #expect(json.contains("read_failures"))
+        #expect(!json.contains("episode-9"), "only the closed vocabulary crosses the boundary")
+    }
+
+    /// The two fetch limits make load-bearing claims about the builder's caps:
+    /// the background-run limit must EQUAL the cap (fetching fewer would silently
+    /// truncate below what the bundle promises), and the row limit must EXCEED it
+    /// (so the builder's newest-first sort, not the store's row order, decides
+    /// which rows ship). Both were prose in a doc comment; neither was checked.
+    @Test("the adapter's fetch limits agree with the builder's caps")
+    func fetchLimitsAgreeWithBuilderCaps() {
+        #expect(RediffDiagnosticsFetchAdapter.backgroundRunFetchLimit
+                == DiagnosticsBundleBuilder.rediffBackgroundRunCap)
+        #expect(RediffDiagnosticsFetchAdapter.rowFetchLimit
+                > DiagnosticsBundleBuilder.rediffRowCap)
+    }
+
+    /// The Release hatch is `#if !DEBUG` and therefore absent from this build —
+    /// which is exactly why the duplication was dangerous. What CAN be pinned
+    /// in DEBUG is that the surviving hatch is a pure forward, so there is no
+    /// second body left to diverge.
+    @Test("the DEBUG hatch forwards to the shared adapter rather than reimplementing it")
+    func debugHatchForwardsToTheSharedAdapter() async throws {
+        let store = try await makeTestStore()
+        try await seed(store)
+
+        let viaHatch = await DebugDiagnosticsHatch.makeRediffFetch(store: store)()
+        let viaAdapter = await RediffDiagnosticsFetchAdapter.make(store: store)()
+
+        #expect(viaHatch.bandwidth.fullFetchBytesTotal == viaAdapter.bandwidth.fullFetchBytesTotal)
+        #expect(viaHatch.bandwidth.dayZeroUnmarkedCount == viaAdapter.bandwidth.dayZeroUnmarkedCount)
+        #expect(viaHatch.dayZeroAttempts.count == viaAdapter.dayZeroAttempts.count)
+        #expect(viaHatch.refetchStates.count == viaAdapter.refetchStates.count)
+        #expect(viaHatch.backgroundRuns.count == viaAdapter.backgroundRuns.count)
+        #expect(viaHatch.readFailures == viaAdapter.readFailures)
+    }
+}
