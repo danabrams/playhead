@@ -1112,6 +1112,17 @@ struct DuplicateAssetReconcileTests {
         let strandedChunks = try await store.fetchTranscriptChunks(assetId: "contained-loser")
         #expect(strandedChunks.count == 1,
                 "the half-finished re-point must roll back, not leave children moved onto a row that still has a sibling")
+        // R3: the SCHEMA has to roll back with the data. The two halves of
+        // "unchanged" are separable — DDL is transactional in SQLite, but only
+        // because the index is built inside the savepoint, and building it
+        // outside would leave a live UNIQUE constraint on a database whose
+        // `schema_version` says 38 and whose duplicates are still there. Every
+        // later insert for those episodes would then fail against a rail
+        // nothing records as installed.
+        #expect(try probeRowCount(
+            in: directory,
+            table: "sqlite_master WHERE type = 'index' AND name = 'idx_assets_episode_fingerprint'"
+        ) == 0, "a rolled-back rung must leave no index behind")
 
         // The retry a later launch performs, once whatever blocked it is gone.
         try await store.execForTesting("DROP TRIGGER bd0hi9_v39_guard")
@@ -1119,6 +1130,10 @@ struct DuplicateAssetReconcileTests {
         #expect(try await store.schemaVersion() == 39)
         #expect(try probeRowCount(in: directory, table: "analysis_assets") == 1)
         #expect(try await store.fetchTranscriptChunks(assetId: "contained-winner").count == 1)
+        #expect(try probeRowCount(
+            in: directory,
+            table: "sqlite_master WHERE type = 'index' AND name = 'idx_assets_episode_fingerprint'"
+        ) == 1, "and the retry that completes must install it")
     }
 
     /// R2 finding 3. `episodeIdsWithMultipleAssets` filters

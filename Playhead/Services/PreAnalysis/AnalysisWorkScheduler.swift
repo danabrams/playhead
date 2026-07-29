@@ -4832,6 +4832,18 @@ actor AnalysisWorkScheduler {
             observedWeak = await downloadManager.fingerprint(for: job.episodeId)?.weak
         }
         let insertWeakFingerprint = AudioFingerprint.nonEmptyWeak(observedWeak)
+        // playhead-0hi9: re-check the lease before minting the row. Everything
+        // above this line suspends — `capabilitiesService.currentSnapshot` did
+        // already, and the `downloadManager.fingerprint` read added another
+        // window — and the lease-renewal task flips `lostOwnership` from
+        // outside. Inserting after the lease was reclaimed creates a second
+        // `analysis_assets` row for an episode the new owner is already
+        // working, which is the exact defect this bead exists to remove.
+        // R3: NOT COVERED BY A TEST. `lostOwnership` is only reachable through
+        // a failed lease renewal on a timer, and forcing it would need new
+        // production seams for both the flag and this private method; the
+        // guard is strictly additive over `main`, so the untested state is no
+        // worse than not having it.
         guard !lostOwnership else { throw CancellationError() }
         let asset = AnalysisAsset(
             id: assetId,
