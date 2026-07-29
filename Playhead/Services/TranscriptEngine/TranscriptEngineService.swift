@@ -383,6 +383,11 @@ struct TranscriptFailureReason: Sendable, Hashable {
         )
     }
 
+    /// Bridged `NSError` domains whose `code` is a synthesised case ordinal
+    /// rather than a diagnostic: our own module's types and the standard
+    /// library's. Neither can produce a number a support engineer can act on.
+    static let syntheticErrorDomainPrefixes = ["Playhead.", "Swift."]
+
     /// Classify a thrown error into an exportable reason.
     static func classify(_ error: Error, failedShardCount: Int = 0) -> TranscriptFailureReason {
         // Every Swift error bridges to an NSError, so `error as NSError` never
@@ -391,10 +396,20 @@ struct TranscriptFailureReason: Sendable, Hashable {
         // "<Module>.<TypeName>" with the case's ORDINAL as its code, so
         // exporting that would be noise dressed as data (`.modelNotLoaded`
         // would ship `code: 0`). Only a genuine framework error — Speech,
-        // AVFoundation, POSIX — carries a code worth having, and none of those
-        // domains is one of ours.
+        // AVFoundation, POSIX — carries a code worth having.
+        //
+        // playhead-ngev: the STDLIB's domain is synthesised the same way and
+        // was not covered. `CancellationError` bridges to
+        // `Swift.CancellationError` with code 1 (measured, not assumed — it is
+        // not even 0), so a cancelled run exported `failure_code: 1` beside
+        // `failure_class: cancelled`, and in a support bundle a bare integer
+        // next to a class reads as a real framework code. That is the same
+        // "noise dressed as data" this rule already rejects for our own types;
+        // the rule was just written one module too narrow.
         let nsError = error as NSError
-        let isOurSyntheticDomain = nsError.domain.hasPrefix("Playhead.")
+        let isOurSyntheticDomain = Self.syntheticErrorDomainPrefixes.contains {
+            nsError.domain.hasPrefix($0)
+        }
         return TranscriptFailureReason(
             failureClass: TranscriptFailureClass.classify(error),
             code: isOurSyntheticDomain ? nil : nsError.code,

@@ -276,6 +276,21 @@ struct TranscriptFailureTaxonomyTests {
                 "a synthesised case ordinal is not a diagnostic (got \(String(describing: reason.code)))")
     }
 
+    /// The control for the widened redaction rule: excusing the standard
+    /// library must not excuse everything. A domain that merely CONTAINS a
+    /// synthetic prefix, or an unrelated framework domain, still exports its
+    /// code — otherwise `failure_code` would be dead weight.
+    @Test("widening the synthetic-domain rule did not swallow real domains")
+    func syntheticDomainRuleIsNarrow() {
+        #expect(TranscriptFailureReason.classify(
+            NSError(domain: "com.apple.speech.Swift", code: 42, userInfo: nil)
+        ).code == 42)
+        #expect(TranscriptFailureReason.classify(
+            NSError(domain: "NSPOSIXErrorDomain", code: 28, userInfo: nil)
+        ).code == 28)
+        #expect(TranscriptFailureReason.syntheticErrorDomainPrefixes == ["Playhead.", "Swift."])
+    }
+
     /// A genuine framework error's code IS the thing that separates one
     /// Speech failure from another once the class is known — and an integer
     /// cannot carry PII.
@@ -342,8 +357,16 @@ struct TranscriptFailureTaxonomyTests {
         #expect(TranscriptFailureClass.classify(TranscriptEnginePreempted()) == .preempted)
     }
 
-    /// And they export no code: all three are Playhead-domain Swift types, so
-    /// the only integer available is a synthesised ordinal.
+    /// And they export no code: all three are Swift-native types — two ours,
+    /// one the standard library's — so the only integer available is a
+    /// synthesised ordinal.
+    ///
+    /// THIS TEST FAILED FIRST. `CancellationError` bridges to
+    /// `Swift.CancellationError` with code 1, and the redaction rule only
+    /// excused domains prefixed `Playhead.`, so a cancelled run exported
+    /// `failure_code: 1` — a number that reads as a real framework code beside
+    /// `failure_class: cancelled` in a bundle a support engineer opens without
+    /// a device attached.
     @Test("interruptions export no numeric code")
     func interruptionsCarryNoCode() {
         #expect(TranscriptFailureReason.classify(CancellationError()).code == nil)
