@@ -432,6 +432,57 @@ struct MergedChildRowDedupeV40MigrationTests {
         #expect(try scalarInt(db, "SELECT count(*) FROM decoded_spans") == 2)
     }
 
+    // MARK: - 7b. decoded_spans exception C — an unreadable keeper is not risked
+
+    /// playhead-6av0 REVIEW R1 — NEW. `dedupeMergedDecodedSpans` skips a whole
+    /// group when the KEEPER's `anchorProvenanceJSON` will not decode, and that
+    /// branch had no test: replacing the `guard ... else { continue }` with a
+    /// `?? []` fallback left the suite green.
+    ///
+    /// The branch is the difference between "we could not read the keeper's
+    /// anchors" and "the keeper has no anchors". Under the `?? []` reading, a
+    /// `.rediffSlot` / `.spliceSlot` marker on the row about to be DELETED is
+    /// re-added to a keeper whose own anchor list was silently truncated to
+    /// empty — so the group survives with LESS provenance than it started with,
+    /// and a span that was exempt from the boundary refiners and the pre-roll
+    /// clamp quietly stops being exempt. Keeping both rows is the recoverable
+    /// outcome; a half-written keeper is not.
+    @Test("decoded_spans: a group whose KEEPER's provenance will not decode is skipped, not half-merged")
+    func decodedSpanGroupWithUndecodableKeeperProvenanceIsSkipped() async throws {
+        let survivorId = "SURVIVOR"
+        let nativeSpanId = DecodedSpan.makeId(assetId: survivorId, firstAtomOrdinal: 58, lastAtomOrdinal: 67)
+        let importedSpanId = DecodedSpan.makeId(assetId: "LOSER", firstAtomOrdinal: 58, lastAtomOrdinal: 67)
+
+        let dir = try await seededV39Directory(prefix: "V40SpansBadJSON") { db in
+            try self.insertAsset(db, id: survivorId, episodeId: "ep-1", fingerprint: "sha-survivor")
+            try self.insertSpan(
+                db, id: importedSpanId, assetId: survivorId, first: 58, last: 67,
+                start: 71.88, end: 88.14,
+                provenanceJSON: #"[{"type":"rediffSlot"}]"#
+            )
+            // The keeper's provenance is unreadable — a truncated write, a
+            // format this binary predates, anything.
+            try self.insertSpan(
+                db, id: nativeSpanId, assetId: survivorId, first: 58, last: 67,
+                start: 71.88, end: 88.14,
+                provenanceJSON: "{ this is not an AnchorRef array"
+            )
+        }
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try await migrateAgain(dir)
+
+        let db = try openRaw(dir)
+        defer { sqlite3_close_v2(db) }
+        #expect(try scalarInt(db, "SELECT count(*) FROM decoded_spans") == 2,
+                "the group is left ALONE — dropping the duplicate would drop its rediffSlot with it")
+        #expect(try scalarText(db, "SELECT anchorProvenanceJSON FROM decoded_spans WHERE id = \(quoted(nativeSpanId))")
+                == "{ this is not an AnchorRef array",
+                "and the unreadable keeper is not rewritten with a truncated anchor list")
+        // The rung still COMPLETES — one unreadable group is not a migration failure.
+        #expect(try scalarText(db, "SELECT value FROM _meta WHERE key = 'schema_version'") == "40")
+    }
+
     // MARK: - 8. ad_windows is deliberately untouched
 
     @Test("ad_windows content duplicates are deliberately NOT deduplicated")
