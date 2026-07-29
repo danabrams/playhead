@@ -41,18 +41,47 @@ struct RediffDayZeroAccountabilityTests {
 
     // MARK: - Exit taxonomy
 
-    @Test("every formerly silent mint exit has its own raw value")
-    func exitRawValuesAreDistinct() {
-        let raws = Exit.allCases.map(\.rawValue)
-        #expect(Set(raws).count == raws.count, "raw values are persisted — collisions would merge two exits in the DB")
-        // The exits the p70f trace could not tell apart. If any two of these
-        // ever collapse to one case again, this fails.
-        let indistinguishableBefore: [Exit] = [
-            .assetRowMissing, .assetFetchFailed, .aSideNotAnchored, .aSideReadFailed,
-            .fetchFailed, .tooFewBCopies, .noAcceptedByteDiff, .noDivergentSlot,
-            .allSlotsAlreadyCovered, .persistFailed
+    /// REVIEW ROUND 2 — this test was VACUOUS and is now the wire-format pin.
+    ///
+    /// It used to assert `Set(raws).count == raws.count` and that a hand-listed
+    /// array of distinct enum cases had distinct members. Neither can fail at
+    /// runtime: Swift rejects duplicate raw values at COMPILE time (a mutation
+    /// introducing one does not produce a red test, it produces "raw value for
+    /// enum case is not unique"), and a literal list of different cases is
+    /// distinct by construction. The test could never have caught anything.
+    ///
+    /// The hazard it was reaching for is real but different. These strings are
+    /// the PERSISTED wire format of `rediff_day_zero_attempts.lastExit`, and an
+    /// unknown value decodes to `.fetchFailed` — so RENAMING one (the change
+    /// the compiler is perfectly happy with) silently reclassifies every
+    /// existing row on the device as a generic fetch failure, quietly destroying
+    /// exactly the evidence this bead exists to collect. So the contract is
+    /// frozen here, value by value, and `allCases` is compared against the table
+    /// so a NEW exit cannot be added without deciding its persisted name.
+    @Test("the persisted exit raw values are a frozen wire format")
+    func exitRawValuesAreAFrozenWireFormat() {
+        let expected: [Exit: String] = [
+            .minterUnavailable: "minter_unavailable",
+            .assetRowMissing: "asset_row_missing",
+            .assetFetchFailed: "asset_fetch_failed",
+            .aSideNotAnchored: "a_side_not_anchored",
+            .aSideReadFailed: "a_side_read_failed",
+            .suppressedByBackoff: "suppressed_by_backoff",
+            .alreadyInFlight: "already_in_flight",
+            .fetchFailed: "fetch_failed",
+            .tooFewBCopies: "too_few_b_copies",
+            .noAcceptedByteDiff: "no_accepted_byte_diff",
+            .noDivergentSlot: "no_divergent_slot",
+            .allSlotsAlreadyCovered: "all_slots_already_covered",
+            .persistFailed: "persist_failed",
+            .marked: "marked"
         ]
-        #expect(Set(indistinguishableBefore).count == indistinguishableBefore.count)
+        for exit in Exit.allCases {
+            #expect(exit.rawValue == expected[exit],
+                    "renaming a persisted exit reclassifies every existing device row as .fetchFailed")
+        }
+        #expect(Set(Exit.allCases) == Set(expected.keys),
+                "a new exit needs its persisted name decided here, not defaulted")
     }
 
     @Test("the AAC-behind-an-.mp3-suffix hypothesis is distinguishable from clean-but-identical copies")
