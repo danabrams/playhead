@@ -39,13 +39,14 @@ struct DuplicateAssetReconcileTests {
         transcriptCoverage: Double? = nil,
         duration: Double? = nil,
         title: String? = nil,
-        sourceURL: String? = nil
+        sourceURL: String? = nil,
+        weakFingerprint: String? = nil
     ) async throws {
         try await store.insertAsset(AnalysisAsset(
             id: id,
             episodeId: episodeId,
             assetFingerprint: id, // the Pipeline A signature: self-reference
-            weakFingerprint: nil,
+            weakFingerprint: weakFingerprint,
             // Default: the 13-of-14 shape — both rows name the SAME artifact,
             // reached by different container paths.
             sourceURL: sourceURL ?? "file:///container-A/partials/\(episodeId).mp3",
@@ -242,7 +243,8 @@ struct DuplicateAssetReconcileTests {
             featureCoverage: 1_700,
             transcriptCoverage: 1_746,
             duration: 543,
-            title: "Episode 12"
+            title: "Episode 12",
+            weakFingerprint: "https://cdn.example.com/ep12.mp3|\"etag-12\"|8388608|"
         )
         // Newer row: correct duration, shallow transcript, still `queued`.
         try await insertCanonical(
@@ -280,6 +282,12 @@ struct DuplicateAssetReconcileTests {
         #expect(survivor.episodeDurationSec == 2_933)
         // NULLs filled from the folded-in row.
         #expect(survivor.episodeTitle == "Episode 12")
+        // Including the weak identity — the merged row has to stay recognisable
+        // to `canUpgradeWeakAssetToCanonicalSHA` and
+        // `fetchAssetsByEpisodeId(_:weakFingerprint:)`, which is the machinery
+        // part 2 exists to make reachable. Dropping it here would quietly undo
+        // part 2 for exactly the rows this sweep touched.
+        #expect(survivor.weakFingerprint == "https://cdn.example.com/ep12.mp3|\"etag-12\"|8388608|")
 
         // Every child row followed, none orphaned, none cascaded away.
         let chunks = try await store.fetchTranscriptChunks(assetId: canonicalId)

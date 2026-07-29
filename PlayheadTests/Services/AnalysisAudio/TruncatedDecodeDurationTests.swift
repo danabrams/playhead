@@ -206,6 +206,190 @@ struct TruncatedDecodeDurationTests {
         #expect(plain.count == outcome.shards.count)
     }
 
+    // MARK: - 2b. The true branch, reached by a REAL decode
+
+    /// R1: writes an AAC `.m4a` and then STRETCHES its sample-timing table, so
+    /// the asset declares `seconds` while the decoder yields roughly
+    /// `seconds / factor`.
+    ///
+    /// WHY THIS SHAPE. The production case is MP3-with-Xing: the container
+    /// header declares the whole episode, the bytes on disk are a prefix, and
+    /// `AVAssetReader` still reports `.completed` because for a headerless
+    /// stream end-of-file IS end-of-stream. No Apple encoder can author an
+    /// MP3, and the obvious substitutes were measured and do not work:
+    /// truncating a CAF (or inflating its `data`-chunk size) makes the reader
+    /// report `.failed`, which `performDecode` throws on at step 7 before the
+    /// truncation check; a WAV with an inflated `data`-chunk size has its
+    /// duration clamped back to the bytes present; and inflating an MP4's
+    /// `mvhd`/`tkhd`/`mdhd` durations is ignored outright, because
+    /// AVFoundation derives duration from the sample tables.
+    ///
+    /// Stretching `stts.sample_delta` is the one lever that reproduces the
+    /// observable: every packet the reader needs is present, so it COMPLETES,
+    /// but the decode yields far less audio than the asset declares.
+    ///
+    /// This is a synthetic container, and the test asserts the fixture really
+    /// is that shape before asserting anything about the code — if a future OS
+    /// stops honouring it, this fails loudly rather than passing vacuously.
+    private func writeStretchedTimelineM4A(seconds: TimeInterval, factor: UInt32) throws -> URL {
+        let dir = try makeTempDir(prefix: "Bd0hi9Stretch")
+        Self.tempDirs.track(dir)
+        let sourceURL = dir.appendingPathComponent("source-\(UUID().uuidString).m4a")
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 44_100,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw NSError(domain: "TruncatedDecodeDurationTests", code: -3)
+        }
+        // Scope the writer so the container is FINALIZED before the bytes are
+        // read back — an AVAudioFile still in scope has not written its `moov`
+        // yet, and the patcher below would find nothing to patch. Same reason
+        // `CorpusAudioFixtures.aacRoundTrip` scopes its writer.
+        do {
+            let file = try AVAudioFile(
+                forWriting: sourceURL,
+                settings: [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: 44_100.0,
+                    AVNumberOfChannelsKey: 1,
+                    AVEncoderBitRateKey: 64_000,
+                ],
+                commonFormat: .pcmFormatFloat32,
+                interleaved: false
+            )
+            let total = AVAudioFramePosition(seconds * 44_100)
+            var written = AVAudioFramePosition(0)
+            while written < total {
+                let frames = AVAudioFrameCount(min(AVAudioFramePosition(44_100), total - written))
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+                    throw NSError(domain: "TruncatedDecodeDurationTests", code: -4)
+                }
+                buffer.frameLength = frames
+                if let channel = buffer.floatChannelData?[0] {
+                    for i in 0..<Int(frames) {
+                        channel[i] = Float(sin(
+                            2.0 * Double.pi * 440.0
+                                * Double(written + AVAudioFramePosition(i)) / 44_100.0
+                        )) * 0.2
+                    }
+                }
+                try file.write(from: buffer)
+                written += AVAudioFramePosition(frames)
+            }
+        }
+
+        var bytes = [UInt8](try Data(contentsOf: sourceURL))
+        func be32(_ offset: Int) -> UInt32 {
+            (UInt32(bytes[offset]) << 24) | (UInt32(bytes[offset + 1]) << 16)
+                | (UInt32(bytes[offset + 2]) << 8) | UInt32(bytes[offset + 3])
+        }
+        func put32(_ offset: Int, _ value: UInt32) {
+            bytes[offset] = UInt8((value >> 24) & 0xFF)
+            bytes[offset + 1] = UInt8((value >> 16) & 0xFF)
+            bytes[offset + 2] = UInt8((value >> 8) & 0xFF)
+            bytes[offset + 3] = UInt8(value & 0xFF)
+        }
+        // Locate `stts` by scanning for the 4CC rather than descending
+        // moov/trak/mdia/minf/stbl. A hierarchical walk has to get `mdat`'s
+        // 64-bit and extends-to-EOF size forms exactly right or it silently
+        // stops before reaching `moov`, and the writer's box layout is not
+        // ours to depend on. The scan is self-validating instead: a full
+        // `stts` box is
+        //   [size:4]["stts"][version+flags:4][entryCount:4]
+        //   then entryCount x [sampleCount:4][sampleDelta:4]
+        // so requiring `size == 16 + entryCount * 8` rejects a chance match.
+        var stretchedEntries = 0
+        var cursor = 4
+        while cursor + 12 <= bytes.count {
+            guard bytes[cursor] == UInt8(ascii: "s"),
+                  bytes[cursor + 1] == UInt8(ascii: "t"),
+                  bytes[cursor + 2] == UInt8(ascii: "t"),
+                  bytes[cursor + 3] == UInt8(ascii: "s")
+            else {
+                cursor += 1
+                continue
+            }
+            let boxSize = Int(be32(cursor - 4))
+            let entryCount = Int(be32(cursor + 8))
+            guard entryCount > 0,
+                  boxSize == 16 + entryCount * 8,
+                  cursor - 4 + boxSize <= bytes.count
+            else {
+                cursor += 1
+                continue
+            }
+            for entry in 0..<entryCount {
+                let deltaOffset = cursor + 12 + entry * 8 + 4
+                put32(deltaOffset, be32(deltaOffset) * factor)
+                stretchedEntries += 1
+            }
+            cursor += boxSize
+        }
+        guard stretchedEntries > 0 else {
+            // The fixture is the whole point; a silently unpatched file would
+            // make the test pass without exercising anything.
+            throw NSError(
+                domain: "TruncatedDecodeDurationTests",
+                code: -5,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "no stts box patched in \(bytes.count) bytes — re-derive the fixture"]
+            )
+        }
+
+        let patchedURL = dir.appendingPathComponent("stretched-\(UUID().uuidString).m4a")
+        try Data(bytes).write(to: patchedURL)
+        return patchedURL
+    }
+
+    @Test("a REAL decode that falls short of its declared duration reports isTruncated and writes no duration")
+    func realTruncatedDecodeIsSurfacedEndToEnd() async throws {
+        let url = try writeStretchedTimelineM4A(seconds: 60, factor: 6)
+        let asset = AVURLAsset(url: url)
+        let declared = CMTimeGetSeconds(try await asset.load(.duration))
+
+        let service = AnalysisAudioService()
+        let local = try #require(LocalAudioURL(url))
+        let episodeID = "bd0hi9-real-truncated-\(UUID().uuidString)"
+        let outcome = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        let decoded = outcome.shards.map(\.duration).reduce(0, +)
+
+        // The fixture really is the shape under test: a reader that COMPLETED
+        // (a `.failed` reader throws before step 8 and never gets here) over
+        // materially less audio than the asset declares.
+        try #require(declared > 0)
+        try #require(!outcome.shards.isEmpty, "a truncated decode must still return its prefix")
+        try #require(
+            decoded < declared * (1.0 - AnalysisAudioService.truncationTolerance),
+            "fixture no longer truncates: declared \(declared)s, decoded \(decoded)s — re-derive it rather than deleting the test"
+        )
+
+        #expect(outcome.isTruncated,
+                "performDecode computes truncation for the shard cache; the same verdict must reach the caller")
+
+        // The shard cache refused it — proven without touching the private
+        // cache type: a cached decode reports `isTruncated == false` by
+        // construction, so a second pass still reporting `true` is a miss.
+        let second = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        #expect(second.isTruncated,
+                "a truncated decode must not have been cached; a cache hit reports not-truncated")
+
+        // And the whole point: that outcome sets no duration on a real store.
+        let store = try await makeStore()
+        let coordinator = makeCoordinator(store: store)
+        let assetId = "asset-real-trunc-\(UUID().uuidString)"
+        try await seedAsset(store: store, assetId: assetId)
+        await coordinator.persistSpooledEpisodeDuration(
+            assetId: assetId,
+            episodeId: "ep-\(assetId)",
+            outcome: outcome
+        )
+        let persisted = try await store.fetchAsset(id: assetId)
+        #expect(persisted?.episodeDurationSec == nil,
+                "real file -> real decode -> truncation flag -> no duration written (got \(String(describing: persisted?.episodeDurationSec)))")
+    }
+
     // MARK: - 3. The coordinator gate
 
     @Test("truncated outcome leaves episodeDurationSec NULL")
