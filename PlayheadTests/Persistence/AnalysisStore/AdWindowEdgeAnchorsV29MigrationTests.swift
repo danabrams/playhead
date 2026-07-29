@@ -192,6 +192,20 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }
 
+    /// playhead-6av0 REVIEW R2 — REWRITTEN. As first landed this test proved
+    /// nothing: it ran `migrate()` to head and then called the seam against a
+    /// database ALREADY at `currentSchemaVersion`, where
+    /// `migrateAdWindowEdgeAnchorsV29IfNeeded`'s `guard schemaVersion() < 29`
+    /// returns on its first line. Both assertions were satisfied by
+    /// `createTables()`, not by the rung. Measured: with the entire body of
+    /// `migrateOnlyForTesting()` deleted, this test stayed GREEN. Its old
+    /// comment ("addColumnIfNeeded no-ops but setSchemaVersion(29) still
+    /// bumps") described a code path that does not run.
+    ///
+    /// The fix is the pattern the V39/V40 tests use: open the store first so
+    /// `ensureOpen()` short-circuits, then REWIND it to a real v28 device —
+    /// version stamped back AND the columns actually gone — so the rung is the
+    /// only thing that can put them back.
     @Test("isolated ladder (migrateOnlyForTesting) reaches v29 and adds the columns")
     func isolatedLadderReachesV29() async throws {
         let dir = try freshTempDir()
@@ -199,11 +213,17 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
 
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
-        // createTables() builds ad_windows in its final v29 shape; then the
-        // ladder seam runs the V*IfNeeded chain (the columns already exist, so
-        // addColumnIfNeeded no-ops but setSchemaVersion(29) still bumps).
         try await store.migrate()
-        AnalysisStore.resetMigratedPathsForTesting()
+
+        try await store.execForTesting("""
+            ALTER TABLE ad_windows DROP COLUMN startEdgeAnchor;
+            ALTER TABLE ad_windows DROP COLUMN endEdgeAnchor;
+            """)
+        try await store.setMetaValue(forKey: "schema_version", value: "28")
+        // The rewind has to be real, or the rung has nothing to do.
+        #expect(try !probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
+        #expect(try !probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
+
         try await store.migrateOnlyForTesting()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)

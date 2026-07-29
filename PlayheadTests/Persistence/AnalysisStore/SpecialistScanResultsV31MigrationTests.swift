@@ -171,6 +171,16 @@ struct SpecialistScanResultsV31MigrationTests {
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 
+    /// playhead-6av0 REVIEW R2 — REWRITTEN. Calling the seam on a store
+    /// already at `currentSchemaVersion` means
+    /// `migrateSpecialistScanResultsV31IfNeeded` returns on its
+    /// `guard schemaVersion() < 31` line, so the table this asserts was built
+    /// by the earlier `migrate()`, not by the rung. Measured: with the entire
+    /// body of `migrateOnlyForTesting()` deleted, this test stayed GREEN.
+    ///
+    /// Rewinding to v30 is the sharper fixture here than for V29/V30, because
+    /// `specialist_scan_results` lives ONLY in this versioned rung and not in
+    /// `createTables()` — so once dropped, nothing but V31 can bring it back.
     @Test("isolated ladder (migrateOnlyForTesting) includes v31")
     func isolatedLadderReachesV31() async throws {
         let dir = try freshTempDir()
@@ -179,7 +189,11 @@ struct SpecialistScanResultsV31MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
-        AnalysisStore.resetMigratedPathsForTesting()
+
+        try await store.execForTesting("DROP TABLE specialist_scan_results")
+        try await store.setMetaValue(forKey: "schema_version", value: "30")
+        #expect(try !probeTableExists(in: dir, table: "specialist_scan_results"))
+
         try await store.migrateOnlyForTesting()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)

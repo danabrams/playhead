@@ -188,6 +188,12 @@ struct AdmissionRejectReasonV30MigrationTests {
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }
 
+    /// playhead-6av0 REVIEW R2 — REWRITTEN, for the same reason as the V29
+    /// twin. Calling the seam on a store already at `currentSchemaVersion`
+    /// means `migrateAdmissionRejectReasonV30IfNeeded` returns on its
+    /// `guard schemaVersion() < 30` line and both columns are only present
+    /// because `createTables()` built them. Measured: with the entire body of
+    /// `migrateOnlyForTesting()` deleted, this test stayed GREEN.
     @Test("isolated ladder (migrateOnlyForTesting) reaches v30 and adds the columns")
     func isolatedLadderReachesV30() async throws {
         let dir = try freshTempDir()
@@ -195,12 +201,18 @@ struct AdmissionRejectReasonV30MigrationTests {
 
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
-        // createTables() builds analysis_jobs; the ladder seam then runs the
-        // V*IfNeeded chain (the reject columns already exist after the first
-        // migrate(), so addColumnIfNeeded no-ops but setSchemaVersion(30) still
-        // bumps).
         try await store.migrate()
-        AnalysisStore.resetMigratedPathsForTesting()
+
+        // Rewind to a real v29 device: the columns actually gone, not just the
+        // version stamped back.
+        try await store.execForTesting("""
+            ALTER TABLE analysis_jobs DROP COLUMN lastRejectReason;
+            ALTER TABLE analysis_jobs DROP COLUMN lastRejectAt;
+            """)
+        try await store.setMetaValue(forKey: "schema_version", value: "29")
+        #expect(try !probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
+        #expect(try !probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
+
         try await store.migrateOnlyForTesting()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)

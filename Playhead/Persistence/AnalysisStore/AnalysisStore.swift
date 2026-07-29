@@ -1563,7 +1563,33 @@ actor AnalysisStore {
     /// intentionally seed a corrupt DB and then recover are supported.
     private func ensureOpen() throws {
         if didOpen { return }
+        try openSQLiteHandle()
 
+        // Step 4: schema migration (pragmas, CREATE TABLE, V*IfNeeded
+        // ladder). Flip `didOpen = true` BEFORE invoking the migration
+        // so the inner `exec` / `prepare` re-entrancy guards
+        // short-circuit. On any thrown error, roll `didOpen` back to
+        // false and close the handle so a retry path observes a clean
+        // slate. `runSchemaMigration` is internally transactional with
+        // ROLLBACK on error so the file itself is left consistent.
+        didOpen = true
+        do {
+            try runSchemaMigration()
+        } catch {
+            didOpen = false
+            closeHandleAfterFailedOpen()
+            throw error
+        }
+    }
+
+    /// Steps 1–3 of `ensureOpen()`: container directory, `sqlite3_open_v2`,
+    /// Data Protection re-stamp. Deliberately does NOT touch `didOpen` and
+    /// does NOT run any SQL, so a caller can decide for itself what the
+    /// freshly-opened handle should be initialised with. `ensureOpen()`
+    /// follows it with `runSchemaMigration()`; the DEBUG-only
+    /// `openWithoutSchemaMigrationForTesting()` follows it with pragmas
+    /// alone.
+    private func openSQLiteHandle() throws {
         // Step 1: directory + Data Protection. The path-form initializer
         // sets `containerDirectoryToCreate` to `nil` so this step is a
         // no-op for `:memory:` and raw-path test stores.
@@ -1616,26 +1642,61 @@ actor AnalysisStore {
                 ofItemAtPath: databaseURL.path
             )
         }
+    }
 
-        // Step 4: schema migration (pragmas, CREATE TABLE, V*IfNeeded
-        // ladder). Flip `didOpen = true` BEFORE invoking the migration
-        // so the inner `exec` / `prepare` re-entrancy guards
-        // short-circuit. On any thrown error, roll `didOpen` back to
-        // false and close the handle so a retry path observes a clean
-        // slate. `runSchemaMigration` is internally transactional with
-        // ROLLBACK on error so the file itself is left consistent.
+    /// Shared failure tail: close the handle and reset `db` so a subsequent
+    /// `ensureOpen()` retries from the top rather than reusing a handle
+    /// whose initialisation threw.
+    private func closeHandleAfterFailedOpen() {
+        if let h = self.db {
+            sqlite3_close_v2(h)
+            self.db = nil
+        }
+    }
+
+    #if DEBUG
+    /// playhead-6av0 REVIEW R2 — the fix for a seam that had been silently
+    /// vacuous since playhead-6boz.
+    ///
+    /// `migrateOnlyForTesting()` exists to run the `V*IfNeeded` ladder
+    /// WITHOUT `createTables()` painting every table into its head shape
+    /// first — that masking is the whole reason the seam was written
+    /// (`MigrationLadderTests` cycle-4 H1). But after playhead-6boz turned
+    /// `migrate()` into a lazy `ensureOpen()` bootstrap, EVERY SQL surface
+    /// began routing through `ensureOpen()`, and the seam's own first
+    /// statement is SQL. On a store nobody had opened yet, that first
+    /// statement ran the entire real `runSchemaMigration()` — `createTables()`
+    /// and the full ladder — before the seam's first rung was consulted. The
+    /// seam then re-ran against a database already at head, where every rung
+    /// guards itself out. Measured in review round 2: with the ENTIRE body of
+    /// `migrateOnlyForTesting()` after its first statement deleted, three
+    /// `MigrationLadderTests` cases and the V29/V30/V31 ladder tests all
+    /// stayed green.
+    ///
+    /// This is the missing rung: open the handle and apply pragmas, flip
+    /// `didOpen`, and stop — no `createTables()`, no ladder. A store that is
+    /// ALREADY open (the correct pattern, and what the V39/V40 tests use:
+    /// `migrate()`, rewind `schema_version`, then run the seam) short-circuits
+    /// on `didOpen` exactly as before, so this changes nothing for them.
+    ///
+    /// Pragmas are applied because `runSchemaMigration()` applies them first
+    /// too, and the ladder's behaviour genuinely depends on them —
+    /// `foreign_keys` defaults OFF, and the V39 re-point's `ON DELETE
+    /// CASCADE` / `RESTRICT` handling would otherwise be tested against
+    /// semantics production never runs under.
+    func openWithoutSchemaMigrationForTesting() throws {
+        if didOpen { return }
+        try openSQLiteHandle()
         didOpen = true
         do {
-            try runSchemaMigration()
+            try configurePragmas()
         } catch {
             didOpen = false
-            if let h = self.db {
-                sqlite3_close_v2(h)
-                self.db = nil
-            }
+            closeHandleAfterFailedOpen()
             throw error
         }
     }
+    #endif
 
     /// Tracks which database paths have already been migrated in this process
     /// to avoid redundant DDL work on repeated `open()` calls.
@@ -2137,6 +2198,16 @@ actor AnalysisStore {
     /// default behavior here mirrors what `migrate()` would do minus
     /// `createTables()`.
     func migrateOnlyForTesting() throws {
+        // playhead-6av0 REVIEW R2 — MUST BE THE FIRST STATEMENT, and must stay
+        // ahead of anything that touches SQL. Every SQL surface routes through
+        // `ensureOpen()`, which runs the WHOLE of `runSchemaMigration()` —
+        // `createTables()` plus the real ladder. Before this line existed, a
+        // seam called on a not-yet-opened store therefore ran the full
+        // production migration first and then re-ran itself against a database
+        // already at head, where every rung guards itself out: the seam did
+        // nothing, and the tests named after it proved nothing. See
+        // `openWithoutSchemaMigrationForTesting()` for the measurement.
+        try openWithoutSchemaMigrationForTesting()
         try writeInitialSchemaVersionIfNeeded()
         if try tableExists("transcript_chunks") {
             try migrateTranscriptChunksPhase1()
