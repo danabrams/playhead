@@ -338,6 +338,120 @@ struct ManualVetoReachesPersistedAnalysisTests {
         #expect(untouched.decisionState == AdDecisionState.candidate.rawValue)
     }
 
+    /// ACCEPT THE RECEIPT, REFUSE THE LEARNING — the half of that split the
+    /// suite did not pin (review round 1).
+    ///
+    /// The window-less branch deliberately withholds the trust penalty:
+    /// `revertByTimeRange`'s trust block is guarded by `!exactTargets.isEmpty`,
+    /// because the trust score measures how often the SKIP SURFACE was wrong
+    /// and material that never produced an `ad_window` never risked a skip.
+    /// That is a real product decision and it was previously asserted by
+    /// nothing — dropping the guard silently penalises a show for a correction
+    /// over material it never offered to skip, and `recordWeakFalseSkipSignal`
+    /// increments the very same `recentFalseSkipSignals` counter a genuine
+    /// false skip does, so the damage is indistinguishable downstream.
+    ///
+    /// The negative assertion is read behind `drainTrustWrites`, whose own
+    /// barrier fails loudly if the trust write path is dead — otherwise "0
+    /// signals" would pass just as happily against a service that can no
+    /// longer record anything at all.
+    @Test(
+        "A window-less veto records the correction but NOT a trust penalty",
+        .timeLimit(.minutes(1))
+    )
+    func windowlessVetoWithholdsTheTrustPenalty() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        // A highlighted span with NO `ad_window` behind it.
+        try await store.upsertDecodedSpans([
+            makeDetectedSpan(
+                id: "span-orphan",
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            ),
+        ])
+
+        let trustStore = try await makeTestStore()
+        try await seedSkipTestTrustProfile(
+            in: trustStore,
+            podcastId: "podcast-1",
+            mode: SkipMode.auto.rawValue,
+            trustScore: 0.9,
+            observations: 50
+        )
+        // `recordFalseSkipSignal` never lazy-creates, so the drain barrier
+        // needs its own seeded row to be a real barrier.
+        try await seedSkipTestTrustProfile(
+            in: trustStore,
+            podcastId: trustWriteBarrierShow,
+            mode: SkipMode.auto.rawValue,
+            trustScore: 0.9,
+            observations: 50
+        )
+        let trustService = TrustScoringService(store: trustStore)
+
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: trustService,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 7
+        )
+
+        let accepted = await orchestrator.revertByTimeRange(
+            start: 100,
+            end: 160,
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1",
+            ifCurrentEpisodeId: "ep-1",
+            ifPlaybackLifecycleGeneration: 7,
+            correctionSpan: makeVetoSpan(
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            )
+        )
+        #expect(accepted, "the gesture still commits")
+
+        // POSITIVE CONTROL FIRST: the receipt really was written, so a later
+        // zero-penalty reading cannot be explained by the gesture having done
+        // nothing at all.
+        let receipts = try await awaitCorrectionReceipts(
+            store,
+            orchestrator: orchestrator,
+            correctionStore: correctionStore,
+            assetId: "asset-1",
+            expected: 1
+        )
+        #expect(receipts.count == 1, "the correction IS recorded")
+
+        try await drainTrustWrites(trustService, trustStore, orchestrator)
+        let profile = try #require(
+            try await trustStore.fetchProfile(podcastId: "podcast-1")
+        )
+        #expect(
+            profile.recentFalseSkipSignals == 0,
+            """
+            A correction over material that never produced an ad_window must \
+            NOT penalise the show's trust score — it never risked a skip. \
+            The receipt is accepted; only the learning is refused.
+            """
+        )
+        #expect(
+            profile.skipTrustScore == 0.9,
+            "and the trust score itself is untouched"
+        )
+    }
+
     // MARK: - Defect B
 
     /// The durable correction is what removes the span from the shared read
@@ -404,6 +518,101 @@ struct ManualVetoReachesPersistedAnalysisTests {
             clobber guard, synthetic-ordinal collision probing, the egress \
             privacy baseline) still see every persisted row.
             """
+        )
+    }
+
+    /// The suppression's NARROWNESS, which nothing pinned before review round
+    /// 1. `userVetoedTimeRanges` reads only `CorrectionSource.manualVeto` —
+    /// the one gesture whose stated meaning is "this material is not an ad".
+    ///
+    /// This boundary is load-bearing in the dangerous direction. `listenRevert`
+    /// is recorded whenever the listener rewinds and plays through a skip, and
+    /// it is a far weaker claim (they may simply have wanted to hear it). If
+    /// the source filter were widened or dropped, ordinary rewind behaviour
+    /// would start silently erasing ad highlights across the app — the same
+    /// "UI disagrees with the pipeline" failure this bead exists to prevent,
+    /// arriving through the front door.
+    ///
+    /// Note the correction here overlaps the span EXACTLY, so the only thing
+    /// keeping the span visible is the source discrimination itself.
+    @Test("Only a manual veto suppresses a span — a listenRevert does not")
+    func onlyAManualVetoSuppressesTheSpan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.upsertDecodedSpans([
+            makeDetectedSpan(
+                id: "span-detected",
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            ),
+        ])
+
+        _ = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: "asset-1",
+                    startTime: 100,
+                    endTime: 160
+                ).serialized,
+                source: .listenRevert,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1")
+                .map(\.id) == ["span-detected"],
+            """
+            A `listenRevert` over the very same range must NOT suppress the \
+            span. Rewinding through a skip is not the assertion "this is not \
+            an ad", and treating it as one would erase highlights the \
+            detection pipeline still believes in.
+            """
+        )
+
+        // POSITIVE CONTROL: a manual veto covering the same span DOES
+        // suppress it — so the assertion above is discriminating on SOURCE,
+        // not silently passing because the range never matched.
+        //
+        // The control's range is deliberately NOT byte-identical to the
+        // `listenRevert` above. `correction_events` dedupes on
+        // (assetId, effectiveCorrectionType, normalizedScopeKey,
+        // correctionIdentityKey) — `source` is NOT in that key, and
+        // `.exactTimeSpan` bounds quantize to a 100 ms bucket — so an
+        // identical range would collide with the row already written and
+        // `ON CONFLICT … source = COALESCE(correction_events.source,
+        // excluded.source)` would KEEP the weaker `listenRevert`. Using the
+        // same range here would therefore measure the dedupe collision rather
+        // than the source discrimination this test is about.
+        //
+        // That collision is a real, separately-reported defect (review round
+        // 1, playhead-u45d finding 1): a manual veto whose range collides
+        // with a pre-existing non-veto false-positive correction is silently
+        // swallowed and the span stays highlighted. It is NOT fixed here
+        // because both candidate remedies — changing the dedupe identity key,
+        // or widening which sources suppress — are persistence/product
+        // decisions above this bead's authority.
+        _ = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: CorrectionScope.exactTimeSpan(
+                    assetId: "asset-1",
+                    startTime: 105,
+                    endTime: 155
+                ).serialized,
+                source: .manualVeto,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1").isEmpty,
+            "a manual veto overlapping the same span does suppress it"
         )
     }
 
