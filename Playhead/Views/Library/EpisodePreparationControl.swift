@@ -51,6 +51,13 @@ struct EpisodePreparationControl: View {
                 .foregroundStyle(AppColors.textSecondary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
+        case .partiallyAnalyzed:
+            // playhead-pz32: honestly "some of it". A half-filled circle in
+            // the quiet secondary ink, NOT the sage checkmark — the shape and
+            // the colour both differ from `.ready` so the distinction survives
+            // greyscale, and it reads as incomplete rather than as a warning
+            // (nothing went wrong; the pipeline just did not get all the way).
+            glyph(systemName: "circle.lefthalf.filled", color: AppColors.textSecondary)
         case .ready:
             glyph(systemName: "checkmark.circle", color: Palette.mutedSage)
         case .waitingForWifi:
@@ -117,17 +124,14 @@ struct EpisodePreparationControl: View {
 
     // MARK: - Accessibility
 
+    // playhead-pz32: both strings come from the pure layer so the
+    // "Analysis ready" vs "Partly analyzed" distinction is asserted by unit
+    // tests rather than by reading a view body.
     private var accessibilityLabel: String {
-        switch readiness.state {
-        case .idle:           return "Download and analyze"
-        case .waitingForWifi: return "Waiting for Wi‑Fi to download"
-        case .downloading:    return "Downloading"
-        case .analyzing:      return "Analyzing"
-        case .ready:          return "Analysis ready"
-        }
+        episodePreparationAccessibilityLabel(readiness)
     }
 
     private var accessibilityValue: String {
-        episodePreparationCaption(readiness) ?? ""
+        episodePreparationAccessibilityValue(readiness)
     }
 }

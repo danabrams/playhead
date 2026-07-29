@@ -124,6 +124,31 @@ enum SessionState: String, Sendable, CaseIterable {
         }
     }
 
+    /// playhead-pz32: convenience classifier — a completion terminal that
+    /// is explicitly DEGRADED. `completeFeatureOnly` means the transcript
+    /// never advanced past preview; `completeTranscriptPartial` means the
+    /// transcript fell short of the finalize coverage ratio. Both are
+    /// terminals the pipeline reached having read only part of the audio,
+    /// so neither may render as calm, unqualified success.
+    ///
+    /// `.complete` (legacy monolithic) and `.completeFull` are NOT degraded
+    /// by this classifier: `.completeFull` asserts the coverage invariant
+    /// passed, and `.complete` carries no per-terminal quality information
+    /// at all. Neither is treated as a licence to claim readiness on its own
+    /// — see `episodePreparationAnalysisComplete`, where measured ad-scan
+    /// coverage is the only thing that can satisfy the ✓.
+    var isDegradedTerminalCompletion: Bool {
+        switch self {
+        case .completeFeatureOnly, .completeTranscriptPartial:
+            return true
+        case .complete, .completeFull,
+             .queued, .spooling, .featuresReady, .hotPathReady,
+             .waitingForBackfill, .backfill,
+             .failed, .failedTranscript, .failedFeature, .cancelledBudget:
+            return false
+        }
+    }
+
     /// playhead-gtt9.8: convenience classifier — any failure or
     /// cancellation terminal.
     var isTerminalFailure: Bool {

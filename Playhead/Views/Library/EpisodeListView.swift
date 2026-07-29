@@ -466,6 +466,20 @@ private struct EpisodeRow: View {
 
                 // Readiness status (playhead-cthe)
                 //
+                // ⚠️ playhead-pz32 / playhead-8ssx — DORMANT, and do NOT wake it
+                // without re-deciding its quantity. This draws a SECOND
+                // `checkmark.circle` in `Palette.mutedSage`, visually identical
+                // to `EpisodePreparationControl`'s `.ready` glyph just above,
+                // gated on `Episode.coverageSummary` — a producer-set
+                // `isComplete` BOOLEAN, not a measurement, and one nothing in
+                // the app writes today (only the memberwise-init default), so
+                // `derivePlaybackReadiness` always returns `.none` and this never
+                // renders. The moment a producer populates `coverageSummary`,
+                // this row grows a second ✓ driven by the very quantity pz32
+                // removed from the readiness predicate. Whoever wires it must
+                // route it through `AnalysisCoverageSummary.adScanFraction` (or
+                // delete this glyph in favour of the control's).
+                //
                 // The ✓ affordance is a DERIVED view of
                 // `(coverageSummary, playbackAnchor)`. Per the Phase 2
                 // spec, we render the checkmark only for `.proximal` or

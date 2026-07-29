@@ -1880,7 +1880,9 @@ actor BackfillJobRunner {
             spansJSON: "[]",
             status: .noAds,
             attemptCount: 1,
-            errorContext: "noWork:\(reason)",
+            // playhead-pz32: the marker every coverage accounting reads to
+            // exclude this row. Keep it going through the shared constant.
+            errorContext: "\(SemanticScanResult.noWorkSentinelErrorContextPrefix)\(reason)",
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: 0,

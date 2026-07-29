@@ -181,12 +181,69 @@ struct SemanticScanStatusTests {
         #expect(coverage.examinedSeconds == 100)
     }
 
+    /// playhead-pz32: a NO-WORK SENTINEL carries `status == .noAds` — whose
+    /// `didExamineWindow` is `true` — and spans the WHOLE attempted transcript
+    /// range, while meaning "no work was performed". Counting it turns a job that
+    /// made zero FM calls into a fully-screened episode.
+    @Test("playhead-pz32: a no-work sentinel is a coverage HOLE, not an examination")
+    func coverageExcludesNoWorkSentinels() {
+        let sentinel = makeCoverageRow(
+            id: "sentinel",
+            start: 0,
+            end: 3578,
+            status: .noAds,
+            errorContext: "\(SemanticScanResult.noWorkSentinelErrorContextPrefix)emptySegments"
+        )
+        // The trap in one line: the STATUS says examined, the ROW does not.
+        #expect(sentinel.status.didExamineWindow)
+        #expect(sentinel.isNoWorkSentinel)
+        #expect(!sentinel.didExamineWindow)
+
+        let coverage = SemanticScanCoverage.compute(rows: [sentinel], episodeDuration: 3578)
+        #expect(coverage.examinedSeconds == 0)
+        #expect(coverage.unexaminedSeconds == 3578)
+        #expect(coverage.unexaminedRanges == [0 ... 3578])
+        #expect(!coverage.isComplete)
+
+        // A real `.noAds` verdict alongside it still counts, so the exclusion is
+        // the sentinel marker and not the `.noAds` status.
+        let real = makeCoverageRow(id: "real", start: 0, end: 100, status: .noAds)
+        #expect(real.didExamineWindow)
+        let mixed = SemanticScanCoverage.compute(rows: [sentinel, real], episodeDuration: 3578)
+        #expect(mixed.examinedSeconds == 100)
+        #expect(mixed.unexaminedRanges == [100 ... 3578])
+    }
+
+    /// The static form is what a narrow SQL projection uses (it has raw column
+    /// values, not a decoded row), so it must agree with the instance form and
+    /// must treat an unrecognised persisted status string as NOT examined.
+    @Test("playhead-pz32: the static didExamineWindow matches the row form")
+    func staticDidExamineWindowMatchesRowForm() {
+        for status in SemanticScanStatus.allCases {
+            #expect(
+                SemanticScanResult.didExamineWindow(status: status, errorContext: nil)
+                    == makeCoverageRow(id: "r", start: 0, end: 1, status: status).didExamineWindow,
+                "static/instance disagreement for \(status.rawValue)"
+            )
+            // The sentinel marker vetoes every status.
+            #expect(!SemanticScanResult.didExamineWindow(
+                status: status,
+                errorContext: "\(SemanticScanResult.noWorkSentinelErrorContextPrefix)x"
+            ))
+        }
+        // An unrecognised / missing persisted status string under-claims.
+        #expect(!SemanticScanResult.didExamineWindow(status: nil, errorContext: nil))
+        // An unrelated errorContext (a real failure's diagnostics) is not a veto.
+        #expect(SemanticScanResult.didExamineWindow(status: .success, errorContext: "retry:1"))
+    }
+
     private func makeCoverageRow(
         id: String,
         start: Double,
         end: Double,
         status: SemanticScanStatus,
-        scanPass: String = "passA"
+        scanPass: String = "passA",
+        errorContext: String? = nil
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: id,
@@ -201,7 +258,7 @@ struct SemanticScanStatusTests {
             spansJSON: "[]",
             status: status,
             attemptCount: 1,
-            errorContext: nil,
+            errorContext: errorContext,
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: 1,

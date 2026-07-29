@@ -271,10 +271,23 @@ actor EpisodeSurfaceStatusObserver {
                 persisted = .running
             case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
                 // playhead-gtt9.8: the three richer terminals + the
-                // legacy `.complete` all map to `.done`. Commit 6 will
-                // split degraded-ready (feature-only / transcript-
-                // partial) from full-ready once the downstream reducer
-                // has a degraded bucket.
+                // legacy `.complete` all map to `.done` — this
+                // projection is LOSSY by construction and callers that
+                // care about completion QUALITY must not consult it.
+                //
+                // playhead-pz32: the library's readiness ✓ used to be
+                // such a caller, so `completeFeatureOnly` (transcript
+                // never advanced past preview) rendered the identical
+                // calm checkmark as a genuine full analysis. It now
+                // reads the RAW `analysisState` column via
+                // `episodePreparationTerminalCompletion` +
+                // `SessionState.isDegradedTerminalCompletion` and draws
+                // a distinct ◐ state. `PersistedStatus` itself still
+                // has no degraded bucket: adding one changes the
+                // surface-status reducer's contract (and everything
+                // gated on it), which is a behaviour change rather than
+                // a reporting fix. Use the `SessionState` classifiers
+                // until that bucket exists.
                 persisted = .done
             case .failed, .failedTranscript, .failedFeature, .cancelledBudget:
                 // playhead-gtt9.8: the richer failure terminals all map

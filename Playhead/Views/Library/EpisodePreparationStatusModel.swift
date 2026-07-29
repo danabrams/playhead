@@ -11,12 +11,42 @@
 // subscription updates the affected episode in place. All decisions still
 // live in the pure derivation + the coordinator; this model is thin
 // input-gathering glue.
+//
+// playhead-pz32 — one read model, not a hand-copied mirror. This file used to
+// carry a comment claiming its coverage arithmetic mirrored the Activity
+// screen's "so the two surfaces cannot drift". It had already drifted:
+// playhead-sd71 moved Activity onto the gap-aware analyzed AREA while this
+// file still recomputed `max(featureCoverageEndTime, confirmedAdCoverageEndTime)`
+// inline. Both surfaces now read the SAME `AnalysisCoverageSummary`
+// (`AnalysisStore.fetchCoverageSummariesByAssetIds`), so a copied formula can
+// no longer go stale. They still display different SCALARS of that one model,
+// deliberately and for different questions:
+//   * Activity's AN bar shows `analysisCoveredSec` — "how much transcribed
+//     audio lies at or before the analysis frontier" (pipeline progress).
+//   * This control's readiness ✓ and analyze zone show `adScanFraction` —
+//     "how much audio was actually read for ads" (the user-facing promise).
+// NEITHER dominates the other: AN can exceed the ad-scan fraction (the frontier
+// has passed audio the scan has not reached, the usual case), and the ad-scan
+// fraction can exceed AN (a scan window read text lying past the feature/ad
+// frontier). Nor is either a strict subset of the transcript union — AN is, but
+// the ad-scan area bridges sub-ad-width transcript gaps
+// (`AnalysisCoverageMath.adScanBridgeableGapSec`) and so can exceed the raw union
+// by those bridged seconds, bounded by the transcript's outer span. So the two
+// surfaces can legitimately show different numbers for one episode; do not
+// "reconcile" them by making one read the other. What may never happen again is
+// the ✓ resolving from a quantity that is not ad-scan coverage.
 
 import Foundation
+import OSLog
 
 @MainActor
 @Observable
 final class EpisodePreparationStatusModel {
+
+    private static let logger = Logger(
+        subsystem: "com.playhead",
+        category: "EpisodePreparationStatus"
+    )
 
     private let runtime: PlayheadRuntime
 
@@ -28,10 +58,11 @@ final class EpisodePreparationStatusModel {
     /// re-derive one episode without touching the store.
     private struct Raw {
         var isDownloaded = false
-        var analysisActive = false
-        var analysisComplete = false
-        var analysisFailed = false
-        var analysisFraction: Double?
+        /// playhead-pz32: the analysis half, projected by the pure
+        /// `episodePreparationAnalysisInputs` from the asset row + its coverage
+        /// summary. Held as one value so this model cannot re-derive (or
+        /// half-derive) the readiness quantities itself.
+        var analysis = EpisodePreparationAnalysisInputs()
         var downloadPermitted = true
         var snapshotDownloadFraction: Double?
         var liveDownloadFraction: Double?
@@ -61,7 +92,18 @@ final class EpisodePreparationStatusModel {
     func isActionable(for episodeId: String) -> Bool {
         switch readiness(for: episodeId).state {
         case .idle, .waitingForWifi: return true
-        case .downloading, .analyzing, .ready: return false
+        // playhead-pz32: `.partiallyAnalyzed` is informational, not
+        // actionable, and that is a measured conclusion rather than
+        // caution. A tap routes to `prepareEpisodeForAnalysis` →
+        // `AnalysisWorkScheduler.enqueue`, which computes the SAME
+        // `workKey` the finished job already owns and inserts with
+        // `INSERT OR IGNORE`; only `queued`/`paused`/retryable-`failed`
+        // rows dispatch, and a `complete` row is GC'd only after 7
+        // days. So the tap would re-drive nothing. An enabled button
+        // that provably does nothing is a second dishonest affordance
+        // — worse than an honest inert glyph. Re-drive belongs to
+        // playhead-gqx4 / playhead-i7qe, which own coverage.
+        case .downloading, .analyzing, .partiallyAnalyzed, .ready: return false
         }
     }
 
@@ -73,9 +115,43 @@ final class EpisodePreparationStatusModel {
         let store = runtime.analysisStore
         let ids = Set(episodeIds)
 
-        // One store query for all episodes' latest assets, one download
-        // snapshot, one cached-id scan, one permission read.
+        // One store query for all episodes' latest assets, one coverage-summary
+        // batch, one download snapshot, one cached-id scan, one permission read.
         let assets = (try? await store.fetchLatestAssetByEpisodeIdMap()) ?? [:]
+        // playhead-pz32: the ad-scan coverage the readiness predicate keys on
+        // comes from the SAME `AnalysisCoverageSummary` read model the Activity
+        // screen consumes — one definition of every coverage quantity for both
+        // surfaces, so a copied formula can no longer go stale.
+        //
+        // COST, stated honestly: this is new work on this path (the pre-pz32
+        // fraction came free off the already-fetched asset row) and
+        // `fetchCoverageSummariesByAssetIds` runs four prepared statements per
+        // 500-id chunk, including every fast transcript chunk for the assets in
+        // scope. It is bounded by the number of episodes that have an
+        // `analysis_assets` row — NOT by the list length — which is why the id
+        // set is built by `compactMap`ping the assets rather than from
+        // `episodeIds`. Most library rows have never been analysed and cost
+        // nothing here. If that ever stops being true (a user with thousands of
+        // analysed episodes on screen), the fix is to narrow the fetch to the
+        // visible window, not to go back to reading a cheaper wrong number.
+        let coverageAssetIds = Set(episodeIds.compactMap { assets[$0]?.id })
+        // A THROW is not "coverage unknown". `AnalysisStore` is an actor also
+        // driven by the pipeline, so one `SQLITE_BUSY` empties the whole batch —
+        // and because this is a single call for the entire list, treating that as
+        // unknown would flip EVERY completed row at once, until the next
+        // `ActivityRefreshNotification` (posted only on job start/finish, so
+        // possibly not for a long time on an idle device). So a failed read leaves
+        // the previous analysis inputs in place and says so in the log, rather
+        // than repainting the library off a transport error.
+        let summaries: [String: AnalysisCoverageSummary]?
+        do {
+            summaries = try await store.fetchCoverageSummariesByAssetIds(coverageAssetIds)
+        } catch {
+            summaries = nil
+            Self.logger.warning(
+                "EpisodePreparationStatusModel: coverage read failed for \(coverageAssetIds.count, privacy: .public) asset(s); keeping prior readiness: \(error.localizedDescription, privacy: .public)"
+            )
+        }
         let snapshot = await downloadManager.progressSnapshot()
         let cachedIds = await downloadManager.cachedEpisodeIds(matching: ids)
         let permitted = await runtime.episodePreparationCoordinator.currentDownloadPermission()
@@ -85,19 +161,12 @@ final class EpisodePreparationStatusModel {
             r.isDownloaded = cachedIds.contains(id)
             r.snapshotDownloadFraction = snapshot[id]
             r.downloadPermitted = permitted
-            if let asset = assets[id] {
-                let status = EpisodeSurfaceStatusObserver.analysisState(from: asset).persistedStatus
-                r.analysisActive = episodePreparationAnalysisActive(status: status)
-                r.analysisFraction = Self.analysisFraction(from: asset)
-                r.analysisComplete = episodePreparationAnalysisComplete(
-                    status: status, analysisFraction: r.analysisFraction
+            if let summaries {
+                let asset = assets[id]
+                r.analysis = episodePreparationAnalysisInputs(
+                    asset: asset,
+                    coverage: asset.flatMap { summaries[$0.id] }
                 )
-                r.analysisFailed = (status == .failed || status == .cancelled)
-            } else {
-                r.analysisActive = false
-                r.analysisComplete = false
-                r.analysisFailed = false
-                r.analysisFraction = nil
             }
             // Drop the optimistic download bridge once the real in-flight /
             // cached signal is present, so a transfer that never started
@@ -164,31 +233,14 @@ final class EpisodePreparationStatusModel {
                 isDownloaded: r.isDownloaded,
                 downloadInFlight: inFlight,
                 downloadFraction: downloadFraction,
-                analysisActive: r.analysisActive,
-                analysisComplete: r.analysisComplete,
-                analysisFailed: r.analysisFailed,
-                analysisFraction: r.analysisFraction,
+                analysisActive: r.analysis.analysisActive,
+                analysisComplete: r.analysis.analysisComplete,
+                analysisTerminatedComplete: r.analysis.analysisTerminatedComplete,
+                analysisFailed: r.analysis.analysisFailed,
+                adScanFraction: r.analysis.adScanFraction,
                 userInitiated: userInitiated.contains(id),
                 downloadPermitted: r.downloadPermitted
             )
         )
-    }
-
-    /// Coverage watermark / duration, clamped to `[0, 1]`; `nil` when the
-    /// watermark or a positive duration is unknown. Mirrors the Activity
-    /// screen's `max(featureCoverageEndSec, confirmedAdCoverageEndSec)`
-    /// derivation so the two surfaces cannot drift.
-    private static func analysisFraction(from asset: AnalysisAsset) -> Double? {
-        let watermark: Double?
-        switch (asset.featureCoverageEndTime, asset.confirmedAdCoverageEndTime) {
-        case let (f?, a?): watermark = max(f, a)
-        case let (f?, nil): watermark = f
-        case let (nil, a?): watermark = a
-        case (nil, nil): watermark = nil
-        }
-        guard let watermark, let duration = asset.episodeDurationSec, duration > 0 else {
-            return nil
-        }
-        return min(1, max(0, watermark / duration))
     }
 }
