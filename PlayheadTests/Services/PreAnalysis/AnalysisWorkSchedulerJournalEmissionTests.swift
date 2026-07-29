@@ -142,9 +142,24 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         downloads: StubDownloadProvider,
         thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = {
             ProcessInfo.processInfo.thermalState
-        }
+        },
+        // playhead-ngev (review r1): the existing tests trip their arms before
+        // transcription, so they neither need nor want a loaded recognizer —
+        // both parameters default to exactly the previous behaviour. The
+        // interruption tests below DO reach stage 3, which needs
+        // `SpeechService.isReady()` to be true or the loop reports
+        // `speech_engine_not_ready` and never exercises the arm under test.
+        recognizer: any SpeechRecognizer = StubSpeechRecognizer(),
+        loadSpeechModel: Bool = false
     ) async -> AnalysisWorkScheduler {
-        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        // `serializesRecognizerRequests` deviates from the production default
+        // only for the tests that actually transcribe, so they do not contend
+        // on the process-wide recognizer gate with a concurrently running
+        // suite. Callers that never reach stage 3 keep the old construction.
+        let speechService = loadSpeechModel
+            ? SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+            : SpeechService(recognizer: recognizer)
+        if loadSpeechModel { try? await speechService.loadFastModel() }
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioProvider,
@@ -189,6 +204,221 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         return try await store.fetchWorkJournalEntries(
             episodeId: episodeId,
             generationID: job.generationID
+        )
+    }
+
+    // MARK: - playhead-ngev (review r1): interrupted.requeue spends NO attempt
+
+    /// Fails every shard to the loop's own conclusion, so the run is a genuine
+    /// total failure rather than a displaced one. The control half of the pair
+    /// below — same fixture, same stage, opposite termination.
+    private final class ConcludingFailureRecognizer: SpeechRecognizer, @unchecked Sendable {
+        private var loaded = false
+        func loadModel() async throws { loaded = true }
+        func unloadModel() async { loaded = false }
+        func isModelLoaded() async -> Bool { loaded }
+        func transcribe(
+            shard: AnalysisShard, podcastId: String?
+        ) async throws -> [TranscriptSegment] {
+            guard loaded else { throw TranscriptEngineError.modelNotLoaded }
+            throw TranscriptEngineError.vadFailed("shard \(shard.id)")
+        }
+        func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+            [VADResult(isSpeech: true, speechProbability: 1.0,
+                       startTime: shard.startTime,
+                       endTime: shard.startTime + shard.duration)]
+        }
+    }
+
+    /// Drives one full dispatch pass to the transcript stage and reports the
+    /// job row afterwards. Both halves of the A/B differ only in the
+    /// recognizer, so any difference in `attemptCount` is attributable to the
+    /// termination and nothing else.
+    private func runOneTranscriptPass(
+        jobId: String,
+        episodeId: String,
+        recognizer: any SpeechRecognizer
+    ) async throws -> TranscriptPassResult {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let tmpDir = try makeTempDir(prefix: "ngev-\(jobId)")
+        let audioFile = tmpDir.appendingPathComponent("episode.m4a")
+        FileManager.default.createFile(atPath: audioFile.path, contents: Data())
+        downloads.cachedURLs[episodeId] = audioFile
+
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: jobId,
+                jobType: "preAnalysis",
+                episodeId: episodeId,
+                analysisAssetId: "asset-\(jobId)",
+                workKey: "fp-\(jobId):1:preAnalysis",
+                sourceFingerprint: "fp-\(jobId)",
+                priority: 10,
+                desiredCoverageSec: 90,
+                state: "queued",
+                attemptCount: 0
+            )
+        )
+        // THE ASSET ROW MUST EXIST. `resolveAnalysisAssetId` returns
+        // `job.analysisAssetId` VERBATIM when it is set and does not create the
+        // row, so without this the pass dies at stage 2 on a FOREIGN KEY
+        // constraint and never reaches transcription at all. That is not a
+        // hypothetical: the first run of this fixture did exactly that, and
+        // because a stage-2 failure also routes through the `.failed` arm, the
+        // CONTROL half passed anyway — green for a reason that had nothing to
+        // do with what it claims to test. The premise assertion below is what
+        // stops that from ever being silent again.
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: "asset-\(jobId)",
+                episodeId: episodeId,
+                assetFingerprint: "fp-\(jobId)",
+                weakFingerprint: nil,
+                sourceURL: audioFile.absoluteString,
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: "queued",
+                analysisVersion: 1,
+                capabilitySnapshot: nil
+            )
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = (0..<4).map {
+            makeShard(id: $0, episodeID: episodeId, startTime: Double($0) * 30, duration: 30)
+        }
+        let scheduler = await makeScheduler(
+            store: store,
+            audioProvider: audioStub,
+            downloads: downloads,
+            recognizer: recognizer,
+            loadSpeechModel: true
+        )
+        // Bracket the pass. The arm computes `nextEligibleAt` from `clock()` at
+        // some instant strictly inside this window, so a delay assertion can be
+        // EXACT regardless of how starved the machine is — no wall-clock slack,
+        // no load-dependent flake.
+        let before = Date().timeIntervalSince1970
+        _ = await scheduler.processNextDispatchableJobForTesting()
+        let after = Date().timeIntervalSince1970
+        let row = try await store.fetchJob(byId: jobId)
+
+        // THE PREMISE, ASSERTED RATHER THAN ASSUMED. Both outcome arms write
+        // the runner's reason to `lastErrorCode`, so a `transcription:` prefix
+        // is proof the pass actually reached stage 3. Anything else — a decode
+        // throw, a `features:` FK failure — means the fixture never exercised
+        // the arm under test, and both halves of this A/B would otherwise
+        // report green while measuring nothing.
+        let code = row?.lastErrorCode ?? "<nil>"
+        #expect(
+            code.hasPrefix("transcription:"),
+            """
+            the pass never reached the transcript stage (lastErrorCode=\(code)), so this \
+            fixture is measuring a different failure than the one it names
+            """
+        )
+        return TranscriptPassResult(job: row, clockBefore: before, clockAfter: after)
+    }
+
+    /// The job row plus the bracket around the pass, so a caller can assert on
+    /// `nextEligibleAt` exactly rather than with wall-clock slack.
+    private struct TranscriptPassResult {
+        let job: AnalysisJob?
+        let clockBefore: Double
+        let clockAfter: Double
+    }
+
+    /// A LISTENER MOVING THE PLAYHEAD MUST NOT COST A PERMANENT RETRY.
+    ///
+    /// The `.failed` arm charges one of five attempts and then supersedes the
+    /// job with `nextEligibleAt: nil`. That row cannot come back:
+    /// `analysis_jobs.workKey` is UNIQUE, `insertJob` is `INSERT OR IGNORE`,
+    /// and the key is `"<fingerprint>:<analysisVersion>:preAnalysis"` — stable
+    /// across launches — so every later enqueue for the episode is silently
+    /// dropped until an app update bumps `analysisVersion`. The only reset,
+    /// `requeueOrphanedLease`, rewrites `state = 'running'` rows and never
+    /// touches a superseded one.
+    ///
+    /// Five scrubs across an episode's analysis lifetime is ordinary listening,
+    /// so charging them would permanently kill analysis on exactly the episodes
+    /// a listener engages with most.
+    @Test("an interrupted transcript pass is requeued without spending an attempt")
+    func interruptedPassSpendsNoAttempt() async throws {
+        let result = try await runOneTranscriptPass(
+            jobId: "ngev-interrupted",
+            episodeId: "ep-ngev-interrupted",
+            recognizer: CancellingRecognizer()
+        )
+        let row = try #require(result.job, "the job row must survive the pass")
+        #expect(
+            row.attemptCount == 0,
+            """
+            a scrub spent \(row.attemptCount) of five PERMANENT retry attempts. At five \
+            the job is superseded with nextEligibleAt: nil and every later enqueue for \
+            the episode is silently dropped — analysis is dead for that episode
+            """
+        )
+        #expect(row.state == "queued", "an interrupted job must be retryable, got \(row.state)")
+
+        // THE REQUEUE FLOOR, WHICH IS THE HALF THAT COSTS BATTERY IF IT GOES.
+        //
+        // Spending no attempt is only half the accounting. `.preempted` and
+        // `.cancelledByPlayback` requeue with `nextEligibleAt: nil` — safe for
+        // them, because a higher-lane job then holds the slot. An interruption
+        // is reported WHILE PLAYBACK CONTINUES, so an immediately re-admitted
+        // job collides with the same live engine owner again at once and spins.
+        //
+        // That regression has no red-test shape of its own: it surfaces as
+        // battery drain a listener reports vaguely, months later. It is exactly
+        // what a future "simplify the requeue to match `.preempted`" would do.
+        // So the floor is pinned here.
+        //
+        // Bracketed rather than slack-based: the arm reads `clock()` at an
+        // instant strictly between `clockBefore` and `clockAfter`, so this is
+        // exact under any load. The upper bound also proves the delay is the
+        // FLAT first rung and not the failure ladder's escalating value.
+        let eligible = try #require(
+            row.nextEligibleAt,
+            """
+            an interrupted job was requeued immediately eligible. It will collide with \
+            the live engine owner that just displaced it and requeue again — a hot loop \
+            burning battery mid-episode
+            """
+        )
+        #expect(
+            eligible >= result.clockBefore + 60,
+            "requeued only \(eligible - result.clockAfter)s out, below the 60s floor"
+        )
+        #expect(
+            eligible <= result.clockAfter + 60,
+            """
+            requeued \(eligible - result.clockBefore)s out — the floor is meant to be the \
+            ladder's FLAT first rung, not an escalating backoff. An interruption spends \
+            no attempt, so there is nothing to escalate against
+            """
+        )
+    }
+
+    /// THE CONTROL, AND IT IS WHAT KEEPS THE BUDGET MEANINGFUL. Same fixture,
+    /// same stage — only the termination differs. A genuinely broken episode
+    /// must still exhaust its attempts and stop, or it retries forever and the
+    /// poisoned-slot starvation playhead-gyvb.1 fixed comes back.
+    @Test("control: a transcript pass that failed on its own still spends an attempt")
+    func concludedFailurePassSpendsAnAttempt() async throws {
+        let result = try await runOneTranscriptPass(
+            jobId: "ngev-concluded",
+            episodeId: "ep-ngev-concluded",
+            recognizer: ConcludingFailureRecognizer()
+        )
+        let row = try #require(result.job, "the job row must survive the pass")
+        #expect(
+            row.attemptCount == 1,
+            """
+            a genuine transcript failure spent \(row.attemptCount) attempts, not 1 — a \
+            permanently broken episode now retries forever and pins its slot
+            """
         )
     }
 

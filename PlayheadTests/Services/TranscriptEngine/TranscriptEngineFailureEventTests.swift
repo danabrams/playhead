@@ -187,6 +187,113 @@ private final class SucceedsForOneEpisodeRecognizer: SpeechRecognizer, @unchecke
     }
 }
 
+/// playhead-ngev: a one-shot gate. `wait()` suspends until `open()`, and
+/// opening before waiting is remembered — so a test can synchronise with the
+/// transcription loop without polling or sleeping, and cannot deadlock on the
+/// order in which the two sides get scheduled.
+private actor InterruptionTestGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        opened = true
+        let pending = waiters
+        waiters = []
+        for waiter in pending { waiter.resume() }
+    }
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+}
+
+/// playhead-ngev: yields nothing (a silent shard — a clean, durable finish
+/// that inserts no rows) and announces each call, so a test can act at a known
+/// point in the loop.
+private final class AnnouncingSilentRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    let firstCall = InterruptionTestGate()
+
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        await firstCall.open()
+        return []
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: false, speechProbability: 0.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
+/// playhead-ngev: fails every shard and announces the first attempt. The
+/// interrupted-with-a-real-diagnosis fixture.
+private final class AnnouncingFailingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    let firstCall = InterruptionTestGate()
+
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        await firstCall.open()
+        throw TranscriptEngineError.vadFailed("no speech boundaries in shard \(shard.id)")
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
+/// playhead-ngev (review r1): the fixture for TWO OVERLAPPING LOOP BODIES.
+///
+/// Each shard announces its entry and then blocks on its own release gate, so
+/// a test can hold a cancelled predecessor and its live successor at chosen
+/// points and decide the interleaving rather than race it.
+///
+/// Shard 0 finishes SILENTLY — a clean, durable finish that inserts no rows,
+/// which is precisely the quantity `shardsCompletedThisRun` counts and the one
+/// an overlapping predecessor could donate. Shard 1 fails, so the run that owns
+/// it is a total failure on its own work and must say so.
+private final class OverlappingRunRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    let silentEntered = InterruptionTestGate()
+    let silentRelease = InterruptionTestGate()
+    let failingEntered = InterruptionTestGate()
+    let failingRelease = InterruptionTestGate()
+
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        if shard.id == 0 {
+            await silentEntered.open()
+            await silentRelease.wait()
+            return []
+        }
+        await failingEntered.open()
+        await failingRelease.wait()
+        throw TranscriptEngineError.vadFailed("no speech boundaries in shard \(shard.id)")
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
 /// Never loads, so `SpeechService.isReady()` is false.
 private final class NeverReadyRecognizer: SpeechRecognizer, @unchecked Sendable {
     func loadModel() async throws {}
@@ -233,6 +340,13 @@ struct TranscriptEngineFailureEventTests {
         case failed(TranscriptFailureReason)
     }
 
+    /// playhead-ngev: a test that has already awaited the loop's exit can emit
+    /// a `.failed` for this id afterwards. Seeing it means the loop's own
+    /// terminal event never arrived, so the fold returns `nil` IMMEDIATELY
+    /// rather than waiting out the suite's time limit — a mutation that
+    /// deletes an emission fails in milliseconds instead of a minute.
+    private static let sentinelAssetId = "asset-sentinel"
+
     private static func awaitTerminal(
         on events: AsyncStream<TranscriptEngineEvent>,
         assetId: String
@@ -240,8 +354,46 @@ struct TranscriptEngineFailureEventTests {
         for await event in events {
             if case .completed(let id) = event, id == assetId { return .completed }
             if case .failed(let id, let reason) = event, id == assetId { return .failed(reason) }
+            if case .failed(let id, _) = event, id == sentinelAssetId { return nil }
         }
         return nil
+    }
+
+    /// playhead-ngev (review r1): the first `count` terminal events for
+    /// `assetId`, in arrival order.
+    ///
+    /// `awaitTerminal` above stops at the first one, which is not enough when
+    /// two loop bodies overlap on the SAME asset: the predecessor's
+    /// interruption and the successor's own verdict are both terminals for that
+    /// id, and the whole question is what the SECOND one says.
+    private static func awaitTerminals(
+        on events: AsyncStream<TranscriptEngineEvent>,
+        assetId: String,
+        count: Int
+    ) async -> [Terminal] {
+        var seen: [Terminal] = []
+        for await event in events {
+            if case .completed(let id) = event, id == assetId { seen.append(.completed) }
+            if case .failed(let id, let reason) = event, id == assetId { seen.append(.failed(reason)) }
+            if case .failed(let id, _) = event, id == sentinelAssetId { break }
+            if seen.count == count { break }
+        }
+        return seen
+    }
+
+    /// playhead-ngev: block until the transcription loop is parked in
+    /// `waitForMoreShards`, which is where a real loop waits for a streaming
+    /// decoder — and therefore where a scrub's cancellation usually lands.
+    ///
+    /// Asserted rather than assumed: without it a test can cancel BEFORE the
+    /// loop reaches the park and end up exercising a different arm, which
+    /// would quietly leave the parked case unmeasured.
+    private static func waitUntilParked(_ engine: TranscriptEngineService) async throws {
+        for _ in 0..<1_000 {
+            if await engine.appendWaiterCountForTesting > 0 { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        Issue.record("the loop never parked in waitForMoreShards — the fixture is not testing the parked case")
     }
 
     // MARK: - Total failure
@@ -897,13 +1049,23 @@ struct TranscriptEngineFailureEventTests {
         )
     }
 
-    // MARK: - The stop gate still applies
+    // MARK: - playhead-ngev: the stop gate lets the CURRENT run's failure out
 
-    /// `.failed` must obey the same per-asset gate as `.completed`: after
-    /// `stopTranscription`, the runner has moved on and any event it observes
-    /// would be attributed to whatever it is doing next.
+    /// THE EVENT THAT WAS DELETED 30 LINES BEFORE THE ROW THAT NEEDED IT.
+    ///
+    /// playhead-8ysk gated `.failed` exactly like `.completed`. But the runner
+    /// inserts the asset into `stoppedAssetIds` at the TOP of its zero-coverage
+    /// branch and writes the journal row at the BOTTOM, so "this asset is
+    /// stopped" does not mean "the runner has moved on" — it means the runner
+    /// is mid-write, and the event the gate silenced is the only classified
+    /// account of the failure it is about to describe.
+    ///
+    /// The reason `.completed` is gated does not transfer: subscribers ACT on
+    /// `.completed` (finalize a backfill, queue ad detection over a coverage
+    /// watermark). Nothing acts on `.failed` — it only says why nothing
+    /// happened.
     @Test(.timeLimit(.minutes(1)))
-    func failedIsSuppressedForAStoppedAsset() async throws {
+    func currentRunsFailedSurvivesTheStopGate() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(Self.asset(id: "asset-stopped"))
         let speech = SpeechService(
@@ -918,15 +1080,63 @@ struct TranscriptEngineFailureEventTests {
         // the emission directly against a gated asset instead.
         await engine.emitFailedForTesting(
             analysisAssetId: "asset-stopped",
-            reason: TranscriptFailureReason(failureClass: .silentShard)
+            reason: TranscriptFailureReason(failureClass: .silentShard),
+            fromCurrentRun: true
         )
         await engine.emitFailedForTesting(
-            analysisAssetId: "asset-other",
+            analysisAssetId: "asset-sentinel",
             reason: TranscriptFailureReason(failureClass: .noShards)
         )
 
-        // The first event to arrive must be the ungated one — proving the
-        // gated one was dropped rather than merely late.
+        // Ordering is the assertion. The gated event must arrive FIRST; a
+        // build that drops it delivers only the sentinel, and does so
+        // immediately rather than by timing out.
+        var received: [String] = []
+        for await event in events {
+            if case .failed(let id, _) = event {
+                received.append(id)
+                if received.count == 2 { break }
+                if id == "asset-sentinel" { break }
+            }
+        }
+        #expect(
+            received == ["asset-stopped", "asset-sentinel"],
+            """
+            the current run's `.failed` for a stopped asset was dropped, which \
+            is the event the runner's own journal row is about to describe \
+            (received \(received))
+            """
+        )
+    }
+
+    /// The counterweight, and what keeps the exemption from being a blanket
+    /// hole. A SUPERSEDED run's failure is still dropped for a gated asset:
+    /// its successor has its own observer, and there is a real window — between
+    /// a new runner subscribing with `events()` and its `startTranscription`
+    /// rescinding the gate — in which a stale reason would be read as the new
+    /// run's own, failing a run that has not yet done anything.
+    @Test(.timeLimit(.minutes(1)))
+    func supersededRunsFailedIsStillSuppressed() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-stopped"))
+        let speech = SpeechService(
+            recognizer: AlwaysFailingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.stopTranscription(analysisAssetId: "asset-stopped")
+        await engine.emitFailedForTesting(
+            analysisAssetId: "asset-stopped",
+            reason: TranscriptFailureReason(failureClass: .silentShard),
+            fromCurrentRun: false
+        )
+        await engine.emitFailedForTesting(
+            analysisAssetId: "asset-sentinel",
+            reason: TranscriptFailureReason(failureClass: .noShards)
+        )
+
         var received: [String] = []
         for await event in events {
             if case .failed(let id, _) = event {
@@ -934,7 +1144,285 @@ struct TranscriptEngineFailureEventTests {
                 break
             }
         }
-        #expect(received == ["asset-other"],
-                "a .failed for a stopped asset must be dropped (received \(received))")
+        #expect(
+            received == ["asset-sentinel"],
+            """
+            a superseded run's `.failed` reached a subscriber for an asset that \
+            is still gated (received \(received))
+            """
+        )
+    }
+
+    // MARK: - playhead-ngev: the interruptions are reported, not swallowed
+
+    /// THE DOMINANT PRODUCTION CASE, AND IT WAS NOT A FAILURE AT ALL.
+    ///
+    /// One `TranscriptEngineService` is shared by `AnalysisCoordinator` and
+    /// `AnalysisJobRunner`, so a scrub, a speed change or a new episode cancels
+    /// whatever the other owner was running. The loop returned in SILENCE, the
+    /// runner waited out its full 300 s timeout, and the row it finally wrote
+    /// said `asr_failed`. Ordinary playback was recorded as an ASR failure,
+    /// five minutes after the fact.
+    ///
+    /// Driven through the drain-loop park, which is where a real loop waits
+    /// for more shards, so the cancellation lands the way a scrub's does
+    /// rather than being simulated by a thrown error.
+    @Test(.timeLimit(.minutes(1)))
+    func cancellationIsReportedInsteadOfReturningInSilence() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-cancelled"))
+        let recognizer = AnnouncingSilentRecognizer()
+        let speech = SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        // No `finishAppending`: the loop transcribes its shard and then parks
+        // in `waitForMoreShards`, exactly as it does under a streaming decoder.
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-asset-cancelled", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-cancelled",
+            snapshot: Self.snapshot
+        )
+        await recognizer.firstCall.wait()
+        try await Self.waitUntilParked(engine)
+
+        // A raw cancel — what `startTranscription` does to its predecessor.
+        let task = await engine.activeTaskForTesting()
+        task?.cancel()
+        await task?.value
+
+        await engine.emitFailedForTesting(
+            analysisAssetId: "asset-sentinel",
+            reason: TranscriptFailureReason(failureClass: .noShards)
+        )
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-cancelled")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("""
+                a cancelled run reported \(String(describing: terminal)) — in \
+                production that silence costs the runner a 300 s timeout and \
+                the episode an `asr_failed` row for an ordinary scrub
+                """)
+            return
+        }
+        #expect(reason.failureClass == .cancelled)
+        #expect(
+            reason.termination == .interrupted,
+            "an interrupted run must say so, or the coordinator tears down a live session"
+        )
+    }
+
+    /// AND THE DIAGNOSIS THE RUN ALREADY EARNED IS NOT THROWN AWAY.
+    ///
+    /// Eleven of the thirteen silent returns could execute with `shardFailures`
+    /// non-empty: shards fail with a fully classified reason, the listener
+    /// scrubs, and the accumulated diagnoses go out of scope one line before
+    /// anything could emit them. Same defect as the one playhead-8ysk removed
+    /// from the catches, one level further out — the code computed the right
+    /// answer and lost it on the way to the emitter.
+    @Test(.timeLimit(.minutes(1)))
+    func aCancelledRunStillReportsWhatItsShardsFailedWith() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-cancelled-diag"))
+        let recognizer = AnnouncingFailingRecognizer()
+        let speech = SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-asset-cancelled-diag", startTime: 0, duration: 30),
+            ],
+            analysisAssetId: "asset-cancelled-diag",
+            snapshot: Self.snapshot
+        )
+        await recognizer.firstCall.wait()
+        try await Self.waitUntilParked(engine)
+
+        let task = await engine.activeTaskForTesting()
+        task?.cancel()
+        await task?.value
+
+        await engine.emitFailedForTesting(
+            analysisAssetId: Self.sentinelAssetId,
+            reason: TranscriptFailureReason(failureClass: .noShards)
+        )
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-cancelled-diag")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("expected .failed, got \(String(describing: terminal))")
+            return
+        }
+        #expect(
+            reason.failureClass == .vadFailed,
+            """
+            the interruption overwrote a diagnosis the engine had already \
+            computed. `cancelled` says the run stopped; `vad_failed` says why \
+            it was producing nothing when it did (got \(reason.failureClass.rawValue))
+            """
+        )
+        #expect(reason.failedShardCount == 1)
+        #expect(
+            reason.termination == .interrupted,
+            """
+            reported as a run that reached its own conclusion, which is the \
+            total-failure gate's meaning — the two are different rows and \
+            different remedies
+            """
+        )
+    }
+
+    /// A `stopTranscription` reports `stopped`, and — the point — the report
+    /// SURVIVES the gate that same call installs. This is the end-to-end form
+    /// of `currentRunsFailedSurvivesTheStopGate`: the loop's own emission, for
+    /// an asset the stop has just fenced.
+    @Test(.timeLimit(.minutes(1)))
+    func aStoppedRunReportsStoppedThroughItsOwnGate() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-stop-reports"))
+        let recognizer = AnnouncingSilentRecognizer()
+        let speech = SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-asset-stop-reports", startTime: 0, duration: 30),
+            ],
+            analysisAssetId: "asset-stop-reports",
+            snapshot: Self.snapshot
+        )
+        await recognizer.firstCall.wait()
+        try await Self.waitUntilParked(engine)
+
+        let task = await engine.activeTaskForTesting()
+        await engine.stopTranscription(analysisAssetId: "asset-stop-reports")
+        await task?.value
+
+        await engine.emitFailedForTesting(
+            analysisAssetId: "asset-sentinel",
+            reason: TranscriptFailureReason(failureClass: .noShards)
+        )
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-stop-reports")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("""
+                the stopped run said nothing (got \(String(describing: terminal))) — \
+                either it returned in silence or its report was dropped by the \
+                gate the stop installed
+                """)
+            return
+        }
+        #expect(reason.failureClass == .stopped)
+        #expect(reason.termination == .interrupted)
+    }
+
+    // MARK: - playhead-ngev item 4: the tallies belong to ONE run
+
+    /// THE ONE CLAIM THE BEAD SHIPPED WITHOUT A TEST, AND IT IS A RACE.
+    ///
+    /// `chunksInsertedThisRun` and `shardsCompletedThisRun` were actor fields
+    /// reset at the top of `runTranscriptionLoop`. Their doc comments asserted
+    /// per-pass scoping that an actor field cannot provide: `startTranscription`
+    /// cancels its predecessor and spawns the successor WITHOUT awaiting the
+    /// predecessor's exit, and cancellation is cooperative — so two loop bodies
+    /// overlap, and any work the predecessor finishes after the successor's
+    /// reset is credited to the successor. Making them loop locals fixes it,
+    /// but "a local has no shared cell" is a structural argument, and this
+    /// project has been burned by structural arguments that were never measured.
+    ///
+    /// So measure it. The interleaving is forced, not raced:
+    ///
+    ///   1. the predecessor is held INSIDE `transcribe` for a silent shard —
+    ///      the case that finishes cleanly while inserting no rows, which is
+    ///      exactly the quantity `shardsCompletedThisRun` counts;
+    ///   2. a scrub cancels it and starts a successor for the SAME asset whose
+    ///      only shard fails, so the successor is a total failure on its own
+    ///      work;
+    ///   3. the predecessor is released FIRST and its interruption is awaited,
+    ///      which proves its credit line has already executed;
+    ///   4. only then does the successor reach its total-failure gate.
+    ///
+    /// With the tallies on the actor, step 3 leaves `shardsCompletedThisRun`
+    /// at 1 and the successor's gate reads "this run did work" — so it emits
+    /// `.completed` over a run in which every shard failed, which is the exact
+    /// lie playhead-8ysk was filed to remove, reintroduced through a back door
+    /// that only opens when a listener scrubs.
+    @Test(.timeLimit(.minutes(1)))
+    func anOverlappingPredecessorDoesNotCreditTheSuccessor() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-overlap"))
+        let recognizer = OverlappingRunRecognizer()
+        let speech = SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        // Two subscribers: the first reads the predecessor's terminal, the
+        // second reads past it to the successor's. One stream cannot do both,
+        // because the gate that sequences them has to be opened in between.
+        let predecessorEvents = await engine.events()
+        let successorEvents = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-asset-overlap", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-overlap",
+            snapshot: Self.snapshot
+        )
+        await recognizer.silentEntered.wait()
+
+        // The scrub. Cancels the predecessor and spawns the successor for the
+        // same asset without awaiting the predecessor's exit — the production
+        // shape, not a contrivance.
+        await engine.startTranscription(
+            shards: [makeShard(id: 1, episodeID: "ep-asset-overlap", startTime: 30, duration: 30)],
+            analysisAssetId: "asset-overlap",
+            snapshot: Self.snapshot
+        )
+        await recognizer.failingEntered.wait()
+        await engine.finishAppending(analysisAssetId: "asset-overlap")
+
+        // Step 3: let the CANCELLED PREDECESSOR finish its shard, and wait for
+        // proof that it did. Its interruption is emitted after the credit line,
+        // so observing it means the credit has already happened.
+        await recognizer.silentRelease.open()
+        let predecessorTerminals = await Self.awaitTerminals(
+            on: predecessorEvents, assetId: "asset-overlap", count: 1
+        )
+        guard let firstTerminal = predecessorTerminals.first,
+              case .failed(let predecessor) = firstTerminal else {
+            Issue.record("""
+                the predecessor reported \(String(describing: predecessorTerminals.first)) \
+                instead of its interruption — the fixture is not testing the overlap
+                """)
+            return
+        }
+        #expect(predecessor.failureClass == .cancelled)
+        #expect(predecessor.termination == .interrupted)
+
+        // Step 4: only now does the successor reach its own total-failure gate.
+        await recognizer.failingRelease.open()
+        let terminals = await Self.awaitTerminals(
+            on: successorEvents, assetId: "asset-overlap", count: 2
+        )
+        #expect(terminals.count == 2, "got \(terminals)")
+        guard terminals.count == 2, case .failed(let successor) = terminals[1] else {
+            Issue.record("""
+                the successor reported \(String(describing: terminals.last)) over a run \
+                in which every shard failed. A cancelled predecessor's clean shard was \
+                credited to it, so its total-failure gate read "this run did work"
+                """)
+            return
+        }
+        #expect(
+            successor.failureClass == .vadFailed,
+            "the successor reported \(successor.failureClass.rawValue), not its own shard's class"
+        )
+        #expect(successor.failedShardCount == 1)
+        #expect(
+            successor.termination == .ranToConclusion,
+            "the successor was not interrupted — it ran out of shards and judged itself"
+        )
     }
 }

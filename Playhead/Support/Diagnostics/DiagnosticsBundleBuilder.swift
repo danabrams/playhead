@@ -113,12 +113,17 @@ enum DiagnosticsBundleBuilder {
     /// projection boundary that `metadata` as a whole correctly may not.
     static func extractFailure(
         fromMetadata metadata: String
-    ) -> (failureClass: String?, failureCode: Int?) {
+    ) -> (
+        failureClass: String?,
+        failureCode: Int?,
+        failureObservation: String?,
+        failureTermination: String?
+    ) {
         guard let data = metadata.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
               let dict = object as? [String: Any]
         else {
-            return (nil, nil)
+            return (nil, nil, nil, nil)
         }
         let failureClass = (dict[DiagnosticsFailureKeys.failureClass] as? String)
             .flatMap(TranscriptFailureClass.init(rawValue:))?
@@ -128,7 +133,17 @@ enum DiagnosticsBundleBuilder {
         let rawCode = dict[DiagnosticsFailureKeys.failureCode]
         let failureCode = (rawCode as? String).flatMap(Int.init)
             ?? (rawCode as? NSNumber)?.intValue
-        return (failureClass, failureCode)
+        // playhead-ngev: identical construction to `failure_class` — the value
+        // is admitted ONLY if it round-trips through a closed enum of
+        // compile-time literals, so an emitter that writes free text under
+        // either key exports nothing at all.
+        let failureObservation = (dict[DiagnosticsFailureKeys.failureObservation] as? String)
+            .flatMap(AnalysisJobRunner.TranscriptRunObservation.init(rawValue:))?
+            .rawValue
+        let failureTermination = (dict[DiagnosticsFailureKeys.failureTermination] as? String)
+            .flatMap(TranscriptRunTermination.init(rawValue:))?
+            .rawValue
+        return (failureClass, failureCode, failureObservation, failureTermination)
     }
 
     /// Half of the transcript excerpt window around an ad boundary;
@@ -222,7 +237,9 @@ enum DiagnosticsBundleBuilder {
                 eventType: entry.eventType.rawValue,
                 cause: entry.cause?.rawValue,
                 failureClass: failure.failureClass,
-                failureCode: failure.failureCode
+                failureCode: failure.failureCode,
+                failureObservation: failure.failureObservation,
+                failureTermination: failure.failureTermination
             )
         }
 

@@ -208,4 +208,326 @@ struct TranscriptObservationTests {
         #expect(result.failure?.code == 42)
         #expect(result.coverage == 0)
     }
+
+    // MARK: - playhead-ngev: "the engine said it finished" is a THIRD fact
+
+    /// A `.completed` over an empty transcript and a 300 s silence both leave
+    /// the fold with `(coverage: 0, failure: nil)`, so the journal row could
+    /// not tell them apart — and they are different bugs in different files
+    /// ("the engine believes it succeeded" vs "the engine never spoke").
+    @Test(".completed is recorded even when it carried no coverage")
+    func completedIsObservableAtZeroCoverage() async throws {
+        let result = await AnalysisJobRunner.observeTranscriptEvents(
+            stream: stream([.completed(analysisAssetId: assetId)]),
+            assetId: assetId,
+            persistedCoverage: { 0 }
+        )
+        #expect(result.coverage == 0)
+        #expect(result.failure == nil)
+        #expect(
+            result.sawCompleted,
+            """
+            the engine's own `.completed` was not recorded, so this row is \
+            indistinguishable from a five-minute silence — the exact overload \
+            `failure_observation` exists to remove
+            """
+        )
+    }
+
+    /// The other two shapes, so the flag cannot be a constant.
+    @Test("a stream that ends with no terminal event saw no completion")
+    func silenceIsNotACompletion() async throws {
+        let result = await AnalysisJobRunner.observeTranscriptEvents(
+            stream: stream([]), assetId: assetId, persistedCoverage: { 0 }
+        )
+        #expect(result.sawCompleted == false)
+    }
+
+    @Test("a .failed is not a completion")
+    func failureIsNotACompletion() async throws {
+        let result = await AnalysisJobRunner.observeTranscriptEvents(
+            stream: stream([
+                .failed(
+                    analysisAssetId: assetId,
+                    reason: TranscriptFailureReason(failureClass: .noShards)
+                )
+            ]),
+            assetId: assetId,
+            persistedCoverage: { 0 }
+        )
+        #expect(result.sawCompleted == false)
+    }
+
+    /// Another asset's `.completed` must not be recorded as ours. The engine's
+    /// stream is shared, so this is routine — and crediting it would make a
+    /// silent timeout report `engine_completed_zero`, sending a reader to the
+    /// engine's completion path for a run the engine never finished.
+    @Test("another asset's .completed is not recorded as ours")
+    func anotherAssetsCompletionIsNotOurs() async throws {
+        let result = await AnalysisJobRunner.observeTranscriptEvents(
+            stream: stream([.completed(analysisAssetId: "someone-else")]),
+            assetId: assetId,
+            persistedCoverage: { 0 }
+        )
+        #expect(result.sawCompleted == false)
+    }
+
+    // MARK: - playhead-ngev: the observation vocabulary
+
+    /// The three-case mapping, stated as a table. Absence of a `failure_class`
+    /// was overloaded across four unrelated diagnoses; this is what separates
+    /// them, and it is derived from facts the runner always holds.
+    @Test("the observation names which of the three endings happened")
+    func observationClassification() {
+        typealias Observation = AnalysisJobRunner.TranscriptRunObservation
+
+        #expect(
+            Observation.classify(
+                failure: TranscriptFailureReason(failureClass: .silentShard),
+                sawCompleted: false
+            ) == .engineReported
+        )
+        #expect(
+            Observation.classify(failure: nil, sawCompleted: true) == .engineCompletedZero
+        )
+        #expect(
+            Observation.classify(failure: nil, sawCompleted: false) == .engineSilentTimeout
+        )
+        // A reported failure wins over a completion flag: the fold breaks on
+        // `.failed`, so the two cannot both describe this run.
+        #expect(
+            Observation.classify(
+                failure: TranscriptFailureReason(failureClass: .noShards),
+                sawCompleted: true
+            ) == .engineReported
+        )
+    }
+
+    /// The vocabulary crosses the bundle projection, so it is held to the same
+    /// bar as `TranscriptFailureClass`: fixed identifiers only.
+    @Test("every observation raw value is a bare snake_case identifier")
+    func observationRawValuesAreIdentifierShaped() {
+        let shape = #/^[a-z][a-z0-9_]*$/#
+        #expect(AnalysisJobRunner.TranscriptRunObservation.allCases.count == 3)
+        for observation in AnalysisJobRunner.TranscriptRunObservation.allCases {
+            #expect(
+                (try? shape.wholeMatch(in: observation.rawValue)) != nil,
+                "'\(observation.rawValue)' is not identifier-shaped"
+            )
+        }
+    }
+
+    // MARK: - playhead-ngev: `cause` is no longer hardcoded
+
+    /// A ROW MUST NOT CONTRADICT ITSELF. `cause` was a hardcoded `.asrFailed`
+    /// with no reference to the failure, so a row could read
+    /// `cause = asr_failed` beside `failure_class = no_shards` — and an
+    /// aggregate counts the column that is wrong.
+    @Test(
+        "a class that proves the recognizer never ran is not journaled as an ASR failure",
+        arguments: [
+            TranscriptFailureClass.noShards,
+            .speechEngineNotReady,
+            .modelNotLoaded,
+            .persistenceFailed,
+            .cancelled,
+            .stopped,
+        ]
+    )
+    func nonRecognitionFailuresAreJournaledAsPipelineErrors(
+        failureClass: TranscriptFailureClass
+    ) {
+        let cause = AnalysisJobRunner.journalCause(
+            failure: TranscriptFailureReason(failureClass: failureClass),
+            observation: .engineReported
+        )
+        #expect(
+            cause == .pipelineError,
+            "\(failureClass.rawValue) was journaled as \(cause.rawValue)"
+        )
+    }
+
+    /// The positive control. Reserving `.asrFailed` is worthless if nothing
+    /// ever gets it — the label would still name an absence, just a rarer one.
+    @Test(
+        "a class that means recognition ran keeps the ASR cause",
+        arguments: [
+            TranscriptFailureClass.transcriptionFailed,
+            .vadFailed,
+            .analyzerSessionFailure,
+        ]
+    )
+    func recognitionFailuresKeepTheASRCause(failureClass: TranscriptFailureClass) {
+        let cause = AnalysisJobRunner.journalCause(
+            failure: TranscriptFailureReason(failureClass: failureClass),
+            observation: .engineReported
+        )
+        #expect(cause == .asrFailed, "\(failureClass.rawValue) was journaled as \(cause.rawValue)")
+    }
+
+    /// A silent timeout has no reporter at all, so nothing in it can support a
+    /// claim about ASR. This is the row the bead was filed over: 300 s of
+    /// silence, journaled as an ASR failure.
+    @Test("a silent timeout is a pipeline error, never an ASR failure")
+    func silentTimeoutIsAPipelineError() {
+        #expect(
+            AnalysisJobRunner.journalCause(failure: nil, observation: .engineSilentTimeout)
+                == .pipelineError
+        )
+        // Even if a reason somehow rode along with a timeout, the timeout wins:
+        // no one reported, so no one can be blamed.
+        #expect(
+            AnalysisJobRunner.journalCause(
+                failure: TranscriptFailureReason(failureClass: .vadFailed),
+                observation: .engineSilentTimeout
+            ) == .pipelineError
+        )
+    }
+
+    @Test("a completion over an empty transcript is a pipeline error")
+    func completedZeroIsAPipelineError() {
+        #expect(
+            AnalysisJobRunner.journalCause(failure: nil, observation: .engineCompletedZero)
+                == .pipelineError
+        )
+    }
+
+    // MARK: - playhead-ngev: the runner must not stop an engine it no longer owns
+
+    /// The zero-coverage stop exists to fence an ORPHANED engine. An
+    /// interrupted run is the one case where the engine is not orphaned: it is
+    /// shared, and the cancel came from a live owner that has already re-tasked
+    /// it (a scrub, a speed change, a different episode). Stopping it there
+    /// cancels the listener's own transcription and gates the asset against the
+    /// appends that owner is about to make.
+    ///
+    /// This only became reachable with this bead — an interruption used to be
+    /// silent, so the runner sat out its 300 s timeout and the successor was
+    /// usually finished by the time the stop landed.
+    @Test("an interrupted run does not tear down the engine a live owner re-tasked")
+    func interruptedRunLeavesTheEngineAlone() {
+        #expect(
+            AnalysisJobRunner.shouldStopEngine(
+                after: TranscriptFailureReason(
+                    failureClass: .cancelled, termination: .interrupted
+                )
+            ) == false
+        )
+        // Including when the interruption carries a real shard diagnosis: it is
+        // the termination that says someone else owns the engine now.
+        #expect(
+            AnalysisJobRunner.shouldStopEngine(
+                after: TranscriptFailureReason(
+                    failureClass: .modelNotLoaded, code: nil, failedShardCount: 4,
+                    termination: .interrupted
+                )
+            ) == false
+        )
+    }
+
+    // MARK: - playhead-ngev (review r1): a scrub must not spend a retry attempt
+
+    /// THE ATTEMPT BUDGET IS PERMANENT, AND FIVE SCRUBS IS ORDINARY LISTENING.
+    ///
+    /// The scheduler charges every `.failed` one of five attempts and then
+    /// supersedes the job with `nextEligibleAt: nil`. That row cannot come
+    /// back: `analysis_jobs.workKey` is UNIQUE, `insertJob` is
+    /// `INSERT OR IGNORE`, and the key is
+    /// `"<fingerprint>:<analysisVersion>:preAnalysis"` — stable across
+    /// launches — so every later enqueue for the episode is silently dropped
+    /// until an app update bumps `analysisVersion`. The only attempt reset,
+    /// `requeueOrphanedLease`, rewrites `state = 'running'` rows and never
+    /// touches a superseded one.
+    ///
+    /// So routing an interruption to `.failed` would permanently kill analysis
+    /// on exactly the episodes a listener engages with most. It reports as
+    /// `.interrupted`, which the scheduler requeues without spending anything.
+    @Test(
+        "an interruption reports .interrupted, whatever diagnosis it carries",
+        arguments: [
+            TranscriptFailureClass.cancelled,
+            .stopped,
+            .preempted,
+            // The termination decides, not the class: a run whose shards were
+            // genuinely failing and which was THEN scrubbed is still a run the
+            // listener ended.
+            .modelNotLoaded,
+            .vadFailed,
+        ]
+    )
+    func interruptionsDoNotSpendARetryAttempt(failureClass: TranscriptFailureClass) {
+        let reason = AnalysisJobRunner.zeroCoverageStopReason(
+            failure: TranscriptFailureReason(
+                failureClass: failureClass, termination: .interrupted
+            )
+        )
+        guard case .interrupted(let code) = reason else {
+            Issue.record("""
+                \(failureClass.rawValue) interrupted reported \(reason), which spends one \
+                of five PERMANENT retry attempts. At five the episode's analysis is \
+                abandoned for good
+                """)
+            return
+        }
+        // The diagnosis is not lost by declining to charge for it.
+        #expect(code == "transcription:\(failureClass.rawValue)")
+    }
+
+    /// THE REVERSE HAZARD, AND IT IS THE ONE THAT KEEPS THE BUDGET MEANINGFUL.
+    /// A genuinely broken episode must still exhaust its attempts and stop, or
+    /// it retries forever. Only the TERMINATION may excuse a run.
+    @Test(
+        "a run that concluded on its own still spends its attempt",
+        arguments: [
+            TranscriptFailureClass.vadFailed,
+            .transcriptionFailed,
+            .noShards,
+            .speechEngineNotReady,
+            .persistenceFailed,
+            // Even a class whose NAME is an interruption: if the loop reached
+            // its own conclusion, the run was not displaced.
+            .cancelled,
+        ]
+    )
+    func concludedRunsStillSpendTheirAttempt(failureClass: TranscriptFailureClass) {
+        let reason = AnalysisJobRunner.zeroCoverageStopReason(
+            failure: TranscriptFailureReason(
+                failureClass: failureClass, termination: .ranToConclusion
+            )
+        )
+        guard case .failed = reason else {
+            Issue.record("""
+                \(failureClass.rawValue) that ran to conclusion reported \(reason), which \
+                is requeued without spending an attempt — so a permanently broken \
+                episode retries forever
+                """)
+            return
+        }
+    }
+
+    /// And the two zero-coverage exits that carry no failure at all — a 300 s
+    /// silence and a `.completed` over an empty transcript — are failures, not
+    /// interruptions. Nothing reported, so nothing excuses them.
+    @Test("a run nobody reported on still spends its attempt")
+    func unreportedRunsStillSpendTheirAttempt() {
+        let reason = AnalysisJobRunner.zeroCoverageStopReason(failure: nil)
+        guard case .failed(let code) = reason else {
+            Issue.record("an unreported zero-coverage run reported \(reason)")
+            return
+        }
+        #expect(code == "transcription:zeroCoverage")
+    }
+
+    /// The control: every other zero-coverage exit still stops the engine.
+    /// Without it the fix reads "never stop", which reinstates the orphaned
+    /// writer playhead-5uvz.5 fenced.
+    @Test("control: a run that concluded, or reported nothing, still stops the engine")
+    func nonInterruptedRunsStillStopTheEngine() {
+        #expect(AnalysisJobRunner.shouldStopEngine(after: nil))
+        #expect(
+            AnalysisJobRunner.shouldStopEngine(
+                after: TranscriptFailureReason(failureClass: .vadFailed, failedShardCount: 3)
+            )
+        )
+    }
 }

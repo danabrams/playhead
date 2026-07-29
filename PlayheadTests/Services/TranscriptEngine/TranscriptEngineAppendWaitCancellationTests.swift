@@ -163,7 +163,17 @@ struct TranscriptEngineAppendWaitCancellationTests {
         await task.value
 
         // Waking the waiter must not be mistaken for end-of-input. The loop
-        // re-checks cancellation after the park and returns without emitting.
+        // re-checks cancellation after the park and does not complete the
+        // asset.
+        //
+        // playhead-ngev: it is no longer SILENT — it emits
+        // `.failed(.cancelled, interrupted)`, which is what turns a 300 s
+        // runner stall into an instantly named row
+        // (`cancellationIsReportedInsteadOfReturningInSilence` pins that). The
+        // claim under test here is narrower and unchanged: whatever else it
+        // says, a cancelled loop must never claim COMPLETION, because that is
+        // the event subscribers act on.
+        //
         // A negative check, so a bounded observation window is correct here:
         // too short can only produce a false PASS, never a flaky failure.
         let completed = await withTaskGroup(of: String?.self) { group in

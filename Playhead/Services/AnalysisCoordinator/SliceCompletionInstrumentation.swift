@@ -438,6 +438,15 @@ enum CauseEmissionRegistry {
         // emitter without needing the dfem runner-recorder injection.
         declareLive(cause: .asrFailed, tag: "AnalysisJobRunner.run.transcriptionTimeout")
 
+        // playhead-ngev: the SAME site is now a live emitter of
+        // `pipeline_error` too. The cause was hardcoded `.asrFailed` there, so
+        // rows whose own `failure_class` proved the recognizer never ran
+        // (`no_shards`, `speech_engine_not_ready`, `persistence_failed`) still
+        // claimed an ASR failure — and so did every 300 s silent timeout,
+        // where nothing was reported by anyone. Which of the two a given row
+        // gets is decided by `AnalysisJobRunner.journalCause`.
+        declareLive(cause: .pipelineError, tag: "AnalysisJobRunner.run.transcriptionTimeout")
+
         // pipeline_error catch-all in the runner. Already declared live
         // for the DownloadManager site above; the runner hook is
         // planned (AnalysisJobRunner does not yet funnel through the

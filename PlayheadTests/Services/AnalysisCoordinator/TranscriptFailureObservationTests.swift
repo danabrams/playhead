@@ -365,6 +365,117 @@ struct TranscriptFailureObservationTests {
         #expect(after?.updatedAt == before?.updatedAt)
     }
 
+    // MARK: - playhead-ngev: an interruption is not a terminal failure
+
+    /// THE REGRESSION THE NEW EVENTS WOULD OTHERWISE CAUSE.
+    ///
+    /// The loop now reports the interruptions it used to return from in
+    /// silence, and the dominant one is a scrub: `handleScrub` calls
+    /// `startTranscription`, which cancels the running loop AND immediately
+    /// spawns its replacement for the same asset. That replacement is the
+    /// session this observer is watching, and it will emit its own
+    /// `.completed`.
+    ///
+    /// Treating the predecessor's exit as terminal would stop observing and
+    /// release the handle while the successor was still transcribing, so
+    /// `finalizeBackfill` would never run for an episode that transcribed
+    /// perfectly well — a brand-new way to lose a backfill, introduced by a
+    /// diagnostics fix. Before this bead the arm saw NOTHING here, so keeping
+    /// observing is also what preserves the shipping behaviour.
+    @Test("an interrupted run keeps the session under observation")
+    func interruptedFailureKeepsObserving() async throws {
+        let fixture = try await seed(idSuffix: "interrupted-keeps")
+        await fixture.coordinator.installTranscriptObserverForTesting()
+        let before = try await fixture.store.fetchSession(id: fixture.sessionId)
+
+        let step = await fixture.coordinator.handleTranscriptEventForTesting(
+            .failed(
+                analysisAssetId: fixture.assetId,
+                reason: TranscriptFailureReason(
+                    failureClass: .cancelled, termination: .interrupted
+                )
+            ),
+            sessionId: fixture.sessionId,
+            assetId: fixture.assetId,
+            episodeId: fixture.episodeId,
+            activeShards: fixture.shards
+        )
+
+        #expect(
+            step == .keepObserving,
+            """
+            a scrub tore down the observer for a session whose successor loop \
+            is still transcribing. The successor's `.completed` now has nobody \
+            listening, so the backfill is never finalized
+            """
+        )
+        #expect(
+            await fixture.coordinator.hasTranscriptObserverForTesting,
+            "the handle belongs to the live session and must survive an interruption"
+        )
+        let after = try await fixture.store.fetchSession(id: fixture.sessionId)
+        #expect(after?.state == before?.state)
+        #expect(after?.updatedAt == before?.updatedAt, "the session row was not touched at all")
+    }
+
+    /// The counterweight: it is the TERMINATION that decides, not the class.
+    /// An interrupted run can carry a real per-shard diagnosis — shards
+    /// failing `model_not_loaded` and then a scrub — and branching on the
+    /// class would tear the live session down for exactly those runs.
+    @Test("an interruption carrying a real shard diagnosis still keeps observing")
+    func interruptedWithDiagnosisKeepsObserving() async throws {
+        let fixture = try await seed(idSuffix: "interrupted-with-class")
+        await fixture.coordinator.installTranscriptObserverForTesting()
+
+        let step = await fixture.coordinator.handleTranscriptEventForTesting(
+            .failed(
+                analysisAssetId: fixture.assetId,
+                reason: TranscriptFailureReason(
+                    failureClass: .modelNotLoaded, code: nil, failedShardCount: 3,
+                    termination: .interrupted
+                )
+            ),
+            sessionId: fixture.sessionId,
+            assetId: fixture.assetId,
+            episodeId: fixture.episodeId,
+            activeShards: fixture.shards
+        )
+
+        #expect(step == .keepObserving)
+        #expect(await fixture.coordinator.hasTranscriptObserverForTesting)
+    }
+
+    /// And the control that stops the guard from swallowing everything: a run
+    /// that reached its own conclusion is still terminal, still does not
+    /// finalize, and still releases the handle. `failedDoesNotFinalize` and
+    /// `failedReleasesTheObserverHandle` above cover the same ground for the
+    /// default termination; this states it explicitly.
+    @Test("control: a run that reached its own conclusion is still terminal")
+    func ranToConclusionFailureIsStillTerminal() async throws {
+        let fixture = try await seed(idSuffix: "conclusion-terminal")
+        await fixture.coordinator.installTranscriptObserverForTesting()
+
+        let step = await fixture.coordinator.handleTranscriptEventForTesting(
+            .failed(
+                analysisAssetId: fixture.assetId,
+                reason: TranscriptFailureReason(
+                    failureClass: .vadFailed, code: nil, failedShardCount: 8,
+                    termination: .ranToConclusion
+                )
+            ),
+            sessionId: fixture.sessionId,
+            assetId: fixture.assetId,
+            episodeId: fixture.episodeId,
+            activeShards: fixture.shards
+        )
+
+        #expect(step == .stopObserving)
+        #expect(
+            await fixture.coordinator.hasTranscriptObserverForTesting == false,
+            "a total failure must still release the handle, or backfill cannot recover"
+        )
+    }
+
     /// `.chunksPersisted` keeps the loop running. Pinned because the
     /// extraction turned three `continue`/`return` statements into returned
     /// values, and a step returned from the wrong arm would silently end

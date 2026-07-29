@@ -32,6 +32,38 @@ private func makeTestRequest(
     )
 }
 
+/// playhead-ngev (review r1): throws `CancellationError` out of the recognizer,
+/// which is how a scrub reaches the transcription loop in production — one
+/// `TranscriptEngineService` is shared by `AnalysisCoordinator` and
+/// `AnalysisJobRunner`, so `startTranscription` from the playback lane cancels
+/// whatever the other owner was running.
+///
+/// `SpeechService` rethrows recognizer errors unchanged, so the loop's
+/// `catch is CancellationError` arm fires and reports an INTERRUPTED run —
+/// the state the runner must not respond to by tearing the engine down.
+///
+/// Internal rather than private: `AnalysisWorkSchedulerJournalEmissionTests`
+/// drives the same interruption one layer up, to prove the scheduler does not
+/// charge it a retry attempt.
+final class CancellingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private var loaded = false
+
+    func loadModel() async throws { loaded = true }
+    func unloadModel() async { loaded = false }
+    func isModelLoaded() async -> Bool { loaded }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard loaded else { throw TranscriptEngineError.modelNotLoaded }
+        throw CancellationError()
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
 private func makeShards(count: Int, shardDuration: Double = 30) -> [AnalysisShard] {
     (0..<count).map { i in
         makeShard(
@@ -1528,6 +1560,19 @@ struct AnalysisJobRunnerTests {
                     == TranscriptFailureClass.transcriptionFailed.rawValue,
                 "metadata must name the cause; got keys=\(Array(parsed.keys).sorted())"
             )
+            // playhead-ngev: and the two keys that say how the run ended. The
+            // engine reported, and it reported having reached its own
+            // conclusion — as opposed to a 300 s silence or a run cut short by
+            // playback, which are the same blank column without these.
+            #expect(
+                (parsed[DiagnosticsFailureKeys.failureObservation] as? String)
+                    == AnalysisJobRunner.TranscriptRunObservation.engineReported.rawValue,
+                "got \(String(describing: parsed[DiagnosticsFailureKeys.failureObservation]))"
+            )
+            #expect(
+                (parsed[DiagnosticsFailureKeys.failureTermination] as? String)
+                    == TranscriptRunTermination.ranToConclusion.rawValue
+            )
             // Four shards were decoded and every one of them failed.
             #expect((parsed[DiagnosticsFailureKeys.failedShardCount] as? String) == "4")
             // `TranscriptEngineError` is a Swift-native enum, so its bridged
@@ -1552,6 +1597,338 @@ struct AnalysisJobRunnerTests {
             let projected = bundle.workJournalTail.first { $0.id == row.id }
             #expect(projected?.failureClass == TranscriptFailureClass.transcriptionFailed.rawValue,
                     "the cause must survive the bundle projection, not just SQLite")
+            #expect(
+                projected?.failureObservation
+                    == AnalysisJobRunner.TranscriptRunObservation.engineReported.rawValue,
+                "the observation must survive the projection too"
+            )
+            #expect(projected?.failureTermination
+                    == TranscriptRunTermination.ranToConclusion.rawValue)
         }
+    }
+
+    // MARK: - playhead-ngev: `cause` stops contradicting `failure_class`
+
+    /// A ROW THAT CONTRADICTED ITSELF, END TO END.
+    ///
+    /// `cause` was a hardcoded `.asrFailed` at both emission sites with no
+    /// reference to the failure at all, so a run in which the recognizer was
+    /// never invoked — the model never loaded, which is the post-swallow state
+    /// of the launch-time `loadFastModel()` failure — still produced a row
+    /// reading `cause = asr_failed` beside `failure_class =
+    /// speech_engine_not_ready`. Whichever half an aggregate counted, one of
+    /// them was wrong, and the `asr_failed` count is the one two dogfood
+    /// cycles were read from.
+    ///
+    /// The engine-side class is already pinned by
+    /// `notReadyEngineEmitsFailedInsteadOfNothing`; what is new here is that
+    /// the RUNNER attributes it correctly on its way into `work_journal`.
+    @Test("A run where the recognizer never loaded is journaled as a pipeline error, not an ASR failure")
+    func testNotReadyEngineJournalsPipelineErrorNotASRFailure() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: nil)
+
+        let jobId = UUID().uuidString
+        let inserted = try await store.insertJob(
+            makeAnalysisJob(
+                jobId: jobId,
+                episodeId: "test-ep",
+                analysisAssetId: "test-asset",
+                workKey: "wk-not-ready-\(UUID().uuidString)"
+            )
+        )
+        #expect(inserted, "insertJob must succeed for the test premise to hold")
+        let acquired = try await store.acquireLeaseWithJournal(
+            jobId: jobId,
+            episodeId: "test-ep",
+            owner: "test-owner",
+            expiresAt: Date().timeIntervalSince1970 + 300
+        )
+        #expect(acquired, "Lease acquire must succeed for the test premise to hold")
+        let generationID = try await store.fetchJob(byId: jobId)?.generationID ?? ""
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 4)
+
+        // The post-swallow device state: a recognizer that never loaded.
+        // Deliberately NO `loadFastModel()`.
+        let speechService = SpeechService(recognizer: MockSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(
+                speechService: speechService,
+                store: store
+            ),
+            adDetection: StubAdDetectionProvider()
+        )
+
+        let outcome = await runner.run(
+            AnalysisRangeRequest(
+                jobId: jobId,
+                episodeId: "test-ep",
+                podcastId: "test-pod",
+                analysisAssetId: "test-asset",
+                audioURL: makeTestRequest().audioURL,
+                desiredCoverageSec: 120,
+                mode: .preRollWarmup,
+                outputPolicy: .writeWindowsAndCues,
+                priority: .medium
+            )
+        )
+
+        // The premise: we landed on the zero-coverage branch with the engine's
+        // own class, not on the fallback literal.
+        if case .failed(let msg) = outcome.stopReason {
+            #expect(msg == "transcription:\(TranscriptFailureClass.speechEngineNotReady.rawValue)",
+                    "got \(msg)")
+        } else {
+            Issue.record("Expected .failed(transcription:...), got \(outcome.stopReason)")
+        }
+
+        let entries = try await store.fetchWorkJournalEntries(
+            episodeId: "test-ep", generationID: generationID
+        )
+        let failedRows = entries.filter { $0.eventType == .failed }
+        #expect(failedRows.count == 1, "expected one failed row; got \(failedRows.count)")
+        guard let row = failedRows.first else { return }
+
+        #expect(
+            row.cause == .pipelineError,
+            """
+            the recognizer was never invoked — `SpeechService.isReady()` was \
+            false before a single shard was handed over — and the row still \
+            says \(row.cause?.rawValue ?? "nil"). That contradiction is what \
+            makes an `asr_failed` count unusable
+            """
+        )
+        #expect(row.cause != .asrFailed)
+
+        let parsed = try JSONSerialization.jsonObject(
+            with: Data(row.metadata.utf8)
+        ) as? [String: Any]
+        #expect((parsed?[DiagnosticsFailureKeys.failureClass] as? String)
+                == TranscriptFailureClass.speechEngineNotReady.rawValue)
+        #expect((parsed?[DiagnosticsFailureKeys.failureObservation] as? String)
+                == AnalysisJobRunner.TranscriptRunObservation.engineReported.rawValue)
+
+        // And the projection carries both, so the contradiction cannot be
+        // re-introduced downstream of the journal either.
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 27", deviceClass: .iPhone17Pro,
+            buildType: .debug,
+            eligibility: AnalysisEligibility(
+                hardwareSupported: true, appleIntelligenceEnabled: true,
+                regionSupported: true, languageSupported: true,
+                modelAvailableNow: true, capturedAt: Date()
+            ),
+            workJournalEntries: [row], installID: UUID()
+        )
+        let projected = bundle.workJournalTail.first { $0.id == row.id }
+        #expect(projected?.cause == InternalMissCause.pipelineError.rawValue)
+        #expect(projected?.failureClass == TranscriptFailureClass.speechEngineNotReady.rawValue)
+    }
+
+    // MARK: - playhead-ngev: the runner must not fence an engine a live owner holds
+
+    /// THE CALL SITE, NOT THE PREDICATE.
+    ///
+    /// `shouldStopEngine(after:)` is a pure function and is unit-tested both
+    /// ways in `TranscriptObservationTests`. That proves nothing about whether
+    /// the runner CONSULTS it: the runner holds a concrete
+    /// `TranscriptEngineService` with no protocol seam, so `stopTranscription`
+    /// cannot be spied on, and a build that dropped the predicate from the
+    /// zero-coverage `if` would pass every test that existed before this one.
+    ///
+    /// That call site is where this bead can hurt a listener. The stop exists
+    /// (playhead-5uvz.5 Gap-6) to fence an ORPHANED engine. An interrupted run
+    /// is the one case where the engine is not orphaned but RE-TASKED: the
+    /// cancel came from `startTranscription` on the shared engine — a scrub, a
+    /// speed change, a different episode — so stopping it there cancels the
+    /// listener's own transcription and gates the asset against the appends
+    /// that owner is about to make.
+    ///
+    /// Only reachable at all since this bead: an interruption used to be
+    /// silent, so the runner sat out its 300 s timeout and the successor was
+    /// usually finished before the stop landed.
+    @Test("an interrupted run leaves the shared engine unfenced")
+    func testInterruptedRunDoesNotFenceTheAsset() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: nil)
+
+        let jobId = UUID().uuidString
+        let inserted = try await store.insertJob(
+            makeAnalysisJob(
+                jobId: jobId,
+                episodeId: "test-ep",
+                analysisAssetId: "test-asset",
+                workKey: "wk-interrupted-\(UUID().uuidString)"
+            )
+        )
+        #expect(inserted, "insertJob must succeed for the test premise to hold")
+        let acquired = try await store.acquireLeaseWithJournal(
+            jobId: jobId,
+            episodeId: "test-ep",
+            owner: "test-owner",
+            expiresAt: Date().timeIntervalSince1970 + 300
+        )
+        #expect(acquired, "Lease acquire must succeed for the test premise to hold")
+        let generationID = try await store.fetchJob(byId: jobId)?.generationID ?? ""
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 4)
+
+        let speechService = SpeechService(
+            recognizer: CancellingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(speechService: speechService, store: store)
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: transcriptEngine,
+            adDetection: StubAdDetectionProvider()
+        )
+
+        let outcome = await runner.run(
+            AnalysisRangeRequest(
+                jobId: jobId,
+                episodeId: "test-ep",
+                podcastId: "test-pod",
+                analysisAssetId: "test-asset",
+                audioURL: makeTestRequest().audioURL,
+                desiredCoverageSec: 120,
+                mode: .preRollWarmup,
+                outputPolicy: .writeWindowsAndCues,
+                priority: .medium
+            )
+        )
+
+        // The premise, and half the fix: we landed on the zero-coverage branch
+        // carrying an INTERRUPTED failure, and it reports as `.interrupted` —
+        // the outcome the scheduler requeues without spending one of the job's
+        // five permanent retry attempts.
+        if case .interrupted(let msg) = outcome.stopReason {
+            #expect(msg == "transcription:\(TranscriptFailureClass.cancelled.rawValue)", "got \(msg)")
+        } else {
+            Issue.record("""
+                Expected .interrupted(transcription:cancelled), got \(outcome.stopReason). \
+                A scrub charged against a five-attempt budget that ends in a permanent \
+                `superseded`
+                """)
+        }
+
+        // THE ASSERTION. The engine is shared and its live owner has already
+        // re-tasked it; the runner must not have fenced the asset.
+        let fencedAfterInterruption = await transcriptEngine
+            .isStoppedForTesting(analysisAssetId: "test-asset")
+        #expect(
+            fencedAfterInterruption == false,
+            """
+            the runner fenced an asset whose transcription a live owner still \
+            holds. In production that cancels the listener's own transcription \
+            mid-episode and drops every shard that owner appends next
+            """
+        )
+
+        // And the row still names what happened, so declining to stop is not
+        // also declining to report.
+        let entries = try await store.fetchWorkJournalEntries(
+            episodeId: "test-ep", generationID: generationID
+        )
+        let failedRows = entries.filter { $0.eventType == .failed }
+        #expect(failedRows.count == 1, "expected one failed row; got \(failedRows.count)")
+        guard let row = failedRows.first else { return }
+        #expect(
+            row.cause == .pipelineError,
+            "a scrub is not an ASR failure (got \(row.cause?.rawValue ?? "nil"))"
+        )
+        let parsed = try JSONSerialization.jsonObject(
+            with: Data(row.metadata.utf8)
+        ) as? [String: Any]
+        #expect((parsed?[DiagnosticsFailureKeys.failureClass] as? String)
+                == TranscriptFailureClass.cancelled.rawValue)
+        #expect((parsed?[DiagnosticsFailureKeys.failureTermination] as? String)
+                == TranscriptRunTermination.interrupted.rawValue)
+        #expect((parsed?[DiagnosticsFailureKeys.failureObservation] as? String)
+                == AnalysisJobRunner.TranscriptRunObservation.engineReported.rawValue)
+    }
+
+    /// The control, and it is what keeps the carve-out from reading "never
+    /// stop" — which would reinstate the orphaned writer playhead-5uvz.5
+    /// fenced. A run that reached its own conclusion over zero coverage still
+    /// gets the engine fenced, through the same call site.
+    @Test("control: a run that concluded on its own still fences the asset")
+    func testConcludedRunStillFencesTheAsset() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store: store, fastTranscriptCoverageEndTime: nil)
+
+        let jobId = UUID().uuidString
+        _ = try await store.insertJob(
+            makeAnalysisJob(
+                jobId: jobId,
+                episodeId: "test-ep",
+                analysisAssetId: "test-asset",
+                workKey: "wk-concluded-\(UUID().uuidString)"
+            )
+        )
+        _ = try await store.acquireLeaseWithJournal(
+            jobId: jobId,
+            episodeId: "test-ep",
+            owner: "test-owner",
+            expiresAt: Date().timeIntervalSince1970 + 300
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 4)
+
+        let recognizer = MockSpeechRecognizer()
+        let speechService = SpeechService(
+            recognizer: recognizer, serializesRecognizerRequests: false
+        )
+        try await speechService.loadFastModel()
+        recognizer.shouldThrow = true
+        let transcriptEngine = TranscriptEngineService(speechService: speechService, store: store)
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: transcriptEngine,
+            adDetection: StubAdDetectionProvider()
+        )
+
+        let outcome = await runner.run(
+            AnalysisRangeRequest(
+                jobId: jobId,
+                episodeId: "test-ep",
+                podcastId: "test-pod",
+                analysisAssetId: "test-asset",
+                audioURL: makeTestRequest().audioURL,
+                desiredCoverageSec: 120,
+                mode: .preRollWarmup,
+                outputPolicy: .writeWindowsAndCues,
+                priority: .medium
+            )
+        )
+
+        if case .failed(let msg) = outcome.stopReason {
+            #expect(msg == "transcription:\(TranscriptFailureClass.transcriptionFailed.rawValue)",
+                    "got \(msg)")
+        } else {
+            Issue.record("Expected .failed(transcription:...), got \(outcome.stopReason)")
+        }
+
+        let fencedAfterConclusion = await transcriptEngine
+            .isStoppedForTesting(analysisAssetId: "test-asset")
+        #expect(
+            fencedAfterConclusion,
+            """
+            the runner left an orphaned engine unfenced. Its later chunk writes \
+            and coverage updates land behind the back of a scheduler that has \
+            already moved on — the defect playhead-5uvz.5 Gap-6 closed
+            """
+        )
     }
 }
