@@ -402,6 +402,132 @@ struct AnalysisCoverageMathClippedTests {
         }
     }
 
+    /// The BOUNDS side must be de-overlapped too. Without merging the right side,
+    /// overlapping bounds double-count the shared region — and overlapping fast
+    /// chunks are an expected shape (see the `a-overlap` fixture in the sibling
+    /// suite).
+    @Test("(pz32) overlapping BOUNDS are de-overlapped, not double-counted")
+    func intersectionDeOverlapsBoundsSide() {
+        // Bounds union is [10,90] → 80 seconds of [0,100] survive, not 10+75=85.
+        let result = AnalysisCoverageMath.unionedSecondsIntersecting(
+            [(start: 0, end: 100)],
+            within: [(start: 10, end: 20), (start: 15, end: 90)]
+        )
+        #expect(result == 80)
+    }
+
+    /// A brute-force differential oracle for the MULTI-BOUND case, which the
+    /// hand-computed points cannot cover exhaustively: sample both interval sets on
+    /// a fine grid and count the cells inside both. Randomised over many shapes,
+    /// including deliberately overlapping intervals on both sides, so a lost
+    /// de-overlap or a skipped pair shows up as a mismatch rather than as a
+    /// still-satisfied inequality.
+    @Test("(pz32) intersection matches a brute-force grid oracle over random shapes")
+    func intersectionMatchesGridOracle() {
+        let step = 0.25
+        // Must exceed the largest endpoint the generator can produce (179 + 60),
+        // or the oracle silently truncates coverage the function counts.
+        let limit = 260.0
+
+        func gridSeconds(
+            _ a: [(start: Double, end: Double)],
+            _ b: [(start: Double, end: Double)]
+        ) -> Double {
+            var covered = 0
+            var t = 0.0
+            while t < limit {
+                let mid = t + step / 2
+                let inA = a.contains { mid > $0.start && mid < $0.end }
+                let inB = b.contains { mid > $0.start && mid < $0.end }
+                if inA && inB { covered += 1 }
+                t += step
+            }
+            return Double(covered) * step
+        }
+
+        // Deterministic pseudo-random so a failure is reproducible.
+        var seed: UInt64 = 0x5EED_1234
+        func next(_ bound: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(bound))
+        }
+        func randomSet() -> [(start: Double, end: Double)] {
+            (0..<(1 + next(5))).map { _ in
+                let start = Double(next(180))
+                return (start: start, end: start + Double(1 + next(60)))
+            }
+        }
+
+        for _ in 0..<200 {
+            let left = randomSet()
+            let right = randomSet()
+            let actual = AnalysisCoverageMath.unionedSecondsIntersecting(left, within: right)
+            let expected = gridSeconds(left, right)
+            #expect(
+                abs(actual - expected) < step,
+                "intersection \(actual) != oracle \(expected) for left=\(left) right=\(right)"
+            )
+        }
+    }
+
+    // MARK: - playhead-pz32: bridgingShortGaps
+
+    @Test("(pz32) bridging coalesces gaps at or under the width and no wider")
+    func bridgingCoalescesShortGapsOnly() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 0, end: 10),
+            (start: 13, end: 20),   // 3 s gap  → bridged at 5
+            (start: 25, end: 30),   // 5 s gap  → bridged at 5 (boundary, inclusive)
+            (start: 40, end: 50)    // 10 s gap → NOT bridged
+        ]
+        let bridged = AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: 5)
+        #expect(bridged.count == 2)
+        #expect(bridged[0] == (start: 0, end: 30))
+        #expect(bridged[1] == (start: 40, end: 50))
+        // Seconds gained are exactly the bridged gaps (3 + 5), never more.
+        #expect(AnalysisCoverageMath.unionedSeconds(bridged)
+            == AnalysisCoverageMath.unionedSeconds(intervals) + 8)
+    }
+
+    @Test("(pz32) bridging at zero is the plain union; a negative width is treated as zero")
+    func bridgingAtZeroIsPlainUnion() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 0, end: 10), (start: 11, end: 20)
+        ]
+        for width in [0.0, -1.0, -.infinity] {
+            let bridged = AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: width)
+            #expect(AnalysisCoverageMath.unionedSeconds(bridged)
+                == AnalysisCoverageMath.unionedSeconds(intervals))
+            #expect(bridged.count == 2)
+        }
+    }
+
+    @Test("(pz32) bridging drops non-finite and degenerate intervals")
+    func bridgingDropsJunk() {
+        let bridged = AnalysisCoverageMath.bridgingShortGaps([
+            (start: 0, end: 10),
+            (start: .nan, end: 50),
+            (start: 20, end: 20),
+            (start: 90, end: 10),
+            (start: 12, end: 18)
+        ], upTo: 5)
+        #expect(bridged.count == 1)
+        #expect(bridged[0] == (start: 0, end: 18))
+    }
+
+    /// Bridging must never invent coverage OUTSIDE the span of the inputs — it
+    /// fills interior gaps only, so the first start and last end are preserved.
+    @Test("(pz32) bridging preserves the outer span")
+    func bridgingPreservesOuterSpan() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 7, end: 10), (start: 12, end: 20), (start: 100, end: 110)
+        ]
+        let bridged = AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: 1_000)
+        #expect(bridged.count == 1)
+        #expect(bridged[0] == (start: 7, end: 110))
+        #expect(AnalysisCoverageMath.unionedSeconds(bridged) == 103)
+    }
+
     /// Intersecting with a single `[0, upperBound]` bound must agree exactly with
     /// `unionedSecondsClipped` — two routes to the same clip.
     @Test("(pz32) intersecting with [0, bound] equals unionedSecondsClipped")
@@ -1956,6 +2082,50 @@ struct AnalysisStoreAdScanCoverageTests {
         ))
     }
 
+    /// The overshoot tolerance must be RELATIVE. An absolute one-shard allowance
+    /// is 0.8% of an hour but 67% of a 45-second trailer, so a short episode whose
+    /// real audio runs 64% longer than declared would pass an absolute check and
+    /// render a confident ✓ on a denominator that is wildly short — the same
+    /// failure, relocated to the short end.
+    @Test("the duration tolerance scales with the episode, so a short one cannot cheat")
+    func durationToleranceIsRelative() async throws {
+        // The pure helper first: a 45 s episode gets 2.25 s of slack, not 30 s.
+        #expect(AnalysisCoverageSummary.adScanDurationToleranceSec(episodeDurationSec: 45) == 2.25)
+        // Long episodes stay capped at one shard rather than acquiring 5% of an hour.
+        #expect(
+            AnalysisCoverageSummary.adScanDurationToleranceSec(episodeDurationSec: 3600)
+                == AnalysisAudioService.defaultShardDuration
+        )
+
+        let store = try await makeTestStore()
+        // A 45 s trailer whose real audio (and transcript) runs 74 s.
+        try await store.insertAsset(makeAsset(
+            id: "a-trailer", episodeDurationSec: 45, fastTranscriptCoverageEndTime: 74
+        ))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-trailer", index: 0, start: 0, end: 74)
+        )
+        let trailer = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-trailer"])["a-trailer"]
+        )
+        #expect(trailer.adScanCoveredSec == 74)
+        // 74 > 45 + 2.25 → unmeasurable. An absolute 30 s tolerance would have
+        // clamped 74/45 to 1.0 and lit the ✓.
+        #expect(trailer.adScanFraction == nil)
+
+        // Sub-tolerance drift on the same short episode still clamps to 1.
+        try await store.insertAsset(makeAsset(
+            id: "a-trailer-ok", episodeDurationSec: 45, fastTranscriptCoverageEndTime: 47
+        ))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-trailer-ok", index: 0, start: 0, end: 47)
+        )
+        let ok = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-trailer-ok"])["a-trailer-ok"]
+        )
+        #expect(ok.adScanFraction == 1)
+    }
+
     /// Batched reads must not cross-contaminate: each asset gets only its own
     /// windows. A single shared `Set` bug here would let one fully-scanned
     /// episode light the ✓ on every row in the list.
@@ -1976,13 +2146,19 @@ struct AnalysisStoreAdScanCoverageTests {
         #expect(try #require(summaries["a-thin"]).adScanFraction == 0.05)
     }
 
-    /// CROSS-PRODUCER AGREEMENT. `SemanticScanCoverage.compute` is the
-    /// pipeline's own breadcrumb; the store read is the user-facing one. They
-    /// derive the same quantity from the same rows by different routes (full
-    /// row decode + Swift filter vs. a narrow SQL projection), so they must
-    /// agree exactly — otherwise the log and the checkmark tell different
-    /// stories about the same episode.
-    @Test("store ad-scan seconds equal SemanticScanCoverage.examinedSeconds")
+    /// CROSS-PRODUCER AGREEMENT, on the axis the two producers actually share:
+    /// WHICH ROWS count. `SemanticScanCoverage.compute` is the pipeline's own
+    /// breadcrumb (full row decode + Swift filter); the store read is the
+    /// user-facing one (narrow SQL projection). Both must select exactly the same
+    /// rows — same pass, same examined predicate, same sentinel exclusion — or the
+    /// log and the checkmark disagree about what happened.
+    ///
+    /// They deliberately do NOT produce the same SECONDS: the store additionally
+    /// intersects with the transcript, so `examinedSeconds >= adScanCoveredSec` in
+    /// general. This fixture inserts a transcript that spans the whole attempted
+    /// range, which makes the intersection a no-op and isolates row selection —
+    /// and the sibling test below pins the inequality where it bites.
+    @Test("store ad-scan seconds equal SemanticScanCoverage.examinedSeconds on one row set")
     func agreesWithPipelineBreadcrumb() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: "a-agree", episodeDurationSec: 3578))
@@ -2005,6 +2181,33 @@ struct AnalysisStoreAdScanCoverageTests {
         // Sanity-check the number itself so the agreement isn't 0 == 0:
         // [0,600] = 600, [900,1425.9] = 525.9, [2000,2100] = 100.
         #expect(abs(breadcrumb.examinedSeconds - 1225.9) < 0.0001)
+    }
+
+    /// The two producers measure DIFFERENT quantities once the transcript is
+    /// gappy, and that is by design: the breadcrumb answers "how much did the pass
+    /// attempt to screen", the checkmark answers "how much audio was read". Pinned
+    /// so nobody "fixes" the divergence by making the ✓ read the looser number —
+    /// which is precisely the bug this bead exists to remove.
+    @Test("the breadcrumb over-reports vs the store on a gappy transcript, by design")
+    func breadcrumbAndStoreDivergeOnGappyTranscript() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-diverge", episodeDurationSec: 3600))
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-diverge", index: 0, start: 0, end: 60),
+            makeGapChunk(assetId: "a-diverge", index: 1, start: 3540, end: 3600)
+        ])
+        let rows = [makeScan(assetId: "a-diverge", index: 0, start: 0, end: 3600)]
+        for row in rows {
+            try await store.insertSemanticScanResult(row)
+        }
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-diverge"])["a-diverge"]
+        )
+        let breadcrumb = SemanticScanCoverage.compute(rows: rows)
+        #expect(breadcrumb.examinedSeconds == 3600)
+        #expect(summary.adScanCoveredSec == 120)
+        #expect(summary.adScanCoveredSec! < breadcrumb.examinedSeconds)
     }
 
     /// A scan window's persisted bounds are `first.startTime ... last.endTime`
@@ -2036,9 +2239,114 @@ struct AnalysisStoreAdScanCoverageTests {
         let fraction = try #require(summary.adScanFraction)
         #expect(abs(fraction - 120.0 / 3600.0) < 0.0001)
         #expect(fraction < episodePreparationCompleteThreshold)
-        // The load-bearing invariant: you cannot read audio you never
-        // transcribed, so the ad-scan area is a subset of the transcript union.
+        // The bound is the transcript, so the ad-scan area cannot exceed the
+        // transcript union by more than the bridged sub-ad-width gaps (none here:
+        // the single hole is 3,480 s wide).
         #expect(summary.adScanCoveredSec! <= summary.fastTranscriptCoveredSec!)
+    }
+
+    /// The intersection must be GAP-AWARE, not a `[0, transcriptSeconds]` PREFIX
+    /// clip. Both give the same answer when the scan window happens to start at
+    /// zero, which is what the fixture above does — so this one puts the scan
+    /// window over the LATE transcript run only. A prefix clip returns 0 here;
+    /// the correct answer is 60.
+    @Test("the transcript bound is gap-aware, not a prefix clip")
+    func transcriptBoundIsGapAwareNotAPrefix() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-latewindow", episodeDurationSec: 3600))
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-latewindow", index: 0, start: 0, end: 60),
+            makeGapChunk(assetId: "a-latewindow", index: 1, start: 3540, end: 3600)
+        ])
+        // A window over the late run ONLY. `fastTranscriptCoveredSec` is 120, so a
+        // prefix bound of [0,120] would intersect this to nothing.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-latewindow", index: 0, start: 3500, end: 3600)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-latewindow"])
+        let summary = try #require(summaries["a-latewindow"])
+        #expect(summary.adScanCoveredSec == 60)
+
+        // And a window straddling the hole picks up BOTH runs, not one.
+        try await store.insertAsset(makeAsset(id: "a-straddle", episodeDurationSec: 3600))
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-straddle", index: 0, start: 0, end: 60),
+            makeGapChunk(assetId: "a-straddle", index: 1, start: 3540, end: 3600)
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-straddle", index: 0, start: 30, end: 3570)
+        )
+        let straddle = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-straddle"])["a-straddle"]
+        )
+        // [30,60] = 30 and [3540,3570] = 30.
+        #expect(straddle.adScanCoveredSec == 60)
+    }
+
+    /// A `transcript_chunks` row spans the FIRST WORD's start to the LAST WORD's
+    /// end, so the raw chunk union is riddled with inter-utterance holes: measured
+    /// on the 2026-04-25 device capture it is 0.68–0.976 of the transcript span,
+    /// with 182–1,199 disjoint runs per asset. Intersecting against the RAW union
+    /// would cap every real episode below the 0.98 threshold and make the ✓
+    /// unreachable, so sub-ad-width gaps are bridged. A gap WIDER than an ad is
+    /// still a hole.
+    @Test("sub-ad-width transcript gaps are bridged; ad-width blocks stay holes")
+    func subAdWidthGapsAreBridged() async throws {
+        let store = try await makeTestStore()
+        // 1,000 s episode transcribed as ten 99 s utterances separated by 1 s
+        // breaths, plus one 60 s untranscribed block at the end.
+        var chunks: [TranscriptChunk] = []
+        var cursor = 0.0
+        for index in 0..<10 {
+            chunks.append(makeGapChunk(
+                assetId: "a-breaths", index: index, start: cursor, end: cursor + 93
+            ))
+            cursor += 94
+        }
+        try await store.insertAsset(makeAsset(id: "a-breaths", episodeDurationSec: 1000))
+        try await store.insertTranscriptChunks(chunks)
+        // One window over the whole episode: the scan read every utterance.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-breaths", index: 0, start: 0, end: 1000)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-breaths"])["a-breaths"]
+        )
+        // Raw chunk union is 10 × 93 = 930 (0.93 — BELOW the threshold, which is
+        // the bug this bridging fixes).
+        #expect(summary.fastTranscriptCoveredSec == 930)
+        // Bridged across the nine 1 s breaths: 0 … 939. The trailing 61 s block is
+        // NOT bridged, so it stays unscanned.
+        #expect(summary.adScanCoveredSec == 939)
+        let fraction = try #require(summary.adScanFraction)
+        #expect(abs(fraction - 0.939) < 0.0001)
+        // The bridged area legitimately exceeds the raw transcript union — that is
+        // the point — but never the transcript SPAN (0 … 939).
+        #expect(summary.adScanCoveredSec! > summary.fastTranscriptCoveredSec!)
+    }
+
+    /// The bridge width must be strictly under the shortest span any lane will
+    /// call an ad, so bridging can never conceal one. Pins the boundary in both
+    /// directions against the constant.
+    @Test("a gap at the bridge width bridges; one past it does not")
+    func bridgeWidthBoundary() async throws {
+        let bridge = AnalysisCoverageMath.adScanBridgeableGapSec
+        #expect(bridge == 5.0)
+        // Strictly less than every ad-width minimum in the codebase, so no
+        // bridged gap can hide an ad.
+        #expect(bridge <= 5.0)
+        #expect(bridge < GlobalPriorDefaults.standard.typicalAdDuration.lowerBound)
+
+        let atWidth = AnalysisCoverageMath.bridgingShortGaps(
+            [(start: 0, end: 100), (start: 100 + bridge, end: 200)], upTo: bridge
+        )
+        #expect(atWidth.count == 1)
+        let pastWidth = AnalysisCoverageMath.bridgingShortGaps(
+            [(start: 0, end: 100), (start: 100 + bridge + 0.001, end: 200)], upTo: bridge
+        )
+        #expect(pastWidth.count == 2)
     }
 
     /// `BackfillJobRunner.makeNoWorkSentinelScanResult` writes a passA row with

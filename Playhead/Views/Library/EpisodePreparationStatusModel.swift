@@ -34,10 +34,16 @@
 // from a quantity that is not ad-scan coverage.
 
 import Foundation
+import OSLog
 
 @MainActor
 @Observable
 final class EpisodePreparationStatusModel {
+
+    private static let logger = Logger(
+        subsystem: "com.playhead",
+        category: "EpisodePreparationStatus"
+    )
 
     private let runtime: PlayheadRuntime
 
@@ -122,9 +128,23 @@ final class EpisodePreparationStatusModel {
         // analysed episodes on screen), the fix is to narrow the fetch to the
         // visible window, not to go back to reading a cheaper wrong number.
         let coverageAssetIds = Set(episodeIds.compactMap { assets[$0]?.id })
-        // A throwing read degrades to "coverage unknown", which under-claims
-        // (not-ready) rather than leaving a stale ✓ standing.
-        let summaries = (try? await store.fetchCoverageSummariesByAssetIds(coverageAssetIds)) ?? [:]
+        // A THROW is not "coverage unknown". `AnalysisStore` is an actor also
+        // driven by the pipeline, so one `SQLITE_BUSY` empties the whole batch —
+        // and because this is a single call for the entire list, treating that as
+        // unknown would flip EVERY completed row at once, until the next
+        // `ActivityRefreshNotification` (posted only on job start/finish, so
+        // possibly not for a long time on an idle device). So a failed read leaves
+        // the previous analysis inputs in place and says so in the log, rather
+        // than repainting the library off a transport error.
+        let summaries: [String: AnalysisCoverageSummary]?
+        do {
+            summaries = try await store.fetchCoverageSummariesByAssetIds(coverageAssetIds)
+        } catch {
+            summaries = nil
+            Self.logger.warning(
+                "EpisodePreparationStatusModel: coverage read failed for \(coverageAssetIds.count, privacy: .public) asset(s); keeping prior readiness: \(error.localizedDescription, privacy: .public)"
+            )
+        }
         let snapshot = await downloadManager.progressSnapshot()
         let cachedIds = await downloadManager.cachedEpisodeIds(matching: ids)
         let permitted = await runtime.episodePreparationCoordinator.currentDownloadPermission()
@@ -134,11 +154,13 @@ final class EpisodePreparationStatusModel {
             r.isDownloaded = cachedIds.contains(id)
             r.snapshotDownloadFraction = snapshot[id]
             r.downloadPermitted = permitted
-            let asset = assets[id]
-            r.analysis = episodePreparationAnalysisInputs(
-                asset: asset,
-                coverage: asset.flatMap { summaries[$0.id] }
-            )
+            if let summaries {
+                let asset = assets[id]
+                r.analysis = episodePreparationAnalysisInputs(
+                    asset: asset,
+                    coverage: asset.flatMap { summaries[$0.id] }
+                )
+            }
             // Drop the optimistic download bridge once the real in-flight /
             // cached signal is present, so a transfer that never started
             // cannot strand the bar.

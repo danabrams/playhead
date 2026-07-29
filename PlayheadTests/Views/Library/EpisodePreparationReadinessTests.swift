@@ -251,34 +251,30 @@ struct EpisodePreparationReadinessTests {
         #expect(r.state == .analyzing)
     }
 
-    @Test("no ad-scan measurement at a completion terminal → actionable ✦, never a fabricated ◐ 0%")
-    func testTerminalWithNoMeasurementIsActionableIdle() {
+    @Test("no ad-scan measurement at a completion terminal → ◐ with NO fabricated percentage")
+    func testTerminalWithNoMeasurementSaysAmountUnknown() {
         // `semantic_scan_results` rows are deleted whenever the scan cohort revs
-        // — prompt/schema/plan/normalization bumps, a locale change, an OS
-        // update, or simply a new app build
-        // (`pruneOrphanedScansForCurrentCohort`). After that the coverage is
-        // genuinely UNKNOWN, and the pipeline no longer trusts those verdicts
-        // either. ◐ would assert a measurement ("0% scanned") that does not
-        // exist, and ◐ is not actionable — so the whole library would strand on
-        // a dead glyph after every release. ✦ is true and tappable.
-        let readiness = deriveEpisodePreparationReadiness(
-            inputs(
-                isDownloaded: true,
-                analysisTerminatedComplete: true,
-                adScanFraction: nil
+        // — prompt/schema/plan/normalization bumps, a locale change, an OS update,
+        // or simply a new app build (`pruneOrphanedScansForCurrentCohort`). The
+        // coverage is then genuinely UNKNOWN. ◐ is still the honest STATE, but the
+        // spoken value must not claim "0% scanned" for a quantity nobody measured.
+        for unmeasured: Double? in [nil, .nan, .infinity, -.infinity] {
+            let readiness = deriveEpisodePreparationReadiness(
+                inputs(
+                    isDownloaded: true,
+                    analysisTerminatedComplete: true,
+                    adScanFraction: unmeasured
+                )
             )
-        )
-        #expect(readiness.state == .idle)
-        #expect(readiness.downloadFraction == 1)
-        // A NaN is an absent measurement too — it would clamp to 0 and render the
-        // same fabricated "0% scanned".
-        #expect(deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisTerminatedComplete: true, adScanFraction: .nan)
-        ).state == .idle)
-        #expect(deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisTerminatedComplete: true, adScanFraction: .infinity)
-        ).state == .idle)
-        // A MEASURED zero is different: it stays ◐, because 0 is a real answer.
+            #expect(readiness.state == .partiallyAnalyzed)
+            #expect(readiness.downloadFraction == 1)
+            #expect(!readiness.analysisFractionIsMeasured)
+            #expect(
+                episodePreparationAccessibilityValue(readiness) == "Amount scanned unknown",
+                "\(String(describing: unmeasured)) must not be spoken as a percentage"
+            )
+        }
+        // A MEASURED zero is different: 0 is a real answer and is spoken as one.
         let measuredZero = deriveEpisodePreparationReadiness(
             inputs(
                 isDownloaded: true,
@@ -287,6 +283,8 @@ struct EpisodePreparationReadinessTests {
             )
         )
         #expect(measuredZero.state == .partiallyAnalyzed)
+        #expect(measuredZero.analysisFractionIsMeasured)
+        #expect(episodePreparationAccessibilityValue(measuredZero) == "0% scanned for ads")
     }
 
     @Test("an in-flight download outranks ◐ so the live transfer stays visible")
@@ -506,7 +504,10 @@ struct EpisodePreparationReadinessTests {
         var labels: [String: EpisodePreparationControlState] = [:]
         for state in EpisodePreparationControlState.allCases {
             let readiness = EpisodePreparationReadiness(
-                state: state, downloadFraction: 1, analysisFraction: 0.47
+                state: state,
+                downloadFraction: 1,
+                analysisFraction: 0.47,
+                analysisFractionIsMeasured: true
             )
             let label = episodePreparationAccessibilityLabel(readiness)
             #expect(!label.isEmpty, "\(state) has an empty accessibility label")
@@ -522,7 +523,10 @@ struct EpisodePreparationReadinessTests {
     @Test("partly-analyzed announces itself as partial AND says how much")
     func testPartiallyAnalyzedAccessibility() {
         let partial = EpisodePreparationReadiness(
-            state: .partiallyAnalyzed, downloadFraction: 1, analysisFraction: 0.47
+            state: .partiallyAnalyzed,
+            downloadFraction: 1,
+            analysisFraction: 0.47,
+            analysisFractionIsMeasured: true
         )
         let ready = EpisodePreparationReadiness(
             state: .ready, downloadFraction: 1, analysisFraction: 1
@@ -615,7 +619,10 @@ struct EpisodePreparationReadinessTests {
     private func derive(
         sessionState: SessionState,
         adScanFraction: Double?,
-        isDownloaded: Bool = true
+        isDownloaded: Bool = true,
+        // Attribute the in-helper expectation to the CALLER, otherwise all eight
+        // call sites report the same useless line number on failure.
+        sourceLocation: SourceLocation = #_sourceLocation
     ) -> EpisodePreparationReadiness {
         let analysis = episodePreparationAnalysisInputs(
             asset: asset(state: sessionState),
@@ -623,7 +630,7 @@ struct EpisodePreparationReadinessTests {
                 adScanCoveredSec: adScanFraction.map { $0 * Self.episodeDuration }
             )
         )
-        #expect(analysis.adScanFraction == adScanFraction)
+        #expect(analysis.adScanFraction == adScanFraction, sourceLocation: sourceLocation)
         return deriveEpisodePreparationReadiness(
             inputs(
                 isDownloaded: isDownloaded,
@@ -794,10 +801,15 @@ struct EpisodePreparationReadinessTests {
             let readiness = derive(sessionState: sessionState, adScanFraction: 0.01)
             #expect(readiness.state != .ready, "\(sessionState) must not read ready at 1% scanned")
         }
-        // Zero and unknown coverage are both under-claims, never ✓ — but they
-        // are different claims: 0 is measured (◐), nil is unmeasured (✦).
-        #expect(derive(sessionState: .completeFull, adScanFraction: 0).state == .partiallyAnalyzed)
-        #expect(derive(sessionState: .completeFull, adScanFraction: nil).state == .idle)
+        // Zero and unknown coverage are both under-claims, never ✓ — but they are
+        // different claims: 0 is measured, nil is not, and only the first may be
+        // spoken as a number.
+        let measuredZero = derive(sessionState: .completeFull, adScanFraction: 0)
+        #expect(measuredZero.state == .partiallyAnalyzed)
+        #expect(measuredZero.analysisFractionIsMeasured)
+        let unmeasured = derive(sessionState: .completeFull, adScanFraction: nil)
+        #expect(unmeasured.state == .partiallyAnalyzed)
+        #expect(!unmeasured.analysisFractionIsMeasured)
         #expect(derive(sessionState: .backfill, adScanFraction: nil).state == .analyzing)
     }
 

@@ -594,11 +594,17 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// unknown (mirrors ``fastTranscriptCoveredSec``'s nil semantics), so
     /// AN renders as `--%` rather than a synthetic 0%.
     let analysisCoveredSec: Double?
-    /// playhead-pz32: interval-unioned seconds of audio a **semantic ad scan
-    /// actually examined** — the union of `semantic_scan_results` windows on
-    /// the coverage lane (``SemanticScanCoverage/coverageScanPass``) whose
-    /// status says a verdict was obtained
-    /// (``SemanticScanStatus/didExamineWindow``).
+    /// playhead-pz32: seconds of audio a **semantic ad scan actually examined**.
+    ///
+    /// Precisely: the interval union of `semantic_scan_results` windows on the
+    /// coverage lane (``SemanticScanCoverage/coverageScanPass``) that produced a
+    /// verdict (``SemanticScanResult/didExamineWindow(status:errorContext:)`` —
+    /// the status semantics MINUS no-work sentinels), INTERSECTED with the
+    /// transcribed region (sub-ad-width gaps bridged, see
+    /// ``AnalysisCoverageMath/adScanBridgeableGapSec``). The intersection is what
+    /// stops a single window's bounds from claiming a large untranscribed block
+    /// its prompt never contained; the bridging is what stops every
+    /// inter-utterance breath from counting as unscanned.
     ///
     /// This is the only persisted quantity that answers "how much of this
     /// episode has been read for ads?". It is deliberately NOT any of the
@@ -630,17 +636,18 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     ///   * scan coverage unknown or non-finite;
     ///   * duration missing, non-finite, or non-positive (legacy rows,
     ///     placeholder rows pre-decode) — never a divide-by-zero;
-    ///   * coverage exceeding the duration by more than one shard. A ratio above
-    ///     1 means the numerator and the denominator describe different audio,
+    ///   * coverage exceeding the duration by more than
+    ///     ``adScanDurationToleranceSec(episodeDurationSec:)``. A ratio above 1
+    ///     means the numerator and the denominator describe different audio,
     ///     which happens for real: a feed can declare a duration wildly shorter
     ///     than the file (the 2026-04-27 libsyn/flightcast episode declared 704 s
-    ///     for ~9,700 s of audio), and terminal rows carrying `transcript 1.163,
-    ///     feature 1.724` have been observed (playhead-csbq). Clamping such an
-    ///     overshoot to exactly `1.0` would turn a broken denominator into a
-    ///     confident ✓ on ~10% of the audio, so a disagreement that large reads
-    ///     as unmeasurable instead. One shard of slack absorbs the ordinary
-    ///     feed-vs-measured drift, mirroring
-    ///     ``FastTranscriptCoverageInvariant/Tolerances/watermarkPastDurationSec``.
+    ///     for ~9,700 s of audio; four of the five assets in the 2026-04-25
+    ///     device capture have a declared duration shorter than their transcript
+    ///     span), and terminal rows carrying `transcript 1.163, feature 1.724`
+    ///     have been observed (playhead-csbq). Clamping such an overshoot to
+    ///     exactly `1.0` would turn a broken denominator into a confident ✓ on a
+    ///     fraction of the audio, so a disagreement that large reads as
+    ///     unmeasurable instead.
     var adScanFraction: Double? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
@@ -648,10 +655,27 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
               let episodeDurationSec,
               episodeDurationSec.isFinite,
               episodeDurationSec > 0,
-              adScanCoveredSec <= episodeDurationSec + AnalysisAudioService.defaultShardDuration else {
+              adScanCoveredSec <= episodeDurationSec
+                + Self.adScanDurationToleranceSec(episodeDurationSec: episodeDurationSec) else {
             return nil
         }
         return min(1, adScanCoveredSec / episodeDurationSec)
+    }
+
+    /// playhead-pz32: how far measured coverage may exceed the declared duration
+    /// before the two are judged to describe different audio.
+    ///
+    /// RELATIVE, capped by one shard. An absolute one-shard tolerance is the
+    /// obvious choice and is wrong at the short end: 30 s is 0.8% of an hour-long
+    /// episode but 67% of a 45-second trailer, so a 45 s episode whose real audio
+    /// runs 74 s would pass an absolute check and render a confident ✓ on a
+    /// denominator that is 39% short — the exact failure this guard exists to
+    /// prevent, merely relocated. 5% absorbs ordinary feed-vs-measured drift at
+    /// every scale; the shard cap keeps long episodes from acquiring a large
+    /// absolute allowance (mirroring
+    /// ``FastTranscriptCoverageInvariant/Tolerances/watermarkPastDurationSec``).
+    static func adScanDurationToleranceSec(episodeDurationSec: Double) -> Double {
+        min(AnalysisAudioService.defaultShardDuration, 0.05 * episodeDurationSec)
     }
 }
 
@@ -779,10 +803,51 @@ enum AnalysisCoverageMath {
         intervals.filter { $0.start.isFinite && $0.end.isFinite && $0.end > $0.start }
     }
 
+    /// playhead-pz32: the widest untranscribed gap that may be BRIDGED when
+    /// measuring semantic ad-scan area — see ``bridgingShortGaps(_:upTo:)``.
+    ///
+    /// Chosen for a PROVABLE property, not fitted to a corpus: 5 s is the
+    /// smallest minimum-ad-width any detection lane uses
+    /// (`RediffDiffer.minGapFps(minAdSeconds:)` and
+    /// `RediffSlotOwnership.Config.minAdSeconds` both default to `5.0`; the
+    /// segment aggregator's floor is 30 s, six times larger). A bridged gap is
+    /// therefore always shorter than the shortest span this app will ever call
+    /// an ad, so bridging cannot conceal one.
+    static let adScanBridgeableGapSec: Double = 5.0
+
+    /// playhead-pz32: coalesce intervals across gaps no wider than `maxGapSec`,
+    /// returning a disjoint ascending set.
+    ///
+    /// Why the ad-scan measure needs this. A `transcript_chunks` row spans the
+    /// FIRST WORD's start to the LAST WORD's end, so every inter-utterance
+    /// breath is a hole in the raw chunk union — measured on the 2026-04-25
+    /// device capture, `union(chunks) / transcriptSpan` is 0.68–0.976 across
+    /// five assets with 182–1,199 disjoint runs each, and the largest gap in
+    /// three of them is under 9 s. Intersecting scan windows with the RAW union
+    /// therefore caps the ad-scan fraction below the 0.98 readiness threshold on
+    /// every real episode, which would make the ✓ unreachable — an under-claim so
+    /// total it deletes the signal instead of correcting it.
+    ///
+    /// Bridging sub-ad-width gaps measures what the scan actually did: a window's
+    /// prompt is a contiguous run of transcript, and a half-second pause inside
+    /// it was read. What must NOT be bridged is a genuine untranscribed BLOCK — a
+    /// music bed or outro no pass ever read. On the same capture those are
+    /// unmistakable (single gaps of 90 s and 1,050 s), and at a 5 s bridge they
+    /// remain holes: those two assets stay at 0.96 and 0.71 (correctly not
+    /// ready) while the three well-transcribed ones reach 0.983–1.0.
+    static func bridgingShortGaps(
+        _ intervals: [(start: Double, end: Double)],
+        upTo maxGapSec: Double
+    ) -> [(start: Double, end: Double)] {
+        mergedIntervals(normalize(intervals), bridging: max(0, maxGapSec))
+    }
+
     /// Sort + coalesce ALREADY-NORMALIZED intervals into a disjoint ascending
     /// union. Touching intervals collapse, matching ``unionedSeconds(_:)``.
+    /// `bridging` additionally coalesces across gaps no wider than itself.
     private static func mergedIntervals(
-        _ intervals: [(start: Double, end: Double)]
+        _ intervals: [(start: Double, end: Double)],
+        bridging: Double = 0
     ) -> [(start: Double, end: Double)] {
         let sorted = intervals.sorted { lhs, rhs in
             if lhs.start != rhs.start { return lhs.start < rhs.start }
@@ -794,7 +859,7 @@ enum AnalysisCoverageMath {
                 merged.append(interval)
                 continue
             }
-            if interval.start <= last.end {
+            if interval.start <= last.end + bridging {
                 merged[merged.count - 1] = (start: last.start, end: max(last.end, interval.end))
             } else {
                 merged.append(interval)
@@ -9683,13 +9748,14 @@ actor AnalysisStore {
     ///     watermarks; no artifact tables outrank them today. Provenance
     ///     stays ``CoverageProvenance/assetWatermark`` while populated and
     ///     ``CoverageProvenance/unknown`` when nil.
-    ///   - playhead-pz32: `adScanCoveredSec` is the interval-unioned seconds
-    ///     of coverage-lane `semantic_scan_results` windows that produced a
-    ///     verdict. SQLite cannot union intervals, so we fetch
-    ///     `(windowStartTime, windowEndTime, status)` and union in Swift —
-    ///     same shape as the fast-chunk pass above. The status filter runs in
-    ///     Swift against ``SemanticScanStatus/didExamineWindow`` rather than
-    ///     an `IN (...)` list of raw values, so "what counts as examined"
+    ///   - playhead-pz32: `adScanCoveredSec` is the interval-unioned seconds of
+    ///     coverage-lane `semantic_scan_results` windows that produced a verdict,
+    ///     intersected with the (gap-bridged) transcribed region. SQLite cannot
+    ///     union intervals, so we fetch `(windowStartTime, windowEndTime, status,
+    ///     errorContext)` and do the set arithmetic in Swift — same shape as the
+    ///     fast-chunk pass above. The row filter runs in Swift against
+    ///     ``SemanticScanResult/didExamineWindow(status:errorContext:)`` rather
+    ///     than an `IN (...)` list of raw values, so "what counts as examined"
     ///     has exactly one definition in the codebase.
     ///
     /// Empty input returns an empty dictionary without preparing a
@@ -9983,6 +10049,12 @@ actor AnalysisStore {
             // read `[0,3600]` — and reporting that as a fully screened episode
             // would be this bead's own bug one layer down.
             //
+            // The bound is the transcript with sub-ad-width gaps BRIDGED, not the
+            // raw chunk union: a chunk spans first-word to last-word, so the raw
+            // union is riddled with inter-utterance holes that no scan could
+            // have missed anything in. See `adScanBridgeableGapSec` for why 5 s,
+            // and why bridging cannot conceal an ad.
+            //
             // `nil` only when no coverage-lane row exists at all; a scan that
             // ran and examined nothing reports a measured 0.
             let adScanCoveredSec: Double?
@@ -9990,7 +10062,10 @@ actor AnalysisStore {
             if adScanRowSeen.contains(id) {
                 adScanCoveredSec = AnalysisCoverageMath.unionedSecondsIntersecting(
                     adScanIntervals[id] ?? [],
-                    within: transcriptIntervals
+                    within: AnalysisCoverageMath.bridgingShortGaps(
+                        transcriptIntervals,
+                        upTo: AnalysisCoverageMath.adScanBridgeableGapSec
+                    )
                 )
                 adScanCoveredSource = .semanticScanResults
             } else {

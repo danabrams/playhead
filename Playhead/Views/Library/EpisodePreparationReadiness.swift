@@ -44,7 +44,14 @@ enum EpisodePreparationControlState: String, Equatable, Sendable, CaseIterable {
     /// because nothing is running — a spinner here would be a lie in the
     /// other direction.
     case partiallyAnalyzed
-    /// ✓ Fully ad-scanned; skip-cues prepared.
+    /// ✓ The episode's audio has been read for ads end to end.
+    ///
+    /// Scoped precisely, because the old glyph promised more than it knew: this
+    /// asserts that the COVERAGE-LANE screening pass
+    /// (``SemanticScanCoverage/coverageScanPass``) examined essentially all of
+    /// the audio. It does not assert that boundary refinement (`passB`) has
+    /// finished, nor that every resulting skip cue is final — those narrow
+    /// already-screened windows and do not change whether the audio was read.
     case ready
 }
 
@@ -124,6 +131,13 @@ struct EpisodePreparationReadiness: Equatable, Sendable {
     var downloadFraction: Double
     /// Analyze-zone fill, `[0, 1]`.
     var analysisFraction: Double
+    /// playhead-pz32: whether ``analysisFraction`` is a real MEASUREMENT or the
+    /// zero that stands in for an absent one. Both draw an empty analyze zone,
+    /// but only a measured value may be spoken as a percentage — announcing
+    /// "0% scanned for ads" for an episode whose scan rows were merely deleted
+    /// invents a number. Defaults to `false` so a caller that does not think
+    /// about it under-claims.
+    var analysisFractionIsMeasured: Bool = false
 }
 
 // MARK: - Cellular gate (pure)
@@ -163,10 +177,9 @@ func episodePreparationDownloadPermitted(
 ///      Supersedes everything, including the cellular gate (a fully-analyzed
 ///      episode is ready regardless of network).
 ///   2. `.partiallyAnalyzed` — the pipeline reached a completion terminal with
-///      nothing running and no transfer in flight, but MEASURED coverage falls
-///      short (or the terminal is a degraded one). playhead-pz32: this case used
-///      to fold into `.ready`. With coverage unmeasured it falls to actionable
-///      `.idle` instead, because ◐ asserts a measurement.
+///      nothing running and no transfer in flight, but coverage falls short, is
+///      unmeasured, or the terminal is a degraded one. playhead-pz32: this case
+///      used to fold into `.ready`.
 ///   3. Resting `.idle` — no intent and nothing active. The ✦ glyph.
 ///   4. Working (intent OR an in-flight download OR active analysis):
 ///      * not downloaded, download in flight → `.downloading`
@@ -207,30 +220,27 @@ func deriveEpisodePreparationReadiness(
     //    genuinely in flight, where the live download is the more useful truth
     //    and a frozen ◐ would hide it.
     if inputs.analysisTerminatedComplete, !inputs.analysisActive, !inputs.downloadInFlight {
-        // ◐ asserts a MEASUREMENT ("this much was scanned"). With no ad-scan
-        // measurement at all there is nothing to assert: rendering ◐ would put a
-        // fabricated "0% scanned" against a quantity the store explicitly tagged
-        // unknown, and ◐ is not actionable, so the user would be stranded.
+        // ◐ WITHOUT a percentage when there is no measurement to report. That is
+        // the state after a cohort bump: `semantic_scan_results` rows are deleted
+        // whenever the prompt/schema/plan/normalization revs, the locale changes,
+        // the OS updates or the app build changes
+        // (`pruneOrphanedScansForCurrentCohort`), which also means the pipeline no
+        // longer trusts those verdicts. "Partly analyzed, amount unknown" is the
+        // whole truth.
         //
-        // This is the state after a cohort bump — `semantic_scan_results` rows
-        // are deleted whenever the prompt/schema/plan/normalization revs, the
-        // locale changes, the OS updates or the app build changes
-        // (`pruneOrphanedScansForCurrentCohort`), which also means the pipeline
-        // itself no longer trusts those verdicts. "Nothing is prepared; tap to
-        // prepare" is exactly true, and ✦ is the actionable glyph that says it.
-        // `isFinite`, not `!= nil`: a NaN would clamp to 0 and render the same
-        // fabricated "0% scanned" as an absent measurement.
-        guard inputs.adScanFraction?.isFinite == true else {
-            return EpisodePreparationReadiness(
-                state: .idle,
-                downloadFraction: inputs.isDownloaded ? 1 : download,
-                analysisFraction: 0
-            )
-        }
+        // Deliberately NOT the actionable ✦ here, tempting as it is: the tap
+        // would promise a re-scan the job state machine does not currently
+        // deliver (`insertJob` is `INSERT OR IGNORE` on a `workKey` the completed
+        // job already owns, and only `queued`/`paused`/retryable-`failed` rows
+        // dispatch), so it would swap an honest inert glyph for a false promise —
+        // a different lie, not a fix. Re-drive is playhead-gqx4 / playhead-i7qe's.
         return EpisodePreparationReadiness(
             state: .partiallyAnalyzed,
             downloadFraction: inputs.isDownloaded ? 1 : download,
-            analysisFraction: analysis
+            analysisFraction: analysis,
+            // `isFinite`, not `!= nil`: a NaN clamps to 0 and would otherwise be
+            // spoken as the same fabricated "0%" as an absent measurement.
+            analysisFractionIsMeasured: inputs.adScanFraction?.isFinite == true
         )
     }
 
@@ -331,15 +341,18 @@ func episodePreparationAccessibilityLabel(
     }
 }
 
-/// playhead-pz32: the control's VoiceOver value per state. Working states
-/// read out the progress caption. `.partiallyAnalyzed` reads out how much
-/// audio was actually screened, because "partly" without a number is not
-/// actionable information. The two other resting states have no value.
+/// playhead-pz32: the control's VoiceOver value per state. Working states read
+/// out the progress caption. `.partiallyAnalyzed` reads out how much audio was
+/// actually screened, because "partly" without a number is not actionable
+/// information — UNLESS there is no measurement, in which case saying "0%
+/// scanned" would invent one and the honest value is the amount's absence. The
+/// two other resting states have no value.
 func episodePreparationAccessibilityValue(
     _ readiness: EpisodePreparationReadiness
 ) -> String {
     switch readiness.state {
     case .partiallyAnalyzed:
+        guard readiness.analysisFractionIsMeasured else { return "Amount scanned unknown" }
         return "\(episodePreparationPercent(readiness.analysisFraction)) scanned for ads"
     case .idle, .ready, .waitingForWifi, .downloading, .analyzing:
         return episodePreparationCaption(readiness) ?? ""
@@ -362,6 +375,14 @@ func episodePreparationPercent(_ fraction: Double) -> String {
 /// playhead-pz32: this cutoff was never the defect and must not be lowered to
 /// make the ✓ easier to reach. The defect was WHICH QUANTITY it was applied
 /// to — see ``EpisodePreparationInputs/adScanFraction``.
+///
+/// It is, however, calibrated for a quantity that can actually reach 1: the
+/// ad-scan area bridges sub-ad-width transcript gaps for exactly that reason
+/// (``AnalysisCoverageMath/adScanBridgeableGapSec``). Applying 0.98 to the RAW
+/// chunk union instead would put the ✓ permanently out of reach, because a
+/// transcript chunk spans first-word to last-word and its union tops out around
+/// 0.93–0.98 of real audio. If this threshold is ever revisited, revisit the
+/// bridging in the same breath — the pair has to be calibrated together.
 let episodePreparationCompleteThreshold: Double = 0.98
 
 /// Whether the (canonical, projected) analysis status indicates a job is

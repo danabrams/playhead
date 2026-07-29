@@ -270,11 +270,18 @@ struct SemanticScanCoverage: Sendable, Equatable {
     /// playhead-pz32: the canonical COVERAGE LANE. `passA` rows are the
     /// whole-episode screening sweep; `passB` rows are localized extent
     /// attempts INSIDE already-screened `passA` windows, so counting them
-    /// would double-count. Shared with
-    /// ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)``'s
-    /// `adScanCoveredSec` derivation so the pipeline breadcrumb and the
-    /// user-facing readiness predicate can never disagree about which rows
-    /// constitute coverage.
+    /// would double-count.
+    ///
+    /// Shared with ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)``'s
+    /// `adScanCoveredSec` derivation, so the pipeline breadcrumb and the
+    /// user-facing readiness predicate agree about WHICH ROWS constitute
+    /// coverage. They deliberately do NOT agree on the resulting SECONDS: this
+    /// type unions the window bounds as persisted, while `adScanCoveredSec`
+    /// additionally intersects them with the transcribed region, because a
+    /// window's bounds can straddle audio its prompt never contained. Expect
+    /// `examinedSeconds >= adScanCoveredSec`, sometimes by a lot — the log is
+    /// answering "how much did the pass attempt to screen", the checkmark is
+    /// answering "how much audio was read".
     static let coverageScanPass = "passA"
 
     /// Compute coverage for one scan pass.
