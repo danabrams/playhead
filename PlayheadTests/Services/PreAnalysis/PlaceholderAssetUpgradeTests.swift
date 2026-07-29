@@ -407,6 +407,48 @@ struct PlaceholderAssetUpgradeTests {
         #expect(rehydrated.weak.contains("4096"))
     }
 
+    /// R1: `fingerprint(for:)` now WRITES its rehydration back into
+    /// `fingerprintCache`, and `computeStrongFingerprint` short-circuits on a
+    /// cache hit. A pin that carries neither a weak nor a strong identity must
+    /// therefore report a miss rather than seed an empty entry — an empty
+    /// entry would be returned for the rest of the process and would shadow
+    /// the real fingerprint once the download completes.
+    @Test("a pin carrying no identity reports a miss instead of poisoning the cache")
+    func emptyPinDoesNotPoisonTheFingerprintCache() async throws {
+        let dir = try makeTempDir(prefix: "Bd0hi9PinEmpty")
+        Self.tempDirs.track(dir)
+        let episodeId = "ep-empty-pin"
+        let manager = DownloadManager(cacheDirectory: dir)
+        let pinURL = await manager.pinFileURL(for: episodeId)
+        try FileManager.default.createDirectory(
+            at: pinURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // No sourceURL, no etag, no sha256, no weakFingerprint.
+        try Data(#"{"expectedBytes":1024}"#.utf8).write(to: pinURL)
+
+        #expect(await manager.fingerprint(for: episodeId) == nil,
+                "an identity-free pin carries nothing a caller can act on")
+
+        // The download finishes and pins for real. The earlier miss must not
+        // have left anything behind that shadows it.
+        let weak = "https://cdn.example.com/late.mp3|\"etag-late\"|1024|"
+        let sha = String(repeating: "c", count: 64)
+        _ = await manager.writePin(
+            AudioAssetPin(
+                expectedBytes: 1024,
+                sha256: sha,
+                sourceURL: "https://cdn.example.com/late.mp3",
+                etag: "\"etag-late\"",
+                weakFingerprint: weak
+            ),
+            for: episodeId
+        )
+        let recovered = try #require(await manager.fingerprint(for: episodeId))
+        #expect(recovered.strong == sha)
+        #expect(recovered.weak == weak)
+    }
+
     @Test("nonEmptyWeak rejects the empty sentinel that no-metadata paths write")
     func nonEmptyWeakRejectsSentinels() {
         #expect(AudioFingerprint.nonEmptyWeak(nil) == nil)

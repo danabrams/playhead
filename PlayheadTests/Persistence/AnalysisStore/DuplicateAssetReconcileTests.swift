@@ -186,6 +186,29 @@ struct DuplicateAssetReconcileTests {
         #expect(chosen?.id == "sha-row")
     }
 
+    /// R1: `chooseMergeSurvivor` breaks a `createdAt` tie on `rowId DESC` to
+    /// match `fetchAssetByEpisodeId`'s ordering — the merge must keep whichever
+    /// row the rest of the app already treats as current. Every other survivor
+    /// test uses distinct timestamps, so nothing pinned the tiebreak, and
+    /// `createdAt` ties are the norm on a fixture-seeded or fast-inserting
+    /// database (the column defaults to whole seconds).
+    @Test("a createdAt tie is broken on rowid, matching fetchAssetByEpisodeId")
+    func createdAtTieIsBrokenOnRowId() {
+        let lowerRow = AssetMergeRow(
+            rowId: 3, id: "low", assetFingerprint: "low",
+            createdAt: 1_000, analysisState: "queued", terminalReason: nil,
+            sourceURL: "file:///a/shared.mp3"
+        )
+        let higherRow = AssetMergeRow(
+            rowId: 7, id: "high", assetFingerprint: "high",
+            createdAt: 1_000, analysisState: "queued", terminalReason: nil,
+            sourceURL: "file:///a/shared.mp3"
+        )
+        #expect(AnalysisStore.chooseMergeSurvivor([lowerRow, higherRow])?.id == "high")
+        #expect(AnalysisStore.chooseMergeSurvivor([higherRow, lowerRow])?.id == "high",
+                "the verdict must not depend on the order rows came out of SQLite")
+    }
+
     @Test("with no SHA row at all, the newest row survives")
     func newestRowSurvivesWithoutSHA() {
         let older = AssetMergeRow(
@@ -712,6 +735,61 @@ struct DuplicateAssetReconcileTests {
         #expect(try await allAssets(store: store, episodeId: "").count == 2)
     }
 
+    /// The duration fold is a PREFERENCE, not a max — that is the whole point
+    /// of the comment on `foldAssetRow`, and nothing pinned it: every other
+    /// fixture happens to give the survivor the larger value, so `MAX(...)`
+    /// would pass them all. Here the placeholder's poisoned duration is the
+    /// bigger number, which is exactly the case a max gets wrong.
+    @Test("a LARGER placeholder duration still loses to the survivor's own")
+    func largerPlaceholderDurationDoesNotWin() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-bigger-poison"
+        try await insertPlaceholder(
+            store: store, id: "ph-bigger", episodeId: episodeId,
+            state: SessionState.completeFull.rawValue, duration: 5_000
+        )
+        try await insertCanonical(
+            store: store, id: "canon-bigger", episodeId: episodeId,
+            fingerprint: canonicalSHA, duration: 2_933
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 1)
+        #expect(summary.survivorsWithInheritedDuration.isEmpty)
+        let survivor = try #require(try await store.fetchAsset(id: "canon-bigger"))
+        #expect(survivor.episodeDurationSec == 2_933,
+                "a MAX would hand the merged row the placeholder's artefact whenever it happens to be larger")
+    }
+
+    /// R1: the `createdAt` guard in the v39 dedup is what stops the migration
+    /// from aborting on a database that predates the column — and an aborted
+    /// migration at launch means `PlayheadRuntime` deletes the analysis
+    /// directory. The guard only matters when such a database ALSO has a
+    /// collision to resolve, which no fixture had.
+    @Test("v39 dedup resolves a collision on a schema with no createdAt column")
+    func migrationDedupWithoutCreatedAtColumn() async throws {
+        let (store, directory) = try await makeTestStoreWithDirectory()
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await insertCanonical(
+            store: store, id: "nocreated-old", episodeId: "ep-nocreated", fingerprint: canonicalSHA
+        )
+        try await insertCanonical(
+            store: store, id: "nocreated-new", episodeId: "ep-nocreated", fingerprint: canonicalSHA
+        )
+        // Model the pre-v9 shape: the ordering column simply is not there.
+        try await store.execForTesting("ALTER TABLE analysis_assets DROP COLUMN createdAt")
+        try await store.setMetaValue(forKey: "schema_version", value: "38")
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == 39)
+        #expect(try probeRowCount(in: directory, table: "analysis_assets") == 1)
+        #expect(try probeRowCount(
+            in: directory,
+            table: "analysis_assets WHERE id = 'nocreated-new'"
+        ) == 1, "rowid DESC alone is a correct, if coarser, newest-wins")
+    }
+
     /// R1 finding 2, at the store seam: the merge has to SAY when a survivor's
     /// duration is only there because the placeholder had one, because after
     /// the `COALESCE` the two cases are indistinguishable from the row alone.
@@ -836,6 +914,51 @@ struct DuplicateAssetReconcileTests {
         let duration = try #require(survivor.episodeDurationSec)
         #expect(abs(duration - 30) < 1.0,
                 "the merged row must carry a MEASURED duration, not the placeholder's 543 s prefix (got \(duration))")
+    }
+
+    /// R1: the sweep is ONE-SHOT, gated on a `_meta` key. If a failed pass
+    /// wrote that key the user's library would stay split forever — which is
+    /// precisely how the two existing sweeps (`did_duration_backfill_v1`,
+    /// `did_terminal_state_reconcile_v1`) came to be useless here. Nothing
+    /// covered the marker at all: not the failure case, not the short-circuit.
+    @Test("a failed merge leaves the one-shot marker unset; the retry completes and then short-circuits")
+    func failedPassDoesNotMarkItselfDone() async throws {
+        let store = try await makeTestStore()
+        let coordinator = makeCoordinator(store: store)
+        let metaKey = AnalysisCoordinator.duplicateAssetReconcileV1MetaKey
+        try await insertPlaceholder(
+            store: store, id: "ph-mark", episodeId: "ep-mark",
+            state: SessionState.completeFull.rawValue
+        )
+        try await insertCanonical(
+            store: store, id: "canon-mark", episodeId: "ep-mark", fingerprint: canonicalSHA
+        )
+
+        await store.setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders: 1)
+        let failed = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in nil }
+        )
+        await store.setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders: nil)
+
+        #expect(failed.failed)
+        #expect(try await store.fetchMetaValue(forKey: metaKey) == nil,
+                "marking a rolled-back pass done would strand the split library forever")
+        #expect(try await allAssets(store: store, episodeId: "ep-mark").count == 2)
+
+        // The retry a real relaunch performs.
+        let retry = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in nil }
+        )
+        #expect(retry.merge.placeholdersMerged == 1)
+        #expect(!retry.alreadyDone)
+        #expect(try await store.fetchMetaValue(forKey: metaKey) == "1")
+
+        // And every launch after that is free.
+        let third = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in nil }
+        )
+        #expect(third.alreadyDone)
+        #expect(third.merge == DuplicateAssetMergeSummary())
     }
 
     /// The counterpart: a survivor that brought its own duration is left
