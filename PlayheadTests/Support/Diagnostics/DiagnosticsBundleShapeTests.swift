@@ -252,7 +252,37 @@ private enum BundleShapeFixtures {
         else {
             return nil
         }
-        return Set(defaultSubtree.keys)
+        var paths: Set<String> = []
+        collectKeyPaths(defaultSubtree, prefix: "", into: &paths)
+        return paths
+    }
+
+    /// Every key PATH in the subtree, not just the top level.
+    ///
+    /// REVIEW ROUND 2 (playhead-p70f): the top-level-only version had the same
+    /// silent failure the drift check was written to prevent, one level down.
+    /// `rediff_diagnostics` is a whole nested subtree, so a bead adding or
+    /// renaming a field INSIDE it — as round 2's `read_failures` does — left
+    /// the checked-in fixture stale while the drift check reported it fresh,
+    /// and legal review would have been handed a bundle that no longer matched
+    /// what ships. Array elements collapse onto a single `key[]` prefix so the
+    /// path set stays a shape, not a row count.
+    private static func collectKeyPaths(
+        _ value: Any,
+        prefix: String,
+        into paths: inout Set<String>
+    ) {
+        if let dictionary = value as? [String: Any] {
+            for (key, child) in dictionary {
+                let path = prefix.isEmpty ? key : "\(prefix).\(key)"
+                paths.insert(path)
+                collectKeyPaths(child, prefix: path, into: &paths)
+            }
+        } else if let array = value as? [Any] {
+            for element in array {
+                collectKeyPaths(element, prefix: prefix + "[]", into: &paths)
+            }
+        }
     }
 }
 
@@ -324,7 +354,22 @@ struct DiagnosticsBundleShapeTests {
         // title, feed URL, advertiser, product, window id, or
         // transcript text. The proof lives in
         // `BannerTallyDiagnosticsPrivacyTests` (legal item g).
-        "banner_tallies"
+        "banner_tallies",
+        // playhead-p70f: the rediff re-fetch lane (bandwidth ledger,
+        // lagged attempt states, day-0 attempt records, and the lane's
+        // BGTask fires). Always encoded so a support engineer can tell
+        // "the lane did nothing" from "this bundle predates the lane".
+        // Privacy review: every per-asset row carries the install-scoped
+        // `asset_id_hash` produced by the SAME `EpisodeIdHasher` the
+        // scheduler-event and banner tails use — never the raw
+        // `analysisAssetId`. Everything else is an integer, a timestamp,
+        // or a closed enum rawValue: the day-0 records' `lastDetail`
+        // (which is `String(describing: error)` and can carry the
+        // enclosure URL) is deliberately NOT projected, and the run
+        // ledger's free-form `deferReason` is PARSED into two integers
+        // rather than forwarded. The proof lives in
+        // `DiagnosticsBundleRediffTests`.
+        "rediff_diagnostics"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

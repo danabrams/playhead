@@ -1226,7 +1226,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 37
+    nonisolated static let currentSchemaVersion = 38
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1961,6 +1961,9 @@ actor AnalysisStore {
             // playhead-0sro: data-only repair of stale fast-transcript
             // coverage watermarks on already-persisted assets.
             try migrateFastTranscriptCoverageReconcileV37IfNeeded()
+            // playhead-p70f: day-0 rediff attempt accountability table + the
+            // day-0 bandwidth-ledger counter. Additive-only and idempotent.
+            try migrateRediffDayZeroAttemptsV38IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2261,6 +2264,11 @@ actor AnalysisStore {
         // fixtures without `analysis_assets` / `transcript_chunks` still
         // reach v37.
         try migrateFastTranscriptCoverageReconcileV37IfNeeded()
+        // playhead-p70f (v38): mirror the day-0 rediff attempt table + the
+        // `dayZeroUnmarkedCount` ledger column into the ladder seam. The
+        // helper is fully idempotent and guards the column ALTER on
+        // `tableExists`, so seeded fixtures without the ledger still reach v38.
+        try migrateRediffDayZeroAttemptsV38IfNeeded()
     }
     #endif
 
@@ -5539,6 +5547,9 @@ actor AnalysisStore {
 
     /// Accumulate re-fetch bandwidth + outcome counters into the single
     /// ledger row (created on first write).
+    ///
+    /// playhead-p70f: `dayZeroUnmarkedCount` closes the hole where a day-0 run
+    /// could spend a full k-way fetch and leave EVERY counter at zero.
     func accumulateRediffBandwidth(
         precheckBytes: Int,
         fullFetchBytes: Int,
@@ -5546,13 +5557,14 @@ actor AnalysisStore {
         rotatedCount: Int,
         failedCount: Int,
         parkedCount: Int,
+        dayZeroUnmarkedCount: Int = 0,
         at now: Double
     ) throws {
         let sql = """
             INSERT INTO rediff_bandwidth_ledger
             (id, precheckBytesTotal, fullFetchBytesTotal, unchangedCount,
-             rotatedCount, failedCount, parkedCount, lastUpdatedAt)
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+             rotatedCount, failedCount, parkedCount, dayZeroUnmarkedCount, lastUpdatedAt)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 precheckBytesTotal = precheckBytesTotal + excluded.precheckBytesTotal,
                 fullFetchBytesTotal = fullFetchBytesTotal + excluded.fullFetchBytesTotal,
@@ -5560,6 +5572,7 @@ actor AnalysisStore {
                 rotatedCount = rotatedCount + excluded.rotatedCount,
                 failedCount = failedCount + excluded.failedCount,
                 parkedCount = parkedCount + excluded.parkedCount,
+                dayZeroUnmarkedCount = dayZeroUnmarkedCount + excluded.dayZeroUnmarkedCount,
                 lastUpdatedAt = excluded.lastUpdatedAt
             """
         let stmt = try prepare(sql)
@@ -5576,7 +5589,8 @@ actor AnalysisStore {
         bind(stmt, 4, rotatedCount)
         bind(stmt, 5, failedCount)
         bind(stmt, 6, parkedCount)
-        bind(stmt, 7, now)
+        bind(stmt, 7, dayZeroUnmarkedCount)
+        bind(stmt, 8, now)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -5585,7 +5599,8 @@ actor AnalysisStore {
     func fetchRediffBandwidthTotals() throws -> RediffBandwidthTotals {
         let sql = """
             SELECT precheckBytesTotal, fullFetchBytesTotal, unchangedCount,
-                   rotatedCount, failedCount, parkedCount, lastUpdatedAt
+                   rotatedCount, failedCount, parkedCount, lastUpdatedAt,
+                   dayZeroUnmarkedCount
             FROM rediff_bandwidth_ledger WHERE id = 1
             """
         let stmt = try prepare(sql)
@@ -5598,8 +5613,267 @@ actor AnalysisStore {
             rotatedCount: Int(sqlite3_column_int64(stmt, 3)),
             failedCount: Int(sqlite3_column_int64(stmt, 4)),
             parkedCount: Int(sqlite3_column_int64(stmt, 5)),
+            dayZeroUnmarkedCount: Int(sqlite3_column_int64(stmt, 7)),
             lastUpdatedAt: sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 6)
         )
+    }
+
+    // MARK: - V38: Day-0 rediff attempt accountability (playhead-p70f)
+    //
+    // `rediff_day_zero_attempts` — one row per asset the DAY-0 (play-time)
+    // rediff has attempted, carrying which of the formerly silent exits fired,
+    // the per-B-side diff counters that separate "the byte aligner rejected
+    // everything" from "the copies were diffed and simply agreed", and the
+    // cumulative bytes the asset has cost.
+    //
+    // WHY NOT `rediff_refetch_state`. That table gates the LAGGED sweep's
+    // eligibility, and the xsdz.36.4 poisoning fix deliberately leaves it
+    // untouched on an unmarked day-0 run so the lagged sweep can still recover
+    // the ads later. Writing day-0 outcomes there would resurrect exactly the
+    // bug that fix removed. This table is read by NO lagged query.
+    //
+    // Also adds `rediff_bandwidth_ledger.dayZeroUnmarkedCount` so the top-line
+    // ledger read can never again show ~300 MB against four zeroed counters.
+
+    /// V38 migration — day-0 attempt table + the day-0 ledger counter.
+    /// Idempotent (`CREATE TABLE IF NOT EXISTS` + `addColumnIfNeeded`); the
+    /// column ALTER is guarded on `tableExists` so a seeded fixture without
+    /// the ledger still reaches v38.
+    private func migrateRediffDayZeroAttemptsV38IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 38 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS rediff_day_zero_attempts (
+                analysisAssetId        TEXT PRIMARY KEY REFERENCES analysis_assets(id) ON DELETE CASCADE,
+                attemptCount           INTEGER NOT NULL DEFAULT 0,
+                lastAttemptAt          REAL NOT NULL,
+                lastExit               TEXT NOT NULL,
+                lastMarkCount          INTEGER NOT NULL DEFAULT 0,
+                lastBSideCount         INTEGER NOT NULL DEFAULT 0,
+                lastBSidesAccepted     INTEGER NOT NULL DEFAULT 0,
+                lastBSidesGateRejected INTEGER NOT NULL DEFAULT 0,
+                lastBSidesUnreadable   INTEGER NOT NULL DEFAULT 0,
+                lastDivergentSlotCount INTEGER NOT NULL DEFAULT 0,
+                lastFullFetchBytes     INTEGER NOT NULL DEFAULT 0,
+                totalFullFetchBytes    INTEGER NOT NULL DEFAULT 0,
+                suppressedCount        INTEGER NOT NULL DEFAULT 0,
+                lastSuppressedAt       REAL,
+                lastDetail             TEXT,
+                policyGeneration       INTEGER NOT NULL DEFAULT 0
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_rediff_day_zero_attempts_last ON rediff_day_zero_attempts(lastAttemptAt DESC);")
+        // Belt-and-braces for a table already present from an earlier build of
+        // this same (unreleased) migration: `CREATE TABLE IF NOT EXISTS` is a
+        // no-op there, so the column has to be asserted separately. `DEFAULT 0`
+        // is deliberately NOT `currentGeneration` — a row this build did not
+        // write must read as a foreign generation and get a fresh budget.
+        try addColumnIfNeeded(
+            table: "rediff_day_zero_attempts",
+            column: "policyGeneration",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+        if try tableExists("rediff_bandwidth_ledger") {
+            try addColumnIfNeeded(
+                table: "rediff_bandwidth_ledger",
+                column: "dayZeroUnmarkedCount",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+        }
+        try setSchemaVersion(38)
+    }
+
+    /// Upsert one asset's day-0 attempt record.
+    /// `DayZeroRediffAttemptPolicy.advance` has already folded the prior row's
+    /// `attemptCount` / `totalFullFetchBytes` into the value.
+    ///
+    /// The two SUPPRESSION columns are seeded on insert and then left alone on
+    /// conflict — `noteRediffDayZeroSuppression` owns them and increments them
+    /// in place. `advance` reads them and writes them back, so persisting them
+    /// here would be a read-modify-write over a counter another writer is
+    /// incrementing, and the interleaving is not hypothetical: an
+    /// `.alreadyInFlight` suppression is recorded PRECISELY while the attempt
+    /// it collided with is between its own read and its own write.
+    func upsertRediffDayZeroAttempt(_ record: RediffDayZeroAttemptRecord) throws {
+        let sql = """
+            INSERT INTO rediff_day_zero_attempts
+            (analysisAssetId, attemptCount, lastAttemptAt, lastExit, lastMarkCount,
+             lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
+             lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
+             totalFullFetchBytes, suppressedCount, lastSuppressedAt, lastDetail,
+             policyGeneration)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(analysisAssetId) DO UPDATE SET
+                attemptCount = excluded.attemptCount,
+                lastAttemptAt = excluded.lastAttemptAt,
+                lastExit = excluded.lastExit,
+                lastMarkCount = excluded.lastMarkCount,
+                lastBSideCount = excluded.lastBSideCount,
+                lastBSidesAccepted = excluded.lastBSidesAccepted,
+                lastBSidesGateRejected = excluded.lastBSidesGateRejected,
+                lastBSidesUnreadable = excluded.lastBSidesUnreadable,
+                lastDivergentSlotCount = excluded.lastDivergentSlotCount,
+                lastFullFetchBytes = excluded.lastFullFetchBytes,
+                totalFullFetchBytes = excluded.totalFullFetchBytes,
+                lastDetail = excluded.lastDetail,
+                policyGeneration = excluded.policyGeneration
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, record.analysisAssetId)
+        bind(stmt, 2, record.attemptCount)
+        bind(stmt, 3, record.lastAttemptAt)
+        bind(stmt, 4, record.lastExit.rawValue)
+        bind(stmt, 5, record.lastMarkCount)
+        bind(stmt, 6, record.lastBSideCount)
+        bind(stmt, 7, record.lastBSidesAccepted)
+        bind(stmt, 8, record.lastBSidesGateRejected)
+        bind(stmt, 9, record.lastBSidesUnreadable)
+        bind(stmt, 10, record.lastDivergentSlotCount)
+        // Byte counts bind as INT64 for the same trapping-conversion reason as
+        // `accumulateRediffBandwidth`: a CDN-controlled enclosure has no size cap.
+        sqlite3_bind_int64(stmt, 11, Int64(record.lastFullFetchBytes))
+        sqlite3_bind_int64(stmt, 12, Int64(record.totalFullFetchBytes))
+        bind(stmt, 13, record.suppressedCount)
+        if let suppressedAt = record.lastSuppressedAt {
+            bind(stmt, 14, suppressedAt)
+        } else {
+            sqlite3_bind_null(stmt, 14)
+        }
+        if let detail = record.lastDetail {
+            bind(stmt, 15, detail)
+        } else {
+            sqlite3_bind_null(stmt, 15)
+        }
+        bind(stmt, 16, record.policyGeneration)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Record that a day-0 kickoff for this asset was DECLINED without spending
+    /// bytes (backoff window, exhausted budget, already-marked, or a concurrent
+    /// attempt already in flight).
+    ///
+    /// Deliberately increments ONLY `suppressedCount` / `lastSuppressedAt` and
+    /// leaves `attemptCount` and `lastExit` untouched on conflict: a suppression
+    /// is not an attempt, so it must neither consume the attempt budget nor
+    /// overwrite the record of WHICH exit the last real attempt took. On a
+    /// first-ever write (only reachable via the in-flight guard, which can fire
+    /// before any attempt has completed) the row is seeded with
+    /// `attemptCount = 0`, which leaves the asset immediately eligible.
+    func noteRediffDayZeroSuppression(
+        assetId: String,
+        reason: RediffDayZeroExit,
+        at now: Double
+    ) throws {
+        let sql = """
+            INSERT INTO rediff_day_zero_attempts
+            (analysisAssetId, attemptCount, lastAttemptAt, lastExit,
+             suppressedCount, lastSuppressedAt, policyGeneration)
+            VALUES (?, 0, ?, ?, 1, ?, ?)
+            ON CONFLICT(analysisAssetId) DO UPDATE SET
+                suppressedCount = suppressedCount + 1,
+                lastSuppressedAt = excluded.lastSuppressedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, now)
+        bind(stmt, 3, reason.rawValue)
+        bind(stmt, 4, now)
+        bind(stmt, 5, DayZeroRediffAttemptPolicy.currentGeneration)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// One asset's day-0 attempt record, or `nil` when day-0 has never run for
+    /// it. This is what `DayZeroRediffAttemptPolicy.decide` reads BEFORE any
+    /// bytes are spent.
+    func fetchRediffDayZeroAttempt(assetId: String) throws -> RediffDayZeroAttemptRecord? {
+        let stmt = try prepare("\(Self.rediffDayZeroSelectColumns) WHERE analysisAssetId = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readRediffDayZeroAttemptRow(stmt)
+    }
+
+    /// Every day-0 attempt record, most recent first — the diagnostics-bundle
+    /// query surface.
+    func fetchRediffDayZeroAttempts(limit: Int = 200) throws -> [RediffDayZeroAttemptRecord] {
+        let stmt = try prepare("\(Self.rediffDayZeroSelectColumns) ORDER BY lastAttemptAt DESC LIMIT ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, max(0, limit))
+        var rows: [RediffDayZeroAttemptRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(readRediffDayZeroAttemptRow(stmt))
+        }
+        return rows
+    }
+
+    /// Stable positional column list shared by both day-0 reads.
+    private static let rediffDayZeroSelectColumns = """
+        SELECT analysisAssetId, attemptCount, lastAttemptAt, lastExit, lastMarkCount,
+               lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
+               lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
+               totalFullFetchBytes, lastDetail, suppressedCount, lastSuppressedAt,
+               policyGeneration
+        FROM rediff_day_zero_attempts
+        """
+
+    private func readRediffDayZeroAttemptRow(_ stmt: OpaquePointer?) -> RediffDayZeroAttemptRecord {
+        // An unknown persisted exit (a future build's value read by an older
+        // one) decodes to `.fetchFailed`: RETRYABLE, so an older build backs
+        // off rather than permanently parking an asset under a value it cannot
+        // reason about. The conservative direction here is "retry later", not
+        // "never again".
+        let exit = RediffDayZeroExit(rawValue: text(stmt, 3)) ?? .fetchFailed
+        return RediffDayZeroAttemptRecord(
+            analysisAssetId: text(stmt, 0),
+            attemptCount: Int(sqlite3_column_int64(stmt, 1)),
+            lastAttemptAt: sqlite3_column_double(stmt, 2),
+            lastExit: exit,
+            lastMarkCount: Int(sqlite3_column_int64(stmt, 4)),
+            lastBSideCount: Int(sqlite3_column_int64(stmt, 5)),
+            lastBSidesAccepted: Int(sqlite3_column_int64(stmt, 6)),
+            lastBSidesGateRejected: Int(sqlite3_column_int64(stmt, 7)),
+            lastBSidesUnreadable: Int(sqlite3_column_int64(stmt, 8)),
+            lastDivergentSlotCount: Int(sqlite3_column_int64(stmt, 9)),
+            lastFullFetchBytes: Int(sqlite3_column_int64(stmt, 10)),
+            totalFullFetchBytes: Int(sqlite3_column_int64(stmt, 11)),
+            suppressedCount: Int(sqlite3_column_int64(stmt, 13)),
+            lastSuppressedAt: sqlite3_column_type(stmt, 14) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 14),
+            lastDetail: sqlite3_column_type(stmt, 12) == SQLITE_NULL ? nil : text(stmt, 12),
+            // Read POSITIONALLY, never defaulted: a row written before this
+            // column existed reads 0, which is a foreign generation, which is
+            // what earns it a fresh attempt budget.
+            policyGeneration: Int(sqlite3_column_int64(stmt, 15))
+        )
+    }
+
+    /// Recent `background_task_runs` rows for ONE entry point — the
+    /// diagnostics-bundle surface for the rediff lagged sweep's fires
+    /// (playhead-p70f change 4). `fetchLatestBackgroundTaskRun` returns only
+    /// the newest and `fetchRecentBackgroundTaskRuns` mixes every entry point,
+    /// neither of which answers "how has the rediff sweep been doing?".
+    func fetchRecentBackgroundTaskRuns(
+        entryPoint: BackgroundTaskRunEntryPoint,
+        limit: Int
+    ) throws -> [BackgroundTaskRunRecord] {
+        let sql = """
+            \(backgroundTaskRunSelectColumns)
+            FROM background_task_runs
+            WHERE entryPoint = ?
+            ORDER BY startedAt DESC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, entryPoint.rawValue)
+        bind(stmt, 2, max(0, limit))
+        var rows: [BackgroundTaskRunRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let record = try? readBackgroundTaskRunRow(stmt) {
+                rows.append(record)
+            }
+        }
+        return rows
     }
 
     // MARK: - Transcript chunk ASR confidence (playhead-snat)
@@ -17284,6 +17558,14 @@ struct RediffBandwidthTotals: Sendable, Equatable {
     var rotatedCount: Int = 0
     var failedCount: Int = 0
     var parkedCount: Int = 0
+    /// playhead-p70f (V38): day-0 runs that spent bytes and minted NOTHING.
+    ///
+    /// Before this column the day-0 path could only ever move `rotatedCount`
+    /// (via `.dayZeroMarked`); `unchanged`/`failed`/`parked` were structurally
+    /// unreachable from it, so 299.6 MB of day-0 fetches left every counter at
+    /// zero and the ledger read as "nothing happened". A fetch that mints
+    /// nothing now increments THIS.
+    var dayZeroUnmarkedCount: Int = 0
     var lastUpdatedAt: Double?
     var totalBytes: Int64 { precheckBytesTotal + fullFetchBytesTotal }
 }

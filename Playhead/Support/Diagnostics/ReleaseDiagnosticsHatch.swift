@@ -98,6 +98,7 @@ func runReleaseDiagnosticsExport(
         learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
         stabilityFetch: ReleaseDiagnosticsHatch.stabilityFetch,
         bannerTalliesFetch: ReleaseDiagnosticsHatch.bannerTalliesFetch,
+        rediffFetch: ReleaseDiagnosticsHatch.makeRediffFetch(store: runtime.analysisStore),
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -170,6 +171,20 @@ enum ReleaseDiagnosticsHatch {
     /// runtime or ModelContext dependency to thread through.
     static let bannerTalliesFetch: DiagnosticsBannerTalliesFetch = {
         await MainActor.run { BannerTallyStore.shared.sessions }
+    }
+
+    // MARK: Rediff-lane adapter (playhead-p70f)
+
+    /// Adapter from the four rediff tables to the `DiagnosticsRediffFetch`
+    /// closure the coordinator consumes (playhead-p70f change 4).
+    ///
+    /// REVIEW ROUND 2 — this file is `#if !DEBUG`, so the copy that used to
+    /// live here was compiled by NOTHING the test suite can run: it was the
+    /// half of the duplication that could diverge silently and still ship. The
+    /// single implementation now lives in `RediffDiagnosticsFetchAdapter`
+    /// (unconditionally compiled, directly tested) and both hatches forward.
+    static func makeRediffFetch(store: AnalysisStore) -> DiagnosticsRediffFetch {
+        RediffDiagnosticsFetchAdapter.make(store: store)
     }
 
     // MARK: Environment construction

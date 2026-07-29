@@ -52,6 +52,24 @@ struct DiagnosticsTranscriptChunk: Sendable, Equatable {
     let text: String
 }
 
+/// playhead-p70f: the raw, un-projected rediff telemetry the builder turns into
+/// `DefaultBundle.RediffDiagnostics`. Kept as store-native types so the fetch
+/// closure is a straight read and the ONE place raw asset ids are dropped is
+/// `buildDefault` (legal checklist item a — same discipline as banner tallies).
+struct DiagnosticsRediffSnapshot: Sendable {
+    var bandwidth: RediffBandwidthTotals = RediffBandwidthTotals()
+    var refetchStates: [RediffRefetchStateRow] = []
+    var dayZeroAttempts: [RediffDayZeroAttemptRecord] = []
+    var backgroundRuns: [BackgroundTaskRunRecord] = []
+    /// Names (from `RediffDiagnosticsFetchAdapter.Read`) of the reads that
+    /// THREW. Empty is the healthy case. Without this an unreadable table and
+    /// an empty table are the same bundle — the "zero is not evidence" mistake
+    /// this bead exists to correct, reintroduced at the export layer.
+    var readFailures: [String] = []
+
+    static let empty = DiagnosticsRediffSnapshot()
+}
+
 /// Per-episode input for `DiagnosticsBundleBuilder.buildOptIn(...)`.
 struct DiagnosticsEpisodeInput: Sendable, Equatable {
     let episodeId: String
@@ -130,7 +148,8 @@ enum DiagnosticsBundleBuilder {
         musicBedProfileSnapshots: [ShowMusicBedProfileSnapshot] = [],
         learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
         stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
-        bannerTallies: [BannerTallySession] = []
+        bannerTallies: [BannerTallySession] = [],
+        rediff: DiagnosticsRediffSnapshot = .empty
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -211,6 +230,8 @@ enum DiagnosticsBundleBuilder {
             )
         }
 
+        let rediffDiagnostics = projectRediff(rediff, installID: installID)
+
         return DefaultBundle(
             appVersion: appVersion,
             osVersion: osVersion,
@@ -228,8 +249,152 @@ enum DiagnosticsBundleBuilder {
             // already applied the allowlist, so re-deriving either here
             // would only create a second place for them to disagree.
             stabilityDiagnostics: stabilityDiagnostics,
-            bannerTallies: bannerTallySummaries
+            bannerTallies: bannerTallySummaries,
+            rediffDiagnostics: rediffDiagnostics
         )
+    }
+
+    // MARK: - Rediff lane projection (playhead-p70f)
+
+    /// Cap on how many per-asset rediff rows ship. A large library could carry
+    /// hundreds; the newest are the ones a support engineer reads.
+    static let rediffRowCap = 50
+
+    /// Cap on `background_task_runs` rows for the rediff entry point.
+    static let rediffBackgroundRunCap = 25
+
+    /// Project the raw rediff telemetry into the support-safe bundle shape.
+    ///
+    /// This is the ONLY place a raw `analysisAssetId` is dropped: every row's
+    /// id goes through `EpisodeIdHasher` (legal checklist item a), exactly as
+    /// the banner-tally and music-bed projections do.
+    ///
+    /// The day-0 rows' `lastDetail` — the only free text in the snapshot — is
+    /// NOT projected at all rather than sanitized: it originates from
+    /// `String(describing: error)`, which on a `URLError` carries the enclosure
+    /// URL, and no allowlist is a safe bound on an arbitrary error dump. The
+    /// closed `last_exit` enum is what a support engineer needs; the free text
+    /// stays on device. `DiagnosticsBundleRediffTests.detailIsNotExported` is
+    /// the proof, and every other projected field is an integer, a timestamp,
+    /// or a closed enum `rawValue`.
+    private static func projectRediff(
+        _ snapshot: DiagnosticsRediffSnapshot,
+        installID: UUID
+    ) -> DefaultBundle.RediffDiagnostics {
+        func hash(_ assetId: String) -> String {
+            EpisodeIdHasher.hash(installID: installID, episodeId: assetId)
+        }
+
+        let bandwidth = DefaultBundle.RediffBandwidthSummary(
+            precheckBytesTotal: snapshot.bandwidth.precheckBytesTotal,
+            fullFetchBytesTotal: snapshot.bandwidth.fullFetchBytesTotal,
+            unchangedCount: snapshot.bandwidth.unchangedCount,
+            rotatedCount: snapshot.bandwidth.rotatedCount,
+            failedCount: snapshot.bandwidth.failedCount,
+            parkedCount: snapshot.bandwidth.parkedCount,
+            dayZeroUnmarkedCount: snapshot.bandwidth.dayZeroUnmarkedCount,
+            lastUpdatedAt: snapshot.bandwidth.lastUpdatedAt
+        )
+
+        let refetchStates = snapshot.refetchStates
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(rediffRowCap)
+            .map { row in
+                DefaultBundle.RediffRefetchStateSummary(
+                    assetIdHash: hash(row.analysisAssetId),
+                    unchangedAttempts: row.attemptState.unchangedAttempts,
+                    lastAttemptAt: row.attemptState.lastAttemptAt,
+                    resolved: row.attemptState.resolved,
+                    lastFailureClass: row.attemptState.lastFailureClass?.rawValue,
+                    sameClassFailureStreak: row.attemptState.sameClassFailureStreak,
+                    updatedAt: row.updatedAt
+                )
+            }
+
+        let dayZeroAttempts = snapshot.dayZeroAttempts
+            .sorted { $0.lastAttemptAt > $1.lastAttemptAt }
+            .prefix(rediffRowCap)
+            .map { row in
+                DefaultBundle.RediffDayZeroAttemptSummary(
+                    assetIdHash: hash(row.analysisAssetId),
+                    attemptCount: row.attemptCount,
+                    lastAttemptAt: row.lastAttemptAt,
+                    lastExit: row.lastExit.rawValue,
+                    lastMarkCount: row.lastMarkCount,
+                    lastBSideCount: row.lastBSideCount,
+                    lastBSidesAccepted: row.lastBSidesAccepted,
+                    lastBSidesGateRejected: row.lastBSidesGateRejected,
+                    lastBSidesUnreadable: row.lastBSidesUnreadable,
+                    lastDivergentSlotCount: row.lastDivergentSlotCount,
+                    lastFullFetchBytes: row.lastFullFetchBytes,
+                    totalFullFetchBytes: row.totalFullFetchBytes,
+                    suppressedCount: row.suppressedCount,
+                    lastSuppressedAt: row.lastSuppressedAt,
+                    policyGeneration: row.policyGeneration
+                )
+            }
+
+        let backgroundRuns = snapshot.backgroundRuns
+            .filter { $0.entryPoint == .rediffRefetch }
+            .sorted { $0.startedAt > $1.startedAt }
+            .prefix(rediffBackgroundRunCap)
+            .map { run in
+                DefaultBundle.RediffBackgroundRunSummary(
+                    startedAt: run.startedAt,
+                    finishedAt: run.finishedAt,
+                    outcome: run.outcome.rawValue,
+                    precheckBytes: rediffAnnotationValue(run.deferReason, key: "precheckBytes"),
+                    fullFetchBytes: rediffAnnotationValue(run.deferReason, key: "fullFetchBytes"),
+                    jobsSeen: run.jobsSeen,
+                    jobsAdmitted: run.jobsAdmitted,
+                    jobsCompleted: run.jobsCompleted,
+                    expiration: run.expiration
+                )
+            }
+
+        // Closed vocabulary only — anything the adapter did not name is
+        // dropped rather than forwarded, so this can never become a text
+        // channel out of the device.
+        let readFailures = snapshot.readFailures
+            .compactMap { RediffDiagnosticsFetchAdapter.Read(rawValue: $0)?.rawValue }
+
+        return DefaultBundle.RediffDiagnostics(
+            bandwidth: bandwidth,
+            refetchStates: Array(refetchStates),
+            dayZeroAttempts: Array(dayZeroAttempts),
+            backgroundRuns: Array(backgroundRuns),
+            readFailures: readFailures
+        )
+    }
+
+    /// Longest `deferReason` this parser will scan. The rediff annotation is
+    /// two `key=integer` pairs; anything longer is not it.
+    static let rediffAnnotationCharCap = 120
+
+    /// Pull ONE `key=<integer>` value out of the rediff sweep's run-ledger
+    /// annotation (`"precheckBytes=N fullFetchBytes=M"`), or `nil`.
+    ///
+    /// NO free text crosses this boundary — the return type is `Int?`. Two
+    /// reasons the annotation is parsed rather than forwarded:
+    ///   * `DiagnosticTextSanitizer`'s allowlist has no `=`, so the raw string
+    ///     would be rejected wholesale and the bandwidth signal lost;
+    ///   * `deferReason` is a free-form column shared with other entry points,
+    ///     so "forward whatever is in it" is not a bound anyone maintains.
+    ///
+    /// The day-0 records' `lastDetail` is likewise NOT exported: it is
+    /// `String(describing: error)`, and a `URLError` carries the enclosure URL
+    /// — a content-identifying string that would be a stronger disclosure than
+    /// the raw `episodeId` legal checklist item (a) already forbids. The closed
+    /// `last_exit` enum is what a support engineer needs; the free text stays
+    /// on device in `rediff_day_zero_attempts`.
+    private static func rediffAnnotationValue(_ raw: String?, key: String) -> Int? {
+        guard let raw, raw.count <= rediffAnnotationCharCap else { return nil }
+        for token in raw.split(separator: " ") {
+            let parts = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, parts[0] == key else { continue }
+            return Int(parts[1])
+        }
+        return nil
     }
 
     // MARK: - OptIn bundle

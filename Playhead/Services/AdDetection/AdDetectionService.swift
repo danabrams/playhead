@@ -1301,10 +1301,24 @@ protocol AdDetectionProviding: Sendable {
     /// A-side (resolved read-only from the asset row) against the k-way day-0
     /// B-copies and persist a MARK-ONLY banner for every byte-EXACT,
     /// ≥2-persona-robust divergent slot — the FIRST-LISTEN marking path that
-    /// needs NO persisted transcript/analysis. Returns the number of marks
-    /// minted. The default is a no-op (`0`) so test/stub conformers that never
-    /// run a day-0 mint compile unchanged; `AdDetectionService` overrides it.
-    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int
+    /// needs NO persisted transcript/analysis.
+    ///
+    /// playhead-p70f: returns a `RediffDayZeroMintOutcome`, not a bare `Int`.
+    /// The old `Int` collapsed nine distinct failure modes into one `0`, which
+    /// is why 299.6 MB of day-0 fetches on the owner's device left no evidence
+    /// of WHERE they died. The default is a no-op so test/stub conformers that
+    /// never run a day-0 mint compile unchanged; `AdDetectionService` overrides.
+    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> RediffDayZeroMintOutcome
+
+    /// playhead-p70f change 3: the FREE, LOCAL-ONLY half of the day-0 mint's
+    /// preconditions — asset row present, `sourceURL` resolving to an anchored
+    /// regular file, and that file mappable. Returns `nil` when the mint has a
+    /// usable A-side, or the exit that will doom it.
+    ///
+    /// WHY IT EXISTS: all four of these checks used to run AFTER the ~108 MB
+    /// k-way fetch had already been downloaded and billed. Hoisting them ahead
+    /// of the fetch makes a doomed attempt cost ZERO bytes.
+    func dayZeroPrefetchBlocker(analysisAssetId: String) async -> RediffDayZeroExit?
 }
 
 extension AdDetectionProviding {
@@ -1325,9 +1339,20 @@ extension AdDetectionProviding {
 }
 
 extension AdDetectionProviding {
-    /// Default no-op: a conformer without a byte-exact day-0 mint path returns 0
-    /// (mints nothing). `AdDetectionService` provides the real implementation.
-    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int { 0 }
+    /// Default no-op: a conformer without a byte-exact day-0 mint path mints
+    /// nothing. `AdDetectionService` provides the real implementation.
+    func mintByteExactDayZeroMarks(
+        analysisAssetId: String,
+        bSideURLs: [URL]
+    ) async -> RediffDayZeroMintOutcome {
+        .blocked(.minterUnavailable)
+    }
+
+    /// Default: a conformer without a day-0 mint path has nothing to pre-check.
+    /// Returning `nil` (not blocked) keeps the seam honest — the blocker's job
+    /// is to name a KNOWN blocker, and "I don't implement day-0" is reported by
+    /// `mintByteExactDayZeroMarks` above, not by inventing a fake blocker here.
+    func dayZeroPrefetchBlocker(analysisAssetId: String) async -> RediffDayZeroExit? { nil }
 }
 
 extension AdDetectionProviding {
@@ -10979,51 +11004,56 @@ actor AdDetectionService {
     /// NEVER-PERSIST-B (wrj8/xsdz.28): the B bytes are read (mmap) only inside
     /// this call; the caller (`RediffRefetchService`) still deletes every B-copy.
     /// The persisted marks are A-time scalars only. The A-side file is READ-ONLY.
-    func mintByteExactDayZeroMarks(analysisAssetId: String, bSideURLs: [URL]) async -> Int {
+    func mintByteExactDayZeroMarks(
+        analysisAssetId: String,
+        bSideURLs: [URL]
+    ) async -> RediffDayZeroMintOutcome {
         // Day-0 requires ≥2 distinct-persona B-copies for COLLISION RECOVERY: on
         // a client-pinned show a single re-fetch can collide (byte-identical → no
         // divergence), so staging ≥2 gives a divergence a chance. NOT an agreement
         // quorum — the mint UNIONs whatever diverges (playhead-wybg).
         guard bSideURLs.count >= RediffSlotOwnership.dayZeroMinKWayBCopies else {
             logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): \(bSideURLs.count) B-side(s) < \(RediffSlotOwnership.dayZeroMinKWayBCopies) distinct-persona B-copies for collision recovery")
-            return 0
+            return RediffDayZeroMintOutcome(exit: .tooFewBCopies, bSideCount: bSideURLs.count)
         }
         // The asset row supplies the PINNED A-side (wrj8: read-only played file).
-        let asset: AnalysisAsset
-        do {
-            guard let fetched = try await store.fetchAsset(id: analysisAssetId) else {
-                logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): no asset row")
-                return 0
-            }
-            asset = fetched
-        } catch {
-            logger.warning("[xsdz.36.4] day-0 mint fetchAsset failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
-            return 0
-        }
-        guard let aSideURL = Self.byteDifferASideURL(sourceURL: asset.sourceURL) else {
-            logger.info("[xsdz.36.4] day-0 mint skipped asset=\(analysisAssetId, privacy: .public): no anchored A-side file")
-            return 0
-        }
+        // playhead-p70f: resolved through the SAME helper the pre-fetch blocker
+        // uses, so the free check and the real mint can never drift apart.
         let aData: Data
-        do {
-            aData = try Data(contentsOf: aSideURL, options: .mappedIfSafe)
-        } catch {
-            logger.warning("[xsdz.36.4] day-0 mint A-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
-            return 0
+        switch await resolveDayZeroASide(analysisAssetId: analysisAssetId) {
+        case .blocked(let exit):
+            return RediffDayZeroMintOutcome(exit: exit, bSideCount: bSideURLs.count)
+        case .ready(let mapped):
+            aData = mapped
         }
 
         // BYTE-EXACT per-persona diffs ONLY. A B whose byte gate rejects (no
         // chained runs / non-monotonic / re-encode CDN) is a chroma-fallback
         // TRIGGER for the lagged pass — but day-0 mints NOTHING from it: it
         // simply does not contribute a per-persona slot list to the union.
+        //
+        // playhead-p70f: the two per-B `continue`s used to be invisible. They are
+        // now COUNTED, because the counts are the diagnosis. `RediffByteAligner`
+        // is an MP3-frame parser by construction; every device `sourceURL` ends
+        // in `.mp3` but `DownloadManager` warns the suffix is normalized and is
+        // "not evidence that the bytes are MP3". If the bytes are AAC/M4A the
+        // aligner finds no frames and EVERY diff gate-rejects — which reads here
+        // as `bSidesGateRejected == bSideCount`, unmistakably different from
+        // "diffs accepted, copies simply agreed".
         var perBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
+        var unreadable = 0
+        var gateRejected = 0
         for bSideURL in bSideURLs {
-            guard Self.isAnchoredRegularFile(bSideURL) else { continue }
+            guard Self.isAnchoredRegularFile(bSideURL) else {
+                unreadable += 1
+                continue
+            }
             let bData: Data
             do {
                 bData = try Data(contentsOf: bSideURL, options: .mappedIfSafe)
             } catch {
                 logger.warning("[xsdz.36.4] day-0 mint B-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+                unreadable += 1
                 continue
             }
             let alignment = RediffByteAligner.align(aData: aData, bData: bData)
@@ -11035,9 +11065,36 @@ actor AdDetectionService {
                 alignment: alignment,
                 recoverNonMonotonicSegments: RediffActivation.nonMonotonicSegmentRecoveryEnabled
             ) else {
+                gateRejected += 1
                 continue
             }
             perBSideSlots.append(acceptance.playedSlots)
+        }
+
+        /// Every counted outcome from here on carries the same per-B census.
+        func outcome(
+            _ exit: RediffDayZeroExit,
+            markCount: Int = 0,
+            divergentSlotCount: Int = 0
+        ) -> RediffDayZeroMintOutcome {
+            RediffDayZeroMintOutcome(
+                markCount: markCount,
+                exit: exit,
+                bSideCount: bSideURLs.count,
+                bSidesAccepted: perBSideSlots.count,
+                bSidesGateRejected: gateRejected,
+                bSidesUnreadable: unreadable,
+                divergentSlotCount: divergentSlotCount
+            )
+        }
+
+        // NOT ONE copy produced a usable diff — the aligner had nothing to work
+        // with. Distinct from `.noDivergentSlot` below, and the distinction is
+        // the whole point: this is the exit that would fire if the .mp3 suffix
+        // is lying about the container.
+        guard !perBSideSlots.isEmpty else {
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): NO accepted byte diff — \(gateRejected) gate-rejected, \(unreadable) unreadable of \(bSideURLs.count) B-copies")
+            return outcome(.noAcceptedByteDiff)
         }
 
         // UNION the byte-EXACT divergent slots across personas (false-widening
@@ -11047,8 +11104,8 @@ actor AdDetectionService {
         // still mints (playhead-wybg). Overlapping same-slot detections collapse.
         let unioned = RediffSlotOwnership.unionedPlayedSlots(perBSideSlots)
         guard !unioned.isEmpty else {
-            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): \(perBSideSlots.count) byte-exact diff(s), no divergent slot — nothing minted")
-            return 0
+            logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): \(perBSideSlots.count) byte-exact diff(s) ACCEPTED, no divergent slot — nothing minted")
+            return outcome(.noDivergentSlot)
         }
 
         // Idempotency: skip any minted slot overlapping an existing AdWindow
@@ -11089,16 +11146,66 @@ actor AdDetectionService {
         }
         guard !windows.isEmpty else {
             logger.info("[xsdz.36.4] day-0 mint asset=\(analysisAssetId, privacy: .public): all \(unioned.count) unioned slot(s) already covered by existing AdWindows — nothing minted")
-            return 0
+            return outcome(.allSlotsAlreadyCovered, divergentSlotCount: unioned.count)
         }
         do {
             try await store.upsertHotPathAdWindows(windows, existingIDs: [], retiredIDs: [])
         } catch {
             logger.warning("[xsdz.36.4] day-0 mint persist failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
-            return 0
+            var failed = outcome(.persistFailed, divergentSlotCount: unioned.count)
+            failed.detail = String(describing: error)
+            return failed
         }
         logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) mark-only banner(s) asset=\(analysisAssetId, privacy: .public)")
-        return windows.count
+        return outcome(.marked, markCount: windows.count, divergentSlotCount: unioned.count)
+    }
+
+    /// playhead-p70f change 3 — the FREE, LOCAL-ONLY preconditions of the day-0
+    /// mint, hoisted so the caller can run them BEFORE spending ~108 MB.
+    ///
+    /// Returns `nil` when the mint has a usable A-side. Every non-nil return is
+    /// an exit the mint would have taken anyway — but AFTER the fetch had been
+    /// downloaded and billed, which is precisely the defect: four of the mint's
+    /// exits are pure local reads that cost nothing, and all four ran only once
+    /// ~108 MB was already gone.
+    func dayZeroPrefetchBlocker(analysisAssetId: String) async -> RediffDayZeroExit? {
+        switch await resolveDayZeroASide(analysisAssetId: analysisAssetId) {
+        case .blocked(let exit): return exit
+        case .ready: return nil
+        }
+    }
+
+    /// Shared A-side resolution for the day-0 mint AND its pre-fetch blocker:
+    /// asset row → anchored `sourceURL` → read-only mmap. ONE implementation so
+    /// the free pre-check and the real mint can never disagree about whether an
+    /// attempt is doomed.
+    ///
+    /// SAFETY (wrj8): mapping is READ-ONLY. Day-0 never writes the pinned
+    /// playback audio.
+    private func resolveDayZeroASide(
+        analysisAssetId: String
+    ) async -> RediffDayZeroASideResolution {
+        let asset: AnalysisAsset
+        do {
+            guard let fetched = try await store.fetchAsset(id: analysisAssetId) else {
+                logger.info("[p70f] day-0 A-side unavailable asset=\(analysisAssetId, privacy: .public): no asset row")
+                return .blocked(.assetRowMissing)
+            }
+            asset = fetched
+        } catch {
+            logger.warning("[p70f] day-0 A-side fetchAsset failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return .blocked(.assetFetchFailed)
+        }
+        guard let aSideURL = Self.byteDifferASideURL(sourceURL: asset.sourceURL) else {
+            logger.info("[p70f] day-0 A-side unavailable asset=\(analysisAssetId, privacy: .public): sourceURL is not an anchored regular file")
+            return .blocked(.aSideNotAnchored)
+        }
+        do {
+            return .ready(try Data(contentsOf: aSideURL, options: .mappedIfSafe))
+        } catch {
+            logger.warning("[p70f] day-0 A-side read failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
+            return .blocked(.aSideReadFailed)
+        }
     }
 
     private func boundarySingletonPromotedSegments(

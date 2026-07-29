@@ -161,13 +161,30 @@ extension RediffBSideConsuming {
 /// first listen — the very failure the day-0 `RediffBSideConsuming`/revalidate
 /// route hit). The chroma differ is NEVER consulted here (byte-exact only).
 ///
-/// Returns the number of marks minted. `0` ⇒ nothing byte-exact/robust was
-/// found (or a chroma-only fallback) ⇒ the day-0 run must NOT resolve the
-/// shared lagged state, so the lagged sweep still recovers the ads later. The
-/// CALLER (`RediffRefetchService`) still owns deletion of every B-copy via its
+/// Returns a `RediffDayZeroMintOutcome`. `markCount == 0` ⇒ nothing
+/// byte-exact/robust was found ⇒ the day-0 run must NOT resolve the shared
+/// lagged state, so the lagged sweep still recovers the ads later. The CALLER
+/// (`RediffRefetchService`) still owns deletion of every B-copy via its
 /// `defer` — the never-persist-B contract is unchanged. Mark-only (no auto-skip).
+///
+/// playhead-p70f: the return type replaced a bare `Int` whose `0` collapsed
+/// nine distinct failure modes. `outcome.exit` names which one fired.
 protocol RediffDayZeroMinting: Sendable {
-    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> Int
+    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> RediffDayZeroMintOutcome
+
+    /// playhead-p70f change 3: the FREE, LOCAL-ONLY preconditions of the mint —
+    /// asset row present, `sourceURL` anchored, A-side mappable. Returns `nil`
+    /// when the mint has something to work with, or the exit that dooms it.
+    ///
+    /// The service calls this BEFORE the k-way fetch, so an attempt that was
+    /// always going to die on a local read costs ZERO bytes instead of ~108 MB.
+    /// The default returns `nil` (nothing known to block) so pre-p70f conformers
+    /// and test doubles keep their old behavior: fetch, then discover.
+    func dayZeroPrefetchBlocker(assetId: String) async -> RediffDayZeroExit?
+}
+
+extension RediffDayZeroMinting {
+    func dayZeroPrefetchBlocker(assetId: String) async -> RediffDayZeroExit? { nil }
 }
 
 /// The B-side decoded to an EMPTY fingerprint stream — nothing to diff, and
@@ -767,10 +784,10 @@ struct LoggingRediffRefetchRecorder: RediffRefetchRecording {
             logger.info("rediff-refetch ROTATED assetId=\(assetId, privacy: .public) precheckBytes=\(cost.precheckBytes, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) fpCount=\(fingerprintCount, privacy: .public)")
         case let .failed(assetId, cost, failureClass, newState, error):
             logger.error("rediff-refetch FAILED assetId=\(assetId, privacy: .public) bytes=\(cost.totalBytes, privacy: .public) class=\(failureClass.rawValue, privacy: .public) streak=\(newState.sameClassFailureStreak, privacy: .public) error=\(error, privacy: .public)")
-        case let .dayZeroMarked(assetId, cost, markCount, _):
-            logger.info("rediff DAY-0 MARKED assetId=\(assetId, privacy: .public) marks=\(markCount, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public)")
-        case let .dayZeroUnmarked(assetId, cost, error):
-            logger.info("rediff DAY-0 unmarked assetId=\(assetId, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) error=\(error ?? "none", privacy: .public)")
+        case let .dayZeroMarked(assetId, cost, mint, _):
+            logger.info("rediff DAY-0 MARKED assetId=\(assetId, privacy: .public) marks=\(mint.markCount, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public)")
+        case let .dayZeroUnmarked(assetId, cost, mint):
+            logger.info("rediff DAY-0 unmarked assetId=\(assetId, privacy: .public) exit=\(mint.exit.rawValue, privacy: .public) bCopies=\(mint.bSideCount, privacy: .public) accepted=\(mint.bSidesAccepted, privacy: .public) gateRejected=\(mint.bSidesGateRejected, privacy: .public) unreadable=\(mint.bSidesUnreadable, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) detail=\(mint.detail ?? "none", privacy: .public)")
         }
     }
 }

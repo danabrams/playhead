@@ -113,6 +113,7 @@ func runDebugDiagnosticsExport(
         learnedDeviceProfilesFetch: learnedDeviceProfilesFetch,
         stabilityFetch: DebugDiagnosticsHatch.stabilityFetch,
         bannerTalliesFetch: DebugDiagnosticsHatch.bannerTalliesFetch,
+        rediffFetch: DebugDiagnosticsHatch.makeRediffFetch(store: runtime.analysisStore),
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -200,6 +201,22 @@ enum DebugDiagnosticsHatch {
     /// bundle has the same shape as a Release one.
     static let bannerTalliesFetch: DiagnosticsBannerTalliesFetch = {
         await MainActor.run { BannerTallyStore.shared.sessions }
+    }
+
+    // MARK: Rediff-lane adapter (playhead-p70f)
+
+    /// Adapter from the four rediff tables to the `DiagnosticsRediffFetch`
+    /// closure the coordinator consumes (playhead-p70f change 4).
+    ///
+    /// REVIEW ROUND 2 — the body used to be duplicated verbatim here and in
+    /// `ReleaseDiagnosticsHatch`. The test target builds DEBUG, so the Release
+    /// copy was compiled by nothing any test can run and a divergence there
+    /// (wrong limit, dropped read, stale entry point) would have shipped with
+    /// the suite green. The single implementation now lives in
+    /// `RediffDiagnosticsFetchAdapter`, which is unconditionally compiled and
+    /// directly tested; both hatches forward to it so they cannot drift.
+    static func makeRediffFetch(store: AnalysisStore) -> DiagnosticsRediffFetch {
+        RediffDiagnosticsFetchAdapter.make(store: store)
     }
 
     // MARK: Environment construction

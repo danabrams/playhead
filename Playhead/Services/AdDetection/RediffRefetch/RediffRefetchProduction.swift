@@ -138,19 +138,76 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
             let parked = RediffRefetchPolicy.isParked(newState, config: config)
             await persist(assetId: assetId, state: newState, cost: cost, unchanged: 0, rotated: 0, failed: 1, parked: parked ? 1 : 0)
 
-        case let .dayZeroMarked(assetId, cost, markCount, newState):
+        case let .dayZeroMarked(assetId, cost, mint, newState):
             // Day-0 byte-exact mint that PRODUCED marks → resolve the shared
-            // state (day-0 K≥3 supersets the lagged K=1 sweep) + account bytes.
-            Self.logger.info("rediff DAY-0 MARKED assetId=\(assetId, privacy: .public) marks=\(markCount, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public)")
+            // state (day-0 K≥2 supersets the lagged K=1 sweep) + account bytes.
+            Self.logger.info("rediff DAY-0 MARKED assetId=\(assetId, privacy: .public) marks=\(mint.markCount, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public)")
             await persist(assetId: assetId, state: newState, cost: cost, unchanged: 0, rotated: 1, failed: 0, parked: 0)
+            await recordDayZeroAttempt(assetId: assetId, mint: mint, cost: cost)
 
-        case let .dayZeroUnmarked(assetId, cost, error):
-            // POISONING FIX: bandwidth ONLY — NO `upsertRediffRefetchState`, so a
+        case let .dayZeroUnmarked(assetId, cost, mint):
+            // POISONING FIX (UNCHANGED): NO `upsertRediffRefetchState`, so a
             // no-mark/failed day-0 run never resolves or advances the lagged
             // attempt-state (`fetchRediffCandidateSeeds` still enumerates the
             // asset for a later lagged sweep).
-            Self.logger.info("rediff DAY-0 unmarked assetId=\(assetId, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) error=\(error ?? "none", privacy: .public)")
-            await accumulateBandwidthOnly(cost: cost)
+            //
+            // playhead-p70f: what DID change is that this arm is no longer
+            // silent. It writes a per-asset day-0 attempt row naming the exit
+            // (a table no lagged query reads, so the poisoning fix is intact),
+            // and — for a run that actually spent bytes — increments the
+            // ledger's `dayZeroUnmarkedCount`. Previously this path hardcoded
+            // ALL FOUR ledger counters to zero and wrote no row anywhere, which
+            // is how 299.6 MB of fetches read as "nothing happened".
+            Self.logger.info("rediff DAY-0 unmarked assetId=\(assetId, privacy: .public) exit=\(mint.exit.rawValue, privacy: .public) bCopies=\(mint.bSideCount, privacy: .public) accepted=\(mint.bSidesAccepted, privacy: .public) gateRejected=\(mint.bSidesGateRejected, privacy: .public) unreadable=\(mint.bSidesUnreadable, privacy: .public) fullFetchBytes=\(cost.fullFetchBytes, privacy: .public) detail=\(mint.detail ?? "none", privacy: .public)")
+            if case .alreadyInFlight = mint.exit {
+                // A duplicate kickoff is not an attempt — it must not consume
+                // the attempt budget or overwrite the last real exit.
+                await noteSuppression(assetId: assetId, reason: mint.exit)
+            } else {
+                await accumulateDayZeroBandwidth(cost: cost, unmarkedRunSpentBytes: mint.exit.spentBandwidth)
+                await recordDayZeroAttempt(assetId: assetId, mint: mint, cost: cost)
+            }
+        }
+    }
+
+    /// playhead-p70f: fold one day-0 attempt into `rediff_day_zero_attempts`.
+    /// Read-modify-write through `DayZeroRediffAttemptPolicy.advance` so the
+    /// attempt count and the cumulative per-asset byte spend accumulate — the
+    /// two numbers that make a replay bleed self-evident in one row.
+    private func recordDayZeroAttempt(
+        assetId: String,
+        mint: RediffDayZeroMintOutcome,
+        cost: RediffRefetchPolicy.BandwidthCost
+    ) async {
+        do {
+            let prior = try await store.fetchRediffDayZeroAttempt(assetId: assetId)
+            let advanced = DayZeroRediffAttemptPolicy.advance(
+                record: prior,
+                assetId: assetId,
+                outcome: mint,
+                fullFetchBytes: cost.fullFetchBytes,
+                at: now()
+            )
+            try await store.upsertRediffDayZeroAttempt(advanced)
+        } catch {
+            // EXPECTED for exactly one exit: `.assetRowMissing`. The table is
+            // FK'd to `analysis_assets` and the store runs `foreign_keys = ON`,
+            // so "there is no asset row" is precisely the case that cannot have
+            // an asset-keyed row. Every other exit reaching here is a genuine
+            // store failure. Either way the attempt is FREE at this point (the
+            // record write is the last step) and the os_log line below is the
+            // surviving evidence.
+            Self.logger.warning("rediff DAY-0 attempt record failed assetId=\(assetId, privacy: .public) exit=\(mint.exit.rawValue, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// playhead-p70f: note a kickoff DECLINED without spending bytes. Increments
+    /// only the suppression counters — never `attemptCount`, never `lastExit`.
+    private func noteSuppression(assetId: String, reason: RediffDayZeroExit) async {
+        do {
+            try await store.noteRediffDayZeroSuppression(assetId: assetId, reason: reason, at: now())
+        } catch {
+            Self.logger.warning("rediff DAY-0 suppression note failed assetId=\(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -185,11 +242,22 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
         }
     }
 
-    /// playhead-xsdz.36.4 (poisoning fix): accumulate ONLY the bandwidth ledger,
-    /// never the per-asset attempt state. Used for a `.dayZeroUnmarked` outcome
-    /// so an empty/failed day-0 run is accounted for but leaves the shared
-    /// `rediff_refetch_state` untouched (the lagged sweep still enumerates it).
-    private func accumulateBandwidthOnly(cost: RediffRefetchPolicy.BandwidthCost) async {
+    /// playhead-xsdz.36.4 (poisoning fix) + playhead-p70f: accumulate the
+    /// bandwidth ledger WITHOUT touching `rediff_refetch_state`, so an
+    /// empty/failed day-0 run is accounted for but the lagged sweep still
+    /// enumerates the asset.
+    ///
+    /// playhead-p70f closed the accounting hole this method used to have: it
+    /// hardcoded ALL FOUR outcome counters to 0, which is why the device ledger
+    /// read `299.6 MB | unchanged 0 | rotated 0 | failed 0 | parked 0`. A day-0
+    /// run that SPENT bytes and minted nothing now increments
+    /// `dayZeroUnmarkedCount`. The pre-fetch blocks (which spend nothing) do
+    /// not — inflating a bandwidth counter for zero bandwidth would be a
+    /// different lie.
+    private func accumulateDayZeroBandwidth(
+        cost: RediffRefetchPolicy.BandwidthCost,
+        unmarkedRunSpentBytes: Bool
+    ) async {
         do {
             try await store.accumulateRediffBandwidth(
                 precheckBytes: cost.precheckBytes,
@@ -198,6 +266,7 @@ struct AnalysisStoreRediffRefetchRecorder: RediffRefetchRecording {
                 rotatedCount: 0,
                 failedCount: 0,
                 parkedCount: 0,
+                dayZeroUnmarkedCount: unmarkedRunSpentBytes ? 1 : 0,
                 at: now()
             )
         } catch {
@@ -462,7 +531,13 @@ struct RevalidatingRediffBSideConsumer: RediffBSideConsuming {
 struct AdDetectionDayZeroByteExactMinter: RediffDayZeroMinting {
     let adDetection: any AdDetectionProviding
 
-    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> Int {
+    func mintByteExactDayZeroMarks(assetId: String, bSideURLs: [URL]) async -> RediffDayZeroMintOutcome {
         await adDetection.mintByteExactDayZeroMarks(analysisAssetId: assetId, bSideURLs: bSideURLs)
+    }
+
+    /// playhead-p70f change 3: forward the free local pre-check so the service
+    /// can decline a doomed attempt BEFORE the ~108 MB k-way fetch.
+    func dayZeroPrefetchBlocker(assetId: String) async -> RediffDayZeroExit? {
+        await adDetection.dayZeroPrefetchBlocker(analysisAssetId: assetId)
     }
 }

@@ -1581,6 +1581,11 @@ final class PlayheadRuntime {
         // opt-in). The deep-scan opt-in provider is `{ false }` until a settings
         // toggle is wired — the current opt-in wiring point.
         if let rediffRefetchService {
+            // playhead-p70f: the trigger now reads the DURABLE per-asset day-0
+            // history before spending anything, and records a suppression when
+            // it declines. Without these two closures the trigger falls back to
+            // "always attempt", which is exactly the ~108 MB-per-replay bleed.
+            let dayZeroAttemptStore = analysisStore
             self.dayZeroRediffTrigger = DayZeroRediffTrigger(
                 service: rediffRefetchService,
                 reachabilityProvider: { [transportStatusProvider] in
@@ -1589,7 +1594,17 @@ final class PlayheadRuntime {
                 chargeStateProvider: { [batteryProvider] in
                     await batteryProvider.currentBatteryState().isCharging
                 },
-                deepScanOptInProvider: { false }
+                deepScanOptInProvider: { false },
+                attemptRecordProvider: { assetId in
+                    // A store read failure must FAIL OPEN (attempt) rather than
+                    // permanently suppressing day-0 on a transient error.
+                    (try? await dayZeroAttemptStore.fetchRediffDayZeroAttempt(assetId: assetId)) ?? nil
+                },
+                suppressionRecorder: { assetId, reason, now in
+                    try? await dayZeroAttemptStore.noteRediffDayZeroSuppression(
+                        assetId: assetId, reason: reason, at: now
+                    )
+                }
             )
         } else {
             self.dayZeroRediffTrigger = nil

@@ -39,6 +39,29 @@
 
     ],
     "os_version" : "iOS 26.0",
+    "rediff_diagnostics" : {
+      "background_runs" : [
+
+      ],
+      "bandwidth" : {
+        "day_zero_unmarked_count" : 0,
+        "failed_count" : 0,
+        "full_fetch_bytes_total" : 0,
+        "parked_count" : 0,
+        "precheck_bytes_total" : 0,
+        "rotated_count" : 0,
+        "unchanged_count" : 0
+      },
+      "day_zero_attempts" : [
+
+      ],
+      "read_failures" : [
+
+      ],
+      "refetch_states" : [
+
+      ]
+    },
     "scheduler_events" : [
       {
         "episode_id_hash" : "d40dd3e75454df1bcc83f23160d7f95a327432f9b07047c8982f2668848b9eb9",

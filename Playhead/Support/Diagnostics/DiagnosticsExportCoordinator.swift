@@ -45,6 +45,7 @@ final class DiagnosticsExportCoordinator {
     private let learnedDeviceProfilesFetch: DiagnosticsLearnedDeviceProfilesFetch
     private let stabilityFetch: DiagnosticsStabilityFetch
     private let bannerTalliesFetch: DiagnosticsBannerTalliesFetch
+    private let rediffFetch: DiagnosticsRediffFetch
     private let optInSink: DiagnosticsOptInSink
     private let optInEpisodes: [DiagnosticsEpisodeInput]
 
@@ -87,6 +88,13 @@ final class DiagnosticsExportCoordinator {
     ///     shown no cards yields an empty array, and the builder still
     ///     emits the `banner_tallies` key so key presence stays
     ///     grep-stable.
+    ///   - rediffFetch: playhead-p70f — async read of the rediff
+    ///     re-fetch lane's telemetry (bandwidth ledger, lagged attempt
+    ///     states, day-0 attempt records, and the lane's BGTask fires).
+    ///     Defaults to `.empty`; production wires it to the live
+    ///     `AnalysisStore`. The `rediff_diagnostics` key is always
+    ///     emitted, so an empty snapshot still distinguishes "the lane
+    ///     has done nothing" from "this bundle predates the lane".
     ///   - optInSink: adapter that mutates `Episode.diagnosticsOptIn`.
     ///   - optInEpisodes: per-episode inputs for the OptIn bundle. Only
     ///     entries with `diagnosticsOptIn == true` ship; the builder
@@ -101,6 +109,7 @@ final class DiagnosticsExportCoordinator {
         learnedDeviceProfilesFetch: @escaping DiagnosticsLearnedDeviceProfilesFetch = { [] },
         stabilityFetch: @escaping DiagnosticsStabilityFetch = { [] },
         bannerTalliesFetch: @escaping DiagnosticsBannerTalliesFetch = { [] },
+        rediffFetch: @escaping DiagnosticsRediffFetch = { .empty },
         optInSink: DiagnosticsOptInSink,
         optInEpisodes: [DiagnosticsEpisodeInput] = []
     ) {
@@ -112,6 +121,7 @@ final class DiagnosticsExportCoordinator {
         self.learnedDeviceProfilesFetch = learnedDeviceProfilesFetch
         self.stabilityFetch = stabilityFetch
         self.bannerTalliesFetch = bannerTalliesFetch
+        self.rediffFetch = rediffFetch
         self.optInSink = optInSink
         self.optInEpisodes = optInEpisodes
     }
@@ -150,6 +160,7 @@ final class DiagnosticsExportCoordinator {
         let learnedDeviceProfiles = try await learnedDeviceProfilesFetch()
         let stabilityDiagnostics = await stabilityFetch()
         let bannerTallies = await bannerTalliesFetch()
+        let rediff = await rediffFetch()
 
         let defaultBundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: environment.appVersion,
@@ -163,7 +174,8 @@ final class DiagnosticsExportCoordinator {
             musicBedProfileSnapshots: musicBedProfileSnapshots,
             learnedDeviceProfiles: learnedDeviceProfiles,
             stabilityDiagnostics: stabilityDiagnostics,
-            bannerTallies: bannerTallies
+            bannerTallies: bannerTallies,
+            rediff: rediff
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 
