@@ -496,6 +496,13 @@ struct PostRollEndClampTests {
         )
     }
 
+    /// NOTE ON WHAT ENFORCES THIS: the composite is fail-closed, but the
+    /// explicit `episodeDuration.isFinite, > 0` guard is not what enforces it —
+    /// deleting that guard leaves this test green, because `endTime <
+    /// episodeDuration` rejects 0 / -1 / NaN and the proximity comparison
+    /// rejects `.infinity`. The guard is kept as defence in depth (see the
+    /// comment at its site); this test pins the OBSERVABLE contract, which is
+    /// the thing that must not regress however the guards are arranged.
     @Test("a missing or non-finite episode duration fails closed")
     func unknownDurationFailsClosed() {
         let valid = window(start: 1740.0, end: 1780.0)

@@ -142,6 +142,19 @@ enum PostRollEndClamp {
         // No trustworthy EOF → nothing to snap to. `runBackfill` is called with
         // `episodeDuration: 0` in a few degenerate paths; fail closed there
         // rather than clamping every window's end to 0.
+        //
+        // DEFENCE IN DEPTH, and honestly labelled as such: this guard is
+        // UNREACHABLE given the three below it, so deleting it does not fail any
+        // test (a mutation confirmed that). The proof: clamping requires
+        // `startTime > 0`, `endTime > startTime` and `endTime < episodeDuration`,
+        // which together imply `episodeDuration > 0`; a NaN duration loses
+        // `endTime < episodeDuration`; and an infinite duration loses the
+        // proximity comparison. It is kept because that argument runs through
+        // THREE separate guards and IEEE NaN semantics — relying on it
+        // implicitly is how a later reorder silently starts clamping every
+        // window's end to zero. Do not "clean this up" by deleting it; if the
+        // redundancy ever bothers you, delete it together with a test proving
+        // the composite still fails closed.
         guard episodeDuration.isFinite, episodeDuration > 0 else {
             return windows
         }
