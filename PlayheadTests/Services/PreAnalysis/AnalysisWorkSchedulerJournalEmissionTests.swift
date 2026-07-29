@@ -260,6 +260,30 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
                 attemptCount: 0
             )
         )
+        // THE ASSET ROW MUST EXIST. `resolveAnalysisAssetId` returns
+        // `job.analysisAssetId` VERBATIM when it is set and does not create the
+        // row, so without this the pass dies at stage 2 on a FOREIGN KEY
+        // constraint and never reaches transcription at all. That is not a
+        // hypothetical: the first run of this fixture did exactly that, and
+        // because a stage-2 failure also routes through the `.failed` arm, the
+        // CONTROL half passed anyway — green for a reason that had nothing to
+        // do with what it claims to test. The premise assertion below is what
+        // stops that from ever being silent again.
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: "asset-\(jobId)",
+                episodeId: episodeId,
+                assetFingerprint: "fp-\(jobId)",
+                weakFingerprint: nil,
+                sourceURL: audioFile.absoluteString,
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: "queued",
+                analysisVersion: 1,
+                capabilitySnapshot: nil
+            )
+        )
 
         let audioStub = StubAnalysisAudioProvider()
         audioStub.shardsToReturn = (0..<4).map {
@@ -273,7 +297,23 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             loadSpeechModel: true
         )
         _ = await scheduler.processNextDispatchableJobForTesting()
-        return try await store.fetchJob(byId: jobId)
+        let row = try await store.fetchJob(byId: jobId)
+
+        // THE PREMISE, ASSERTED RATHER THAN ASSUMED. Both outcome arms write
+        // the runner's reason to `lastErrorCode`, so a `transcription:` prefix
+        // is proof the pass actually reached stage 3. Anything else — a decode
+        // throw, a `features:` FK failure — means the fixture never exercised
+        // the arm under test, and both halves of this A/B would otherwise
+        // report green while measuring nothing.
+        let code = row?.lastErrorCode ?? "<nil>"
+        #expect(
+            code.hasPrefix("transcription:"),
+            """
+            the pass never reached the transcript stage (lastErrorCode=\(code)), so this \
+            fixture is measuring a different failure than the one it names
+            """
+        )
+        return row
     }
 
     /// A LISTENER MOVING THE PLAYHEAD MUST NOT COST A PERMANENT RETRY.
