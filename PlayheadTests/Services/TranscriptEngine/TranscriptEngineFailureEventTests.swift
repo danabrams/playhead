@@ -1390,7 +1390,8 @@ struct TranscriptEngineFailureEventTests {
         let predecessorTerminals = await Self.awaitTerminals(
             on: predecessorEvents, assetId: "asset-overlap", count: 1
         )
-        guard case .failed(let predecessor) = predecessorTerminals.first else {
+        guard let firstTerminal = predecessorTerminals.first,
+              case .failed(let predecessor) = firstTerminal else {
             Issue.record("""
                 the predecessor reported \(String(describing: predecessorTerminals.first)) \
                 instead of its interruption — the fixture is not testing the overlap

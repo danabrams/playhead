@@ -1812,8 +1812,10 @@ struct AnalysisJobRunnerTests {
 
         // THE ASSERTION. The engine is shared and its live owner has already
         // re-tasked it; the runner must not have fenced the asset.
+        let fencedAfterInterruption = await transcriptEngine
+            .isStoppedForTesting(analysisAssetId: "test-asset")
         #expect(
-            await transcriptEngine.isStoppedForTesting(analysisAssetId: "test-asset") == false,
+            fencedAfterInterruption == false,
             """
             the runner fenced an asset whose transcription a live owner still \
             holds. In production that cancels the listener's own transcription \
@@ -1908,8 +1910,10 @@ struct AnalysisJobRunnerTests {
             Issue.record("Expected .failed(transcription:...), got \(outcome.stopReason)")
         }
 
+        let fencedAfterConclusion = await transcriptEngine
+            .isStoppedForTesting(analysisAssetId: "test-asset")
         #expect(
-            await transcriptEngine.isStoppedForTesting(analysisAssetId: "test-asset"),
+            fencedAfterConclusion,
             """
             the runner left an orphaned engine unfenced. Its later chunk writes \
             and coverage updates land behind the back of a scheduler that has \
