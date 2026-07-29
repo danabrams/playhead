@@ -125,19 +125,20 @@ private struct ShardCache: Sendable {
 
     /// playhead-8ysk: read the manifest in either shape.
     ///
-    /// Returns the entries plus the source byte length recorded alongside
-    /// them. `sourceByteLength == nil` means a PRE-8ysk manifest — a bare
-    /// JSON array with no record of what it was decoded from. That is
+    /// Returns the entries plus the source identity recorded alongside them.
+    /// `identity == nil` means the entry carries no usable record of what it
+    /// was decoded from — either a PRE-8ysk manifest (a bare JSON array) or a
+    /// v2 envelope that stamped only a byte length. Both are
     /// indistinguishable from "decoded from a file we can no longer name",
-    /// so the caller must treat it as unvalidated.
+    /// so the caller must treat them as unvalidated.
     static func readManifest(
         episodeID: String
-    ) -> (entries: [ShardManifestEntry], sourceByteLength: Int64?)? {
+    ) -> (entries: [ShardManifestEntry], identity: AnalysisAudioService.SourceIdentity?)? {
         guard let data = try? Data(contentsOf: manifestPath(episodeID: episodeID)) else {
             return nil
         }
         if let envelope = try? JSONDecoder().decode(ShardManifest.self, from: data) {
-            return (envelope.entries, envelope.sourceByteLength)
+            return (envelope.entries, envelope.identity)
         }
         if let legacy = try? JSONDecoder().decode([ShardManifestEntry].self, from: data) {
             return (legacy, nil)
@@ -156,8 +157,8 @@ private struct ShardCache: Sendable {
         guard let manifest = readManifest(episodeID: episodeID) else { return nil }
 
         guard AnalysisAudioService.isShardCacheValid(
-            recordedSourceByteLength: manifest.sourceByteLength,
-            currentSourceByteLength: AnalysisAudioService.sourceByteLength(of: sourceURL)
+            recorded: manifest.identity,
+            current: AnalysisAudioService.sourceIdentity(of: sourceURL)
         ) else {
             removeShards(episodeID: episodeID)
             return nil
@@ -190,7 +191,7 @@ private struct ShardCache: Sendable {
     /// immortal entry is the whole defect this stamp exists to close —
     /// re-decoding is strictly cheaper than serving a wrong answer forever.
     static func saveShards(_ shards: [AnalysisShard], episodeID: String, sourceURL: URL) {
-        guard let sourceByteLength = AnalysisAudioService.sourceByteLength(of: sourceURL) else {
+        guard let identity = AnalysisAudioService.sourceIdentity(of: sourceURL) else {
             return
         }
         let dir = episodeDirectory(episodeID: episodeID)
@@ -211,7 +212,8 @@ private struct ShardCache: Sendable {
         ) }
         let envelope = ShardManifest(
             version: ShardManifest.currentVersion,
-            sourceByteLength: sourceByteLength,
+            sourceByteLength: identity.byteLength,
+            sourceModificationTimeNanos: identity.modificationTimeNanos,
             entries: entries
         )
         if let data = try? JSONEncoder().encode(envelope) {
@@ -285,29 +287,49 @@ private struct ShardManifestEntry: Codable, Sendable {
 /// byte-exact but it guards the *URL*, and the URL was discarded on a cache
 /// hit.
 ///
-/// WHY BYTE LENGTH IS THE KEY. The failure mode is one file growing: the
-/// 8 MiB `DownloadManager.defaultPlayableThreshold` prefix is decoded and
-/// cached, then the download completes and the same URL holds the whole
-/// episode. A prefix and its completion never share a length, so length
-/// alone separates them, and — unlike a modification date — it cannot be
-/// perturbed by a restore-from-backup or a metadata-only touch, so it
-/// produces no spurious re-decodes.
+/// WHY THE SOURCE'S IDENTITY IS THE KEY. The dominant failure mode is one
+/// file growing: the 8 MiB `DownloadManager.defaultPlayableThreshold` prefix
+/// is decoded and cached, then the download completes and the same URL holds
+/// the whole episode. A prefix and its completion never share a length, so
+/// the byte length alone separates those two.
 ///
-/// It is deliberately measured from the decode's ACTUAL input rather than
-/// taken from `AnalysisJob.sourceFingerprint`: the fingerprint is what the
-/// scheduler believes about the asset, and the bug is precisely that what is
-/// on disk had diverged from that belief.
+/// It does NOT separate every pair that matters — see
+/// ``AnalysisAudioService/SourceIdentity`` for the delete-and-re-download
+/// path that byte length misses and the modification time catches (review
+/// r2). Both fields are required to match.
+///
+/// The stamp is deliberately measured from the decode's ACTUAL input rather
+/// than taken from `AnalysisJob.sourceFingerprint`: the fingerprint is what
+/// the scheduler believes about the asset, and the bug is precisely that
+/// what is on disk had diverged from that belief.
 private struct ShardManifest: Codable, Sendable {
-    /// Bumped only if the envelope's shape changes. A reader that cannot
-    /// decode the envelope falls back to the legacy bare-array shape and
-    /// treats it as unstamped.
-    static let currentVersion = 2
+    /// Bumped when the envelope's shape changes. v2 stamped only
+    /// `sourceByteLength`; v3 adds `sourceModificationTimeNanos`. A reader
+    /// that cannot decode the envelope falls back to the legacy bare-array
+    /// shape and treats it as unstamped.
+    static let currentVersion = 3
 
     let version: Int
     /// Length in bytes of the source audio file at the moment these shards
     /// were persisted.
     let sourceByteLength: Int64
+    /// Modification time of that same file, in integer nanoseconds since the
+    /// reference date. Optional ONLY so a v2 envelope still decodes; a v2
+    /// entry then reports a `nil` identity and is discarded on the next read
+    /// against a measurable source, exactly as a pre-8ysk bare array is.
+    let sourceModificationTimeNanos: Int64?
     let entries: [ShardManifestEntry]
+
+    /// The stamp, or `nil` when this envelope predates a field that is now
+    /// required. Keeping the reconstruction here means `readManifest` cannot
+    /// forget one of the two fields.
+    var identity: AnalysisAudioService.SourceIdentity? {
+        guard let sourceModificationTimeNanos else { return nil }
+        return AnalysisAudioService.SourceIdentity(
+            byteLength: sourceByteLength,
+            modificationTimeNanos: sourceModificationTimeNanos
+        )
+    }
 }
 
 // MARK: - AnalysisShardPCMReader (playhead-l2f.6)
@@ -492,14 +514,77 @@ actor AnalysisAudioService {
     }
 
     /// playhead-8ysk: length in bytes of a decode's source file, or `nil`
-    /// when it cannot be measured (missing, unreadable, not a regular file).
+    /// when it cannot be measured (the file is missing or unreadable).
+    ///
+    /// Note this measures the path's own inode: `attributesOfItem` does not
+    /// traverse a terminal symbolic link. Production decode sources come from
+    /// `DownloadManager.servingURLIfComplete`, which is always a regular file
+    /// in the managed complete directory, so the two coincide there.
     nonisolated static func sourceByteLength(of url: URL) -> Int64? {
+        sourceIdentity(of: url)?.byteLength
+    }
+
+    /// playhead-8ysk (review r2): everything a cache entry records about the
+    /// file it was decoded from.
+    ///
+    /// LENGTH ALONE IS NOT ENOUGH, and the reason is specific to this app.
+    /// The original argument for a bare byte length was that "production
+    /// mutation is monotone growth at one URL" — the 8 MiB playable prefix
+    /// filling in to the whole episode — and a prefix never shares a length
+    /// with its own completion. That premise is false. `DownloadManager`
+    /// deletes complete audio in two places that leave the shard cache
+    /// standing: LRU `evictIfNeeded()` and the user-facing `clearCache()`.
+    /// (Only the *transcript-DB* clear in `SettingsViewModel` wipes
+    /// `AnalysisShards`; clearing the audio cache does not.) A re-download
+    /// then writes a DIFFERENT file at the SAME canonical path — mutation
+    /// that is not growth.
+    ///
+    /// And "different file, same length" is not a freak coincidence here:
+    /// this app exists because podcast CDNs re-stitch dynamic ads per
+    /// request. The cross-network survey behind `RediffFetchPersona` found
+    /// 0 of 6 networks re-encode the body — the ad region is spliced in and
+    /// the surrounding bytes are identical, which is what makes the
+    /// byte-exact rediff differ work at all. So the total length of two
+    /// stitches differs only by the difference between two ad pods, and ad
+    /// inventory is sold in fixed 15/30/60 s units at one bitrate. Equal
+    /// totals are an ordinary outcome, not a long shot — and the failure it
+    /// produces is silent and severe: ad windows located in the OLD stitch,
+    /// applied to the new audio.
+    ///
+    /// The modification time closes it. Measured on this machine: 200 of 200
+    /// delete-and-rewrite cycles of a 4 MB file produced 200 distinct
+    /// mtimes, 0 adjacent collisions, so a re-download is always separable
+    /// from the download it replaced. Stored as integer nanoseconds because
+    /// the value has to survive a JSON round-trip and compare with `==`.
+    ///
+    /// The cost is a spurious re-decode if an mtime ever moves without the
+    /// content moving (a restore-from-backup that does not preserve
+    /// timestamps). That was the original objection to using mtime, and it
+    /// is the right trade the other way round: a spurious re-decode is
+    /// bounded work, while serving another stitch's shards is a wrong answer
+    /// that nothing downstream can detect.
+    struct SourceIdentity: Sendable, Equatable {
+        let byteLength: Int64
+        let modificationTimeNanos: Int64
+    }
+
+    /// Measure the file at `url`, or `nil` when it cannot be measured
+    /// (missing, unreadable, or not a regular file).
+    nonisolated static func sourceIdentity(of url: URL) -> SourceIdentity? {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attributes[.size] as? NSNumber
+              let type = attributes[.type] as? FileAttributeType,
+              type == .typeRegular,
+              let size = attributes[.size] as? NSNumber,
+              let modified = attributes[.modificationDate] as? Date
         else {
             return nil
         }
-        return size.int64Value
+        return SourceIdentity(
+            byteLength: size.int64Value,
+            modificationTimeNanos: Int64(
+                (modified.timeIntervalSinceReferenceDate * 1_000_000_000).rounded()
+            )
+        )
     }
 
     /// playhead-8ysk: may a cached shard set be served for the file that is
@@ -519,18 +604,20 @@ actor AnalysisAudioService {
     ///   boundary refinement and the chapter snapshots read
     ///   ``AnalysisShardPCMReader``, which goes straight to the manifest and
     ///   never consults this predicate at all.
-    /// - `recordedSourceByteLength == nil` → **discard**. A pre-8ysk manifest
-    ///   carries no record of its input, so it can never be shown to match;
-    ///   treating "unknown" as "matches" would preserve exactly the immortal
-    ///   entries this change exists to clear, including the ones already on
-    ///   the owner's device.
-    /// - otherwise → serve iff the lengths are equal.
+    /// - `recorded == nil` → **discard**. A pre-8ysk manifest carries no
+    ///   record of its input, so it can never be shown to match; treating
+    ///   "unknown" as "matches" would preserve exactly the immortal entries
+    ///   this change exists to clear, including the ones already on the
+    ///   owner's device. A v2 manifest — length stamped, modification time
+    ///   not — reads as `nil` here for the same reason (review r2).
+    /// - otherwise → serve iff BOTH the length and the modification time are
+    ///   equal. See ``SourceIdentity`` for why length alone is not enough.
     nonisolated static func isShardCacheValid(
-        recordedSourceByteLength: Int64?,
-        currentSourceByteLength: Int64?
+        recorded: SourceIdentity?,
+        current: SourceIdentity?
     ) -> Bool {
-        guard let current = currentSourceByteLength else { return true }
-        guard let recorded = recordedSourceByteLength else { return false }
+        guard let current else { return true }
+        guard let recorded else { return false }
         return recorded == current
     }
 
@@ -692,6 +779,50 @@ actor AnalysisAudioService {
     ) -> [String] {
         ShardCache.removeOrphanedDirectories(prefix: prefix, olderThan: age)
     }
+
+    #if DEBUG
+    // MARK: - Cache write/read seam (playhead-8ysk review r2)
+
+    /// Persist a shard set exactly as a completed decode would, then read it
+    /// back — without running a decode.
+    ///
+    /// WHY THIS EXISTS. `saveShards` refuses to cache a source it cannot
+    /// measure, and round 1 could not kill the mutation that replaces that
+    /// refusal with `?? 0` (stamp zero and cache anyway): `ShardCache` is
+    /// file-private, and the window between "the decode finished" and
+    /// "`saveShards` measures the file" is not controllable from outside — a
+    /// test would have to delete the audio in the microseconds after
+    /// `AVAssetReader` drains and before the stamp is taken. Round 1
+    /// therefore judged the mutation's impact by READING the `?? 0` variant
+    /// and calling it self-healing.
+    ///
+    /// This seam makes the window addressable directly, so the guard is
+    /// measured rather than reasoned about. It is DEBUG-only and the
+    /// production path does not call it.
+    nonisolated static func saveShardsForTesting(
+        _ shards: [AnalysisShard],
+        episodeID: String,
+        sourceURL: URL
+    ) {
+        ShardCache.saveShards(shards, episodeID: episodeID, sourceURL: sourceURL)
+    }
+
+    /// Read side of ``saveShardsForTesting(_:episodeID:sourceURL:)``.
+    nonisolated static func loadShardsForTesting(
+        episodeID: String,
+        sourceURL: URL
+    ) -> [AnalysisShard]? {
+        ShardCache.loadShards(episodeID: episodeID, sourceURL: sourceURL)
+    }
+
+    /// Whether a manifest was written at all — the property that separates
+    /// "refused to cache" from "cached with a bogus stamp".
+    nonisolated static func manifestExistsForTesting(episodeID: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: ShardCache.manifestPath(episodeID: episodeID).path
+        )
+    }
+    #endif
 
     // MARK: - Decoding pipeline
 

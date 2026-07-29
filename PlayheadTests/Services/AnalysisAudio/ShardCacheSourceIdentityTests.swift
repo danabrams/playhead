@@ -113,30 +113,68 @@ struct ShardCacheSourceIdentityTests {
 
     // MARK: - 1. The predicate
 
+    /// A stamp with an arbitrary but fixed modification time, so length-only
+    /// cases read as they did before review r2 added the second field.
+    private func identity(_ bytes: Int64, at nanos: Int64 = 700_000_000_000_000_000)
+        -> AnalysisAudioService.SourceIdentity {
+        AnalysisAudioService.SourceIdentity(byteLength: bytes, modificationTimeNanos: nanos)
+    }
+
     @Test("a cache entry stamped with a different source length is not valid")
     func lengthMismatchIsInvalid() {
         // The incident, in numbers: 8 MiB of an episode whose completed
         // download is 90 MB.
         #expect(!AnalysisAudioService.isShardCacheValid(
-            recordedSourceByteLength: 8_388_608,
-            currentSourceByteLength: 94_371_840
+            recorded: identity(8_388_608),
+            current: identity(94_371_840)
         ))
         #expect(AnalysisAudioService.isShardCacheValid(
-            recordedSourceByteLength: 94_371_840,
-            currentSourceByteLength: 94_371_840
+            recorded: identity(94_371_840),
+            current: identity(94_371_840)
         ))
         // Off by a single byte is still a different file.
         #expect(!AnalysisAudioService.isShardCacheValid(
-            recordedSourceByteLength: 94_371_839,
-            currentSourceByteLength: 94_371_840
+            recorded: identity(94_371_839),
+            current: identity(94_371_840)
+        ))
+    }
+
+    /// REVIEW R2. The case a byte length cannot see: the same URL holding a
+    /// DIFFERENT file of exactly the same size. Round 1 dismissed this as
+    /// benign on the premise that production mutation is monotone growth at
+    /// one URL — but `DownloadManager.evictIfNeeded()` (LRU) and
+    /// `clearCache()` both delete complete audio without touching the shard
+    /// cache, so a re-download writes a new file at the old path. And the
+    /// re-download is a DAI re-stitch: the cross-network survey behind
+    /// `RediffFetchPersona` found 0 of 6 networks re-encode the body, so two
+    /// stitches differ only by the ad pods, and ad inventory is
+    /// duration-quantized at a fixed bitrate. Equal totals are ordinary.
+    @Test("a same-length replacement at the same path is not valid")
+    func sameLengthDifferentFileIsInvalid() {
+        let downloaded = identity(94_371_840, at: 700_000_000_000_000_000)
+        let reDownloaded = identity(94_371_840, at: 700_086_400_000_000_000)
+        #expect(
+            !AnalysisAudioService.isShardCacheValid(
+                recorded: downloaded, current: reDownloaded
+            ),
+            """
+            a re-download of identical length must invalidate. Serving here \
+            means ad windows located in the OLD stitch are applied to the new \
+            audio — silently, since nothing downstream can tell
+            """
+        )
+        // Same file, untouched: still valid. Otherwise the rule above is just
+        // "never serve", which is the over-correction round 1 caught.
+        #expect(AnalysisAudioService.isShardCacheValid(
+            recorded: downloaded, current: downloaded
         ))
     }
 
     @Test("a pre-8ysk manifest carries no stamp and is never served over a readable source")
     func unstampedEntryIsInvalidWhenSourceIsReadable() {
         #expect(!AnalysisAudioService.isShardCacheValid(
-            recordedSourceByteLength: nil,
-            currentSourceByteLength: 8_388_608
+            recorded: nil,
+            current: identity(8_388_608)
         ))
     }
 
@@ -163,12 +201,12 @@ struct ShardCacheSourceIdentityTests {
     @Test("an unmeasurable source serves the cache rather than discarding it")
     func unmeasurableSourceStillServesTheCache() {
         #expect(AnalysisAudioService.isShardCacheValid(
-            recordedSourceByteLength: 8_388_608,
-            currentSourceByteLength: nil
+            recorded: identity(8_388_608),
+            current: nil
         ))
         #expect(AnalysisAudioService.isShardCacheValid(
-            recordedSourceByteLength: nil,
-            currentSourceByteLength: nil
+            recorded: nil,
+            current: nil
         ))
     }
 
@@ -311,6 +349,20 @@ struct ShardCacheSourceIdentityTests {
     /// the same size of CAF. The stamp therefore still matches, the cache must
     /// still be served, and the samples that come back must be the ORIGINAL
     /// quiet ones. A build that re-decoded would hand back the loud ones.
+    /// REVIEW R2 REWORK. Round 1 proved the serve by replacing the source's
+    /// CONTENT at a constant LENGTH and requiring the cached (quiet) samples
+    /// back. That probe no longer says what it used to: the stamp now carries
+    /// the source's modification time as well, so a constant-length
+    /// replacement is correctly invalidated — and it is the subject of its own
+    /// test below (`constantLengthReplacementIsRedecoded`), which is the
+    /// end-to-end proof that the second field does real work.
+    ///
+    /// The serve is now proved WITHOUT touching the source at all, which is
+    /// strictly stronger: the cache is primed with MARKER shards — three of
+    /// them, samples at a flat 0.25 — that no decode of a 45 s sine file could
+    /// ever produce. If `decodeOutcome` hands those back, it did not decode.
+    /// A build that re-decodes returns two shards of sine and fails on both
+    /// the count and the flatness.
     @Test("a cache whose stamp still matches is served, not re-decoded")
     func matchingStampIsServedFromCache() async throws {
         let url = try makeAudioURL()
@@ -323,12 +375,93 @@ struct ShardCacheSourceIdentityTests {
         }
 
         try writeSynthAudio(seconds: 45, to: url, amplitude: 0.25)
-        let quietBytes = try #require(AnalysisAudioService.sourceByteLength(of: url))
         let local = try #require(LocalAudioURL(url))
+
+        // What a REAL decode of this file looks like, under a fresh id so no
+        // cache can answer. Without this control the marker assertions could
+        // be satisfied by a decoder that happens to produce flat shards.
+        let control = try await service.decodeOutcome(fileURL: local, episodeID: controlID)
+        try #require(control.shards.count == 2, "45 s at a 30 s shard duration is two shards")
+        let controlIsFlat = Set(control.shards[0].samples).count == 1
+        try #require(!controlIsFlat, "a real decode of a sine must not be flat")
+
+        // Prime the cache with something a decode could not have produced.
+        let markers = [
+            AnalysisShard(
+                id: 0, episodeID: episodeID, startTime: 0, duration: 30,
+                samples: Array(repeating: Float(0.25), count: 4_000)
+            ),
+            AnalysisShard(
+                id: 1, episodeID: episodeID, startTime: 30, duration: 30,
+                samples: Array(repeating: Float(0.25), count: 4_000)
+            ),
+            AnalysisShard(
+                id: 2, episodeID: episodeID, startTime: 60, duration: 30,
+                samples: Array(repeating: Float(0.25), count: 4_000)
+            )
+        ]
+        AnalysisAudioService.saveShardsForTesting(markers, episodeID: episodeID, sourceURL: url)
+
+        func assertServed(_ outcome: AnalysisDecodeOutcome, _ label: String) {
+            #expect(
+                outcome.shards.count == 3,
+                """
+                \(label): a stamp that still matches must be SERVED. Got \
+                \(outcome.shards.count) shards; the cache holds 3 and a \
+                re-decode of this file yields 2. The cache is being discarded \
+                when it is valid, so every retry pays a full re-decode
+                """
+            )
+            #expect(
+                outcome.shards.allSatisfy { Set($0.samples) == [Float(0.25)] },
+                "\(label): the samples came from a decode, not from the cache"
+            )
+            #expect(!outcome.isTruncated)
+        }
+
+        assertServed(
+            try await service.decodeOutcome(fileURL: local, episodeID: episodeID), "first read"
+        )
+
+        // And it does not THRASH: a valid entry survives being served over and
+        // over. Repetition is asserted with the marker probe rather than by
+        // comparing manifest bytes — an evict-and-re-decode rewrites
+        // `manifest.json`, and after the first re-decode its content is stable,
+        // so a byte comparison would pass against a cache that churns the
+        // whole episode on every read.
+        for pass in 0..<3 {
+            assertServed(
+                try await service.decodeOutcome(fileURL: local, episodeID: episodeID),
+                "repeat pass \(pass)"
+            )
+        }
+    }
+
+    /// REVIEW R2. The end-to-end complement: the source is replaced with
+    /// DIFFERENT AUDIO OF EXACTLY THE SAME LENGTH — the delete-and-
+    /// re-download shape, where a DAI re-stitch swaps one ad pod for another
+    /// of equal encoded size — and the cache must re-decode.
+    ///
+    /// Round 1 reasoned this collision was benign because "production
+    /// mutation is monotone growth at one URL". It is not:
+    /// `DownloadManager.evictIfNeeded()` and `clearCache()` both delete
+    /// complete audio and leave the shard cache standing. This test drives
+    /// the real `decodeOutcome` path, so it fails against a build that stamps
+    /// only the byte length.
+    @Test("a same-length replacement of the source is re-decoded, not served")
+    func constantLengthReplacementIsRedecoded() async throws {
+        let url = try makeAudioURL()
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-restitch-\(UUID().uuidString)"
+        defer { Task { await service.evictCache(episodeID: episodeID) } }
 
         func peak(_ shards: [AnalysisShard]) -> Float {
             shards.flatMap(\.samples).reduce(Float(0)) { Swift.max($0, abs($1)) }
         }
+
+        try writeSynthAudio(seconds: 45, to: url, amplitude: 0.25)
+        let quietBytes = try #require(AnalysisAudioService.sourceByteLength(of: url))
+        let local = try #require(LocalAudioURL(url))
 
         let first = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
         let quietPeak = peak(first.shards)
@@ -342,43 +475,17 @@ struct ShardCacheSourceIdentityTests {
             "the probe needs a constant-length replacement (\(quietBytes) -> \(loudBytes))"
         )
 
-        // The replacement really is different audio — decoded under a FRESH
-        // episode id, so no cache can answer. Without this the test would
-        // still pass if `writeSynthAudio` ignored `amplitude` entirely.
-        let control = try await service.decodeOutcome(fileURL: local, episodeID: controlID)
-        let loudPeak = peak(control.shards)
-        try #require(
-            loudPeak > 0.7,
-            "the replacement must decode differently or this test proves nothing (peak \(loudPeak))"
-        )
-
         let second = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
         #expect(
-            peak(second.shards) == quietPeak,
+            peak(second.shards) > 0.7,
             """
-            a stamp that still matches must be SERVED: got peak \(peak(second.shards)), \
-            expected the cached \(quietPeak). A re-decode would return \(loudPeak) — \
-            the cache is being discarded when it is valid, so every retry pays a \
-            full re-decode
+            a different file of the same length was served from cache: got peak \
+            \(peak(second.shards)), expected the replacement's ~0.9. A byte length \
+            alone cannot separate two DAI stitches whose ad pods encode to the same \
+            size, and the failure is silent — ad windows from the OLD stitch applied \
+            to the new audio
             """
         )
-        #expect(second.shards.count == first.shards.count)
-        #expect(!second.isTruncated)
-
-        // And it does not THRASH: a valid entry survives being served over and
-        // over. Repetition is asserted with the same amplitude probe rather
-        // than by comparing the manifest bytes — an evict-and-re-decode
-        // rewrites `manifest.json` with byte-identical content (same entries,
-        // same source length), so a content comparison would pass against a
-        // cache that churns the whole episode on every read and would be
-        // exactly the vacuous test this bead is about.
-        for pass in 0..<3 {
-            let repeated = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
-            #expect(
-                peak(repeated.shards) == quietPeak,
-                "pass \(pass) re-decoded a valid cache (peak \(peak(repeated.shards)))"
-            )
-        }
     }
 
     /// And the entry is EVICTED, not merely bypassed. A stale directory that
@@ -423,6 +530,153 @@ struct ShardCacheSourceIdentityTests {
             the invalidated directory must be removed — shard_1.pcm belongs to \
             the superseded decode and nothing else in the app will ever sweep it
             """
+        )
+    }
+
+    // MARK: - 5. The write-side guard (review r2)
+
+    private func syntheticShards(episodeID: String) -> [AnalysisShard] {
+        [
+            AnalysisShard(
+                id: 0, episodeID: episodeID, startTime: 0, duration: 30,
+                samples: Array(repeating: Float(0.25), count: 480_000)
+            ),
+            AnalysisShard(
+                id: 1, episodeID: episodeID, startTime: 30, duration: 15,
+                samples: Array(repeating: Float(0.25), count: 240_000)
+            )
+        ]
+    }
+
+    /// ROUND 1's SURVIVING MUTATION, now killable.
+    ///
+    /// `saveShards` refuses to write anything when it cannot measure the
+    /// source. Round 1 mutated that guard to `?? 0` — stamp zero and cache
+    /// anyway — and the mutant survived the whole suite, because `ShardCache`
+    /// is file-private and the decode→save window is not reachable from
+    /// outside. `AnalysisAudioService.saveShardsForTesting` makes it reachable.
+    ///
+    /// The assertion is deliberately about the MANIFEST FILE, not about what
+    /// a later read returns. The `?? 0` mutant writes a manifest stamped `0`,
+    /// and a read against a real 700 KB source then correctly discards it —
+    /// so asserting only on the read would pass against the mutant and prove
+    /// nothing. What separates the two builds is whether a cache entry was
+    /// created at all.
+    @Test("a source that cannot be measured is not cached at all")
+    func unmeasurableSourceIsNotCachedAtAll() async throws {
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-unmeasurable-\(UUID().uuidString)"
+        defer { Task { await service.evictCache(episodeID: episodeID) } }
+
+        // A URL in a real directory that has no file at it — exactly the
+        // state the decode→save window enters when the audio is deleted
+        // (LRU eviction, or the user removing the download) after the
+        // decode drained and before the stamp is taken.
+        let missing = try makeAudioURL()
+        try #require(
+            AnalysisAudioService.sourceByteLength(of: missing) == nil,
+            "fixture must be unmeasurable or this test proves nothing"
+        )
+
+        AnalysisAudioService.saveShardsForTesting(
+            syntheticShards(episodeID: episodeID),
+            episodeID: episodeID,
+            sourceURL: missing
+        )
+
+        #expect(
+            !AnalysisAudioService.manifestExistsForTesting(episodeID: episodeID),
+            """
+            an unmeasurable source must produce NO cache entry. A manifest \
+            here is an entry stamped with a length that never described any \
+            file — and because `isShardCacheValid` fails OPEN on an \
+            unmeasurable source, such an entry is served unconditionally \
+            every time the audio is absent
+            """
+        )
+    }
+
+    /// And the guard is not vacuous: the same call with a measurable source
+    /// DOES cache. Without this control, `unmeasurableSourceIsNotCachedAtAll`
+    /// passes against a `saveShards` that writes nothing ever — the negative-
+    /// without-a-positive shape that round 1 found across this whole suite.
+    @Test("control: a measurable source is cached and served back")
+    func measurableSourceIsCached() async throws {
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-measurable-\(UUID().uuidString)"
+        defer { Task { await service.evictCache(episodeID: episodeID) } }
+
+        let url = try makeAudioURL()
+        try writeSynthAudio(seconds: 45, to: url)
+        let shards = syntheticShards(episodeID: episodeID)
+
+        AnalysisAudioService.saveShardsForTesting(
+            shards, episodeID: episodeID, sourceURL: url
+        )
+
+        #expect(AnalysisAudioService.manifestExistsForTesting(episodeID: episodeID))
+        let served = try #require(
+            AnalysisAudioService.loadShardsForTesting(episodeID: episodeID, sourceURL: url),
+            "a stamp taken from this very file must validate against it"
+        )
+        #expect(served.map(\.id) == [0, 1])
+        #expect(served[0].samples.count == 480_000)
+    }
+
+    /// RUN THE SELF-HEALING CLAIM ROUND 1 ONLY REASONED ABOUT.
+    ///
+    /// Round 1 judged the `?? 0` mutant's impact bounded because an entry
+    /// stamped `0` "self-heals the moment the source is measurable again".
+    /// That disposition was reached by reading, and this project has had
+    /// by-reading dispositions invert. Here it is executed, through a state
+    /// production can actually reach: a source that measures ZERO BYTES — a
+    /// file the downloader created and had not yet written to. `saveShards`
+    /// accepts it (0 is measurable, and `guard let` admits it — only `nil` is
+    /// refused), stamping an entry that describes an empty file.
+    ///
+    /// The claim under test is that such an entry cannot survive the source
+    /// acquiring any content. It holds — and note WHY it is not a substitute
+    /// for the guard above: healing needs the source to be MEASURABLE, and
+    /// the `?? 0` mutant's entries are created precisely when it is not.
+    @Test("a zero-byte stamp is discarded the moment the source has content")
+    func zeroByteStampSelfHealsWhenTheSourceGrows() async throws {
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-zerostamp-\(UUID().uuidString)"
+        defer { Task { await service.evictCache(episodeID: episodeID) } }
+
+        let url = try makeAudioURL()
+        try Data().write(to: url)
+        try #require(
+            AnalysisAudioService.sourceByteLength(of: url) == 0,
+            "the fixture must measure zero, not nil"
+        )
+
+        AnalysisAudioService.saveShardsForTesting(
+            syntheticShards(episodeID: episodeID), episodeID: episodeID, sourceURL: url
+        )
+        try #require(
+            AnalysisAudioService.manifestExistsForTesting(episodeID: episodeID),
+            "zero IS measurable, so the entry must be written — otherwise this test measures the wrong guard"
+        )
+        // Still self-consistent while the source stays empty.
+        #expect(
+            AnalysisAudioService.loadShardsForTesting(episodeID: episodeID, sourceURL: url) != nil
+        )
+
+        // The source acquires content. The stamp can no longer describe it.
+        try writeSynthAudio(seconds: 45, to: url)
+        #expect(
+            AnalysisAudioService.loadShardsForTesting(episodeID: episodeID, sourceURL: url) == nil,
+            """
+            a stamp of 0 must not validate against a source with content. \
+            This is the self-healing round 1 asserted by reading; if it ever \
+            stops holding, an entry that describes no file at all becomes \
+            immortal
+            """
+        )
+        #expect(
+            !AnalysisAudioService.manifestExistsForTesting(episodeID: episodeID),
+            "and the healed entry is evicted, not merely bypassed"
         )
     }
 }
