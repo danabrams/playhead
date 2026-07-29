@@ -1264,7 +1264,17 @@ struct TranscriptEngineSpeakerIdTests {
         #expect(abs((upgradedEventChunks[0].avgConfidence ?? 0) - 0.82) < 0.001)
     }
 
-    @Test("duplicate fingerprint fills missing speakerId and avgConfidence across matching rows", .timeLimit(.minutes(1)))
+    /// playhead-6av0 REWRITE. This test used to manufacture a SECOND row under
+    /// one `(analysisAssetId, segmentFingerprint)` and assert that the
+    /// metadata-upgrade UPDATEs — which carry no `LIMIT` — reached both. That
+    /// premise is gone: `transcript_chunks` is now UNIQUE on
+    /// `(analysisAssetId, pass, segmentFingerprint)`, so the duplicate cannot
+    /// exist. The regression it guarded against (a duplicate row left behind
+    /// with a NULL `speakerId` after an upgrade pass) is now prevented rather
+    /// than tolerated, and the two halves of that are what this pins: the
+    /// second insert is REFUSED, and the one surviving row still takes the
+    /// upgrade.
+    @Test("a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade", .timeLimit(.minutes(1)))
     func duplicateFingerprintFillsSpeakerIdAndAvgConfidenceAcrossMatchingRows() async throws {
         let assetId = "asset-speaker-duplicate-rows"
         let store = try await makeTestStore()
@@ -1295,7 +1305,7 @@ struct TranscriptEngineSpeakerIdTests {
         }
 
         let original = try #require((try await store.fetchTranscriptChunks(assetId: assetId)).first)
-        try await store.insertTranscriptChunk(TranscriptChunk(
+        let insertedDuplicate = try await store.insertTranscriptChunk(TranscriptChunk(
             id: "duplicate-missing-speaker",
             analysisAssetId: original.analysisAssetId,
             segmentFingerprint: original.segmentFingerprint,
@@ -1312,6 +1322,8 @@ struct TranscriptEngineSpeakerIdTests {
             speakerId: nil,
             avgConfidence: nil
         ))
+        #expect(!insertedDuplicate,
+                "the UNIQUE (analysisAssetId, pass, segmentFingerprint) index refuses the second row")
 
         recognizer.transcribeResult = [
             makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7, avgConfidence: 0.77)
@@ -1331,10 +1343,12 @@ struct TranscriptEngineSpeakerIdTests {
 
         let matchingChunks = try await store.fetchTranscriptChunks(assetId: assetId)
             .filter { $0.segmentFingerprint == original.segmentFingerprint }
-        #expect(matchingChunks.count == 2)
-        #expect(matchingChunks.allSatisfy { $0.speakerId == 7 })
-        #expect(abs((matchingChunks[0].avgConfidence ?? 0) - 0.61) < 0.001)
-        #expect(abs((matchingChunks[1].avgConfidence ?? 0) - 0.77) < 0.001)
+        #expect(matchingChunks.count == 1,
+                "one row per (asset, pass, fingerprint) — the duplicate never landed")
+        #expect(matchingChunks.allSatisfy { $0.speakerId == 7 },
+                "the survivor's missing speakerId is still filled by the second pass")
+        #expect(abs((matchingChunks[0].avgConfidence ?? 0) - 0.61) < 0.001,
+                "avgConfidence was already set on the survivor, so the IfMissing upgrade correctly no-ops")
     }
 }
 
