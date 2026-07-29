@@ -35,14 +35,17 @@ struct DuplicateAssetReconcileTests {
         featureCoverage: Double? = nil,
         transcriptCoverage: Double? = nil,
         duration: Double? = nil,
-        title: String? = nil
+        title: String? = nil,
+        sourceURL: String? = nil
     ) async throws {
         try await store.insertAsset(AnalysisAsset(
             id: id,
             episodeId: episodeId,
             assetFingerprint: id, // the Pipeline A signature: self-reference
             weakFingerprint: nil,
-            sourceURL: "file:///partial/\(episodeId).mp3",
+            // Default: the 13-of-14 shape — both rows name the SAME artifact,
+            // reached by different container paths.
+            sourceURL: sourceURL ?? "file:///container-A/partials/\(episodeId).mp3",
             featureCoverageEndTime: featureCoverage,
             fastTranscriptCoverageEndTime: transcriptCoverage,
             confirmedAdCoverageEndTime: nil,
@@ -62,14 +65,15 @@ struct DuplicateAssetReconcileTests {
         state: String = SessionState.queued.rawValue,
         featureCoverage: Double? = nil,
         transcriptCoverage: Double? = nil,
-        duration: Double? = nil
+        duration: Double? = nil,
+        sourceURL: String? = nil
     ) async throws {
         try await store.insertAsset(AnalysisAsset(
             id: id,
             episodeId: episodeId,
             assetFingerprint: fingerprint,
             weakFingerprint: nil,
-            sourceURL: "file:///complete/\(episodeId).mp3",
+            sourceURL: sourceURL ?? "file:///container-B/complete/\(episodeId).mp3",
             featureCoverageEndTime: featureCoverage,
             fastTranscriptCoverageEndTime: transcriptCoverage,
             confirmedAdCoverageEndTime: nil,
@@ -167,11 +171,13 @@ struct DuplicateAssetReconcileTests {
     func canonicalSHARowIsTheSurvivor() {
         let placeholder = AssetMergeRow(
             rowId: 9, id: "ph", assetFingerprint: "ph",
-            createdAt: 2_000, analysisState: "completeFull", terminalReason: nil
+            createdAt: 2_000, analysisState: "completeFull", terminalReason: nil,
+            sourceURL: "file:///a/shared.mp3"
         )
         let canonical = AssetMergeRow(
             rowId: 1, id: "sha-row", assetFingerprint: String(repeating: "d", count: 64),
-            createdAt: 1_000, analysisState: "queued", terminalReason: nil
+            createdAt: 1_000, analysisState: "queued", terminalReason: nil,
+            sourceURL: "file:///b/shared.mp3"
         )
         let chosen = AnalysisStore.chooseMergeSurvivor([placeholder, canonical])
         #expect(chosen?.id == "sha-row")
@@ -181,11 +187,13 @@ struct DuplicateAssetReconcileTests {
     func newestRowSurvivesWithoutSHA() {
         let older = AssetMergeRow(
             rowId: 1, id: "a", assetFingerprint: "a",
-            createdAt: 1_000, analysisState: "queued", terminalReason: nil
+            createdAt: 1_000, analysisState: "queued", terminalReason: nil,
+            sourceURL: "file:///b/shared.mp3"
         )
         let newer = AssetMergeRow(
             rowId: 2, id: "b", assetFingerprint: "b",
-            createdAt: 2_000, analysisState: "queued", terminalReason: nil
+            createdAt: 2_000, analysisState: "queued", terminalReason: nil,
+            sourceURL: "file:///a/shared.mp3"
         )
         #expect(AnalysisStore.chooseMergeSurvivor([older, newer])?.id == "b")
     }
@@ -413,6 +421,122 @@ struct DuplicateAssetReconcileTests {
             #expect(survivor.fastTranscriptCoverageEndTime == Double(600 + index))
             let chunks = try await store.fetchTranscriptChunks(assetId: survivor.id)
             #expect(chunks.count == 1, "the placeholder's transcript must have moved, not cascaded")
+        }
+    }
+
+    // MARK: - The 14th pair, and atomicity
+
+    @Test("container-path drift alone does not block the merge (13-of-14 shape)")
+    func containerPathDriftStillMerges() {
+        let victim = AssetMergeRow(
+            rowId: 1, id: "ph", assetFingerprint: "ph", createdAt: 1,
+            analysisState: "completeFull", terminalReason: nil,
+            sourceURL: "file:///var/mobile/Containers/Data/Application/AAAA/Library/Caches/partials/9f2c.mp3"
+        )
+        let survivor = AssetMergeRow(
+            rowId: 2, id: "sha", assetFingerprint: String(repeating: "e", count: 64), createdAt: 2,
+            analysisState: "queued", terminalReason: nil,
+            sourceURL: "file:///var/mobile/Containers/Data/Application/BBBB/Library/Caches/complete/9F2C.MP3"
+        )
+        #expect(AnalysisStore.mergeGuard(victim: victim, survivor: survivor) == .merge,
+                "playhead-9x4c rewrites everything left of the hashed filename; that is not an identity change")
+    }
+
+    @Test("the 14th pair — different artifacts — is SKIPPED with a recorded reason, never merged")
+    func differingSourceArtifactIsSkipped() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-14th"
+        try await insertPlaceholder(
+            store: store, id: "ph-14th", episodeId: episodeId,
+            state: SessionState.completeFull.rawValue,
+            sourceURL: "file:///container-A/complete/aaaa1111.mp3"
+        )
+        try await insertCanonical(
+            store: store, id: "canon-14th", episodeId: episodeId, fingerprint: canonicalSHA,
+            sourceURL: "file:///container-A/complete/bbbb2222.mp3"
+        )
+        try await insertChunk(store: store, id: "chunk-14th", assetId: "ph-14th", index: 0, start: 0, end: 100)
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.episodesInspected == 1)
+        #expect(summary.placeholdersMerged == 0, "two different artifacts must never be fused")
+        #expect(summary.skippedDifferentSource == 1, "and the refusal must be counted, not silent")
+        #expect(summary.survivingAssetIds.isEmpty)
+
+        // Nothing moved, nothing deleted — the episode is exactly as it was.
+        #expect(try await allAssets(store: store, episodeId: episodeId).count == 2)
+        let chunks = try await store.fetchTranscriptChunks(assetId: "ph-14th")
+        #expect(chunks.count == 1)
+    }
+
+    @Test("a row with no usable sourceURL is skipped rather than merged on faith")
+    func unknownSourceIsSkipped() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-nosource"
+        try await insertPlaceholder(
+            store: store, id: "ph-nosource", episodeId: episodeId, sourceURL: ""
+        )
+        try await insertCanonical(
+            store: store, id: "canon-nosource", episodeId: episodeId, fingerprint: canonicalSHA
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 0)
+        #expect(summary.skippedUnknownSource == 1)
+        #expect(try await allAssets(store: store, episodeId: episodeId).count == 2)
+    }
+
+    @Test("an interruption mid-sweep rolls the WHOLE pass back — no half-merged episode")
+    func interruptedSweepRollsBack() async throws {
+        let (store, directory) = try await makeTestStoreWithDirectory()
+        for index in 0..<3 {
+            let episodeId = "ep-atomic-\(index)"
+            try await insertPlaceholder(
+                store: store, id: "ph-atomic-\(index)", episodeId: episodeId,
+                state: SessionState.completeFull.rawValue, transcriptCoverage: 900
+            )
+            try await insertCanonical(
+                store: store, id: "canon-atomic-\(index)", episodeId: episodeId,
+                fingerprint: String(format: "%064x", index + 100), transcriptCoverage: 100
+            )
+            try await insertSession(
+                store: store, id: "sess-atomic-\(index)", assetId: "ph-atomic-\(index)",
+                state: SessionState.completeFull.rawValue
+            )
+            try await insertChunk(
+                store: store, id: "chunk-atomic-\(index)", assetId: "ph-atomic-\(index)",
+                index: 0, start: 0, end: 900
+            )
+        }
+        let assetsBefore = try probeRowCount(in: directory, table: "analysis_assets")
+        let chunksBefore = try probeRowCount(in: directory, table: "transcript_chunks")
+        let sessionsBefore = try probeRowCount(in: directory, table: "analysis_sessions")
+
+        // Die after the second placeholder — the shape of a jetsam during a
+        // background launch sweep.
+        await store.setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders: 2)
+        await #expect(throws: (any Error).self) {
+            _ = try await store.reconcileDuplicatePlaceholderAssets()
+        }
+        await store.setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders: nil)
+
+        #expect(try probeRowCount(in: directory, table: "analysis_assets") == assetsBefore,
+                "a rolled-back sweep must not have deleted any asset row")
+        #expect(try probeRowCount(in: directory, table: "transcript_chunks") == chunksBefore)
+        #expect(try probeRowCount(in: directory, table: "analysis_sessions") == sessionsBefore)
+        for index in 0..<3 {
+            #expect(try await allAssets(store: store, episodeId: "ep-atomic-\(index)").count == 2,
+                    "episode \(index) must be exactly as it was before the interrupted pass")
+            let moved = try await store.fetchSession(id: "sess-atomic-\(index)")
+            #expect(moved?.analysisAssetId == "ph-atomic-\(index)",
+                    "child rows must still point where they did before the pass")
+        }
+
+        // And the retry that a real relaunch would perform completes cleanly.
+        let retry = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(retry.placeholdersMerged == 3)
+        for index in 0..<3 {
+            #expect(try await allAssets(store: store, episodeId: "ep-atomic-\(index)").count == 1)
         }
     }
 

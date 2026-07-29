@@ -1244,7 +1244,44 @@ struct DuplicateAssetMergeSummary: Sendable, Equatable {
     var survivingAssetIds: [String] = []
     /// Completion terminals adopted from a folded-in row.
     var adoptedTerminalStates = 0
+    /// Placeholder rows LEFT IN PLACE because their `sourceURL` names a
+    /// different artifact than the survivor's. See ``AssetMergeGuard``.
+    var skippedDifferentSource = 0
+    /// Placeholder rows left in place because one side carried no usable
+    /// `sourceURL` at all, so no artifact identity could be compared.
+    var skippedUnknownSource = 0
 }
+
+/// Whether one placeholder may be folded into one survivor.
+///
+/// playhead-0hi9: 13 of the 14 duplicated episodes on the owner's device hold
+/// two rows naming the SAME file. The 14th holds two DIFFERENT `sourceURL`s.
+/// That one is filed separately (playhead-9x4c tracks `sourceURL` storing
+/// absolute container paths) and is explicitly out of scope here — but it is
+/// in the same table, and this sweep will meet it.
+///
+/// The merge is irreversible: it re-points child rows and deletes a row. The
+/// risk is asymmetric. Skipping a pair leaves the user exactly as broken as
+/// before and the sweep can be re-armed later; merging two rows that describe
+/// DIFFERENT audio fuses one episode's transcript onto another's analysis and
+/// nothing can take that apart afterwards. So the sweep merges only on
+/// positive evidence that both rows name the same artifact, and records a
+/// reason otherwise.
+///
+/// The comparison is on the last path component, not the whole URL, precisely
+/// because playhead-9x4c makes the leading container path unstable across
+/// reinstalls: `DownloadManager.safeFilename(for:)` derives the basename from
+/// the episode id, so it survives a container move that rewrites everything to
+/// its left.
+enum AssetMergeGuard: Sendable, Equatable {
+    /// Both rows name the same on-disk artifact.
+    case merge
+    /// The rows name different artifacts. Left alone, deliberately.
+    case skipDifferentSource(victim: String, survivor: String)
+    /// One side has no usable `sourceURL`, so nothing can be compared.
+    case skipUnknownSource
+}
+
 
 /// One schema location holding an `analysis_assets.id`, discovered at runtime.
 struct ChildAssetColumn: Sendable, Equatable {
@@ -1262,6 +1299,19 @@ struct AssetMergeRow: Sendable, Equatable {
     let createdAt: Double
     let analysisState: String
     let terminalReason: String?
+    let sourceURL: String
+
+    /// The stable part of `sourceURL`: the hashed filename the download
+    /// manager derives from the episode id. `nil` when the value is empty or
+    /// carries no path component at all.
+    var artifactBasename: String? {
+        let trimmed = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let component = URL(string: trimmed)?.lastPathComponent
+            ?? trimmed.split(separator: "/").last.map(String.init)
+        guard let component, !component.isEmpty, component != "/" else { return nil }
+        return component.lowercased()
+    }
 
     /// A Pipeline A placeholder writes its own row id into `assetFingerprint`.
     /// That self-reference is the signature: it is exactly what makes the row
@@ -14337,6 +14387,15 @@ actor AnalysisStore {
         try exec(sql)
     }
 
+    /// playhead-0hi9 test seam: throw from inside
+    /// ``reconcileDuplicatePlaceholderAssets()`` once `afterPlaceholders`
+    /// placeholders have been folded, so a test can prove the whole pass rolls
+    /// back rather than leaving half a merge. Jetsam mid-sweep during a
+    /// background launch is the real-world version of this.
+    func setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders: Int?) {
+        duplicateAssetMergeFaultAfterPlaceholders = afterPlaceholders
+    }
+
     func setFeatureBatchPersistenceFaultInjectionForTesting(
         _ injection: FeatureBatchPersistenceFaultInjection?
     ) {
@@ -15205,6 +15264,12 @@ actor AnalysisStore {
 
     // MARK: - Duplicate placeholder-asset reconciliation (playhead-0hi9)
 
+    #if DEBUG
+    /// Test-only: fold this many placeholders, then throw. See
+    /// ``setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders:)``.
+    private var duplicateAssetMergeFaultAfterPlaceholders: Int?
+    #endif
+
     /// Fold Pipeline A placeholder rows into the canonical-SHA row for the
     /// same episode.
     ///
@@ -15272,6 +15337,18 @@ actor AnalysisStore {
                 // row's terminal claim against its real coverage afterwards, so
                 // whichever state is adopted is verified, not trusted.
                 for victim in rows where victim.id != survivor.id && victim.isPlaceholder {
+                    switch Self.mergeGuard(victim: victim, survivor: survivor) {
+                    case .skipDifferentSource(let victimName, let survivorName):
+                        summary.skippedDifferentSource += 1
+                        logger.warning("Duplicate-asset merge: LEAVING episode \(episodeId, privacy: .public) alone — placeholder names \(victimName, privacy: .public) but survivor names \(survivorName, privacy: .public); merging rows that describe different audio is not reversible (see playhead-9x4c)")
+                        continue
+                    case .skipUnknownSource:
+                        summary.skippedUnknownSource += 1
+                        logger.warning("Duplicate-asset merge: LEAVING episode \(episodeId, privacy: .public) alone — one row carries no usable sourceURL, so the two artifacts cannot be shown to be the same")
+                        continue
+                    case .merge:
+                        break
+                    }
                     let moved = try repointChildRows(
                         from: victim.id,
                         to: survivor.id,
@@ -15285,6 +15362,14 @@ actor AnalysisStore {
                     try deleteAssetRow(id: victim.id)
                     summary.placeholdersMerged += 1
                     mergedHere = true
+                    #if DEBUG
+                    if let limit = duplicateAssetMergeFaultAfterPlaceholders,
+                       summary.placeholdersMerged >= limit {
+                        throw AnalysisStoreError.queryFailed(
+                            "injected duplicate-asset merge fault after \(summary.placeholdersMerged) placeholder(s)"
+                        )
+                    }
+                    #endif
                 }
                 if mergedHere, !summary.survivingAssetIds.contains(survivor.id) {
                     summary.survivingAssetIds.append(survivor.id)
@@ -15296,6 +15381,20 @@ actor AnalysisStore {
             throw error
         }
         return summary
+    }
+
+    /// Decide whether one placeholder may be folded into one survivor. Pure,
+    /// so the 14th-pair case can be exercised without standing up a database.
+    /// See ``AssetMergeGuard`` for why this is evidence-based rather than
+    /// merge-by-default.
+    nonisolated static func mergeGuard(victim: AssetMergeRow, survivor: AssetMergeRow) -> AssetMergeGuard {
+        guard let victimName = victim.artifactBasename,
+              let survivorName = survivor.artifactBasename
+        else { return .skipUnknownSource }
+        guard victimName == survivorName else {
+            return .skipDifferentSource(victim: victimName, survivor: survivorName)
+        }
+        return .merge
     }
 
     /// The survivor is the row a fingerprint-keyed lookup will find: prefer a
@@ -15368,7 +15467,8 @@ actor AnalysisStore {
 
     private func assetMergeRows(episodeId: String) throws -> [AssetMergeRow] {
         let stmt = try prepare("""
-            SELECT rowid, id, assetFingerprint, createdAt, analysisState, terminalReason
+            SELECT rowid, id, assetFingerprint, createdAt, analysisState,
+                   terminalReason, sourceURL
             FROM analysis_assets
             WHERE episodeId = ?
             """)
@@ -15382,7 +15482,8 @@ actor AnalysisStore {
                 assetFingerprint: text(stmt, 2),
                 createdAt: sqlite3_column_double(stmt, 3),
                 analysisState: text(stmt, 4),
-                terminalReason: optionalText(stmt, 5)
+                terminalReason: optionalText(stmt, 5),
+                sourceURL: text(stmt, 6)
             ))
         }
         return out
