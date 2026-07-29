@@ -153,6 +153,32 @@ enum PreRollStartClamp {
             return windows
         }
 
+        // USER-SET BOUNDARIES ARE NOT OURS TO MOVE. `.unanchored` above means
+        // "no DETECTOR anchored this edge" — it does NOT mean "no human chose
+        // it". A window the listener added carries no edge anchor, so it arrives
+        // here looking exactly like an FM guess.
+        //
+        // This was LATENT rather than new: the clamp could always move a
+        // hand-set start, but at the old 20 s ceiling it never reached one.
+        // Raising the ceiling to 90 s brought `UserAddedMarkSurvivesBackfill`'s
+        // 20–30 s mark into range, and the clamp moved the listener's start to
+        // 0. So the low ceiling was hiding the bug, not preventing it.
+        //
+        // Forbidden by the fidelity rule: a manual mark outranks anything else,
+        // and a transcript span marking is the HIGHEST-fidelity correction
+        // precisely because the bounds are the listener's rather than the
+        // detector's. This clamp is a derived positional heuristic and sits below
+        // every correction source, so it defers.
+        //
+        // Literal rather than an enum case because `AdBoundaryState` has none —
+        // the value is written and read as a raw string throughout
+        // (`AdDetectionService.swift:2939` writes, `TranscriptPeekViewModel.swift:441`
+        // reads). Matching that convention; adding a case would touch every
+        // exhaustive switch over the enum and is not this bead's work.
+        guard first.boundaryState != "userMarked" else {
+            return windows
+        }
+
         // Pre-roll gate: only a first slot whose start sits in `(0, N]`.
         //   • `startTime > 0` — a start already at/before 0.0 has nothing to do
         //     (idempotent no-op).

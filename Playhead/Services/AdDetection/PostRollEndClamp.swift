@@ -189,6 +189,32 @@ enum PostRollEndClamp {
             return windows
         }
 
+        // USER-SET BOUNDARIES ARE NOT OURS TO MOVE. `.unanchored` above means
+        // "no DETECTOR anchored this edge" — it does NOT mean "no human chose
+        // it". A window the listener added carries no edge anchor, so it reaches
+        // this point looking exactly like an FM guess, and without this guard the
+        // clamp extends the end the listener selected by hand.
+        //
+        // That is forbidden by the fidelity rule: a manual mark outranks
+        // anything else, and a transcript span marking is the HIGHEST-fidelity
+        // correction precisely because the time bounds are the listener's rather
+        // than the detector's. This clamp is a derived positional heuristic and
+        // sits below every correction source on that ladder, so it must defer.
+        //
+        // Found by `UserAddedMarkSurvivesBackfillTests` failing: a hand-marked
+        // 20–30 s window in a 90 s episode is exactly 60 s from EOF, so the
+        // proximity guard admitted it and the clamp moved the user's end to 90.
+        //
+        // The literal rather than `AdBoundaryState.userMarked` is deliberate:
+        // that enum has no such case, and the value is written and read as a
+        // raw string throughout (`AdDetectionService.swift:2939` writes it,
+        // `TranscriptPeekViewModel.swift:441` reads it). Matching the existing
+        // convention here rather than adding a case, because adding one touches
+        // every exhaustive switch over that enum and is not this bead's work.
+        guard last.boundaryState != "userMarked" else {
+            return windows
+        }
+
         // Geometry gate.
         //   • `endTime < episodeDuration` — an end already at/past EOF has
         //     nothing to do (idempotent no-op).
