@@ -84,23 +84,59 @@ struct RediffDayZeroAccountabilityTests {
                 "a new exit needs its persisted name decided here, not defaulted")
     }
 
-    @Test("the AAC-behind-an-.mp3-suffix hypothesis is distinguishable from clean-but-identical copies")
-    func gateRejectVersusNoDivergence() {
-        // If RediffByteAligner (an MP3-frame parser) finds no frames because the
-        // bytes are AAC, EVERY B-copy gate-rejects.
-        let allRejected = RediffDayZeroMintOutcome(
-            exit: .noAcceptedByteDiff, bSideCount: 2, bSidesAccepted: 0,
-            bSidesGateRejected: 2, bSidesUnreadable: 0, divergentSlotCount: 0
+    /// REVIEW ROUND 3 — this test was VACUOUS and is now the free-exit census pin.
+    ///
+    /// It used to build two `RediffDayZeroMintOutcome` LITERALS and then assert
+    /// properties of its own literals (`allRejected.exit != diffedButIdentical.exit`,
+    /// `allRejected.bSidesGateRejected == allRejected.bSideCount`). No production
+    /// symbol beyond the memberwise initialiser was involved, so no production
+    /// change could redden it — renaming or retyping a field is a COMPILE error,
+    /// not a red test, and everything else was self-referential. Round 3 proved it
+    /// by inverting the real census inside `mintByteExactDayZeroMarks` (swapping
+    /// `bSidesAccepted` with `bSidesGateRejected`): six real-bytes tests failed and
+    /// this one passed.
+    ///
+    /// The AAC-behind-an-.mp3-suffix claim it was gesturing at is real, and it is
+    /// carried over REAL bytes by
+    /// `RediffDayZeroMintExitTests.nonMP3BytesReportNoAcceptedByteDiff` and
+    /// `.identicalCopiesReportNoDivergentSlot` — precisely the tests the
+    /// inverted-census mutation killed. Nothing is lost by retargeting this one.
+    ///
+    /// What WAS genuinely unpinned is the other half of the census contract.
+    /// `blocked` is the constructor for every zero-byte exit, and its all-zero
+    /// census is not decoration: `DayZeroRediffAttemptPolicy.advance` copies it
+    /// verbatim into `rediff_day_zero_attempts` and `DiagnosticsBundleBuilder`
+    /// exports it. A `blocked` that invented a B-side count would put phantom
+    /// B-copies against an exit that never fetched a byte — a number that lies, in
+    /// the one table this bead exists to make truthful. A mutation giving `blocked`
+    /// a non-zero census survived the whole round-1/2/3 battery until this test.
+    @Test("a zero-byte exit reports a ZERO per-B census — a free decline never invents B-copies")
+    func blockedExitsCarryAnEmptyCensus() {
+        for exit in Exit.allCases where !exit.spentBandwidth {
+            let blocked = RediffDayZeroMintOutcome.blocked(exit, detail: "why")
+            #expect(blocked.exit == exit)
+            #expect(blocked.markCount == 0, "\(exit.rawValue) minted nothing")
+            #expect(blocked.bSideCount == 0, "\(exit.rawValue) never fetched a B-copy")
+            #expect(blocked.bSidesAccepted == 0, "\(exit.rawValue) diffed nothing")
+            #expect(blocked.bSidesGateRejected == 0, "\(exit.rawValue) gate-rejected nothing")
+            #expect(blocked.bSidesUnreadable == 0, "\(exit.rawValue) read nothing")
+            #expect(blocked.divergentSlotCount == 0, "\(exit.rawValue) found no slot")
+            #expect(blocked.detail == "why", "…and the reason still travels")
+        }
+        // …and the census a free exit carries is what lands in the DURABLE row,
+        // so the phantom-B-copy failure mode is closed end to end rather than at
+        // the constructor only.
+        let record = Policy.advance(
+            record: nil, assetId: "a",
+            outcome: .blocked(.aSideNotAnchored),
+            fullFetchBytes: 0, at: 1
         )
-        // If the bytes ARE MP3 and the CDN simply served identical copies, the
-        // diffs are accepted and the union is empty.
-        let diffedButIdentical = RediffDayZeroMintOutcome(
-            exit: .noDivergentSlot, bSideCount: 2, bSidesAccepted: 2,
-            bSidesGateRejected: 0, bSidesUnreadable: 0, divergentSlotCount: 0
-        )
-        #expect(allRejected.exit != diffedButIdentical.exit)
-        #expect(allRejected.bSidesGateRejected == allRejected.bSideCount)
-        #expect(diffedButIdentical.bSidesAccepted == diffedButIdentical.bSideCount)
+        #expect(record.lastMarkCount == 0)
+        #expect(record.lastBSideCount == 0)
+        #expect(record.lastBSidesAccepted == 0)
+        #expect(record.lastBSidesGateRejected == 0)
+        #expect(record.lastBSidesUnreadable == 0)
+        #expect(record.lastDivergentSlotCount == 0)
     }
 
     @Test("pre-fetch exits are marked free; post-fetch exits are marked as having spent bandwidth")
@@ -748,16 +784,32 @@ struct RediffDayZeroAttemptStoreTests {
         )
     }
 
+    /// REVIEW ROUND 3. This claimed to round-trip EVERY diagnostic field while
+    /// leaving six of the sixteen at their default — `lastMarkCount`,
+    /// `lastBSidesAccepted`, `lastBSidesUnreadable`, `lastDivergentSlotCount`,
+    /// `suppressedCount` and `lastSuppressedAt` were all 0/nil. `read == record`
+    /// then holds even when the reader hardcodes one of those columns: a mutation
+    /// replacing `lastBSidesUnreadable: Int(sqlite3_column_int64(stmt, 8))` with a
+    /// literal `0` survived, and so did dropping the upsert's `suppressedCount`
+    /// bind (whose INSERT arm is reached by no other test with a non-zero value —
+    /// `noteRediffDayZeroSuppression` owns the ON CONFLICT arm).
+    ///
+    /// Every value below is now DISTINCT and non-default, so a dropped column, a
+    /// hardcoded default, or two swapped column indices all fail. They are chosen
+    /// for distinctness, not realism — this pins a storage contract, not a
+    /// semantic one (`RediffDayZeroMintExitTests` owns the semantics).
     @Test("the V38 table round-trips every diagnostic field")
     func roundTrip() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: "a1"))
         let record = RediffDayZeroAttemptRecord(
             analysisAssetId: "a1", attemptCount: 2, lastAttemptAt: 1_234.5,
-            lastExit: .noAcceptedByteDiff, lastMarkCount: 0, lastBSideCount: 2,
-            lastBSidesAccepted: 0, lastBSidesGateRejected: 2, lastBSidesUnreadable: 0,
-            lastDivergentSlotCount: 0, lastFullFetchBytes: 108_000_000,
-            totalFullFetchBytes: 216_000_000, lastDetail: "boom"
+            lastExit: .noAcceptedByteDiff, lastMarkCount: 3, lastBSideCount: 4,
+            lastBSidesAccepted: 5, lastBSidesGateRejected: 6, lastBSidesUnreadable: 7,
+            lastDivergentSlotCount: 8, lastFullFetchBytes: 108_000_000,
+            totalFullFetchBytes: 216_000_000, suppressedCount: 9,
+            lastSuppressedAt: 4_321.5, lastDetail: "boom",
+            policyGeneration: 42
         )
         try await store.upsertRediffDayZeroAttempt(record)
 
@@ -914,6 +966,23 @@ struct RediffDayZeroAttemptStoreTests {
     /// no asset row by definition. Pinned so the taxonomy's documentation stays
     /// honest — the recorder must SWALLOW the failure (never propagate), leave
     /// no row, and cost nothing.
+    ///
+    /// REVIEW ROUND 3 — the accepted residual gap, pinned rather than left to a
+    /// review report. This exit's ENTIRE durable trace is the `os_log` breadcrumb
+    /// in `recordDayZeroAttempt`'s `catch`; the attempt row is refused by the
+    /// foreign key and, being a zero-byte exit, it moves no ledger counter either.
+    /// What it DOES move is `rediff_bandwidth_ledger.lastUpdatedAt` — an all-zero
+    /// delta with a fresh timestamp, which is a faint echo of the very shape this
+    /// bead exists to kill ("the ledger was written and nothing to show for it").
+    ///
+    /// Shipping it is deliberate. The exit costs zero bytes, so it cannot
+    /// contribute to the bandwidth bleed this bead is about; in production it
+    /// requires the `analysis_assets` row to vanish between the runtime resolving
+    /// the id and day-0 reaching the store. The honest fix is a global
+    /// blocked-exit counter on the ledger, which is a schema step — filed as
+    /// playhead-ctgn rather than bolted on here. This test is what stops the
+    /// tautology being rediscovered as a bug, and pins the residue so a future
+    /// reader sees the timestamp move for what it is.
     @Test("recording .assetRowMissing for an unknown asset is swallowed, not persisted")
     func assetRowMissingCannotBePersisted() async throws {
         let store = try await makeTestStore()
@@ -929,6 +998,17 @@ struct RediffDayZeroAttemptStoreTests {
         let totals = try await store.fetchRediffBandwidthTotals()
         #expect(totals.dayZeroUnmarkedCount == 0)
         #expect(totals.fullFetchBytesTotal == 0)
+        #expect(totals.precheckBytesTotal == 0)
+        #expect(totals.unchangedCount == 0)
+        #expect(totals.rotatedCount == 0)
+        #expect(totals.failedCount == 0)
+        #expect(totals.parkedCount == 0)
+        // THE RESIDUE (playhead-ctgn): the only ledger field this exit moves is
+        // the timestamp. Asserted, not tolerated silently — if a later change
+        // gives the exit a real counter, this expectation is where it announces
+        // itself.
+        #expect(totals.lastUpdatedAt == 500,
+                "the ledger timestamp moves while every counter stays 0 — the accepted residual gap")
     }
 
     /// REVIEW ROUND 1, END-TO-END. The pure-policy proof

@@ -211,7 +211,14 @@ struct DiagnosticsBundleRediffTests {
         for reason in [nil, "some unrelated defer reason", "precheckBytes=notanumber"] {
             let out = build(DiagnosticsRediffSnapshot(backgroundRuns: [run(reason)]))
                 .rediffDiagnostics.backgroundRuns.first
+            // REVIEW ROUND 3: `out?.precheckBytes == nil` on its own is the
+            // optional-chaining vacuity shape — it holds whenever `out` is nil,
+            // i.e. it would keep passing if the projection stopped emitting the
+            // row at all, which is the failure this file exists to catch. The
+            // row's existence is asserted first so the nil is about the ANNOTATION.
+            #expect(out != nil, "the run is still projected — only its annotation is unparseable")
             #expect(out?.precheckBytes == nil, "unparseable input must not become a number")
+            #expect(out?.fullFetchBytes == nil, "…and neither key half-parses")
         }
 
         // And nothing textual reaches the JSON.
@@ -370,10 +377,18 @@ struct RediffDiagnosticsFetchAdapterTests {
     }
 
     /// The Release hatch is `#if !DEBUG` and therefore absent from this build —
-    /// which is exactly why the duplication was dangerous. What CAN be pinned
-    /// in DEBUG is that the surviving hatch is a pure forward, so there is no
-    /// second body left to diverge.
-    @Test("the DEBUG hatch forwards to the shared adapter rather than reimplementing it")
+    /// which is exactly why the duplication was dangerous.
+    ///
+    /// REVIEW ROUND 3, on what this does and does NOT prove. It pins that the
+    /// hatch AGREES with the shared adapter on every projected field: a mutation
+    /// making `makeRediffFetch` return `.empty` instead of forwarding reddens it.
+    /// It cannot prove the hatch is a *pure forward* — a byte-identical
+    /// reimplementation would pass, and no runtime assertion can distinguish the
+    /// two. What actually removes the divergence risk is structural (one
+    /// unconditionally-compiled `RediffDiagnosticsFetchAdapter`, both hatches
+    /// one-lining into it); this test is the regression guard on top of it, not
+    /// the guarantee.
+    @Test("the DEBUG hatch agrees with the shared adapter on every projected field")
     func debugHatchForwardsToTheSharedAdapter() async throws {
         let store = try await makeTestStore()
         try await seed(store)
