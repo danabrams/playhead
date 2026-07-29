@@ -1695,11 +1695,30 @@ actor AnalysisCoordinator {
             capabilityJSON = nil
         }
 
+        // playhead-0hi9: `assetFingerprint` is still the row's own UUID —
+        // Pipeline A mints this row the moment playback starts, long before
+        // the full-file SHA exists. What changed is `weakFingerprint`: it now
+        // carries the enclosure-URL/ETag/Content-Length/Last-Modified identity
+        // the download manager already knows at this point, which is the
+        // column's entire purpose.
+        //
+        // Without it, `canUpgradeWeakAssetToCanonicalSHA` could never fire on
+        // this row — its final gate is `assetFingerprint == currentWeak ||
+        // weakFingerprint == currentWeak`, and a UUID never equals a weak
+        // fingerprint while the other side was permanently NULL. The only
+        // writer of the column, `updateAssetFingerprint`, was reachable solely
+        // from inside the upgrade path that required it to already be
+        // populated. That closed loop is what let a second row be minted for
+        // the same episode by `AnalysisWorkScheduler.resolveAnalysisAssetId`
+        // once the download finished and the SHA became known.
+        let weakFingerprint = AudioFingerprint.nonEmptyWeak(
+            await downloadManager?.fingerprint(for: episodeId)?.weak
+        )
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: episodeId,
             assetFingerprint: assetId, // Placeholder until content hashing
-            weakFingerprint: nil,
+            weakFingerprint: weakFingerprint,
             sourceURL: audioURL.url.absoluteString,
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
@@ -1724,6 +1743,20 @@ actor AnalysisCoordinator {
 
         return (sessionId, assetId, .queued)
     }
+
+#if DEBUG
+    /// playhead-0hi9 test seam: run `resolveSession` without starting the
+    /// pipeline, so a test can assert what the Pipeline A insert actually
+    /// writes into `analysis_assets` (in particular `weakFingerprint`, whose
+    /// absence made the canonical-SHA upgrade unreachable). Production code
+    /// reaches `resolveSession` only through `handlePlayStarted`.
+    func resolveSessionForTesting(
+        episodeId: String,
+        audioURL: LocalAudioURL
+    ) async throws -> (String, String, SessionState) {
+        try await resolveSession(episodeId: episodeId, audioURL: audioURL)
+    }
+#endif
 
     // MARK: - Capability Changes
 

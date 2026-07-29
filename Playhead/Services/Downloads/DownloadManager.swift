@@ -71,6 +71,19 @@ struct AudioFingerprint: Sendable, Equatable {
     /// SHA-256 of full file contents (nil until download completes).
     let strong: String?
 
+    /// playhead-0hi9: a weak fingerprint is only usable as an identity when
+    /// it is non-empty. Several paths write the `""` sentinel when no HTTP
+    /// response was ever observed, and persisting that into
+    /// `analysis_assets.weakFingerprint` would make every such row look
+    /// identical. `canUpgradeWeakAssetToCanonicalSHA` applies the same
+    /// non-empty rule on the read side, so the two ends agree.
+    static func nonEmptyWeak(_ candidate: String?) -> String? {
+        guard let candidate,
+              !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return candidate
+    }
+
     /// Build weak fingerprint from URL and HTTP metadata.
     static func makeWeak(url: URL, metadata: HTTPAssetMetadata) -> String {
         let etag = metadata.etag ?? ""
@@ -123,6 +136,19 @@ struct AudioAssetPin: Codable, Sendable, Equatable {
     var sourceURL: String?
     /// HTTP validator captured at download time (diagnostics only).
     var etag: String?
+    /// playhead-0hi9: the weak fingerprint (`enclosure URL | ETag |
+    /// Content-Length | Last-Modified`) that was live when these bytes were
+    /// written.
+    ///
+    /// `DownloadManager.fingerprintCache` is pure in-memory state — never
+    /// persisted, cleared by `clearCache()` — so after any relaunch
+    /// `fingerprint(for:)` returned nil and the scheduler's canonical-SHA
+    /// upgrade path (`canUpgradeWeakAssetToCanonicalSHA`) was unreachable no
+    /// matter what the database held. The strong hash was already durable
+    /// here; the weak one was not, and the upgrade needs BOTH. Optional so
+    /// pins written before this field decode unchanged — those rehydrate a
+    /// best-effort weak from `sourceURL`/`etag`/`expectedBytes` instead.
+    var weakFingerprint: String?
 }
 
 // MARK: - DownloadManagerError
@@ -2551,6 +2577,16 @@ actor DownloadManager {
         #if DEBUG
         guard !forcePinWriteFailureForTesting else { return false }
         #endif
+        // playhead-0hi9: stamp the live weak fingerprint onto every pin from
+        // one place rather than threading it through nine construction sites.
+        // Never overwrites a weak the caller supplied, and never downgrades a
+        // recorded weak to the empty sentinel.
+        var pin = pin
+        if AudioFingerprint.nonEmptyWeak(pin.weakFingerprint) == nil {
+            pin.weakFingerprint = AudioFingerprint.nonEmptyWeak(
+                fingerprintCache[episodeId]?.weak
+            )
+        }
         let url = pinFileURL(for: episodeId)
         guard let data = try? JSONEncoder().encode(pin) else { return false }
         do {
@@ -2927,8 +2963,61 @@ actor DownloadManager {
     // MARK: - Fingerprinting
 
     /// Returns the current fingerprint for an episode, if available.
+    ///
+    /// playhead-0hi9: falls back to the `.pin` sidecar on a cache miss. The
+    /// cache is process-local and empty after every relaunch, and this method
+    /// is the ONLY source of `currentAudioFingerprint` for
+    /// `AnalysisWorkScheduler.resolveAnalysisAssetId` — so before this
+    /// fallback existed, the canonical-SHA upgrade could not fire on any
+    /// launch after the one that performed the download, which is half of why
+    /// one episode ended up with two `analysis_assets` rows. Rehydrating also
+    /// warms the cache so repeated calls stay a dictionary read.
     func fingerprint(for episodeId: String) -> AudioFingerprint? {
-        fingerprintCache[episodeId]
+        if let cached = fingerprintCache[episodeId] {
+            return cached
+        }
+        guard let rehydrated = fingerprintFromPin(for: episodeId) else {
+            return nil
+        }
+        fingerprintCache[episodeId] = rehydrated
+        return rehydrated
+    }
+
+    /// playhead-0hi9: reconstruct an `AudioFingerprint` from the durable
+    /// completeness sidecar.
+    ///
+    /// Pins written since 0hi9 carry the exact weak string that was live at
+    /// download time, so the rehydrated value is byte-identical to what the
+    /// in-memory cache held. Older pins predate the field; for those the weak
+    /// is rebuilt from what the sidecar does carry (`sourceURL`, `etag`,
+    /// `expectedBytes`). That reconstruction omits `Last-Modified`, which the
+    /// pin never recorded, so it matches the live weak only for assets served
+    /// without that header — best-effort by construction, and strictly better
+    /// than the nil it replaces.
+    private func fingerprintFromPin(for episodeId: String) -> AudioFingerprint? {
+        guard let pin = loadPin(for: episodeId) else { return nil }
+        let weak: String?
+        if let persisted = AudioFingerprint.nonEmptyWeak(pin.weakFingerprint) {
+            weak = persisted
+        } else if let source = pin.sourceURL, let url = URL(string: source) {
+            weak = AudioFingerprint.makeWeak(
+                url: url,
+                metadata: HTTPAssetMetadata(
+                    etag: pin.etag,
+                    contentLength: pin.expectedBytes > 0 && pin.expectedBytes != Int64.max
+                        ? pin.expectedBytes
+                        : nil,
+                    lastModified: nil
+                )
+            )
+        } else {
+            weak = nil
+        }
+        // A pin with neither a weak nor a strong identity carries no
+        // information the caller can act on; report the miss rather than
+        // caching an empty fingerprint that would shadow a later real one.
+        guard weak != nil || pin.sha256 != nil else { return nil }
+        return AudioFingerprint(weak: weak ?? "", strong: pin.sha256)
     }
 
     /// Computes or returns the strong fingerprint (full SHA-256) for a cached file.

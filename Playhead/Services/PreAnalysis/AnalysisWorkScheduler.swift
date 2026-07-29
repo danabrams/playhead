@@ -4815,11 +4815,29 @@ actor AnalysisWorkScheduler {
                 sourceFingerprint: job.sourceFingerprint
             )
         )
+        // playhead-0hi9: record the weak fingerprint alongside the canonical
+        // SHA. This is the row Pipeline B mints; carrying the weak identity
+        // makes the pair symmetric with the Pipeline A placeholder, so
+        // whichever row a later run finds first, `fetchAssetsByEpisodeId(_:
+        // weakFingerprint:)` and `canUpgradeWeakAssetToCanonicalSHA` can
+        // recognise it as the same audio instead of minting a third row.
+        // `currentAudioFingerprint` is already resolved above for the
+        // canonical-SHA case; the second read covers the non-canonical case,
+        // and `fingerprint(for:)` now survives relaunch via the `.pin`
+        // sidecar.
+        let observedWeak: String?
+        if let currentAudioFingerprint {
+            observedWeak = currentAudioFingerprint.weak
+        } else {
+            observedWeak = await downloadManager.fingerprint(for: job.episodeId)?.weak
+        }
+        let insertWeakFingerprint = AudioFingerprint.nonEmptyWeak(observedWeak)
+        guard !lostOwnership else { throw CancellationError() }
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: job.episodeId,
             assetFingerprint: job.sourceFingerprint,
-            weakFingerprint: nil,
+            weakFingerprint: insertWeakFingerprint,
             sourceURL: localAudioURL.absoluteString,
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
