@@ -206,6 +206,40 @@ struct TruncatedDecodeDurationTests {
         #expect(plain.count == outcome.shards.count)
     }
 
+    /// R2: the shard-cache hit is a SECOND, independent producer of
+    /// `AnalysisDecodeOutcome`, and it asserts `isTruncated == false` by
+    /// construction (step 9 of `performDecode` refuses to cache a truncated
+    /// decode, so anything in the cache covered the whole asset). Nothing
+    /// exercised that branch: every existing test decodes under a fresh
+    /// episode id, so all of them take the compute path. If the cached branch
+    /// ever reported `true`, `persistSpooledEpisodeDuration` would silently
+    /// stop writing a duration for every episode with a warm cache — a
+    /// coverage regression with no failing test anywhere.
+    ///
+    /// The cache hit is PROVEN, not assumed: the audio file is deleted between
+    /// the two calls, so a recompute would throw `fileNotFound` at step 1.
+    @Test("a shard-cache hit returns its shards AND reports isTruncated == false")
+    func cachedDecodeReportsNotTruncated() async throws {
+        let url = try writeSynthAudio(seconds: 6)
+        let service = AnalysisAudioService()
+        let local = try #require(LocalAudioURL(url))
+        let episodeID = "bd0hi9-cache-hit-\(UUID().uuidString)"
+        defer { Task { await service.evictCache(episodeID: episodeID) } }
+
+        let first = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        try #require(!first.shards.isEmpty)
+        #expect(!first.isTruncated)
+
+        // Remove the source. Only the cache can answer now.
+        try FileManager.default.removeItem(at: url)
+        let second = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        #expect(!second.shards.isEmpty,
+                "the second pass must have been served from the shard cache — the file is gone")
+        #expect(second.shards.count == first.shards.count)
+        #expect(!second.isTruncated,
+                "a cached decode covered the whole asset when it was written; calling it truncated would stop every warm-cache episode from ever recording a duration")
+    }
+
     // MARK: - 2b. The true branch, reached by a REAL decode
 
     /// R1: writes an AAC `.m4a` and then STRETCHES its sample-timing table, so

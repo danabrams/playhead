@@ -998,4 +998,190 @@ struct DuplicateAssetReconcileTests {
         let survivor = try #require(try await store.fetchAsset(id: "canon-own"))
         #expect(survivor.episodeDurationSec == 2_933)
     }
+
+    // MARK: - R2 findings
+
+    /// R2 finding 1. `assetReferencingChildColumns` discovered child rows by
+    /// COLUMN NAME (`analysisAssetId` / `assetId`). Every reference in today's
+    /// schema happens to use one of those two spellings, so the rule looked
+    /// complete — but nothing enforces it, and the failure mode of getting it
+    /// wrong is not a missed re-point:
+    ///
+    ///   * under `ON DELETE CASCADE` the undiscovered rows are DESTROYED by
+    ///     `deleteAssetRow` instead of moved;
+    ///   * under `ON DELETE RESTRICT` `deleteAssetRow` raises
+    ///     `FOREIGN KEY constraint failed`, which inside the V39 migration
+    ///     aborts `migrate()` — and `PlayheadRuntime` answers a thrown
+    ///     `migrate()` by deleting `AnalysisStore.defaultDirectory()` and
+    ///     retrying, which succeeds on an empty directory.
+    ///
+    /// So discovery now also asks the schema itself, via
+    /// `PRAGMA foreign_key_list`. This test uses the RESTRICT shape because it
+    /// is the one that reaches the data-loss path.
+    @Test("a foreign key into analysis_assets is followed whatever the column is called")
+    func foreignKeyUnderAnyColumnNameIsFollowed() async throws {
+        let (store, directory) = try await makeTestStoreWithDirectory()
+        // A column name neither discovery-by-name spelling would ever match.
+        try await store.execForTesting("""
+            CREATE TABLE rogue_asset_children (
+                id TEXT PRIMARY KEY,
+                ownerAssetId TEXT NOT NULL
+                    REFERENCES analysis_assets(id) ON DELETE RESTRICT
+            )
+            """)
+
+        let columns = try await store.assetReferencingChildColumns()
+        #expect(
+            columns.contains(
+                ChildAssetColumn(table: "rogue_asset_children", column: "ownerAssetId")
+            ),
+            "the schema is the authority on what references analysis_assets — not a naming convention"
+        )
+
+        // And the discovery has to be load-bearing, not just reported: plant a
+        // v39-visible collision whose loser owns one of these rows and migrate.
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await insertCanonical(
+            store: store, id: "rogue-loser", episodeId: "ep-rogue", fingerprint: canonicalSHA
+        )
+        try await insertCanonical(
+            store: store, id: "rogue-winner", episodeId: "ep-rogue", fingerprint: canonicalSHA
+        )
+        try await store.execForTesting(
+            "INSERT INTO rogue_asset_children VALUES ('rogue-child', 'rogue-loser')"
+        )
+        try await store.setMetaValue(forKey: "schema_version", value: "38")
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == 39,
+                "the migration must COMPLETE — a throw here is answered at launch by deleting the store")
+        #expect(try probeRowCount(
+            in: directory,
+            table: "analysis_assets WHERE episodeId = 'ep-rogue'"
+        ) == 1)
+        #expect(try probeRowCount(
+            in: directory,
+            table: "rogue_asset_children WHERE ownerAssetId = 'rogue-winner'"
+        ) == 1, "the row must have been MOVED to the winner, not cascaded away or left dangling")
+    }
+
+    /// R2 finding 2. Containment. Every throw site the V39 rung can reach —
+    /// a constraint it did not clear, a delete blocked by something the
+    /// re-point could not follow, a corrupt index, a future trigger — used to
+    /// take `migrate()` down with it, and a thrown `migrate()` at launch is
+    /// answered by `PlayheadRuntime` with
+    /// `removeItem(at: AnalysisStore.defaultDirectory())` + retry, which
+    /// succeeds on an empty directory. Silent, total loss of the user's
+    /// analysis database, to protect an INDEX.
+    ///
+    /// The rung now runs in a SAVEPOINT: on any failure it rolls back, logs a
+    /// fault, and leaves `schema_version` at 38 so the next launch retries.
+    /// The degraded state is exactly what `main` ships today.
+    ///
+    /// The fixture is a `BEFORE DELETE` trigger rather than any one specific
+    /// hazard, precisely because the point is to be indifferent to WHICH throw
+    /// site fires.
+    @Test("a V39 failure is contained: migrate() still succeeds and the database is untouched")
+    func v39FailureIsContainedRatherThanAbortingMigrate() async throws {
+        let (store, directory) = try await makeTestStoreWithDirectory()
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await insertCanonical(
+            store: store, id: "contained-loser", episodeId: "ep-contained", fingerprint: canonicalSHA
+        )
+        try await insertCanonical(
+            store: store, id: "contained-winner", episodeId: "ep-contained", fingerprint: canonicalSHA
+        )
+        try await insertChunk(
+            store: store, id: "chunk-contained", assetId: "contained-loser",
+            index: 0, start: 0, end: 100
+        )
+        try await store.execForTesting("""
+            CREATE TRIGGER bd0hi9_v39_guard BEFORE DELETE ON analysis_assets
+            BEGIN SELECT RAISE(ABORT, 'v39 containment fixture'); END
+            """)
+        try await store.setMetaValue(forKey: "schema_version", value: "38")
+
+        // MUST NOT THROW.
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == 38,
+                "an unfinished V39 must stay retryable, not mark itself done")
+        #expect(try probeRowCount(in: directory, table: "analysis_assets") == 2,
+                "the database must be exactly as it was — nothing deleted")
+        let strandedChunks = try await store.fetchTranscriptChunks(assetId: "contained-loser")
+        #expect(strandedChunks.count == 1,
+                "the half-finished re-point must roll back, not leave children moved onto a row that still has a sibling")
+
+        // The retry a later launch performs, once whatever blocked it is gone.
+        try await store.execForTesting("DROP TRIGGER bd0hi9_v39_guard")
+        try await store.migrateOnlyForTesting()
+        #expect(try await store.schemaVersion() == 39)
+        #expect(try probeRowCount(in: directory, table: "analysis_assets") == 1)
+        #expect(try await store.fetchTranscriptChunks(assetId: "contained-winner").count == 1)
+    }
+
+    /// R2 finding 3. `episodeIdsWithMultipleAssets` filters
+    /// `TRIM(episodeId) != ''`, and the `TRIM` is the whole guard for anything
+    /// that is blank without being empty. Nothing pinned it: the R1 test uses
+    /// `""`, which `episodeId != ''` alone already rejects. A whitespace-only
+    /// id is the same defect — `DownloadManager.safeFilename(for:)` is
+    /// `SHA256(episodeId)`, so every row written with that id lands on one
+    /// basename and ``AssetMergeGuard`` votes `.merge` on rows from unrelated
+    /// episodes.
+    @Test("rows grouped under a whitespace-only episodeId are never merged")
+    func whitespaceOnlyEpisodeIdIsNeverMerged() async throws {
+        let store = try await makeTestStore()
+        let blankish = "   "
+        try await insertPlaceholder(
+            store: store, id: "ph-ws", episodeId: blankish,
+            sourceURL: "file:///container-A/e3b0c442.mp3"
+        )
+        try await insertCanonical(
+            store: store, id: "canon-ws", episodeId: blankish, fingerprint: canonicalSHA,
+            sourceURL: "file:///container-B/e3b0c442.mp3"
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 0,
+                "whitespace is not an episode identity any more than the empty string is")
+        #expect(summary.episodesInspected == 0)
+        #expect(try await allAssets(store: store, episodeId: blankish).count == 2)
+    }
+
+    /// R2 finding 4. ``AssetMergeRow/artifactBasename`` trims before testing
+    /// for empty, and that trim is the only thing standing between a
+    /// whitespace-only `sourceURL` and a `.merge` verdict: `URL(string: "   ")`
+    /// is NOT nil, so the value survives to become a basename of spaces, and
+    /// two such rows compare equal. Nothing covered it — the existing unknown
+    /// -source test uses `""`, which the `isEmpty` check rejects on its own.
+    /// The `"/"` rejection is pinned for the same reason.
+    @Test("a blank-but-not-empty sourceURL is unknown, never a basename")
+    func blankSourceURLIsUnknownRatherThanMerged() {
+        func row(_ id: String, _ sourceURL: String) -> AssetMergeRow {
+            AssetMergeRow(
+                rowId: 1, id: id, assetFingerprint: id, createdAt: 1,
+                analysisState: "queued", terminalReason: nil, sourceURL: sourceURL
+            )
+        }
+        #expect(row("a", "   ").artifactBasename == nil)
+        #expect(row("a", "\t\n").artifactBasename == nil)
+        #expect(row("a", "/").artifactBasename == nil)
+        #expect(row("a", "//").artifactBasename == nil)
+
+        #expect(
+            AnalysisStore.mergeGuard(victim: row("ph", "   "), survivor: row("sha", "\t")) == .skipUnknownSource,
+            "two rows whose sourceURL is only whitespace name NOTHING in common — merging them is the irreversible false merge"
+        )
+        #expect(
+            AnalysisStore.mergeGuard(victim: row("ph", "/"), survivor: row("sha", "/")) == .skipUnknownSource
+        )
+        // And the guard still says yes to the shape it exists to allow.
+        #expect(
+            AnalysisStore.mergeGuard(
+                victim: row("ph", "file:///A/9f2c.mp3"),
+                survivor: row("sha", "file:///B/9f2c.mp3")
+            ) == .merge
+        )
+    }
 }

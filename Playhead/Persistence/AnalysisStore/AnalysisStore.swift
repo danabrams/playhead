@@ -5855,14 +5855,54 @@ actor AnalysisStore {
     ///
     /// Idempotent: `CREATE UNIQUE INDEX IF NOT EXISTS`, and the dedup is a
     /// no-op once no group has more than one row.
+    ///
+    /// R2 — CONTAINMENT, AND WHY IT IS NOT OPTIONAL. Everything this rung does
+    /// is DATA-DEPENDENT: it deletes rows, moves child rows between parents,
+    /// and builds an index that fails outright on a violation it did not
+    /// manage to clear. That is a much larger throw surface than the additive
+    /// `CREATE TABLE` / `ADD COLUMN` rungs above, and the consequence of a
+    /// throw here is not a failed migration — it is total data loss:
+    /// `PlayheadRuntime` answers a thrown `migrate()` at launch with
+    /// `removeItem(at: AnalysisStore.defaultDirectory())` followed by a retry,
+    /// and the retry succeeds because the directory is now empty. The user's
+    /// entire analysis database is discarded, silently, with nothing surfaced.
+    ///
+    /// So the rung runs inside a SAVEPOINT and treats its own failure as
+    /// survivable. On a throw it rolls back to the savepoint — undoing any
+    /// half-finished re-point — logs a fault, and **leaves `schema_version` at
+    /// 38** so the next launch retries rather than marking the repair
+    /// permanently done. The cost of that path is exactly the state `main`
+    /// ships today: no unique index, duplicates still possible, and the launch
+    /// sweep still able to repair the pairs on disk. The cost of the
+    /// alternative is the user's library. The index is a rail, not data, and a
+    /// rail is never worth the thing it protects.
+    ///
+    /// The savepoint nests correctly in both callers: inside
+    /// `runSchemaMigration`'s `BEGIN IMMEDIATE` it is a nested savepoint, and
+    /// under `migrateOnlyForTesting` (not transaction-wrapped) `SAVEPOINT`
+    /// opens a transaction that the matching `RELEASE` commits.
     private func migrateUniqueEpisodeFingerprintIndexV39IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 39 else { return }
-        if try tableExists("analysis_assets") {
+        guard try tableExists("analysis_assets") else {
+            try setSchemaVersion(39)
+            return
+        }
+        let savepoint = "v39_unique_asset_identity"
+        try exec("SAVEPOINT \(savepoint)")
+        do {
             try dedupeExactFingerprintCollisionsForV39()
             try exec("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_episode_fingerprint
                 ON analysis_assets(episodeId, assetFingerprint)
                 """)
+            try exec("RELEASE SAVEPOINT \(savepoint)")
+        } catch {
+            // `ROLLBACK TO` does not pop the savepoint; `RELEASE` must follow
+            // or the enclosing transaction is left with a stale frame.
+            try? exec("ROLLBACK TO SAVEPOINT \(savepoint)")
+            try? exec("RELEASE SAVEPOINT \(savepoint)")
+            logger.fault("V39 unique-asset-identity migration could not complete and was rolled back; schema stays at 38 and the next launch retries. The analysis database is UNCHANGED — this is deliberately not fatal, because a thrown migrate() at launch is answered by deleting the whole store. Error: \(String(describing: error), privacy: .public)")
+            return
         }
         try setSchemaVersion(39)
     }
@@ -15487,7 +15527,33 @@ actor AnalysisStore {
 
     /// Every `(table, column)` pair in the LIVE schema that holds an
     /// `analysis_assets.id`. Read from `sqlite_master` + `PRAGMA table_info`
-    /// so no hand-maintained list can drift out of date.
+    /// + `PRAGMA foreign_key_list` so no hand-maintained list can drift out of
+    /// date.
+    ///
+    /// TWO DISCOVERY RULES, DELIBERATELY UNIONED — they cover different
+    /// mistakes and neither subsumes the other:
+    ///
+    ///   * BY NAME (`analysisAssetId` / `assetId`). Catches the columns that
+    ///     hold an asset id without declaring a foreign key —
+    ///     `shadow_fm_responses.assetId` and `background_task_runs.assetId`
+    ///     are real examples, and `ad_listen_rewinds.analysisAssetId` arrived
+    ///     via `ALTER TABLE` in V34 so no `CREATE TABLE` body reveals it.
+    ///   * BY DECLARED FOREIGN KEY into `analysis_assets`, WHATEVER the column
+    ///     is called. R2: the name rule alone is a data-loss hazard, not a
+    ///     coverage nicety. A future table referencing `analysis_assets(id)`
+    ///     under any other spelling is invisible to ``repointChildRows``, and
+    ///     the outcome is decided by that FK's delete action, neither of which
+    ///     is acceptable:
+    ///       - `ON DELETE CASCADE` — ``deleteAssetRow`` silently destroys rows
+    ///         the merge was supposed to move.
+    ///       - `ON DELETE RESTRICT` — ``deleteAssetRow`` raises
+    ///         `FOREIGN KEY constraint failed`. Inside the V39 migration that
+    ///         aborts `migrate()`, and `PlayheadRuntime` answers a thrown
+    ///         `migrate()` by removing `AnalysisStore.defaultDirectory()` and
+    ///         retrying — which succeeds on an empty directory. The whole
+    ///         analysis database, gone, silently.
+    ///     The schema is the authority on what references this table, so ask
+    ///     it rather than trusting a naming convention to hold forever.
     func assetReferencingChildColumns() throws -> [ChildAssetColumn] {
         let assetColumnNames: Set<String> = ["analysisAssetId", "assetId"]
         var tables: [String] = []
@@ -15505,6 +15571,7 @@ actor AnalysisStore {
 
         var out: [ChildAssetColumn] = []
         for table in tables {
+            var columns: Set<String> = []
             // `PRAGMA table_info(...)` cannot be parameterized. These names come
             // from `sqlite_master`, never from a caller, and are quoted anyway.
             let infoStmt = try prepare("PRAGMA table_info(\(Self.quotedIdentifier(table)))")
@@ -15512,8 +15579,25 @@ actor AnalysisStore {
             while try nextRow(infoStmt) {
                 let column = text(infoStmt, 1)
                 if assetColumnNames.contains(column) {
-                    out.append(ChildAssetColumn(table: table, column: column))
+                    columns.insert(column)
                 }
+            }
+
+            // `PRAGMA foreign_key_list` columns: id, seq, table, from, to,
+            // on_update, on_delete, match. `table` is the PARENT, `from` the
+            // child column. SQLite records the parent name as written in the
+            // DDL, so compare case-insensitively.
+            let fkStmt = try prepare("PRAGMA foreign_key_list(\(Self.quotedIdentifier(table)))")
+            defer { sqlite3_finalize(fkStmt) }
+            while try nextRow(fkStmt) {
+                guard text(fkStmt, 2).lowercased() == "analysis_assets" else { continue }
+                let from = text(fkStmt, 3)
+                guard !from.isEmpty else { continue }
+                columns.insert(from)
+            }
+
+            for column in columns.sorted() {
+                out.append(ChildAssetColumn(table: table, column: column))
             }
         }
         return out
