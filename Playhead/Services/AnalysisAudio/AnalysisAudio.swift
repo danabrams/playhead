@@ -334,6 +334,33 @@ protocol AnalysisAudioProviding: Sendable {
     func decode(fileURL: LocalAudioURL, episodeID: String, shardDuration: TimeInterval) async throws -> [AnalysisShard]
 }
 
+// MARK: - AnalysisDecodeOutcome
+
+/// playhead-0hi9: the shards a decode produced **plus** whether the decode
+/// covered the whole asset.
+///
+/// `performDecode` has always computed truncation — it is what suppresses the
+/// shard cache, because caching a partial decode poisons the episode
+/// permanently. It then threw the flag away, so callers could not tell a
+/// complete 2933 s decode from the ~543 s prefix that
+/// `DownloadManager.defaultPlayableThreshold` (8 MiB) makes playable
+/// mid-download. `AnalysisCoordinator.runFromSpooling` persisted the shard
+/// sum of that prefix as `analysis_assets.episodeDurationSec`, which is the
+/// source of the >100 % coverage ratios in playhead-csbq.
+///
+/// Surfacing the flag lets a caller apply the *same* guard the shard cache
+/// already applies: derive nothing durable from an unverified decode.
+struct AnalysisDecodeOutcome: Sendable {
+    /// Shards produced by this decode. Non-empty on success; a prefix of the
+    /// episode when `isTruncated`.
+    let shards: [AnalysisShard]
+    /// `true` when decoded audio fell short of the asset's declared duration
+    /// by more than ``AnalysisAudioService/truncationTolerance``. Shards are
+    /// still returned — a truncated decode is useful for the hot zone, it is
+    /// only unsafe to treat as a *measurement* of the episode.
+    let isTruncated: Bool
+}
+
 // MARK: - AnalysisAudioService
 
 /// Decodes cached podcast audio into reusable 16 kHz mono shards for the
@@ -354,7 +381,28 @@ actor AnalysisAudioService {
 
     /// Truncation tolerance — if decoded audio is shorter than the asset
     /// duration by more than this fraction, treat as truncated.
-    private static let truncationTolerance: Double = 0.05
+    static let truncationTolerance: Double = 0.05
+
+    /// playhead-0hi9: the truncation predicate, hoisted out of
+    /// ``performDecode`` step 8 so it can be exercised without an audio
+    /// fixture. Behaviour is unchanged — same comparison, same tolerance.
+    ///
+    /// `assetDuration` is what the *container* claims (an MP3 Xing/LAME
+    /// header, an MPEG-4 `moov`); `decodedDuration` is what actually came out
+    /// of the reader. A partially-downloaded file declares the whole episode
+    /// and decodes a prefix, which is the shape this catches.
+    ///
+    /// An unknown or non-positive `assetDuration` returns `false`: with no
+    /// declared length there is nothing to fall short of, and calling that
+    /// "truncated" would suppress the shard cache for every asset whose
+    /// container omits a duration.
+    nonisolated static func isTruncatedDecode(
+        decodedDuration: Double,
+        assetDuration: Double
+    ) -> Bool {
+        assetDuration > 0
+            && decodedDuration < assetDuration * (1.0 - truncationTolerance)
+    }
 
     /// Converter output buffer size in frames per conversion cycle.
     /// 30 s of 16 kHz Float32 mono = 480 000 frames ≈ 1.92 MB. Pre-allocated
@@ -379,7 +427,7 @@ actor AnalysisAudioService {
 
     private let logger = Logger(subsystem: "com.playhead", category: "AnalysisAudio")
     private let signposter = OSSignposter(subsystem: "com.playhead", category: "AnalysisAudio")
-    private var activeTasks: [String: Task<[AnalysisShard], Error>] = [:]
+    private var activeTasks: [String: Task<AnalysisDecodeOutcome, Error>] = [:]
 
     // MARK: - Instrumentation (test seam)
 
@@ -429,9 +477,32 @@ actor AnalysisAudioService {
         episodeID: String,
         shardDuration: TimeInterval = AnalysisAudioService.defaultShardDuration
     ) async throws -> [AnalysisShard] {
+        try await decodeOutcome(
+            fileURL: fileURL,
+            episodeID: episodeID,
+            shardDuration: shardDuration
+        ).shards
+    }
+
+    /// playhead-0hi9: ``decode`` plus the truncation verdict.
+    ///
+    /// Callers that persist anything derived from the *extent* of the decode
+    /// (durations, coverage denominators) must use this and honour
+    /// `isTruncated` — the same rule the shard cache in step 9 of
+    /// ``performDecode`` already follows. Callers that only consume the audio
+    /// can keep using ``decode``.
+    ///
+    /// A shard-cache hit reports `isTruncated == false` by construction: step
+    /// 9 refuses to persist a truncated decode, so anything in the cache
+    /// covered the whole asset when it was written.
+    func decodeOutcome(
+        fileURL: LocalAudioURL,
+        episodeID: String,
+        shardDuration: TimeInterval = AnalysisAudioService.defaultShardDuration
+    ) async throws -> AnalysisDecodeOutcome {
         // Return persisted shards if available.
         if let cached = ShardCache.loadShards(episodeID: episodeID) {
-            return cached
+            return AnalysisDecodeOutcome(shards: cached, isTruncated: false)
         }
 
         // If a decode for this episode is already in flight, await it.
@@ -439,7 +510,7 @@ actor AnalysisAudioService {
             return try await existing.value
         }
 
-        let task = Task<[AnalysisShard], Error> {
+        let task = Task<AnalysisDecodeOutcome, Error> {
             try await self.performDecode(
                 fileURL: fileURL,
                 episodeID: episodeID,
@@ -450,9 +521,9 @@ actor AnalysisAudioService {
         activeTasks[episodeID] = task
 
         do {
-            let shards = try await task.value
+            let outcome = try await task.value
             activeTasks[episodeID] = nil
-            return shards
+            return outcome
         } catch {
             activeTasks[episodeID] = nil
             throw error
@@ -497,7 +568,7 @@ actor AnalysisAudioService {
         fileURL: LocalAudioURL,
         episodeID: String,
         shardDuration: TimeInterval
-    ) async throws -> [AnalysisShard] {
+    ) async throws -> AnalysisDecodeOutcome {
         // 1. Validate the file exists locally.
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw AnalysisAudioError.fileNotFound(fileURL.url)
@@ -948,8 +1019,10 @@ actor AnalysisAudioService {
         //    pre-fix `allSamples.count` and is the source of truth for
         //    decoded duration now that no whole-episode buffer exists.
         let decodedDuration = Double(cumulativeOutputSamples) / Self.targetSampleRate
-        let isTruncated = assetDuration > 0
-            && decodedDuration < assetDuration * (1.0 - Self.truncationTolerance)
+        let isTruncated = Self.isTruncatedDecode(
+            decodedDuration: decodedDuration,
+            assetDuration: assetDuration
+        )
 
         // 9. Persist shards for reuse — but only when the file was fully decoded.
         //     Truncated files (still downloading) must not be cached, otherwise
@@ -967,7 +1040,10 @@ actor AnalysisAudioService {
             logger.warning("Truncated file \(fileURL.lastPathComponent): decoded \(decodedDuration, format: .fixed(precision: 1))s of \(assetDuration, format: .fixed(precision: 1))s (\(pct)%)")
         }
 
-        return shards
+        // playhead-0hi9: the flag travels with the shards now. It used to die
+        // here, and `runFromSpooling` persisted the shard sum of a partial
+        // decode as the episode's duration.
+        return AnalysisDecodeOutcome(shards: shards, isTruncated: isTruncated)
     }
 
     // MARK: - Sample rate conversion

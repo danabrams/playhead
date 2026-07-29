@@ -1228,15 +1228,16 @@ actor AnalysisCoordinator {
         // (file not found, unreadable asset, decoder failure).
         logger.info("Spooling: decoding audio for episode \(episodeId)")
         let decodeStart = ContinuousClock.now
-        let shards: [AnalysisShard]
+        let outcome: AnalysisDecodeOutcome
         do {
-            shards = try await audioService.decode(fileURL: audioURL, episodeID: episodeId)
+            outcome = try await audioService.decodeOutcome(fileURL: audioURL, episodeID: episodeId)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             logger.error("Audio decode failed for episode \(episodeId): \(error)")
             throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
         }
+        let shards = outcome.shards
         let decodeElapsed = ContinuousClock.now - decodeStart
         guard !shards.isEmpty else {
             throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
@@ -1246,28 +1247,11 @@ actor AnalysisCoordinator {
         activeShards = shards
         activeAudioURL = audioURL
 
-        // playhead-gtt9.1.1: persist the shard-sum duration onto the
-        // `analysis_assets` row so the coverage guard has a durable
-        // denominator if the pipeline is restarted directly into
-        // `.backfill` (where `activeShards` is never rehydrated). We
-        // also cache it locally so `currentEpisodeDuration()` has a
-        // fallback when `activeShards` is later cleared.
-        if totalAudio > 0 {
-            do {
-                try await store.updateEpisodeDuration(
-                    id: assetId,
-                    episodeDurationSec: totalAudio
-                )
-                cachedPersistedEpisodeDuration = totalAudio
-            } catch {
-                // A failed duration write is not fatal to the pipeline
-                // — `activeShards` is still authoritative for the
-                // in-memory guard. Log and continue; the only cost is
-                // that if the process is killed before another write,
-                // the resume guard will fail safe (gtt9.1.1 intent).
-                logger.warning("Failed to persist episodeDurationSec=\(totalAudio) for asset \(assetId): \(error)")
-            }
-        }
+        await persistSpooledEpisodeDuration(
+            assetId: assetId,
+            episodeId: episodeId,
+            outcome: outcome
+        )
 
         // Start streaming decode — feeds download bytes directly into
         // the decoder, emitting shards as audio arrives.
@@ -1297,6 +1281,62 @@ actor AnalysisCoordinator {
 
         try await transition(sessionId: sessionId, assetId: assetId, to: .featuresReady)
         try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
+    }
+
+    /// playhead-gtt9.1.1: persist the shard-sum duration onto the
+    /// `analysis_assets` row so the coverage guard has a durable denominator
+    /// if the pipeline is restarted directly into `.backfill` (where
+    /// `activeShards` is never rehydrated). Also cached locally so
+    /// ``currentEpisodeDuration()`` has a fallback once `activeShards` is
+    /// cleared.
+    ///
+    /// playhead-0hi9: ONLY from a decode that covered the whole asset.
+    /// `DownloadManager.defaultPlayableThreshold` (8 MiB) resumes playback
+    /// mid-download, which fires `.playStarted` and spools against a byte
+    /// prefix — on a ~123 kbps show that prefix decodes to ~543 s no matter
+    /// how long the episode really is, which is why episodes of 2933 s,
+    /// 1746 s and 4379 s all recorded ~540 s. Persisting that shard sum
+    /// turned `episodeDurationSec` into a measurement of the download
+    /// threshold rather than of the episode, and every coverage ratio scored
+    /// against it came out above 1.0 (playhead-csbq).
+    ///
+    /// `ShardCache` already refuses to persist a truncated decode, on the
+    /// stated grounds that a cached partial result would be returned
+    /// permanently. A persisted partial *duration* is the same poison, in the
+    /// database instead of on disk, and it outlives the cache. So this
+    /// applies the identical guard: on a truncated decode the row keeps
+    /// whatever duration it already had (normally NULL, which the coverage
+    /// guard fails safe on) until a complete decode or the launch-time
+    /// `AudioFileDurationProbe` sweep supplies a real one.
+    ///
+    /// Takes the whole ``AnalysisDecodeOutcome`` rather than a caller-supplied
+    /// flag so the truncation verdict cannot drift from the decode it came
+    /// out of.
+    func persistSpooledEpisodeDuration(
+        assetId: String,
+        episodeId: String,
+        outcome: AnalysisDecodeOutcome
+    ) async {
+        let totalAudio = outcome.shards.map(\.duration).reduce(0, +)
+        guard totalAudio > 0 else { return }
+        guard !outcome.isTruncated else {
+            logger.info("Spooling: decode of episode \(episodeId, privacy: .public) is truncated (\(String(format: "%.0f", totalAudio), privacy: .public)s decoded) — NOT persisting episodeDurationSec")
+            return
+        }
+        do {
+            try await store.updateEpisodeDuration(
+                id: assetId,
+                episodeDurationSec: totalAudio
+            )
+            cachedPersistedEpisodeDuration = totalAudio
+        } catch {
+            // A failed duration write is not fatal to the pipeline —
+            // `activeShards` is still authoritative for the in-memory guard.
+            // Log and continue; the only cost is that if the process is
+            // killed before another write, the resume guard will fail safe
+            // (gtt9.1.1 intent).
+            logger.warning("Failed to persist episodeDurationSec=\(totalAudio) for asset \(assetId): \(error)")
+        }
     }
 
     // MARK: - Stage: FeaturesReady -> HotPathReady
@@ -1534,36 +1574,12 @@ actor AnalysisCoordinator {
         }
     }
 
-    /// Resolve or create an analysis asset ID for an episode without starting
-    /// the pipeline. Use this to wire up the transcript UI while audio is
-    /// still downloading.
-    func resolveAssetId(episodeId: String) async -> String? {
-        do {
-            if let existing = try await store.fetchAssetByEpisodeId(episodeId) {
-                return existing.id
-            }
-            // Create a placeholder asset so the UI has an ID to bind to.
-            let assetId = UUID().uuidString
-            let asset = AnalysisAsset(
-                id: assetId,
-                episodeId: episodeId,
-                assetFingerprint: assetId,
-                weakFingerprint: nil,
-                sourceURL: "",
-                featureCoverageEndTime: nil,
-                fastTranscriptCoverageEndTime: nil,
-                confirmedAdCoverageEndTime: nil,
-                analysisState: SessionState.queued.rawValue,
-                analysisVersion: 1,
-                capabilitySnapshot: nil
-            )
-            try await store.insertAsset(asset)
-            return assetId
-        } catch {
-            logger.error("Failed to resolve asset ID for episode \(episodeId): \(error)")
-            return nil
-        }
-    }
+    // playhead-0hi9: `resolveAssetId(episodeId:)` was deleted here. It had
+    // zero callers repo-wide, and it minted a third flavour of placeholder
+    // row — `assetFingerprint: assetId`, `weakFingerprint: nil`, and an EMPTY
+    // `sourceURL` — that no reconciliation path could ever have matched.
+    // Keeping a second, worse placeholder factory alive next to the one this
+    // bead is fixing was an invitation to reintroduce the bug.
 
     // MARK: - Session Resolution
 
