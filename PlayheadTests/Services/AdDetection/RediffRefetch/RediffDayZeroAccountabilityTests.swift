@@ -1360,4 +1360,204 @@ struct RediffDayZeroMintExitTests {
         #expect(outcome.exit == .tooFewBCopies)
         #expect(outcome.bSideCount == 1)
     }
+
+    // MARK: - REVIEW ROUND 2, REGION 1: the four mint exits with no test
+
+    /// `.aSideReadFailed` — the A-side is an anchored regular file the mmap
+    /// still cannot read. `prefetchBlockerMatchesMintExits` only reaches
+    /// `.aSideNotAnchored` (the file is absent), so the `catch` around
+    /// `Data(contentsOf:options:.mappedIfSafe)` in `resolveDayZeroASide` was
+    /// unexecuted: collapsing it into `.aSideNotAnchored` changed no test, and
+    /// the two are different diagnoses (LRU-evicted / never-downloaded vs.
+    /// present-but-unreadable, e.g. Data Protection locked after first unlock).
+    ///
+    /// Built with `chmod 000`, the same construction
+    /// `unmappableBCopyCountsAsUnreadable` uses for the B-side branch: `stat`
+    /// still reports a non-empty regular file so the anchor guard passes, while
+    /// the read fails. The `isAnchoredRegularFile` control below is what stops
+    /// this test silently degenerating into a second `.aSideNotAnchored` case
+    /// if the chmod ever stopped biting.
+    @Test("an A-side that is anchored but UNREADABLE is its own exit, not 'not anchored'")
+    func unmappableASideIsNamedSeparately() async throws {
+        let dir = try makeTempDir(prefix: "RediffP70fASideUnreadable")
+        let aURL = dir.appendingPathComponent("a.mp3")
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: aURL.path
+            )
+            try? FileManager.default.removeItem(at: dir)
+        }
+        try writeMP3(to: aURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: aURL.path)
+        #expect(AdDetectionService.isAnchoredRegularFile(aURL),
+                "control: the anchor guard still PASSES — this is the branch beyond it")
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: aURL.absoluteString)
+        let service = makeService(store: store)
+
+        // FREE half: the pre-fetch blocker names it before a byte is spent.
+        #expect(await service.dayZeroPrefetchBlocker(analysisAssetId: "a1") == .aSideReadFailed)
+        // …and the mint, sharing the one resolver, cannot disagree.
+        let outcome = await service.mintByteExactDayZeroMarks(
+            analysisAssetId: "a1",
+            bSideURLs: [URL(fileURLWithPath: "/tmp/p70f-b0.mp3"), URL(fileURLWithPath: "/tmp/p70f-b1.mp3")]
+        )
+        #expect(outcome.exit == .aSideReadFailed)
+        #expect(outcome.exit != RediffDayZeroExit.aSideNotAnchored,
+                "an unreadable file and an absent file are different diagnoses")
+        #expect(outcome.bSideCount == 2)
+        #expect(!outcome.exit.spentBandwidth, "an unreadable A-side is a FREE decline")
+    }
+
+    /// A/B pair carrying a REAL byte-exact divergence: A has an ID3-separated
+    /// distinct ad block over ≈[95, 165] s, both B-copies are the same content
+    /// without it. Same construction as `RediffByteFirstEndToEndTests.BytePair`
+    /// (private to that file). Both B-copies are identical, so the k-way union
+    /// collapses to the one slot.
+    private struct DivergentTriple {
+        let aURL: URL
+        let b0: URL
+        let b1: URL
+
+        static func stage(in dir: URL) throws -> DivergentTriple {
+            let adStartFrame = 3637      // ≈ 95.008 s
+            let adFrames = 2680          // ≈ 70.008 s
+            let contentFrames = 10_719   // ≈ 280.0 s of played (A) audio
+            let c1 = SyntheticMP3.frames(count: adStartFrame, seed: 0xC0FFEE)
+            let c2 = SyntheticMP3.frames(count: contentFrames - adStartFrame - adFrames, seed: 0xFACADE)
+            let ad = SyntheticMP3.frames(count: adFrames, seed: 0xAD_B10C)
+            let aData = SyntheticMP3.file(c1 + [SyntheticMP3.id3v2(payloadBytes: 32)] + ad + c2)
+            let bData = SyntheticMP3.file(c1 + c2)
+            let aURL = dir.appendingPathComponent("a.mp3", isDirectory: false)
+            let b0 = dir.appendingPathComponent("b0.fresh.mp3", isDirectory: false)
+            let b1 = dir.appendingPathComponent("b1.fresh.mp3", isDirectory: false)
+            try aData.write(to: aURL)
+            try bData.write(to: b0)
+            try bData.write(to: b1)
+            return DivergentTriple(aURL: aURL, b0: b0, b1: b1)
+        }
+    }
+
+    private func coveringWindow(assetId: String, start: Double, end: Double) -> AdWindow {
+        AdWindow(
+            id: UUID().uuidString,
+            analysisAssetId: assetId,
+            startTime: start,
+            endTime: end,
+            confidence: 0.9,
+            boundaryState: "decoded",
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "test-detection-v1",
+            advertiser: nil, product: nil, adDescription: nil,
+            evidenceText: nil, evidenceStartTime: start,
+            metadataSource: "test", metadataConfidence: nil, metadataPromptVersion: nil,
+            wasSkipped: false, userDismissedBanner: false,
+            evidenceSources: nil, eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            catalogStoreMatchSimilarity: nil
+        )
+    }
+
+    /// `.allSlotsAlreadyCovered` needs NO fault seam — it is a normal-path
+    /// outcome. Round 1 left it untested, which mattered: the exit is the one
+    /// that says "day-0 worked and there was simply nothing new", and confusing
+    /// it with `.noDivergentSlot` would send a future investigation at the byte
+    /// aligner instead of the idempotency filter.
+    ///
+    /// The MINT half is not decoration — it is the anti-vacuity control. If the
+    /// synthetic pair ever stopped diverging, the covered half would still pass
+    /// (for the wrong reason, via `.noDivergentSlot`), so the two halves are
+    /// asserted over the same bytes.
+    @Test("REGION 1: a real divergence MINTS; the same divergence under an existing window is .allSlotsAlreadyCovered")
+    func existingWindowMakesARealDivergenceAllSlotsAlreadyCovered() async throws {
+        let dir = try makeTempDir(prefix: "RediffP70fCovered")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let triple = try DivergentTriple.stage(in: dir)
+
+        // CONTROL: with no existing window the SAME bytes mint a real banner.
+        let mintStore = try await makeTestStore()
+        try await insertAsset(store: mintStore, assetId: "a1", sourceURL: triple.aURL.absoluteString)
+        let minted = await makeService(store: mintStore)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [triple.b0, triple.b1])
+        #expect(minted.exit == .marked, "the pair really does diverge — got \(minted.exit)")
+        #expect(minted.markCount == 1)
+        #expect(minted.divergentSlotCount == 1)
+        #expect(minted.bSidesAccepted == 2)
+
+        // COVERED: an AdWindow already spans the divergent slot.
+        let coveredStore = try await makeTestStore()
+        try await insertAsset(store: coveredStore, assetId: "a1", sourceURL: triple.aURL.absoluteString)
+        try await coveredStore.insertAdWindow(coveringWindow(assetId: "a1", start: 90, end: 170))
+        let covered = await makeService(store: coveredStore)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [triple.b0, triple.b1])
+
+        #expect(covered.exit == .allSlotsAlreadyCovered)
+        #expect(covered.markCount == 0)
+        #expect(covered.divergentSlotCount == 1,
+                "the slot WAS found and then filtered — NOT the same as never finding one")
+        #expect(covered.bSidesAccepted == 2)
+        #expect(covered.exit != RediffDayZeroExit.noDivergentSlot)
+        #expect(try await coveredStore.fetchAdWindows(assetId: "a1").count == 1,
+                "no second banner over the same region")
+    }
+
+    /// `.persistFailed` — round 1 classified this UNREACHABLE for want of a
+    /// store fault seam. It is reachable, and NO new seam was needed: the store
+    /// already ships `execForTesting`, its pre-existing test-only DDL hatch
+    /// ("tests can corrupt rows on purpose"), so the write can be made to fail
+    /// for real by removing the table it writes into. Nothing in production
+    /// changes, and no fake error object is substituted for a real one — this
+    /// is the genuine `AnalysisStore` throw path.
+    @Test("REGION 1: a real write failure over a real divergence is .persistFailed, with detail")
+    func persistFailureIsNamed() async throws {
+        let dir = try makeTempDir(prefix: "RediffP70fPersistFail")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let triple = try DivergentTriple.stage(in: dir)
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: triple.aURL.absoluteString)
+        let service = makeService(store: store)
+        // The fault: the table `upsertHotPathAdWindows` writes into is gone.
+        try await store.execForTesting("DROP TABLE ad_windows")
+
+        let outcome = await service.mintByteExactDayZeroMarks(
+            analysisAssetId: "a1", bSideURLs: [triple.b0, triple.b1]
+        )
+
+        #expect(outcome.exit == .persistFailed)
+        #expect(outcome.divergentSlotCount == 1,
+                "the slot was found and the windows were BUILT — only the write failed")
+        #expect(outcome.markCount == 0, "markCount counts what was PERSISTED, never what was built")
+        #expect(outcome.bSidesAccepted == 2)
+        #expect(outcome.detail != nil, "a persist failure without its error text is not diagnosable")
+        #expect(outcome.exit.spentBandwidth, "the fetch was already paid for by this point")
+    }
+
+    /// `.assetFetchFailed` — likewise reachable through `execForTesting`. The
+    /// point of the exit is that it is NOT `.assetRowMissing`: one is transient
+    /// (retry helps), the other is structural, and the taxonomy claims to tell
+    /// them apart. Both are asserted here over the same service.
+    @Test("REGION 1: a store failure reading the asset row is .assetFetchFailed, NOT .assetRowMissing")
+    func assetFetchFailureIsDistinctFromAMissingRow() async throws {
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: "file:///tmp/p70f-nothing-here.mp3")
+        let service = makeService(store: store)
+
+        // Control: table intact, row absent ⇒ the OTHER exit.
+        #expect(await service.dayZeroPrefetchBlocker(analysisAssetId: "ghost") == .assetRowMissing)
+
+        // The fault: the read itself now throws.
+        try await store.execForTesting("DROP TABLE analysis_assets")
+
+        #expect(await service.dayZeroPrefetchBlocker(analysisAssetId: "a1") == .assetFetchFailed)
+        let outcome = await service.mintByteExactDayZeroMarks(
+            analysisAssetId: "a1",
+            bSideURLs: [URL(fileURLWithPath: "/tmp/p70f-b0.mp3"), URL(fileURLWithPath: "/tmp/p70f-b1.mp3")]
+        )
+        #expect(outcome.exit == .assetFetchFailed)
+        #expect(outcome.exit != RediffDayZeroExit.assetRowMissing,
+                "a transient store failure must not read as a permanent structural one")
+        #expect(!outcome.exit.spentBandwidth, "the pre-fetch blocker declines this for free")
+        #expect(outcome.bSideCount == 2)
+    }
 }
