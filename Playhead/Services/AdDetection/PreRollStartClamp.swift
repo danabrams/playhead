@@ -88,16 +88,22 @@ enum PreRollStartClamp {
     /// `.rediffByteExact` / `.stingerSnapped` start is left untouched. Everything
     /// else is unchanged: the end edge, every other window, the array ordering,
     /// and every non-authority field of the clamped window (`id`,
-    /// `decisionState`, `confidence`, `evidenceStartTime`, …). An eligible or
-    /// missing gate is demoted to mark-only; a stricter gate is preserved.
+    /// `decisionState`, `confidence`, `evidenceStartTime`, …) — INCLUDING the
+    /// eligibility gate, which is carried through verbatim rather than demoted.
     ///
     /// - Parameters:
     ///   - windows: the episode's finalized ad windows (any order).
     ///   - config: the pre-roll threshold. `maxPreRollStartSeconds <= 0` disables.
+    ///   - protectedRegions: time ranges the listener defined by hand. The clamp
+    ///     refuses to widen ACROSS one. Must be supplied by the caller: persisted
+    ///     `userMarked` rows are not in `windows`, so the clamp cannot discover
+    ///     them itself. Empty means "none known", which is the pre-existing
+    ///     behaviour.
     /// - Returns: `windows` with at most the first slot's start clamped to 0.0.
     static func clamp(
         windows: [AdWindow],
-        config: Configuration = .default
+        config: Configuration = .default,
+        protectedRegions: [(start: Double, end: Double)] = []
     ) -> [AdWindow] {
         // Disabled: a non-positive threshold means "never clamp".
         guard config.maxPreRollStartSeconds.isFinite,
@@ -137,6 +143,31 @@ enum PreRollStartClamp {
             return windows
         }
 
+        // A LISTENER'S OWN WINDOW IS NOT OURS TO MOVE (playhead-lc4c).
+        // `.unanchored` above means "no DETECTOR anchored this edge" — it does
+        // NOT mean "no human chose it". A window the listener added carries no
+        // edge anchor, so it arrives here looking exactly like an FM guess, and
+        // the trustworthy-edge exemption does not cover it.
+        //
+        // Forbidden by the fidelity rule: a manual mark outranks anything else,
+        // and a transcript span marking is the HIGHEST-fidelity correction
+        // precisely because the bounds are the listener's rather than the
+        // detector's. This clamp is a derived positional heuristic and sits below
+        // every correction source, so it defers.
+        //
+        // A raw String rather than an `AdBoundaryState` case because the enum has
+        // none — the value is written and read as a raw string throughout
+        // (AdDetectionService writes it, TranscriptPeekViewModel reads it).
+        // Matching that convention; adding a case would touch every exhaustive
+        // switch over the enum and is not this bead's work.
+        //
+        // NOTE: this guard only covers a user-marked row that is IN `windows`.
+        // The case that actually bites — a DETECTOR window widened over a
+        // separately-persisted mark — is handled by `protectedRegions` below.
+        guard first.boundaryState != "userMarked" else {
+            return windows
+        }
+
         // Pre-roll gate: only a first slot whose start sits in `(0, N]`.
         //   • `startTime > 0` — a start already at/before 0.0 has nothing to do
         //     (idempotent no-op).
@@ -147,6 +178,37 @@ enum PreRollStartClamp {
               first.endTime > first.startTime,
               first.startTime > 0,
               first.startTime <= config.maxPreRollStartSeconds else {
+            return windows
+        }
+
+        // DO NOT WIDEN ACROSS A LISTENER'S MARK (playhead-lc4c). The extension
+        // covers `[0, first.startTime)`. If a protected region intersects that
+        // span, widening would SWALLOW it: the widened detector window would sit
+        // on top of a range the listener defined by hand, reducing their mark to a
+        // redundant row inside a bigger guess.
+        //
+        // Observed, not hypothetical: a fusion window past a user's [35, 55) mark
+        // was widened to [0, 60) and engulfed it, leaving TWO windows over the
+        // marked region. The clamp cannot detect this on its own because the
+        // `userMarked` row is persisted separately and is NOT in `windows` — hence
+        // the caller-supplied list.
+        //
+        // REFUSE rather than partially extend to the mark's edge. Refusing fails
+        // closed and is trivially reasonable about; a partial extension would
+        // manufacture a novel adjacency between a detector guess and a human
+        // boundary, and the only episodes it would help are ones where the
+        // listener has ALREADY told us where the ad is.
+        let crossesProtectedRegion = protectedRegions.contains { region in
+            // A degenerate region protects nothing — otherwise a single bad row
+            // becomes a permanent global veto on the clamp for that episode.
+            guard region.start.isFinite,
+                  region.end.isFinite,
+                  region.end > region.start else {
+                return false
+            }
+            return region.start < first.startTime && 0.0 < region.end
+        }
+        guard !crossesProtectedRegion else {
             return windows
         }
 
@@ -167,21 +229,42 @@ private extension AdWindow {
     /// `evidenceStartTime` is deliberately LEFT WHERE THE EVIDENCE ACTUALLY
     /// STARTS — the clamp widens the MARK, not the evidence — and the
     /// ordinal-addressed `id`, `decisionState`, and `confidence` are copied
-    /// unchanged. The gate is capped to mark-only because the newly added prefix
-    /// has no classifier authority. Catalog-match provenance is also cleared: it
-    /// describes the old `[startTime, endTime)` fingerprint, and retaining its
-    /// exact row identity after widening would let a later correction revoke
-    /// unrelated source material.
+    /// unchanged. Catalog-match provenance IS cleared: it describes the old
+    /// `[startTime, endTime)` fingerprint, and retaining its exact row identity
+    /// after widening would let a later correction revoke unrelated source
+    /// material.
+    ///
+    /// `eligibilityGate` IS CARRIED THROUGH VERBATIM, INCLUDING `nil`
+    /// (playhead-ye0n).
+    ///
+    /// This helper used to demote the gate to `markOnly` on the theory that a
+    /// widened window is a less certain window. That was wrong, and it is worth
+    /// recording why so it is not reintroduced:
+    ///
+    ///   • THE RISK IS PER-EDGE, NOT PER-WINDOW. This clamp only moves the first
+    ///     slot's START leftward to 0.0 — an OUTER edge, bounded by the episode
+    ///     boundary. The edge that can eat the show is the INNER one (a pre-roll's
+    ///     end), and the clamp never touches it. Demoting the whole window for
+    ///     moving the free edge surrendered auto-skip on the part that was already
+    ///     trustworthy — and a mark-only banner is worth far less than a silent
+    ///     skip, and can itself cost show content when the listener acts on it.
+    ///   • IT WAS REDUNDANT where it was right: the clamp fires only on an
+    ///     `.unanchored` start edge, and playhead-2350 is the independent
+    ///     authority on whether an unanchored edge may auto-skip.
+    ///   • IT BROKE A REAL CONTRACT where 2350 deliberately permits an unanchored
+    ///     edge to stay eligible. playhead-527u stamps a user-marked window
+    ///     `.eligible` at the listener's own boundaries despite it carrying no
+    ///     detector anchor; the demotion overrode the listener.
+    ///
+    /// So this is a pure WIDTH change now. Carrying the gate through must never
+    /// become RAISING it: a window that arrives `markOnly` stays `markOnly`, one
+    /// that arrives suppressed/blocked stays so, and one that arrives `nil` stays
+    /// `nil`. Verbatim copy is the only behaviour satisfying all three, which is
+    /// why there is no severity arithmetic here at all — arithmetic is what would
+    /// let a future edit start auto-skipping windows the pipeline refused. In
+    /// particular the old code mapped `nil` to `markOnly`, so an ungated window
+    /// silently acquired a gate the pipeline never assigned.
     func withStartTimeClampedToZero() -> AdWindow {
-        let safeEligibilityGate: String
-        if let existing = eligibilityGate.flatMap(
-            SkipEligibilityGate.init(rawValue:)
-        ),
-           existing.severity >= SkipEligibilityGate.markOnly.severity {
-            safeEligibilityGate = existing.rawValue
-        } else {
-            safeEligibilityGate = SkipEligibilityGate.markOnly.rawValue
-        }
         return AdWindow(
             id: id,
             analysisAssetId: analysisAssetId,
@@ -202,7 +285,7 @@ private extension AdWindow {
             wasSkipped: wasSkipped,
             userDismissedBanner: userDismissedBanner,
             evidenceSources: evidenceSources,
-            eligibilityGate: safeEligibilityGate,
+            eligibilityGate: eligibilityGate,
             catalogStoreMatchSimilarity: nil,
             catalogFingerprintVersion: nil,
             catalogMatchedEntryId: nil,
