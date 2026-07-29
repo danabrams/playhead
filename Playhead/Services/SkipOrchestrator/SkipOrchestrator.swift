@@ -298,6 +298,21 @@ actor SkipOrchestrator {
             .map(\.rawValue)
     )
 
+    /// playhead-u45d: the persisted decision states
+    /// `AnalysisStore.persistRevertedAdWindowsIfCurrent` will accept as veto
+    /// targets. Deliberately a copy of the store's own literal rather than a
+    /// reference to `preloadEligibleDecisionStates`, which happens to hold the
+    /// same three values for an unrelated reason (cross-launch cue
+    /// continuity): the two are free to diverge, and a shared constant would
+    /// couple them by accident. A row outside this set would make the whole
+    /// transaction return nil, so admitting one here would convert a working
+    /// veto into a refused one.
+    private static let userVetoRevertibleDecisionStates: Set<String> = [
+        AdDecisionState.candidate.rawValue,
+        AdDecisionState.confirmed.rawValue,
+        AdDecisionState.applied.rawValue,
+    ]
+
     // MARK: - Dependencies
 
     private let store: AnalysisStore
@@ -3737,6 +3752,36 @@ actor SkipOrchestrator {
                 return false
             }
         }
+        // playhead-u45d: THE VETO'S TARGETS COME FROM PERSISTED ANALYSIS, NOT
+        // ONLY FROM THE LIVE SESSION.
+        //
+        // The listener is looking at the transcript, which renders persisted
+        // `decoded_spans`. This seam used to resolve targets exclusively from
+        // `windows` / `suggestWindows` — live playback state with a completely
+        // different lifetime — and returned `false` when that came up empty.
+        // The empty case is not exotic: `beginEpisode` only hydrates persisted
+        // rows at `confidence >= 0.7`, so every mark-only-tier window is
+        // displayed and untracked; so is any row belonging to an episode that
+        // is not the one playing. The listener could therefore only dismiss an
+        // ad the orchestrator happened to be holding at that moment, and the
+        // rest failed silently after four deliberate taps.
+        //
+        // The read happens HERE, before the synchronous target/partition
+        // block, so that block keeps the playhead-1mq1.2.1 property it was
+        // given: the target set and the evidence partition are computed
+        // together, with no suspension between them. A read failure degrades
+        // to the live-only behaviour rather than cancelling the gesture.
+        var persistedWindows: [AdWindow] = []
+        do {
+            persistedWindows = try await store.fetchAdWindows(
+                assetId: expectedAssetId
+            )
+        } catch {
+            logger.warning(
+                "Manual veto: persisted ad-window read failed; falling back to live session targets"
+            )
+        }
+
         let sourceLifecycleGeneration = episodeLifecycleGeneration
         let sourceShowId = validatedShow.showId
         let managedRevertTargets: [(id: String, managed: ManagedWindow)] =
@@ -3776,12 +3821,43 @@ actor SkipOrchestrator {
             }
             exactTargetsByID[target.id] = target.window
         }
+
+        // playhead-u45d: fold in every persisted row the live session was not
+        // holding. Ids the session already contributed are left alone, so the
+        // previously-working path is byte-identical and this is purely
+        // additive; a live-vs-stored divergence on a shared id is still
+        // adjudicated where it always was, by
+        // `persistRevertedAdWindowsIfCurrent`'s producer-revision check.
+        //
+        // The material pre-filter is not decoration. That store call validates
+        // every expected row and returns nil — failing the WHOLE transaction —
+        // if any one of them is malformed, so admitting a corrupt persisted
+        // row here would turn a veto that used to succeed into a refusal.
+        for window in persistedWindows
+        where exactTargetsByID[window.id] == nil
+            && window.analysisAssetId == expectedAssetId
+            && !window.id.isEmpty
+            && Self.userVetoRevertibleDecisionStates
+                .contains(window.decisionState)
+            && window.startTime.isFinite
+            && window.endTime.isFinite
+            && window.confidence.isFinite
+            && window.startTime >= 0
+            && window.endTime > window.startTime
+            && (0...1).contains(window.confidence)
+            && window.startTime < end
+            && window.endTime > start {
+            exactTargetsByID[window.id] = window
+        }
+
         let exactTargets = exactTargetsByID.values.sorted {
             $0.id < $1.id
         }
-        guard let correctionOwner = exactTargets.first else {
-            return false
-        }
+        // playhead-u45d: NO LONGER A REFUSAL. A highlighted span with no
+        // `ad_window` behind it — spans and windows are different populations,
+        // written by different stages — has no row to revert but still carries
+        // a correction worth recording. See the window-less branch below.
+        let correctionOwner = exactTargets.first
 
         // playhead-1mq1.2.1: partition every target before the first
         // suspension, excluding this transaction's OWN window set — a window
@@ -3824,11 +3900,13 @@ actor SkipOrchestrator {
                     assetId: expectedAssetId,
                     podcastId: sourceShowId,
                     source: .manualVeto,
-                    windowId: correctionOwner.id,
-                    additionalWindowIds:
-                        exactTargets.dropFirst().map(\.id),
-                    detectionProjection:
-                        ExplicitFeedbackDetectionProjection(correctionOwner),
+                    windowId: correctionOwner?.id,
+                    additionalWindowIds: correctionOwner == nil
+                        ? nil
+                        : exactTargets.dropFirst().map(\.id),
+                    detectionProjection: correctionOwner.map {
+                        ExplicitFeedbackDetectionProjection($0)
+                    },
                     correctionProvenance:
                         correctionSpan?.anchorProvenance ?? []
                 )
@@ -3838,15 +3916,42 @@ actor SkipOrchestrator {
             if let barrier = feedbackPersistenceBarrierForTesting {
                 await barrier()
             }
-            guard let wasNewlyInserted =
-                    try await store.persistRevertedAdWindowsIfCurrent(
-                        expectedWindows: exactTargets,
-                        analysisAssetId: expectedAssetId,
-                        expectedPodcastId: sourceShowId,
-                        correction: correction
-                    )
-            else {
-                return false
+            let wasNewlyInserted: Bool
+            if exactTargets.isEmpty {
+                // playhead-u45d: nothing to revert, everything to record. The
+                // correction IS the durable artifact here — it is what
+                // `BackfillEvidenceFusion` reads to suppress this material on
+                // the next pass, and what the transcript's own read consults
+                // to stop highlighting it.
+                //
+                // Without a correction store there is no `CorrectionEvent` at
+                // all (the existing policy a few lines above), so this gesture
+                // has nothing durable to write and must say so rather than
+                // report a success it did not achieve.
+                guard let correction,
+                      let inserted =
+                        try await store
+                            .persistUserVetoCorrectionWithoutWindows(
+                                correction: correction,
+                                analysisAssetId: expectedAssetId,
+                                expectedPodcastId: sourceShowId
+                            )
+                else {
+                    return false
+                }
+                wasNewlyInserted = inserted
+            } else {
+                guard let inserted =
+                        try await store.persistRevertedAdWindowsIfCurrent(
+                            expectedWindows: exactTargets,
+                            analysisAssetId: expectedAssetId,
+                            expectedPodcastId: sourceShowId,
+                            correction: correction
+                        )
+                else {
+                    return false
+                }
+                wasNewlyInserted = inserted
             }
             if let correction {
                 schedulePostCommitCorrectionLearning(

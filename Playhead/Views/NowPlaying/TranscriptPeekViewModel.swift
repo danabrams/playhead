@@ -430,7 +430,17 @@ final class TranscriptPeekViewModel {
         var mapping: [Int: [DecodedSpan]] = [:]
         var userMarked = Set<Int>()
 
-        let userMarkedWindows = adWindows.filter { $0.boundaryState == "userMarked" }
+        // playhead-u45d: the same defect one field over. This set used to
+        // filter on `boundaryState` alone, so vetoing an ad the listener had
+        // marked themselves flipped `decisionState` to `reverted` and left the
+        // rows lit — the write landing where nothing looked, exactly as with
+        // decoded spans. `reverted` IS the durable record the veto writes;
+        // reading it is the correction taking effect, not the view hiding a
+        // row it was never told about.
+        let userMarkedWindows = adWindows.filter {
+            $0.boundaryState == "userMarked"
+                && $0.decisionState != AdDecisionState.reverted.rawValue
+        }
 
         for (idx, chunk) in chunks.enumerated() {
             let overlapping = decodedSpans.filter { span in

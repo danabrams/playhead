@@ -9783,7 +9783,9 @@ actor AnalysisStore {
         }
 
         let current = try fetchAdWindows(assetId: analysisAssetId)
-        let currentDecodedSpans = try fetchDecodedSpans(
+        // playhead-u45d: the egress baseline freezes the PERSISTED shape, so
+        // it must see every row regardless of the listener's corrections.
+        let currentDecodedSpans = try fetchDecodedSpansIncludingUserVetoed(
             assetId: analysisAssetId
         )
         let currentListenRewinds = try fetchListenRewinds(
@@ -10050,7 +10052,11 @@ actor AnalysisStore {
         }
         guard let decodedSpans =
                 ExplicitBannerFeedbackPrivacy.canonicalDecodedSpans(
-                    try fetchDecodedSpans(assetId: analysisAssetId),
+                    // playhead-u45d: privacy projection over the persisted
+                    // rows — the veto-aware read would change the baseline.
+                    try fetchDecodedSpansIncludingUserVetoed(
+                        assetId: analysisAssetId
+                    ),
                     expectedAssetId: analysisAssetId
                 ),
               let listenRewinds =
@@ -10239,6 +10245,58 @@ actor AnalysisStore {
                     decisionState: AdDecisionState.reverted.rawValue
                 )
             }
+            try exec("COMMIT")
+            return wasNewlyInserted
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// playhead-u45d: durably record a veto over material that owns NO
+    /// `ad_windows` row.
+    ///
+    /// `decoded_spans` and `ad_windows` are different populations — the Phase
+    /// 5 projector writes spans from evidence atoms, fusion writes windows —
+    /// so the transcript routinely highlights material with no window behind
+    /// it. ``persistRevertedAdWindowsIfCurrent`` requires a non-empty expected
+    /// set and returns nil for those, which is what made the gesture a silent
+    /// no-op: there was no row to revert, so nothing at all was written and the
+    /// listener was told nothing. There is still a correction to record, and
+    /// it is the correction — not the row mutation — that the detection
+    /// pipeline learns from.
+    ///
+    /// Validates the same identity the windowed path does, minus the parts
+    /// that only exist when a window does: the event must belong to this
+    /// asset, name the expected show, carry the expected source, scope itself
+    /// to an exact time span on this asset, and claim NO ad-window target.
+    /// Returns nil (writing nothing) when any of that fails.
+    func persistUserVetoCorrectionWithoutWindows(
+        correction: CorrectionEvent,
+        analysisAssetId: String,
+        expectedPodcastId: String?,
+        expectedCorrectionSource: CorrectionSource = .manualVeto
+    ) throws -> Bool? {
+        try exec("BEGIN TRANSACTION")
+        do {
+            guard !analysisAssetId.isEmpty,
+                  correction.analysisAssetId == analysisAssetId,
+                  correction.podcastId == expectedPodcastId,
+                  correction.source == expectedCorrectionSource,
+                  correction.targetRefs?.adWindowId == nil,
+                  correction.targetRefs?.adWindowIds == nil,
+                  let scope = CorrectionScope.deserialize(correction.scope),
+                  case let .exactTimeSpan(scopedAssetId, start, end) = scope,
+                  scopedAssetId == analysisAssetId,
+                  start.isFinite,
+                  end.isFinite,
+                  start >= 0,
+                  end > start
+            else {
+                try exec("ROLLBACK")
+                return nil
+            }
+            let wasNewlyInserted = try appendCorrectionEvent(correction)
             try exec("COMMIT")
             return wasNewlyInserted
         } catch {
@@ -14449,7 +14507,11 @@ actor AnalysisStore {
               }),
               let decodedSpans =
                 ExplicitBannerFeedbackPrivacy.canonicalDecodedSpans(
-                    try fetchDecodedSpans(assetId: analysisAssetId),
+                    // playhead-u45d: privacy projection over the persisted
+                    // rows — the veto-aware read would change the baseline.
+                    try fetchDecodedSpansIncludingUserVetoed(
+                        assetId: analysisAssetId
+                    ),
                     expectedAssetId: analysisAssetId
                 ),
               let listenRewinds =
@@ -16123,9 +16185,82 @@ actor AnalysisStore {
         }
     }
 
-    /// Fetch all decoded spans for an asset, ordered by startTime.
+    /// The decoded spans for an asset that the listener has NOT vetoed,
+    /// ordered by startTime. This is the default read — every consumer that
+    /// asks "is this material an ad?" gets the answer the listener's
+    /// corrections have already revised.
+    ///
+    /// playhead-u45d — WHY THE VETO IS RESOLVED HERE, AND NOT IN THE VIEW.
+    ///
+    /// `decoded_spans` has no decision, gate or tombstone column, so before
+    /// this bead the transcript highlight had nothing to filter on even in
+    /// principle: it rendered raw geometry while the veto's only durable
+    /// mutation went to `ad_windows.decisionState`. Marking a detected span
+    /// "not an ad" therefore committed a correction and changed nothing the
+    /// listener could see.
+    ///
+    /// The obvious repair — drop the span in `LiveTranscriptPeekDataSource` or
+    /// in the view model — is the wrong one. It would make the UI say one
+    /// thing while `BackfillEvidenceFusion`'s correction factor and the
+    /// recurrence-revocation machinery went on reading exactly what they read
+    /// before, which is a pretence rather than a correction.
+    ///
+    /// So the suppression is keyed on the durable record itself: the
+    /// `CorrectionEvent` that `SkipOrchestrator.revertByTimeRange` writes,
+    /// which is the SAME row the detection pipeline already consults. The span
+    /// disappears BECAUSE the correction exists — remove the correction and it
+    /// comes back — and it disappears identically for every reader, not just
+    /// for the one surface that noticed.
+    ///
+    /// Readers doing structural bookkeeping over persisted rows (the
+    /// width-ownership clobber guard, synthetic-ordinal collision probing, the
+    /// explicit-feedback egress baseline) must still see every row and call
+    /// ``fetchDecodedSpansIncludingUserVetoed(assetId:)`` explicitly.
     func fetchDecodedSpans(assetId: String) throws -> [DecodedSpan] {
-        try fetchDecodedSpansIncludingUserVetoed(assetId: assetId)
+        let rows = try fetchDecodedSpansIncludingUserVetoed(assetId: assetId)
+        guard !rows.isEmpty else { return rows }
+        let vetoes = try userVetoedTimeRanges(assetId: assetId)
+        guard !vetoes.isEmpty else { return rows }
+        return rows.filter { span in
+            !vetoes.contains { veto in
+                veto.startTime < span.endTime && veto.endTime > span.startTime
+            }
+        }
+    }
+
+    /// Time ranges over `assetId` the listener has explicitly marked "not an
+    /// ad" (`CorrectionSource.manualVeto` carrying an `.exactTimeSpan` scope).
+    ///
+    /// Deliberately narrow. `listenRevert` ("play this through") and the
+    /// private banner-denial receipts are also false-positive-kinded, but they
+    /// are weaker or differently-scoped claims and the banner receipts carry
+    /// their own egress-privacy machinery. This reads only the gesture whose
+    /// stated meaning is "this material is not an ad"; widening it later is
+    /// additive.
+    ///
+    /// OVERLAP, not containment, and that matches
+    /// `SkipOrchestrator.revertByTimeRange`'s own target predicate — the same
+    /// gesture reverts every `ad_window` that merely overlaps its range. Using
+    /// a different rule here would let the display and the durable state
+    /// disagree about what one tap covered.
+    func userVetoedTimeRanges(
+        assetId: String
+    ) throws -> [(startTime: Double, endTime: Double)] {
+        var ranges: [(startTime: Double, endTime: Double)] = []
+        for event in try loadCorrectionEvents(analysisAssetId: assetId) {
+            guard event.source == .manualVeto,
+                  let scope = CorrectionScope.deserialize(event.scope),
+                  case let .exactTimeSpan(scopedAssetId, start, end) = scope,
+                  scopedAssetId == assetId,
+                  start.isFinite,
+                  end.isFinite,
+                  end > start
+            else {
+                continue
+            }
+            ranges.append((startTime: start, endTime: end))
+        }
+        return ranges
     }
 
     /// Every persisted `decoded_spans` row for an asset, ordered by
