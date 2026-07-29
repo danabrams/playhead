@@ -246,6 +246,59 @@ struct MigrationLadderTests {
         // test fails only on the bugs it was designed to catch.
     }
 
+    /// playhead-6av0 REVIEW R2 — THE RAIL THAT WAS MISSING.
+    ///
+    /// The three tests above are named for a seam whose ONLY reason to exist
+    /// is that it does not run `createTables()`. Between playhead-6boz and
+    /// review round 2 it silently did: every SQL surface routes through
+    /// `ensureOpen()`, the seam's first statement is SQL, and on a
+    /// not-yet-opened store that first statement ran the whole real
+    /// migration — `createTables()` and the full ladder — before the seam's
+    /// own first rung was consulted. Six tests named after the seam went on
+    /// passing across eleven schema versions. Measured: deleting the ENTIRE
+    /// body of `migrateOnlyForTesting()` left all six GREEN.
+    ///
+    /// Nothing pinned the no-`createTables()` property directly, so nothing
+    /// could notice it had been lost — the three tests above only assert the
+    /// END STATE, which `migrate()` reaches by itself. This asserts the
+    /// property: after the seam runs against a v1-shape fixture, the tables
+    /// that live ONLY in `createTables()` must still be absent.
+    ///
+    /// `transcript_chunks`, `analysis_jobs`, `semantic_scan_results` and
+    /// `decoded_spans` are each built by `createTables()` and by nothing else;
+    /// every rung that touches them in the seam is `tableExists`-guarded. So
+    /// their appearance here means one thing only: `createTables()` ran.
+    @Test("Cycle 4 H1 RAIL: the isolated ladder does NOT run createTables()")
+    func isolatedLadderDoesNotRunCreateTables() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try seedV1ShapeDatabase(in: dir)
+        for table in ["transcript_chunks", "analysis_jobs", "semantic_scan_results", "decoded_spans"] {
+            #expect(try !probeTableExists(in: dir, table: table), "fixture precondition")
+        }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrateOnlyForTesting()
+
+        for table in ["transcript_chunks", "analysis_jobs", "semantic_scan_results", "decoded_spans"] {
+            #expect(
+                try !probeTableExists(in: dir, table: table),
+                """
+                `\(table)` exists after migrateOnlyForTesting(). It lives only in \
+                createTables(), so createTables() ran — the seam is painting over \
+                the fixture it was written to avoid, and every test named after it \
+                is measuring migrate() instead. Check that nothing reaches SQL \
+                ahead of `openWithoutSchemaMigrationForTesting()`.
+                """
+            )
+        }
+        // …and the ladder still ran: its tableExists-guarded rungs skipped the
+        // absent tables and the version still climbed to head.
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
+    }
+
     @Test("Cycle 4 H1: v2-seeded DB climbs to v5 via isolated ladder")
     func isolatedLadderFromV2() async throws {
         let dir = try freshTempDir()
