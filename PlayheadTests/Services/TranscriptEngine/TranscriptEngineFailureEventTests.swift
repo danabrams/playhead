@@ -191,7 +191,7 @@ private final class SucceedsForOneEpisodeRecognizer: SpeechRecognizer, @unchecke
 /// opening before waiting is remembered — so a test can synchronise with the
 /// transcription loop without polling or sleeping, and cannot deadlock on the
 /// order in which the two sides get scheduled.
-private actor TestGate {
+private actor InterruptionTestGate {
     private var opened = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
@@ -215,7 +215,7 @@ private actor TestGate {
 /// point in the loop.
 private final class AnnouncingSilentRecognizer: SpeechRecognizer, @unchecked Sendable {
     private let _loaded = OSAllocatedUnfairLock(initialState: false)
-    let firstCall = TestGate()
+    let firstCall = InterruptionTestGate()
 
     func loadModel() async throws { _loaded.withLock { $0 = true } }
     func unloadModel() async { _loaded.withLock { $0 = false } }
@@ -237,7 +237,7 @@ private final class AnnouncingSilentRecognizer: SpeechRecognizer, @unchecked Sen
 /// interrupted-with-a-real-diagnosis fixture.
 private final class AnnouncingFailingRecognizer: SpeechRecognizer, @unchecked Sendable {
     private let _loaded = OSAllocatedUnfairLock(initialState: false)
-    let firstCall = TestGate()
+    let firstCall = InterruptionTestGate()
 
     func loadModel() async throws { _loaded.withLock { $0 = true } }
     func unloadModel() async { _loaded.withLock { $0 = false } }
