@@ -19,11 +19,13 @@ import Foundation
 
 /// Resting/working state of the per-episode prepare control.
 ///
-/// Resting states are `.idle` (✦ — not prepared; tap to prepare) and
-/// `.ready` (✓ — fully analyzed; ad-skips prepared). The three working
-/// states drive the segmented readiness bar. `.waitingForWifi` is the
-/// cellular-gated variant: the user has expressed intent but a download
-/// is required and the current network + `cellularPolicy` forbid it.
+/// Resting states are `.idle` (✦ — not prepared; tap to prepare),
+/// `.partiallyAnalyzed` (◐ — the pipeline stopped without covering the
+/// episode) and `.ready` (✓ — fully ad-scanned; ad-skips prepared). The
+/// three working states drive the segmented readiness bar.
+/// `.waitingForWifi` is the cellular-gated variant: the user has expressed
+/// intent but a download is required and the current network +
+/// `cellularPolicy` forbid it.
 enum EpisodePreparationControlState: String, Equatable, Sendable, CaseIterable {
     /// ✦ Nothing prepared yet (not downloaded / not analyzed). Tap to prepare.
     case idle
@@ -33,7 +35,16 @@ enum EpisodePreparationControlState: String, Equatable, Sendable, CaseIterable {
     case downloading
     /// Audio is present; analysis is running — the analyze zone fills.
     case analyzing
-    /// ✓ Fully analyzed; skip-cues prepared.
+    /// playhead-pz32: ◐ the pipeline reached a terminal completion but the
+    /// episode is NOT fully ad-scanned — either the terminal itself is a
+    /// degraded one (`completeFeatureOnly` / `completeTranscriptPartial`) or
+    /// measured ad-scan coverage falls short of
+    /// ``episodePreparationCompleteThreshold``. Distinct from `.ready`
+    /// because it is the honest answer, and distinct from `.analyzing`
+    /// because nothing is running — a spinner here would be a lie in the
+    /// other direction.
+    case partiallyAnalyzed
+    /// ✓ Fully ad-scanned; skip-cues prepared.
     case ready
 }
 
@@ -58,23 +69,41 @@ struct EpisodePreparationInputs: Equatable, Sendable {
     /// was triggered automatically (auto-pipeline) or by the user. Drives
     /// the "auto-analyzing shows the working bar without a tap" behaviour.
     var analysisActive: Bool
-    /// Analysis has covered the whole episode — the authoritative `.ready`
-    /// signal, computed by the caller from coverage-vs-duration (and/or a
-    /// terminal `done` analysis state). Note: the partial-completion
-    /// `SessionState` terminals (`completeFeatureOnly` /
-    /// `completeTranscriptPartial`) project to `PersistedStatus.done`, so
-    /// they arrive here as `analysisComplete == true` (calm ✓) — the
-    /// control does not distinguish degraded-full from full.
+    /// The episode is HONESTLY fully analyzed — the authoritative `.ready`
+    /// signal, computed by the caller via
+    /// ``episodePreparationAnalysisComplete(status:adScanFraction:isDegradedTerminal:)``
+    /// from MEASURED semantic ad-scan coverage. playhead-pz32: a terminal
+    /// `PersistedStatus.done` no longer implies this on its own — the four
+    /// `SessionState` completion terminals all project to `.done`, two of
+    /// them explicitly degraded, and none of them proves the audio was read
+    /// for ads.
     var analysisComplete: Bool
+    /// playhead-pz32: the pipeline reached a terminal COMPLETION for this
+    /// episode (any of `.complete`, `.completeFull`, `.completeFeatureOnly`,
+    /// `.completeTranscriptPartial`) — it will do no further work on its own.
+    /// Combined with `analysisComplete == false` this is what distinguishes
+    /// "stopped short" (◐ `.partiallyAnalyzed`) from "still working"
+    /// (`.analyzing`).
+    var analysisTerminatedComplete: Bool
     /// Analysis reached a terminal FAILURE / cancellation (all
     /// `failed*` / `cancelledBudget` `SessionState`s project to
     /// `PersistedStatus.failed`). A terminal failure must resolve to a
     /// resting, actionable glyph — never a perpetual "analyzing" spinner —
     /// so the user can tap to retry.
     var analysisFailed: Bool
-    /// Coverage watermark / duration in `[0, 1]`, or `nil` when coverage
-    /// or duration is unknown (legacy rows, 0-duration episodes).
-    var analysisFraction: Double?
+    /// playhead-pz32: fraction of the episode's audio that a semantic ad
+    /// scan has actually EXAMINED, in `[0, 1]`, or `nil` when the scan
+    /// extent or a positive duration is unknown. Sourced from
+    /// ``AnalysisCoverageSummary/adScanFraction``.
+    ///
+    /// This replaced `max(featureCoverageEndTime, confirmedAdCoverageEndTime)
+    /// / episodeDurationSec`, which was the wrong quantity twice over: the
+    /// first arm is the DSP feature watermark (it sweeps the whole episode
+    /// regardless of the semantic scan) and the second is `max(endTime)` of
+    /// detected ad windows (so one late detection lit the ✓ with almost
+    /// nothing scanned — meaning AN EPISODE WHERE DETECTION DID WORSE COULD
+    /// LOOK MORE COMPLETE). Neither is a measure of audio read for ads.
+    var adScanFraction: Double?
     /// The user tapped the control this session (explicit intent). Makes
     /// the control show the working bar immediately, before the first
     /// progress tick arrives.
@@ -130,11 +159,14 @@ func episodePreparationDownloadPermitted(
 
 /// Pure state machine for the prepare control. Precedence (highest first):
 ///
-///   1. `.ready` — analysis is complete. Supersedes everything, including
-///      the cellular gate (a fully-analyzed episode is ready regardless of
-///      network).
-///   2. Resting `.idle` — no intent and nothing active. The ✦ glyph.
-///   3. Working (intent OR an in-flight download OR active analysis):
+///   1. `.ready` — the episode is honestly, measurably fully ad-scanned.
+///      Supersedes everything, including the cellular gate (a fully-analyzed
+///      episode is ready regardless of network).
+///   2. `.partiallyAnalyzed` — the pipeline reached a completion terminal
+///      with nothing running, but coverage falls short (or the terminal is a
+///      degraded one). playhead-pz32: this case used to fold into `.ready`.
+///   3. Resting `.idle` — no intent and nothing active. The ✦ glyph.
+///   4. Working (intent OR an in-flight download OR active analysis):
 ///      * not downloaded, download in flight → `.downloading`
 ///      * not downloaded, download blocked by cellular → `.waitingForWifi`
 ///      * not downloaded, download permitted → `.downloading` (about to start)
@@ -142,23 +174,43 @@ func episodePreparationDownloadPermitted(
 ///
 /// The download zone always fills before the analyze zone: `.downloading`
 /// reports the live download fraction with analysis pinned at 0, and
-/// `.analyzing` reports the download zone full (1) with the live analysis
+/// `.analyzing` reports the download zone full (1) with the live ad-scan
 /// fraction. Both output fractions are clamped to `[0, 1]`, so a jittery
 /// input can never push a bar past full or below empty.
 func deriveEpisodePreparationReadiness(
     _ inputs: EpisodePreparationInputs
 ) -> EpisodePreparationReadiness {
     let download = clampUnit(inputs.downloadFraction)
-    let analysis = clampUnit(inputs.analysisFraction)
+    let analysis = clampUnit(inputs.adScanFraction)
 
-    // 1. Fully analyzed — the calm ✓. Highest precedence.
+    // 1. Honestly fully ad-scanned — the calm ✓. Highest precedence.
     if inputs.analysisComplete {
         return EpisodePreparationReadiness(
             state: .ready, downloadFraction: 1, analysisFraction: 1
         )
     }
 
-    // 2. No intent and nothing running → resting ✦. Surface any known
+    // 2. playhead-pz32: the pipeline finished but the episode is NOT fully
+    //    ad-scanned. Two shapes land here and both used to render the same
+    //    calm ✓ as a genuine full analysis:
+    //      * a DEGRADED terminal (`completeFeatureOnly` /
+    //        `completeTranscriptPartial`), where the transcript never
+    //        advanced far enough for the scan to read the audio;
+    //      * a nominally-full terminal whose MEASURED ad-scan coverage is
+    //        short (or unmeasurable).
+    //    It must not read as `.analyzing` either: nothing is running, so a
+    //    working bar would promise progress that will never arrive. A
+    //    completion terminal is about analysis, not about the audio cache,
+    //    so this outranks the download branches below.
+    if inputs.analysisTerminatedComplete, !inputs.analysisActive {
+        return EpisodePreparationReadiness(
+            state: .partiallyAnalyzed,
+            downloadFraction: inputs.isDownloaded ? 1 : download,
+            analysisFraction: analysis
+        )
+    }
+
+    // 3. No intent and nothing running → resting ✦. Surface any known
     //    progress in the fractions so a partially-prepared-then-abandoned
     //    episode still reads sensibly if a caller chooses to draw them.
     let isWorking = inputs.userInitiated || inputs.downloadInFlight || inputs.analysisActive
@@ -170,7 +222,7 @@ func deriveEpisodePreparationReadiness(
         )
     }
 
-    // 3. Working. The download zone fills first.
+    // 4. Working. The download zone fills first.
     if !inputs.isDownloaded {
         // An actual transfer in flight always reads as downloading, even if
         // the network flipped to a now-forbidden link mid-transfer. (The
@@ -223,7 +275,7 @@ func deriveEpisodePreparationReadiness(
 /// 30%"). `nil` for the resting states, which render a glyph only.
 func episodePreparationCaption(_ readiness: EpisodePreparationReadiness) -> String? {
     switch readiness.state {
-    case .idle, .ready:
+    case .idle, .ready, .partiallyAnalyzed:
         return nil
     case .waitingForWifi:
         return "Waiting for Wi‑Fi"
@@ -231,6 +283,42 @@ func episodePreparationCaption(_ readiness: EpisodePreparationReadiness) -> Stri
         return "Downloading \(episodePreparationPercent(readiness.downloadFraction))"
     case .analyzing:
         return "Downloaded · analyzing \(episodePreparationPercent(readiness.analysisFraction))"
+    }
+}
+
+// MARK: - Accessibility (pure)
+
+/// playhead-pz32: the control's VoiceOver label per state. Pure so the
+/// "analyzed vs. partly analyzed" distinction is unit-testable without
+/// standing up SwiftUI — a screen-reader user must be able to tell a fully
+/// ad-scanned episode from one the pipeline stopped short on, and that is
+/// exactly the kind of guarantee that silently rots when it lives inline in
+/// a view body.
+func episodePreparationAccessibilityLabel(
+    _ readiness: EpisodePreparationReadiness
+) -> String {
+    switch readiness.state {
+    case .idle:              return "Download and analyze"
+    case .waitingForWifi:    return "Waiting for Wi‑Fi to download"
+    case .downloading:       return "Downloading"
+    case .analyzing:         return "Analyzing"
+    case .partiallyAnalyzed: return "Partly analyzed"
+    case .ready:             return "Analysis ready"
+    }
+}
+
+/// playhead-pz32: the control's VoiceOver value per state. Working states
+/// read out the progress caption. `.partiallyAnalyzed` reads out how much
+/// audio was actually screened, because "partly" without a number is not
+/// actionable information. The two other resting states have no value.
+func episodePreparationAccessibilityValue(
+    _ readiness: EpisodePreparationReadiness
+) -> String {
+    switch readiness.state {
+    case .partiallyAnalyzed:
+        return "\(episodePreparationPercent(readiness.analysisFraction)) scanned for ads"
+    case .idle, .ready, .waitingForWifi, .downloading, .analyzing:
+        return episodePreparationCaption(readiness) ?? ""
     }
 }
 
@@ -243,9 +331,13 @@ func episodePreparationPercent(_ fraction: Double) -> String {
 
 // MARK: - Analysis-state mapping (pure)
 
-/// Fraction at or above which analysis coverage counts as "the whole
-/// episode is analyzed". Slightly below 1 so the last sub-second of
+/// Fraction at or above which measured ad-scan coverage counts as "the whole
+/// episode has been read for ads". Slightly below 1 so the last sub-second of
 /// coverage rounding does not strand the control at "analyzing 99%".
+///
+/// playhead-pz32: this cutoff was never the defect and must not be lowered to
+/// make the ✓ easier to reach. The defect was WHICH QUANTITY it was applied
+/// to — see ``EpisodePreparationInputs/adScanFraction``.
 let episodePreparationCompleteThreshold: Double = 0.98
 
 /// Whether the (canonical, projected) analysis status indicates a job is
@@ -265,23 +357,63 @@ func episodePreparationAnalysisActive(status: AnalysisState.PersistedStatus?) ->
     }
 }
 
-/// Whether analysis is complete: the pipeline reported a terminal `.done`
-/// status, OR coverage has reached the end of the episode
-/// (`analysisFraction >= episodePreparationCompleteThreshold`). A terminal
-/// `.done` wins even if the fraction is unknown (0-duration / legacy rows).
-/// A `.failed` / `.cancelled` status is NOT complete (the control falls
-/// back to an actionable resting state so the user can retry).
+/// playhead-pz32: whether the episode can HONESTLY be reported as analyzed.
+///
+/// MEASURED semantic ad-scan coverage is the only thing that satisfies this.
+/// Three things that used to satisfy it, and why none of them may:
+///
+///   * **A terminal `.done` status.** All four `SessionState` completion
+///     terminals project to `.done`, and two of them
+///     (`completeFeatureOnly` / `completeTranscriptPartial`) are explicitly
+///     degraded — feature-only means the transcript never advanced past
+///     preview, so the semantic scan cannot have read the audio. `.done`
+///     said "the pipeline stopped", never "the audio was screened".
+///   * **The DSP feature watermark.** Feature extraction sweeps the whole
+///     episode independently of the semantic scan, so it hits 100% while
+///     most audio has never been read for ads. This is the arm that lit the
+///     ✓ on a 47%-scanned episode.
+///   * **`max(endTime)` of detected ad windows.** Not coverage at all: one
+///     late-placed detection pushes it to the end of the episode, so AN
+///     EPISODE WHERE DETECTION DID WORSE CAN LOOK MORE COMPLETE.
+///
+/// A `.failed` / `.cancelled` status is NOT complete, and a degraded terminal
+/// is NOT complete, regardless of coverage — the control falls back to an
+/// actionable resting state (or ◐) instead. An unknown / non-finite
+/// `adScanFraction` is NOT complete: where the quantity is unmeasured, render
+/// not-ready rather than ready.
 func episodePreparationAnalysisComplete(
     status: AnalysisState.PersistedStatus?,
-    analysisFraction: Double?
+    adScanFraction: Double?,
+    isDegradedTerminal: Bool
 ) -> Bool {
-    if status == .done { return true }
-    // A failed / cancelled job never reads as ready, even if coverage
-    // happened to reach the end — the control returns to an actionable
-    // resting glyph so the user can retry.
+    // A failed / cancelled job never reads as ready, even at full coverage —
+    // the control returns to an actionable resting glyph so the user can retry.
     if status == .failed || status == .cancelled { return false }
-    guard let analysisFraction, analysisFraction.isFinite else { return false }
-    return analysisFraction >= episodePreparationCompleteThreshold
+    // A degraded terminal never reads as calm success. Belt and braces: the
+    // coverage arm below would normally already fall short (a transcript that
+    // never advanced cannot have been scanned), but the terminal is a direct
+    // statement from the pipeline that it stopped short, and it must not be
+    // possible for a coverage-measurement bug to override it.
+    if isDegradedTerminal { return false }
+    guard let adScanFraction, adScanFraction.isFinite else { return false }
+    return adScanFraction >= episodePreparationCompleteThreshold
+}
+
+/// playhead-pz32: whether the persisted analysis state is one of the four
+/// completion terminals — the pipeline will do no more work for this episode
+/// on its own. Feeds
+/// ``EpisodePreparationInputs/analysisTerminatedComplete``.
+///
+/// Reads the RAW `analysis_assets.analysisState` column rather than the
+/// projected `PersistedStatus`, because the projection is exactly what erases
+/// the distinction this bead is about: all four completion terminals collapse
+/// into `.done`. An unrecognised string (forward-compat) is not a terminal.
+func episodePreparationTerminalCompletion(analysisState: String) -> SessionState? {
+    guard let sessionState = SessionState(rawValue: analysisState),
+          sessionState.isTerminalCompletion else {
+        return nil
+    }
+    return sessionState
 }
 
 // MARK: - Private

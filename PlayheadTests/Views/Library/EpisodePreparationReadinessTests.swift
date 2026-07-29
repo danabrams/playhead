@@ -20,8 +20,9 @@ struct EpisodePreparationReadinessTests {
         downloadFraction: Double? = nil,
         analysisActive: Bool = false,
         analysisComplete: Bool = false,
+        analysisTerminatedComplete: Bool = false,
         analysisFailed: Bool = false,
-        analysisFraction: Double? = nil,
+        adScanFraction: Double? = nil,
         userInitiated: Bool = false,
         downloadPermitted: Bool = true
     ) -> EpisodePreparationInputs {
@@ -31,8 +32,9 @@ struct EpisodePreparationReadinessTests {
             downloadFraction: downloadFraction,
             analysisActive: analysisActive,
             analysisComplete: analysisComplete,
+            analysisTerminatedComplete: analysisTerminatedComplete,
             analysisFailed: analysisFailed,
-            analysisFraction: analysisFraction,
+            adScanFraction: adScanFraction,
             userInitiated: userInitiated,
             downloadPermitted: downloadPermitted
         )
@@ -51,7 +53,7 @@ struct EpisodePreparationReadinessTests {
     @Test("downloaded but not analyzed, no intent, not active → idle (tap to analyze)")
     func testDownloadedNotAnalyzedIsIdle() {
         let r = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisFraction: 0)
+            inputs(isDownloaded: true, adScanFraction: 0)
         )
         #expect(r.state == .idle)
         // Download zone reads full at rest so a later working transition
@@ -63,7 +65,7 @@ struct EpisodePreparationReadinessTests {
     @Test("analysis complete → ready with both zones full")
     func testReady() {
         let r = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisComplete: true, analysisFraction: 1)
+            inputs(isDownloaded: true, analysisComplete: true, adScanFraction: 1)
         )
         #expect(r.state == .ready)
         #expect(r.downloadFraction == 1)
@@ -161,7 +163,7 @@ struct EpisodePreparationReadinessTests {
     func testAutoAnalyzingWithoutTap() {
         // No userInitiated — the auto-pipeline drives the working bar.
         let r = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisActive: true, analysisFraction: 0.3)
+            inputs(isDownloaded: true, analysisActive: true, adScanFraction: 0.3)
         )
         #expect(r.state == .analyzing)
         #expect(r.downloadFraction == 1)
@@ -179,7 +181,7 @@ struct EpisodePreparationReadinessTests {
                 isDownloaded: true,
                 analysisActive: false,
                 analysisFailed: true,
-                analysisFraction: 0.4,
+                adScanFraction: 0.4,
                 userInitiated: true
             )
         )
@@ -193,21 +195,92 @@ struct EpisodePreparationReadinessTests {
                 isDownloaded: true,
                 analysisActive: true,
                 analysisFailed: true,
-                analysisFraction: 0.5,
+                adScanFraction: 0.5,
                 userInitiated: true
             )
         )
         #expect(r.state == .analyzing)
     }
 
-    @Test("partial-completion terminals (project to .done) read as ready")
-    func testPartialCompletionIsReady() {
-        // completeFeatureOnly / completeTranscriptPartial both project to
-        // PersistedStatus.done → analysisComplete == true → ready, even at
-        // low measured coverage fraction.
-        #expect(episodePreparationAnalysisComplete(status: .done, analysisFraction: 0.2))
+    // MARK: - playhead-pz32: terminal-but-short → ◐, never a calm ✓
+    //
+    // SPEC CHANGE (deliberate). The two tests replaced here asserted the
+    // defect: a terminal `.done` — which every completion terminal projects
+    // to, degraded ones included — made the control read `.ready` at ANY
+    // measured coverage. That is precisely the behaviour that told the
+    // product owner a 47%-scanned episode was analysed.
+
+    @Test("terminal .done at low ad-scan coverage is NOT complete (pz32)")
+    func testTerminalDoneAtLowCoverageIsNotComplete() {
+        // A terminal `.done` says "the pipeline stopped", never "the audio was
+        // read for ads". Only measured coverage can satisfy the ✓.
+        #expect(!episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: 0.2, isDegradedTerminal: false
+        ))
+        // …and unknown coverage is not a licence either.
+        #expect(!episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: nil, isDegradedTerminal: false
+        ))
+        // A completion terminal that fell short rests on ◐, not a spinner and
+        // not a checkmark.
         let r = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisComplete: true, analysisFraction: 0.2)
+            inputs(
+                isDownloaded: true,
+                analysisTerminatedComplete: true,
+                adScanFraction: 0.2
+            )
+        )
+        #expect(r.state == .partiallyAnalyzed)
+        #expect(r.downloadFraction == 1)
+        #expect(r.analysisFraction == 0.2)
+    }
+
+    @Test("a completion terminal with a live retry still shows the working bar")
+    func testTerminalCompleteWithActiveRetryAnalyzes() {
+        // `.partiallyAnalyzed` means "stopped short". If a job is running, the
+        // honest render is the working bar — otherwise a re-drive would look
+        // like it had already given up.
+        let r = deriveEpisodePreparationReadiness(
+            inputs(
+                isDownloaded: true,
+                analysisActive: true,
+                analysisTerminatedComplete: true,
+                adScanFraction: 0.2
+            )
+        )
+        #expect(r.state == .analyzing)
+    }
+
+    @Test("terminal-but-short on an un-downloaded episode still reads ◐, not ✦")
+    func testTerminalShortWithoutCachedAudio() {
+        // The audio cache can be evicted after analysis; a completion terminal
+        // is a statement about analysis, so it outranks the download branches.
+        let r = deriveEpisodePreparationReadiness(
+            inputs(
+                isDownloaded: false,
+                analysisTerminatedComplete: true,
+                adScanFraction: 0.47
+            )
+        )
+        #expect(r.state == .partiallyAnalyzed)
+        #expect(r.downloadFraction == 0)
+        #expect(r.analysisFraction == 0.47)
+    }
+
+    @Test("◐ is not actionable-by-derivation: full coverage still wins the ✓")
+    func testTerminalCompleteAtFullCoverageIsReady() {
+        // The ◐ branch must not swallow genuinely-complete episodes: a
+        // non-degraded terminal at full measured coverage is still ✓.
+        #expect(episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: 1.0, isDegradedTerminal: false
+        ))
+        let r = deriveEpisodePreparationReadiness(
+            inputs(
+                isDownloaded: true,
+                analysisComplete: true,
+                analysisTerminatedComplete: true,
+                adScanFraction: 1.0
+            )
         )
         #expect(r.state == .ready)
     }
@@ -215,7 +288,7 @@ struct EpisodePreparationReadinessTests {
     @Test("downloaded + user tapped, analysis not yet started → analyzing at 0")
     func testDownloadedThenTapSkipsToAnalyze() {
         let r = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisFraction: nil, userInitiated: true)
+            inputs(isDownloaded: true, adScanFraction: nil, userInitiated: true)
         )
         #expect(r.state == .analyzing)
         #expect(r.downloadFraction == 1)
@@ -227,7 +300,7 @@ struct EpisodePreparationReadinessTests {
     @Test("fractions above 1 clamp to 1")
     func testClampHigh() {
         let r = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisActive: true, analysisFraction: 1.7)
+            inputs(isDownloaded: true, analysisActive: true, adScanFraction: 1.7)
         )
         #expect(r.analysisFraction == 1)
     }
@@ -240,7 +313,7 @@ struct EpisodePreparationReadinessTests {
         #expect(neg.downloadFraction == 0)
 
         let nan = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisActive: true, analysisFraction: .nan)
+            inputs(isDownloaded: true, analysisActive: true, adScanFraction: .nan)
         )
         #expect(nan.analysisFraction == 0)
     }
@@ -248,7 +321,7 @@ struct EpisodePreparationReadinessTests {
     @Test("0-duration episode: missing analysis fraction collapses to 0, no crash")
     func testZeroDurationMissingCoverage() {
         let r = deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisActive: true, analysisFraction: nil)
+            inputs(isDownloaded: true, analysisActive: true, adScanFraction: nil)
         )
         #expect(r.state == .analyzing)
         #expect(r.analysisFraction == 0)
@@ -290,17 +363,55 @@ struct EpisodePreparationReadinessTests {
         #expect(!episodePreparationAnalysisActive(status: nil))
     }
 
-    @Test("analysis complete on terminal done OR high coverage; never on failure")
+    @Test("analysis complete ONLY on high measured ad-scan coverage (pz32)")
     func testAnalysisCompleteMapping() {
-        #expect(episodePreparationAnalysisComplete(status: .done, analysisFraction: nil))
-        #expect(episodePreparationAnalysisComplete(status: .done, analysisFraction: 0.1))
-        #expect(episodePreparationAnalysisComplete(status: .running, analysisFraction: 0.99))
-        #expect(!episodePreparationAnalysisComplete(status: .running, analysisFraction: 0.5))
-        #expect(!episodePreparationAnalysisComplete(status: nil, analysisFraction: nil))
-        #expect(!episodePreparationAnalysisComplete(status: .running, analysisFraction: .nan))
+        // Measured coverage is the only route to complete — not a terminal
+        // status, not an unknown fraction.
+        #expect(episodePreparationAnalysisComplete(
+            status: .running, adScanFraction: 0.99, isDegradedTerminal: false
+        ))
+        #expect(episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: 1.0, isDegradedTerminal: false
+        ))
+        // A status with no asset row / unknown coverage never reads complete.
+        #expect(!episodePreparationAnalysisComplete(
+            status: nil, adScanFraction: nil, isDegradedTerminal: false
+        ))
+        #expect(!episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: nil, isDegradedTerminal: false
+        ))
+        #expect(!episodePreparationAnalysisComplete(
+            status: .running, adScanFraction: 0.5, isDegradedTerminal: false
+        ))
+        #expect(!episodePreparationAnalysisComplete(
+            status: .running, adScanFraction: .nan, isDegradedTerminal: false
+        ))
         // A failed / cancelled job never reads as complete, even at high coverage.
-        #expect(!episodePreparationAnalysisComplete(status: .failed, analysisFraction: 0.99))
-        #expect(!episodePreparationAnalysisComplete(status: .cancelled, analysisFraction: 1.0))
+        #expect(!episodePreparationAnalysisComplete(
+            status: .failed, adScanFraction: 0.99, isDegradedTerminal: false
+        ))
+        #expect(!episodePreparationAnalysisComplete(
+            status: .cancelled, adScanFraction: 1.0, isDegradedTerminal: false
+        ))
+        // A degraded terminal never reads as complete, even at full measured
+        // coverage — the pipeline itself said it stopped short, and no
+        // coverage-measurement bug may override that.
+        #expect(!episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: 1.0, isDegradedTerminal: true
+        ))
+    }
+
+    @Test("the threshold is exactly 0.98 and is applied to ad-scan coverage")
+    func testCompleteThresholdBoundary() {
+        // Pins the cutoff so a future "make the ✓ easier to reach" edit has to
+        // change a test that says why it must not.
+        #expect(episodePreparationCompleteThreshold == 0.98)
+        #expect(episodePreparationAnalysisComplete(
+            status: .running, adScanFraction: 0.98, isDegradedTerminal: false
+        ))
+        #expect(!episodePreparationAnalysisComplete(
+            status: .running, adScanFraction: 0.9799, isDegradedTerminal: false
+        ))
     }
 
     // MARK: - Caption + percent
@@ -323,9 +434,62 @@ struct EpisodePreparationReadinessTests {
         #expect(episodePreparationCaption(waiting) == "Waiting for Wi‑Fi")
 
         // Resting states carry no caption (glyph only).
-        for state in [EpisodePreparationControlState.idle, .ready] {
+        for state in [EpisodePreparationControlState.idle, .ready, .partiallyAnalyzed] {
             let r = EpisodePreparationReadiness(state: state, downloadFraction: 1, analysisFraction: 1)
             #expect(episodePreparationCaption(r) == nil)
+        }
+    }
+
+    // MARK: - playhead-pz32: accessibility labels are state-distinct
+
+    @Test("every control state has a UNIQUE accessibility label")
+    func testAccessibilityLabelsAreUnique() {
+        // The load-bearing property: a screen-reader user must be able to tell
+        // "analysed" from "partly analysed". Asserting global uniqueness (not
+        // just that one pair differs) means no future state can be added that
+        // silently shares a label with another.
+        var labels: [String: EpisodePreparationControlState] = [:]
+        for state in EpisodePreparationControlState.allCases {
+            let readiness = EpisodePreparationReadiness(
+                state: state, downloadFraction: 1, analysisFraction: 0.47
+            )
+            let label = episodePreparationAccessibilityLabel(readiness)
+            #expect(!label.isEmpty, "\(state) has an empty accessibility label")
+            #expect(
+                labels[label] == nil,
+                "\(state) shares the accessibility label \"\(label)\" with \(String(describing: labels[label]))"
+            )
+            labels[label] = state
+        }
+        #expect(labels.count == EpisodePreparationControlState.allCases.count)
+    }
+
+    @Test("partly-analyzed announces itself as partial AND says how much")
+    func testPartiallyAnalyzedAccessibility() {
+        let partial = EpisodePreparationReadiness(
+            state: .partiallyAnalyzed, downloadFraction: 1, analysisFraction: 0.47
+        )
+        let ready = EpisodePreparationReadiness(
+            state: .ready, downloadFraction: 1, analysisFraction: 1
+        )
+        #expect(episodePreparationAccessibilityLabel(partial) == "Partly analyzed")
+        #expect(episodePreparationAccessibilityLabel(ready) == "Analysis ready")
+        // The value carries the honest number so "partly" is actionable.
+        #expect(episodePreparationAccessibilityValue(partial) == "47% scanned for ads")
+        #expect(episodePreparationAccessibilityValue(ready) == "")
+    }
+
+    @Test("working-state accessibility values still mirror the visible caption")
+    func testWorkingAccessibilityValuesMirrorCaption() {
+        for state in [EpisodePreparationControlState.downloading, .analyzing, .waitingForWifi, .idle] {
+            let readiness = EpisodePreparationReadiness(
+                state: state, downloadFraction: 0.5, analysisFraction: 0.3
+            )
+            #expect(
+                episodePreparationAccessibilityValue(readiness)
+                    == (episodePreparationCaption(readiness) ?? ""),
+                "\(state) accessibility value drifted from its caption"
+            )
         }
     }
 
@@ -355,30 +519,129 @@ struct EpisodePreparationReadinessTests {
         EpisodeSurfaceStatusObserver.analysisState(from: asset(state: state)).persistedStatus
     }
 
-    @Test("every completion terminal projects to ready (even degraded-full)")
-    func testCompletionTerminalsAreReady() {
-        for state in [SessionState.complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial] {
-            let status = projectedStatus(state)
-            // Low measured coverage must not matter — the terminal wins.
+    /// Reproduces exactly what `EpisodePreparationStatusModel.refresh` does for
+    /// one asset, so the projection + terminal classification + predicate are
+    /// exercised as a unit rather than as three separately-mocked booleans.
+    private func derive(
+        sessionState: SessionState,
+        adScanFraction: Double?,
+        isDownloaded: Bool = true
+    ) -> EpisodePreparationReadiness {
+        let assetRow = asset(state: sessionState)
+        let status = EpisodeSurfaceStatusObserver.analysisState(from: assetRow).persistedStatus
+        let terminal = episodePreparationTerminalCompletion(analysisState: assetRow.analysisState)
+        return deriveEpisodePreparationReadiness(
+            inputs(
+                isDownloaded: isDownloaded,
+                analysisActive: episodePreparationAnalysisActive(status: status),
+                analysisComplete: episodePreparationAnalysisComplete(
+                    status: status,
+                    adScanFraction: adScanFraction,
+                    isDegradedTerminal: terminal?.isDegradedTerminalCompletion ?? false
+                ),
+                analysisTerminatedComplete: terminal != nil,
+                analysisFailed: status == .failed || status == .cancelled,
+                adScanFraction: adScanFraction
+            )
+        )
+    }
+
+    /// playhead-pz32 acceptance (c): each DEGRADED terminal must be
+    /// distinguishable from `.complete`. Held at IDENTICAL full coverage so the
+    /// only varying input is the terminal itself — this fails on the old
+    /// behaviour, where all four projected to `.done` and rendered ✓.
+    @Test("degraded terminals are distinguishable from .complete at equal coverage")
+    func testDegradedTerminalsDistinguishableFromComplete() {
+        for state in [SessionState.complete, .completeFull] {
             #expect(
-                episodePreparationAnalysisComplete(status: status, analysisFraction: 0.05),
-                "\(state) should read as complete"
+                derive(sessionState: state, adScanFraction: 1.0).state == .ready,
+                "\(state) at full ad-scan coverage should be ready"
             )
         }
+        for state in [SessionState.completeFeatureOnly, .completeTranscriptPartial] {
+            #expect(
+                derive(sessionState: state, adScanFraction: 1.0).state == .partiallyAnalyzed,
+                "\(state) must never render the same calm ✓ as .complete"
+            )
+        }
+        // And the classifier itself agrees, exhaustively over every case.
+        for state in SessionState.allCases {
+            let expected = state == .completeFeatureOnly || state == .completeTranscriptPartial
+            #expect(
+                state.isDegradedTerminalCompletion == expected,
+                "\(state).isDegradedTerminalCompletion should be \(expected)"
+            )
+        }
+    }
+
+    /// playhead-pz32: `episodePreparationTerminalCompletion` reads the RAW
+    /// column, so it must recognise all four completion terminals, reject the
+    /// non-terminals and failures, and tolerate an unknown string.
+    @Test("terminal-completion classification over every persisted state string")
+    func testTerminalCompletionClassification() {
+        for state in SessionState.allCases {
+            let resolved = episodePreparationTerminalCompletion(analysisState: state.rawValue)
+            #expect(
+                (resolved != nil) == state.isTerminalCompletion,
+                "\(state) terminal-completion classification disagrees with SessionState"
+            )
+            #expect(resolved == nil || resolved == state)
+        }
+        #expect(episodePreparationTerminalCompletion(analysisState: "someFutureState") == nil)
+        #expect(episodePreparationTerminalCompletion(analysisState: "") == nil)
     }
 
     @Test("every failure terminal is neither active nor complete (→ control rests, not stuck)")
     func testFailureTerminalsRestNotStuck() {
         for state in [SessionState.failed, .failedTranscript, .failedFeature, .cancelledBudget] {
             let status = projectedStatus(state)
-            #expect(!episodePreparationAnalysisComplete(status: status, analysisFraction: 0.99))
+            #expect(!episodePreparationAnalysisComplete(
+                status: status, adScanFraction: 0.99, isDegradedTerminal: false
+            ))
             #expect(!episodePreparationAnalysisActive(status: status))
             // Feeds `analysisFailed`, which the derivation resolves to idle.
             let r = deriveEpisodePreparationReadiness(
                 inputs(isDownloaded: true, analysisFailed: true, userInitiated: true)
             )
             #expect(r.state == .idle, "\(state) must not strand at .analyzing")
+            // End-to-end: a failure terminal never reaches ✓ or ◐.
+            #expect(derive(sessionState: state, adScanFraction: 1.0).state == .idle)
         }
+    }
+
+    /// playhead-pz32 acceptance (a) + (b): the two shapes that lit the ✓ on
+    /// Dan's asset 820134BF. Both are expressed in the terms the OLD predicate
+    /// used, so both FAIL on the pre-pz32 behaviour.
+    @Test("(a) fully-swept DSP watermark + low ad-scan coverage is NOT ready")
+    func testFullFeatureWatermarkLowScanIsNotReady() {
+        // The old predicate was max(featureCoverageEndTime,
+        // confirmedAdCoverageEndTime) / duration >= 0.98. Feature extraction
+        // sweeps the whole episode independently of the semantic scan, so this
+        // asset had featureCoverageEndTime == duration while only 47% of the
+        // audio had ever been read for ads. `analysisState` was `backfill`.
+        let readiness = derive(sessionState: .backfill, adScanFraction: 0.47)
+        #expect(readiness.state != .ready)
+        #expect(readiness.state == .analyzing)
+        // The bar and caption report the honest number, not the DSP watermark.
+        #expect(readiness.analysisFraction == 0.47)
+        #expect(episodePreparationCaption(readiness) == "Downloaded · analyzing 47%")
+    }
+
+    @Test("(b) one late ad detection + near-zero ad-scan coverage is NOT ready")
+    func testLateAdDetectionAloneIsNotReady() {
+        // `confirmedAdCoverageEndTime` is max(endTime) OF DETECTED AD WINDOWS,
+        // so a single detection at the end of the episode used to drive the
+        // predicate to ~1.0 with nothing scanned. Perversely, an episode where
+        // detection did WORSE could look MORE complete. Ad-scan coverage is
+        // indifferent to where detections landed.
+        for sessionState in [SessionState.backfill, .completeFull, .complete] {
+            let readiness = derive(sessionState: sessionState, adScanFraction: 0.01)
+            #expect(readiness.state != .ready, "\(sessionState) must not read ready at 1% scanned")
+        }
+        // Zero and unknown coverage are both under-claims, never ✓.
+        #expect(derive(sessionState: .completeFull, adScanFraction: 0).state == .partiallyAnalyzed)
+        #expect(derive(sessionState: .completeFull, adScanFraction: nil).state == .partiallyAnalyzed)
+        #expect(derive(sessionState: .backfill, adScanFraction: nil).state == .analyzing)
     }
 
     // MARK: - Full lifecycle sweep (idle → downloading → analyzing → ready)
@@ -397,11 +660,11 @@ struct EpisodePreparationReadinessTests {
         ).state == .downloading)
         // download done, analysis running
         #expect(deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisActive: true, analysisFraction: 0.2, userInitiated: true)
+            inputs(isDownloaded: true, analysisActive: true, adScanFraction: 0.2, userInitiated: true)
         ).state == .analyzing)
         // coverage reaches the end
         #expect(deriveEpisodePreparationReadiness(
-            inputs(isDownloaded: true, analysisComplete: true, analysisFraction: 1, userInitiated: true)
+            inputs(isDownloaded: true, analysisComplete: true, adScanFraction: 1, userInitiated: true)
         ).state == .ready)
     }
 }

@@ -733,7 +733,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             return "asset_watermark"
         case .unknown:
             return "unknown"
-        case .finalPassChunks, .adWindows, .cachedAudio:
+        case .finalPassChunks, .adWindows, .cachedAudio, .semanticScanResults:
             // Not currently produced for `fastTranscriptCoveredSource`,
             // but keep the switch exhaustive without crashing if a
             // future pipeline change starts emitting one. The dogfood

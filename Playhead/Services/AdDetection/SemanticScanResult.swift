@@ -224,6 +224,16 @@ struct SemanticScanCoverage: Sendable, Equatable {
     /// True when every second accounted for produced a verdict.
     var isComplete: Bool { unexaminedRanges.isEmpty }
 
+    /// playhead-pz32: the canonical COVERAGE LANE. `passA` rows are the
+    /// whole-episode screening sweep; `passB` rows are localized extent
+    /// attempts INSIDE already-screened `passA` windows, so counting them
+    /// would double-count. Shared with
+    /// ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)``'s
+    /// `adScanCoveredSec` derivation so the pipeline breadcrumb and the
+    /// user-facing readiness predicate can never disagree about which rows
+    /// constitute coverage.
+    static let coverageScanPass = "passA"
+
     /// Compute coverage for one scan pass.
     ///
     /// - Parameters:
@@ -241,7 +251,7 @@ struct SemanticScanCoverage: Sendable, Equatable {
     ///     window looked there.
     static func compute(
         rows: [SemanticScanResult],
-        scanPass: String = "passA",
+        scanPass: String = SemanticScanCoverage.coverageScanPass,
         episodeDuration: Double? = nil
     ) -> SemanticScanCoverage {
         let passRows = rows.filter { $0.scanPass == scanPass && $0.windowEndTime > $0.windowStartTime }

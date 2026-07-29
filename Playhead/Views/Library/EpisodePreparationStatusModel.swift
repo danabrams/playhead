@@ -11,6 +11,23 @@
 // subscription updates the affected episode in place. All decisions still
 // live in the pure derivation + the coordinator; this model is thin
 // input-gathering glue.
+//
+// playhead-pz32 — one read model, not a hand-copied mirror. This file used to
+// carry a comment claiming its coverage arithmetic mirrored the Activity
+// screen's "so the two surfaces cannot drift". It had already drifted:
+// playhead-sd71 moved Activity onto the gap-aware analyzed AREA while this
+// file still recomputed `max(featureCoverageEndTime, confirmedAdCoverageEndTime)`
+// inline. Both surfaces now read the SAME `AnalysisCoverageSummary`
+// (`AnalysisStore.fetchCoverageSummariesByAssetIds`), so a copied formula can
+// no longer go stale. They still display different SCALARS of that one model,
+// deliberately and for different questions:
+//   * Activity's AN bar shows `analysisCoveredSec` — "how much transcribed
+//     audio lies at or before the analysis frontier" (pipeline progress).
+//   * This control's readiness ✓ and analyze zone show `adScanFraction` —
+//     "how much audio was actually read for ads" (the user-facing promise).
+// AN is the looser of the two, so it can legitimately read higher than the
+// ad-scan fraction for the same episode. What may never happen again is the
+// ✓ resolving from a quantity that is not ad-scan coverage.
 
 import Foundation
 
@@ -30,8 +47,9 @@ final class EpisodePreparationStatusModel {
         var isDownloaded = false
         var analysisActive = false
         var analysisComplete = false
+        var analysisTerminatedComplete = false
         var analysisFailed = false
-        var analysisFraction: Double?
+        var adScanFraction: Double?
         var downloadPermitted = true
         var snapshotDownloadFraction: Double?
         var liveDownloadFraction: Double?
@@ -61,7 +79,14 @@ final class EpisodePreparationStatusModel {
     func isActionable(for episodeId: String) -> Bool {
         switch readiness(for: episodeId).state {
         case .idle, .waitingForWifi: return true
-        case .downloading, .analyzing, .ready: return false
+        // playhead-pz32: `.partiallyAnalyzed` is informational, not
+        // actionable. Tapping would route into
+        // `prepareEpisodeForAnalysis`, and whether re-driving a
+        // session that already reached a completion terminal does
+        // anything is a PIPELINE question (playhead-gqx4 /
+        // playhead-i7qe own coverage). Offering a tap that may
+        // silently no-op would be a second dishonest affordance.
+        case .downloading, .analyzing, .partiallyAnalyzed, .ready: return false
         }
     }
 
@@ -73,9 +98,15 @@ final class EpisodePreparationStatusModel {
         let store = runtime.analysisStore
         let ids = Set(episodeIds)
 
-        // One store query for all episodes' latest assets, one download
-        // snapshot, one cached-id scan, one permission read.
+        // One store query for all episodes' latest assets, one coverage-summary
+        // batch, one download snapshot, one cached-id scan, one permission read.
         let assets = (try? await store.fetchLatestAssetByEpisodeIdMap()) ?? [:]
+        // playhead-pz32: the ad-scan coverage the readiness predicate keys on
+        // comes from the SAME `AnalysisCoverageSummary` read model the Activity
+        // screen consumes — one batched query for every visible row, and one
+        // definition of every coverage quantity for both surfaces.
+        let coverageAssetIds = Set(episodeIds.compactMap { assets[$0]?.id })
+        let summaries = (try? await store.fetchCoverageSummariesByAssetIds(coverageAssetIds)) ?? [:]
         let snapshot = await downloadManager.progressSnapshot()
         let cachedIds = await downloadManager.cachedEpisodeIds(matching: ids)
         let permitted = await runtime.episodePreparationCoordinator.currentDownloadPermission()
@@ -87,17 +118,27 @@ final class EpisodePreparationStatusModel {
             r.downloadPermitted = permitted
             if let asset = assets[id] {
                 let status = EpisodeSurfaceStatusObserver.analysisState(from: asset).persistedStatus
-                r.analysisActive = episodePreparationAnalysisActive(status: status)
-                r.analysisFraction = Self.analysisFraction(from: asset)
-                r.analysisComplete = episodePreparationAnalysisComplete(
-                    status: status, analysisFraction: r.analysisFraction
+                // The RAW column, not the projection: `PersistedStatus` folds
+                // all four completion terminals into `.done` and so cannot
+                // tell a degraded terminal from a full one.
+                let terminal = episodePreparationTerminalCompletion(
+                    analysisState: asset.analysisState
                 )
+                r.analysisActive = episodePreparationAnalysisActive(status: status)
+                r.adScanFraction = summaries[asset.id]?.adScanFraction
+                r.analysisComplete = episodePreparationAnalysisComplete(
+                    status: status,
+                    adScanFraction: r.adScanFraction,
+                    isDegradedTerminal: terminal?.isDegradedTerminalCompletion ?? false
+                )
+                r.analysisTerminatedComplete = (terminal != nil)
                 r.analysisFailed = (status == .failed || status == .cancelled)
             } else {
                 r.analysisActive = false
                 r.analysisComplete = false
+                r.analysisTerminatedComplete = false
                 r.analysisFailed = false
-                r.analysisFraction = nil
+                r.adScanFraction = nil
             }
             // Drop the optimistic download bridge once the real in-flight /
             // cached signal is present, so a transfer that never started
@@ -166,29 +207,12 @@ final class EpisodePreparationStatusModel {
                 downloadFraction: downloadFraction,
                 analysisActive: r.analysisActive,
                 analysisComplete: r.analysisComplete,
+                analysisTerminatedComplete: r.analysisTerminatedComplete,
                 analysisFailed: r.analysisFailed,
-                analysisFraction: r.analysisFraction,
+                adScanFraction: r.adScanFraction,
                 userInitiated: userInitiated.contains(id),
                 downloadPermitted: r.downloadPermitted
             )
         )
-    }
-
-    /// Coverage watermark / duration, clamped to `[0, 1]`; `nil` when the
-    /// watermark or a positive duration is unknown. Mirrors the Activity
-    /// screen's `max(featureCoverageEndSec, confirmedAdCoverageEndSec)`
-    /// derivation so the two surfaces cannot drift.
-    private static func analysisFraction(from asset: AnalysisAsset) -> Double? {
-        let watermark: Double?
-        switch (asset.featureCoverageEndTime, asset.confirmedAdCoverageEndTime) {
-        case let (f?, a?): watermark = max(f, a)
-        case let (f?, nil): watermark = f
-        case let (nil, a?): watermark = a
-        case (nil, nil): watermark = nil
-        }
-        guard let watermark, let duration = asset.episodeDurationSec, duration > 0 else {
-            return nil
-        }
-        return min(1, max(0, watermark / duration))
     }
 }

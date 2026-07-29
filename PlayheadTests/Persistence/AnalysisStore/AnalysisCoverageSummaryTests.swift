@@ -1518,3 +1518,382 @@ struct FastTranscriptCoverageV37MigrationTests {
         #expect(try await second.fetchFastTranscriptCoverageEndTime(id: "m-idem") == 1800)
     }
 }
+
+// MARK: - playhead-pz32: semantic ad-scan coverage
+
+/// playhead-pz32: `AnalysisCoverageSummary.adScanCoveredSec` is the ONLY
+/// persisted quantity that answers "how much of this episode has been read for
+/// ads?". These tests pin it against the three quantities it replaced in the
+/// library readiness predicate — the DSP feature watermark, `max(endTime)` of
+/// detected ad windows, and the transcript-clipped analyzed area — every one of
+/// which can sit at 100% while the semantic scan has barely started.
+@Suite("AnalysisStore ad-scan coverage (playhead-pz32)")
+struct AnalysisStoreAdScanCoverageTests {
+
+    /// `insertSemanticScanResult` rejects a `scanCohortJSON` that is not a
+    /// decodable `ScanCohort`, so the fixtures must carry a real one.
+    private static let cohortJSON: String = {
+        let cohort = ScanCohort(
+            promptLabel: "pz32-test",
+            promptHash: "prompt-v1",
+            schemaHash: "schema-v1",
+            scanPlanHash: "plan-v1",
+            normalizationHash: "norm-v1",
+            osBuild: "26A123",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        // Pure value types — encoding cannot fail.
+        let data = (try? encoder.encode(cohort)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }()
+
+    private func makeAsset(
+        id: String,
+        episodeDurationSec: Double? = 3600,
+        featureCoverageEndTime: Double? = nil,
+        fastTranscriptCoverageEndTime: Double? = nil,
+        confirmedAdCoverageEndTime: Double? = nil,
+        analysisState: String = "backfill"
+    ) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///\(id).m4a",
+            featureCoverageEndTime: featureCoverageEndTime,
+            fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
+            confirmedAdCoverageEndTime: confirmedAdCoverageEndTime,
+            analysisState: analysisState,
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: episodeDurationSec
+        )
+    }
+
+    private func makeScan(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        status: SemanticScanStatus = .success,
+        scanPass: String = SemanticScanCoverage.coverageScanPass
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: "\(assetId)-scan-\(scanPass)-\(index)",
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: index * 10,
+            windowLastAtomOrdinal: index * 10 + 9,
+            windowStartTime: start,
+            windowEndTime: end,
+            scanPass: scanPass,
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: status,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: Self.cohortJSON,
+            transcriptVersion: "tx-v1",
+            reuseScope: "\(assetId)-\(scanPass)-\(index)"
+        )
+    }
+
+    /// THE BEAD'S FIXTURE (asset 820134BF): DSP feature extraction swept the
+    /// whole episode and a late ad detection parked `confirmedAdCoverageEndTime`
+    /// at the end, but only 47% of the audio was ever screened for ads. The old
+    /// predicate's `max(feature, confirmedAd) / duration` reads 1.0 here; the
+    /// ad-scan fraction reads 0.47 and must NOT clear the 0.98 threshold.
+    @Test("full DSP watermark + late ad detection: ad-scan fraction stays at the real 47%")
+    func fullWatermarkLowScanCoverage() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-820134bf",
+            episodeDurationSec: 3600,
+            featureCoverageEndTime: 3600,
+            fastTranscriptCoverageEndTime: 3600,
+            confirmedAdCoverageEndTime: 3580
+        ))
+        // 1692s of 3600s examined == 47%.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-820134bf", index: 0, start: 0, end: 1692)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-820134bf"])
+        let summary = try #require(summaries["a-820134bf"])
+
+        // Both discredited arms are at (or near) full.
+        #expect(summary.featureCoverageEndSec == 3600)
+        #expect(summary.confirmedAdCoverageEndSec == 3580)
+        // The honest quantity is not.
+        #expect(summary.adScanCoveredSec == 1692)
+        #expect(summary.adScanCoveredSource == .semanticScanResults)
+        let fraction = try #require(summary.adScanFraction)
+        #expect(abs(fraction - 0.47) < 0.0001)
+        #expect(fraction < episodePreparationCompleteThreshold)
+    }
+
+    /// Only windows that produced a VERDICT count. A refused / guardrailed /
+    /// cancelled window is not audio we screened and found clean — counting it
+    /// is exactly how a truncated scan reports itself as complete.
+    @Test("refused / guardrailed / cancelled windows do not count as scanned")
+    func onlyExaminedWindowsCount() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-refusals", episodeDurationSec: 1000))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-refusals", index: 0, start: 0, end: 100, status: .success)
+        )
+        try await store.insertSemanticScanResult(
+            // `.noAds` is the permissive path's "I looked, nothing here" — a
+            // real examination despite living in the failure-accounting list.
+            makeScan(assetId: "a-refusals", index: 1, start: 100, end: 200, status: .noAds)
+        )
+        for (index, status) in [
+            SemanticScanStatus.refusal,
+            .guardrailViolation,
+            .cancelled,
+            .thermalDeferred,
+            .exceededContextWindow,
+            .permissiveRefusal
+        ].enumerated() {
+            try await store.insertSemanticScanResult(makeScan(
+                assetId: "a-refusals",
+                index: 10 + index,
+                start: 200 + Double(index) * 100,
+                end: 300 + Double(index) * 100,
+                status: status
+            ))
+        }
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-refusals"])
+        let summary = try #require(summaries["a-refusals"])
+        // 0–200 examined; 200–800 attempted but never read.
+        #expect(summary.adScanCoveredSec == 200)
+        #expect(summary.adScanFraction == 0.2)
+    }
+
+    /// Overlapping / duplicated windows must union, not sum — otherwise a
+    /// re-scanned region inflates coverage past what was actually read (and a
+    /// heavily retried episode would be the first to claim readiness).
+    @Test("overlapping scan windows union rather than sum")
+    func overlappingWindowsUnion() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-overlap-scan", episodeDurationSec: 1000))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-overlap-scan", index: 0, start: 0, end: 400)
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-overlap-scan", index: 1, start: 200, end: 500)
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-overlap-scan", index: 2, start: 100, end: 300)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-overlap-scan"])
+        let summary = try #require(summaries["a-overlap-scan"])
+        // Sum of widths would be 400 + 300 + 200 = 900; union is 500.
+        #expect(summary.adScanCoveredSec == 500)
+        #expect(summary.adScanFraction == 0.5)
+    }
+
+    /// `passB` rows are localized extent attempts INSIDE already-screened
+    /// `passA` windows. Counting them would double-count, and a `passB`-only
+    /// asset has no coverage-lane evidence at all.
+    @Test("passB rows are excluded from the coverage lane")
+    func passBRowsExcluded() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-passb", episodeDurationSec: 1000))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-passb", index: 0, start: 0, end: 100)
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-passb", index: 1, start: 500, end: 900, scanPass: "passB")
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-passb"])
+        let summary = try #require(summaries["a-passb"])
+        #expect(summary.adScanCoveredSec == 100)
+
+        // passB-only: no coverage-lane row at all → unknown, not a synthetic 0.
+        try await store.insertAsset(makeAsset(id: "a-passb-only", episodeDurationSec: 1000))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-passb-only", index: 0, start: 0, end: 900, scanPass: "passB")
+        )
+        let onlyB = try await store.fetchCoverageSummariesByAssetIds(["a-passb-only"])
+        let bSummary = try #require(onlyB["a-passb-only"])
+        #expect(bSummary.adScanCoveredSec == nil)
+        #expect(bSummary.adScanCoveredSource == .unknown)
+        #expect(bSummary.adScanFraction == nil)
+    }
+
+    /// Unknown vs measured-zero must stay distinguishable in the provenance
+    /// tag, and BOTH must produce a nil-or-zero fraction that reads not-ready.
+    @Test("no scan rows → unknown; rows that all refused → measured zero")
+    func unknownVersusMeasuredZero() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-noscan",
+            episodeDurationSec: 1000,
+            featureCoverageEndTime: 1000,
+            confirmedAdCoverageEndTime: 1000,
+            analysisState: "completeFull"
+        ))
+        try await store.insertAsset(makeAsset(id: "a-allrefused", episodeDurationSec: 1000))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-allrefused", index: 0, start: 0, end: 900, status: .refusal)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds([
+            "a-noscan", "a-allrefused"
+        ])
+        let noScan = try #require(summaries["a-noscan"])
+        #expect(noScan.adScanCoveredSec == nil)
+        #expect(noScan.adScanCoveredSource == .unknown)
+        #expect(noScan.adScanFraction == nil)
+        // A fully-swept DSP watermark and a `completeFull` terminal buy nothing.
+        #expect(noScan.featureCoverageEndSec == 1000)
+
+        let allRefused = try #require(summaries["a-allrefused"])
+        #expect(allRefused.adScanCoveredSec == 0)
+        #expect(allRefused.adScanCoveredSource == .semanticScanResults)
+        #expect(allRefused.adScanFraction == 0)
+    }
+
+    /// A missing / zero / non-positive duration makes the fraction unmeasurable.
+    /// It must be `nil` (→ not ready), never a divide-by-zero or a synthetic 1.
+    @Test("unknown or zero duration → nil fraction, never a claim of readiness")
+    func unmeasurableDurationYieldsNilFraction() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-nodur", episodeDurationSec: nil))
+        try await store.insertAsset(makeAsset(id: "a-zerodur", episodeDurationSec: 0))
+        for id in ["a-nodur", "a-zerodur"] {
+            try await store.insertSemanticScanResult(
+                makeScan(assetId: id, index: 0, start: 0, end: 900)
+            )
+        }
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-nodur", "a-zerodur"])
+        for id in ["a-nodur", "a-zerodur"] {
+            let summary = try #require(summaries[id])
+            #expect(summary.adScanCoveredSec == 900)
+            #expect(summary.adScanFraction == nil, "\(id) must not synthesise a fraction")
+            #expect(!episodePreparationAnalysisComplete(
+                status: .done, adScanFraction: summary.adScanFraction, isDegradedTerminal: false
+            ))
+        }
+    }
+
+    /// Scan windows running past the declared duration must clamp to 1.0, not
+    /// overshoot — the fraction is a `[0, 1]` contract for the bar.
+    @Test("scan coverage past the declared duration clamps to 1.0")
+    func coveragePastDurationClamps() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-over", episodeDurationSec: 500))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-over", index: 0, start: 0, end: 900)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-over"])
+        let summary = try #require(summaries["a-over"])
+        #expect(summary.adScanFraction == 1)
+    }
+
+    /// Batched reads must not cross-contaminate: each asset gets only its own
+    /// windows. A single shared `Set` bug here would let one fully-scanned
+    /// episode light the ✓ on every row in the list.
+    @Test("batched read attributes scan windows to the right asset")
+    func batchedReadIsPerAsset() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-full", episodeDurationSec: 1000))
+        try await store.insertAsset(makeAsset(id: "a-thin", episodeDurationSec: 1000))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-full", index: 0, start: 0, end: 1000)
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-thin", index: 0, start: 0, end: 50)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-full", "a-thin"])
+        #expect(try #require(summaries["a-full"]).adScanFraction == 1)
+        #expect(try #require(summaries["a-thin"]).adScanFraction == 0.05)
+    }
+
+    /// CROSS-PRODUCER AGREEMENT. `SemanticScanCoverage.compute` is the
+    /// pipeline's own breadcrumb; the store read is the user-facing one. They
+    /// derive the same quantity from the same rows by different routes (full
+    /// row decode + Swift filter vs. a narrow SQL projection), so they must
+    /// agree exactly — otherwise the log and the checkmark tell different
+    /// stories about the same episode.
+    @Test("store ad-scan seconds equal SemanticScanCoverage.examinedSeconds")
+    func agreesWithPipelineBreadcrumb() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-agree", episodeDurationSec: 3578))
+        let rows: [SemanticScanResult] = [
+            makeScan(assetId: "a-agree", index: 0, start: 0, end: 300),
+            makeScan(assetId: "a-agree", index: 1, start: 250, end: 600),
+            makeScan(assetId: "a-agree", index: 2, start: 900, end: 1425.9),
+            makeScan(assetId: "a-agree", index: 3, start: 1425.9, end: 1800, status: .guardrailViolation),
+            makeScan(assetId: "a-agree", index: 4, start: 2000, end: 2100, status: .noAds),
+            makeScan(assetId: "a-agree", index: 5, start: 2500, end: 2600, scanPass: "passB")
+        ]
+        for row in rows {
+            try await store.insertSemanticScanResult(row)
+        }
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-agree"])
+        let summary = try #require(summaries["a-agree"])
+        let breadcrumb = SemanticScanCoverage.compute(rows: rows)
+        #expect(summary.adScanCoveredSec == breadcrumb.examinedSeconds)
+        // Sanity-check the number itself so the agreement isn't 0 == 0:
+        // [0,600] = 600, [900,1425.9] = 525.9, [2000,2100] = 100.
+        #expect(abs(breadcrumb.examinedSeconds - 1225.9) < 0.0001)
+    }
+
+    /// The analyzed AREA (`analysisCoveredSec`, playhead-sd71) is gap-aware and
+    /// still not a measure of ad screening: a fully-transcribed episode with a
+    /// frontier at the end reads 100% analyzed area on 1% ad-scan coverage.
+    /// Pinning both on one asset documents why the readiness predicate had to
+    /// move off it rather than reuse Activity's number.
+    @Test("analyzed AREA can read 100% while ad-scan coverage reads 1%")
+    func analyzedAreaIsNotAdScanCoverage() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-area",
+            episodeDurationSec: 1000,
+            featureCoverageEndTime: 1000,
+            confirmedAdCoverageEndTime: 1000
+        ))
+        try await store.insertTranscriptChunks([
+            TranscriptChunk(
+                id: "a-area-chunk-0",
+                analysisAssetId: "a-area",
+                segmentFingerprint: "a-area-fp-0",
+                chunkIndex: 0,
+                startTime: 0,
+                endTime: 1000,
+                text: "t",
+                normalizedText: "t",
+                pass: "fast",
+                modelVersion: "test-asr",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-area", index: 0, start: 0, end: 10)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-area"])
+        let summary = try #require(summaries["a-area"])
+        #expect(summary.analysisCoveredSec == 1000)
+        #expect(summary.adScanCoveredSec == 10)
+        #expect(summary.adScanFraction == 0.01)
+    }
+}

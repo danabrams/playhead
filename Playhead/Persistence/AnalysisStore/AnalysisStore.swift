@@ -554,6 +554,9 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         case adWindows = "ad_windows"
         /// Value derived from cached audio state (download-progress side).
         case cachedAudio = "cached_audio"
+        /// playhead-pz32: value derived from `semantic_scan_results` rows —
+        /// the seconds of audio a semantic ad scan actually examined.
+        case semanticScanResults = "semantic_scan_results"
         /// Coverage genuinely unknown — no chunks, no watermark, no ad
         /// windows present. Surfaces as `nil` fractions / `--%` rather than
         /// a synthetic 0% bar.
@@ -591,6 +594,48 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// unknown (mirrors ``fastTranscriptCoveredSec``'s nil semantics), so
     /// AN renders as `--%` rather than a synthetic 0%.
     let analysisCoveredSec: Double?
+    /// playhead-pz32: interval-unioned seconds of audio a **semantic ad scan
+    /// actually examined** — the union of `semantic_scan_results` windows on
+    /// the coverage lane (``SemanticScanCoverage/coverageScanPass``) whose
+    /// status says a verdict was obtained
+    /// (``SemanticScanStatus/didExamineWindow``).
+    ///
+    /// This is the only persisted quantity that answers "how much of this
+    /// episode has been read for ads?". It is deliberately NOT any of the
+    /// other scalars on this summary:
+    ///   * ``featureCoverageEndSec`` is the acoustic/DSP feature-extraction
+    ///     watermark. Feature extraction sweeps the whole episode
+    ///     independently of the semantic scan, so it reaches 100% while most
+    ///     audio has never been screened for ads.
+    ///   * ``confirmedAdCoverageEndSec`` is not coverage at all — it is
+    ///     `max(endTime)` OF DETECTED AD WINDOWS. One late-placed detection
+    ///     pushes it to the end of the episode with almost nothing scanned,
+    ///     which has the perverse consequence that AN EPISODE WHERE
+    ///     DETECTION DID WORSE CAN LOOK MORE COMPLETE.
+    ///   * ``analysisCoveredSec`` is transcript-union-clipped-to-that-same
+    ///     frontier, so it inherits both problems in a gap-aware form.
+    ///
+    /// `nil` when no coverage-lane scan row exists for the asset at all
+    /// (the scan has not started, or its rows were invalidated by a cohort
+    /// bump) — never a synthetic 0, so a caller can distinguish "measured
+    /// zero" from "no measurement". Both must render as not-ready.
+    let adScanCoveredSec: Double?
+    let adScanCoveredSource: CoverageProvenance
+
+    /// playhead-pz32: ``adScanCoveredSec`` as a fraction of the episode's
+    /// duration, clamped to `[0, 1]`. `nil` when either the scan coverage or
+    /// a positive duration is unknown — an unmeasurable episode must read as
+    /// not-ready, never as ready.
+    var adScanFraction: Double? {
+        guard let adScanCoveredSec,
+              adScanCoveredSec.isFinite,
+              let episodeDurationSec,
+              episodeDurationSec.isFinite,
+              episodeDurationSec > 0 else {
+            return nil
+        }
+        return min(1, max(0, adScanCoveredSec / episodeDurationSec))
+    }
 }
 
 /// playhead-hygc.1.2: shared arithmetic for ``AnalysisCoverageSummary``.
@@ -9548,6 +9593,14 @@ actor AnalysisStore {
     ///     watermarks; no artifact tables outrank them today. Provenance
     ///     stays ``CoverageProvenance/assetWatermark`` while populated and
     ///     ``CoverageProvenance/unknown`` when nil.
+    ///   - playhead-pz32: `adScanCoveredSec` is the interval-unioned seconds
+    ///     of coverage-lane `semantic_scan_results` windows that produced a
+    ///     verdict. SQLite cannot union intervals, so we fetch
+    ///     `(windowStartTime, windowEndTime, status)` and union in Swift —
+    ///     same shape as the fast-chunk pass above. The status filter runs in
+    ///     Swift against ``SemanticScanStatus/didExamineWindow`` rather than
+    ///     an `IN (...)` list of raw values, so "what counts as examined"
+    ///     has exactly one definition in the codebase.
     ///
     /// Empty input returns an empty dictionary without preparing a
     /// statement; large inputs are chunked at 500 placeholders per
@@ -9619,6 +9672,10 @@ actor AnalysisStore {
         var fastMaxEnd: [String: Double] = [:]
         // ---- Pass 3 (fold into one query): final-pass chunk MAX(endTime).
         var finalMaxEnd: [String: Double] = [:]
+        // ---- Pass 4 (playhead-pz32): coverage-lane semantic-scan windows
+        //      that produced a verdict, for the ad-scan AREA.
+        var adScanIntervals: [String: [(start: Double, end: Double)]] = [:]
+        var adScanRowSeen: Set<String> = []
 
         index = 0
         while index < allIds.count {
@@ -9672,6 +9729,43 @@ actor AnalysisStore {
                 finalMaxEnd[assetId] = sqlite3_column_double(finalStmt, 1)
             }
             sqlite3_finalize(finalStmt)
+
+            // playhead-pz32: coverage-lane semantic-scan windows. Hits
+            // `idx_semantic_scan_results_asset_pass`. Rows are recorded as
+            // "seen" regardless of status so a scan that only ever refused
+            // reports a MEASURED zero (0 examined seconds) rather than
+            // "unknown" — both render not-ready, but the provenance tag stays
+            // honest about which one it is.
+            let scanSQL = """
+                SELECT analysisAssetId, windowStartTime, windowEndTime, status
+                FROM semantic_scan_results
+                WHERE scanPass = ?
+                  AND analysisAssetId IN (\(placeholders))
+                ORDER BY analysisAssetId, windowStartTime, windowEndTime
+                """
+            let scanStmt = try prepare(scanSQL)
+            bind(scanStmt, 1, SemanticScanCoverage.coverageScanPass)
+            for (i, id) in slice.enumerated() {
+                bind(scanStmt, Int32(i + 2), id)
+            }
+            while sqlite3_step(scanStmt) == SQLITE_ROW {
+                let assetId = text(scanStmt, 0)
+                adScanRowSeen.insert(assetId)
+                let startTime = sqlite3_column_double(scanStmt, 1)
+                let endTime = sqlite3_column_double(scanStmt, 2)
+                guard endTime > startTime else { continue }
+                // A window only counts as scanned when a verdict was actually
+                // obtained. A refused / guardrailed / cancelled window is NOT
+                // audio we screened and found clean — counting it would
+                // silently inflate coverage, which is the failure mode this
+                // whole read exists to prevent. An unrecognised status string
+                // (forward-compat) is treated as NOT examined: under-claim.
+                guard SemanticScanStatus(rawValue: text(scanStmt, 3))?.didExamineWindow == true else {
+                    continue
+                }
+                adScanIntervals[assetId, default: []].append((start: startTime, end: endTime))
+            }
+            sqlite3_finalize(scanStmt)
 
             index = end
         }
@@ -9775,6 +9869,20 @@ actor AnalysisStore {
                 analysisCoveredSec = nil
             }
 
+            // playhead-pz32: semantic ad-scan AREA. Independent of every
+            // watermark above — this is the union of windows a semantic scan
+            // actually read. `nil` only when no coverage-lane row exists at
+            // all; a scan that ran and examined nothing reports a measured 0.
+            let adScanCoveredSec: Double?
+            let adScanCoveredSource: AnalysisCoverageSummary.CoverageProvenance
+            if adScanRowSeen.contains(id) {
+                adScanCoveredSec = AnalysisCoverageMath.unionedSeconds(adScanIntervals[id] ?? [])
+                adScanCoveredSource = .semanticScanResults
+            } else {
+                adScanCoveredSec = nil
+                adScanCoveredSource = .unknown
+            }
+
             summaries[id] = AnalysisCoverageSummary(
                 assetId: id,
                 episodeDurationSec: assetRow?.episodeDurationSec,
@@ -9788,7 +9896,9 @@ actor AnalysisStore {
                 confirmedAdCoverageEndSource: confirmedAdSec == nil ? .unknown : .assetWatermark,
                 finalPassCoverageEndSec: finalEndSec,
                 finalPassCoverageEndSource: finalEndSource,
-                analysisCoveredSec: analysisCoveredSec
+                analysisCoveredSec: analysisCoveredSec,
+                adScanCoveredSec: adScanCoveredSec,
+                adScanCoveredSource: adScanCoveredSource
             )
         }
         return summaries
