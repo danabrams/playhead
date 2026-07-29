@@ -1184,4 +1184,99 @@ struct DuplicateAssetReconcileTests {
             ) == .merge
         )
     }
+
+    /// R2 finding 5, found by a SURVIVING mutation: `foldAssetRow`'s adoption
+    /// guard has two halves — the victim must be a completion terminal AND the
+    /// survivor must not already be one. Only the first half was covered
+    /// (`terminalStateIsAdopted` uses a `queued` survivor,
+    /// `midPipelineStateIsNotAdopted` mutates the victim). Dropping
+    /// `!survivorState.isTerminalCompletion` survived the whole suite.
+    ///
+    /// It is not a harmless mutant. Both `completeFull` and
+    /// `completeTranscriptPartial` are terminal completions, so a survivor that
+    /// genuinely finished would have its verdict — and its `terminalReason`,
+    /// which carries the coverage numbers — REPLACED by the placeholder's.
+    /// The placeholder's terminal claim was scored against the poisoned ~543 s
+    /// denominator this whole bead exists to remove, and
+    /// `reconcilePersistedTerminalAssetVerdict` only repairs claims that
+    /// coverage CONTRADICTS, so a downgrade sticks.
+    @Test("a survivor that already completed keeps its own terminal claim")
+    func survivorOwnTerminalClaimIsNotReplaced() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-both-terminal"
+        try await insertPlaceholder(
+            store: store, id: "ph-both", episodeId: episodeId,
+            state: SessionState.completeTranscriptPartial.rawValue,
+            transcriptCoverage: 600, duration: 543
+        )
+        try await insertCanonical(
+            store: store, id: "canon-both", episodeId: episodeId,
+            fingerprint: canonicalSHA, state: SessionState.completeFull.rawValue,
+            featureCoverage: 2_900, transcriptCoverage: 2_900, duration: 2_933
+        )
+        try await store.execForTesting("""
+            UPDATE analysis_assets SET terminalReason = 'survivor-own-reason'
+            WHERE id = 'canon-both'
+            """)
+        try await store.execForTesting("""
+            UPDATE analysis_assets SET terminalReason = 'placeholder-543s-reason'
+            WHERE id = 'ph-both'
+            """)
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 1)
+        #expect(summary.adoptedTerminalStates == 0,
+                "the survivor's own completion is not the placeholder's to overwrite")
+
+        let survivor = try #require(try await store.fetchAsset(id: "canon-both"))
+        #expect(survivor.analysisState == SessionState.completeFull.rawValue,
+                "a completeFull survivor must not be downgraded to the placeholder's partial verdict")
+        #expect(survivor.terminalReason == "survivor-own-reason",
+                "the reason carries the coverage numbers the verdict was scored against")
+    }
+
+    /// R2 finding 6, found by a SURVIVING mutation: `repairMergedAsset` decides
+    /// to re-probe on `forceDurationReprobe || duration <= 0 || watermarkEnd >
+    /// duration`, and only the first two arms were covered. Deleting the
+    /// `watermarkEnd > duration` arm survived the whole suite.
+    ///
+    /// That arm is the one the DEVICE data actually needs. The observed shape
+    /// is a placeholder holding 630–1746 s of transcript next to a survivor
+    /// holding a 528–561 s duration of its OWN — so nothing is inherited, the
+    /// force-reprobe arm never fires, and `duration <= 0` is false. The merge
+    /// is what exposes it: raising the survivor's watermark to the max of the
+    /// pair puts 1746 s of proven coverage on a row claiming to be 560 s long.
+    /// Without this arm that contradiction is written and then kept forever,
+    /// because the sweep is one-shot.
+    @Test("a duration the MERGED coverage contradicts is re-probed even though the survivor brought it")
+    func mergedCoverageContradictingDurationIsReProbed() async throws {
+        let store = try await makeTestStore()
+        let coordinator = makeCoordinator(store: store)
+        let episodeId = "ep-contradicted"
+        let audioURL = try writeSynthAudio(seconds: 30)
+
+        try await insertPlaceholder(
+            store: store, id: "ph-contradicted", episodeId: episodeId,
+            state: SessionState.completeTranscriptPartial.rawValue,
+            transcriptCoverage: 1_746, duration: 543
+        )
+        try await insertCanonical(
+            store: store, id: "canon-contradicted", episodeId: episodeId,
+            fingerprint: canonicalSHA, transcriptCoverage: 90, duration: 560
+        )
+
+        let summary = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in audioURL }
+        )
+        #expect(summary.merge.placeholdersMerged == 1)
+        #expect(summary.merge.survivorsWithInheritedDuration.isEmpty,
+                "the survivor brought its own value — the force-reprobe arm is deliberately not what is under test")
+        #expect(summary.durationsProbed == 1,
+                "a merged watermark above the row's own duration is a contradiction only the audio can settle")
+
+        let survivor = try #require(try await store.fetchAsset(id: "canon-contradicted"))
+        let duration = try #require(survivor.episodeDurationSec)
+        #expect(abs(duration - 30) < 1.0,
+                "the merged row must carry a MEASURED duration, not the 560 s the merge just contradicted (got \(duration))")
+    }
 }
