@@ -719,11 +719,16 @@ actor AnalysisJobRunner {
         // the runner returns; the engine drops in-flight chunks and
         // gates any late writes/events for the stopped asset id.
         //
-        // Calling unconditionally on zero coverage is safe: a normal
+        // On every zero-coverage exit EXCEPT an interruption: a normal
         // `.completed` path also yields zero coverage when the engine
         // genuinely produced nothing, and stopping a session that
         // already terminated is a no-op aside from the gate insertion
         // (which is harmless because no further writes can land).
+        //
+        // playhead-ngev carves out the interruption — see
+        // `shouldStopEngine(after:)`. There the engine is not orphaned but
+        // re-tasked, and the stop would cancel the listener's own
+        // transcription and fence the asset against its appends.
         if transcriptCoverage == 0, Self.shouldStopEngine(after: transcriptFailure) {
             await transcriptEngine.stopTranscription(analysisAssetId: assetId)
         }
