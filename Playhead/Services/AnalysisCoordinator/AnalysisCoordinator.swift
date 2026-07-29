@@ -2012,6 +2012,30 @@ actor AnalysisCoordinator {
                 \(reason.failureClass.rawValue) \
                 across \(reason.failedShardCount) shard(s) — not finalizing backfill
                 """)
+            // playhead-8ysk (review r3): RELEASE THE OBSERVER HANDLE, the way
+            // `finalizeBackfill`'s `defer` does on the `.completed` side.
+            //
+            // Not finalizing is right, but stopping without clearing
+            // `transcriptEventTask` leaves a handle to a task that has already
+            // returned — and that handle is not bookkeeping, it is a decision
+            // variable. `runFromBackfill` branches on
+            // `transcriptEventTask == nil`: nil means "no transcription is
+            // running, so consult `resumeBackfillDecision` and either finalize
+            // or throw for a full restart", and non-nil means "transcription is
+            // live, just wait". A session that resumes at `.backfill` in this
+            // process — a `.waitingForBackfill` thermal resume, or another
+            // playback event for the episode — would therefore log "Backfill
+            // waiting for transcript completion" and park forever, waiting on a
+            // transcription that has already failed. The recovery path is
+            // skipped precisely for the runs that need it.
+            //
+            // Guarded on the ACTIVE asset because the handle is
+            // session-scoped: if a newer session has already installed its own
+            // observer, this arm belongs to a superseded one and must not clear
+            // the successor's handle.
+            if activeAssetId == assetId {
+                transcriptEventTask = nil
+            }
             return .stopObserving
         }
     }
@@ -3637,6 +3661,24 @@ actor AnalysisCoordinator {
     // MARK: - Test seams (playhead-gtt9.1.1)
 
     #if DEBUG
+    /// playhead-8ysk (review r3): is an observer handle still installed?
+    ///
+    /// This is the variable `runFromBackfill` branches on, so "did the terminal
+    /// arm release it" is a behavioural question, not an implementation detail.
+    var hasTranscriptObserverForTesting: Bool { transcriptEventTask != nil }
+
+    /// Install a placeholder observer handle.
+    ///
+    /// `startObservingTranscriptEvents` is private and needs a live engine
+    /// stream, but the handle's identity is irrelevant to the guard under test:
+    /// `runFromBackfill` asks only whether it is nil. A task that has already
+    /// finished is in fact the exact production state after a `.failed` —
+    /// which is what makes the stale handle dangerous rather than merely untidy.
+    func installTranscriptObserverForTesting() {
+        transcriptEventTask?.cancel()
+        transcriptEventTask = Task {}
+    }
+
     /// Test seam that mirrors the production resume-from-persisted-`.backfill`
     /// path without requiring audio, a download manager, or a
     /// playback snapshot.

@@ -214,6 +214,103 @@ struct TranscriptFailureObservationTests {
         #expect(after?.updatedAt == before?.updatedAt, "the session row was not touched at all")
     }
 
+    /// NOT FINALIZING IS ONLY HALF THE ARM'S JOB (review r3).
+    ///
+    /// `transcriptEventTask` is not bookkeeping — it is the variable
+    /// `runFromBackfill` branches on. Nil means "nothing is transcribing, so
+    /// consult `resumeBackfillDecision` and either finalize or throw for a full
+    /// restart"; non-nil means "transcription is live, just wait". On the
+    /// `.completed` side `finalizeBackfill`'s `defer` clears it. The `.failed`
+    /// arm returned `.stopObserving` while leaving a handle to a task that had
+    /// already returned, so a session resuming at `.backfill` in this process —
+    /// a `.waitingForBackfill` thermal resume, or another playback event for
+    /// the episode — would log "Backfill waiting for transcript completion" and
+    /// park forever on a transcription that had already failed. The recovery
+    /// path was disabled for exactly the runs that need it.
+    @Test(".failed releases the observer handle so backfill can recover")
+    func failedReleasesTheObserverHandle() async throws {
+        let fixture = try await seed(idSuffix: "failed-releases-handle")
+        await fixture.coordinator.installTranscriptObserverForTesting()
+        try #require(
+            await fixture.coordinator.hasTranscriptObserverForTesting,
+            "the handle must be installed, or this test proves nothing"
+        )
+
+        let step = await fixture.coordinator.handleTranscriptEventForTesting(
+            .failed(
+                analysisAssetId: fixture.assetId,
+                reason: TranscriptFailureReason(
+                    failureClass: .modelNotLoaded, code: nil, failedShardCount: 4
+                )
+            ),
+            sessionId: fixture.sessionId,
+            assetId: fixture.assetId,
+            episodeId: fixture.episodeId,
+            activeShards: fixture.shards
+        )
+        #expect(step == .stopObserving)
+
+        #expect(
+            await fixture.coordinator.hasTranscriptObserverForTesting == false,
+            """
+            `.failed` abandoned the observer but kept its handle. \
+            `runFromBackfill` reads that handle as "transcription is still \
+            running" and parks instead of recovering, so this session can never \
+            reach `resumeBackfillDecision` again in this process
+            """
+        )
+    }
+
+    /// The counterweight: releasing the handle must be a property of the
+    /// TERMINAL arm, not of every event. A `.chunksPersisted` mid-run that
+    /// cleared the handle would send `runFromBackfill` down the resume branch
+    /// while transcription was still live — finalizing or restarting on top of
+    /// a running engine.
+    @Test("control: a non-terminal event leaves the observer handle installed")
+    func nonTerminalEventKeepsTheObserverHandle() async throws {
+        let fixture = try await seed(idSuffix: "keeps-handle")
+        await fixture.coordinator.installTranscriptObserverForTesting()
+
+        let step = await fixture.coordinator.handleTranscriptEventForTesting(
+            .chunksPersisted(analysisAssetId: fixture.assetId, chunks: []),
+            sessionId: fixture.sessionId,
+            assetId: fixture.assetId,
+            episodeId: fixture.episodeId,
+            activeShards: fixture.shards
+        )
+        #expect(step == .keepObserving)
+        #expect(
+            await fixture.coordinator.hasTranscriptObserverForTesting,
+            "a mid-run event must not tear down the live observer"
+        )
+    }
+
+    /// And a `.failed` for ANOTHER asset must not release THIS session's
+    /// handle. The engine's event stream is shared, so a failure belonging to a
+    /// superseded or unrelated asset is routine; clearing on it would disable
+    /// the live session's recovery gate from the outside.
+    @Test(".failed for a different asset leaves this session's handle alone")
+    func failedForAnotherAssetKeepsTheHandle() async throws {
+        let fixture = try await seed(idSuffix: "other-asset-handle")
+        await fixture.coordinator.installTranscriptObserverForTesting()
+
+        let step = await fixture.coordinator.handleTranscriptEventForTesting(
+            .failed(
+                analysisAssetId: "some-other-asset",
+                reason: TranscriptFailureReason(failureClass: .noShards)
+            ),
+            sessionId: fixture.sessionId,
+            assetId: fixture.assetId,
+            episodeId: fixture.episodeId,
+            activeShards: fixture.shards
+        )
+        #expect(step == .keepObserving)
+        #expect(
+            await fixture.coordinator.hasTranscriptObserverForTesting,
+            "another asset's failure must not disarm this session's observer"
+        )
+    }
+
     /// The `guard analysisAssetId == assetId else { return .keepObserving }`
     /// in the `.failed` arm. A failure belonging to a DIFFERENT asset — the
     /// engine's event stream is shared, so this is routine — must neither tear
