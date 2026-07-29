@@ -956,7 +956,12 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// the caller treats absent entries as non-overlapping.
     private func loadSyntheticOrdinalTimeMap(assetId: String) async -> [Int: (startTime: Double, endTime: Double)] {
         do {
-            let spans = try await store.fetchDecodedSpans(assetId: assetId)
+            // playhead-u45d: an ORDINAL→TIME index, not an ad judgement. A
+            // `.exactSpan` correction that names a vetoed span's ordinals must
+            // still resolve to a time range or it silently stops counting.
+            let spans = try await store.fetchDecodedSpansIncludingUserVetoed(
+                assetId: assetId
+            )
             var map: [Int: (startTime: Double, endTime: Double)] = [:]
             for span in spans where span.firstAtomOrdinal < 0 {
                 let times = (startTime: span.startTime, endTime: span.endTime)
@@ -1226,7 +1231,13 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
     /// synthetic (false-negative) spans for this asset. Used by
     /// `recordFalseNegative` to probe forward on hash collision.
     private func loadSyntheticOrdinals(assetId: String) async throws -> Set<Int> {
-        let spans = try await store.fetchDecodedSpans(assetId: assetId)
+        // playhead-u45d: collision avoidance is about OCCUPIED ORDINALS, not
+        // about which spans are still believed to be ads. A vetoed row still
+        // occupies its ordinal pair, and `INSERT OR REPLACE` would silently
+        // overwrite it if this probe stopped seeing it.
+        let spans = try await store.fetchDecodedSpansIncludingUserVetoed(
+            assetId: assetId
+        )
         var ordinals: Set<Int> = []
         for span in spans where span.firstAtomOrdinal < 0 {
             ordinals.insert(span.firstAtomOrdinal)

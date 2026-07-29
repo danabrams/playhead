@@ -246,7 +246,7 @@ struct DecisionExplanation: Sendable, Codable, Equatable {
 // MARK: - CorrectionSource
 
 /// The UI gesture or mechanism that produced a user correction.
-enum CorrectionSource: String, Sendable, Codable {
+enum CorrectionSource: String, Sendable, Codable, CaseIterable {
     /// User tapped "Listen" on a span that was auto-skipped, reverting the skip.
     case listenRevert
     /// User explicitly vetoed a span via "This isn't an ad".
@@ -261,6 +261,55 @@ enum CorrectionSource: String, Sendable, Codable {
     case bannerSuggestionConfirmed
     /// Durable, private receipt for No on a suggest-tier banner.
     case bannerSuggestionDenied
+
+    /// How much this gesture is worth when two corrections claim the same
+    /// material — HIGHER WINS.
+    ///
+    /// playhead-u45d. Two corrections over the same asset + span + kind share
+    /// one `correction_events` identity (see
+    /// `AnalysisStore.appendCorrectionEvent`), so exactly one `source` can
+    /// describe that row. Before this rank the survivor was whichever gesture
+    /// happened to arrive FIRST, which meant a listener who had once rewound
+    /// through a span could never afterwards mark it "not an ad": the veto
+    /// landed on the existing `listenRevert` row, bumped its audit counters,
+    /// and left it a `listenRevert` — so `userVetoedTimeRanges` never saw it
+    /// and the span stayed highlighted. That is this bead's reported symptom.
+    ///
+    /// The ladder, and the reasoning behind each rung:
+    ///
+    ///   3  `manualVeto` / `falseNegative` — the listener selected specific
+    ///      transcript sentences and said what they are. The bounds are
+    ///      THEIRS and the claim is unambiguous.
+    ///   2  the four banner answers — a tap about a whole detected window,
+    ///      usually mid-listen, whose range came from the DETECTOR rather
+    ///      than the listener.
+    ///   1  `listenRevert` — INFERRED from a rewind-through. It may mean "not
+    ///      an ad", or it may mean the listener simply wanted to hear it.
+    ///
+    /// Rank is deliberately not unique per case: the four banner answers are
+    /// one rung because they are the same gesture pointed at different tiers.
+    /// Equal rank means "no precedence", which the persistence layer resolves
+    /// exactly as it did before this rank existed.
+    ///
+    /// `falseNegative` sits at 3 as `manualVeto`'s opposite-signed twin — the
+    /// same deliberate transcript assertion, pointed the other way. Its rank
+    /// is currently inert, because `effectiveCorrectionType` is part of the
+    /// dedupe identity and so an FN correction never collides with an FP one;
+    /// it is stated anyway so the ladder is total and a future reader does not
+    /// have to infer a missing rung.
+    var fidelityRank: Int {
+        switch self {
+        case .manualVeto, .falseNegative:
+            return 3
+        case .bannerAutoSkipConfirmed,
+             .bannerAutoSkipDenied,
+             .bannerSuggestionConfirmed,
+             .bannerSuggestionDenied:
+            return 2
+        case .listenRevert:
+            return 1
+        }
+    }
 
     /// Explicit banner answers are retained on-device for correctness and
     /// learning, but are never diagnostic-export material.

@@ -8584,7 +8584,12 @@ actor AdDetectionService {
         // persisted width-owned rows, skip the upsert entirely and leave the
         // slot-owned rows authoritative. Checks BOTH markers via `isWidthOwnership`
         // so a rediff-owned asset is protected identically to a splice-owned one.
-        let existingSpans = (try? await store.fetchDecodedSpans(assetId: analysisAssetId)) ?? []
+        // playhead-u45d: STRUCTURAL bookkeeping — this guard asks "does a
+        // width-owned row already exist under this id?", not "is this an ad?".
+        // A user-vetoed row still owns its id, so the veto-aware read would
+        // let a fresh decode re-mint the very ghost row this guard exists to
+        // prevent.
+        let existingSpans = (try? await store.fetchDecodedSpansIncludingUserVetoed(assetId: analysisAssetId)) ?? []
         let assetIsSlotOwned = existingSpans.contains { $0.anchorProvenance.contains(where: { $0.isWidthOwnership }) }
         if assetIsSlotOwned {
             logger.info(
