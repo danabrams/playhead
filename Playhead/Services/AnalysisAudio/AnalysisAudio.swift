@@ -186,12 +186,21 @@ private struct ShardCache: Sendable {
     /// Persist shards to disk, stamped with the identity of the file they
     /// were decoded from (playhead-8ysk).
     ///
-    /// A source whose length cannot be measured is NOT cached at all. An
+    /// A source whose identity could not be measured is NOT cached at all. An
     /// unstamped entry can never be invalidated afterwards, and an
     /// immortal entry is the whole defect this stamp exists to close —
     /// re-decoding is strictly cheaper than serving a wrong answer forever.
-    static func saveShards(_ shards: [AnalysisShard], episodeID: String, sourceURL: URL) {
-        guard let identity = AnalysisAudioService.sourceIdentity(of: sourceURL) else {
+    ///
+    /// THE IDENTITY IS PASSED IN, NOT MEASURED HERE (review r3). It must be
+    /// the measurement taken when the decode OPENED the file; measuring at
+    /// save time describes a file the shards may not have come from. See
+    /// ``AnalysisAudioService/performDecode(fileURL:episodeID:shardDuration:)``.
+    static func saveShards(
+        _ shards: [AnalysisShard],
+        episodeID: String,
+        identity: AnalysisAudioService.SourceIdentity?
+    ) {
+        guard let identity else {
             return
         }
         let dir = episodeDirectory(episodeID: episodeID)
@@ -811,6 +820,25 @@ actor AnalysisAudioService {
     }
 
     #if DEBUG
+    /// playhead-8ysk (review r3): fires inside `performDecode` immediately
+    /// after the source is measured and before the asset is opened.
+    ///
+    /// The ordering it guards — stamp the file as it was when the decode
+    /// STARTED — is only observable if the source changes during the decode,
+    /// and in production that change is a background download appending bytes.
+    /// This hook is the deterministic stand-in for that race: a test grows the
+    /// file at exactly the instrumented instant, so "measured before" and
+    /// "measured after" produce different stamps and the mutation that moves
+    /// the measurement back into `saveShards` fails a test instead of shipping.
+    /// Follows the `nonisolated(unsafe) static var` observer convention already
+    /// used by `FusionBudgetClamp.testClampObserver` and friends.
+    ///
+    /// The `episodeID` is passed so an installed hook can ignore decodes it did
+    /// not stage. It is one global observed by a whole parallel test run, and
+    /// several suites decode audio; without the filter, one suite's hook fires
+    /// on another suite's decode and mutates a fixture out from under it.
+    nonisolated(unsafe) static var didMeasureSourceForTesting: (@Sendable (String) -> Void)?
+
     // MARK: - Cache write/read seam (playhead-8ysk review r2)
 
     /// Persist a shard set exactly as a completed decode would, then read it
@@ -834,7 +862,9 @@ actor AnalysisAudioService {
         episodeID: String,
         sourceURL: URL
     ) {
-        ShardCache.saveShards(shards, episodeID: episodeID, sourceURL: sourceURL)
+        ShardCache.saveShards(
+            shards, episodeID: episodeID, identity: sourceIdentity(of: sourceURL)
+        )
     }
 
     /// Read side of ``saveShardsForTesting(_:episodeID:sourceURL:)``.
@@ -865,6 +895,38 @@ actor AnalysisAudioService {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw AnalysisAudioError.fileNotFound(fileURL.url)
         }
+
+        // 1b. Measure the source NOW, before a single byte is read, and stamp
+        //     the cache with THIS value at step 9 (playhead-8ysk review r3).
+        //
+        //     The stamp must describe the file the decoder opened, and that is
+        //     a claim about WHEN as much as about WHICH file. Measuring inside
+        //     `saveShards` — i.e. after the decode drains — is wrong here
+        //     because the source is routinely still growing while we read it:
+        //     `DownloadManager.streamingDownload` returns the CANONICAL path
+        //     as soon as `defaultPlayableThreshold` (8 MiB) bytes are on disk
+        //     and keeps writing, and `PlayheadRuntime` hands that same URL
+        //     straight to `handlePlaybackEvent(.playStarted(audioURL:))`. The
+        //     8 MiB prefix decoding to a ~543 s stub of a 2933 s episode is
+        //     documented on ``AnalysisDecodeOutcome`` as the live shape.
+        //
+        //     With a save-time measurement the failure is silent and permanent:
+        //     the prefix decodes, `isTruncated` is false (a prefix that
+        //     declares its own length reads as complete to itself), the
+        //     download finishes DURING the decode, and the entry is stamped
+        //     with the COMPLETE file's identity. It then matches forever, and
+        //     the episode serves a prefix decode for good — the immortal cache
+        //     this bead exists to close, re-entered through the clock.
+        //
+        //     Measured pre-decode the same race is self-healing: the stamp
+        //     records the prefix, the grown file no longer matches, the entry
+        //     is evicted and re-decoded. The cost of being wrong is one extra
+        //     decode; the cost of the other order is a wrong answer nothing
+        //     downstream can detect.
+        let sourceIdentity = Self.sourceIdentity(of: fileURL.url)
+        #if DEBUG
+        Self.didMeasureSourceForTesting?(episodeID)
+        #endif
 
         // 2. Load the asset and get its audio track.
         let asset = AVURLAsset(url: fileURL.url)
@@ -1333,8 +1395,13 @@ actor AnalysisAudioService {
         //     looks complete TO ITSELF, `isTruncated` is false, and the partial
         //     decode is cached. The byte stamp catches that case when the file
         //     finishes downloading; nothing else does.
+        //
+        //     playhead-8ysk review r3: `sourceIdentity` is the measurement
+        //     taken at step 1b, BEFORE the decode. Do not re-measure here —
+        //     see step 1b for why a save-time measurement stamps a file the
+        //     shards may not have come from.
         if !isTruncated {
-            ShardCache.saveShards(shards, episodeID: episodeID, sourceURL: fileURL.url)
+            ShardCache.saveShards(shards, episodeID: episodeID, identity: sourceIdentity)
         }
 
         // 10. Log truncation warning but return partial shards — throwing here

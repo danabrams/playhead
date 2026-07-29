@@ -37,11 +37,21 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import os
 import Testing
 
 @testable import Playhead
 
-@Suite("playhead-8ysk — the shard cache is keyed on its source, not just the episode")
+// `.serialized` (review r3): two tests below install
+// `AnalysisAudioService.didMeasureSourceForTesting`, which is one global. Run
+// in parallel they overwrite each other's hook, so one test's decode fires the
+// other's closure and neither measures what it claims to. Serializing this
+// suite is what makes the hook safe to use; the per-episode filter in each
+// closure is what makes it safe against the REST of the run.
+@Suite(
+    "playhead-8ysk — the shard cache is keyed on its source, not just the episode",
+    .serialized
+)
 struct ShardCacheSourceIdentityTests {
 
     private static let tempDirs = TestTempDirTracker()
@@ -776,6 +786,148 @@ struct ShardCacheSourceIdentityTests {
         #expect(
             !AnalysisAudioService.manifestExistsForTesting(episodeID: episodeID),
             "and the healed entry is evicted, not merely bypassed"
+        )
+    }
+
+    // MARK: - 8. WHEN the source is measured (review r3)
+
+    /// THE STAMP IS A CLAIM ABOUT A MOMENT, NOT JUST ABOUT A FILE.
+    ///
+    /// Review r2 made the stamp describe the right FILE (it resolved symlinks,
+    /// because `attributesOfItem` reports the link). It left the stamp
+    /// describing the wrong MOMENT: `saveShards` measured the source after the
+    /// decode drained, so what got written was the file as it existed at the
+    /// END of the decode, not the file the decoder opened.
+    ///
+    /// That gap is not theoretical here, because analysis is routinely pointed
+    /// at a file that is still being written.
+    /// `DownloadManager.streamingDownload` returns the CANONICAL path as soon
+    /// as `defaultPlayableThreshold` (8 MiB) bytes have landed and keeps
+    /// appending, and `PlayheadRuntime` passes that same URL straight into
+    /// `handlePlaybackEvent(.playStarted(audioURL:))`.
+    /// ``AnalysisDecodeOutcome``'s own documentation describes the result: an
+    /// 8 MiB prefix decoding to a ~543 s stub of a 2933 s episode.
+    ///
+    /// The failure it produced was silent and PERMANENT. The prefix decodes;
+    /// `isTruncated` is false because a prefix that declares its own length
+    /// reads as complete to itself; the download finishes while the decode is
+    /// still running; and the entry is stamped with the identity of the
+    /// COMPLETED file. From then on the stamp matches forever and the episode
+    /// serves a prefix decode for the rest of the install — the immortal cache
+    /// this bead exists to close, re-entered through the clock instead of
+    /// through the key.
+    ///
+    /// Measured before the decode, the same race self-heals: the stamp records
+    /// the prefix, the grown file does not match it, the entry is evicted and
+    /// re-decoded. This test pins that direction by growing the source at the
+    /// instrumented instant — the deterministic stand-in for the background
+    /// download, since a real one cannot be scheduled inside the decode window.
+    @Test("a source that grows during the decode is stamped as it was BEFORE it")
+    func sourceIsStampedAsOfDecodeStartNotDecodeEnd() async throws {
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-growrace-\(UUID().uuidString)"
+        defer {
+            Task { await service.evictCache(episodeID: episodeID) }
+            AnalysisAudioService.didMeasureSourceForTesting = nil
+        }
+
+        let url = try makeAudioURL()
+        try writeSynthAudio(seconds: 45, to: url)
+        let identityAtDecodeStart = try #require(AnalysisAudioService.sourceIdentity(of: url))
+
+        // Grow the source exactly once, at the moment the decode measures it —
+        // i.e. inside the decode's own window, which is where a background
+        // download lands in production. Appending to a CAF leaves it decodable
+        // and changes both length and mtime (measured off-budget).
+        let grown = OSAllocatedUnfairLock(initialState: false)
+        AnalysisAudioService.didMeasureSourceForTesting = { @Sendable decodingEpisodeID in
+            guard decodingEpisodeID == episodeID else { return }
+            grown.withLock { alreadyGrown in
+                guard !alreadyGrown else { return }
+                alreadyGrown = true
+                guard let handle = try? FileHandle(forWritingTo: url) else { return }
+                defer { try? handle.close() }
+                try? handle.seekToEnd()
+                try? handle.write(contentsOf: Data(repeating: 0, count: 300_000))
+            }
+        }
+
+        let local = try #require(LocalAudioURL(url))
+        let outcome = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        try #require(!outcome.shards.isEmpty, "the fixture must decode, or nothing is cached")
+        try #require(grown.withLock { $0 }, "the hook must have fired, or this measures nothing")
+
+        let identityAfterDecode = try #require(AnalysisAudioService.sourceIdentity(of: url))
+        try #require(
+            identityAfterDecode != identityAtDecodeStart,
+            "the fixture must actually change the source, or both orders agree"
+        )
+
+        // NON-VACUITY, and it has to be checked BEFORE the load: a miss below
+        // would also be produced by a decode that cached nothing at all (if the
+        // growth pushed `isTruncated` true), and that version of the test would
+        // pass against the defect. Prove an entry was written first — and read
+        // this before `loadShardsForTesting`, which evicts on a mismatch.
+        try #require(
+            AnalysisAudioService.manifestExistsForTesting(episodeID: episodeID),
+            """
+            nothing was cached, so this test cannot distinguish a pre-decode \
+            stamp from a post-decode one. The fixture must produce a cacheable \
+            (non-truncated) decode
+            """
+        )
+
+        // The entry carries the PRE-decode stamp — which the file on disk no
+        // longer matches, so the cache must miss and the shards must be
+        // evicted. A post-decode stamp would match the grown file and serve
+        // this decode forever.
+        #expect(
+            AnalysisAudioService.loadShardsForTesting(episodeID: episodeID, sourceURL: url) == nil,
+            """
+            the cache served a decode of the PRE-growth file against the \
+            POST-growth source. The stamp was taken after the decode, so it \
+            describes bytes the shards did not come from — and because it \
+            matches the finished download it can never invalidate. This is the \
+            immortal partial-decode cache, reintroduced by measuring at the \
+            wrong time
+            """
+        )
+    }
+
+    /// The control for the test above, and the reason it is not vacuous: with
+    /// the source left ALONE, the identical decode caches and serves normally.
+    /// Without this, "the cache missed" would also be satisfied by a decode
+    /// that never caches anything at all.
+    @Test("control: an unchanged source during the decode is cached and served")
+    func unchangedSourceDuringDecodeIsStillCached() async throws {
+        let service = AnalysisAudioService()
+        let episodeID = "bd8ysk-growrace-control-\(UUID().uuidString)"
+        defer {
+            Task { await service.evictCache(episodeID: episodeID) }
+            AnalysisAudioService.didMeasureSourceForTesting = nil
+        }
+
+        let url = try makeAudioURL()
+        try writeSynthAudio(seconds: 45, to: url)
+
+        let fired = OSAllocatedUnfairLock(initialState: false)
+        AnalysisAudioService.didMeasureSourceForTesting = { @Sendable decodingEpisodeID in
+            guard decodingEpisodeID == episodeID else { return }
+            fired.withLock { $0 = true }
+        }
+
+        let local = try #require(LocalAudioURL(url))
+        let outcome = try await service.decodeOutcome(fileURL: local, episodeID: episodeID)
+        try #require(!outcome.shards.isEmpty)
+        try #require(fired.withLock { $0 }, "the hook fires on every decode, not only the mutating one")
+
+        #expect(
+            AnalysisAudioService.loadShardsForTesting(episodeID: episodeID, sourceURL: url) != nil,
+            """
+            an untouched source must still be cached and served. If this fails, \
+            the pre-decode measurement is stamping something the source does not \
+            match, and every episode pays a re-decode on every pass
+            """
         )
     }
 }

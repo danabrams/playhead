@@ -352,6 +352,30 @@ actor TranscriptEngineService {
     /// Used by appendShards to decide whether to start a new loop.
     private var loopRunning: Bool = false
 
+    /// playhead-8ysk (review r3): transcript chunks THIS run inserted.
+    ///
+    /// Reset at the top of every `runTranscriptionLoop` and incremented at the
+    /// single batch-insert site in `transcribeShard`, so it counts durable rows
+    /// this pass produced and nothing else.
+    ///
+    /// It exists because the obvious alternative is wrong.
+    /// `store.fetchTranscriptChunks(assetId:)` is
+    /// `WHERE analysisAssetId = ?` with no pass or generation scoping, and the
+    /// asset row is REUSED across passes — `AnalysisCoordinator` resolves it
+    /// with `fetchAssetByEpisodeId` and keeps `existing.id`. So on a retry of
+    /// an asset that once made progress, that query returns the EARLIER pass's
+    /// chunks, and a total failure now would read as "we produced something".
+    /// A retry of a partly-transcribed asset is the exact shape of this bead's
+    /// incident (147 acquisitions, 9 finalizations), so the cumulative read
+    /// would have failed in the case the failure event exists for — the same
+    /// per-pass-vs-cumulative confusion review r2 found in the runner's
+    /// `fastTranscriptCoverageEndTime` fallback, one layer down.
+    ///
+    /// `AnalysisJobRunner` already does this correctly and is the model:
+    /// it snapshots `existingChunkCount` before transcription and reports
+    /// `currentChunkCount - existingChunkCount`.
+    private var chunksInsertedThisRun: Int = 0
+
     /// Optional preemption context threaded in by AnalysisJobRunner
     /// (playhead-01t8). Polled after each TranscriptChunk batch
     /// persists; on a preempt request the loop acknowledges and
@@ -726,6 +750,9 @@ actor TranscriptEngineService {
         // below still `continue` — partial coverage is better than none — but
         // they no longer throw the diagnosis away with the shard.
         var shardFailures: [TranscriptFailureReason] = []
+        // playhead-8ysk (review r3): this run's own production. See the
+        // declaration for why the store cannot answer this question.
+        chunksInsertedThisRun = 0
 
         guard !shards.isEmpty || !appendedShards.isEmpty else {
             logger.warning("No shards to transcribe")
@@ -931,18 +958,24 @@ actor TranscriptEngineService {
         // A run that persisted some chunks genuinely did partial work, and the
         // catches above keep continuing on purpose; downgrading those to
         // failures would discard usable transcript.
-        if !shardFailures.isEmpty {
-            let persisted = (try? await store.fetchTranscriptChunks(assetId: analysisAssetId)) ?? []
-            if persisted.isEmpty {
-                let reason = Self.dominantFailure(shardFailures)
-                logger.error("""
-                    Transcription produced nothing for asset \(analysisAssetId) in \(loopElapsed): \
-                    \(reason.failureClass.rawValue) \
-                    across \(reason.failedShardCount) shard(s)
-                    """)
-                emitEvent(.failed(analysisAssetId: analysisAssetId, reason: reason))
-                return
-            }
+        //
+        // "Produced nothing" means THIS RUN produced nothing, which is why the
+        // count comes from `chunksInsertedThisRun` and not from the store. See
+        // that property's declaration: `fetchTranscriptChunks(assetId:)` is
+        // cumulative over the asset's whole lifetime and the asset row is
+        // reused across passes, so asking it here would have let a retry of a
+        // partly-transcribed asset report `.completed` over a total failure —
+        // reinstating the very lie this block removes, in the retry case this
+        // bead was filed for.
+        if !shardFailures.isEmpty, chunksInsertedThisRun == 0 {
+            let reason = Self.dominantFailure(shardFailures)
+            logger.error("""
+                Transcription produced nothing for asset \(analysisAssetId) in \(loopElapsed): \
+                \(reason.failureClass.rawValue) \
+                across \(reason.failedShardCount) shard(s)
+                """)
+            emitEvent(.failed(analysisAssetId: analysisAssetId, reason: reason))
+            return
         }
 
         logger.info("Transcription loop complete for asset \(analysisAssetId) in \(loopElapsed)")
@@ -1199,6 +1232,10 @@ actor TranscriptEngineService {
         // Batch-insert to SQLite.
         if !chunksToInsert.isEmpty {
             try await store.insertTranscriptChunks(chunksToInsert)
+            // playhead-8ysk (review r3): count AFTER the insert returns, so a
+            // throwing insert (the `persistence_failed` class) does not credit
+            // this run with rows it never wrote.
+            chunksInsertedThisRun += chunksToInsert.count
         }
         if !emittedChunks.isEmpty {
             emitEvent(.chunksPersisted(analysisAssetId: analysisAssetId, chunks: emittedChunks))

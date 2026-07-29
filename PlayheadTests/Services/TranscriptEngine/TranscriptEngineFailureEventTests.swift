@@ -251,6 +251,148 @@ struct TranscriptEngineFailureEventTests {
         #expect(!chunks.isEmpty, "the fixture must persist something, or this proves nothing")
     }
 
+    // MARK: - Retry of an asset that once made progress (review r3)
+
+    /// THE HEADLINE CASE, AND IT FAILED HERE FIRST.
+    ///
+    /// The bead exists because 147 analysis jobs were acquired and 9 finalized
+    /// over six days: the device is overwhelmingly RETRYING assets that already
+    /// made partial progress. So the retry is the case a failure report has to
+    /// survive, and until review r3 it was the one case it did not.
+    ///
+    /// The gate read `store.fetchTranscriptChunks(assetId:)` — which is
+    /// `WHERE analysisAssetId = ?` with no pass scoping — and the asset row is
+    /// REUSED across passes (`AnalysisCoordinator` resolves it via
+    /// `fetchAssetByEpisodeId` and keeps `existing.id`). So an EARLIER pass's
+    /// chunks made `persisted.isEmpty` false and a total failure emitted
+    /// `.completed`. Downstream, `AnalysisJobRunner` then reads
+    /// `fastTranscriptCoverageEndTime` — cumulative for the same reason — sees
+    /// non-zero, and skips the entire zero-coverage branch: no `work_journal`
+    /// row, no `failure_class`, no named `lastErrorCode`.
+    ///
+    /// That is exactly the defect review r2 fixed one layer up (R7), reappearing
+    /// underneath the fix. Both come from reading a cumulative store value as a
+    /// per-pass measure.
+    ///
+    /// The fixture is the incident: a pre-existing chunk from pass 1, then a
+    /// pass that transcribes nothing.
+    @Test(.timeLimit(.minutes(1)))
+    func retryThatProducesNothingStillReportsFailed() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-retry"))
+
+        // Pass 1's durable output. The row survives into pass 2 because the
+        // asset id does.
+        try await store.insertTranscriptChunks([
+            TranscriptChunk(
+                id: "chunk-from-pass-1",
+                analysisAssetId: "asset-retry",
+                segmentFingerprint: "seg-pass-1",
+                chunkIndex: 0,
+                startTime: 0,
+                endTime: 5,
+                text: "from an earlier pass",
+                normalizedText: "from an earlier pass",
+                pass: TranscriptPassType.fast.rawValue,
+                modelVersion: "speech-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil
+            ),
+        ])
+        let seeded = try await store.fetchTranscriptChunks(assetId: "asset-retry")
+        #expect(seeded.count == 1, "the retry premise requires prior-pass output to exist")
+
+        // Pass 2: every shard fails, so this run produces nothing at all.
+        let speech = SpeechService(
+            recognizer: AlwaysFailingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-asset-retry", startTime: 0, duration: 30),
+                makeShard(id: 1, episodeID: "ep-asset-retry", startTime: 30, duration: 30),
+            ],
+            analysisAssetId: "asset-retry",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-retry")
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-retry")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("""
+                a retry that transcribed nothing reported \
+                \(String(describing: terminal)) — the prior pass's chunks were \
+                counted as this pass's output
+                """)
+            return
+        }
+        #expect(reason.failureClass == .vadFailed)
+        #expect(reason.failedShardCount == 2)
+
+        // And the earlier pass's work is untouched: reporting the failure must
+        // not be confused with discarding usable transcript.
+        let after = try await store.fetchTranscriptChunks(assetId: "asset-retry")
+        #expect(after.count == 1, "the prior pass's chunk must survive the failure report")
+    }
+
+    /// The counterweight to the test above, and the reason the fix is a
+    /// per-run counter rather than "ignore what is in the store".
+    ///
+    /// A retry that DOES persist something is still a partial success and must
+    /// still complete. Without this, tightening the gate to "any shard failed"
+    /// — or to "the store gained no rows", which a dedup-heavy retry can also
+    /// satisfy — would pass the test above while throwing away real work.
+    @Test(.timeLimit(.minutes(1)))
+    func retryThatPersistsSomethingStillCompletes() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-retry-partial"))
+        try await store.insertTranscriptChunks([
+            TranscriptChunk(
+                id: "chunk-retry-prior",
+                analysisAssetId: "asset-retry-partial",
+                segmentFingerprint: "seg-retry-prior",
+                chunkIndex: 0,
+                startTime: 0,
+                endTime: 5,
+                text: "from an earlier pass",
+                normalizedText: "from an earlier pass",
+                pass: TranscriptPassType.fast.rawValue,
+                modelVersion: "speech-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil
+            ),
+        ])
+
+        let speech = SpeechService(
+            recognizer: FailAfterFirstRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-asset-retry-partial", startTime: 0, duration: 30),
+                makeShard(id: 1, episodeID: "ep-asset-retry-partial", startTime: 30, duration: 30),
+            ],
+            analysisAssetId: "asset-retry-partial",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-retry-partial")
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-retry-partial")
+        #expect(terminal == .completed,
+                "a retry that persisted new chunks is a partial success, not a failure")
+
+        let after = try await store.fetchTranscriptChunks(assetId: "asset-retry-partial")
+        #expect(after.count > 1, "this run must really have added rows, or it proves nothing")
+    }
+
     /// THE ACCIDENTAL DEMO, TURNED INTO A GUARD (round-1 review).
     ///
     /// `appendShardsAfterCompletion` never seeded its `analysis_assets` row.
