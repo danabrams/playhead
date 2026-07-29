@@ -2845,6 +2845,143 @@ actor AnalysisCoordinator {
         return summary
     }
 
+    // MARK: - Duplicate placeholder-asset reconcile (playhead-0hi9 part 3)
+
+    /// `_meta.key` flag. Once set, subsequent calls short-circuit.
+    ///
+    /// A NEW key, not a bump of an existing one: `did_duration_backfill_v1` and
+    /// `did_terminal_state_reconcile_v1` are already marked done on the
+    /// affected device, and both are per-row duplicate-blind — reusing either
+    /// would either not run at all or re-run work that is not the repair
+    /// needed here.
+    static let duplicateAssetReconcileV1MetaKey = "did_duplicate_asset_reconcile_v1"
+
+    /// One-shot launch-time sweep that merges the `analysis_assets` pairs
+    /// already on disk, then repairs what the merge exposes.
+    ///
+    /// Three ordered steps, because each depends on the previous one:
+    ///
+    ///  1. ``AnalysisStore/reconcileDuplicatePlaceholderAssets()`` — one
+    ///     transaction, re-points every child row, takes the max of each
+    ///     coverage watermark, deletes the placeholder. See that method for
+    ///     the merge policy.
+    ///  2. Re-probe `episodeDurationSec` for each survivor from the cached
+    ///     audio file. The merged row inherits the survivor's duration, which
+    ///     may itself be a mid-download artifact from before part 1 landed;
+    ///     `AudioFileDurationProbe` reads container metadata and is the only
+    ///     measurement either row can be checked against. Only rows whose
+    ///     duration is missing or contradicted by their own coverage are
+    ///     probed — a plausible duration is left alone.
+    ///  3. Re-score the survivor's terminal claim with the EXISTING
+    ///     ``reconcilePersistedTerminalAssetVerdict(asset:transcriptCoverageEnd:featureCoverageEnd:episodeDuration:)``.
+    ///     The merge may have adopted a `completeFull` from the folded-in row;
+    ///     this is what stops that adoption from being an unchecked assertion.
+    ///     Reuses the hygc.1.3 rules rather than inventing parallel ones.
+    ///
+    /// - Parameter cachedFileURL: local file URL for an episodeId, or nil when
+    ///   the audio is not on disk. In production
+    ///   `await downloadManager.cachedFileURL(for:)`.
+    ///
+    /// Errors are logged and swallowed — a launch sweep must never block the
+    /// app. The merge itself is atomic, so a failure there leaves the database
+    /// exactly as it was and the next launch retries (the `_meta` marker is
+    /// only written after a completed pass).
+    func reconcileDuplicateAnalysisAssetsIfNeeded(
+        cachedFileURL: @escaping @Sendable (String) async -> URL?
+    ) async -> DuplicateAssetReconcileSummary {
+        var summary = DuplicateAssetReconcileSummary()
+
+        do {
+            if let flag = try await store.fetchMetaValue(forKey: Self.duplicateAssetReconcileV1MetaKey),
+               flag == "1" {
+                summary.alreadyDone = true
+                return summary
+            }
+        } catch {
+            logger.warning("Duplicate-asset reconcile: meta read failed (\(String(describing: error), privacy: .public)); proceeding without idempotence guard")
+        }
+
+        let merge: DuplicateAssetMergeSummary
+        do {
+            merge = try await store.reconcileDuplicatePlaceholderAssets()
+        } catch {
+            // Do NOT set the marker — the transaction rolled back, so the next
+            // launch must try again rather than skip the repair forever.
+            logger.error("Duplicate-asset reconcile: merge failed, database unchanged: \(String(describing: error), privacy: .public)")
+            summary.failed = true
+            return summary
+        }
+        summary.merge = merge
+
+        for assetId in merge.survivingAssetIds {
+            await repairMergedAsset(assetId: assetId, cachedFileURL: cachedFileURL, summary: &summary)
+        }
+
+        do {
+            try await store.setMetaValue(
+                forKey: Self.duplicateAssetReconcileV1MetaKey,
+                value: "1"
+            )
+        } catch {
+            logger.warning("Duplicate-asset reconcile: failed to set idempotence marker: \(String(describing: error), privacy: .public)")
+        }
+
+        if merge.placeholdersMerged > 0 {
+            logger.info("Duplicate-asset reconcile: merged \(merge.placeholdersMerged, privacy: .public) placeholder row(s) across \(merge.episodesInspected, privacy: .public) episode(s); re-pointed \(merge.childRowsRepointed, privacy: .public) child row(s), discarded \(merge.childRowsDiscarded, privacy: .public) conflicting duplicate(s), re-probed \(summary.durationsRewritten, privacy: .public) duration(s), repaired \(summary.terminalStatesRepaired, privacy: .public) terminal state(s)")
+        }
+        return summary
+    }
+
+    /// Steps 2 and 3 for one merged row.
+    private func repairMergedAsset(
+        assetId: String,
+        cachedFileURL: @escaping @Sendable (String) async -> URL?,
+        summary: inout DuplicateAssetReconcileSummary
+    ) async {
+        guard let asset = try? await store.fetchAsset(id: assetId) else { return }
+
+        let transcriptEnd = (try? await store.fetchMaxTranscriptEndTimeByAssetIds([assetId]))?[assetId] ?? 0
+        var duration = asset.episodeDurationSec ?? 0
+        let featureEnd = asset.featureCoverageEndTime ?? 0
+        let watermarkEnd = max(featureEnd, max(asset.fastTranscriptCoverageEndTime ?? 0, transcriptEnd))
+        let durationLooksWrong = duration <= 0 || watermarkEnd > duration
+
+        if durationLooksWrong, let fileURL = await cachedFileURL(asset.episodeId) {
+            summary.durationsProbed += 1
+            if let probed = await AudioFileDurationProbe.probeDuration(at: fileURL), probed > 0 {
+                do {
+                    try await store.updateEpisodeDuration(id: assetId, episodeDurationSec: probed)
+                    summary.durationsRewritten += 1
+                    duration = probed
+                    logger.info("Duplicate-asset reconcile: asset \(assetId, privacy: .public) duration re-probed \(asset.episodeDurationSec.map { "\($0)" } ?? "nil", privacy: .public) -> \(probed, privacy: .public)s")
+                } catch {
+                    logger.warning("Duplicate-asset reconcile: duration write failed for \(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            } else {
+                summary.durationProbeFailed += 1
+            }
+        }
+
+        guard let refreshed = try? await store.fetchAsset(id: assetId) else { return }
+        let verdict = Self.reconcilePersistedTerminalAssetVerdict(
+            asset: refreshed,
+            transcriptCoverageEnd: transcriptEnd,
+            featureCoverageEnd: refreshed.featureCoverageEndTime,
+            episodeDuration: refreshed.episodeDurationSec
+        )
+        guard case .repair(let state, let reason) = verdict else { return }
+        do {
+            try await store.updateAssetState(
+                id: assetId,
+                state: state.rawValue,
+                terminalReason: reason
+            )
+            summary.terminalStatesRepaired += 1
+        } catch {
+            logger.warning("Duplicate-asset reconcile: terminal repair failed for \(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
     // MARK: - Persisted terminal-state reconcile (playhead-hygc.1.3)
 
     /// `_meta.key` flag controlling idempotence of
@@ -3547,6 +3684,29 @@ actor AnalysisCoordinator {
 
 /// Result of one duration-backfill sweep — see
 /// `AnalysisCoordinator.runEpisodeDurationBackfillIfNeeded`.
+/// playhead-0hi9 part 3: outcome of one
+/// ``AnalysisCoordinator/reconcileDuplicateAnalysisAssetsIfNeeded(cachedFileURL:)``
+/// pass.
+struct DuplicateAssetReconcileSummary: Sendable, Equatable {
+    /// What the transactional SQL merge did.
+    var merge = DuplicateAssetMergeSummary()
+    /// Merged rows whose duration was missing or contradicted and therefore
+    /// re-probed from the audio file.
+    var durationsProbed = 0
+    /// Of those, the ones a probe actually rewrote.
+    var durationsRewritten = 0
+    /// Probes that returned nil (row left untouched).
+    var durationProbeFailed = 0
+    /// Merged rows whose terminal claim the hygc.1.3 verdict contradicted
+    /// against the re-probed duration, and repaired.
+    var terminalStatesRepaired = 0
+    /// `true` when the sweep had already run on this install and was a no-op.
+    var alreadyDone = false
+    /// `true` when the merge threw. The transaction rolled back, the `_meta`
+    /// marker was NOT written, and the next launch retries.
+    var failed = false
+}
+
 struct EpisodeDurationBackfillSummary: Sendable, Equatable {
     /// Number of rows whose `episodeDurationSec` was rewritten.
     var rewritten: Int = 0

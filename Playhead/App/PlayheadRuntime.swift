@@ -2309,6 +2309,22 @@ final class PlayheadRuntime {
             // inside are logged and swallowed.
             _ = await analysisCoordinator.reconcilePersistedTerminalStatesIfNeeded()
 
+            // playhead-0hi9: one-shot launch sweep that merges the
+            // `analysis_assets` PAIRS already on disk — one episode, two
+            // rows, state split across both. Runs AFTER the duration
+            // backfill and terminal reconcile because those two are
+            // per-row duplicate-blind and already marked done on affected
+            // installs; this sweep carries its own `_meta` key
+            // (`did_duplicate_asset_reconcile_v1`) and does the merge, the
+            // duration re-probe and the terminal re-score itself. The merge
+            // is one SQL transaction, so an interrupted launch leaves the
+            // database untouched and the next launch retries.
+            _ = await analysisCoordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+                cachedFileURL: { episodeId in
+                    await downloadManager.cachedFileURL(for: episodeId)
+                }
+            )
+
             // bd-200: prune scan rows under stale cohort hashes (locale change,
             // app upgrade, prompt/schema/plan/normalization revs). Best-effort —
             // failures are logged but don't block app launch. Must run AFTER
