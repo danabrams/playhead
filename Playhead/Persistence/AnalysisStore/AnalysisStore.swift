@@ -15624,27 +15624,44 @@ actor AnalysisStore {
     /// another's analysis — the guard exists to refuse. Blank ids are skipped;
     /// leaving them alone costs nothing and cannot be undone if we get it
     /// wrong.
+    ///
+    /// R3: THE BLANK TEST IS IN SWIFT, NOT SQL. It used to be
+    /// `WHERE TRIM(episodeId) != ''`, and SQLite's one-argument `TRIM` strips
+    /// ASCII SPACE and nothing else — a tab-, newline- or NBSP-only id walked
+    /// straight through a filter whose whole job was to stop it, with exactly
+    /// the consequence above. `trimmingCharacters(in: .whitespacesAndNewlines)`
+    /// is the same predicate ``AssetMergeRow/artifactBasename`` already
+    /// applies to `sourceURL`, so both ends of the guard now agree on what
+    /// "blank" means, over the whole Unicode whitespace set rather than one
+    /// code point.
     private func episodeIdsWithMultipleAssets() throws -> [String] {
         let stmt = try prepare("""
             SELECT episodeId FROM analysis_assets
-            WHERE TRIM(episodeId) != ''
             GROUP BY episodeId HAVING COUNT(*) > 1
             ORDER BY episodeId
             """)
         defer { sqlite3_finalize(stmt) }
         var out: [String] = []
         while try nextRow(stmt) {
-            out.append(text(stmt, 0))
+            let episodeId = text(stmt, 0)
+            guard !episodeId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            out.append(episodeId)
         }
         return out
     }
 
+    /// R3: `ORDER BY rowid` is load-bearing, not tidiness. The fold order
+    /// decides which placeholder's completion terminal the merged row ends up
+    /// with when an episode holds more than one, and an unordered scan makes
+    /// that SQLite's choice rather than ours. `rowid` is insert order, so the
+    /// row the device wrote first is folded first.
     private func assetMergeRows(episodeId: String) throws -> [AssetMergeRow] {
         let stmt = try prepare("""
             SELECT rowid, id, assetFingerprint, createdAt, analysisState,
                    terminalReason, sourceURL, episodeDurationSec
             FROM analysis_assets
             WHERE episodeId = ?
+            ORDER BY rowid
             """)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, episodeId)
@@ -15665,6 +15682,13 @@ actor AnalysisStore {
         }
         return out
     }
+
+#if DEBUG
+    /// R3 test seam: the rows one episode's fold will walk, in fold order.
+    func assetMergeRowsForTesting(episodeId: String) throws -> [AssetMergeRow] {
+        try assetMergeRows(episodeId: episodeId)
+    }
+#endif
 
     /// Move every child row from `victim` to `survivor`.
     ///
@@ -15790,9 +15814,21 @@ actor AnalysisStore {
         // are NOT adopted: they describe work in flight against a row that no
         // longer exists, and leaving the survivor `queued` lets the pipeline
         // resume from the merged watermarks instead.
+        //
+        // R3: the survivor's state is RE-READ, not taken from the `survivor`
+        // snapshot the caller captured before the episode's first fold. With
+        // two placeholders each carrying a completion terminal, the snapshot
+        // still says `queued` on the second fold, so the second placeholder
+        // overwrote the terminal the first one supplied — `completeFull`
+        // replaced by `completeTranscriptPartial`, and with it the
+        // `terminalReason` holding the coverage numbers. That is the same
+        // downgrade the second half of this guard exists to refuse (see
+        // `survivorOwnTerminalClaimIsNotReplaced`), and the sweep's re-score
+        // does not contain it: a downgrade is not a claim coverage
+        // contradicts, so it stands, permanently, on a one-shot sweep.
         guard let victimState = SessionState(rawValue: victim.analysisState),
               victimState.isTerminalCompletion,
-              let survivorState = SessionState(rawValue: survivor.analysisState),
+              let survivorState = SessionState(rawValue: try currentAnalysisState(id: survivor.id)),
               !survivorState.isTerminalCompletion
         else { return outcome }
         try updateAssetState(
@@ -15802,6 +15838,18 @@ actor AnalysisStore {
         )
         outcome.adoptedTerminalState = true
         return outcome
+    }
+
+    /// The `analysisState` currently on disk for one asset. R3: the fold's
+    /// adoption guard needs the LIVE value, because a previous fold in the same
+    /// episode may already have written one. Returns `""` when the row is gone,
+    /// which parses to no `SessionState` and therefore adopts nothing.
+    private func currentAnalysisState(id: String) throws -> String {
+        let stmt = try prepare("SELECT analysisState FROM analysis_assets WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        guard try nextRow(stmt) else { return "" }
+        return text(stmt, 0)
     }
 
     private func deleteAssetRow(id: String) throws {

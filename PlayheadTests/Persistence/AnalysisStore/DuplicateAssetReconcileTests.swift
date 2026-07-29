@@ -1330,4 +1330,330 @@ struct DuplicateAssetReconcileTests {
         let duration = try #require(survivor.episodeDurationSec)
         #expect(abs(duration - 30) < 1.0, "got \(duration)")
     }
+
+    // MARK: - R3: more than two rows, and rows that are all placeholders
+
+    /// R3 finding 1. Every fixture in this suite before now was a PAIR, and the
+    /// adoption guard reads a survivor snapshot taken before the first fold —
+    /// so with two placeholders each carrying a completion terminal, the second
+    /// fold sees a survivor that is still `queued` in the snapshot and
+    /// overwrites the terminal the first fold just adopted.
+    ///
+    /// That is precisely the rule R2 finding 5 established
+    /// (``survivorOwnTerminalClaimIsNotReplaced``): a completion terminal
+    /// already on the survivor is not another row's to replace. The guard
+    /// enforced it against terminals the survivor BROUGHT and leaked for
+    /// terminals it had just ADOPTED, which is the same downgrade —
+    /// `completeFull` replaced by `completeTranscriptPartial`, and with it the
+    /// `terminalReason` carrying the coverage numbers. The re-score does not
+    /// contain it: a downgrade is not a claim coverage contradicts, so
+    /// ``AnalysisCoordinator/reconcilePersistedTerminalAssetVerdict`` leaves it
+    /// standing, and the sweep is one-shot.
+    ///
+    /// Three rows is not a hypothetical shape: nothing about the placeholder
+    /// mint is once-per-episode, and the V39 unique index cannot collapse them
+    /// because each placeholder's `assetFingerprint` is its own distinct UUID.
+    @Test("with two placeholders, the terminal adopted first is not overwritten by the second")
+    func firstAdoptedTerminalSurvivesASecondPlaceholder() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-multi-placeholder"
+        // Insert order fixes the fold order (`assetMergeRows` orders by rowid).
+        try await insertCanonical(
+            store: store, id: "canon-multi", episodeId: episodeId,
+            fingerprint: canonicalSHA, state: SessionState.queued.rawValue
+        )
+        try await insertPlaceholder(
+            store: store, id: "ph-multi-first", episodeId: episodeId,
+            state: SessionState.completeFull.rawValue,
+            featureCoverage: 2_900, transcriptCoverage: 2_900, duration: 2_933
+        )
+        try await insertPlaceholder(
+            store: store, id: "ph-multi-second", episodeId: episodeId,
+            state: SessionState.completeTranscriptPartial.rawValue,
+            featureCoverage: 100, transcriptCoverage: 120, duration: 543
+        )
+        try await store.execForTesting(
+            "UPDATE analysis_assets SET terminalReason = 'first-full' WHERE id = 'ph-multi-first'"
+        )
+        try await store.execForTesting(
+            "UPDATE analysis_assets SET terminalReason = 'second-partial' WHERE id = 'ph-multi-second'"
+        )
+        try await insertChunk(
+            store: store, id: "chunk-multi-first", assetId: "ph-multi-first",
+            index: 0, start: 0, end: 2_900
+        )
+        try await insertChunk(
+            store: store, id: "chunk-multi-second", assetId: "ph-multi-second",
+            index: 1, start: 0, end: 120
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.episodesInspected == 1)
+        #expect(summary.placeholdersMerged == 2, "both placeholders must fold, not just the first")
+        #expect(summary.adoptedTerminalStates == 1,
+                "the survivor acquires a completion terminal ONCE; the second fold has nothing left to adopt")
+
+        let rows = try await allAssets(store: store, episodeId: episodeId)
+        #expect(rows.count == 1, "three rows must converge to one (got \(rows.count))")
+        let survivor = try #require(rows.first)
+        #expect(survivor.id == "canon-multi")
+        #expect(survivor.analysisState == SessionState.completeFull.rawValue,
+                "a later placeholder must not downgrade the terminal an earlier one supplied")
+        #expect(survivor.terminalReason == "first-full",
+                "the reason carries the coverage numbers the adopted verdict was scored against")
+        // The rest of the fold still accumulates across BOTH placeholders.
+        #expect(survivor.featureCoverageEndTime == 2_900)
+        #expect(survivor.fastTranscriptCoverageEndTime == 2_900)
+        #expect(survivor.episodeDurationSec == 2_933,
+                "the poisoned 543 s must not win the COALESCE either")
+        #expect(try await store.fetchTranscriptChunks(assetId: "canon-multi").count == 2,
+                "both placeholders' transcripts must move, not cascade away")
+    }
+
+    /// R3. The fold order decides which terminal the merged row keeps, so it
+    /// must not be whatever order SQLite happened to return. `assetMergeRows`
+    /// has no natural key to sort on but `rowid`, which is insert order and
+    /// therefore the same order the device wrote the rows in.
+    @Test("the fold order is deterministic, not whatever order the scan returned")
+    func mergeRowsAreOrderedByRowId() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-fold-order"
+        for index in 0..<4 {
+            try await insertPlaceholder(
+                store: store, id: "ph-order-\(index)", episodeId: episodeId,
+                state: SessionState.queued.rawValue
+            )
+        }
+        let rows = try await store.assetMergeRowsForTesting(episodeId: episodeId)
+        #expect(rows.map(\.id) == ["ph-order-0", "ph-order-1", "ph-order-2", "ph-order-3"])
+        #expect(rows.map(\.rowId) == rows.map(\.rowId).sorted())
+    }
+
+    /// R3. No canonical row has ever existed for this episode — it was played
+    /// but never fully downloaded, which is exactly the state
+    /// ``AnalysisStore/chooseMergeSurvivor(_:)`` falls back for. The duplicates
+    /// still have to collapse: two placeholders is two split coverage
+    /// watermarks and two sets of child rows for one episode.
+    @Test("an episode with nothing but placeholders still converges to one row")
+    func allPlaceholderEpisodeStillConverges() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-all-placeholder"
+        try await insertPlaceholder(
+            store: store, id: "ph-only-old", episodeId: episodeId,
+            state: SessionState.queued.rawValue, transcriptCoverage: 400
+        )
+        try await insertPlaceholder(
+            store: store, id: "ph-only-new", episodeId: episodeId,
+            state: SessionState.queued.rawValue, transcriptCoverage: 90
+        )
+        // `chooseMergeSurvivor` falls back to newest, and `createdAt` ties are
+        // the norm on a fast-inserting fixture — so the tiebreak is `rowid`.
+        try await insertChunk(
+            store: store, id: "chunk-only-old", assetId: "ph-only-old",
+            index: 0, start: 0, end: 400
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 1)
+        let rows = try await allAssets(store: store, episodeId: episodeId)
+        #expect(rows.count == 1, "got \(rows.count)")
+        let survivor = try #require(rows.first)
+        #expect(survivor.id == "ph-only-new", "newest wins when no row carries a canonical SHA")
+        #expect(survivor.fastTranscriptCoverageEndTime == 400, "watermarks still take the max of the pair")
+        #expect(try await store.fetchTranscriptChunks(assetId: "ph-only-new").count == 1)
+    }
+
+    /// R3. The counterpart: one row, and it is a placeholder. The sweep must
+    /// not touch it — there is nothing to merge it into, and deleting it would
+    /// take the episode's whole analysis with it.
+    @Test("an episode whose only row is a placeholder is left completely alone")
+    func lonePlaceholderIsNeverTouched() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-lone-placeholder"
+        try await insertPlaceholder(
+            store: store, id: "ph-lone", episodeId: episodeId,
+            state: SessionState.completeFull.rawValue, transcriptCoverage: 900, duration: 543
+        )
+        try await insertChunk(
+            store: store, id: "chunk-lone", assetId: "ph-lone", index: 0, start: 0, end: 900
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary == DuplicateAssetMergeSummary(),
+                "a single-row episode is not a duplicate and must not be inspected at all")
+        let rows = try await allAssets(store: store, episodeId: episodeId)
+        #expect(rows.count == 1)
+        #expect(try #require(rows.first).id == "ph-lone")
+        #expect(try await store.fetchTranscriptChunks(assetId: "ph-lone").count == 1)
+    }
+
+    /// R3. Two placeholders, only one of which names the survivor's artifact.
+    /// The matching one must fold and the other must be left exactly where it
+    /// is — a per-victim decision, not a per-episode one.
+    @Test("one placeholder merges while a sibling naming a different artifact is skipped")
+    func onePlaceholderMergesWhileAnotherIsSkipped() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-mixed-artifacts"
+        try await insertCanonical(
+            store: store, id: "canon-mixed", episodeId: episodeId, fingerprint: canonicalSHA,
+            sourceURL: "file:///container-B/complete/9f2c.mp3"
+        )
+        try await insertPlaceholder(
+            store: store, id: "ph-mixed-same", episodeId: episodeId,
+            sourceURL: "file:///container-A/partials/9f2c.mp3"
+        )
+        try await insertPlaceholder(
+            store: store, id: "ph-mixed-other", episodeId: episodeId,
+            sourceURL: "file:///container-A/partials/deadbeef.mp3"
+        )
+        try await insertChunk(
+            store: store, id: "chunk-mixed-other", assetId: "ph-mixed-other",
+            index: 0, start: 0, end: 60
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 1)
+        #expect(summary.skippedDifferentSource == 1)
+        #expect(summary.survivingAssetIds == ["canon-mixed"])
+        let rows = try await allAssets(store: store, episodeId: episodeId)
+        #expect(Set(rows.map(\.id)) == ["canon-mixed", "ph-mixed-other"],
+                "the refusal is per-victim; it must not block the pair that does match")
+        #expect(try await store.fetchTranscriptChunks(assetId: "ph-mixed-other").count == 1,
+                "a skipped placeholder keeps its children")
+    }
+
+    // MARK: - R3: degenerate identifiers
+
+    /// R3 finding 2. R2 pinned `"   "` and called the rule "whitespace is not
+    /// an episode identity". SQLite's one-argument `TRIM` strips ASCII SPACE
+    /// and nothing else — a tab- or newline-only id sails through the filter,
+    /// is grouped, and (because `DownloadManager.safeFilename(for:)` is
+    /// `SHA256(episodeId)`, so every row written under that id lands on ONE
+    /// basename) ``AssetMergeGuard`` votes `.merge` on rows from unrelated
+    /// episodes. Same defect R1 and R2 each found once; the character class was
+    /// just too narrow.
+    @Test("tab- and newline-only episodeIds are rejected exactly like spaces are")
+    func nonSpaceWhitespaceEpisodeIdIsNeverMerged() async throws {
+        for (label, blankish) in [("tab", "\t"), ("newline", "\n"), ("mixed", " \t\r\n ")] {
+            let store = try await makeTestStore()
+            try await insertPlaceholder(
+                store: store, id: "ph-\(label)", episodeId: blankish,
+                sourceURL: "file:///container-A/e3b0c442.mp3"
+            )
+            try await insertCanonical(
+                store: store, id: "canon-\(label)", episodeId: blankish, fingerprint: canonicalSHA,
+                sourceURL: "file:///container-B/e3b0c442.mp3"
+            )
+
+            let summary = try await store.reconcileDuplicatePlaceholderAssets()
+            #expect(summary.placeholdersMerged == 0,
+                    "\(label): SHA256 of a blank id is one basename, so this merges unrelated episodes")
+            #expect(summary.episodesInspected == 0, "\(label)")
+            #expect(try await allAssets(store: store, episodeId: blankish).count == 2, "\(label)")
+        }
+    }
+
+    /// R3. A real id that merely CONTAINS the characters a blank-id filter or a
+    /// string-interpolated query would choke on must still be grouped and
+    /// merged normally. `%` and `_` are LIKE wildcards, `'` and `"` end SQL
+    /// literals and identifiers, and `--` opens a comment.
+    @Test("an episodeId full of SQL metacharacters is bound, not interpreted")
+    func metacharacterEpisodeIdMergesNormally() async throws {
+        let store = try await makeTestStore()
+        let nasty = "ep-'\"--%_;drop"
+        try await insertPlaceholder(store: store, id: "ph-nasty", episodeId: nasty)
+        try await insertCanonical(
+            store: store, id: "canon-nasty", episodeId: nasty, fingerprint: canonicalSHA
+        )
+        // A neighbour the LIKE wildcards would sweep up if the id were ever
+        // interpolated into a pattern.
+        try await insertPlaceholder(store: store, id: "ph-plain", episodeId: "ep-xy--ab;drop")
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.episodesInspected == 1, "only the id with two rows is a group")
+        #expect(summary.placeholdersMerged == 1)
+        #expect(try await allAssets(store: store, episodeId: nasty).count == 1)
+        #expect(try await allAssets(store: store, episodeId: "ep-xy--ab;drop").count == 1,
+                "the neighbour must be untouched")
+    }
+
+    // MARK: - R3: launch ordering
+
+    /// R3 finding 3. R2 disposed of the launch ordering by reading, on the
+    /// grounds that this sweep re-probes duration and re-scores terminal state
+    /// itself and so depends on neither sweep in front of it. That is provable
+    /// by running it first — and running it first is the only order that
+    /// works, which is the opposite of "the ordering carries no invariant".
+    ///
+    /// Behind `reconcilePersistedTerminalStatesIfNeeded` the two sweeps fight.
+    /// The reconcile scores the PLACEHOLDER's `completeFull` against the
+    /// placeholder's own poisoned 543 s duration, finds 29 s of transcript
+    /// against it, and repairs the claim away. The merge then has no completion
+    /// terminal left to adopt, so the merged row lands on `queued` — even
+    /// though the measured 30 s duration makes 29 s of coverage a claim that
+    /// holds (0.967, clear of `finalizeBackfillMinCoverageRatio`). The episode
+    /// is re-analysed from scratch for nothing, and both sweeps are one-shot.
+    ///
+    /// So `PlayheadRuntime` now runs the merge FIRST, and this test is what
+    /// says so: it asserts the invariants that hold in either order, then pins
+    /// the divergence that makes the order load-bearing. If the sibling sweeps
+    /// are ever taught to agree, this last expectation is the one to revisit.
+    @Test("the merge must run BEFORE the terminal reconcile or the adopted terminal is lost")
+    func sweepMustRunBeforeTheTerminalReconcile() async throws {
+        let audioURL = try writeSynthAudio(seconds: 30)
+
+        func buildFixture(_ store: AnalysisStore) async throws {
+            try await insertPlaceholder(
+                store: store, id: "ph-order", episodeId: "ep-order",
+                state: SessionState.completeFull.rawValue,
+                featureCoverage: 29, transcriptCoverage: 29, duration: 543
+            )
+            try await insertCanonical(
+                store: store, id: "canon-order", episodeId: "ep-order",
+                fingerprint: canonicalSHA, state: SessionState.queued.rawValue,
+                featureCoverage: nil, transcriptCoverage: nil, duration: nil
+            )
+            try await insertChunk(
+                store: store, id: "chunk-order", assetId: "ph-order", index: 0, start: 0, end: 29
+            )
+        }
+
+        // The shipped order: merge, then duration backfill, then reconcile.
+        let firstStore = try await makeTestStore()
+        try await buildFixture(firstStore)
+        let firstCoordinator = makeCoordinator(store: firstStore)
+        _ = await firstCoordinator.reconcileDuplicateAnalysisAssetsIfNeeded(cachedFileURL: { _ in audioURL })
+        _ = await firstCoordinator.runEpisodeDurationBackfillIfNeeded(cachedFileURL: { _ in audioURL })
+        _ = await firstCoordinator.reconcilePersistedTerminalStatesIfNeeded()
+
+        // The order this bead originally shipped with.
+        let lastStore = try await makeTestStore()
+        try await buildFixture(lastStore)
+        let lastCoordinator = makeCoordinator(store: lastStore)
+        _ = await lastCoordinator.runEpisodeDurationBackfillIfNeeded(cachedFileURL: { _ in audioURL })
+        _ = await lastCoordinator.reconcilePersistedTerminalStatesIfNeeded()
+        _ = await lastCoordinator.reconcileDuplicateAnalysisAssetsIfNeeded(cachedFileURL: { _ in audioURL })
+
+        // What the merge delivers regardless of where it sits: one row, the
+        // union of the pair's coverage, and a MEASURED duration.
+        for (label, store) in [("merge-first", firstStore), ("merge-last", lastStore)] {
+            let rows = try await allAssets(store: store, episodeId: "ep-order")
+            #expect(rows.count == 1, "\(label): the pair converges either way (got \(rows.count))")
+            let survivor = try #require(rows.first)
+            #expect(survivor.id == "canon-order", "\(label)")
+            #expect(survivor.fastTranscriptCoverageEndTime == 29,
+                    "\(label): watermarks are the max of the pair")
+            let duration = try #require(survivor.episodeDurationSec, "\(label)")
+            #expect(abs(duration - 30) < 1.0,
+                    "\(label): the merged row carries a measured duration, not the 543 s artefact (got \(duration))")
+        }
+
+        let mergedFirst = try #require(try await firstStore.fetchAsset(id: "canon-order"))
+        #expect(mergedFirst.analysisState == SessionState.completeFull.rawValue,
+                "merging first preserves a completion the measured duration shows is true")
+
+        let mergedLast = try #require(try await lastStore.fetchAsset(id: "canon-order"))
+        #expect(mergedLast.analysisState == SessionState.queued.rawValue,
+                "and merging last loses it — the reconcile repaired the placeholder's claim against the poisoned denominator before the merge could adopt it. This is why PlayheadRuntime runs the merge first.")
+    }
 }
