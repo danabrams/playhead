@@ -16125,6 +16125,14 @@ actor AnalysisStore {
 
     /// Fetch all decoded spans for an asset, ordered by startTime.
     func fetchDecodedSpans(assetId: String) throws -> [DecodedSpan] {
+        try fetchDecodedSpansIncludingUserVetoed(assetId: assetId)
+    }
+
+    /// Every persisted `decoded_spans` row for an asset, ordered by
+    /// startTime — including rows the listener has vetoed.
+    func fetchDecodedSpansIncludingUserVetoed(
+        assetId: String
+    ) throws -> [DecodedSpan] {
         let sql = """
             SELECT id, assetId, firstAtomOrdinal, lastAtomOrdinal,
                    startTime, endTime, anchorProvenanceJSON
