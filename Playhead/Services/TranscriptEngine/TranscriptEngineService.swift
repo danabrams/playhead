@@ -970,20 +970,26 @@ actor TranscriptEngineService {
                     return
                 } catch {
                     logger.error("Shard-0 backfill failed: \(error)")
-                    // playhead-8ysk (review r4): record the diagnosis here too.
-                    // This is the third `transcribeShard` call site and the only
-                    // one that used to drop its error on the floor — the same
-                    // "thrown away with the shard" defect this bead removed at
-                    // the other two. It is reached exactly when the first 30 s
-                    // is missing, i.e. when the run is already in trouble, so
-                    // its class is worth having in `dominantFailure`.
+                    // playhead-8ysk (review r4): DELIBERATELY NOT recorded into
+                    // `shardFailures`, and the reason is an invariant rather
+                    // than an oversight — round 4 tried adding it here and the
+                    // suite rejected the change.
                     //
-                    // This does NOT make the run a failure by itself: the gate
-                    // below also requires that no shard finished, and the
-                    // comment's "the rest of the transcript is already
-                    // persisted" case satisfies neither of the other two
-                    // conditions.
-                    shardFailures.append(TranscriptFailureReason.classify(error))
+                    // This is the third `transcribeShard` call site, and unlike
+                    // the other two it can only ever re-attempt a shard the
+                    // main loop already attempted: it selects
+                    // `shards.first(where: { $0.id == 0 })` out of the same
+                    // array the loop iterated in full. So whatever it throws,
+                    // that shard's class is already in `shardFailures`.
+                    // Appending would add no diagnosis and would turn
+                    // `failedShardCount` from a count of failed SHARDS into a
+                    // count of failed ATTEMPTS — double-counting shard 0, and
+                    // breaking the on-device duration-proxy invariant that
+                    // `DiagnosticsBundleFailureClassTests` reasons about ("in a
+                    // total failure it equals the shard count").
+                    // `shardZeroBackfillDoesNotInflateTheFailedShardCount`
+                    // pins it.
+                    //
                     // Best-effort: continue to .completed below since the
                     // rest of the transcript is already persisted.
                 }

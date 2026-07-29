@@ -32,11 +32,18 @@ import Testing
 /// the test can prove the reason travelled, not merely that something failed.
 private final class AlwaysFailingRecognizer: SpeechRecognizer, @unchecked Sendable {
     private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    /// Attempts, not shards. `runTranscriptionLoop` can hand the same shard
+    /// over twice — the main loop and then the shard-0 backfill — and review
+    /// r4 needs to prove that second attempt really happened.
+    private let _calls = OSAllocatedUnfairLock(initialState: 0)
+    var callCount: Int { _calls.withLock { $0 } }
+
     func loadModel() async throws { _loaded.withLock { $0 = true } }
     func unloadModel() async { _loaded.withLock { $0 = false } }
     func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
 
     func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        _calls.withLock { $0 += 1 }
         throw TranscriptEngineError.vadFailed("no speech boundaries in shard \(shard.id)")
     }
 
@@ -547,25 +554,31 @@ struct TranscriptEngineFailureEventTests {
 
     // MARK: - The third `transcribeShard` call site (review r4)
 
-    /// THE SHARD-0 BACKFILL DROPPED ITS ERROR ON THE FLOOR.
+    /// `failedShardCount` COUNTS SHARDS, NOT ATTEMPTS.
     ///
-    /// `runTranscriptionLoop` calls `transcribeShard` from three places. Two
-    /// record the classified failure; the shard-0 backfill — reached exactly
-    /// when the first 30 s is missing, i.e. when the run is already in
-    /// trouble — logged and discarded it. That is the same "the diagnosis dies
-    /// with the shard" defect this bead removed at the other two sites.
+    /// `runTranscriptionLoop` calls `transcribeShard` from three places, and
+    /// the third — the shard-0 backfill, reached when the first 30 s is
+    /// missing — deliberately does NOT record its error into `shardFailures`.
+    /// Round 4 read that silence as the "diagnosis dies with the shard" defect
+    /// this bead removed at the other two sites and added the append; three
+    /// tests in this file rejected it, because the backfill can only ever
+    /// re-attempt a shard the main loop already attempted and classified.
     ///
-    /// The fixture is a single-shard run that fails: the main loop records one
-    /// failure, then the backfill re-attempts shard 0 (no early chunk exists)
-    /// and fails again. `failedShardCount == 2` is therefore the precise
-    /// signature that the backfill's error was recorded — it counts failed
-    /// ATTEMPTS, and shard 0 was attempted twice.
+    /// Those three tests pin the invariant only for multi-shard runs, where an
+    /// off-by-one is easy to misread as an unrelated fixture change. This is
+    /// the minimal fixture that isolates it: ONE shard, which fails in the main
+    /// loop, leaves no early chunk, and is therefore re-attempted and fails
+    /// again. Two failed attempts, one failed shard — and the count must say
+    /// one, because it is exported to `work_journal.metadata` as a
+    /// shard-count-shaped value whose duration-proxy analysis in
+    /// `DiagnosticsBundleFailureClassTests` assumes exactly that.
     @Test(.timeLimit(.minutes(1)))
-    func shardZeroBackfillFailureIsRecorded() async throws {
+    func shardZeroBackfillDoesNotInflateTheFailedShardCount() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(Self.asset(id: "asset-backfill"))
+        let recognizer = AlwaysFailingRecognizer()
         let speech = SpeechService(
-            recognizer: AlwaysFailingRecognizer(), serializesRecognizerRequests: false
+            recognizer: recognizer, serializesRecognizerRequests: false
         )
         try await speech.loadFastModel()
         let engine = TranscriptEngineService(speechService: speech, store: store)
@@ -585,15 +598,28 @@ struct TranscriptEngineFailureEventTests {
         }
         #expect(reason.failureClass == .vadFailed)
         #expect(
-            reason.failedShardCount == 2,
+            reason.failedShardCount == 1,
             """
-            the shard-0 backfill re-attempted shard 0 and threw; its failure \
-            must reach `shardFailures` like the other two call sites' do \
+            one shard failed. The shard-0 backfill re-attempted it and failed \
+            again, but recording that would make this a count of attempts and \
+            would export a shard count larger than the episode has \
             (got \(reason.failedShardCount))
             """
         )
+        // THE PREMISE, ASSERTED RATHER THAN ASSUMED. One shard was handed to
+        // the recognizer TWICE — once by the main loop, once by the shard-0
+        // backfill. Without this the test passes vacuously against any build
+        // where the backfill never ran, which is most of them.
+        #expect(
+            recognizer.callCount == 2,
+            """
+            the shard-0 backfill must actually re-attempt shard 0, or the count \
+            was never exposed to inflation and this test guards nothing \
+            (attempts: \(recognizer.callCount))
+            """
+        )
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-backfill")
-        #expect(chunks.isEmpty, "the backfill premise requires no early chunk to exist")
+        #expect(chunks.isEmpty, "no early chunk may exist, or the backfill never runs")
     }
 
     /// THE ACCIDENTAL DEMO, TURNED INTO A GUARD (round-1 review).
