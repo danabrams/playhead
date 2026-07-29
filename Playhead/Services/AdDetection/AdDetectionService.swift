@@ -5856,9 +5856,35 @@ actor AdDetectionService {
         // The widened start does also flow into the learned priors + metadata
         // extraction below (both read `nonSuppressedWindows`); that is benign and
         // arguably correct — a pre-roll genuinely starts at 0:00.
+        // A LISTENER'S MARK IS OFF LIMITS TO THE CLAMP (playhead-lc4c). The
+        // `userMarked` rows are persisted separately and are NOT in
+        // `fusionWindows`, so the clamp cannot see them — a detector window can
+        // otherwise be widened straight over a span the listener defined by hand.
+        // Observed: a fusion window past a user's [35, 55) mark widened to [0, 60)
+        // and engulfed it, leaving two windows over the marked region.
+        //
+        // Failing to read is fail-closed in the SAFE direction for the CLAMP but
+        // NOT for the mark: an empty list means the clamp behaves exactly as it did
+        // before this guard existed. That is the pre-existing behaviour rather than
+        // a new risk, and swallowing the error keeps a read failure from aborting
+        // an otherwise good backfill — but it does mean a mark can still be
+        // widened over if this read fails, which is why the read is a plain
+        // `fetchAdWindows` on the asset we already hold rather than anything that
+        // can partially succeed.
+        let protectedUserMarkedRegions: [(start: Double, end: Double)]
+        do {
+            protectedUserMarkedRegions = try await store
+                .fetchAdWindows(assetId: analysisAssetId)
+                .filter { $0.boundaryState == "userMarked" }
+                .map { (start: $0.startTime, end: $0.endTime) }
+        } catch {
+            protectedUserMarkedRegions = []
+        }
+
         fusionWindows = PreRollStartClamp.clamp(
             windows: fusionWindows,
-            config: .init(maxPreRollStartSeconds: config.preRollStartClampSeconds)
+            config: .init(maxPreRollStartSeconds: config.preRollStartClampSeconds),
+            protectedRegions: protectedUserMarkedRegions
         )
         // The clamp runs after decisions are assembled, so refresh the
         // persisted/runtime decision envelope from the final window geometry.
