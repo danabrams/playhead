@@ -115,6 +115,30 @@ private final class AlwaysSucceedingRecognizer: SpeechRecognizer, @unchecked Sen
     }
 }
 
+/// Shard 0 yields NO segments — silence or music, which `transcribeShard`
+/// handles by advancing the coverage watermark and returning successfully
+/// without inserting a row. Everything after it throws. The run therefore
+/// inserts nothing while genuinely finishing a shard (playhead-8ysk review r4).
+private final class SilentThenFailingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard shard.id == 0 else {
+            throw TranscriptEngineError.vadFailed("shard \(shard.id)")
+        }
+        return []
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: false, speechProbability: 0.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
 /// Never loads, so `SpeechService.isReady()` is false.
 private final class NeverReadyRecognizer: SpeechRecognizer, @unchecked Sendable {
     func loadModel() async throws {}
@@ -391,6 +415,185 @@ struct TranscriptEngineFailureEventTests {
 
         let after = try await store.fetchTranscriptChunks(assetId: "asset-retry-partial")
         #expect(after.count > 1, "this run must really have added rows, or it proves nothing")
+    }
+
+    // MARK: - Inserting nothing is not the same as doing nothing (review r4)
+
+    /// A RUN THAT INSERTS NO ROWS CAN STILL HAVE DONE ITS WORK.
+    ///
+    /// `transcribeShard` returns successfully without inserting anything when
+    /// the recognizer yields no segments — silence or music. It still advances
+    /// the coverage watermark, so that audio is durably not re-attempted. A
+    /// gate that reads only "rows inserted this run" cannot tell that apart
+    /// from a shard that failed, so a music-heavy episode with one bad shard
+    /// reported a TOTAL FAILURE: wrong `lastErrorCode`, a spurious
+    /// `work_journal` row, a requeue with backoff, and no `finalizeBackfill`.
+    ///
+    /// The bar `partialSuccessStillCompletes` sets is "one bad shard among
+    /// good ones is a partial success". This is the same claim for the good
+    /// shards that have no row to show for themselves.
+    @Test(.timeLimit(.minutes(1)))
+    func silentShardWithNoRowsIsStillWork() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-silent"))
+        let speech = SpeechService(
+            recognizer: SilentThenFailingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [
+                makeShard(id: 0, episodeID: "ep-asset-silent", startTime: 0, duration: 30),
+                makeShard(id: 1, episodeID: "ep-asset-silent", startTime: 30, duration: 30),
+            ],
+            analysisAssetId: "asset-silent",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-silent")
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-silent")
+        #expect(
+            terminal == .completed,
+            """
+            shard 0 finished and moved the watermark; only shard 1 failed. \
+            Reporting a total failure here is the original lie pointing the \
+            other way (got \(String(describing: terminal)))
+            """
+        )
+
+        // The premise: this run really did insert nothing, so it really was
+        // the insert count that had to be wrong about it. Without this the
+        // test would also pass against a build where shard 0 wrote a row.
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-silent")
+        #expect(chunks.isEmpty, "the fixture must insert nothing, or this proves nothing")
+
+        // And the work is durable: the watermark advanced over shard 0 only.
+        let asset = try await store.fetchAsset(id: "asset-silent")
+        #expect(asset?.fastTranscriptCoverageEndTime == 30)
+    }
+
+    /// THE DEDUP-HEAVY RE-RUN — the production shape of the same defect.
+    ///
+    /// The loop deliberately does not filter shards by coverage; it re-runs
+    /// every shard and lets `transcribeShard`'s `segmentFingerprint` dedup
+    /// suppress the duplicates. So a second pass over audio that is already
+    /// transcribed inserts ZERO rows while succeeding completely — and
+    /// re-running already-covered assets is this bead's own incident (147
+    /// acquisitions, 9 finalizations).
+    ///
+    /// `retryThatPersistsSomethingStillCompletes` names "the store gained no
+    /// rows, which a dedup-heavy retry can also satisfy" as a rejected
+    /// alternative. A per-run INSERT count has that identical blind spot; this
+    /// is the fixture that shows it, built by running the real loop twice over
+    /// the same store so the dedup happens through the production fingerprint
+    /// path rather than a hand-computed one.
+    @Test(.timeLimit(.minutes(1)))
+    func dedupOnlyRerunWithOneBadShardStillCompletes() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-dedup"))
+        let shards = [
+            makeShard(id: 0, episodeID: "ep-asset-dedup", startTime: 0, duration: 30),
+            makeShard(id: 1, episodeID: "ep-asset-dedup", startTime: 30, duration: 30),
+        ]
+
+        // Pass 1: transcribe both shards for real.
+        let speech1 = SpeechService(
+            recognizer: AlwaysSucceedingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech1.loadFastModel()
+        let engine1 = TranscriptEngineService(speechService: speech1, store: store)
+        let events1 = await engine1.events()
+        await engine1.startTranscription(
+            shards: shards, analysisAssetId: "asset-dedup", snapshot: Self.snapshot
+        )
+        await engine1.finishAppending(analysisAssetId: "asset-dedup")
+        #expect(await Self.awaitTerminal(on: events1, assetId: "asset-dedup") == .completed)
+        let afterPass1 = try await store.fetchTranscriptChunks(assetId: "asset-dedup").count
+        #expect(afterPass1 == 2, "pass 1 must actually persist, or pass 2 has nothing to dedup")
+
+        // Pass 2: a fresh engine over the same store. Shard 0 produces the
+        // byte-identical segment pass 1 already stored, so it dedups and
+        // inserts nothing; shard 1 throws.
+        let speech2 = SpeechService(
+            recognizer: FailAfterFirstRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech2.loadFastModel()
+        let engine2 = TranscriptEngineService(speechService: speech2, store: store)
+        let events2 = await engine2.events()
+        await engine2.startTranscription(
+            shards: shards, analysisAssetId: "asset-dedup", snapshot: Self.snapshot
+        )
+        await engine2.finishAppending(analysisAssetId: "asset-dedup")
+
+        let terminal = await Self.awaitTerminal(on: events2, assetId: "asset-dedup")
+        #expect(
+            terminal == .completed,
+            """
+            pass 2 transcribed shard 0 successfully — the row already existed, \
+            so there was nothing to insert. Counting inserts alone calls that \
+            a total failure (got \(String(describing: terminal)))
+            """
+        )
+
+        // The premise: pass 2 inserted nothing. If it had, the insert count
+        // would have carried the test and the dedup blind spot would be
+        // untested.
+        let afterPass2 = try await store.fetchTranscriptChunks(assetId: "asset-dedup").count
+        #expect(afterPass2 == afterPass1,
+                "pass 2 must add no rows, or this fixture does not exercise the dedup path")
+    }
+
+    // MARK: - The third `transcribeShard` call site (review r4)
+
+    /// THE SHARD-0 BACKFILL DROPPED ITS ERROR ON THE FLOOR.
+    ///
+    /// `runTranscriptionLoop` calls `transcribeShard` from three places. Two
+    /// record the classified failure; the shard-0 backfill — reached exactly
+    /// when the first 30 s is missing, i.e. when the run is already in
+    /// trouble — logged and discarded it. That is the same "the diagnosis dies
+    /// with the shard" defect this bead removed at the other two sites.
+    ///
+    /// The fixture is a single-shard run that fails: the main loop records one
+    /// failure, then the backfill re-attempts shard 0 (no early chunk exists)
+    /// and fails again. `failedShardCount == 2` is therefore the precise
+    /// signature that the backfill's error was recorded — it counts failed
+    /// ATTEMPTS, and shard 0 was attempted twice.
+    @Test(.timeLimit(.minutes(1)))
+    func shardZeroBackfillFailureIsRecorded() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-backfill"))
+        let speech = SpeechService(
+            recognizer: AlwaysFailingRecognizer(), serializesRecognizerRequests: false
+        )
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        let events = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-asset-backfill", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-backfill",
+            snapshot: Self.snapshot
+        )
+        await engine.finishAppending(analysisAssetId: "asset-backfill")
+
+        let terminal = await Self.awaitTerminal(on: events, assetId: "asset-backfill")
+        guard case .failed(let reason) = terminal else {
+            Issue.record("expected .failed, got \(String(describing: terminal))")
+            return
+        }
+        #expect(reason.failureClass == .vadFailed)
+        #expect(
+            reason.failedShardCount == 2,
+            """
+            the shard-0 backfill re-attempted shard 0 and threw; its failure \
+            must reach `shardFailures` like the other two call sites' do \
+            (got \(reason.failedShardCount))
+            """
+        )
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-backfill")
+        #expect(chunks.isEmpty, "the backfill premise requires no early chunk to exist")
     }
 
     /// THE ACCIDENTAL DEMO, TURNED INTO A GUARD (round-1 review).

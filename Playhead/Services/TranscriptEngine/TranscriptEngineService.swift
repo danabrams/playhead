@@ -376,6 +376,41 @@ actor TranscriptEngineService {
     /// `currentChunkCount - existingChunkCount`.
     private var chunksInsertedThisRun: Int = 0
 
+    /// playhead-8ysk (review r4): shards THIS run carried to a clean finish.
+    ///
+    /// Same lifetime as `chunksInsertedThisRun` — reset at the top of every
+    /// `runTranscriptionLoop`, incremented only at `transcribeShard`'s
+    /// successful exits, so it too is strictly per-pass.
+    ///
+    /// IT EXISTS BECAUSE COUNTING INSERTS IS NOT THE SAME AS COUNTING WORK,
+    /// and the total-failure gate needs the second one. `transcribeShard`
+    /// returns without inserting a row in two ordinary, successful cases:
+    /// a shard whose recognizer yields no segments (silence, music — it still
+    /// advances the coverage watermark and returns), and a shard whose
+    /// segments all match an existing `segmentFingerprint` and are therefore
+    /// deduped. The second is not an edge case here: a re-run over an asset
+    /// that is already transcribed dedups EVERY segment, and re-running
+    /// already-covered assets is this bead's own incident shape (147
+    /// acquisitions, 9 finalizations) — the loop deliberately does not filter
+    /// shards by coverage, precisely so the fingerprint dedup can do it.
+    ///
+    /// So `chunksInsertedThisRun == 0` alone reads a fully-successful re-run
+    /// that happened to also hit one bad shard as "this run produced
+    /// nothing", and reports a total failure for it. That is the same lie the
+    /// gate removes, pointing the other way: `.failed` over a run that did its
+    /// work, which costs a spurious `work_journal` row, a wrong
+    /// `lastErrorCode`, a requeue with backoff, and a skipped
+    /// `finalizeBackfill`. `retryThatPersistsSomethingStillCompletes` already
+    /// names "the store gained no rows, which a dedup-heavy retry can also
+    /// satisfy" as a rejected alternative — a per-run insert count has the
+    /// identical blind spot.
+    ///
+    /// A shard that finishes has done durable work even with no row to show
+    /// for it: the coverage watermark moved, so that audio is not re-attempted.
+    /// That is the same bar `partialSuccessStillCompletes` already sets — one
+    /// bad shard among good ones is a partial success, not a failure.
+    private var shardsCompletedThisRun: Int = 0
+
     /// Optional preemption context threaded in by AnalysisJobRunner
     /// (playhead-01t8). Polled after each TranscriptChunk batch
     /// persists; on a preempt request the loop acknowledges and
@@ -753,6 +788,9 @@ actor TranscriptEngineService {
         // playhead-8ysk (review r3): this run's own production. See the
         // declaration for why the store cannot answer this question.
         chunksInsertedThisRun = 0
+        // playhead-8ysk (review r4): and this run's own progress, which is not
+        // the same quantity — see the declaration.
+        shardsCompletedThisRun = 0
 
         guard !shards.isEmpty || !appendedShards.isEmpty else {
             logger.warning("No shards to transcribe")
@@ -932,6 +970,20 @@ actor TranscriptEngineService {
                     return
                 } catch {
                     logger.error("Shard-0 backfill failed: \(error)")
+                    // playhead-8ysk (review r4): record the diagnosis here too.
+                    // This is the third `transcribeShard` call site and the only
+                    // one that used to drop its error on the floor — the same
+                    // "thrown away with the shard" defect this bead removed at
+                    // the other two. It is reached exactly when the first 30 s
+                    // is missing, i.e. when the run is already in trouble, so
+                    // its class is worth having in `dominantFailure`.
+                    //
+                    // This does NOT make the run a failure by itself: the gate
+                    // below also requires that no shard finished, and the
+                    // comment's "the rest of the transcript is already
+                    // persisted" case satisfies neither of the other two
+                    // conditions.
+                    shardFailures.append(TranscriptFailureReason.classify(error))
                     // Best-effort: continue to .completed below since the
                     // rest of the transcript is already persisted.
                 }
@@ -960,14 +1012,23 @@ actor TranscriptEngineService {
         // failures would discard usable transcript.
         //
         // "Produced nothing" means THIS RUN produced nothing, which is why the
-        // count comes from `chunksInsertedThisRun` and not from the store. See
-        // that property's declaration: `fetchTranscriptChunks(assetId:)` is
-        // cumulative over the asset's whole lifetime and the asset row is
+        // counts come from this run's own tallies and not from the store. See
+        // `chunksInsertedThisRun`'s declaration: `fetchTranscriptChunks(assetId:)`
+        // is cumulative over the asset's whole lifetime and the asset row is
         // reused across passes, so asking it here would have let a retry of a
         // partly-transcribed asset report `.completed` over a total failure —
         // reinstating the very lie this block removes, in the retry case this
         // bead was filed for.
-        if !shardFailures.isEmpty, chunksInsertedThisRun == 0 {
+        //
+        // BOTH tallies are required (review r4). Rows inserted is not a
+        // measure of work done: a shard that yields no segments, and a shard
+        // whose segments all dedup against an earlier pass, both finish
+        // successfully and insert nothing. Gating on the insert count alone
+        // therefore reports a total failure for a re-run that transcribed
+        // everything it was asked to and merely also hit one bad shard — see
+        // `shardsCompletedThisRun`. A run is a total failure only when it
+        // wrote nothing AND carried no shard to a clean finish.
+        if !shardFailures.isEmpty, chunksInsertedThisRun == 0, shardsCompletedThisRun == 0 {
             let reason = Self.dominantFailure(shardFailures)
             logger.error("""
                 Transcription produced nothing for asset \(analysisAssetId) in \(loopElapsed): \
@@ -1111,6 +1172,10 @@ actor TranscriptEngineService {
                 analysisAssetId: analysisAssetId,
                 endTime: shard.startTime + shard.duration
             )
+            // playhead-8ysk (review r4): a silent shard produced no row but it
+            // DID finish, and the watermark it just advanced is durable. Count
+            // it, or a music-heavy run reads as having produced nothing.
+            shardsCompletedThisRun += 1
             return
         }
 
@@ -1247,6 +1312,13 @@ actor TranscriptEngineService {
             analysisAssetId: analysisAssetId,
             endTime: shardEnd
         )
+
+        // playhead-8ysk (review r4): the shard is finished and everything it
+        // produced is durable. Counted BEFORE the preemption safe point below
+        // on purpose — a preempted loop returns without reaching the
+        // total-failure gate, so the ordering cannot matter there, and
+        // counting after the throw would under-report work that did land.
+        shardsCompletedThisRun += 1
 
         logger.info("Wrote \(emittedChunks.count) chunks for shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shardEnd))s]")
 
