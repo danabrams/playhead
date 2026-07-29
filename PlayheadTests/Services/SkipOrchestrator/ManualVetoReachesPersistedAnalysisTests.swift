@@ -580,23 +580,20 @@ struct ManualVetoReachesPersistedAnalysisTests {
         // not silently passing because the range never matched.
         //
         // The control's range is deliberately NOT byte-identical to the
-        // `listenRevert` above. `correction_events` dedupes on
-        // (assetId, effectiveCorrectionType, normalizedScopeKey,
-        // correctionIdentityKey) — `source` is NOT in that key, and
-        // `.exactTimeSpan` bounds quantize to a 100 ms bucket — so an
-        // identical range would collide with the row already written and
-        // `ON CONFLICT … source = COALESCE(correction_events.source,
-        // excluded.source)` would KEEP the weaker `listenRevert`. Using the
-        // same range here would therefore measure the dedupe collision rather
-        // than the source discrimination this test is about.
+        // `listenRevert` above, so that this test measures ONLY the source
+        // discrimination in `userVetoedTimeRanges`. An identical range shares
+        // the 100 ms identity bucket and therefore collapses onto the row
+        // already written, which is a different mechanism with its own
+        // outcome — the fidelity ladder — and its own tests below. Keeping the
+        // two apart is what stops either from masking a regression in the
+        // other.
         //
-        // That collision is a real, separately-reported defect (review round
-        // 1, playhead-u45d finding 1): a manual veto whose range collides
-        // with a pre-existing non-veto false-positive correction is silently
-        // swallowed and the span stays highlighted. It is NOT fixed here
-        // because both candidate remedies — changing the dedupe identity key,
-        // or widening which sources suppress — are persistence/product
-        // decisions above this bead's authority.
+        // (Review round 1 wrote a version of this comment describing the
+        // collapse as an unfixed defect that SWALLOWED the veto. It was: the
+        // conflict clause kept whichever source arrived first. Dan's rule —
+        // "a manually marked span should override anything else" — is now
+        // implemented as `CorrectionSource.fidelityRank`, and an identical
+        // range here would pass. It still measures the wrong thing.)
         _ = try await store.appendCorrectionEvent(
             CorrectionEvent(
                 analysisAssetId: "asset-1",
@@ -810,6 +807,498 @@ struct ManualVetoReachesPersistedAnalysisTests {
         #expect(
             peek.isAdHighlighted(chunkIndex: 0) == false,
             "a reverted mark must stop lighting the transcript"
+        )
+    }
+
+    // MARK: - The fidelity ladder
+
+    // Review round 1 found the reported symptom still reachable after this
+    // bead's own fix, and Dan settled the rule: "A manually marked span should
+    // override anything else… the banner is lower fidelity than the marking
+    // this is not an ad."
+    //
+    // Corrections over the same asset + span + kind share ONE
+    // `correction_events` row, so exactly one `source` survives, and it used to
+    // be whichever gesture arrived FIRST. `CorrectionSource.fidelityRank`
+    // replaces arrival order with the ladder.
+    //
+    // EVERY TEST BELOW MUST KEEP THE LOSING ROW PRESENT. "A manual veto
+    // suppresses the span" passes trivially against an empty table, so each
+    // test writes the other gesture first, proves it landed, and proves the
+    // second write COLLIDED with it (`appendCorrectionEvent` returning false,
+    // one row, `submissionCount == 2`) rather than quietly sitting in a row of
+    // its own. And each direction is asserted separately: winning is one
+    // property, not being undone is another.
+
+    private func exactTimeSpanScope(
+        assetId: String,
+        start: Double,
+        end: Double
+    ) -> String {
+        CorrectionScope.exactTimeSpan(
+            assetId: assetId,
+            startTime: start,
+            endTime: end
+        ).serialized
+    }
+
+    /// HIGHER OVER LOWER. The bug round 1 reproduced, end to end at the store:
+    /// a listener who once rewound through a span could not afterwards mark it
+    /// "not an ad" — the veto landed on the existing `listenRevert` row, bumped
+    /// its counters, and left the source alone, so `userVetoedTimeRanges` never
+    /// saw a veto and the transcript went on highlighting the span.
+    @Test(
+        "A manual veto over a previously rewound span wins the row",
+        .timeLimit(.minutes(1))
+    )
+    func manualVetoOverAPriorListenRevertTakesEffect() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.upsertDecodedSpans([
+            makeDetectedSpan(
+                id: "span-detected",
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            ),
+        ])
+
+        // THE LOSING ROW, actually present.
+        let rewindWroteARow = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: exactTimeSpanScope(
+                    assetId: "asset-1",
+                    start: 100,
+                    end: 160
+                ),
+                source: .listenRevert,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+        #expect(
+            rewindWroteARow,
+            "precondition: the rewind-through really did persist a row"
+        )
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1")
+                .map(\.id) == ["span-detected"],
+            """
+            precondition: a rewind-through on its own does NOT suppress the \
+            span. If it did, the payoff assertion below would pass without \
+            the veto ever mattering.
+            """
+        )
+
+        // THE WINNING GESTURE, over the same 100 ms identity bucket, so it is
+        // guaranteed to collide rather than open a second row.
+        let vetoWroteANewRow = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: exactTimeSpanScope(
+                    assetId: "asset-1",
+                    start: 100,
+                    end: 160
+                ),
+                source: .manualVeto,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+        #expect(
+            vetoWroteANewRow == false,
+            """
+            precondition: the veto COLLAPSED onto the existing row. If it had \
+            opened its own row the precedence rule would never be consulted \
+            and this test would prove nothing.
+            """
+        )
+
+        let events = try await store.loadCorrectionEvents(
+            analysisAssetId: "asset-1"
+        )
+        #expect(
+            events.count == 1,
+            """
+            One row still. The ladder settles WHICH gesture the row describes; \
+            it deliberately does not widen the dedupe identity.
+            """
+        )
+        #expect(
+            events.first?.source == .manualVeto,
+            """
+            The row describes the higher-fidelity gesture. Arrival order used \
+            to decide this and that is exactly what made the veto unwritable.
+            """
+        )
+        #expect(
+            events.first?.submissionCount == 2,
+            """
+            The rewind-through is not erased by losing: the audit counters \
+            still record that it happened.
+            """
+        )
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1").isEmpty,
+            """
+            THE REPORTED SYMPTOM. The span stops being highlighted — for every \
+            reader of the shared read, not just for the transcript.
+            """
+        )
+    }
+
+    /// LOWER OVER HIGHER — the other direction, which is a separate property
+    /// and needs its own test. A rewind-through landing on a span the listener
+    /// has already marked "not an ad" must not undo the marking.
+    @Test(
+        "A later rewind-through cannot downgrade a manual veto",
+        .timeLimit(.minutes(1))
+    )
+    func laterListenRevertCannotDowngradeAManualVeto() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.upsertDecodedSpans([
+            makeDetectedSpan(
+                id: "span-detected",
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            ),
+        ])
+
+        _ = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: exactTimeSpanScope(
+                    assetId: "asset-1",
+                    start: 100,
+                    end: 160
+                ),
+                source: .manualVeto,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1").isEmpty,
+            "precondition: the marking took effect"
+        )
+
+        let rewindWroteANewRow = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: exactTimeSpanScope(
+                    assetId: "asset-1",
+                    start: 100,
+                    end: 160
+                ),
+                source: .listenRevert,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+        #expect(
+            rewindWroteANewRow == false,
+            """
+            precondition: the rewind-through LANDED ON the veto's row. Without \
+            this the span would stay suppressed no matter what the conflict \
+            clause did, and the assertions below would be vacuous.
+            """
+        )
+
+        let events = try await store.loadCorrectionEvents(
+            analysisAssetId: "asset-1"
+        )
+        #expect(events.count == 1, "still one row")
+        #expect(
+            events.first?.source == .manualVeto,
+            """
+            A weaker, inferred gesture cannot relabel a deliberate one. \
+            `COALESCE` happened to get this direction right by keeping the \
+            first writer; rank gets it right on purpose, which is what makes \
+            the other direction fixable without breaking this one.
+            """
+        )
+        #expect(events.first?.submissionCount == 2, "and it is still counted")
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1").isEmpty,
+            "the span the listener dismissed stays dismissed"
+        )
+    }
+
+    /// The winning gesture keeps its OWN attribution, both directions.
+    ///
+    /// `targetRefs` carries the correction's window ids, its inferred evidence,
+    /// and `exactFeedbackSpan` — the listener's own boundaries, which is the
+    /// part of "the marking" Dan's rule is actually about. Refreshing those
+    /// from the newest event is right between equals and wrong when the newest
+    /// event is the weaker claim: a rewind-through would otherwise overwrite a
+    /// transcript marking's bounds with the detector's.
+    @Test(
+        "The surviving row keeps the winning gesture's attribution",
+        .timeLimit(.minutes(1))
+    )
+    func theWinningGestureKeepsItsOwnAttribution() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "ep-2")
+        )
+
+        func event(
+            assetId: String,
+            source: CorrectionSource,
+            windowId: String,
+            causal: CausalSource
+        ) -> CorrectionEvent {
+            CorrectionEvent(
+                analysisAssetId: assetId,
+                scope: exactTimeSpanScope(
+                    assetId: assetId,
+                    start: 100,
+                    end: 160
+                ),
+                source: source,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive,
+                causalSource: causal,
+                targetRefs: CorrectionTargetRefs(adWindowId: windowId)
+            )
+        }
+
+        // asset-1: weaker first, stronger second — the stronger one's
+        // attribution replaces it.
+        _ = try await store.appendCorrectionEvent(
+            event(
+                assetId: "asset-1",
+                source: .listenRevert,
+                windowId: "win-from-rewind",
+                causal: .positionPrior
+            )
+        )
+        _ = try await store.appendCorrectionEvent(
+            event(
+                assetId: "asset-1",
+                source: .manualVeto,
+                windowId: "win-from-marking",
+                causal: .lexical
+            )
+        )
+        let promoted = try await store.loadCorrectionEvents(
+            analysisAssetId: "asset-1"
+        )
+        #expect(promoted.count == 1, "precondition: one row, so they collided")
+        #expect(
+            promoted.first?.targetRefs?.adWindowId == "win-from-marking",
+            "the marking's own attribution is what the row now carries"
+        )
+        #expect(
+            promoted.first?.causalSource == .lexical,
+            "and its causal attribution with it"
+        )
+
+        // asset-2: stronger first, weaker second — the weaker one must not
+        // overwrite what the marking recorded.
+        _ = try await store.appendCorrectionEvent(
+            event(
+                assetId: "asset-2",
+                source: .manualVeto,
+                windowId: "win-from-marking",
+                causal: .lexical
+            )
+        )
+        _ = try await store.appendCorrectionEvent(
+            event(
+                assetId: "asset-2",
+                source: .listenRevert,
+                windowId: "win-from-rewind",
+                causal: .positionPrior
+            )
+        )
+        let defended = try await store.loadCorrectionEvents(
+            analysisAssetId: "asset-2"
+        )
+        #expect(defended.count == 1, "precondition: one row, so they collided")
+        #expect(
+            defended.first?.targetRefs?.adWindowId == "win-from-marking",
+            """
+            A rewind-through must not repoint the row's targets at the \
+            detector's window. Keeping the source but losing the refs would be \
+            a half-downgrade of the record Dan's rule protects.
+            """
+        )
+        #expect(
+            defended.first?.causalSource == .lexical,
+            "nor overwrite its causal attribution"
+        )
+    }
+
+    /// A stored explicit banner receipt is pinned regardless of rank, because
+    /// `isPrivateExplicitFeedbackReceipt` is DERIVED from `source`: promoting
+    /// such a row to `manualVeto` (2 → 3) would move a private receipt into
+    /// diagnostic-export material. Privacy outranks the ladder.
+    ///
+    /// Reaching this needs a banner source carrying an EMPTY identity key,
+    /// which `appendCorrectionEvent` never mints and the v32 backfill removed
+    /// from every legacy row — but a `CorrectionEvent` round-tripped through
+    /// `loadCorrectionEvents` carries its persisted key verbatim, so the shape
+    /// is one hop from expressible and is constructed directly here.
+    ///
+    /// The acknowledged cost: on such a row the veto does not take effect.
+    /// That is the right trade for an unreachable shape — failing to suppress
+    /// a highlight is recoverable, reclassifying a private receipt is not —
+    /// and this test asserts only the privacy property, not the display one.
+    @Test(
+        "A stored banner receipt is never promoted out of its privacy class",
+        .timeLimit(.minutes(1))
+    )
+    func aStoredBannerReceiptIsNeverPromoted() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+
+        _ = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: exactTimeSpanScope(
+                    assetId: "asset-1",
+                    start: 100,
+                    end: 160
+                ),
+                source: .bannerAutoSkipDenied,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive,
+                persistedCorrectionIdentityKey: ""
+            )
+        )
+
+        let landedOnTheReceipt = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: exactTimeSpanScope(
+                    assetId: "asset-1",
+                    start: 100,
+                    end: 160
+                ),
+                source: .manualVeto,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+        #expect(
+            landedOnTheReceipt == false,
+            """
+            precondition: the veto collided with the receipt. Without the \
+            collision the pin is never exercised and this test is vacuous.
+            """
+        )
+
+        let events = try await store.loadCorrectionEvents(
+            analysisAssetId: "asset-1"
+        )
+        #expect(events.count == 1, "one row")
+        #expect(
+            events.first?.source == .bannerAutoSkipDenied,
+            "the receipt's source is pinned even though manualVeto outranks it"
+        )
+        #expect(
+            events.first?.isPrivateExplicitFeedbackReceipt == true,
+            """
+            THE PROPERTY THAT MATTERS. This flag is computed from `source`, so \
+            a promotion here would silently turn a private banner answer into \
+            exportable diagnostic material.
+            """
+        )
+    }
+
+    /// The reporter's gesture, through the production seam, on a span he had
+    /// already rewound through. This is the composition round 1 could not
+    /// reach: the orchestrator commits, reports success, AND the span goes
+    /// dark — which before the ladder it did not, because the correction it
+    /// wrote was absorbed into the earlier `listenRevert`.
+    @Test(
+        "Mark not-an-ad still works on a span the listener once rewound through",
+        .timeLimit(.minutes(1))
+    )
+    func vetoTakesEffectOverAPriorRewindThrough() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        try await store.upsertDecodedSpans([
+            makeDetectedSpan(
+                id: "span-detected",
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            ),
+        ])
+        _ = try await store.appendCorrectionEvent(
+            CorrectionEvent(
+                analysisAssetId: "asset-1",
+                scope: exactTimeSpanScope(
+                    assetId: "asset-1",
+                    start: 100,
+                    end: 160
+                ),
+                source: .listenRevert,
+                podcastId: "podcast-1",
+                correctionType: .falsePositive
+            )
+        )
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1")
+                .map(\.id) == ["span-detected"],
+            "precondition: the earlier rewind-through left the span highlighted"
+        )
+
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 7
+        )
+
+        let accepted = await orchestrator.revertByTimeRange(
+            start: 100,
+            end: 160,
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1",
+            ifCurrentEpisodeId: "ep-1",
+            ifPlaybackLifecycleGeneration: 7,
+            correctionSpan: makeVetoSpan(
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            )
+        )
+        #expect(accepted, "the gesture reports success")
+        #expect(
+            try await store.fetchDecodedSpans(assetId: "asset-1").isEmpty,
+            """
+            …AND the success is real. Reporting `true` while the span stayed \
+            lit is the exact shape of the original report, and it survived \
+            this bead's first fix on any span with a prior rewind-through.
+            """
+        )
+        #expect(
+            try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
+                .first?.source == .manualVeto,
+            "the durable record says what the listener said"
         )
     }
 }

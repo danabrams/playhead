@@ -16238,6 +16238,13 @@ actor AnalysisStore {
     /// stated meaning is "this material is not an ad"; widening it later is
     /// additive.
     ///
+    /// The narrowness is safe to rely on ONLY because
+    /// `appendCorrectionEvent` adjudicates a same-span collision by
+    /// `CorrectionSource.fidelityRank` rather than by arrival order. Reading
+    /// one source out of a column that kept whichever gesture came first would
+    /// mean a listener who had rewound through a span could never afterwards
+    /// mark it "not an ad" — the two facts have to change together.
+    ///
     /// OVERLAP, not containment, and that matches
     /// `SkipOrchestrator.revertByTimeRange`'s own target predicate — the same
     /// gesture reverts every `ad_window` that merely overlaps its range. Using
@@ -16486,6 +16493,23 @@ actor AnalysisStore {
     /// new `CorrectionType` (e.g. `.retracted`) rather than mutating
     /// existing rows.
     ///
+    /// playhead-u45d — WHICH GESTURE THE SURVIVING ROW DESCRIBES.
+    /// Same-kind corrections over the same span DO collapse, and until this
+    /// bead the collapsed row kept whichever `source` arrived FIRST. That made
+    /// a manual "not an ad" unwritable over any span the listener had once
+    /// rewound through: the veto bumped the existing `listenRevert` row's
+    /// counters and changed nothing else, so `userVetoedTimeRanges` — which
+    /// reads `.manualVeto` — never saw it and the transcript went on
+    /// highlighting the span. Arrival order is now irrelevant; the row
+    /// describes the HIGHEST-FIDELITY gesture that has claimed it, per
+    /// `CorrectionSource.fidelityRank`. A higher-fidelity correction arriving
+    /// over a lower one takes effect, and a lower one arriving over a higher
+    /// one cannot undo it. The lower gesture is not erased — it is counted in
+    /// `submissionCount` and `lastSeenAt`, the same retention any
+    /// re-submission gets. Retaining it as a SECOND row would mean widening
+    /// the dedupe identity, which is a different decision from this one and
+    /// is not taken here.
+    ///
     /// playhead-hygc.1.7: returns `true` when the call inserted a NEW
     /// row, `false` when it landed on an existing identity (the
     /// `ON CONFLICT … DO UPDATE` audit-bump path). Callers that fire
@@ -16509,6 +16533,67 @@ actor AnalysisStore {
     ///     but a naive `return !alreadyPresent` would wrongly report
     ///     `true` here, firing a sponsor side effect for a persistence
     ///     write that never actually landed.
+    /// SQL scalar mapping a `correction_events.source` text column to its
+    /// `CorrectionSource.fidelityRank`.
+    ///
+    /// playhead-u45d. Generated from the enum rather than written out as a SQL
+    /// literal so the ladder has exactly ONE definition: adding a case without
+    /// a rank is a Swift compile error, and there is no second copy here to
+    /// drift out of step with it.
+    ///
+    /// NULL and unrecognised text fall to 0, the floor. That is deliberate in
+    /// both directions: `loadCorrectionEvents` already decodes an unrecognised
+    /// source to `nil`, so such a value is invisible to every reader in this
+    /// build, and letting a gesture we DO understand replace it is strictly
+    /// more legible than freezing the row on a string nothing can interpret.
+    private static func correctionSourceFidelitySQL(_ column: String) -> String {
+        let arms = CorrectionSource.allCases
+            .map { "WHEN '\($0.rawValue)' THEN \($0.fidelityRank)" }
+            .joined(separator: " ")
+        return "(CASE \(column) \(arms) ELSE 0 END)"
+    }
+
+    /// SQL predicate: this conflict is a GENERIC cross-source collision, the
+    /// only situation the fidelity ladder adjudicates.
+    ///
+    /// Two exclusions, both load-bearing:
+    ///
+    ///   • An incoming explicit banner receipt owns a private per-window
+    ///     identity key, so it can only ever conflict with ITSELF. Its columns
+    ///     are pinned by the pre-existing `correctionIdentityKey <> ''` arms
+    ///     and must stay that way.
+    ///
+    ///   • A STORED banner source is never rewritten, whatever the ranks say.
+    ///     `CorrectionEvent.isPrivateExplicitFeedbackReceipt` is derived from
+    ///     `source`, so promoting a banner row to `manualVeto` (rank 2 → 3)
+    ///     would silently move a private receipt into diagnostic-export
+    ///     material. `appendCorrectionEvent` never writes a banner source with
+    ///     an empty identity key and the v32 backfill gave every legacy banner
+    ///     row a non-empty one, so this should be unreachable — but a
+    ///     `CorrectionEvent` round-tripped through `loadCorrectionEvents`
+    ///     carries its persisted key verbatim, and the cost of not depending
+    ///     on a migration two versions back is one SQL clause.
+    ///
+    /// `COALESCE(..., '')` because `NULL NOT IN (…)` is NULL, not true, and a
+    /// NULL stored source is precisely the case that must be promotable.
+    ///
+    /// The stored-banner exclusion pins `source` — the column the privacy
+    /// class is derived from — and deliberately nothing else. On that
+    /// unreachable shape the attribution columns keep the refresh behaviour
+    /// they had before the ladder existed; widening the pin would be inventing
+    /// semantics for a row that cannot occur, and the failure it would guard
+    /// against is losing private state, not exporting it.
+    private static var genericCrossSourceConflictSQL: String {
+        let banners = CorrectionSource.allCases
+            .filter(\.isExplicitBannerFeedback)
+            .map { "'\($0.rawValue)'" }
+            .joined(separator: ", ")
+        return """
+            excluded.correctionIdentityKey = ''
+                AND COALESCE(correction_events.source, '') NOT IN (\(banners))
+            """
+    }
+
     @discardableResult
     func appendCorrectionEvent(_ event: CorrectionEvent) throws -> Bool {
         // Compute identity-key columns once, in Swift, so the on-disk
@@ -16578,6 +16663,21 @@ actor AnalysisStore {
         // precedence for the dedupe path: same logical correction →
         // bump the audit counters instead of failing or silently
         // ignoring.
+        // playhead-u45d: THE FIDELITY LADDER, resolved here because here is
+        // where two gestures over the same material become one row.
+        //
+        // `storedOutranks` is the "must not downgrade" half and `incomingOutranks`
+        // the "higher fidelity wins" half; equal rank means neither fires and
+        // every column falls through to the behaviour that predates the ladder.
+        // Since a generic conflict requires an identical `effectiveCorrectionType`,
+        // the only pair that can actually differ in rank today is
+        // `manualVeto` (3) against `listenRevert` (1) — which is exactly the
+        // reported bug.
+        let storedRank = Self.correctionSourceFidelitySQL("correction_events.source")
+        let incomingRank = Self.correctionSourceFidelitySQL("excluded.source")
+        let generic = Self.genericCrossSourceConflictSQL
+        let incomingOutranks = "(\(generic) AND \(incomingRank) > \(storedRank))"
+        let storedOutranks = "(\(generic) AND \(storedRank) > \(incomingRank))"
         let sql = """
             INSERT OR IGNORE INTO correction_events
             (id, analysisAssetId, scope, createdAt, source, podcastId,
@@ -16594,24 +16694,47 @@ actor AnalysisStore {
             )
             DO UPDATE SET
                 lastSeenAt = MAX(correction_events.lastSeenAt, excluded.lastSeenAt),
+                -- The lower-fidelity gesture still HAPPENED even when it loses
+                -- the row: the audit counters count it, which is the same
+                -- retention this table has always given a re-submission.
                 submissionCount = correction_events.submissionCount + 1,
                 -- Refresh causalSource/targetRefs from the new event so
-                -- the latest attribution wins. The original `id` /
-                -- `createdAt` / `firstSeenAt` are intentionally NOT
-                -- overwritten — they pin the first-observation provenance.
+                -- the latest attribution wins, EXCEPT where the new event is
+                -- the lower-fidelity claim. The original `id` / `createdAt` /
+                -- `firstSeenAt` are intentionally NOT overwritten — they pin
+                -- the first-observation provenance. Nor is `scope`: the two
+                -- claims are within one 100 ms identity bucket by
+                -- construction, so re-pointing it would buy at most 100 ms of
+                -- boundary at the cost of a column that no longer matches the
+                -- row's own `createdAt`.
                 source = CASE
+                    WHEN \(incomingOutranks) THEN excluded.source
+                    WHEN \(storedOutranks) THEN correction_events.source
                     WHEN excluded.correctionIdentityKey = ''
                     THEN COALESCE(correction_events.source, excluded.source)
                     ELSE correction_events.source
                 END,
                 podcastId = COALESCE(correction_events.podcastId, excluded.podcastId),
+                -- Not ladder-adjudicated: a generic conflict requires an equal
+                -- `effectiveCorrectionType`, so the two sides can differ here
+                -- only by one of them being NULL, and COALESCE already keeps
+                -- whichever one says something.
                 correctionType = CASE
                     WHEN excluded.correctionIdentityKey = ''
                     THEN COALESCE(correction_events.correctionType, excluded.correctionType)
                     ELSE correction_events.correctionType
                 END,
-                causalSource = COALESCE(excluded.causalSource, correction_events.causalSource),
+                causalSource = CASE
+                    WHEN \(storedOutranks) THEN correction_events.causalSource
+                    ELSE COALESCE(excluded.causalSource, correction_events.causalSource)
+                END,
+                -- `targetRefs` carries the winning gesture's OWN bounds
+                -- (`exactFeedbackSpan`), its window ids and its inferred
+                -- evidence. Letting a later rewind-through overwrite a
+                -- transcript marking's refs would downgrade precisely the
+                -- record Dan's rule protects.
                 targetRefsJSON = CASE
+                    WHEN \(storedOutranks) THEN correction_events.targetRefsJSON
                     WHEN excluded.correctionIdentityKey = ''
                     THEN COALESCE(excluded.targetRefsJSON, correction_events.targetRefsJSON)
                     ELSE correction_events.targetRefsJSON
