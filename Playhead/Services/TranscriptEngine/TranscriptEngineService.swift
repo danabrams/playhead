@@ -908,6 +908,21 @@ actor TranscriptEngineService {
         appendWaiters.count
     }
 
+    /// playhead-ngev (review r1) test seam: whether `analysisAssetId` is
+    /// currently fenced by `stopTranscription`.
+    ///
+    /// It exists because `AnalysisJobRunner.shouldStopEngine(after:)` is a
+    /// pure function and can be proven on its own, but its CALL SITE cannot:
+    /// the runner holds a concrete `TranscriptEngineService` with no protocol
+    /// seam, so `stopTranscription` cannot be spied on and a build that simply
+    /// stopped consulting the predicate would pass every test that existed.
+    /// That call site is the one that decides whether the runner cancels the
+    /// listener's own transcription, so leaving it asserted only by a unit
+    /// test of the predicate is the gap this closes.
+    func isStoppedForTesting(analysisAssetId: String) -> Bool {
+        stoppedAssetIds.contains(analysisAssetId)
+    }
+
     /// playhead-8ysk test seam: push a `.failed` through the emit path for an
     /// arbitrary asset id.
     ///
@@ -1842,9 +1857,19 @@ actor TranscriptEngineService {
             // belonging to an asset that is "stopped". The gate silenced the
             // one event the row needed.
             //
-            // A SUPERSEDED run is still dropped: its generation no longer
-            // matches, its successor has its own observer, and a stale reason
-            // delivered there would fail a run that has not yet done anything.
+            // A SUPERSEDED run is still dropped WHILE THE ASSET IS GATED: its
+            // generation no longer matches, and in the window between a new
+            // runner subscribing with `events()` and its `startTranscription`
+            // rescinding the gate, a stale reason delivered there would fail a
+            // run that has not yet done anything.
+            //
+            // Read the conjunction exactly (review r1): an ungated asset
+            // delivers a superseded run's `.failed` too, and that is the
+            // INTENDED path, not a hole. The dominant supersession is a scrub,
+            // where `startTranscription` ungates the asset before spawning the
+            // successor — so the predecessor's interruption reaches the runner
+            // immediately, which is the whole point of the bead. Dropping it
+            // there would put the runner back on its 300 s timeout.
             stopped = stoppedAssetIds.contains(assetId) && !fromCurrentRun
         }
         if stopped {

@@ -1420,9 +1420,15 @@ actor AnalysisJobRunner {
         /// A `.completed` arrived and the persisted coverage was still zero.
         /// The engine believes it succeeded; the transcript is empty.
         case engineCompletedZero = "engine_completed_zero"
-        /// No terminal event for this asset before the runner's 300 s timeout.
-        /// The engine is either wedged or was cancelled by a build that still
-        /// returns from the loop in silence.
+        /// No terminal event for this asset before the observation ended —
+        /// either the runner's 300 s timeout fired, or the event stream itself
+        /// finished without one. The engine is wedged, gone, or was cancelled
+        /// by a build that still returns from the loop in silence.
+        ///
+        /// The two are deliberately one bucket (review r1): from the runner's
+        /// vantage they are the same statement — nobody reported — and it
+        /// cannot tell them apart without claiming something about the engine's
+        /// internals, which is exactly what this key exists to avoid.
         case engineSilentTimeout = "engine_silent_timeout"
 
         /// Derive the observation from what the fold actually saw. Called only
