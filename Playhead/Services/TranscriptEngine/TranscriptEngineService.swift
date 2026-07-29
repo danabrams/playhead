@@ -1583,11 +1583,20 @@ actor TranscriptEngineService {
         // Batch-insert to SQLite.
         var progress = ShardProgress()
         if !chunksToInsert.isEmpty {
-            try await store.insertTranscriptChunks(chunksToInsert)
             // playhead-8ysk (review r3): count AFTER the insert returns, so a
             // throwing insert (the `persistence_failed` class) does not credit
             // this run with rows it never wrote.
-            progress.chunksInserted = chunksToInsert.count
+            //
+            // playhead-6av0 (review r1): credit the count the STORE reports, not
+            // `chunksToInsert.count`. `insertTranscriptChunk` is now
+            // `INSERT OR IGNORE`, so a batch carrying two segments that hash to
+            // one `(asset, pass, fingerprint)` writes ONE row. Crediting the
+            // batch size would let `chunksInsertedThisRun` claim rows the
+            // database does not hold — and that counter is what decides, at the
+            // end of the run, whether a shard-failure set means "produced
+            // nothing" or "produced something".
+            let inserted = try await store.insertTranscriptChunks(chunksToInsert)
+            progress.chunksInserted = inserted
         }
         if !emittedChunks.isEmpty {
             emitEvent(.chunksPersisted(analysisAssetId: analysisAssetId, chunks: emittedChunks))

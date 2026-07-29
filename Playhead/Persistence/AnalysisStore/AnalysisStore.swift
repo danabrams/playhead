@@ -6056,7 +6056,17 @@ actor AnalysisStore {
         do {
             let chunks = try dedupeMergedTranscriptChunks()
             let spans = try dedupeMergedDecodedSpans()
-            if try tableExists("transcript_chunks") {
+            // playhead-6av0 (review r1): the `pass` guard MIRRORS
+            // ``dedupeMergedTranscriptChunks``'s. Without it a hand-seeded
+            // fixture whose `transcript_chunks` predates the `pass` column would
+            // send the dedupe down its `columnExists` early-out (0 rows swept)
+            // and then hand `CREATE UNIQUE INDEX` a column that is not there —
+            // a throw, a savepoint rollback, and a rung that can never complete
+            // on that database. Production always has `pass` (`createTables()`
+            // asserts it before the ladder runs); this keeps the two guards from
+            // drifting apart.
+            if try tableExists("transcript_chunks"),
+               try columnExists(table: "transcript_chunks", column: "pass") {
                 try exec("""
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_fingerprint
                     ON transcript_chunks(analysisAssetId, pass, segmentFingerprint)
@@ -9053,13 +9063,20 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
-    func insertTranscriptChunks(_ chunks: [TranscriptChunk]) throws {
-        guard !chunks.isEmpty else { return }
+    /// - Returns: how many rows were ACTUALLY written. Under
+    ///   ``insertTranscriptChunk``'s `INSERT OR IGNORE` this can be smaller than
+    ///   `chunks.count`, and a caller that credits itself with `chunks.count`
+    ///   would then be claiming rows the database does not hold — see
+    ///   `TranscriptEngineService.ShardProgress.chunksInserted`, which feeds the
+    ///   "this run produced nothing" failure signal.
+    @discardableResult
+    func insertTranscriptChunks(_ chunks: [TranscriptChunk]) throws -> Int {
+        guard !chunks.isEmpty else { return 0 }
         try exec("BEGIN TRANSACTION")
-        var skipped = 0
+        var inserted = 0
         do {
             for chunk in chunks {
-                if try !insertTranscriptChunk(chunk) { skipped += 1 }
+                if try insertTranscriptChunk(chunk) { inserted += 1 }
             }
             try exec("COMMIT")
         } catch {
@@ -9069,9 +9086,11 @@ actor AnalysisStore {
         // playhead-6av0: never silent. A skip means the batch carried a segment
         // the asset already holds under the same pass — benign, but it is also
         // the only signal that a writer's pre-insert dedupe missed something.
+        let skipped = chunks.count - inserted
         if skipped > 0 {
             logger.notice("insertTranscriptChunks: \(skipped, privacy: .public) of \(chunks.count, privacy: .public) chunk(s) already present for this (asset, pass, fingerprint) and were not re-inserted")
         }
+        return inserted
     }
 
     /// playhead-0sro: advance the fast-transcript coverage watermark on an

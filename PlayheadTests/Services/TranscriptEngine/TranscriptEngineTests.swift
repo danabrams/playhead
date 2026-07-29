@@ -1281,8 +1281,14 @@ struct TranscriptEngineSpeakerIdTests {
         try await store.insertAsset(makeTranscriptAsset(id: assetId, episodeId: "ep-speaker-duplicate-rows"))
 
         let recognizer = MockSpeechRecognizer()
+        // playhead-6av0 review r1: the FIRST pass deliberately carries NO
+        // speakerId. The rewrite as first landed gave pass 1 `speakerId: 7`, so
+        // the closing `allSatisfy { $0.speakerId == 7 }` was already true before
+        // the second pass ran — the assertion passed without exercising
+        // `updateTranscriptChunkSpeakerIdIfMissing` at all, which is the one
+        // production path this test names. Starting from nil makes the claim real.
         recognizer.transcribeResult = [
-            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7, avgConfidence: 0.61)
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: nil, avgConfidence: 0.61)
         ]
         let speech = SpeechService(
             recognizer: recognizer,
@@ -1345,8 +1351,9 @@ struct TranscriptEngineSpeakerIdTests {
             .filter { $0.segmentFingerprint == original.segmentFingerprint }
         #expect(matchingChunks.count == 1,
                 "one row per (asset, pass, fingerprint) — the duplicate never landed")
-        #expect(matchingChunks.allSatisfy { $0.speakerId == 7 },
-                "the survivor's missing speakerId is still filled by the second pass")
+        let survivor = try #require(matchingChunks.first)
+        #expect(survivor.speakerId == 7,
+                "the survivor's speakerId was NULL after pass 1 and is filled by pass 2 — updateTranscriptChunkSpeakerIdIfMissing still reaches the one surviving row")
         #expect(abs((matchingChunks[0].avgConfidence ?? 0) - 0.61) < 0.001,
                 "avgConfidence was already set on the survivor, so the IfMissing upgrade correctly no-ops")
     }

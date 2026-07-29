@@ -577,11 +577,17 @@ struct MergedChildRowDedupeV40MigrationTests {
         // their pre-insert read cannot see a duplicate that is only in the
         // batch. Under a bare INSERT the UNIQUE index turns that into a throw
         // that rolls back the WHOLE batch and loses the shard's transcript.
-        try await store.insertTranscriptChunks([
+        let inserted = try await store.insertTranscriptChunks([
             chunk(id: "a", fingerprint: "fp-A", index: 0),
             chunk(id: "b", fingerprint: "fp-A", index: 1),
             chunk(id: "c", fingerprint: "fp-B", index: 2),
         ])
+        // playhead-6av0 REVIEW R1: the batch size is NOT the row count any more.
+        // `TranscriptEngineService` credits `ShardProgress.chunksInserted` from
+        // this return value, and that counter is what decides whether a run with
+        // shard failures "produced nothing"; returning 3 here would have it
+        // claim a row the database does not hold.
+        #expect(inserted == 2, "the store reports rows WRITTEN, not rows offered")
 
         let after = try openRaw(dir)
         defer { sqlite3_close_v2(after) }
@@ -590,15 +596,211 @@ struct MergedChildRowDedupeV40MigrationTests {
         #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks WHERE id = 'c'") == 1)
     }
 
-    @Test("the isolated ladder (migrateOnlyForTesting) also reaches v40 and creates the index")
-    func isolatedLadderReachesV40() async throws {
+    /// playhead-6av0 REVIEW R1 — REWRITTEN, because as first landed this test
+    /// proved nothing. It built a fresh `AnalysisStore` and called
+    /// `migrateOnlyForTesting()` directly; but that seam's first statement
+    /// reaches SQL, every SQL surface routes through `ensureOpen()`, and
+    /// `ensureOpen()` runs the WHOLE of `runSchemaMigration()` — `createTables()`
+    /// plus the real ladder — before the seam's own first rung is consulted. The
+    /// store was already at v40 with the index built by the time line 1 of the
+    /// seam ran. Deleting the seam's `migrateDeduplicateMergedChildRowsV40IfNeeded()`
+    /// call left the old test GREEN (measured).
+    ///
+    /// The fix is to open the store FIRST, so `didOpen` is set and
+    /// `ensureOpen()` short-circuits, and only then rewind the database to a v39
+    /// device and run the seam. Now the seam is the only thing that can move the
+    /// schema, and the test fails if that call is removed.
+    @Test("the isolated ladder seam (migrateOnlyForTesting) runs V40: it repairs AND builds the index")
+    func isolatedLadderSeamRunsV40() async throws {
         let dir = try makeTempDir(prefix: "V40IsolatedLadder")
         defer { try? FileManager.default.removeItem(at: dir) }
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
+        // Opens the handle and flips `didOpen`, so nothing below re-enters
+        // `runSchemaMigration()`.
+        try await store.migrate()
+
+        let db = try openRaw(dir)
+        try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint")
+        try insertAsset(db, id: "SURVIVOR", episodeId: "ep-1", fingerprint: "sha-survivor")
+        try insertChunk(
+            db, id: "own", assetId: "SURVIVOR", fingerprint: "fp-A",
+            chunkIndex: 12, start: 10, end: 11, text: "Hello there"
+        )
+        try insertChunk(
+            db, id: "imported", assetId: "SURVIVOR", fingerprint: "fp-A",
+            chunkIndex: 3, start: 10, end: 11, text: "Hello there"
+        )
+        try exec(db, "UPDATE _meta SET value = '39' WHERE key = 'schema_version'")
+        sqlite3_close_v2(db)
+
         try await store.migrateOnlyForTesting()
 
         #expect(try await store.schemaVersion() == 40)
         #expect(try probeIndexExists(in: dir, indexName: "idx_chunks_asset_pass_fingerprint"))
+        let after = try openRaw(dir)
+        defer { sqlite3_close_v2(after) }
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks") == 1,
+                "the seam ran the data repair too, not just the DDL")
+        #expect(try scalarText(after, "SELECT id FROM transcript_chunks") == "own")
+    }
+
+    // MARK: - 10. The FTS rebuild is load-bearing, not defensive decoration
+
+    /// playhead-6av0 REVIEW R1 — NEW. `dedupeMergedTranscriptChunks` issues an
+    /// FTS `rebuild` before its DELETE, and NOTHING pinned it: removing that
+    /// statement left the whole suite green (measured).
+    ///
+    /// It is not decoration. `transcript_chunks_fts` is EXTERNAL-CONTENT, and
+    /// deleting a content row whose index entry is missing makes the
+    /// `transcript_chunks_ad` trigger's `'delete'` command trip SQLite's
+    /// corruption check — `SQLITE_CORRUPT`, "database disk image is malformed",
+    /// verified directly against sqlite3. Inside V40 that throw is caught by the
+    /// savepoint: the rung rolls back, `schema_version` stays at 39, and the
+    /// owner's 7,339 duplicate rows survive every future launch with nothing but
+    /// a fault line to show for it.
+    ///
+    /// Missing index entries are exactly the shape an old database has: rows
+    /// written before `transcript_chunks_fts` existed. `'delete-all'` reproduces
+    /// that state on the real schema without hand-building one.
+    @Test("rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required")
+    func dedupeSurvivesRowsMissingFromTheFTSIndex() async throws {
+        let dir = try await seededV39Directory(prefix: "V40FTSMissing") { db in
+            try self.insertAsset(db, id: "SURVIVOR", episodeId: "ep-1", fingerprint: "sha-survivor")
+            try self.insertChunk(
+                db, id: "own", assetId: "SURVIVOR", fingerprint: "fp-A",
+                chunkIndex: 12, start: 10, end: 11, text: "prehistoric sponsorship"
+            )
+            try self.insertChunk(
+                db, id: "imported", assetId: "SURVIVOR", fingerprint: "fp-A",
+                chunkIndex: 3, start: 10, end: 11, text: "prehistoric sponsorship"
+            )
+            // Strip the index entries the AFTER INSERT trigger just wrote, so the
+            // rows look exactly like content that predates the FTS table.
+            try self.exec(db, "INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('delete-all')")
+        }
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let db = try openRaw(dir)
+        #expect(try scalarInt(db, "SELECT count(*) FROM transcript_chunks_fts WHERE transcript_chunks_fts MATCH 'prehistoric'") == 0,
+                "fixture precondition: the rows carry no FTS index entry")
+        sqlite3_close_v2(db)
+
+        try await migrateAgain(dir)
+
+        let after = try openRaw(dir)
+        defer { sqlite3_close_v2(after) }
+        // Without the rebuild the DELETE raises SQLITE_CORRUPT, the savepoint
+        // rolls back, and BOTH rows are still here at schema_version 39.
+        #expect(try scalarText(after, "SELECT value FROM _meta WHERE key = 'schema_version'") == "40",
+                "the rung COMPLETED — a rollback here leaves the duplicates on disk forever")
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks") == 1)
+        #expect(try scalarText(after, "SELECT id FROM transcript_chunks") == "own")
+        // ...and the rebuilt index agrees with the post-delete content table.
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks_fts WHERE transcript_chunks_fts MATCH 'prehistoric'") == 1)
+        try exec(after, "INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('integrity-check')")
+    }
+
+    // MARK: - 11. The LAUNCH-SWEEP call site, which the index cannot cover
+
+    /// playhead-6av0 REVIEW R1 — NEW. `reconcileDuplicatePlaceholderAssets`
+    /// calls `dedupeMergedTranscriptChunks() + dedupeMergedDecodedSpans()` after
+    /// a merge, and NOTHING pinned that call: deleting it left the whole suite
+    /// green (measured). It is not redundant with the V40 rung — the rung is
+    /// one-shot, and the sweep can merge assets on ANY later launch.
+    ///
+    /// `decoded_spans` is the half that only the sweep can fix. It carries no
+    /// unique constraint and CANNOT carry one (an entirely-imported group has to
+    /// be kept), so `UPDATE OR IGNORE` has nothing to conflict on and the
+    /// re-point duplicates the row exactly the way `transcript_chunks` used to.
+    @Test("the launch sweep collapses the decoded_spans duplicates its own re-point just created")
+    func launchSweepDedupesDecodedSpansAfterMerge() async throws {
+        let dir = try makeTempDir(prefix: "V40SweepSpans")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        let winnerSpanId = DecodedSpan.makeId(assetId: "WINNER", firstAtomOrdinal: 58, lastAtomOrdinal: 67)
+        let loserSpanId = DecodedSpan.makeId(assetId: "LOSER", firstAtomOrdinal: 58, lastAtomOrdinal: 67)
+
+        let db = try openRaw(dir)
+        // The playhead-0hi9 shape: a self-keyed placeholder and a canonical-SHA
+        // survivor for one episode, same artifact basename so the guard merges.
+        try exec(db, """
+            INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+            VALUES ('LOSER', 'ep-1', 'LOSER', 'file:///tmp/same.mp3', 'pending', 1.0)
+            """)
+        try exec(db, """
+            INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+            VALUES ('WINNER', 'ep-1', '\(String(repeating: "ab", count: 32))',
+                    'file:///tmp/same.mp3', 'pending', 2.0)
+            """)
+        // Both decoded the SAME atom range. The loser's row id was minted
+        // against the loser's asset id, so after the re-point it no longer
+        // hashes from its own (assetId, first, last) — that is what identifies
+        // it as imported. It carries the rediff width marker; the winner's does not.
+        try insertSpan(
+            db, id: loserSpanId, assetId: "LOSER", first: 58, last: 67,
+            start: 71.88, end: 88.14, provenanceJSON: #"[{"type":"rediffSlot"}]"#
+        )
+        try insertSpan(
+            db, id: winnerSpanId, assetId: "WINNER", first: 58, last: 67,
+            start: 71.88, end: 88.14, provenanceJSON: "[]"
+        )
+        sqlite3_close_v2(db)
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 1)
+        #expect(summary.duplicateChildRowsRemoved == 1,
+                "the sweep reports the row it swept — the merge re-pointed a span the winner already had")
+
+        let after = try openRaw(dir)
+        defer { sqlite3_close_v2(after) }
+        #expect(try scalarInt(after, "SELECT count(*) FROM decoded_spans") == 1,
+                "without the post-merge sweep the re-point leaves TWO spans on the winner")
+        #expect(try scalarText(after, "SELECT id FROM decoded_spans") == winnerSpanId)
+        // The imported row's width-ownership anchor is carried onto the keeper
+        // rather than deleted with it.
+        let json = try #require(try scalarText(after, "SELECT anchorProvenanceJSON FROM decoded_spans"))
+        let anchors = try JSONDecoder().decode([AnchorRef].self, from: Data(json.utf8))
+        #expect(anchors.contains(.rediffSlot))
+    }
+
+    // MARK: - 12. The rung never stamps itself onto a NEWER database
+
+    /// playhead-6av0 REVIEW R1 — NEW. The rung's upper bound (`observed < 40`)
+    /// was unpinned: widening it to `< 41` left the suite green (measured).
+    ///
+    /// It is the guard that stops a data-repair rung from DOWNGRADING a
+    /// database. `migrateDeduplicateMergedChildRowsV40IfNeeded` ends with an
+    /// unconditional `setSchemaVersion(40)`, so if the ceiling ever slips, a
+    /// database that a later binary carried to 41 gets stamped back to 40 by an
+    /// older/rebuilt one — and every rung above 40 then re-runs against data
+    /// that has already been through it. Same reasoning as the `>= 39` floor
+    /// below it, in the other direction.
+    @Test("a database stamped NEWER than this binary is left alone — V40 never writes its version backwards")
+    func v40DoesNotDowngradeANewerDatabase() async throws {
+        let dir = try makeTempDir(prefix: "V40NoDowngrade")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        AnalysisStore.resetMigratedPathsForTesting()
+        let bootstrap = try AnalysisStore(directory: dir)
+        try await bootstrap.migrate()
+
+        let db = try openRaw(dir)
+        // A hypothetical v41 device: the index is gone because v41 replaced it
+        // with something else. V40 must not resurrect it, and must not re-stamp.
+        try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint")
+        try exec(db, "UPDATE _meta SET value = '41' WHERE key = 'schema_version'")
+        sqlite3_close_v2(db)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        #expect(try await store.schemaVersion() == 41,
+                "V40 stamped its own version over a NEWER database")
+        #expect(!(try probeIndexExists(in: dir, indexName: "idx_chunks_asset_pass_fingerprint")),
+                "V40 ran its body on a database that is past it")
     }
 }
