@@ -1242,6 +1242,18 @@ struct DuplicateAssetMergeSummary: Sendable, Equatable {
     /// Rows that survived a merge, so an async caller can re-probe their
     /// duration and re-score their terminal claim.
     var survivingAssetIds: [String] = []
+    /// Survivors whose `episodeDurationSec` was FILLED IN from a folded-in
+    /// placeholder because they had none of their own.
+    ///
+    /// R1: such a value is untrustworthy BY CONSTRUCTION — the placeholder's
+    /// duration is the shard sum of an 8 MiB mid-download prefix (part 1 of
+    /// this bead), which is why the whole bead exists. The caller's ordinary
+    /// "does this duration look wrong" check (`missing, or contradicted by its
+    /// own coverage`) cannot see it: a poisoned ~543 s that happens to exceed
+    /// the merged coverage watermark looks perfectly plausible and would be
+    /// kept forever, because the sweep is one-shot. These ids force a re-probe
+    /// against the audio file regardless.
+    var survivorsWithInheritedDuration: [String] = []
     /// Completion terminals adopted from a folded-in row.
     var adoptedTerminalStates = 0
     /// Placeholder rows LEFT IN PLACE because their `sourceURL` names a
@@ -1300,6 +1312,9 @@ struct AssetMergeRow: Sendable, Equatable {
     let analysisState: String
     let terminalReason: String?
     let sourceURL: String
+    /// Declared with a default so the merge's pure helpers can still be
+    /// exercised without inventing a duration.
+    var episodeDurationSec: Double? = nil
 
     /// The stable part of `sourceURL`: the hashed filename the download
     /// manager derives from the episode id. `nil` when the value is empty or
@@ -5824,8 +5839,7 @@ actor AnalysisStore {
     /// fails outright on an existing violation and would take the whole
     /// migration transaction — and therefore app launch — down with it. It
     /// keeps the newest row of each colliding group (`createdAt DESC, rowid
-    /// DESC`, matching `fetchAssetByEpisodeId`) and deletes the rest, which
-    /// cascades their children away.
+    /// DESC`, matching `fetchAssetByEpisodeId`) and folds the rest into it.
     ///
     /// NOTE ON SCOPE. This is NOT the placeholder/SHA merge — that pair holds
     /// two DIFFERENT fingerprints (a UUID and a hash), so it never violates
@@ -5837,38 +5851,83 @@ actor AnalysisStore {
     /// fingerprint); they carry no distinct identity to merge on, so
     /// newest-wins is the honest resolution.
     ///
-    /// Idempotent: `CREATE UNIQUE INDEX IF NOT EXISTS`, and the dedup DELETE
-    /// is a no-op once no group has more than one row.
+    /// Idempotent: `CREATE UNIQUE INDEX IF NOT EXISTS`, and the dedup is a
+    /// no-op once no group has more than one row.
     private func migrateUniqueEpisodeFingerprintIndexV39IfNeeded() throws {
         guard (try schemaVersion() ?? 1) < 39 else { return }
         if try tableExists("analysis_assets") {
-            // `createdAt` is not guaranteed to exist here. Raw-schema test
-            // fixtures (and any pre-v9 database) seed `analysis_assets` without
-            // it, and referencing a missing column aborts the whole migration
-            // transaction — which is app launch. Order by it only when it is
-            // there; `rowid DESC` alone is a correct, if coarser, newest-wins.
-            let hasCreatedAt = try columnExists(table: "analysis_assets", column: "createdAt")
-            let ordering = hasCreatedAt ? "createdAt DESC, rowid DESC" : "rowid DESC"
-            try exec("""
-                DELETE FROM analysis_assets
-                WHERE rowid NOT IN (
-                    SELECT rowid FROM (
-                        SELECT rowid,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY episodeId, assetFingerprint
-                                   ORDER BY \(ordering)
-                               ) AS rank
-                        FROM analysis_assets
-                    )
-                    WHERE rank = 1
-                )
-                """)
+            try dedupeExactFingerprintCollisionsForV39()
             try exec("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_episode_fingerprint
                 ON analysis_assets(episodeId, assetFingerprint)
                 """)
         }
         try setSchemaVersion(39)
+    }
+
+    /// Collapse every `(episodeId, assetFingerprint)` group down to its newest
+    /// row, moving the losers' child rows onto the winner before deleting them.
+    ///
+    /// R1: THE CHILD ROWS ARE WHY THIS IS NOT ONE `DELETE`. A bare
+    /// `DELETE FROM analysis_assets` here is two defects at once, and the
+    /// second one is severe:
+    ///
+    ///   * `training_examples.analysisAssetId` is `ON DELETE RESTRICT`, so the
+    ///     delete raises `FOREIGN KEY constraint failed` and aborts the whole
+    ///     migration transaction. A thrown `migrate()` at launch is not a
+    ///     crash — `PlayheadRuntime` answers it by removing
+    ///     `AnalysisStore.defaultDirectory()` and retrying, so the user's
+    ///     ENTIRE analysis database is silently discarded and re-created empty.
+    ///   * every other child table is `ON DELETE CASCADE`, so the loser's
+    ///     transcript chunks, ad windows and scan rows were destroyed rather
+    ///     than moved — the opposite of what the launch sweep does two steps
+    ///     later for the placeholder/SHA shape, and for rows the index itself
+    ///     declares to be the SAME content identity.
+    ///
+    /// Re-pointing reuses the same runtime schema discovery the sweep uses, so
+    /// a child table added by a later migration is covered here too.
+    private func dedupeExactFingerprintCollisionsForV39() throws {
+        // `createdAt` is not guaranteed to exist here. Raw-schema test fixtures
+        // (and any pre-v9 database) seed `analysis_assets` without it, and
+        // referencing a missing column aborts the whole migration transaction —
+        // which is app launch. Order by it only when it is there; `rowid DESC`
+        // alone is a correct, if coarser, newest-wins.
+        let hasCreatedAt = try columnExists(table: "analysis_assets", column: "createdAt")
+        let ordering = hasCreatedAt ? "createdAt DESC, rowid DESC" : "rowid DESC"
+
+        var collidingKeys: [(episodeId: String, fingerprint: String)] = []
+        let keyStmt = try prepare("""
+            SELECT episodeId, assetFingerprint FROM analysis_assets
+            GROUP BY episodeId, assetFingerprint HAVING COUNT(*) > 1
+            ORDER BY episodeId, assetFingerprint
+            """)
+        defer { sqlite3_finalize(keyStmt) }
+        while try nextRow(keyStmt) {
+            collidingKeys.append((text(keyStmt, 0), text(keyStmt, 1)))
+        }
+        // The overwhelmingly common case: nothing to do, and no schema scan.
+        guard !collidingKeys.isEmpty else { return }
+
+        let childColumns = try assetReferencingChildColumns()
+        for key in collidingKeys {
+            var ids: [String] = []
+            let idStmt = try prepare("""
+                SELECT id FROM analysis_assets
+                WHERE episodeId = ? AND assetFingerprint = ?
+                ORDER BY \(ordering)
+                """)
+            defer { sqlite3_finalize(idStmt) }
+            bind(idStmt, 1, key.episodeId)
+            bind(idStmt, 2, key.fingerprint)
+            while try nextRow(idStmt) {
+                ids.append(text(idStmt, 0))
+            }
+            guard let winner = ids.first else { continue }
+            for loser in ids.dropFirst() {
+                _ = try repointChildRows(from: loser, to: winner, childColumns: childColumns)
+                try deleteAssetRow(id: loser)
+            }
+        }
     }
 
     /// Upsert one asset's day-0 attempt record.
@@ -15363,8 +15422,13 @@ actor AnalysisStore {
                     )
                     summary.childRowsRepointed += moved.repointed
                     summary.childRowsDiscarded += moved.discarded
-                    if try foldAssetRow(victim: victim, into: survivor) {
+                    let fold = try foldAssetRow(victim: victim, into: survivor)
+                    if fold.adoptedTerminalState {
                         summary.adoptedTerminalStates += 1
+                    }
+                    if fold.inheritedDuration,
+                       !summary.survivorsWithInheritedDuration.contains(survivor.id) {
+                        summary.survivorsWithInheritedDuration.append(survivor.id)
                     }
                     try deleteAssetRow(id: victim.id)
                     summary.placeholdersMerged += 1
@@ -15458,9 +15522,24 @@ actor AnalysisStore {
         "\"\(raw.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 
+    /// Episodes holding more than one `analysis_assets` row.
+    ///
+    /// R1: A BLANK `episodeId` IS NOT A GROUP KEY. Grouping by `episodeId` is
+    /// what makes ``mergeGuard``'s basename comparison safe — every row in a
+    /// group already shares an episode identity, so a basename match really
+    /// does mean "the same artifact". The empty string breaks that: it lumps
+    /// every blank-id row together, and since
+    /// `DownloadManager.safeFilename(for:)` is `SHA256(episodeId)`, two rows
+    /// born of two DIFFERENT episodes but written with a blank id land on the
+    /// SAME basename and the guard votes `.merge`. That is exactly the
+    /// irreversible false merge — one episode's transcript fused onto
+    /// another's analysis — the guard exists to refuse. Blank ids are skipped;
+    /// leaving them alone costs nothing and cannot be undone if we get it
+    /// wrong.
     private func episodeIdsWithMultipleAssets() throws -> [String] {
         let stmt = try prepare("""
             SELECT episodeId FROM analysis_assets
+            WHERE TRIM(episodeId) != ''
             GROUP BY episodeId HAVING COUNT(*) > 1
             ORDER BY episodeId
             """)
@@ -15475,7 +15554,7 @@ actor AnalysisStore {
     private func assetMergeRows(episodeId: String) throws -> [AssetMergeRow] {
         let stmt = try prepare("""
             SELECT rowid, id, assetFingerprint, createdAt, analysisState,
-                   terminalReason, sourceURL
+                   terminalReason, sourceURL, episodeDurationSec
             FROM analysis_assets
             WHERE episodeId = ?
             """)
@@ -15490,7 +15569,10 @@ actor AnalysisStore {
                 createdAt: sqlite3_column_double(stmt, 3),
                 analysisState: text(stmt, 4),
                 terminalReason: optionalText(stmt, 5),
-                sourceURL: text(stmt, 6)
+                sourceURL: text(stmt, 6),
+                episodeDurationSec: sqlite3_column_type(stmt, 7) == SQLITE_NULL
+                    ? nil
+                    : sqlite3_column_double(stmt, 7)
             ))
         }
         return out
@@ -15548,8 +15630,25 @@ actor AnalysisStore {
     /// from the audio file afterwards, which is the only measurement either row
     /// can be checked against.
     ///
-    /// Returns `true` when a completion terminal was adopted.
-    private func foldAssetRow(victim: AssetMergeRow, into survivor: AssetMergeRow) throws -> Bool {
+    /// What one fold changed that the caller has to follow up on.
+    struct AssetFoldOutcome: Sendable, Equatable {
+        /// A completion terminal was adopted from the folded-in row.
+        var adoptedTerminalState = false
+        /// The survivor had no `episodeDurationSec` and took the victim's.
+        /// See ``DuplicateAssetMergeSummary/survivorsWithInheritedDuration``.
+        var inheritedDuration = false
+    }
+
+    /// Returns what the caller must follow up on. See ``AssetFoldOutcome``.
+    private func foldAssetRow(
+        victim: AssetMergeRow,
+        into survivor: AssetMergeRow
+    ) throws -> AssetFoldOutcome {
+        var outcome = AssetFoldOutcome()
+        // Recorded BEFORE the UPDATE, because after it the survivor's column
+        // is populated either way and the two cases are indistinguishable.
+        outcome.inheritedDuration =
+            survivor.episodeDurationSec == nil && victim.episodeDurationSec != nil
         let sql = """
             UPDATE analysis_assets AS s
             SET featureCoverageEndTime = MAX(
@@ -15607,13 +15706,14 @@ actor AnalysisStore {
               victimState.isTerminalCompletion,
               let survivorState = SessionState(rawValue: survivor.analysisState),
               !survivorState.isTerminalCompletion
-        else { return false }
+        else { return outcome }
         try updateAssetState(
             id: survivor.id,
             state: victim.analysisState,
             terminalReason: victim.terminalReason
         )
-        return true
+        outcome.adoptedTerminalState = true
+        return outcome
     }
 
     private func deleteAssetRow(id: String) throws {

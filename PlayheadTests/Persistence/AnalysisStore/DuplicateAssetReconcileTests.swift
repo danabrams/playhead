@@ -15,6 +15,7 @@
 // sweeps (`did_duration_backfill_v1`, `did_terminal_state_reconcile_v1`) are
 // one-shot, already marked done on that install, and per-row duplicate-blind.
 
+@preconcurrency import AVFoundation
 import Foundation
 import Testing
 
@@ -22,6 +23,8 @@ import Testing
 
 @Suite("playhead-0hi9 — duplicate analysis_assets reconciliation", .serialized)
 struct DuplicateAssetReconcileTests {
+
+    private static let tempDirs = TestTempDirTracker()
 
     // MARK: - Fixtures
 
@@ -604,5 +607,264 @@ struct DuplicateAssetReconcileTests {
         #expect(rows.count == 1, "the migration must clear its own violations before CREATE UNIQUE INDEX")
         #expect(rows.first?.id == "collide-new", "newest-wins on an exact-identity collision")
         #expect(try await store.schemaVersion() == 39)
+    }
+
+    // MARK: - R1 findings
+
+    /// R1 finding 1. The v39 dedup used to be a bare
+    /// `DELETE FROM analysis_assets`, which is two defects at once:
+    ///
+    ///   * `training_examples.analysisAssetId` is `ON DELETE RESTRICT`, so the
+    ///     DELETE raises `FOREIGN KEY constraint failed`, which aborts the
+    ///     whole migration transaction. A failed `analysisStore.migrate()` at
+    ///     launch is not a crash — `PlayheadRuntime` responds by
+    ///     `removeItem(at: AnalysisStore.defaultDirectory())` and retrying, so
+    ///     the user's ENTIRE analysis database is silently deleted.
+    ///   * every other child table is `ON DELETE CASCADE`, so the loser's
+    ///     transcript chunks, windows and scan rows were destroyed rather than
+    ///     re-pointed — the opposite of what the launch sweep does two steps
+    ///     later for the placeholder/SHA shape.
+    ///
+    /// Both are fixed by re-pointing children onto the winner first, reusing
+    /// the same runtime schema discovery the sweep uses.
+    @Test("v39 dedup re-points the loser's children and survives ON DELETE RESTRICT")
+    func migrationDedupPreservesChildRows() async throws {
+        let store = try await makeTestStore()
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await store.setMetaValue(forKey: "schema_version", value: "38")
+        try await insertCanonical(
+            store: store, id: "collide-loser", episodeId: "ep-children", fingerprint: canonicalSHA
+        )
+        try await insertCanonical(
+            store: store, id: "collide-winner", episodeId: "ep-children", fingerprint: canonicalSHA
+        )
+        try await insertChunk(
+            store: store, id: "chunk-loser", assetId: "collide-loser", index: 0, start: 0, end: 100
+        )
+        try await store.createTrainingExample(TrainingExample(
+            id: "te-loser",
+            analysisAssetId: "collide-loser",
+            startAtomOrdinal: 1,
+            endAtomOrdinal: 2,
+            transcriptVersion: "tv-1",
+            startTime: 10,
+            endTime: 20,
+            textSnapshotHash: "h-loser",
+            textSnapshot: nil,
+            bucket: .positive,
+            commercialIntent: "paid",
+            ownership: "thirdParty",
+            evidenceSources: ["fm"],
+            fmCertainty: 0.9,
+            classifierConfidence: 0.7,
+            userAction: nil,
+            eligibilityGate: nil,
+            scanCohortJSON: "{}",
+            decisionCohortJSON: nil,
+            transcriptQuality: "good",
+            createdAt: 1_700_000_000,
+            privacyClassification: .onDeviceLocal
+        ))
+
+        // The migration must COMPLETE. Before the fix this threw
+        // `FOREIGN KEY constraint failed`, which at launch means the analysis
+        // directory is deleted and re-created empty.
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == 39)
+        let rows = try await allAssets(store: store, episodeId: "ep-children")
+        #expect(rows.count == 1)
+        #expect(rows.first?.id == "collide-winner", "newest-wins on an exact-identity collision")
+        let chunks = try await store.fetchTranscriptChunks(assetId: "collide-winner")
+        #expect(chunks.count == 1,
+                "the loser's transcript must be re-pointed onto the winner, not cascaded away")
+        #expect(try await store.loadTrainingExamples(forAsset: "collide-winner").count == 1,
+                "the RESTRICT child must follow the merge too")
+        #expect(try await store.loadTrainingExamples(forAsset: "collide-loser").isEmpty)
+    }
+
+    /// R1 finding 3. `episodeIdsWithMultipleAssets` groups by `episodeId`, so
+    /// every row in a group shares an episode identity and the basename guard
+    /// is meaningful — EXCEPT for the empty string, which groups every
+    /// blank-id row together. `DownloadManager.safeFilename(for:)` is
+    /// `SHA256(episodeId)`, so two rows born of two DIFFERENT episodes but
+    /// written with a blank id land on the SAME basename and the guard votes
+    /// `.merge`. That is precisely the irreversible false merge
+    /// ``AssetMergeGuard`` exists to prevent, so a blank group key is not a
+    /// merge key.
+    @Test("rows grouped under a blank episodeId are never merged")
+    func blankEpisodeIdIsNeverMerged() async throws {
+        let store = try await makeTestStore()
+        // Same basename on both — `safeFilename("")` is a constant, so this is
+        // exactly what two different episodes would produce.
+        try await insertPlaceholder(
+            store: store, id: "ph-blank", episodeId: "",
+            sourceURL: "file:///container-A/e3b0c442.mp3"
+        )
+        try await insertCanonical(
+            store: store, id: "canon-blank", episodeId: "", fingerprint: canonicalSHA,
+            sourceURL: "file:///container-B/e3b0c442.mp3"
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 0,
+                "a blank episodeId is not an episode identity — merging on it fuses unrelated episodes")
+        #expect(try await allAssets(store: store, episodeId: "").count == 2)
+    }
+
+    /// R1 finding 2, at the store seam: the merge has to SAY when a survivor's
+    /// duration is only there because the placeholder had one, because after
+    /// the `COALESCE` the two cases are indistinguishable from the row alone.
+    @Test("the merge reports survivors whose duration came from the placeholder")
+    func inheritedDurationIsReported() async throws {
+        let store = try await makeTestStore()
+        // Survivor with no duration of its own — inherits, must be flagged.
+        try await insertPlaceholder(
+            store: store, id: "ph-inh", episodeId: "ep-inh", duration: 543
+        )
+        try await insertCanonical(
+            store: store, id: "canon-inh", episodeId: "ep-inh",
+            fingerprint: canonicalSHA, duration: nil
+        )
+        // Survivor that brought its own — nothing inherited, must NOT be flagged.
+        try await insertPlaceholder(
+            store: store, id: "ph-not", episodeId: "ep-not", duration: 543
+        )
+        try await insertCanonical(
+            store: store, id: "canon-not", episodeId: "ep-not",
+            fingerprint: String(repeating: "f", count: 64), duration: 2_933
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 2)
+        #expect(summary.survivorsWithInheritedDuration == ["canon-inh"],
+                "only the survivor that had nothing of its own inherited a duration")
+        let inherited = try #require(try await store.fetchAsset(id: "canon-inh"))
+        #expect(inherited.episodeDurationSec == 543,
+                "the value is still carried across — it is VERIFIED afterwards, not discarded")
+    }
+
+    // MARK: - R1 finding 2: an inherited duration is never trusted
+
+    private func writeSynthAudio(seconds: TimeInterval) throws -> URL {
+        let dir = try makeTempDir(prefix: "Bd0hi9Merge")
+        Self.tempDirs.track(dir)
+        let fileURL = dir.appendingPathComponent("synth-\(UUID().uuidString).caf")
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 44_100,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw NSError(domain: "DuplicateAssetReconcileTests", code: -1)
+        }
+        let file = try AVAudioFile(
+            forWriting: fileURL,
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let totalFrames = AVAudioFramePosition(seconds * 44_100)
+        var written = AVAudioFramePosition(0)
+        while written < totalFrames {
+            let frames = AVAudioFrameCount(min(AVAudioFramePosition(44_100), totalFrames - written))
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+                throw NSError(domain: "DuplicateAssetReconcileTests", code: -2)
+            }
+            buffer.frameLength = frames
+            try file.write(from: buffer)
+            written += AVAudioFramePosition(frames)
+        }
+        return fileURL
+    }
+
+    private func makeCoordinator(store: AnalysisStore) -> AnalysisCoordinator {
+        AnalysisCoordinator(
+            store: store,
+            audioService: AnalysisAudioService(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(
+                speechService: SpeechService(recognizer: StubSpeechRecognizer()),
+                store: store
+            ),
+            capabilitiesService: CapabilitiesService(),
+            adDetectionService: AdDetectionService(
+                store: store,
+                metadataExtractor: FallbackExtractor(),
+                backfillJobRunnerFactory: nil,
+                canUseFoundationModelsProvider: { false }
+            ),
+            skipOrchestrator: SkipOrchestrator(store: store)
+        )
+    }
+
+    /// R1 finding 2. `foldAssetRow` fills the survivor's NULL
+    /// `episodeDurationSec` from the placeholder — and the placeholder's
+    /// duration is the one this whole bead declares untrustworthy (the shard
+    /// sum of an 8 MiB mid-download prefix). The repair step then decides
+    /// whether to re-probe with `duration <= 0 || watermark > duration`, so a
+    /// poisoned 543 s that happens to EXCEED the merged coverage looks
+    /// plausible and is kept forever — the sweep is one-shot.
+    ///
+    /// An inherited duration must always be verified against the audio file.
+    @Test("a duration inherited from the placeholder is always re-probed, even when it looks plausible")
+    func inheritedDurationIsAlwaysReProbed() async throws {
+        let store = try await makeTestStore()
+        let coordinator = makeCoordinator(store: store)
+        let episodeId = "ep-inherit"
+        let audioURL = try writeSynthAudio(seconds: 30)
+
+        // Placeholder: the poisoned mid-download prefix, plus a transcript
+        // watermark BELOW it so the existing contradiction check stays quiet.
+        try await insertPlaceholder(
+            store: store, id: "ph-inherit", episodeId: episodeId,
+            state: SessionState.completeTranscriptPartial.rawValue,
+            transcriptCoverage: 300, duration: 543
+        )
+        // Survivor: no duration of its own, so the fold hands it the 543.
+        try await insertCanonical(
+            store: store, id: "canon-inherit", episodeId: episodeId,
+            fingerprint: canonicalSHA, transcriptCoverage: 100, duration: nil
+        )
+
+        let summary = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in audioURL }
+        )
+        #expect(summary.merge.placeholdersMerged == 1)
+
+        let survivor = try #require(try await store.fetchAsset(id: "canon-inherit"))
+        let duration = try #require(survivor.episodeDurationSec)
+        #expect(abs(duration - 30) < 1.0,
+                "the merged row must carry a MEASURED duration, not the placeholder's 543 s prefix (got \(duration))")
+    }
+
+    /// The counterpart: a survivor that brought its own duration is left
+    /// alone. Without this the fix could degenerate into "always re-probe",
+    /// which would let a partial file on disk overwrite a good value.
+    @Test("a survivor's own duration is not re-probed when nothing contradicts it")
+    func survivorOwnDurationIsLeftAlone() async throws {
+        let store = try await makeTestStore()
+        let coordinator = makeCoordinator(store: store)
+        let episodeId = "ep-own-duration"
+        let audioURL = try writeSynthAudio(seconds: 30)
+
+        try await insertPlaceholder(
+            store: store, id: "ph-own", episodeId: episodeId,
+            state: SessionState.completeTranscriptPartial.rawValue,
+            transcriptCoverage: 300, duration: 543
+        )
+        try await insertCanonical(
+            store: store, id: "canon-own", episodeId: episodeId,
+            fingerprint: canonicalSHA, transcriptCoverage: 100, duration: 2_933
+        )
+
+        let summary = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in audioURL }
+        )
+        #expect(summary.merge.placeholdersMerged == 1)
+        #expect(summary.durationsProbed == 0, "nothing contradicted the survivor's own duration")
+
+        let survivor = try #require(try await store.fetchAsset(id: "canon-own"))
+        #expect(survivor.episodeDurationSec == 2_933)
     }
 }

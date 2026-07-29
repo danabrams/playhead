@@ -2869,9 +2869,13 @@ actor AnalysisCoordinator {
     ///     audio file. The merged row inherits the survivor's duration, which
     ///     may itself be a mid-download artifact from before part 1 landed;
     ///     `AudioFileDurationProbe` reads container metadata and is the only
-    ///     measurement either row can be checked against. Only rows whose
-    ///     duration is missing or contradicted by their own coverage are
-    ///     probed — a plausible duration is left alone.
+    ///     measurement either row can be checked against. Probed when the
+    ///     duration is missing, contradicted by the row's own coverage, or
+    ///     INHERITED from the folded-in placeholder (see
+    ///     ``DuplicateAssetMergeSummary/survivorsWithInheritedDuration`` — that
+    ///     value is a mid-download artefact by construction and can look
+    ///     perfectly self-consistent). A duration the survivor brought itself
+    ///     and that nothing contradicts is left alone.
     ///  3. Re-score the survivor's terminal claim with the EXISTING
     ///     ``reconcilePersistedTerminalAssetVerdict(asset:transcriptCoverageEnd:featureCoverageEnd:episodeDuration:)``.
     ///     The merge may have adopted a `completeFull` from the folded-in row;
@@ -2914,7 +2918,19 @@ actor AnalysisCoordinator {
         summary.merge = merge
 
         for assetId in merge.survivingAssetIds {
-            await repairMergedAsset(assetId: assetId, cachedFileURL: cachedFileURL, summary: &summary)
+            await repairMergedAsset(
+                assetId: assetId,
+                // R1: a duration the survivor took FROM the placeholder is
+                // untrustworthy by construction — it is the shard sum of an
+                // 8 MiB mid-download prefix, the artefact this whole bead
+                // exists to kill. The ordinary "missing or contradicted"
+                // check cannot see it, because a poisoned ~543 s that happens
+                // to exceed the merged coverage watermark looks plausible.
+                // This sweep is one-shot, so it would then be kept forever.
+                forceDurationReprobe: merge.survivorsWithInheritedDuration.contains(assetId),
+                cachedFileURL: cachedFileURL,
+                summary: &summary
+            )
         }
 
         do {
@@ -2933,8 +2949,16 @@ actor AnalysisCoordinator {
     }
 
     /// Steps 2 and 3 for one merged row.
+    ///
+    /// - Parameter forceDurationReprobe: re-probe even when the row's duration
+    ///   is self-consistent. Set for survivors that INHERITED their duration
+    ///   from the folded-in placeholder; a value that never came off this row
+    ///   has not earned the benefit of the doubt. Rows carrying their own
+    ///   duration are still left alone — always re-probing would let a
+    ///   still-downloading file on disk overwrite a good measurement.
     private func repairMergedAsset(
         assetId: String,
+        forceDurationReprobe: Bool,
         cachedFileURL: @escaping @Sendable (String) async -> URL?,
         summary: inout DuplicateAssetReconcileSummary
     ) async {
@@ -2944,7 +2968,7 @@ actor AnalysisCoordinator {
         var duration = asset.episodeDurationSec ?? 0
         let featureEnd = asset.featureCoverageEndTime ?? 0
         let watermarkEnd = max(featureEnd, max(asset.fastTranscriptCoverageEndTime ?? 0, transcriptEnd))
-        let durationLooksWrong = duration <= 0 || watermarkEnd > duration
+        let durationLooksWrong = forceDurationReprobe || duration <= 0 || watermarkEnd > duration
 
         if durationLooksWrong, let fileURL = await cachedFileURL(asset.episodeId) {
             summary.durationsProbed += 1
@@ -3682,8 +3706,6 @@ actor AnalysisCoordinator {
 
 // MARK: - EpisodeDurationBackfillSummary (playhead-gyvb.2)
 
-/// Result of one duration-backfill sweep — see
-/// `AnalysisCoordinator.runEpisodeDurationBackfillIfNeeded`.
 /// playhead-0hi9 part 3: outcome of one
 /// ``AnalysisCoordinator/reconcileDuplicateAnalysisAssetsIfNeeded(cachedFileURL:)``
 /// pass.
@@ -3707,6 +3729,8 @@ struct DuplicateAssetReconcileSummary: Sendable, Equatable {
     var failed = false
 }
 
+/// Result of one duration-backfill sweep — see
+/// `AnalysisCoordinator.runEpisodeDurationBackfillIfNeeded`.
 struct EpisodeDurationBackfillSummary: Sendable, Equatable {
     /// Number of rows whose `episodeDurationSec` was rewritten.
     var rewritten: Int = 0
