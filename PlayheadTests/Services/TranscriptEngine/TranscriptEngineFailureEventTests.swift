@@ -255,6 +255,45 @@ private final class AnnouncingFailingRecognizer: SpeechRecognizer, @unchecked Se
     }
 }
 
+/// playhead-ngev (review r1): the fixture for TWO OVERLAPPING LOOP BODIES.
+///
+/// Each shard announces its entry and then blocks on its own release gate, so
+/// a test can hold a cancelled predecessor and its live successor at chosen
+/// points and decide the interleaving rather than race it.
+///
+/// Shard 0 finishes SILENTLY — a clean, durable finish that inserts no rows,
+/// which is precisely the quantity `shardsCompletedThisRun` counts and the one
+/// an overlapping predecessor could donate. Shard 1 fails, so the run that owns
+/// it is a total failure on its own work and must say so.
+private final class OverlappingRunRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let _loaded = OSAllocatedUnfairLock(initialState: false)
+    let silentEntered = InterruptionTestGate()
+    let silentRelease = InterruptionTestGate()
+    let failingEntered = InterruptionTestGate()
+    let failingRelease = InterruptionTestGate()
+
+    func loadModel() async throws { _loaded.withLock { $0 = true } }
+    func unloadModel() async { _loaded.withLock { $0 = false } }
+    func isModelLoaded() async -> Bool { _loaded.withLock { $0 } }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        if shard.id == 0 {
+            await silentEntered.open()
+            await silentRelease.wait()
+            return []
+        }
+        await failingEntered.open()
+        await failingRelease.wait()
+        throw TranscriptEngineError.vadFailed("no speech boundaries in shard \(shard.id)")
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        [VADResult(isSpeech: true, speechProbability: 1.0,
+                   startTime: shard.startTime,
+                   endTime: shard.startTime + shard.duration)]
+    }
+}
+
 /// Never loads, so `SpeechService.isReady()` is false.
 private final class NeverReadyRecognizer: SpeechRecognizer, @unchecked Sendable {
     func loadModel() async throws {}
@@ -318,6 +357,28 @@ struct TranscriptEngineFailureEventTests {
             if case .failed(let id, _) = event, id == sentinelAssetId { return nil }
         }
         return nil
+    }
+
+    /// playhead-ngev (review r1): the first `count` terminal events for
+    /// `assetId`, in arrival order.
+    ///
+    /// `awaitTerminal` above stops at the first one, which is not enough when
+    /// two loop bodies overlap on the SAME asset: the predecessor's
+    /// interruption and the successor's own verdict are both terminals for that
+    /// id, and the whole question is what the SECOND one says.
+    private static func awaitTerminals(
+        on events: AsyncStream<TranscriptEngineEvent>,
+        assetId: String,
+        count: Int
+    ) async -> [Terminal] {
+        var seen: [Terminal] = []
+        for await event in events {
+            if case .completed(let id) = event, id == assetId { seen.append(.completed) }
+            if case .failed(let id, let reason) = event, id == assetId { seen.append(.failed(reason)) }
+            if case .failed(let id, _) = event, id == sentinelAssetId { break }
+            if seen.count == count { break }
+        }
+        return seen
     }
 
     /// playhead-ngev: block until the transcription loop is parked in
@@ -1257,5 +1318,110 @@ struct TranscriptEngineFailureEventTests {
         }
         #expect(reason.failureClass == .stopped)
         #expect(reason.termination == .interrupted)
+    }
+
+    // MARK: - playhead-ngev item 4: the tallies belong to ONE run
+
+    /// THE ONE CLAIM THE BEAD SHIPPED WITHOUT A TEST, AND IT IS A RACE.
+    ///
+    /// `chunksInsertedThisRun` and `shardsCompletedThisRun` were actor fields
+    /// reset at the top of `runTranscriptionLoop`. Their doc comments asserted
+    /// per-pass scoping that an actor field cannot provide: `startTranscription`
+    /// cancels its predecessor and spawns the successor WITHOUT awaiting the
+    /// predecessor's exit, and cancellation is cooperative — so two loop bodies
+    /// overlap, and any work the predecessor finishes after the successor's
+    /// reset is credited to the successor. Making them loop locals fixes it,
+    /// but "a local has no shared cell" is a structural argument, and this
+    /// project has been burned by structural arguments that were never measured.
+    ///
+    /// So measure it. The interleaving is forced, not raced:
+    ///
+    ///   1. the predecessor is held INSIDE `transcribe` for a silent shard —
+    ///      the case that finishes cleanly while inserting no rows, which is
+    ///      exactly the quantity `shardsCompletedThisRun` counts;
+    ///   2. a scrub cancels it and starts a successor for the SAME asset whose
+    ///      only shard fails, so the successor is a total failure on its own
+    ///      work;
+    ///   3. the predecessor is released FIRST and its interruption is awaited,
+    ///      which proves its credit line has already executed;
+    ///   4. only then does the successor reach its total-failure gate.
+    ///
+    /// With the tallies on the actor, step 3 leaves `shardsCompletedThisRun`
+    /// at 1 and the successor's gate reads "this run did work" — so it emits
+    /// `.completed` over a run in which every shard failed, which is the exact
+    /// lie playhead-8ysk was filed to remove, reintroduced through a back door
+    /// that only opens when a listener scrubs.
+    @Test(.timeLimit(.minutes(1)))
+    func anOverlappingPredecessorDoesNotCreditTheSuccessor() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(Self.asset(id: "asset-overlap"))
+        let recognizer = OverlappingRunRecognizer()
+        let speech = SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+        try await speech.loadFastModel()
+        let engine = TranscriptEngineService(speechService: speech, store: store)
+        // Two subscribers: the first reads the predecessor's terminal, the
+        // second reads past it to the successor's. One stream cannot do both,
+        // because the gate that sequences them has to be opened in between.
+        let predecessorEvents = await engine.events()
+        let successorEvents = await engine.events()
+
+        await engine.startTranscription(
+            shards: [makeShard(id: 0, episodeID: "ep-asset-overlap", startTime: 0, duration: 30)],
+            analysisAssetId: "asset-overlap",
+            snapshot: Self.snapshot
+        )
+        await recognizer.silentEntered.wait()
+
+        // The scrub. Cancels the predecessor and spawns the successor for the
+        // same asset without awaiting the predecessor's exit — the production
+        // shape, not a contrivance.
+        await engine.startTranscription(
+            shards: [makeShard(id: 1, episodeID: "ep-asset-overlap", startTime: 30, duration: 30)],
+            analysisAssetId: "asset-overlap",
+            snapshot: Self.snapshot
+        )
+        await recognizer.failingEntered.wait()
+        await engine.finishAppending(analysisAssetId: "asset-overlap")
+
+        // Step 3: let the CANCELLED PREDECESSOR finish its shard, and wait for
+        // proof that it did. Its interruption is emitted after the credit line,
+        // so observing it means the credit has already happened.
+        await recognizer.silentRelease.open()
+        let predecessorTerminals = await Self.awaitTerminals(
+            on: predecessorEvents, assetId: "asset-overlap", count: 1
+        )
+        guard case .failed(let predecessor) = predecessorTerminals.first else {
+            Issue.record("""
+                the predecessor reported \(String(describing: predecessorTerminals.first)) \
+                instead of its interruption — the fixture is not testing the overlap
+                """)
+            return
+        }
+        #expect(predecessor.failureClass == .cancelled)
+        #expect(predecessor.termination == .interrupted)
+
+        // Step 4: only now does the successor reach its own total-failure gate.
+        await recognizer.failingRelease.open()
+        let terminals = await Self.awaitTerminals(
+            on: successorEvents, assetId: "asset-overlap", count: 2
+        )
+        #expect(terminals.count == 2, "got \(terminals)")
+        guard terminals.count == 2, case .failed(let successor) = terminals[1] else {
+            Issue.record("""
+                the successor reported \(String(describing: terminals.last)) over a run \
+                in which every shard failed. A cancelled predecessor's clean shard was \
+                credited to it, so its total-failure gate read "this run did work"
+                """)
+            return
+        }
+        #expect(
+            successor.failureClass == .vadFailed,
+            "the successor reported \(successor.failureClass.rawValue), not its own shard's class"
+        )
+        #expect(successor.failedShardCount == 1)
+        #expect(
+            successor.termination == .ranToConclusion,
+            "the successor was not interrupted — it ran out of shards and judged itself"
+        )
     }
 }
