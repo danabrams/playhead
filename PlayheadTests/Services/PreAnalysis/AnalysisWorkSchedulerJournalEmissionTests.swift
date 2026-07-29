@@ -238,7 +238,7 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         jobId: String,
         episodeId: String,
         recognizer: any SpeechRecognizer
-    ) async throws -> AnalysisJob? {
+    ) async throws -> TranscriptPassResult {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         let tmpDir = try makeTempDir(prefix: "ngev-\(jobId)")
@@ -296,7 +296,13 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             recognizer: recognizer,
             loadSpeechModel: true
         )
+        // Bracket the pass. The arm computes `nextEligibleAt` from `clock()` at
+        // some instant strictly inside this window, so a delay assertion can be
+        // EXACT regardless of how starved the machine is — no wall-clock slack,
+        // no load-dependent flake.
+        let before = Date().timeIntervalSince1970
         _ = await scheduler.processNextDispatchableJobForTesting()
+        let after = Date().timeIntervalSince1970
         let row = try await store.fetchJob(byId: jobId)
 
         // THE PREMISE, ASSERTED RATHER THAN ASSUMED. Both outcome arms write
@@ -313,7 +319,15 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             fixture is measuring a different failure than the one it names
             """
         )
-        return row
+        return TranscriptPassResult(job: row, clockBefore: before, clockAfter: after)
+    }
+
+    /// The job row plus the bracket around the pass, so a caller can assert on
+    /// `nextEligibleAt` exactly rather than with wall-clock slack.
+    private struct TranscriptPassResult {
+        let job: AnalysisJob?
+        let clockBefore: Double
+        let clockAfter: Double
     }
 
     /// A LISTENER MOVING THE PLAYHEAD MUST NOT COST A PERMANENT RETRY.
@@ -332,12 +346,12 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
     /// a listener engages with most.
     @Test("an interrupted transcript pass is requeued without spending an attempt")
     func interruptedPassSpendsNoAttempt() async throws {
-        let job = try await runOneTranscriptPass(
+        let result = try await runOneTranscriptPass(
             jobId: "ngev-interrupted",
             episodeId: "ep-ngev-interrupted",
             recognizer: CancellingRecognizer()
         )
-        let row = try #require(job, "the job row must survive the pass")
+        let row = try #require(result.job, "the job row must survive the pass")
         #expect(
             row.attemptCount == 0,
             """
@@ -347,6 +361,44 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             """
         )
         #expect(row.state == "queued", "an interrupted job must be retryable, got \(row.state)")
+
+        // THE REQUEUE FLOOR, WHICH IS THE HALF THAT COSTS BATTERY IF IT GOES.
+        //
+        // Spending no attempt is only half the accounting. `.preempted` and
+        // `.cancelledByPlayback` requeue with `nextEligibleAt: nil` — safe for
+        // them, because a higher-lane job then holds the slot. An interruption
+        // is reported WHILE PLAYBACK CONTINUES, so an immediately re-admitted
+        // job collides with the same live engine owner again at once and spins.
+        //
+        // That regression has no red-test shape of its own: it surfaces as
+        // battery drain a listener reports vaguely, months later. It is exactly
+        // what a future "simplify the requeue to match `.preempted`" would do.
+        // So the floor is pinned here.
+        //
+        // Bracketed rather than slack-based: the arm reads `clock()` at an
+        // instant strictly between `clockBefore` and `clockAfter`, so this is
+        // exact under any load. The upper bound also proves the delay is the
+        // FLAT first rung and not the failure ladder's escalating value.
+        let eligible = try #require(
+            row.nextEligibleAt,
+            """
+            an interrupted job was requeued immediately eligible. It will collide with \
+            the live engine owner that just displaced it and requeue again — a hot loop \
+            burning battery mid-episode
+            """
+        )
+        #expect(
+            eligible >= result.clockBefore + 60,
+            "requeued only \(eligible - result.clockAfter)s out, below the 60s floor"
+        )
+        #expect(
+            eligible <= result.clockAfter + 60,
+            """
+            requeued \(eligible - result.clockBefore)s out — the floor is meant to be the \
+            ladder's FLAT first rung, not an escalating backoff. An interruption spends \
+            no attempt, so there is nothing to escalate against
+            """
+        )
     }
 
     /// THE CONTROL, AND IT IS WHAT KEEPS THE BUDGET MEANINGFUL. Same fixture,
@@ -355,12 +407,12 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
     /// poisoned-slot starvation playhead-gyvb.1 fixed comes back.
     @Test("control: a transcript pass that failed on its own still spends an attempt")
     func concludedFailurePassSpendsAnAttempt() async throws {
-        let job = try await runOneTranscriptPass(
+        let result = try await runOneTranscriptPass(
             jobId: "ngev-concluded",
             episodeId: "ep-ngev-concluded",
             recognizer: ConcludingFailureRecognizer()
         )
-        let row = try #require(job, "the job row must survive the pass")
+        let row = try #require(result.job, "the job row must survive the pass")
         #expect(
             row.attemptCount == 1,
             """
