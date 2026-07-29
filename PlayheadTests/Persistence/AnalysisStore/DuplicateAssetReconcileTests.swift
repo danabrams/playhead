@@ -1136,6 +1136,79 @@ struct DuplicateAssetReconcileTests {
         ) == 1, "and the retry that completes must install it")
     }
 
+    /// R4. The containment test above proves the SAVEPOINT works — but only
+    /// through `migrateOnlyForTesting()`, which its own doc comment describes
+    /// as "not transaction-wrapped". The rung's doc claims the savepoint
+    /// "nests correctly in both callers", and the caller that matters is the
+    /// other one: `runSchemaMigration` wraps the entire ladder in
+    /// `BEGIN IMMEDIATE … COMMIT`, so at launch the V39 failure happens
+    /// INSIDE an open transaction and the enclosing `COMMIT` still has to
+    /// succeed afterwards.
+    ///
+    /// That combination — failure path, nested — was the one configuration in
+    /// which containment actually protects the user, and nothing ran it. If
+    /// `ROLLBACK TO SAVEPOINT` / `RELEASE` left the outer transaction unusable
+    /// (a bare `ROLLBACK` here would), the ladder's `COMMIT` throws,
+    /// `migrate()` throws, and `PlayheadRuntime` answers a thrown `migrate()`
+    /// with `removeItem(at: AnalysisStore.defaultDirectory())` and a retry
+    /// that succeeds on an empty directory. The user's entire analysis
+    /// database, discarded to protect an index.
+    ///
+    /// Reaching the real ladder needs a store instance that has never opened
+    /// this path, because `runSchemaMigration` short-circuits on the
+    /// process-global `migratedPaths` cache — hence the reset plus a second
+    /// `AnalysisStore`, which is also exactly what a relaunch looks like.
+    @Test("a V39 failure inside the REAL migrate() transaction is contained, not fatal")
+    func v39FailureIsContainedInsideTheRealMigrationTransaction() async throws {
+        let (seedStore, directory) = try await makeTestStoreWithDirectory()
+        try await seedStore.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await insertCanonical(
+            store: seedStore, id: "real-loser", episodeId: "ep-real", fingerprint: canonicalSHA
+        )
+        try await insertCanonical(
+            store: seedStore, id: "real-winner", episodeId: "ep-real", fingerprint: canonicalSHA
+        )
+        try await insertChunk(
+            store: seedStore, id: "chunk-real", assetId: "real-loser",
+            index: 0, start: 0, end: 100
+        )
+        try await seedStore.execForTesting("""
+            CREATE TRIGGER bd0hi9_v39_real_guard BEFORE DELETE ON analysis_assets
+            BEGIN SELECT RAISE(ABORT, 'v39 containment fixture, real migrate'); END
+            """)
+        try await seedStore.setMetaValue(forKey: "schema_version", value: "38")
+
+        // A relaunch: a fresh store instance on the same path, taking the real
+        // `runSchemaMigration` route rather than the ladder-only test seam.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let relaunched = try AnalysisStore(directory: directory)
+
+        // MUST NOT THROW — this is the call whose failure deletes the store.
+        try await relaunched.migrate()
+
+        #expect(try await relaunched.schemaVersion() == 38,
+                "an unfinished V39 must stay retryable, not mark itself done")
+        #expect(try probeRowCount(in: directory, table: "analysis_assets") == 2,
+                "the enclosing transaction must have COMMITTED the rest of the ladder with the data untouched")
+        #expect(try await relaunched.fetchTranscriptChunks(assetId: "real-loser").count == 1,
+                "the half-finished re-point rolls back to the savepoint, not past it")
+        #expect(try probeRowCount(
+            in: directory,
+            table: "sqlite_master WHERE type = 'index' AND name = 'idx_assets_episode_fingerprint'"
+        ) == 0, "a rolled-back rung must leave no index behind")
+
+        // And the next launch, once whatever blocked it is gone, completes.
+        try await relaunched.execForTesting("DROP TRIGGER bd0hi9_v39_real_guard")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let secondLaunch = try AnalysisStore(directory: directory)
+        try await secondLaunch.migrate()
+
+        #expect(try await secondLaunch.schemaVersion() == 39)
+        #expect(try probeRowCount(in: directory, table: "analysis_assets") == 1)
+        #expect(try await secondLaunch.fetchTranscriptChunks(assetId: "real-winner").count == 1,
+                "and the child row is MOVED by the completing retry, not cascaded away")
+    }
+
     /// R2 finding 3. `episodeIdsWithMultipleAssets` filters
     /// `TRIM(episodeId) != ''`, and the `TRIM` is the whole guard for anything
     /// that is blank without being empty. Nothing pinned it: the R1 test uses
