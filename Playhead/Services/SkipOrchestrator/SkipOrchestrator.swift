@@ -3928,6 +3928,27 @@ actor SkipOrchestrator {
                 // all (the existing policy a few lines above), so this gesture
                 // has nothing durable to write and must say so rather than
                 // report a success it did not achieve.
+                //
+                // AND THERE MUST BE SOMETHING TO CORRECT. This seam cannot see
+                // the transcript, so "a highlighted span with no window" and
+                // "a tap on audio the app never flagged" arrive here
+                // identically. A persisted `decoded_spans` row overlapping the
+                // range is exactly what distinguishes them — it IS what the
+                // transcript drew. Without one there is no claim of ours to
+                // retract, and reporting success would be the same lie in the
+                // other direction. Read includes already-vetoed rows so a
+                // repeat veto stays idempotently truthful rather than
+                // regressing to a refusal on the second tap.
+                let overlappingSpans = (
+                    try? await store.fetchDecodedSpansIncludingUserVetoed(
+                        assetId: expectedAssetId
+                    )
+                ) ?? []
+                guard overlappingSpans.contains(where: {
+                    $0.startTime < end && $0.endTime > start
+                }) else {
+                    return false
+                }
                 guard let correction,
                       let inserted =
                         try await store
@@ -4038,7 +4059,18 @@ actor SkipOrchestrator {
         }
 
         // Signal trust engine once per committed user correction.
-        if let sourceShowId, let trustService {
+        //
+        // playhead-u45d: `!exactTargets.isEmpty` was previously implied — the
+        // seam returned early when no window was found, so this block was
+        // unreachable without one. Now that a window-less veto commits its
+        // correction and continues, the condition has to be stated. It is the
+        // R10 pin's invariant and it is the right one on the merits: the trust
+        // score measures how often the SKIP SURFACE was wrong, and a correction
+        // over material that never produced a window never risked a skip. The
+        // correction is still recorded; only the trust penalty is withheld —
+        // the same ACCEPT THE RECEIPT, REFUSE THE LEARNING split playhead-o4qr
+        // made one axis over.
+        if !exactTargets.isEmpty, let sourceShowId, let trustService {
             if revertedManagedAny {
                 await trustService.recordFalseSkipSignal(
                     podcastId: sourceShowId

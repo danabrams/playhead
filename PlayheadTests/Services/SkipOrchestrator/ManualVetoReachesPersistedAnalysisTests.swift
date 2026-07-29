@@ -259,6 +259,85 @@ struct ManualVetoReachesPersistedAnalysisTests {
         #expect(end == 160)
     }
 
+    /// The window-less path must not become a blanket "yes". A tap over audio
+    /// the app never flagged — no `ad_window`, no `decoded_spans` row — has no
+    /// claim of ours to retract, so it must still refuse rather than record a
+    /// correction against nothing and report success.
+    ///
+    /// This is the boundary that keeps `SkipOrchestratorRevertTests`'
+    /// no-overlap trust pin meaningful: the honest failure here is what stops
+    /// a stray tap from writing a receipt and a trust penalty.
+    @Test(
+        "A veto over material the app never flagged is still refused",
+        .timeLimit(.minutes(1))
+    )
+    func vetoOverUnflaggedMaterialIsRefused() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        // A span and a window exist, but BOTH sit far from the gesture.
+        try await store.upsertDecodedSpans([
+            makeDetectedSpan(
+                id: "span-elsewhere",
+                assetId: "asset-1",
+                start: 100,
+                end: 160
+            ),
+        ])
+        try await store.insertAdWindow(
+            makeSkipTestAdWindow(
+                id: "ad-elsewhere",
+                startTime: 100,
+                endTime: 160,
+                confidence: 0.55,
+                decisionState: AdDecisionState.candidate.rawValue
+            )
+        )
+
+        let correctionStore = PersistentUserCorrectionStore(store: store)
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: correctionStore
+        )
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 5
+        )
+
+        let accepted = await orchestrator.revertByTimeRange(
+            start: 800,
+            end: 900,
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1",
+            ifCurrentEpisodeId: "ep-1",
+            ifPlaybackLifecycleGeneration: 5,
+            correctionSpan: makeVetoSpan(
+                assetId: "asset-1",
+                start: 800,
+                end: 900
+            )
+        )
+        #expect(
+            accepted == false,
+            "nothing was flagged there, so there is nothing to retract"
+        )
+
+        await drainOrchestratorEffects(orchestrator)
+        #expect(
+            try await store.loadCorrectionEvents(analysisAssetId: "asset-1")
+                .isEmpty,
+            "and no receipt may be written against material we never flagged"
+        )
+        let untouched = try #require(
+            try await store.fetchAdWindow(id: "ad-elsewhere")
+        )
+        #expect(untouched.decisionState == AdDecisionState.candidate.rawValue)
+    }
+
     // MARK: - Defect B
 
     /// The durable correction is what removes the span from the shared read
