@@ -113,7 +113,8 @@ enum PreRollStartClamp {
     /// - Returns: `windows` with at most the first slot's start clamped to 0.0.
     static func clamp(
         windows: [AdWindow],
-        config: Configuration = .default
+        config: Configuration = .default,
+        protectedRegions: [(start: Double, end: Double)] = []
     ) -> [AdWindow] {
         // Disabled: a non-positive threshold means "never clamp".
         guard config.maxPreRollStartSeconds.isFinite,
@@ -192,6 +193,40 @@ enum PreRollStartClamp {
             return windows
         }
 
+        // DO NOT WIDEN ACROSS A LISTENER'S MARK. The extension covers
+        // `[0, first.startTime)`. If any protected region intersects that span,
+        // widening would SWALLOW it — the widened window would sit on top of a
+        // range the listener explicitly defined, and the mark would be reduced to
+        // a redundant row over a bigger detector guess.
+        //
+        // This is not hypothetical: it is exactly what raising the ceiling from
+        // 20 s to 90 s did. A fusion window whose start sat past a user's
+        // [35, 55) mark was widened to [0, 60) and engulfed it, leaving TWO
+        // windows over the marked region. The clamp cannot detect this on its own
+        // because the `userMarked` row is persisted separately and is NOT in the
+        // `windows` list the clamp receives — so it must be TOLD, which is what
+        // `protectedRegions` is for. (The `boundaryState` guard above still
+        // matters for the case where a user-marked row IS in the list.)
+        //
+        // We REFUSE rather than partially extend to the mark's edge. Refusing
+        // fails closed and is trivially reasonable about; a partial extension
+        // would manufacture a novel adjacency between a detector guess and a
+        // human boundary, and the only episodes it would help are ones where the
+        // listener has ALREADY told us where the ad is.
+        let widenedSpanStart = 0.0
+        let widenedSpanEnd = first.startTime
+        let crossesProtectedRegion = protectedRegions.contains { region in
+            guard region.end > region.start,
+                  region.start.isFinite,
+                  region.end.isFinite else {
+                return false  // degenerate input cannot protect anything
+            }
+            return region.start < widenedSpanEnd && widenedSpanStart < region.end
+        }
+        guard !crossesProtectedRegion else {
+            return windows
+        }
+
         // Monotonic guard: moving the start to 0.0 must never invert the window.
         // A real window always has `endTime >= 0`; this only rejects degenerate
         // input rather than emitting `start (0) > end`.
@@ -209,21 +244,40 @@ private extension AdWindow {
     /// `evidenceStartTime` is deliberately LEFT WHERE THE EVIDENCE ACTUALLY
     /// STARTS — the clamp widens the MARK, not the evidence — and the
     /// ordinal-addressed `id`, `decisionState`, and `confidence` are copied
-    /// unchanged. The gate is capped to mark-only because the newly added prefix
-    /// has no classifier authority. Catalog-match provenance is also cleared: it
-    /// describes the old `[startTime, endTime)` fingerprint, and retaining its
-    /// exact row identity after widening would let a later correction revoke
-    /// unrelated source material.
+    /// unchanged. Catalog-match provenance IS cleared: it describes the old
+    /// `[startTime, endTime)` fingerprint, and retaining its exact row identity
+    /// after widening would let a later correction revoke unrelated source
+    /// material.
+    ///
+    /// `eligibilityGate` IS CARRIED THROUGH VERBATIM, INCLUDING `nil`.
+    ///
+    /// This clamp used to demote the gate to `markOnly` on the theory that a
+    /// widened window is a less certain window. That was wrong, and it is worth
+    /// recording why so it is not reintroduced:
+    ///
+    ///   • The risk is PER-EDGE, not per-window. This clamp only ever moves the
+    ///     START of the episode's FIRST slot, LEFTWARD, to 0.0 — an OUTER edge,
+    ///     bounded by the episode boundary itself. There is no show content out
+    ///     there to lose. The edge that can eat the show is the INNER one (a
+    ///     pre-roll's end), and this clamp never touches it. Demoting the whole
+    ///     window for moving the free edge surrendered the auto-skip on the part
+    ///     that was already trustworthy.
+    ///   • It was REDUNDANT where it was right. The clamp fires only on an
+    ///     `.unanchored` start edge, and playhead-2350 is the independent
+    ///     authority on whether an unanchored edge may auto-skip.
+    ///   • It BROKE a real contract where 2350 deliberately allows an unanchored
+    ///     edge to stay eligible. playhead-527u: a user-marked window is
+    ///     definitive and is stamped `.eligible` at the user's own boundaries
+    ///     even though it carries no detector anchor. The demotion overrode the
+    ///     listener — forbidden outright by the fidelity rule.
+    ///
+    /// So this is a pure WIDTH change now. Carrying the gate through must never
+    /// become RAISING it: a window that arrives `markOnly` stays `markOnly`, one
+    /// that arrives suppressed/blocked stays so, and one that arrives `nil` stays
+    /// `nil`. Verbatim copy is the only behaviour that satisfies all three, which
+    /// is why there is no severity arithmetic here at all — arithmetic is what
+    /// would let a future edit start auto-skipping windows the pipeline refused.
     func withStartTimeClampedToZero() -> AdWindow {
-        let safeEligibilityGate: String
-        if let existing = eligibilityGate.flatMap(
-            SkipEligibilityGate.init(rawValue:)
-        ),
-           existing.severity >= SkipEligibilityGate.markOnly.severity {
-            safeEligibilityGate = existing.rawValue
-        } else {
-            safeEligibilityGate = SkipEligibilityGate.markOnly.rawValue
-        }
         return AdWindow(
             id: id,
             analysisAssetId: analysisAssetId,
@@ -244,7 +298,7 @@ private extension AdWindow {
             wasSkipped: wasSkipped,
             userDismissedBanner: userDismissedBanner,
             evidenceSources: evidenceSources,
-            eligibilityGate: safeEligibilityGate,
+            eligibilityGate: eligibilityGate,
             catalogStoreMatchSimilarity: nil,
             catalogFingerprintVersion: nil,
             catalogMatchedEntryId: nil,

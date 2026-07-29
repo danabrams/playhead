@@ -37,7 +37,11 @@ struct PostRollEndClampTests {
         eligibilityGate: SkipEligibilityGate? = .eligible,
         evidenceStart: Double? = nil,
         endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
-        catalogMatch: Bool = false
+        catalogMatch: Bool = false,
+        // A raw String rather than `AdBoundaryState` because the enum has no
+        // `userMarked` case — production writes and reads that value as a raw
+        // string, and the clamps match that convention.
+        boundaryState: String = AdBoundaryState.acousticRefined.rawValue
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -45,7 +49,7 @@ struct PostRollEndClampTests {
             startTime: start,
             endTime: end,
             confidence: confidence,
-            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            boundaryState: boundaryState,
             decisionState: decisionState.rawValue,
             detectorVersion: "detection-v1",
             advertiser: nil,
@@ -304,10 +308,21 @@ struct PostRollEndClampTests {
         #expect(clamped[1].endTime == 1780.0)  // anchored post-roll untouched
     }
 
-    // MARK: - Geometry changes are mark-only
+    // MARK: - Geometry changes carry the gate through, never raise it
 
-    @Test("widened eligible material is mark-only and other fields are preserved")
-    func widenedEligibleMaterialIsDemoted() {
+    /// SPECIFICATION CHANGE, playhead-aqo9 (2026-07-29). Inverted deliberately —
+    /// this previously asserted that widening DEMOTED an eligible window.
+    ///
+    /// This clamp is the one that was actually costing auto-skips: with the
+    /// pre-roll ceiling reverted to its old value, five tests asserting
+    /// `eligibilityGate == .eligible` still failed, which is what identified it.
+    /// The clamp moves only the last slot's END rightward to the episode
+    /// duration — an OUTER edge, bounded by the end of the audio, with no show
+    /// content beyond it. The INNER edge (a post-roll's start) is what can eat
+    /// the show, and the clamp never touches it. See the companion note in
+    /// PreRollStartClampTests for the full reasoning.
+    @Test("widened eligible material STAYS eligible and other fields are preserved")
+    func widenedEligibleMaterialKeepsItsGate() {
         let original = window(
             id: "post-roll-id",
             start: 1740.0,
@@ -325,12 +340,114 @@ struct PostRollEndClampTests {
         #expect(clamped.endTime == 1800.0)
         #expect(clamped.startTime == original.startTime)
         #expect(clamped.id == original.id)
-        #expect(clamped.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+        #expect(clamped.eligibilityGate == SkipEligibilityGate.eligible.rawValue,
+                "widening the FREE outer edge must not cost auto-skip eligibility")
         #expect(clamped.decisionState == original.decisionState)
         #expect(clamped.confidence == original.confidence)
         #expect(clamped.evidenceStartTime == original.evidenceStartTime)
         #expect(clamped.startEdgeAnchor == original.startEdgeAnchor)
         #expect(clamped.endEdgeAnchor == original.endEdgeAnchor)
+    }
+
+    /// The inner edge is the one that eats the show, so prove it byte-identical
+    /// rather than inferring it from `startTime == original.startTime` above.
+    @Test("the INNER edge is byte-identical across a clamp that fires")
+    func innerEdgeIsNeverMoved() {
+        let original = window(start: 1740.25, end: 1780.0, eligibilityGate: .eligible)
+        let clamped = PostRollEndClamp.clamp(
+            windows: [original],
+            episodeDuration: 1800.0
+        )[0]
+        #expect(clamped.endTime == 1800.0, "outer edge widened")
+        #expect(
+            clamped.startTime.bitPattern == original.startTime.bitPattern,
+            "a post-roll's START is its inner edge — the clamp must never move it, not even by a rounding step"
+        )
+    }
+
+    /// Carrying the gate through must never become RAISING it. `nil` is the case
+    /// the old severity arithmetic swallowed: it mapped nil to `markOnly`, so an
+    /// ungated window silently acquired a gate the pipeline never assigned.
+    @Test("a nil gate stays nil — widening never invents a gate")
+    func nilGateStaysNil() {
+        let ungated = window(start: 1740.0, end: 1780.0, eligibilityGate: nil)
+        let clamped = PostRollEndClamp.clamp(
+            windows: [ungated],
+            episodeDuration: 1800.0
+        )[0]
+        #expect(clamped.endTime == 1800.0)
+        #expect(clamped.eligibilityGate == nil,
+                "the clamp is a WIDTH change; it has no authority to assign a gate")
+    }
+
+    /// The mirror of the pre-roll protected-region refusal: a DETECTOR window may
+    /// not be widened over a range the listener marked by hand. The mark is a
+    /// separately persisted row and is not in `windows`, so the clamp must be told.
+    @Test("a last slot is NOT widened across a protected user-marked region")
+    func protectedRegionRefusesTheClamp() {
+        let detector = window(start: 1700.0, end: 1750.0, eligibilityGate: .markOnly)
+        let clamped = PostRollEndClamp.clamp(
+            windows: [detector],
+            episodeDuration: 1800.0,
+            protectedRegions: [(start: 1770.0, end: 1790.0)]
+        )[0]
+        #expect(clamped.endTime == 1750.0,
+                "widening to EOF would swallow the listener's [1770, 1790) mark; refuse instead")
+        #expect(clamped.startTime == 1700.0)
+    }
+
+    /// The refusal must be SCOPED, or it silently disables the clamp for any
+    /// episode the listener has ever touched.
+    @Test("a protected region OUTSIDE the widening path does not block the clamp")
+    func protectedRegionElsewhereStillClamps() {
+        let detector = window(start: 1740.0, end: 1780.0, eligibilityGate: .eligible)
+        let clamped = PostRollEndClamp.clamp(
+            windows: [detector],
+            episodeDuration: 1800.0,
+            protectedRegions: [(start: 60.0, end: 90.0)]   // a pre-roll mark
+        )[0]
+        #expect(clamped.endTime == 1800.0,
+                "a mark far from (1780, 1800] must not veto an unrelated post-roll clamp")
+        #expect(clamped.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
+    }
+
+    /// A degenerate region must not become an accidental global veto.
+    @Test("a zero-width or non-finite protected region protects nothing")
+    func degenerateProtectedRegionIsIgnored() {
+        let detector = window(start: 1740.0, end: 1780.0)
+        let zeroWidth = PostRollEndClamp.clamp(
+            windows: [detector],
+            episodeDuration: 1800.0,
+            protectedRegions: [(start: 1790.0, end: 1790.0)]
+        )[0]
+        #expect(zeroWidth.endTime == 1800.0, "a zero-width region cannot contain a mark")
+        let nonFinite = PostRollEndClamp.clamp(
+            windows: [detector],
+            episodeDuration: 1800.0,
+            protectedRegions: [(start: 1790.0, end: .nan)]
+        )[0]
+        #expect(nonFinite.endTime == 1800.0, "non-finite geometry must not veto the clamp")
+    }
+
+    /// playhead-527u + the fidelity rule: `.unanchored` means "no DETECTOR
+    /// anchored this edge", NOT "no human chose it". Fails without the
+    /// `boundaryState != "userMarked"` guard.
+    @Test("a USER-MARKED post-roll is never moved, even inside the proximity zone")
+    func userMarkedWindowIsNotClamped() {
+        let userMark = window(
+            start: 1740.0,
+            end: 1780.0,
+            eligibilityGate: .eligible,
+            boundaryState: "userMarked"
+        )
+        let clamped = PostRollEndClamp.clamp(
+            windows: [userMark],
+            episodeDuration: 1800.0
+        )[0]
+        #expect(clamped.endTime == 1780.0,
+                "the listener chose 1780.0; a positional heuristic may not overrule them")
+        #expect(clamped.startTime == 1740.0)
+        #expect(clamped.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
     }
 
     @Test("widening never weakens an existing correction block")

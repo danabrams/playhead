@@ -33,7 +33,13 @@ struct PreRollStartClampTests {
         eligibilityGate: SkipEligibilityGate? = .eligible,
         evidenceStart: Double? = nil,
         startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
-        catalogMatch: Bool = false
+        catalogMatch: Bool = false,
+        // A raw String rather than `AdBoundaryState` because the enum has no
+        // `userMarked` case — that value is written and read as a raw string
+        // throughout the production code (AdDetectionService writes it,
+        // TranscriptPeekViewModel reads it), and the clamps match that
+        // convention. Tests use the same literal so they exercise the real value.
+        boundaryState: String = AdBoundaryState.acousticRefined.rawValue
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -41,7 +47,7 @@ struct PreRollStartClampTests {
             startTime: start,
             endTime: end,
             confidence: confidence,
-            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            boundaryState: boundaryState,
             decisionState: decisionState.rawValue,
             detectorVersion: "detection-v1",
             advertiser: nil,
@@ -305,10 +311,30 @@ struct PreRollStartClampTests {
         #expect(clamped[1].startTime == 300.0)   // later slot untouched (not a pre-roll anyway)
     }
 
-    // MARK: - Geometry changes are mark-only
+    // MARK: - Geometry changes carry the gate through, never raise it
 
-    @Test("widened eligible material is mark-only and other fields are preserved")
-    func widenedEligibleMaterialIsDemoted() {
+    /// SPECIFICATION CHANGE, playhead-aqo9 (2026-07-29). This test previously
+    /// asserted the opposite — that widening DEMOTED an eligible window to
+    /// `markOnly` — and it is inverted deliberately, not to accommodate an
+    /// implementation.
+    ///
+    /// The demotion was wrong because the risk is PER-EDGE, not per-window. This
+    /// clamp only moves the first slot's START leftward to 0.0: an OUTER edge,
+    /// bounded by the episode boundary, with no show content beyond it to lose.
+    /// The edge that can eat the show is the INNER one, which the clamp never
+    /// touches. Demoting the whole window for moving the free edge surrendered
+    /// the auto-skip on the part that was already trustworthy — and a mark-only
+    /// banner is worth far less than a silent skip, and can itself cost show
+    /// content when the listener acts on it.
+    ///
+    /// Two further reasons it was not merely suboptimal but incorrect: the clamp
+    /// fires only on `.unanchored` edges, where playhead-2350 is already the
+    /// authority on auto-skip eligibility (so the demotion was redundant); and
+    /// where 2350 deliberately permits an unanchored edge to stay eligible — the
+    /// playhead-527u user-marked window, `.eligible` at the listener's own
+    /// boundaries — the demotion overrode the listener.
+    @Test("widened eligible material STAYS eligible and other fields are preserved")
+    func widenedEligibleMaterialKeepsItsGate() {
         let original = window(
             id: "pre-roll-id",
             start: 4.0,
@@ -326,13 +352,109 @@ struct PreRollStartClampTests {
         #expect(clamped.id == original.id)
         #expect(
             clamped.eligibilityGate
-                == SkipEligibilityGate.markOnly.rawValue
+                == SkipEligibilityGate.eligible.rawValue,
+            "widening the FREE outer edge must not cost auto-skip eligibility"
         )
         #expect(clamped.decisionState == original.decisionState)
         #expect(clamped.confidence == original.confidence)
         #expect(clamped.evidenceStartTime == original.evidenceStartTime)  // evidence not widened
         #expect(clamped.startEdgeAnchor == original.startEdgeAnchor)
         #expect(clamped.endEdgeAnchor == original.endEdgeAnchor)
+    }
+
+    /// The inner edge is the one that eats the show, so prove it is untouched
+    /// rather than inferring it from `endTime == original.endTime` above.
+    @Test("the INNER edge is byte-identical across a clamp that fires")
+    func innerEdgeIsNeverMoved() {
+        let original = window(start: 46.4, end: 91.25, eligibilityGate: .eligible)
+        let clamped = PreRollStartClamp.clamp(windows: [original])[0]
+        #expect(clamped.startTime == 0.0, "outer edge widened")
+        #expect(
+            clamped.endTime.bitPattern == original.endTime.bitPattern,
+            "a pre-roll's END is its inner edge — the clamp must never move it, not even by a rounding step"
+        )
+    }
+
+    /// Carrying the gate through must never become RAISING it. `nil` is the case
+    /// severity arithmetic used to swallow: the old code mapped it to `markOnly`,
+    /// so a nil gate silently acquired a value the pipeline never assigned.
+    @Test("a nil gate stays nil — widening never invents a gate")
+    func nilGateStaysNil() {
+        let ungated = window(start: 4.0, end: 34.0, eligibilityGate: nil)
+        let clamped = PreRollStartClamp.clamp(windows: [ungated])[0]
+        #expect(clamped.startTime == 0.0)
+        #expect(clamped.eligibilityGate == nil,
+                "the clamp is a WIDTH change; it has no authority to assign a gate")
+    }
+
+    /// The defect the ceiling raise exposed, reduced to the clamp's own contract:
+    /// a DETECTOR window may not be widened over a range the listener marked by
+    /// hand. The `boundaryState` guard cannot catch this — the mark is a
+    /// separately persisted row and is not in `windows` — so the clamp has to be
+    /// told. Measured shape: a fusion window past a [35, 55) mark was widened to
+    /// [0, 60) and engulfed it, leaving TWO windows over the marked region.
+    @Test("a first slot is NOT widened across a protected user-marked region")
+    func protectedRegionRefusesTheClamp() {
+        let detector = window(start: 56.0, end: 60.0, eligibilityGate: .markOnly)
+        let clamped = PreRollStartClamp.clamp(
+            windows: [detector],
+            protectedRegions: [(start: 35.0, end: 55.0)]
+        )[0]
+        #expect(clamped.startTime == 56.0,
+                "widening to 0.0 would swallow the listener's [35, 55) mark; refuse instead")
+        #expect(clamped.endTime == 60.0)
+    }
+
+    /// The refusal must be SCOPED, or it silently disables the clamp for any
+    /// episode the listener has ever touched. A mark that does not lie in the
+    /// widening path is irrelevant.
+    @Test("a protected region OUTSIDE the widening path does not block the clamp")
+    func protectedRegionElsewhereStillClamps() {
+        let detector = window(start: 4.0, end: 34.0, eligibilityGate: .eligible)
+        let clamped = PreRollStartClamp.clamp(
+            windows: [detector],
+            protectedRegions: [(start: 900.0, end: 960.0)]   // a mid-roll mark
+        )[0]
+        #expect(clamped.startTime == 0.0,
+                "a mark far away from [0, 4) must not veto an unrelated pre-roll clamp")
+        #expect(clamped.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
+    }
+
+    /// A degenerate region must not become an accidental global veto.
+    @Test("a zero-width or non-finite protected region protects nothing")
+    func degenerateProtectedRegionIsIgnored() {
+        let detector = window(start: 4.0, end: 34.0)
+        let zeroWidth = PreRollStartClamp.clamp(
+            windows: [detector],
+            protectedRegions: [(start: 2.0, end: 2.0)]
+        )[0]
+        #expect(zeroWidth.startTime == 0.0, "a zero-width region cannot contain a mark")
+        let nonFinite = PreRollStartClamp.clamp(
+            windows: [detector],
+            protectedRegions: [(start: 0.0, end: .nan), (start: .infinity, end: .infinity)]
+        )[0]
+        #expect(nonFinite.startTime == 0.0, "non-finite geometry must not veto the clamp")
+    }
+
+    /// playhead-527u + the fidelity rule: a manual mark outranks anything else,
+    /// and `.unanchored` means "no DETECTOR anchored this edge", NOT "no human
+    /// chose it" — so a listener's window arrives here looking exactly like an FM
+    /// guess. Latent rather than new: the clamp could always move a hand-set
+    /// start, but the old 20 s ceiling never reached one. This fails without the
+    /// `boundaryState != "userMarked"` guard.
+    @Test("a USER-MARKED pre-roll is never moved, even inside the zone")
+    func userMarkedWindowIsNotClamped() {
+        let userMark = window(
+            start: 35.0,
+            end: 55.0,
+            eligibilityGate: .eligible,
+            boundaryState: "userMarked"
+        )
+        let clamped = PreRollStartClamp.clamp(windows: [userMark])[0]
+        #expect(clamped.startTime == 35.0,
+                "the listener chose 35.0; a positional heuristic may not overrule them")
+        #expect(clamped.endTime == 55.0)
+        #expect(clamped.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
     }
 
     @Test("widening never weakens an existing correction block")

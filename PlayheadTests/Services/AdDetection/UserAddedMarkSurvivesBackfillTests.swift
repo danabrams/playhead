@@ -440,7 +440,11 @@ struct AddedMarkSurvivesBackfillTests {
         let all = try await store.fetchAdWindows(assetId: assetId)
         let overlapping = all.filter { $0.startTime < markEnd && markStart < $0.endTime }
         #expect(overlapping.count == 1,
-                "exactly one AdWindow may surface over a user-marked region; found \(overlapping.count): \(overlapping.map { "\($0.boundaryState)/\($0.decisionState)" })")
+                """
+                exactly one AdWindow may surface over the user-marked region \
+                [\(markStart), \(markEnd)); found \(overlapping.count): \
+                \(overlapping.map { "\($0.boundaryState)/\($0.decisionState) [\($0.startTime), \($0.endTime)) gate=\($0.eligibilityGate ?? "nil") startAnchor=\($0.startEdgeAnchor ?? "nil")" }.joined(separator: ", "))
+                """)
         #expect(overlapping.first?.boundaryState == "userMarked",
                 "the single surviving window must be the user's own userMarked row, not a re-derived fusion window")
         // playhead-527u (product-owner AC): a user's manual mark is DEFINITIVE,

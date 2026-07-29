@@ -881,7 +881,7 @@ struct AdDetectionConfig: Sendable {
         hostReadConfidenceFloor: Double = 0.9,
         postRollGuardSeconds: Double = 90.0,
         unanchoredExtentBlocksAutoSkip: Bool = true,
-        preRollStartClampSeconds: Double = 20.0,
+        preRollStartClampSeconds: Double = 90.0,
         postRollEndClampProximitySeconds: Double = 60.0
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
@@ -5886,9 +5886,32 @@ actor AdDetectionService {
         // The widened start does also flow into the learned priors + metadata
         // extraction below (both read `nonSuppressedWindows`); that is benign and
         // arguably correct — a pre-roll genuinely starts at 0:00.
+        // A LISTENER'S MARK IS OFF LIMITS TO BOTH CLAMPS. The `userMarked` rows
+        // are persisted separately and are NOT in `fusionWindows`, so neither
+        // clamp can see them — a detector window can otherwise be widened
+        // straight over a span the listener defined by hand. Measured: raising
+        // the pre-roll ceiling to 90 s widened a fusion window to [0, 60) on top
+        // of a [35, 55) mark, leaving TWO windows over the marked region.
+        //
+        // Read once here and shared by both clamps. Failing to read is
+        // fail-closed in the SAFE direction for the mark: an empty list only
+        // means the clamps behave as they did before this guard existed, and the
+        // `boundaryState` guard inside each clamp still covers any user-marked
+        // row that IS in the list.
+        let protectedUserMarkedRegions: [(start: Double, end: Double)]
+        do {
+            protectedUserMarkedRegions = try await store
+                .fetchAdWindows(assetId: analysisAssetId)
+                .filter { $0.boundaryState == "userMarked" }
+                .map { (start: $0.startTime, end: $0.endTime) }
+        } catch {
+            protectedUserMarkedRegions = []
+        }
+
         fusionWindows = PreRollStartClamp.clamp(
             windows: fusionWindows,
-            config: .init(maxPreRollStartSeconds: config.preRollStartClampSeconds)
+            config: .init(maxPreRollStartSeconds: config.preRollStartClampSeconds),
+            protectedRegions: protectedUserMarkedRegions
         )
 
         // ── Post-roll end-at-EOF clamp (playhead-aqo9) ───────────────────────
@@ -5918,7 +5941,8 @@ actor AdDetectionService {
             episodeDuration: episodeDuration,
             config: .init(
                 maxEndDistanceSeconds: config.postRollEndClampProximitySeconds
-            )
+            ),
+            protectedRegions: protectedUserMarkedRegions
         )
         // The clamps run after decisions are assembled, so refresh the
         // persisted/runtime decision envelope from the final window geometry.
