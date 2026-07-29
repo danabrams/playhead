@@ -142,9 +142,24 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         downloads: StubDownloadProvider,
         thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = {
             ProcessInfo.processInfo.thermalState
-        }
+        },
+        // playhead-ngev (review r1): the existing tests trip their arms before
+        // transcription, so they neither need nor want a loaded recognizer —
+        // both parameters default to exactly the previous behaviour. The
+        // interruption tests below DO reach stage 3, which needs
+        // `SpeechService.isReady()` to be true or the loop reports
+        // `speech_engine_not_ready` and never exercises the arm under test.
+        recognizer: any SpeechRecognizer = StubSpeechRecognizer(),
+        loadSpeechModel: Bool = false
     ) async -> AnalysisWorkScheduler {
-        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        // `serializesRecognizerRequests` deviates from the production default
+        // only for the tests that actually transcribe, so they do not contend
+        // on the process-wide recognizer gate with a concurrently running
+        // suite. Callers that never reach stage 3 keep the old construction.
+        let speechService = loadSpeechModel
+            ? SpeechService(recognizer: recognizer, serializesRecognizerRequests: false)
+            : SpeechService(recognizer: recognizer)
+        if loadSpeechModel { try? await speechService.loadFastModel() }
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioProvider,
@@ -189,6 +204,129 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         return try await store.fetchWorkJournalEntries(
             episodeId: episodeId,
             generationID: job.generationID
+        )
+    }
+
+    // MARK: - playhead-ngev (review r1): interrupted.requeue spends NO attempt
+
+    /// Fails every shard to the loop's own conclusion, so the run is a genuine
+    /// total failure rather than a displaced one. The control half of the pair
+    /// below — same fixture, same stage, opposite termination.
+    private final class ConcludingFailureRecognizer: SpeechRecognizer, @unchecked Sendable {
+        private var loaded = false
+        func loadModel() async throws { loaded = true }
+        func unloadModel() async { loaded = false }
+        func isModelLoaded() async -> Bool { loaded }
+        func transcribe(
+            shard: AnalysisShard, podcastId: String?
+        ) async throws -> [TranscriptSegment] {
+            guard loaded else { throw TranscriptEngineError.modelNotLoaded }
+            throw TranscriptEngineError.vadFailed("shard \(shard.id)")
+        }
+        func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+            [VADResult(isSpeech: true, speechProbability: 1.0,
+                       startTime: shard.startTime,
+                       endTime: shard.startTime + shard.duration)]
+        }
+    }
+
+    /// Drives one full dispatch pass to the transcript stage and reports the
+    /// job row afterwards. Both halves of the A/B differ only in the
+    /// recognizer, so any difference in `attemptCount` is attributable to the
+    /// termination and nothing else.
+    private func runOneTranscriptPass(
+        jobId: String,
+        episodeId: String,
+        recognizer: any SpeechRecognizer
+    ) async throws -> AnalysisJob? {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let tmpDir = try makeTempDir(prefix: "ngev-\(jobId)")
+        let audioFile = tmpDir.appendingPathComponent("episode.m4a")
+        FileManager.default.createFile(atPath: audioFile.path, contents: Data())
+        downloads.cachedURLs[episodeId] = audioFile
+
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: jobId,
+                jobType: "preAnalysis",
+                episodeId: episodeId,
+                analysisAssetId: "asset-\(jobId)",
+                workKey: "fp-\(jobId):1:preAnalysis",
+                sourceFingerprint: "fp-\(jobId)",
+                priority: 10,
+                desiredCoverageSec: 90,
+                state: "queued",
+                attemptCount: 0
+            )
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = (0..<4).map {
+            makeShard(id: $0, episodeID: episodeId, startTime: Double($0) * 30, duration: 30)
+        }
+        let scheduler = await makeScheduler(
+            store: store,
+            audioProvider: audioStub,
+            downloads: downloads,
+            recognizer: recognizer,
+            loadSpeechModel: true
+        )
+        _ = await scheduler.processNextDispatchableJobForTesting()
+        return try await store.fetchJob(byId: jobId)
+    }
+
+    /// A LISTENER MOVING THE PLAYHEAD MUST NOT COST A PERMANENT RETRY.
+    ///
+    /// The `.failed` arm charges one of five attempts and then supersedes the
+    /// job with `nextEligibleAt: nil`. That row cannot come back:
+    /// `analysis_jobs.workKey` is UNIQUE, `insertJob` is `INSERT OR IGNORE`,
+    /// and the key is `"<fingerprint>:<analysisVersion>:preAnalysis"` — stable
+    /// across launches — so every later enqueue for the episode is silently
+    /// dropped until an app update bumps `analysisVersion`. The only reset,
+    /// `requeueOrphanedLease`, rewrites `state = 'running'` rows and never
+    /// touches a superseded one.
+    ///
+    /// Five scrubs across an episode's analysis lifetime is ordinary listening,
+    /// so charging them would permanently kill analysis on exactly the episodes
+    /// a listener engages with most.
+    @Test("an interrupted transcript pass is requeued without spending an attempt")
+    func interruptedPassSpendsNoAttempt() async throws {
+        let job = try await runOneTranscriptPass(
+            jobId: "ngev-interrupted",
+            episodeId: "ep-ngev-interrupted",
+            recognizer: CancellingRecognizer()
+        )
+        let row = try #require(job, "the job row must survive the pass")
+        #expect(
+            row.attemptCount == 0,
+            """
+            a scrub spent \(row.attemptCount) of five PERMANENT retry attempts. At five \
+            the job is superseded with nextEligibleAt: nil and every later enqueue for \
+            the episode is silently dropped — analysis is dead for that episode
+            """
+        )
+        #expect(row.state == "queued", "an interrupted job must be retryable, got \(row.state)")
+    }
+
+    /// THE CONTROL, AND IT IS WHAT KEEPS THE BUDGET MEANINGFUL. Same fixture,
+    /// same stage — only the termination differs. A genuinely broken episode
+    /// must still exhaust its attempts and stop, or it retries forever and the
+    /// poisoned-slot starvation playhead-gyvb.1 fixed comes back.
+    @Test("control: a transcript pass that failed on its own still spends an attempt")
+    func concludedFailurePassSpendsAnAttempt() async throws {
+        let job = try await runOneTranscriptPass(
+            jobId: "ngev-concluded",
+            episodeId: "ep-ngev-concluded",
+            recognizer: ConcludingFailureRecognizer()
+        )
+        let row = try #require(job, "the job row must survive the pass")
+        #expect(
+            row.attemptCount == 1,
+            """
+            a genuine transcript failure spent \(row.attemptCount) attempts, not 1 — a \
+            permanently broken episode now retries forever and pins its slot
+            """
         )
     }
 

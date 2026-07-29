@@ -775,10 +775,11 @@ actor AnalysisJobRunner {
                 // playhead-8ysk: name the cause in `analysis_jobs.lastErrorCode`
                 // too. It was a fixed `transcription:zeroCoverage` for every one
                 // of the nine distinguishable causes.
-                stopReason: .failed(
-                    transcriptFailure.map { "transcription:\($0.failureClass.rawValue)" }
-                        ?? "transcription:zeroCoverage"
-                )
+                //
+                // playhead-ngev (review r1): and route it by TERMINATION, so a
+                // listener moving the playhead does not spend one of the job's
+                // five permanent retry attempts. See `zeroCoverageStopReason`.
+                stopReason: Self.zeroCoverageStopReason(failure: transcriptFailure)
             )
         }
 
@@ -1489,6 +1490,42 @@ actor AnalysisJobRunner {
     /// instantly is what puts the stop in the successor's way.
     static func shouldStopEngine(after failure: TranscriptFailureReason?) -> Bool {
         failure?.termination != .interrupted
+    }
+
+    /// playhead-ngev (review r1): which outcome a zero-coverage transcription
+    /// reports, and therefore whether it SPENDS ONE OF THE JOB'S FIVE
+    /// PERMANENT RETRY ATTEMPTS.
+    ///
+    /// A listener moving the playhead is not an analysis failure. But the
+    /// scheduler charges every `.failed` one attempt
+    /// (`AnalysisWorkScheduler`'s `failed` arm), and at `maxAttemptCount = 5`
+    /// the job becomes `superseded` with `nextEligibleAt: nil` — a state it
+    /// cannot leave. `analysis_jobs.workKey` is UNIQUE and `insertJob` is
+    /// `INSERT OR IGNORE` over a key that is stable across launches, so every
+    /// later enqueue for that episode is silently dropped; the only reset,
+    /// `requeueOrphanedLease`, rewrites `state = 'running'` rows only and never
+    /// touches a superseded one. Five scrubs across an episode's analysis
+    /// lifetime is ordinary listening, so charging them would permanently kill
+    /// analysis on the episodes a listener engages with most.
+    ///
+    /// Before this bead the same attempt was still charged, just 300 s later —
+    /// but there WAS a rescue: a successor loop completing inside that window
+    /// gave the job non-zero coverage and no attempt was spent. Reporting the
+    /// interruption instantly removes the rescue, which turns an occasional
+    /// loss into a reliable one. This routing is what keeps the honest
+    /// reporting without the regression that came with it.
+    ///
+    /// THE REVERSE HAZARD IS THE REASON THIS IS KEYED ON `termination` AND
+    /// NOTHING ELSE. A genuinely broken episode must still exhaust its budget
+    /// and stop, or it retries forever. `.ranToConclusion` — the total-failure
+    /// gate's verdict — and a nil failure — a silent timeout or a `.completed`
+    /// over an empty transcript — both keep `.failed`.
+    static func zeroCoverageStopReason(
+        failure: TranscriptFailureReason?
+    ) -> AnalysisOutcome.StopReason {
+        let code = failure.map { "transcription:\($0.failureClass.rawValue)" }
+            ?? "transcription:zeroCoverage"
+        return failure?.termination == .interrupted ? .interrupted(code) : .failed(code)
     }
 
     static func failureExtras(_ failure: TranscriptFailureReason?) -> [String: String] {

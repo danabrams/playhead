@@ -111,6 +111,17 @@ actor AnalysisWorkScheduler {
         min(pow(2.0, Double(attempt)) * 60, 3600)
     }
 
+    /// playhead-ngev (review r1): how long a run displaced by playback waits
+    /// before it is eligible again.
+    ///
+    /// The FIRST RUNG of the ladder above, taken as a flat floor rather than a
+    /// ladder position — an interruption never escalates, because it never
+    /// spends an attempt and there is nothing to escalate. It exists only to
+    /// stop a job that keeps colliding with a live engine owner from requeueing
+    /// in a hot loop; the successor's coverage is durable, so one minute later
+    /// the retry usually finds the work already done.
+    private static let interruptedRequeueDelaySeconds = exponentialBackoffSeconds(attempt: 0)
+
     private let store: AnalysisStore
     private let jobRunner: AnalysisJobRunner
     private let capabilitiesService: any CapabilitiesProviding
@@ -4041,6 +4052,75 @@ actor AnalysisWorkScheduler {
                     metadataJSON: pauseMetadata
                 )
                 logger.info("Job \(job.jobId) paused for thermal/memory, retry in 30s")
+
+            case .interrupted(let reason):
+                // playhead-ngev (review r1): PREEMPTION-STYLE ACCOUNTING FOR A
+                // RUN THAT WAS DISPLACED, NOT ONE THAT FAILED.
+                //
+                // The runner reports this when the shared transcript engine was
+                // re-tasked out from under it — a scrub, a speed change, a
+                // different episode. Nothing about the analysis went wrong, so
+                // it must not consume one of the five PERMANENT attempts the
+                // `.failed` arm below spends: at `maxAttemptCount` that arm
+                // supersedes the job with `nextEligibleAt: nil`, and a
+                // superseded row never comes back (`workKey` is UNIQUE and
+                // `insertJob` is `INSERT OR IGNORE` over a key stable across
+                // launches, so later enqueues are silently dropped). Five
+                // scrubs is ordinary listening.
+                //
+                // This is the accounting `.cancelledByPlayback` already uses
+                // for the same event class — "playback displaced the work" —
+                // reached through a different door. `incrementAttempt` is left
+                // at its `false` default, which is the entire fix.
+                //
+                // ONE DELIBERATE DEPARTURE from the `.preempted` /
+                // `.cancelledByPlayback` shape: those requeue with
+                // `nextEligibleAt: nil` (immediately eligible), which is safe
+                // for them because a higher-lane job is now occupying the slot.
+                // An interruption is reported WHILE PLAYBACK CONTINUES, so an
+                // immediately re-admitted job can collide with the same live
+                // owner again at once — a hot requeue loop burning battery
+                // mid-episode. A flat floor off the first rung of the existing
+                // ladder bounds that without ever growing, so the job still
+                // retries indefinitely and still cannot die.
+                //
+                // `lastErrorCode` keeps the diagnosis. The row is `queued`, not
+                // failed, so it does not read as a failure — it says why the
+                // last pass produced nothing, which is what this bead is for.
+                let interruptedNextEligible =
+                    clock().timeIntervalSince1970 + Self.interruptedRequeueDelaySeconds
+                await commitOutcomeArm(
+                    "interrupted.requeue",
+                    AnalysisStore.ProcessJobOutcomeArmCommit(
+                        jobId: job.jobId,
+                        progress: progress,
+                        stateUpdate: .init(
+                            state: "queued",
+                            nextEligibleAt: interruptedNextEligible,
+                            lastErrorCode: reason
+                        )
+                    )
+                )
+                let interruptedMetadata = await SliceCompletionInstrumentation
+                    .recordPaused(
+                        cause: .userPreempted,
+                        deviceClass: DeviceClass.detect(),
+                        sliceDurationMs: 0,
+                        bytesProcessed: 0,
+                        shardsCompleted: 0,
+                        extras: [
+                            "stage": "analysisWorkScheduler.interruptedRequeue",
+                            "job_id": job.jobId,
+                            "runner_reason": reason,
+                        ]
+                    )
+                    .encodeJSON()
+                await emitJournalPreempted(
+                    episodeId: job.episodeId,
+                    cause: .userPreempted,
+                    metadataJSON: interruptedMetadata
+                )
+                logger.info("Job \(job.jobId) interrupted (\(reason)), requeued without spending an attempt")
 
             case .failed(let reason):
                 let attempts = job.attemptCount + 1

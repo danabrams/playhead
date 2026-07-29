@@ -41,7 +41,11 @@ private func makeTestRequest(
 /// `SpeechService` rethrows recognizer errors unchanged, so the loop's
 /// `catch is CancellationError` arm fires and reports an INTERRUPTED run —
 /// the state the runner must not respond to by tearing the engine down.
-private final class CancellingRecognizer: SpeechRecognizer, @unchecked Sendable {
+///
+/// Internal rather than private: `AnalysisWorkSchedulerJournalEmissionTests`
+/// drives the same interruption one layer up, to prove the scheduler does not
+/// charge it a retry attempt.
+final class CancellingRecognizer: SpeechRecognizer, @unchecked Sendable {
     private var loaded = false
 
     func loadModel() async throws { loaded = true }
@@ -1802,12 +1806,18 @@ struct AnalysisJobRunnerTests {
             )
         )
 
-        // The premise: we really did land on the zero-coverage branch carrying
-        // an INTERRUPTED failure, not some other zero-coverage shape.
-        if case .failed(let msg) = outcome.stopReason {
+        // The premise, and half the fix: we landed on the zero-coverage branch
+        // carrying an INTERRUPTED failure, and it reports as `.interrupted` —
+        // the outcome the scheduler requeues without spending one of the job's
+        // five permanent retry attempts.
+        if case .interrupted(let msg) = outcome.stopReason {
             #expect(msg == "transcription:\(TranscriptFailureClass.cancelled.rawValue)", "got \(msg)")
         } else {
-            Issue.record("Expected .failed(transcription:cancelled), got \(outcome.stopReason)")
+            Issue.record("""
+                Expected .interrupted(transcription:cancelled), got \(outcome.stopReason). \
+                A scrub charged against a five-attempt budget that ends in a permanent \
+                `superseded`
+                """)
         }
 
         // THE ASSERTION. The engine is shared and its live owner has already

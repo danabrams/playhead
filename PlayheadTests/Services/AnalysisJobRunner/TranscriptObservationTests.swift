@@ -425,6 +425,99 @@ struct TranscriptObservationTests {
         )
     }
 
+    // MARK: - playhead-ngev (review r1): a scrub must not spend a retry attempt
+
+    /// THE ATTEMPT BUDGET IS PERMANENT, AND FIVE SCRUBS IS ORDINARY LISTENING.
+    ///
+    /// The scheduler charges every `.failed` one of five attempts and then
+    /// supersedes the job with `nextEligibleAt: nil`. That row cannot come
+    /// back: `analysis_jobs.workKey` is UNIQUE, `insertJob` is
+    /// `INSERT OR IGNORE`, and the key is
+    /// `"<fingerprint>:<analysisVersion>:preAnalysis"` — stable across
+    /// launches — so every later enqueue for the episode is silently dropped
+    /// until an app update bumps `analysisVersion`. The only attempt reset,
+    /// `requeueOrphanedLease`, rewrites `state = 'running'` rows and never
+    /// touches a superseded one.
+    ///
+    /// So routing an interruption to `.failed` would permanently kill analysis
+    /// on exactly the episodes a listener engages with most. It reports as
+    /// `.interrupted`, which the scheduler requeues without spending anything.
+    @Test(
+        "an interruption reports .interrupted, whatever diagnosis it carries",
+        arguments: [
+            TranscriptFailureClass.cancelled,
+            .stopped,
+            .preempted,
+            // The termination decides, not the class: a run whose shards were
+            // genuinely failing and which was THEN scrubbed is still a run the
+            // listener ended.
+            .modelNotLoaded,
+            .vadFailed,
+        ]
+    )
+    func interruptionsDoNotSpendARetryAttempt(failureClass: TranscriptFailureClass) {
+        let reason = AnalysisJobRunner.zeroCoverageStopReason(
+            failure: TranscriptFailureReason(
+                failureClass: failureClass, termination: .interrupted
+            )
+        )
+        guard case .interrupted(let code) = reason else {
+            Issue.record("""
+                \(failureClass.rawValue) interrupted reported \(reason), which spends one \
+                of five PERMANENT retry attempts. At five the episode's analysis is \
+                abandoned for good
+                """)
+            return
+        }
+        // The diagnosis is not lost by declining to charge for it.
+        #expect(code == "transcription:\(failureClass.rawValue)")
+    }
+
+    /// THE REVERSE HAZARD, AND IT IS THE ONE THAT KEEPS THE BUDGET MEANINGFUL.
+    /// A genuinely broken episode must still exhaust its attempts and stop, or
+    /// it retries forever. Only the TERMINATION may excuse a run.
+    @Test(
+        "a run that concluded on its own still spends its attempt",
+        arguments: [
+            TranscriptFailureClass.vadFailed,
+            .transcriptionFailed,
+            .noShards,
+            .speechEngineNotReady,
+            .persistenceFailed,
+            // Even a class whose NAME is an interruption: if the loop reached
+            // its own conclusion, the run was not displaced.
+            .cancelled,
+        ]
+    )
+    func concludedRunsStillSpendTheirAttempt(failureClass: TranscriptFailureClass) {
+        let reason = AnalysisJobRunner.zeroCoverageStopReason(
+            failure: TranscriptFailureReason(
+                failureClass: failureClass, termination: .ranToConclusion
+            )
+        )
+        guard case .failed = reason else {
+            Issue.record("""
+                \(failureClass.rawValue) that ran to conclusion reported \(reason), which \
+                is requeued without spending an attempt — so a permanently broken \
+                episode retries forever
+                """)
+            return
+        }
+    }
+
+    /// And the two zero-coverage exits that carry no failure at all — a 300 s
+    /// silence and a `.completed` over an empty transcript — are failures, not
+    /// interruptions. Nothing reported, so nothing excuses them.
+    @Test("a run nobody reported on still spends its attempt")
+    func unreportedRunsStillSpendTheirAttempt() {
+        let reason = AnalysisJobRunner.zeroCoverageStopReason(failure: nil)
+        guard case .failed(let code) = reason else {
+            Issue.record("an unreported zero-coverage run reported \(reason)")
+            return
+        }
+        #expect(code == "transcription:zeroCoverage")
+    }
+
     /// The control: every other zero-coverage exit still stops the engine.
     /// Without it the fix reads "never stop", which reinstates the orphaned
     /// writer playhead-5uvz.5 fenced.
