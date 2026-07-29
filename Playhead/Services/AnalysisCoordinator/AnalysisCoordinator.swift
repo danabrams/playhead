@@ -2007,6 +2007,31 @@ actor AnalysisCoordinator {
             // failure is terminal for the session — stop observing,
             // and do NOT finalize.
             guard analysisAssetId == assetId else { return .keepObserving }
+
+            // playhead-ngev: AN INTERRUPTION IS NOT A TERMINAL FAILURE HERE.
+            //
+            // The loop now reports the interruptions it used to return from in
+            // silence — a cancel, a stop, a preempt. The dominant one is a
+            // scrub: `handleScrub` calls `startTranscription`, which cancels
+            // the running loop AND immediately spawns its replacement for the
+            // same asset. That replacement is the session this observer is
+            // watching, and it will emit its own `.completed`.
+            //
+            // Treating the predecessor's exit as terminal would stop observing
+            // and clear `transcriptEventTask` while the successor was still
+            // transcribing, so `finalizeBackfill` would never run for an
+            // episode that transcribed perfectly well. Before this bead this
+            // arm saw NOTHING in that case, so keeping observing is also what
+            // preserves the shipping behaviour: the new event is additive.
+            guard reason.termination != .interrupted else {
+                logger.info("""
+                    Transcription interrupted for asset \(assetId): \
+                    \(reason.failureClass.rawValue) — a successor run may still \
+                    be live, so the session stays under observation
+                    """)
+                return .keepObserving
+            }
+
             logger.error("""
                 Transcription failed for asset \(assetId): \
                 \(reason.failureClass.rawValue) \

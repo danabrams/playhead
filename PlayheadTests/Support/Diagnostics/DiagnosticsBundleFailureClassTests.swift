@@ -299,4 +299,134 @@ struct DiagnosticsBundleFailureClassTests {
     func noFailureWritesNothing() {
         #expect(AnalysisJobRunner.failureExtras(nil).isEmpty)
     }
+
+    // MARK: - playhead-ngev: the field that is present when the class is not
+
+    /// THE OVERLOADED BLANK. A missing `failure_class` meant any of four
+    /// unrelated things — cancelled by playback, torn down, `.completed` over
+    /// an empty transcript, or nothing heard for five minutes — and a support
+    /// engineer reading the bundle saw one empty column for all four. The
+    /// observation is written on every zero-coverage row, so the blank is
+    /// always accompanied by a statement of what the runner itself saw.
+    @Test("every observation variant round-trips through the projection")
+    func everyObservationRoundTrips() throws {
+        for observation in AnalysisJobRunner.TranscriptRunObservation.allCases {
+            let record = try Self.tailRecord(
+                metadata: #"{"failure_observation":"\#(observation.rawValue)"}"#
+            )
+            #expect(record.failureObservation == observation.rawValue,
+                    "\(observation.rawValue) did not survive the projection")
+        }
+    }
+
+    @Test("every termination variant round-trips through the projection")
+    func everyTerminationRoundTrips() throws {
+        for termination in TranscriptRunTermination.allCases {
+            let record = try Self.tailRecord(
+                metadata: #"{"failure_termination":"\#(termination.rawValue)"}"#
+            )
+            #expect(record.failureTermination == termination.rawValue,
+                    "\(termination.rawValue) did not survive the projection")
+        }
+    }
+
+    /// A row that carries no observation reports absent, so an old bundle and
+    /// a new one are not confusable.
+    @Test("a row with no observation reports absent, not a default")
+    func absentObservationIsNil() throws {
+        let record = try Self.tailRecord(metadata: "{}")
+        #expect(record.failureObservation == nil)
+        #expect(record.failureTermination == nil)
+    }
+
+    /// THE ADVERSARIAL CASE FOR THE NEW KEYS, and the reason they are admitted
+    /// by round-trip rather than forwarded. The legal checklist does NOT
+    /// inspect nested record keys — it passed while an episode title leaked
+    /// into encoded JSON — so this test is the enforcement, not the audit.
+    @Test(
+        "free text under the new keys is dropped, not forwarded",
+        arguments: [
+            "The operation couldn’t be completed. (kAFAssistantErrorDomain error 1101.)",
+            "https://traffic.megaphone.fm/some-show/episode-1234.mp3",
+            "/var/mobile/Containers/Data/Application/ABC/Documents/ep.mp3",
+            "Diary of a CEO — Episode 412",
+            "engine_reported ",
+            "ENGINE_REPORTED",
+            "interrupted!",
+            "",
+        ]
+    )
+    func freeTextUnderNewKeysIsDropped(text: String) throws {
+        let encoded = try #require(
+            String(
+                data: try JSONEncoder().encode([
+                    "failure_observation": text,
+                    "failure_termination": text,
+                ]),
+                encoding: .utf8
+            )
+        )
+        let record = try Self.tailRecord(metadata: encoded)
+        #expect(record.failureObservation == nil, "'\(text)' escaped the observation vocabulary")
+        #expect(record.failureTermination == nil, "'\(text)' escaped the termination vocabulary")
+    }
+
+    /// And none of it reaches the encoded bytes either — the struct field
+    /// being nil is only half the claim, per the standing correction that
+    /// `DiagnosticsBundleShapeTests` is not the legal guard here.
+    @Test("text rejected from the new keys appears nowhere in the encoded bundle")
+    func rejectedNewKeyTextIsAbsentFromEncodedJSON() throws {
+        let secret = "Diary of a CEO — Episode 412"
+        let encoded = try #require(
+            String(
+                data: try JSONEncoder().encode([
+                    "failure_observation": secret,
+                    "failure_termination": secret,
+                ]),
+                encoding: .utf8
+            )
+        )
+        let bundle = DiagnosticsBundleBuilder.buildDefault(
+            appVersion: "1.0", osVersion: "iOS 27", deviceClass: .iPhone17Pro,
+            buildType: .debug, eligibility: Self.eligible,
+            workJournalEntries: [Self.entry(metadata: encoded)], installID: Self.installID
+        )
+        let json = try #require(String(data: try JSONEncoder().encode(bundle), encoding: .utf8))
+        #expect(!json.contains(secret))
+        #expect(!json.contains("Episode 412"))
+    }
+
+    /// The write side joined to the read side for the termination, the same
+    /// way `writeSideRoundTripsThroughTheProjection` does for the class. The
+    /// two halves live in different files; a key renamed on one side would
+    /// otherwise fail silently, and the symptom would be bundles quietly
+    /// losing the only field that says a scrub ended the run.
+    @Test("what the runner writes for an interrupted run is what the projection recovers")
+    func interruptedWriteSideRoundTrips() throws {
+        let extras = AnalysisJobRunner.failureExtras(
+            TranscriptFailureReason(
+                failureClass: .modelNotLoaded, code: nil, failedShardCount: 4,
+                termination: .interrupted
+            )
+        )
+        #expect(extras[DiagnosticsFailureKeys.failureTermination]
+                == TranscriptRunTermination.interrupted.rawValue)
+        let encoded = try #require(
+            String(data: try JSONEncoder().encode(extras), encoding: .utf8)
+        )
+        let record = try Self.tailRecord(metadata: encoded)
+        #expect(record.failureClass == TranscriptFailureClass.modelNotLoaded.rawValue)
+        #expect(record.failureTermination == TranscriptRunTermination.interrupted.rawValue)
+    }
+
+    /// The default is written too, not omitted — otherwise "this run finished"
+    /// and "this build predates the field" would look alike.
+    @Test("a run that reached its own conclusion says so explicitly")
+    func concludedRunWritesItsTermination() {
+        let extras = AnalysisJobRunner.failureExtras(
+            TranscriptFailureReason(failureClass: .vadFailed, failedShardCount: 2)
+        )
+        #expect(extras[DiagnosticsFailureKeys.failureTermination]
+                == TranscriptRunTermination.ranToConclusion.rawValue)
+    }
 }

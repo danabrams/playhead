@@ -648,14 +648,20 @@ actor AnalysisJobRunner {
         // full 300 s timeout for an event that will never come, turning an
         // instant named failure into a `task_expired`. The reason travels out
         // alongside the coverage and is journaled below.
-        let transcriptObservation: (coverage: Double, failure: TranscriptFailureReason?) =
+        let transcriptObservation: (
+            coverage: Double, failure: TranscriptFailureReason?, sawCompleted: Bool
+        ) =
         await withTaskGroup(
-            of: (Double, TranscriptFailureReason?).self
+            of: (Double, TranscriptFailureReason?, Bool).self
         ) { [weak self] group in
-            // Timeout task
+            // Timeout task. playhead-ngev: the `false` is load-bearing — it is
+            // what the zero-coverage row reads as `engine_silent_timeout`,
+            // separating "nobody said anything for five minutes" from "the
+            // engine reported success over an empty transcript". Both used to
+            // arrive here as an indistinguishable `(0, nil)`.
             group.addTask {
                 try? await Task.sleep(for: .seconds(300))
-                return (0, nil)
+                return (0, nil, false)
             }
             // Event stream task
             group.addTask { [weak self] in
@@ -675,12 +681,18 @@ actor AnalysisJobRunner {
                 )
             }
             // Return whichever finishes first
-            let result = await group.next() ?? (0, nil)
+            let result = await group.next() ?? (0, nil, false)
             group.cancelAll()
             return result
         }
         let transcriptCoverage = transcriptObservation.coverage
         let transcriptFailure = transcriptObservation.failure
+        // playhead-ngev: what the runner itself observed, which it always
+        // knows — unlike the class, which is absent on most routes here.
+        let runObservation = TranscriptRunObservation.classify(
+            failure: transcriptFailure,
+            sawCompleted: transcriptObservation.sawCompleted
+        )
 
         PreAnalysisInstrumentation.endStage(transcriptSignpost)
 
@@ -697,7 +709,7 @@ actor AnalysisJobRunner {
         // genuinely produced nothing, and stopping a session that
         // already terminated is a no-op aside from the gate insertion
         // (which is harmless because no further writes can land).
-        if transcriptCoverage == 0 {
+        if transcriptCoverage == 0, Self.shouldStopEngine(after: transcriptFailure) {
             await transcriptEngine.stopTranscription(analysisAssetId: assetId)
         }
 
@@ -732,7 +744,8 @@ actor AnalysisJobRunner {
                 allShards: allShards,
                 existingChunkCount: existingChunkCount,
                 transcriptStageStart: transcriptStageStart,
-                failure: transcriptFailure
+                failure: transcriptFailure,
+                observation: runObservation
             )
             return makeOutcome(
                 assetId: assetId,
@@ -1324,17 +1337,26 @@ actor AnalysisJobRunner {
     /// zero-coverage branch: no `work_journal` row, no `failure_class`, and
     /// `lastErrorCode` never names the cause. The named failure would be
     /// destroyed one layer ABOVE the catch that used to destroy it.
+    ///
+    /// playhead-ngev: `sawCompleted` is the third fact, and it is the one the
+    /// runner could not previously recover. A `.completed` over an empty
+    /// transcript and a 300 s silence both arrive as `(0, nil)`, so the
+    /// journal row could not say which had happened — and "the engine said it
+    /// finished and produced nothing" and "the engine never said anything" are
+    /// different bugs in different files.
     nonisolated static func observeTranscriptEvents(
         stream: AsyncStream<TranscriptEngineEvent>,
         assetId: String,
         persistedCoverage: @Sendable () async -> Double
-    ) async -> (coverage: Double, failure: TranscriptFailureReason?) {
+    ) async -> (coverage: Double, failure: TranscriptFailureReason?, sawCompleted: Bool) {
         var coverage: Double = 0
         var failure: TranscriptFailureReason?
+        var sawCompleted = false
         for await event in stream {
             if Task.isCancelled { break }
             if case .completed(let completedAssetId) = event, completedAssetId == assetId {
                 // Read coverage from the store after transcription completes.
+                sawCompleted = true
                 coverage = await persistedCoverage()
                 break
             }
@@ -1346,7 +1368,101 @@ actor AnalysisJobRunner {
         if coverage == 0, failure == nil {
             coverage = await persistedCoverage()
         }
-        return (coverage, failure)
+        return (coverage, failure, sawCompleted)
+    }
+
+    /// playhead-ngev: which of the three ways a zero-coverage run can end
+    /// actually happened, from the runner's own vantage.
+    ///
+    /// WHY THIS EXISTS ALONGSIDE `failure_class`. The class answers "what went
+    /// wrong", and it is ABSENT whenever the engine did not report — which is
+    /// most of the time, and which is currently overloaded across four
+    /// unrelated diagnoses: the engine was cancelled by playback, the engine
+    /// was torn down, the engine said `.completed` over an empty transcript,
+    /// or the engine said nothing at all for five minutes. A support engineer
+    /// reading a bundle sees one blank column for all four.
+    ///
+    /// The observation is never absent, because it is not a claim about the
+    /// engine's internals — it is a description of what the runner itself
+    /// observed, which the runner always knows with certainty. Absence of a
+    /// class next to `engine_silent_timeout` means "nothing was reported";
+    /// absence next to `engine_completed_zero` means "the engine claims
+    /// success"; those are different bugs and now look different.
+    ///
+    /// Three compile-time literals. Nothing here is derived from audio, a
+    /// feed, a URL, or user text — the same construction argument
+    /// `TranscriptFailureClass` won, and the reason this key may cross the
+    /// bundle projection that drops `metadata` wholesale.
+    enum TranscriptRunObservation: String, Sendable, Hashable, Codable, CaseIterable {
+        /// A `.failed` arrived for this asset. `failure_class` is the answer;
+        /// this row's diagnosis is complete.
+        case engineReported = "engine_reported"
+        /// A `.completed` arrived and the persisted coverage was still zero.
+        /// The engine believes it succeeded; the transcript is empty.
+        case engineCompletedZero = "engine_completed_zero"
+        /// No terminal event for this asset before the runner's 300 s timeout.
+        /// The engine is either wedged or was cancelled by a build that still
+        /// returns from the loop in silence.
+        case engineSilentTimeout = "engine_silent_timeout"
+
+        /// Derive the observation from what the fold actually saw. Called only
+        /// on the zero-coverage path, which is what makes
+        /// `engine_completed_zero` true rather than merely "completed".
+        static func classify(
+            failure: TranscriptFailureReason?,
+            sawCompleted: Bool
+        ) -> TranscriptRunObservation {
+            if failure != nil { return .engineReported }
+            return sawCompleted ? .engineCompletedZero : .engineSilentTimeout
+        }
+    }
+
+    /// playhead-ngev: the `work_journal.cause` for a zero-coverage row.
+    ///
+    /// It was a hardcoded `.asrFailed` at both emission sites, with no
+    /// reference to the failure at all — so rows whose own `failure_class`
+    /// said `no_shards` or `speech_engine_not_ready` still claimed the
+    /// recognizer had failed, and so did every 300 s timeout, where nothing
+    /// was reported by anyone.
+    ///
+    /// `.asrFailed` is now reserved for rows whose class implies recognition
+    /// actually ran. Everything else — including every silent timeout, where
+    /// the honest statement is "the pipeline did not deliver" — is
+    /// `.pipelineError`.
+    static func journalCause(
+        failure: TranscriptFailureReason?,
+        observation: TranscriptRunObservation
+    ) -> InternalMissCause {
+        // A silent timeout has no reporter, so nothing in it can support a
+        // claim about ASR. This is checked first because `failure` is nil
+        // there anyway — stating it explicitly keeps the rule readable.
+        guard observation != .engineSilentTimeout else { return .pipelineError }
+        guard let failure else { return .pipelineError }
+        return failure.failureClass.impliesRecognizerRan ? .asrFailed : .pipelineError
+    }
+
+    /// playhead-ngev: whether the runner should tear the engine down after a
+    /// zero-coverage exit.
+    ///
+    /// The stop exists (playhead-5uvz.5 Gap-6) to fence an ORPHANED engine:
+    /// one still running for an asset whose owning scheduler has moved on, so
+    /// its later chunk writes and coverage updates would land behind the
+    /// runner's back.
+    ///
+    /// An INTERRUPTED run is the one case where the engine is not orphaned. It
+    /// is shared — `PlayheadRuntime` builds one and hands it to both
+    /// `AnalysisCoordinator` and this runner — and the cancel came from
+    /// `startTranscription`, i.e. from a live owner that has already re-tasked
+    /// it (a scrub, a speed change, a different episode). Stopping it there
+    /// would cancel the listener's own transcription and gate the asset
+    /// against the appends that owner is about to make.
+    ///
+    /// This only became reachable in practice with this bead: before it, an
+    /// interruption was silent, the runner waited out its 300 s timeout, and
+    /// by then the successor was usually done. Reporting the interruption
+    /// instantly is what puts the stop in the successor's way.
+    static func shouldStopEngine(after failure: TranscriptFailureReason?) -> Bool {
+        failure?.termination != .interrupted
     }
 
     static func failureExtras(_ failure: TranscriptFailureReason?) -> [String: String] {
@@ -1354,6 +1470,13 @@ actor AnalysisJobRunner {
         var extras = [
             DiagnosticsFailureKeys.failureClass: failure.failureClass.rawValue,
             DiagnosticsFailureKeys.failedShardCount: String(failure.failedShardCount),
+            // playhead-ngev: whether the run finished or was cut short. Two
+            // compile-time literals. It is not redundant with the class: a run
+            // whose shards were failing `model_not_loaded` and which was then
+            // cancelled by a scrub reports the class it earned and the
+            // termination it suffered, and only the second one says the
+            // listener's own playback ended this run.
+            DiagnosticsFailureKeys.failureTermination: failure.termination.rawValue,
         ]
         if let code = failure.code {
             extras[DiagnosticsFailureKeys.failureCode] = String(code)
@@ -1367,7 +1490,8 @@ actor AnalysisJobRunner {
         allShards: [AnalysisShard],
         existingChunkCount: Int,
         transcriptStageStart: Date,
-        failure: TranscriptFailureReason?
+        failure: TranscriptFailureReason?,
+        observation: TranscriptRunObservation
     ) async {
         // Resolve the active job's `{generationID, schedulerEpoch}` so
         // the journal row joins the lease lifecycle written by 5uvz.1.
@@ -1406,11 +1530,20 @@ actor AnalysisJobRunner {
             "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageEndTime),
             "chunks_persisted": String(chunksPersisted),
             "chunk_rate_per_sec": String(format: "%.4f", chunkRatePerSec),
+            // playhead-ngev: ALWAYS present, unlike the class. Absence of a
+            // class is meaningful only when something else says why there is
+            // none.
+            DiagnosticsFailureKeys.failureObservation: observation.rawValue,
         ]
         extras.merge(Self.failureExtras(failure)) { _, new in new }
 
+        // playhead-ngev: no longer hardcoded. A row whose class proves the
+        // recognizer never ran must not be counted as an ASR failure — that
+        // contradiction is what sent two dogfood cycles to the wrong stage.
+        let cause = Self.journalCause(failure: failure, observation: observation)
+
         let metadata = await SliceCompletionInstrumentation.recordFailed(
-            cause: .asrFailed,
+            cause: cause,
             deviceClass: DeviceClass.detect(),
             sliceDurationMs: elapsedMs,
             bytesProcessed: 0,
@@ -1425,7 +1558,7 @@ actor AnalysisJobRunner {
             schedulerEpoch: schedulerEpoch,
             timestamp: now.timeIntervalSince1970,
             eventType: .failed,
-            cause: .asrFailed,
+            cause: cause,
             metadata: metadata.encodeJSON(),
             artifactClass: .scratch
         )

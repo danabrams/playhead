@@ -38,7 +38,7 @@ struct TranscriptFailureTaxonomyTests {
     /// Raw values are a wire format: they are written into `work_journal`
     /// metadata on one build and read out of a diagnostics bundle by a
     /// support engineer on another. Renaming one silently re-buckets history.
-    @Test("TranscriptFailureClass covers the 16 documented variants with stable raw values")
+    @Test("TranscriptFailureClass covers the 19 documented variants with stable raw values")
     func vocabularyIsClosedAndStable() {
         let expected: Set<String> = [
             "silent_shard",
@@ -56,11 +56,18 @@ struct TranscriptFailureTaxonomyTests {
             "no_shards",
             "speech_engine_not_ready",
             "persistence_failed",
+            // playhead-ngev: the three interruptions. They are failure classes
+            // because the loop has to say SOMETHING when it stops — returning
+            // in silence is what left the runner waiting out a 300 s timeout
+            // and then journaling `asr_failed` for an ordinary scrub.
+            "cancelled",
+            "stopped",
+            "preempted",
             "unknown",
         ]
         let actual = Set(TranscriptFailureClass.allCases.map(\.rawValue))
         #expect(actual == expected)
-        #expect(TranscriptFailureClass.allCases.count == 16)
+        #expect(TranscriptFailureClass.allCases.count == 19)
     }
 
     /// The whole point of a closed vocabulary is that it cannot carry text.
@@ -210,6 +217,13 @@ struct TranscriptFailureTaxonomyTests {
 
         var producible: Set<TranscriptFailureClass> = raisedDirectly.union(residual)
         var errors: [Error] = [
+            // playhead-ngev: the interruptions are raised by the loop's own
+            // arms AND recovered by the classifier, so they are proved
+            // reachable here through `classify` rather than being asserted
+            // into the `raisedDirectly` set by hand.
+            CancellationError(),
+            TranscriptEngineStopped(),
+            TranscriptEnginePreempted(),
             AnalysisStoreError.insertFailed("x"),
             TranscriptEngineError.modelNotLoaded,
             TranscriptEngineError.vadFailed("x"),
@@ -313,5 +327,125 @@ struct TranscriptFailureTaxonomyTests {
     @Test("an empty failure list reduces to .unknown rather than trapping")
     func emptyFailureListIsSafe() {
         #expect(TranscriptEngineService.dominantFailure([]).failureClass == .unknown)
+    }
+
+    // MARK: - playhead-ngev: the interruptions
+
+    /// The three ways a run is ended from OUTSIDE must classify to themselves
+    /// rather than to the residual bucket. `.unknown` here would reproduce the
+    /// original defect one level down: a name that carries no information,
+    /// which is all `asr_failed` ever was.
+    @Test("interruptions classify to themselves, not to the catch-all")
+    func interruptionsClassify() {
+        #expect(TranscriptFailureClass.classify(CancellationError()) == .cancelled)
+        #expect(TranscriptFailureClass.classify(TranscriptEngineStopped()) == .stopped)
+        #expect(TranscriptFailureClass.classify(TranscriptEnginePreempted()) == .preempted)
+    }
+
+    /// And they export no code: all three are Playhead-domain Swift types, so
+    /// the only integer available is a synthesised ordinal.
+    @Test("interruptions export no numeric code")
+    func interruptionsCarryNoCode() {
+        #expect(TranscriptFailureReason.classify(CancellationError()).code == nil)
+        #expect(TranscriptFailureReason.classify(TranscriptEngineStopped()).code == nil)
+        #expect(TranscriptFailureReason.classify(TranscriptEnginePreempted()).code == nil)
+    }
+
+    // MARK: - playhead-ngev: which classes may be called an ASR failure
+
+    /// THE PARTITION THAT DECIDES `work_journal.cause`.
+    ///
+    /// The cause was a hardcoded `.asrFailed` for every zero-coverage row, so
+    /// rows whose own `failure_class` proved the recognizer was never invoked
+    /// still claimed ASR had failed — a row reading
+    /// `cause = asr_failed, failure_class = no_shards` contradicts itself, and
+    /// an aggregate counts the wrong half.
+    ///
+    /// Pinned as an exact set rather than as spot checks: a new class silently
+    /// inheriting `false` would be a defensible default, but a new class
+    /// silently inheriting `true` would put an unproven ASR claim into an
+    /// export, and only an exact set catches that.
+    @Test("only classes that mean recognition ran may be reported as an ASR failure")
+    func onlyRecognitionFailuresImplyASR() {
+        let implying = Set(
+            TranscriptFailureClass.allCases.filter(\.impliesRecognizerRan)
+        )
+        #expect(
+            implying == [.transcriptionFailed, .vadFailed, .analyzerSessionFailure],
+            """
+            the ASR-attributable set is \(implying.map(\.rawValue).sorted()). \
+            Everything else describes a stage UPSTREAM of recognition (decode, \
+            model load, analyzer setup), a stage after it (persistence), or an \
+            interruption — and calling those `asr_failed` is what sent two \
+            dogfood cycles looking at the wrong stage.
+            """
+        )
+    }
+
+    /// The specific pairs the bead calls out by name, asserted individually so
+    /// a failure names the offender rather than a set difference.
+    @Test(
+        "classes that prove the recognizer never ran are not ASR failures",
+        arguments: [
+            TranscriptFailureClass.noShards,
+            .speechEngineNotReady,
+            .modelNotLoaded,
+            .persistenceFailed,
+            .silentShard,
+            .cancelled,
+            .stopped,
+            .preempted,
+            .unknown,
+        ]
+    )
+    func nonRecognitionClassesAreNotASR(failureClass: TranscriptFailureClass) {
+        #expect(
+            !failureClass.impliesRecognizerRan,
+            "\(failureClass.rawValue) does not mean the recognizer ran"
+        )
+    }
+
+    // MARK: - playhead-ngev: how the run ended is a second axis
+
+    /// A reason built the ordinary way describes a run that reached its own
+    /// end. Defaulting the other way would re-label every total failure the
+    /// engine already reports as an interruption.
+    @Test("a reason defaults to ran_to_conclusion")
+    func terminationDefaultsToRanToConclusion() {
+        #expect(TranscriptFailureReason(failureClass: .vadFailed).termination == .ranToConclusion)
+        #expect(TranscriptFailureReason.classify(TranscriptEngineError.modelNotLoaded)
+            .termination == .ranToConclusion)
+    }
+
+    /// `interrupted()` re-stamps the termination and CHANGES NOTHING ELSE.
+    /// The whole reason the two axes are separate is that an interrupted run
+    /// can still carry a real per-shard diagnosis; dropping the class, the
+    /// code or the count while re-stamping would collapse them again.
+    @Test("interrupted() keeps the class, the code and the count")
+    func interruptedPreservesTheDiagnosis() {
+        let original = TranscriptFailureReason(
+            failureClass: .modelNotLoaded, code: 1101, failedShardCount: 9
+        )
+        let cutShort = original.interrupted()
+        #expect(cutShort.termination == .interrupted)
+        #expect(cutShort.failureClass == .modelNotLoaded)
+        #expect(cutShort.code == 1101)
+        #expect(cutShort.failedShardCount == 9)
+        #expect(original.termination == .ranToConclusion, "the original is not mutated")
+    }
+
+    /// The termination vocabulary is exported into `work_journal.metadata` and
+    /// crosses the bundle projection, so it is held to the same bar as the
+    /// class: fixed identifiers, nothing that could have come from a feed.
+    @Test("every termination raw value is a bare snake_case identifier")
+    func terminationRawValuesAreIdentifierShaped() {
+        let shape = #/^[a-z][a-z0-9_]*$/#
+        #expect(TranscriptRunTermination.allCases.count == 2)
+        for termination in TranscriptRunTermination.allCases {
+            #expect(
+                (try? shape.wholeMatch(in: termination.rawValue)) != nil,
+                "'\(termination.rawValue)' is not identifier-shaped"
+            )
+        }
     }
 }

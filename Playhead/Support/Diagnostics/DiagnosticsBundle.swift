@@ -92,9 +92,11 @@ enum BuildType: String, Sendable, Hashable, Codable, CaseIterable {
 /// bundles quietly reverting to "`asr_failed`, cause unknown" — the exact
 /// condition this bead exists to end.
 ///
-/// NOT ALL THREE CROSS THE PROJECTION (clarified in review r2, where the
-/// wording above read as though they all did). `failureClass` and
-/// `failureCode` are projected into `DefaultBundle.WorkJournalRecord`.
+/// NOT ALL OF THEM CROSS THE PROJECTION (clarified in review r2, where the
+/// wording above read as though they all did). `failureClass`, `failureCode`
+/// and — playhead-ngev — `failureObservation` and `failureTermination` are
+/// projected into `DefaultBundle.WorkJournalRecord`; all four are closed
+/// vocabularies of compile-time literals or an integer.
 /// `failedShardCount` is written and read ON DEVICE only: it is a count of a
 /// private episode's structure, and in a total failure it equals the shard
 /// count, which discloses the episode's duration to ±30 s — a usable
@@ -108,6 +110,23 @@ enum DiagnosticsFailureKeys {
     /// On-device only — see the note above. Do not add to the projection
     /// without a privacy review.
     static let failedShardCount = "failed_shard_count"
+    /// playhead-ngev: how the run ended from the RUNNER's vantage — one of
+    /// `AnalysisJobRunner.TranscriptRunObservation`'s three literals. Written
+    /// on every zero-coverage row, including the rows that carry no
+    /// `failure_class`, which is the whole point: absence of a class was
+    /// overloaded across four unrelated diagnoses and this key separates them.
+    /// Projected.
+    static let failureObservation = "failure_observation"
+    /// playhead-ngev: whether the transcription run finished or was cut short
+    /// — one of `TranscriptRunTermination`'s two literals. Written whenever
+    /// there is a failure to describe. Projected.
+    ///
+    /// It answers a question the class cannot: an interrupted run carries the
+    /// diagnosis its shards earned, and separately the fact that the
+    /// listener's own playback (a scrub, a speed change, a new episode) ended
+    /// it. Counting `cancelled`/`stopped` classes alone undercounts that,
+    /// because a run with real shard failures reports the shard class.
+    static let failureTermination = "failure_termination"
 }
 
 // MARK: - Default bundle
@@ -557,6 +576,19 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         /// The underlying framework error's `NSError.code`, when there was
         /// one. Never a Swift enum's synthesised case ordinal.
         let failureCode: Int?
+        /// playhead-ngev: an `AnalysisJobRunner.TranscriptRunObservation` raw
+        /// value on a zero-coverage row, `nil` on every other row.
+        ///
+        /// THE FIELD THAT IS PRESENT WHEN `failureClass` IS NOT. A blank
+        /// `failure_class` used to mean any of four things — cancelled by
+        /// playback, torn down, `.completed` over an empty transcript, or
+        /// nothing heard for five minutes — and a support engineer could not
+        /// tell them apart. Admitted by the same round-trip rule as
+        /// `failureClass`: a closed set of compile-time literals or nothing.
+        let failureObservation: String?
+        /// playhead-ngev: a `TranscriptRunTermination` raw value — whether the
+        /// run finished or was cut short. Same round-trip rule.
+        let failureTermination: String?
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -568,6 +600,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case cause
             case failureClass = "failure_class"
             case failureCode = "failure_code"
+            case failureObservation = "failure_observation"
+            case failureTermination = "failure_termination"
         }
     }
 

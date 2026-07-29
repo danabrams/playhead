@@ -153,9 +153,81 @@ enum TranscriptFailureClass: String, Sendable, Hashable, CaseIterable, Codable {
     /// reported `unknown`, which is the same "names an absence" defect as
     /// `asr_failed` one layer down.
     case persistenceFailed = "persistence_failed"
+    /// playhead-ngev: the run's task was cancelled. In production the
+    /// canceller is almost always PLAYBACK, not a failure: one
+    /// `TranscriptEngineService` is shared by `AnalysisCoordinator` and
+    /// `AnalysisJobRunner` (`PlayheadRuntime` builds exactly one), and
+    /// `startTranscription` — reached from `handleScrub`, `handleSpeedChange`
+    /// and every new episode — cancels whatever the other owner was running.
+    ///
+    /// It is a failure class rather than a silent return because the runner
+    /// has to be told SOMETHING: before this bead the cancelled loop returned
+    /// without a word, the runner waited out its full 300 s timeout, and the
+    /// row it finally wrote said `asr_failed`. Scrubbing was recorded as an
+    /// ASR failure.
+    case cancelled
+    /// playhead-ngev: the owning caller gated this asset through
+    /// `stopTranscription(analysisAssetId:)`. Distinct from `.cancelled`
+    /// because the asset is also fenced against late writes and appends —
+    /// this run is not merely losing the engine, it is forbidden from
+    /// finishing.
+    case stopped
+    /// playhead-ngev: a higher lane preempted at a safe point
+    /// (`TranscriptEnginePreempted`). The runner normally intercepts this
+    /// through the sticky `PreemptionSignal` and reports `.preempted` rather
+    /// than a failure; the class exists so the loop's exit is named at the
+    /// engine boundary too, rather than being the one interruption that still
+    /// returns in silence.
+    case preempted
     /// Anything not yet classified. A rising count here is the signal that
     /// this taxonomy needs another case — never a reason to log free text.
     case unknown
+
+    /// playhead-ngev: whether this class means the recognizer ACTUALLY RAN.
+    ///
+    /// It decides `work_journal.cause`, which was a hardcoded `.asrFailed` on
+    /// every zero-coverage row — including rows whose own `failure_class`
+    /// proved ASR was never invoked. A row that reads
+    /// `cause = asr_failed, failure_class = no_shards` is worse than an
+    /// unnamed row: it contradicts itself, and the wrong half is the one an
+    /// aggregate counts.
+    ///
+    /// Exhaustive on purpose (no `default`): a new case must make this
+    /// decision explicitly rather than inheriting whichever answer happened to
+    /// be the fallback. The bar is deliberately high — recognition has to have
+    /// been reached, not merely attempted — because the three sample guards,
+    /// the analyzer-setup failures and the model/asset failures all describe
+    /// something UPSTREAM of the recognizer, and calling those `asr_failed` is
+    /// what sent two dogfood cycles looking at the wrong stage.
+    var impliesRecognizerRan: Bool {
+        switch self {
+        case .transcriptionFailed, .vadFailed, .analyzerSessionFailure:
+            // Recognition (or the analyzer session driving it) started and
+            // reported an error of its own.
+            true
+        case .silentShard, .emptyShard, .nonFiniteSamples,
+             .audioBridgeFailure, .unsupportedSampleRate:
+            // The audio was rejected before recognition — a DECODE-side
+            // diagnosis wearing an ASR label.
+            false
+        case .modelNotLoaded, .speechEngineNotReady, .speechAssetsUnsupported,
+             .analyzerFormatUnavailable, .invalidAnalyzerTimeline:
+            // The recognizer could not be brought up at all.
+            false
+        case .noShards, .persistenceFailed:
+            // Nothing to recognise, or the failure was SQLite's.
+            false
+        case .cancelled, .stopped, .preempted:
+            // The run was cut short from outside; whatever ASR did or did not
+            // do, it is not what ended the run.
+            false
+        case .unknown:
+            // Includes genuine framework `NSError`s that carry a code but no
+            // recognised type. "We do not know" must not be exported as a
+            // positive claim that ASR ran.
+            false
+        }
+    }
 
     /// Classify a thrown error. Total by construction: everything that is not
     /// recognised is `.unknown`, so no call site can leak a description.
@@ -169,6 +241,21 @@ enum TranscriptFailureClass: String, Sendable, Hashable, CaseIterable, Codable {
         // also drops the synthesised case ordinal.)
         if error is AnalysisStoreError {
             return .persistenceFailed
+        }
+        // playhead-ngev: the three interruptions. The loop catches each of
+        // these by type before it reaches its catch-all, so these lines are
+        // not how the classes are normally produced — they are here so that an
+        // interruption arriving WRAPPED (rethrown out of a store call, say)
+        // cannot land in `.unknown`, which is the same "names an absence"
+        // defect one bucket down.
+        if error is CancellationError {
+            return .cancelled
+        }
+        if error is TranscriptEngineStopped {
+            return .stopped
+        }
+        if error is TranscriptEnginePreempted {
+            return .preempted
         }
         if let engineError = error as? TranscriptEngineError {
             switch engineError {
@@ -236,6 +323,26 @@ enum TranscriptFailureClass: String, Sendable, Hashable, CaseIterable, Codable {
     }
 }
 
+/// playhead-ngev: HOW the run ended, which is a different question from what
+/// went wrong in it.
+///
+/// The two axes have to be separate because they disagree in the case that
+/// matters. A run whose shards were failing `model_not_loaded` and which was
+/// then cancelled by a scrub has BOTH a genuine diagnosis (the class) and a
+/// termination that was not its own doing. Collapsing them either loses the
+/// class — reporting only "cancelled", throwing away what the engine knew — or
+/// loses the interruption, which is what tells `AnalysisCoordinator` that a
+/// successor loop is already running and this session must not be torn down.
+///
+/// Two compile-time literals, nothing derived from audio, a feed, a URL or
+/// user text — the same construction argument `TranscriptFailureClass` won.
+enum TranscriptRunTermination: String, Sendable, Hashable, Codable, CaseIterable {
+    /// The loop reached its own end and judged the run a total failure.
+    case ranToConclusion = "ran_to_conclusion"
+    /// The loop was cut short from outside: cancelled, stopped or preempted.
+    case interrupted
+}
+
 /// playhead-8ysk: what a transcription failure was, in exportable form.
 ///
 /// `code` is an `NSError.code` when the underlying error carried one. An
@@ -247,11 +354,33 @@ struct TranscriptFailureReason: Sendable, Hashable {
     /// How many shards failed before the loop gave up. `0` for failures
     /// raised before any shard was attempted.
     let failedShardCount: Int
+    /// playhead-ngev: whether the loop finished or was cut short. Defaults to
+    /// `.ranToConclusion` so every pre-existing construction — including the
+    /// total-failure gate's — keeps its meaning unchanged.
+    let termination: TranscriptRunTermination
 
-    init(failureClass: TranscriptFailureClass, code: Int? = nil, failedShardCount: Int = 0) {
+    init(
+        failureClass: TranscriptFailureClass,
+        code: Int? = nil,
+        failedShardCount: Int = 0,
+        termination: TranscriptRunTermination = .ranToConclusion
+    ) {
         self.failureClass = failureClass
         self.code = code
         self.failedShardCount = failedShardCount
+        self.termination = termination
+    }
+
+    /// This reason, re-stamped as an interrupted run. Used where the loop has
+    /// a real per-shard diagnosis to report but is exiting because something
+    /// outside it said so.
+    func interrupted() -> TranscriptFailureReason {
+        TranscriptFailureReason(
+            failureClass: failureClass,
+            code: code,
+            failedShardCount: failedShardCount,
+            termination: .interrupted
+        )
     }
 
     /// Classify a thrown error into an exportable reason.
@@ -352,64 +481,68 @@ actor TranscriptEngineService {
     /// Used by appendShards to decide whether to start a new loop.
     private var loopRunning: Bool = false
 
-    /// playhead-8ysk (review r3): transcript chunks THIS run inserted.
+    /// playhead-8ysk (review r3) / playhead-ngev: what ONE shard attempt
+    /// produced, returned by `transcribeShard` so the loop can add it up.
     ///
-    /// Reset at the top of every `runTranscriptionLoop` and incremented at the
-    /// single batch-insert site in `transcribeShard`, so it counts durable rows
-    /// this pass produced and nothing else.
-    ///
-    /// It exists because the obvious alternative is wrong.
-    /// `store.fetchTranscriptChunks(assetId:)` is
-    /// `WHERE analysisAssetId = ?` with no pass or generation scoping, and the
-    /// asset row is REUSED across passes — `AnalysisCoordinator` resolves it
-    /// with `fetchAssetByEpisodeId` and keeps `existing.id`. So on a retry of
-    /// an asset that once made progress, that query returns the EARLIER pass's
-    /// chunks, and a total failure now would read as "we produced something".
-    /// A retry of a partly-transcribed asset is the exact shape of this bead's
-    /// incident (147 acquisitions, 9 finalizations), so the cumulative read
-    /// would have failed in the case the failure event exists for — the same
-    /// per-pass-vs-cumulative confusion review r2 found in the runner's
-    /// `fastTranscriptCoverageEndTime` fallback, one layer down.
-    ///
-    /// `AnalysisJobRunner` already does this correctly and is the model:
-    /// it snapshots `existingChunkCount` before transcription and reports
-    /// `currentChunkCount - existingChunkCount`.
-    private var chunksInsertedThisRun: Int = 0
+    /// It used to be two actor fields zeroed at the top of
+    /// `runTranscriptionLoop`, and their doc comments claimed per-pass
+    /// scoping that the actor could not provide: `startTranscription` cancels
+    /// its predecessor and spawns the successor WITHOUT awaiting it, and
+    /// cancellation is cooperative, so two loop bodies overlap — and
+    /// `transcribeShard`'s silent-shard path has no cancellation check between
+    /// the recognizer returning and the increment. A cancelled predecessor
+    /// could therefore credit the successor's tally and suppress a genuine
+    /// `.failed`, which is the same "the count is not about this run" defect
+    /// the fields were introduced to fix, one level out. Loop-locals cannot
+    /// have it: there is no shared cell to write into.
+    struct ShardProgress: Sendable {
+        /// playhead-8ysk (review r3): durable `transcript_chunks` rows this
+        /// attempt inserted. The loop sums them into `chunksInsertedThisRun`.
+        ///
+        /// The obvious alternative — asking the store — is wrong.
+        /// `store.fetchTranscriptChunks(assetId:)` is
+        /// `WHERE analysisAssetId = ?` with no pass or generation scoping, and
+        /// the asset row is REUSED across passes (`AnalysisCoordinator`
+        /// resolves it with `fetchAssetByEpisodeId` and keeps `existing.id`).
+        /// So on a retry of an asset that once made progress, that query
+        /// returns the EARLIER pass's chunks and a total failure now would
+        /// read as "we produced something". A retry of a partly-transcribed
+        /// asset is the exact shape of playhead-8ysk's incident (147
+        /// acquisitions, 9 finalizations), so the cumulative read would have
+        /// failed in the case the failure event exists for.
+        ///
+        /// `AnalysisJobRunner` already does this correctly and is the model:
+        /// it snapshots `existingChunkCount` before transcription and reports
+        /// `currentChunkCount - existingChunkCount`.
+        var chunksInserted: Int = 0
 
-    /// playhead-8ysk (review r4): shards THIS run carried to a clean finish.
-    ///
-    /// Same lifetime as `chunksInsertedThisRun` — reset at the top of every
-    /// `runTranscriptionLoop`, incremented only at `transcribeShard`'s
-    /// successful exits, so it too is strictly per-pass.
-    ///
-    /// IT EXISTS BECAUSE COUNTING INSERTS IS NOT THE SAME AS COUNTING WORK,
-    /// and the total-failure gate needs the second one. `transcribeShard`
-    /// returns without inserting a row in two ordinary, successful cases:
-    /// a shard whose recognizer yields no segments (silence, music — it still
-    /// advances the coverage watermark and returns), and a shard whose
-    /// segments all match an existing `segmentFingerprint` and are therefore
-    /// deduped. The second is not an edge case here: a re-run over an asset
-    /// that is already transcribed dedups EVERY segment, and re-running
-    /// already-covered assets is this bead's own incident shape (147
-    /// acquisitions, 9 finalizations) — the loop deliberately does not filter
-    /// shards by coverage, precisely so the fingerprint dedup can do it.
-    ///
-    /// So `chunksInsertedThisRun == 0` alone reads a fully-successful re-run
-    /// that happened to also hit one bad shard as "this run produced
-    /// nothing", and reports a total failure for it. That is the same lie the
-    /// gate removes, pointing the other way: `.failed` over a run that did its
-    /// work, which costs a spurious `work_journal` row, a wrong
-    /// `lastErrorCode`, a requeue with backoff, and a skipped
-    /// `finalizeBackfill`. `retryThatPersistsSomethingStillCompletes` already
-    /// names "the store gained no rows, which a dedup-heavy retry can also
-    /// satisfy" as a rejected alternative — a per-run insert count has the
-    /// identical blind spot.
-    ///
-    /// A shard that finishes has done durable work even with no row to show
-    /// for it: the coverage watermark moved, so that audio is not re-attempted.
-    /// That is the same bar `partialSuccessStillCompletes` already sets — one
-    /// bad shard among good ones is a partial success, not a failure.
-    private var shardsCompletedThisRun: Int = 0
+        /// playhead-8ysk (review r4): whether the attempt carried the shard to
+        /// a clean finish. The loop sums these into `shardsCompletedThisRun`.
+        ///
+        /// IT EXISTS BECAUSE COUNTING INSERTS IS NOT THE SAME AS COUNTING
+        /// WORK, and the total-failure gate needs the second one.
+        /// `transcribeShard` returns without inserting a row in two ordinary,
+        /// successful cases: a shard whose recognizer yields no segments
+        /// (silence, music — it still advances the coverage watermark and
+        /// returns), and a shard whose segments all match an existing
+        /// `segmentFingerprint` and are therefore deduped. The second is not
+        /// an edge case: a re-run over an asset that is already transcribed
+        /// dedups EVERY segment, and the loop deliberately does not filter
+        /// shards by coverage, precisely so the fingerprint dedup can do it.
+        ///
+        /// So an insert count of zero alone reads a fully-successful re-run
+        /// that happened to also hit one bad shard as "this run produced
+        /// nothing", and reports a total failure for it — the same lie the
+        /// gate removes, pointing the other way, costing a spurious
+        /// `work_journal` row, a wrong `lastErrorCode`, a requeue with
+        /// backoff, and a skipped `finalizeBackfill`.
+        ///
+        /// A shard that finishes has done durable work even with no row to
+        /// show for it: the coverage watermark moved, so that audio is not
+        /// re-attempted. Same bar `partialSuccessStillCompletes` sets — one
+        /// bad shard among good ones is a partial success, not a failure.
+        var finished: Bool = false
+    }
 
     /// Optional preemption context threaded in by AnalysisJobRunner
     /// (playhead-01t8). Polled after each TranscriptChunk batch
@@ -437,6 +570,23 @@ actor TranscriptEngineService {
     /// post-stop appends even if `activeAssetId` has rotated to a
     /// different asset in the meantime.
     private var stoppedAssetIds: Set<String> = []
+
+    /// playhead-ngev: which transcription run is the current one.
+    ///
+    /// Bumped by every path that spawns a loop (`startTranscription` and
+    /// `appendShards`' cold start). A loop carries the value it was born with,
+    /// so it can ask "am I still the run this engine is driving?" without
+    /// consulting `activeTask` (which `stopTranscription` nils out) or
+    /// `activeAssetId` (which it clears).
+    ///
+    /// It exists for the stop-gate exemption in `emitEvent`. A `.failed` from
+    /// the CURRENT run must survive the gate — that is the failure the runner
+    /// is about to journal, and dropping it is how a fully classified failure
+    /// got deleted 30 lines before the row that needed it was written. A
+    /// `.failed` from a SUPERSEDED run must not: the successor has its own
+    /// observer, and a stale reason delivered into it would fail a run that
+    /// has not done anything yet.
+    private var runGeneration: Int = 0
 
     // MARK: - Init
 
@@ -499,11 +649,14 @@ actor TranscriptEngineService {
         latestSnapshot = snapshot
         self.preemption = preemption
 
+        runGeneration += 1
+        let generation = runGeneration
         activeTask = Task { [weak self] in
             guard let self else { return }
             await self.runTranscriptionLoop(
                 shards: shards,
-                analysisAssetId: analysisAssetId
+                analysisAssetId: analysisAssetId,
+                generation: generation
             )
             await self.clearActiveTask()
         }
@@ -588,11 +741,14 @@ actor TranscriptEngineService {
         // If no active loop, start one for the appended shards.
         if !loopRunning {
             activeAssetId = analysisAssetId
+            runGeneration += 1
+            let generation = runGeneration
             activeTask = Task { [weak self] in
                 guard let self else { return }
                 await self.runTranscriptionLoop(
                     shards: [],  // empty — the loop will pick up from appendedShards
-                    analysisAssetId: analysisAssetId
+                    analysisAssetId: analysisAssetId,
+                    generation: generation
                 )
             }
         }
@@ -737,18 +893,29 @@ actor TranscriptEngineService {
         appendWaiters.count
     }
 
-    /// playhead-8ysk test seam: push a `.failed` through `emitEvent` for an
+    /// playhead-8ysk test seam: push a `.failed` through the emit path for an
     /// arbitrary asset id.
     ///
-    /// `.failed` has to obey the same per-asset stop gate `.completed` does,
-    /// and that branch is not reachable from the loop: `startTranscription`
-    /// rescinds a stop for the asset it is starting, so no production
-    /// sequence can have the loop emit for an asset that is still gated. The
-    /// seam exercises the gate directly rather than leaving the branch
-    /// asserted only by the compiler's exhaustiveness check, which would
-    /// happily accept `stopped = false`.
-    func emitFailedForTesting(analysisAssetId: String, reason: TranscriptFailureReason) {
-        emitEvent(.failed(analysisAssetId: analysisAssetId, reason: reason))
+    /// The stop-gate branch is not reachable from the loop by ordinary means:
+    /// `startTranscription` rescinds a stop for the asset it is starting, so
+    /// no production sequence can have a fresh loop emit for an asset that is
+    /// still gated. The seam exercises the gate directly rather than leaving
+    /// the branch asserted only by the compiler's exhaustiveness check.
+    ///
+    /// playhead-ngev: `fromCurrentRun` selects which side of the exemption is
+    /// under test. It is threaded through the REAL `emitFailure` — as a
+    /// generation that either does or does not match `runGeneration` — so the
+    /// seam cannot pass while the production comparison is broken.
+    func emitFailedForTesting(
+        analysisAssetId: String,
+        reason: TranscriptFailureReason,
+        fromCurrentRun: Bool = false
+    ) {
+        emitFailure(
+            reason,
+            analysisAssetId: analysisAssetId,
+            generation: fromCurrentRun ? runGeneration : runGeneration - 1
+        )
     }
 #endif
 
@@ -768,7 +935,8 @@ actor TranscriptEngineService {
 
     private func runTranscriptionLoop(
         shards: [AnalysisShard],
-        analysisAssetId: String
+        analysisAssetId: String,
+        generation: Int
     ) async {
         loopRunning = true
         defer {
@@ -785,12 +953,56 @@ actor TranscriptEngineService {
         // below still `continue` — partial coverage is better than none — but
         // they no longer throw the diagnosis away with the shard.
         var shardFailures: [TranscriptFailureReason] = []
-        // playhead-8ysk (review r3): this run's own production. See the
-        // declaration for why the store cannot answer this question.
-        chunksInsertedThisRun = 0
-        // playhead-8ysk (review r4): and this run's own progress, which is not
-        // the same quantity — see the declaration.
-        shardsCompletedThisRun = 0
+        // playhead-8ysk (review r3): this run's own production, and
+        // (review r4) this run's own progress, which is not the same quantity.
+        // See `ShardProgress` for both rationales.
+        //
+        // playhead-ngev: LOCALS, not actor fields. Their previous doc comments
+        // asserted per-pass scoping that an actor field cannot give them,
+        // because `startTranscription` spawns the successor without awaiting
+        // the predecessor and cancellation is cooperative — two loop bodies
+        // overlap, and a cancelled predecessor could credit the successor.
+        var chunksInsertedThisRun = 0
+        var shardsCompletedThisRun = 0
+
+        // playhead-ngev: REPORT THE INTERRUPTION INSTEAD OF RETURNING IN
+        // SILENCE.
+        //
+        // Thirteen returns below used to leave the loop without a word, and
+        // eleven of them could do it while `shardFailures` held fully
+        // classified diagnoses that then went out of scope. The runner, still
+        // parked in its task group, waited out the full 300 s timeout and
+        // journaled `asr_failed` — so an ordinary scrub, an ordinary speed
+        // change, or starting a different episode was recorded as an ASR
+        // failure, five minutes after the fact.
+        //
+        // Which reason to send:
+        //   * `shardFailures` non-empty — the engine already knows what went
+        //     wrong; send `dominantFailure`, the same value the total-failure
+        //     gate sends, re-stamped as interrupted.
+        //   * empty — nothing went wrong, so the REASON WE STOPPED is the
+        //     whole diagnosis, and it is a fact the loop holds with certainty.
+        //
+        // Either way the termination says the run was cut short, which is what
+        // stops `AnalysisCoordinator` from tearing down a session whose
+        // successor loop is already running.
+        func reportInterruption(_ interruption: TranscriptFailureClass) {
+            // A gated asset means `stopTranscription` is the PROXIMATE cause
+            // and the cancellation is only its mechanism: it cancels the task
+            // and fences the asset in the same call, so whichever check the
+            // loop happens to reach first, the honest name is `stopped`. Left
+            // to the arms alone the same event would report `cancelled` or
+            // `stopped` depending on where the loop was parked, which is an
+            // implementation detail no bundle reader can act on. Only
+            // `.cancelled` is upgraded — a preempt has its own proximate cause.
+            let named = interruption == .cancelled && stoppedAssetIds.contains(analysisAssetId)
+                ? .stopped
+                : interruption
+            let reason = shardFailures.isEmpty
+                ? TranscriptFailureReason(failureClass: named, termination: .interrupted)
+                : Self.dominantFailure(shardFailures).interrupted()
+            emitFailure(reason, analysisAssetId: analysisAssetId, generation: generation)
+        }
 
         guard !shards.isEmpty || !appendedShards.isEmpty else {
             logger.warning("No shards to transcribe")
@@ -798,10 +1010,11 @@ actor TranscriptEngineService {
             // sat in `withTaskGroup` waiting for a `.completed` that could
             // never arrive, until its 300 s timeout fired — one of the two
             // paths behind `task_expired`.
-            emitEvent(.failed(
+            emitFailure(
+                TranscriptFailureReason(failureClass: .noShards),
                 analysisAssetId: analysisAssetId,
-                reason: TranscriptFailureReason(failureClass: .noShards)
-            ))
+                generation: generation
+            )
             return
         }
 
@@ -811,10 +1024,11 @@ actor TranscriptEngineService {
             // end of the swallowed launch-time `loadFastModel()` failure —
             // its empty catch claims "the transcript engine will surface
             // failures when first used", and until now it did not.
-            emitEvent(.failed(
+            emitFailure(
+                TranscriptFailureReason(failureClass: .speechEngineNotReady),
                 analysisAssetId: analysisAssetId,
-                reason: TranscriptFailureReason(failureClass: .speechEngineNotReady)
-            ))
+                generation: generation
+            )
             return
         }
 
@@ -829,6 +1043,7 @@ actor TranscriptEngineService {
         for shard in prioritized {
             guard !Task.isCancelled else {
                 logger.info("Transcription cancelled")
+                reportInterruption(.cancelled)
                 return
             }
 
@@ -838,23 +1053,32 @@ actor TranscriptEngineService {
             // fingerprint dedup (in transcribeShard) instead of skipping here.
 
             do {
-                try await transcribeShard(
+                let progress = try await transcribeShard(
                     shard,
                     analysisAssetId: analysisAssetId
                 )
+                chunksInsertedThisRun += progress.chunksInserted
+                shardsCompletedThisRun += progress.finished ? 1 : 0
             } catch is CancellationError {
                 logger.info("Transcription cancelled during shard \(shard.id)")
+                reportInterruption(.cancelled)
                 return
             } catch is TranscriptEnginePreempted {
                 logger.info("Transcription preempted at safe point after shard \(shard.id) [end=\(String(format: "%.1f", shard.startTime + shard.duration))s]")
+                reportInterruption(.preempted)
                 return
             } catch is TranscriptEngineStopped {
                 // playhead-5uvz.5: caller invoked
                 // `stopTranscription(analysisAssetId:)`. Exit the loop
-                // without emitting `.completed`; the asset is gated so
-                // any late writes/events from this point on would be
-                // dropped anyway.
+                // without emitting `.completed`.
+                //
+                // playhead-ngev: but NOT without a word. The asset is gated,
+                // which used to mean the report would be dropped at the emit
+                // gate anyway — that drop is what deleted the only classified
+                // account of the failure the runner was about to journal. The
+                // gate now lets the current run's `.failed` through.
                 logger.info("Transcription stopped for asset \(analysisAssetId) during shard \(shard.id)")
+                reportInterruption(.stopped)
                 return
             } catch {
                 logger.error("""
@@ -885,18 +1109,26 @@ actor TranscriptEngineService {
                 for shard in newPrioritized {
                     guard !Task.isCancelled else {
                         logger.info("Transcription cancelled during appended batch")
+                        reportInterruption(.cancelled)
                         return
                     }
                     do {
-                        try await transcribeShard(shard, analysisAssetId: analysisAssetId)
+                        let progress = try await transcribeShard(
+                            shard, analysisAssetId: analysisAssetId
+                        )
+                        chunksInsertedThisRun += progress.chunksInserted
+                        shardsCompletedThisRun += progress.finished ? 1 : 0
                     } catch is CancellationError {
                         logger.info("Transcription cancelled during appended shard \(shard.id)")
+                        reportInterruption(.cancelled)
                         return
                     } catch is TranscriptEnginePreempted {
                         logger.info("Transcription preempted at safe point after appended shard \(shard.id)")
+                        reportInterruption(.preempted)
                         return
                     } catch is TranscriptEngineStopped {
                         logger.info("Transcription stopped for asset \(analysisAssetId) during appended shard \(shard.id)")
+                        reportInterruption(.stopped)
                         return
                     } catch {
                         logger.error("""
@@ -913,20 +1145,27 @@ actor TranscriptEngineService {
             // we're done. Otherwise suspend until someone appends more
             // shards, calls finishAppending, or stops the engine.
             if inputClosed { break drainLoop }
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                reportInterruption(.cancelled)
+                return
+            }
             await waitForMoreShards()
         }
 
         // If the task was cancelled while we were suspended on a waiter,
         // exit without emitting `.completed`. Cancellation is not a
         // legitimate end-of-input.
-        if Task.isCancelled { return }
+        if Task.isCancelled {
+            reportInterruption(.cancelled)
+            return
+        }
 
         // playhead-5uvz.5: a stop landing while we were parked on a
         // waiter is also not a legitimate end-of-input. Bail before
         // running the shard-0 backfill or emitting `.completed`.
         if stoppedAssetIds.contains(analysisAssetId) {
             logger.info("Transcription loop exiting for stopped asset \(analysisAssetId) — no .completed emitted")
+            reportInterruption(.stopped)
             return
         }
 
@@ -949,6 +1188,7 @@ actor TranscriptEngineService {
                 allChunks = try await store.fetchTranscriptChunks(assetId: analysisAssetId)
             } catch is CancellationError {
                 logger.info("Transcript chunk fetch cancelled — exiting before shard-0 backfill")
+                reportInterruption(.cancelled)
                 return
             } catch {
                 logger.error("Failed to fetch transcript chunks for shard-0 backfill check: \(error)")
@@ -958,15 +1198,22 @@ actor TranscriptEngineService {
             if !hasEarlyChunk {
                 logger.warning("First 30s missing — transcribing shard 0")
                 do {
-                    try await transcribeShard(firstShard, analysisAssetId: analysisAssetId)
+                    let progress = try await transcribeShard(
+                        firstShard, analysisAssetId: analysisAssetId
+                    )
+                    chunksInsertedThisRun += progress.chunksInserted
+                    shardsCompletedThisRun += progress.finished ? 1 : 0
                 } catch is CancellationError {
                     logger.info("Shard-0 backfill cancelled — exiting without .completed")
+                    reportInterruption(.cancelled)
                     return
                 } catch is TranscriptEnginePreempted {
                     logger.info("Shard-0 backfill preempted — exiting without .completed")
+                    reportInterruption(.preempted)
                     return
                 } catch is TranscriptEngineStopped {
                     logger.info("Shard-0 backfill stopped for asset \(analysisAssetId) — exiting without .completed")
+                    reportInterruption(.stopped)
                     return
                 } catch {
                     logger.error("Shard-0 backfill failed: \(error)")
@@ -1019,7 +1266,7 @@ actor TranscriptEngineService {
         //
         // "Produced nothing" means THIS RUN produced nothing, which is why the
         // counts come from this run's own tallies and not from the store. See
-        // `chunksInsertedThisRun`'s declaration: `fetchTranscriptChunks(assetId:)`
+        // `ShardProgress.chunksInserted`: `fetchTranscriptChunks(assetId:)`
         // is cumulative over the asset's whole lifetime and the asset row is
         // reused across passes, so asking it here would have let a retry of a
         // partly-transcribed asset report `.completed` over a total failure —
@@ -1041,7 +1288,7 @@ actor TranscriptEngineService {
                 \(reason.failureClass.rawValue) \
                 across \(reason.failedShardCount) shard(s)
                 """)
-            emitEvent(.failed(analysisAssetId: analysisAssetId, reason: reason))
+            emitFailure(reason, analysisAssetId: analysisAssetId, generation: generation)
             return
         }
 
@@ -1153,10 +1400,13 @@ actor TranscriptEngineService {
 
     // MARK: - Single shard transcription
 
+    /// - Returns: what this attempt produced (playhead-ngev). The caller adds
+    ///   it to the run's own totals; nothing about one shard's work is stored
+    ///   on the actor, so an overlapping predecessor cannot credit a successor.
     private func transcribeShard(
         _ shard: AnalysisShard,
         analysisAssetId: String
-    ) async throws {
+    ) async throws -> ShardProgress {
         try Task.checkCancellation()
         // playhead-5uvz.5: per-shard stopped check at entry. The check
         // re-runs after every await point inside the shard so a
@@ -1181,8 +1431,7 @@ actor TranscriptEngineService {
             // playhead-8ysk (review r4): a silent shard produced no row but it
             // DID finish, and the watermark it just advanced is durable. Count
             // it, or a music-heavy run reads as having produced nothing.
-            shardsCompletedThisRun += 1
-            return
+            return ShardProgress(chunksInserted: 0, finished: true)
         }
 
         // Convert segments to TranscriptChunks and persist. Metadata upgrades on
@@ -1301,12 +1550,13 @@ actor TranscriptEngineService {
         try checkStopped(analysisAssetId: analysisAssetId)
 
         // Batch-insert to SQLite.
+        var progress = ShardProgress()
         if !chunksToInsert.isEmpty {
             try await store.insertTranscriptChunks(chunksToInsert)
             // playhead-8ysk (review r3): count AFTER the insert returns, so a
             // throwing insert (the `persistence_failed` class) does not credit
             // this run with rows it never wrote.
-            chunksInsertedThisRun += chunksToInsert.count
+            progress.chunksInserted = chunksToInsert.count
         }
         if !emittedChunks.isEmpty {
             emitEvent(.chunksPersisted(analysisAssetId: analysisAssetId, chunks: emittedChunks))
@@ -1320,11 +1570,16 @@ actor TranscriptEngineService {
         )
 
         // playhead-8ysk (review r4): the shard is finished and everything it
-        // produced is durable. Counted BEFORE the preemption safe point below
+        // produced is durable. Marked BEFORE the preemption safe point below
         // on purpose — a preempted loop returns without reaching the
         // total-failure gate, so the ordering cannot matter there, and
         // counting after the throw would under-report work that did land.
-        shardsCompletedThisRun += 1
+        //
+        // playhead-ngev: with the progress RETURNED rather than accumulated on
+        // the actor, a preempt throw does discard this shard's contribution.
+        // That is inert for the same reason: the preempted arm exits before
+        // the gate reads either total.
+        progress.finished = true
 
         logger.info("Wrote \(emittedChunks.count) chunks for shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shardEnd))s]")
 
@@ -1339,6 +1594,8 @@ actor TranscriptEngineService {
             await preemption.acknowledge()
             throw TranscriptEnginePreempted()
         }
+
+        return progress
     }
 
     // MARK: - Prioritization
@@ -1517,7 +1774,28 @@ actor TranscriptEngineService {
         eventContinuations.removeValue(forKey: id)
     }
 
-    private func emitEvent(_ event: TranscriptEngineEvent) {
+    /// playhead-ngev: emit a `.failed` on behalf of run `generation`.
+    ///
+    /// Every failure the loop reports goes through here so the stop-gate
+    /// exemption is decided in exactly one place, from the one fact that
+    /// settles it: whether the emitting run is still the run this engine is
+    /// driving.
+    private func emitFailure(
+        _ reason: TranscriptFailureReason,
+        analysisAssetId: String,
+        generation: Int
+    ) {
+        emitEvent(
+            .failed(analysisAssetId: analysisAssetId, reason: reason),
+            fromCurrentRun: generation == runGeneration
+        )
+    }
+
+    /// - Parameter fromCurrentRun: playhead-ngev — set by `emitFailure` only.
+    ///   `true` exempts a `.failed` from the stopped-asset drop. See the
+    ///   `.failed` arm below for why that exemption is correct for failures
+    ///   and wrong for the other two cases.
+    private func emitEvent(_ event: TranscriptEngineEvent, fromCurrentRun: Bool = false) {
         // playhead-5uvz.5: silently drop events for assets that have
         // been gated by `stopTranscription`. The bead contract is that
         // a stopped asset must produce no further `.chunksPersisted`
@@ -1531,11 +1809,27 @@ actor TranscriptEngineService {
         case .completed(let assetId):
             stopped = stoppedAssetIds.contains(assetId)
         case .failed(let assetId, _):
-            // playhead-8ysk: a `.failed` for a stopped asset is dropped for
-            // the same reason `.completed` is — the runner has moved on and
-            // any event it observes now would be attributed to whatever it is
-            // doing next.
-            stopped = stoppedAssetIds.contains(assetId)
+            // playhead-ngev: a `.failed` from the CURRENT run is NOT dropped,
+            // reversing playhead-8ysk's decision to gate it like `.completed`.
+            //
+            // The reason `.completed` is gated does not transfer. `.completed`
+            // is the signal that coverage is durable, and a subscriber acts on
+            // it: `AnalysisCoordinator` finalizes a backfill, the runner reads
+            // the watermark and queues ad detection. Delivering a stale one
+            // starts work over an asset nobody owns. `.failed` triggers no
+            // downstream work at all — it only names why nothing happened.
+            //
+            // And the asset being gated does not mean the runner has moved on.
+            // It inserts the asset id at the TOP of its zero-coverage branch
+            // and journals at the BOTTOM, so between those two lines the
+            // classified failure it is about to describe was being deleted for
+            // belonging to an asset that is "stopped". The gate silenced the
+            // one event the row needed.
+            //
+            // A SUPERSEDED run is still dropped: its generation no longer
+            // matches, its successor has its own observer, and a stale reason
+            // delivered there would fail a run that has not yet done anything.
+            stopped = stoppedAssetIds.contains(assetId) && !fromCurrentRun
         }
         if stopped {
             logger.info("Dropping event for stopped asset: \(String(describing: event))")
