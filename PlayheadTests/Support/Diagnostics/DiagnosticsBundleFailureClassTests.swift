@@ -151,6 +151,91 @@ struct DiagnosticsBundleFailureClassTests {
         #expect(!json.contains("Episode 412"))
     }
 
+    /// THE DURATION PROXY MUST NOT SHIP (review r3).
+    ///
+    /// `failed_shard_count` is written to `work_journal.metadata` for on-device
+    /// forensics and deliberately not projected: in a total failure it equals
+    /// the shard count, which discloses the episode's duration to ±30 s. That
+    /// is a usable fingerprint in a bundle that goes to the trouble of hashing
+    /// episode ids, and re-identifying an episode by duration against a public
+    /// feed is not hard.
+    ///
+    /// Review r2 exported it, then noticed and reverted — which is exactly why
+    /// this belongs in a test rather than in a comment. `WorkJournalRecord`
+    /// being a fixed-field `Codable` is a real barrier, but it is one edit
+    /// away from not being one, and the round-trip test asserts only that the
+    /// WRITE side emits the key. This asserts the property that actually
+    /// matters: the value does not appear in the bytes that leave the device.
+    ///
+    /// Per the standing correction that `DiagnosticsBundleShapeTests` is not
+    /// the legal guard here — it passed while an episode title leaked — the
+    /// check is against the ENCODED JSON, not against the struct.
+    @Test("failed_shard_count reaches the journal but never the encoded bundle")
+    func failedShardCountIsNotExported() throws {
+        // Two runs identical in every respect EXCEPT the shard count — a
+        // 48-minute episode and a 5-hour one. Asserting the encoded bundles are
+        // byte-identical is the precise form of "the count did not leak":
+        // a bare substring search for the number cannot work, because any small
+        // integer also occurs inside hashes and timestamps, and that noise is
+        // what makes such a test either flaky or vacuous.
+        //
+        // Everything else is pinned to a constant so the only free variable is
+        // the one under test — `Self.entry` mints a fresh `id`/`generationID`
+        // per call, which would defeat the comparison.
+        func bundleJSON(failedShardCount: Int) throws -> String {
+            let extras = AnalysisJobRunner.failureExtras(
+                TranscriptFailureReason(
+                    failureClass: .silentShard, code: 1107,
+                    failedShardCount: failedShardCount
+                )
+            )
+            #expect(
+                extras[DiagnosticsFailureKeys.failedShardCount] == String(failedShardCount),
+                "the write side must still record it on-device, or this test guards nothing"
+            )
+            let entry = WorkJournalEntry(
+                id: "fixed-journal-id",
+                episodeId: "ep-8ysk",
+                generationID: UUID(uuidString: "00000000-0000-0000-0000-0000000008AC")!,
+                schedulerEpoch: 3,
+                timestamp: Self.t0,
+                eventType: .failed,
+                cause: .asrFailed,
+                metadata: String(data: try JSONEncoder().encode(extras), encoding: .utf8)!,
+                artifactClass: .scratch
+            )
+            let bundle = DiagnosticsBundleBuilder.buildDefault(
+                appVersion: "1.0", osVersion: "iOS 27", deviceClass: .iPhone17Pro,
+                buildType: .debug, eligibility: Self.eligible,
+                workJournalEntries: [entry], installID: Self.installID
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            return String(data: try encoder.encode(bundle), encoding: .utf8)!
+        }
+
+        let short = try bundleJSON(failedShardCount: 97)     // ~48 min
+        let long = try bundleJSON(failedShardCount: 601)     // ~5 h
+
+        #expect(
+            short == long,
+            """
+            the exported bundle varies with the shard count, so it carries the \
+            episode's duration to ±30 s — from a bundle that hashes episode ids \
+            precisely to prevent that identification
+            """
+        )
+        #expect(
+            !short.contains(DiagnosticsFailureKeys.failedShardCount),
+            "the key itself must not appear in the exported bundle"
+        )
+
+        // The positive control: what IS meant to cross did cross, so a bundle
+        // that simply dropped everything would satisfy the checks above.
+        #expect(short.contains(TranscriptFailureClass.silentShard.rawValue))
+        #expect(short.contains("\"failure_code\":1107"))
+    }
+
     /// A non-numeric code is dropped for the same reason. `failure_code` is
     /// declared as an integer precisely so it cannot carry text.
     @Test("a non-numeric failure_code is dropped")
