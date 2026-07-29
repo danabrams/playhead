@@ -25,9 +25,13 @@
 //     audio lies at or before the analysis frontier" (pipeline progress).
 //   * This control's readiness ✓ and analyze zone show `adScanFraction` —
 //     "how much audio was actually read for ads" (the user-facing promise).
-// AN is the looser of the two, so it can legitimately read higher than the
-// ad-scan fraction for the same episode. What may never happen again is the
-// ✓ resolving from a quantity that is not ad-scan coverage.
+// Both are subsets of the transcript union, and NEITHER dominates the other:
+// AN can exceed the ad-scan fraction (the frontier has passed audio the scan has
+// not reached, the usual case), and the ad-scan fraction can exceed AN (a scan
+// window read text lying past the feature/ad frontier). So the two surfaces can
+// legitimately show different numbers for one episode; do not "reconcile" them
+// by making one read the other. What may never happen again is the ✓ resolving
+// from a quantity that is not ad-scan coverage.
 
 import Foundation
 
@@ -45,11 +49,11 @@ final class EpisodePreparationStatusModel {
     /// re-derive one episode without touching the store.
     private struct Raw {
         var isDownloaded = false
-        var analysisActive = false
-        var analysisComplete = false
-        var analysisTerminatedComplete = false
-        var analysisFailed = false
-        var adScanFraction: Double?
+        /// playhead-pz32: the analysis half, projected by the pure
+        /// `episodePreparationAnalysisInputs` from the asset row + its coverage
+        /// summary. Held as one value so this model cannot re-derive (or
+        /// half-derive) the readiness quantities itself.
+        var analysis = EpisodePreparationAnalysisInputs()
         var downloadPermitted = true
         var snapshotDownloadFraction: Double?
         var liveDownloadFraction: Double?
@@ -116,30 +120,11 @@ final class EpisodePreparationStatusModel {
             r.isDownloaded = cachedIds.contains(id)
             r.snapshotDownloadFraction = snapshot[id]
             r.downloadPermitted = permitted
-            if let asset = assets[id] {
-                let status = EpisodeSurfaceStatusObserver.analysisState(from: asset).persistedStatus
-                // The RAW column, not the projection: `PersistedStatus` folds
-                // all four completion terminals into `.done` and so cannot
-                // tell a degraded terminal from a full one.
-                let terminal = episodePreparationTerminalCompletion(
-                    analysisState: asset.analysisState
-                )
-                r.analysisActive = episodePreparationAnalysisActive(status: status)
-                r.adScanFraction = summaries[asset.id]?.adScanFraction
-                r.analysisComplete = episodePreparationAnalysisComplete(
-                    status: status,
-                    adScanFraction: r.adScanFraction,
-                    isDegradedTerminal: terminal?.isDegradedTerminalCompletion ?? false
-                )
-                r.analysisTerminatedComplete = (terminal != nil)
-                r.analysisFailed = (status == .failed || status == .cancelled)
-            } else {
-                r.analysisActive = false
-                r.analysisComplete = false
-                r.analysisTerminatedComplete = false
-                r.analysisFailed = false
-                r.adScanFraction = nil
-            }
+            let asset = assets[id]
+            r.analysis = episodePreparationAnalysisInputs(
+                asset: asset,
+                coverage: asset.flatMap { summaries[$0.id] }
+            )
             // Drop the optimistic download bridge once the real in-flight /
             // cached signal is present, so a transfer that never started
             // cannot strand the bar.
@@ -205,11 +190,11 @@ final class EpisodePreparationStatusModel {
                 isDownloaded: r.isDownloaded,
                 downloadInFlight: inFlight,
                 downloadFraction: downloadFraction,
-                analysisActive: r.analysisActive,
-                analysisComplete: r.analysisComplete,
-                analysisTerminatedComplete: r.analysisTerminatedComplete,
-                analysisFailed: r.analysisFailed,
-                adScanFraction: r.adScanFraction,
+                analysisActive: r.analysis.analysisActive,
+                analysisComplete: r.analysis.analysisComplete,
+                analysisTerminatedComplete: r.analysis.analysisTerminatedComplete,
+                analysisFailed: r.analysis.analysisFailed,
+                adScanFraction: r.analysis.adScanFraction,
                 userInitiated: userInitiated.contains(id),
                 downloadPermitted: r.downloadPermitted
             )

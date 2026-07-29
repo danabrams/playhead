@@ -623,18 +623,35 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     let adScanCoveredSource: CoverageProvenance
 
     /// playhead-pz32: ``adScanCoveredSec`` as a fraction of the episode's
-    /// duration, clamped to `[0, 1]`. `nil` when either the scan coverage or
-    /// a positive duration is unknown — an unmeasurable episode must read as
-    /// not-ready, never as ready.
+    /// duration, clamped to `[0, 1]`. `nil` when the quantity is not honestly
+    /// measurable — an unmeasurable episode must read as not-ready, never ready.
+    ///
+    /// Three ways it is not measurable, all returning `nil`:
+    ///   * scan coverage unknown or non-finite;
+    ///   * duration missing, non-finite, or non-positive (legacy rows,
+    ///     placeholder rows pre-decode) — never a divide-by-zero;
+    ///   * coverage exceeding the duration by more than one shard. A ratio above
+    ///     1 means the numerator and the denominator describe different audio,
+    ///     which happens for real: a feed can declare a duration wildly shorter
+    ///     than the file (the 2026-04-27 libsyn/flightcast episode declared 704 s
+    ///     for ~9,700 s of audio), and terminal rows carrying `transcript 1.163,
+    ///     feature 1.724` have been observed (playhead-csbq). Clamping such an
+    ///     overshoot to exactly `1.0` would turn a broken denominator into a
+    ///     confident ✓ on ~10% of the audio, so a disagreement that large reads
+    ///     as unmeasurable instead. One shard of slack absorbs the ordinary
+    ///     feed-vs-measured drift, mirroring
+    ///     ``FastTranscriptCoverageInvariant/Tolerances/watermarkPastDurationSec``.
     var adScanFraction: Double? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
+              adScanCoveredSec >= 0,
               let episodeDurationSec,
               episodeDurationSec.isFinite,
-              episodeDurationSec > 0 else {
+              episodeDurationSec > 0,
+              adScanCoveredSec <= episodeDurationSec + AnalysisAudioService.defaultShardDuration else {
             return nil
         }
-        return min(1, max(0, adScanCoveredSec / episodeDurationSec))
+        return min(1, adScanCoveredSec / episodeDurationSec)
     }
 }
 
@@ -711,21 +728,94 @@ enum AnalysisCoverageMath {
             return upperBound == .infinity ? unionedSeconds(intervals) : 0
         }
         guard upperBound > 0 else { return 0 }
-        let clipped = intervals.compactMap { interval -> (start: Double, end: Double)? in
-            // Drop non-finite / degenerate intervals before clipping so a
-            // poisoned endpoint cannot survive as a synthetic `[0, upperBound]`
-            // span after `max`/`min`.
-            guard interval.start.isFinite,
-                  interval.end.isFinite,
-                  interval.end > interval.start else {
-                return nil
+        return unionedSeconds(clip(intervals, to: upperBound))
+    }
+
+    /// playhead-pz32: unioned seconds of `intervals` that ALSO fall inside
+    /// `bounds` — the de-overlapped intersection area of two interval sets.
+    ///
+    /// Used to intersect semantic-scan window spans with the fast-transcript
+    /// union. A scan window's persisted `[windowStartTime, windowEndTime]` is
+    /// `first.startTime ... last.endTime` over the segments that fit one prompt
+    /// (`FoundationModelClassifier.planPassA`), so when the transcript has a
+    /// hole between two consecutive segments the window's BOUNDS straddle audio
+    /// whose text never entered the prompt. Taking the bounds at face value
+    /// would report a gappy transcript as fully screened — the same
+    /// reach-vs-area conflation playhead-sd71 removed one layer up. You cannot
+    /// read audio you never transcribed, so the intersection is the honest area.
+    ///
+    /// Result properties, both load-bearing: it is `<=
+    /// unionedSeconds(intervals)` AND `<= unionedSeconds(bounds)`, since the
+    /// intersection is a subset of each. Non-finite and degenerate intervals are
+    /// dropped on both sides; empty `bounds` yields `0` (no transcript evidence
+    /// ⇒ nothing can have been read).
+    static func unionedSecondsIntersecting(
+        _ intervals: [(start: Double, end: Double)],
+        within bounds: [(start: Double, end: Double)]
+    ) -> Double {
+        let left = mergedIntervals(normalize(intervals))
+        let right = mergedIntervals(normalize(bounds))
+        guard !left.isEmpty, !right.isEmpty else { return 0 }
+        var total: Double = 0
+        var i = 0
+        var j = 0
+        // Both sides are disjoint and ascending, so one linear sweep suffices:
+        // emit the overlap of the current pair, then advance whichever ends
+        // first (it cannot overlap anything later on the other side).
+        while i < left.count, j < right.count {
+            let start = max(left[i].start, right[j].start)
+            let end = min(left[i].end, right[j].end)
+            if end > start { total += end - start }
+            if left[i].end < right[j].end { i += 1 } else { j += 1 }
+        }
+        return total
+    }
+
+    /// Drop non-finite / degenerate intervals. Shared by the clipping and
+    /// intersection helpers so both honour ``unionedSeconds(_:)``'s contract.
+    private static func normalize(
+        _ intervals: [(start: Double, end: Double)]
+    ) -> [(start: Double, end: Double)] {
+        intervals.filter { $0.start.isFinite && $0.end.isFinite && $0.end > $0.start }
+    }
+
+    /// Sort + coalesce ALREADY-NORMALIZED intervals into a disjoint ascending
+    /// union. Touching intervals collapse, matching ``unionedSeconds(_:)``.
+    private static func mergedIntervals(
+        _ intervals: [(start: Double, end: Double)]
+    ) -> [(start: Double, end: Double)] {
+        let sorted = intervals.sorted { lhs, rhs in
+            if lhs.start != rhs.start { return lhs.start < rhs.start }
+            return lhs.end < rhs.end
+        }
+        var merged: [(start: Double, end: Double)] = []
+        for interval in sorted {
+            guard let last = merged.last else {
+                merged.append(interval)
+                continue
             }
+            if interval.start <= last.end {
+                merged[merged.count - 1] = (start: last.start, end: max(last.end, interval.end))
+            } else {
+                merged.append(interval)
+            }
+        }
+        return merged
+    }
+
+    /// Clip every interval to `[0, upperBound]`, dropping non-finite /
+    /// degenerate ones FIRST so a poisoned endpoint cannot survive as a
+    /// synthetic `[0, upperBound]` span after the `max`/`min`.
+    private static func clip(
+        _ intervals: [(start: Double, end: Double)],
+        to upperBound: Double
+    ) -> [(start: Double, end: Double)] {
+        normalize(intervals).compactMap { interval -> (start: Double, end: Double)? in
             let start = max(0, interval.start)
             let end = min(interval.end, upperBound)
             guard end > start else { return nil }
             return (start: start, end: end)
         }
-        return unionedSeconds(clipped)
     }
 }
 
@@ -9737,7 +9827,7 @@ actor AnalysisStore {
             // "unknown" — both render not-ready, but the provenance tag stays
             // honest about which one it is.
             let scanSQL = """
-                SELECT analysisAssetId, windowStartTime, windowEndTime, status
+                SELECT analysisAssetId, windowStartTime, windowEndTime, status, errorContext
                 FROM semantic_scan_results
                 WHERE scanPass = ?
                   AND analysisAssetId IN (\(placeholders))
@@ -9756,11 +9846,18 @@ actor AnalysisStore {
                 guard endTime > startTime else { continue }
                 // A window only counts as scanned when a verdict was actually
                 // obtained. A refused / guardrailed / cancelled window is NOT
-                // audio we screened and found clean — counting it would
-                // silently inflate coverage, which is the failure mode this
-                // whole read exists to prevent. An unrecognised status string
-                // (forward-compat) is treated as NOT examined: under-claim.
-                guard SemanticScanStatus(rawValue: text(scanStmt, 3))?.didExamineWindow == true else {
+                // audio we screened and found clean, and a NO-WORK SENTINEL row
+                // (`.noAds` spanning the whole attempted range, meaning "no work
+                // performed") is not either — counting them would silently
+                // inflate coverage, which is the failure mode this whole read
+                // exists to prevent. The condition lives in
+                // `SemanticScanResult.didExamineWindow(status:errorContext:)` so
+                // this narrow projection and the pipeline's own breadcrumb apply
+                // the same definition.
+                guard SemanticScanResult.didExamineWindow(
+                    status: SemanticScanStatus(rawValue: text(scanStmt, 3)),
+                    errorContext: optionalText(scanStmt, 4)
+                ) else {
                     continue
                 }
                 adScanIntervals[assetId, default: []].append((start: startTime, end: endTime))
@@ -9848,19 +9945,23 @@ actor AnalysisStore {
             case let (nil, confirmed?): analysisFrontierSec = confirmed
             case (nil, nil): analysisFrontierSec = nil
             }
+            // The transcribed region, as intervals. Real chunk intervals when
+            // chunks landed; otherwise the watermark modelled as one contiguous
+            // `[0, watermark]` span (so a clip degrades to
+            // `min(transcriptWatermark, …)`); empty when transcript coverage is
+            // entirely unknown.
+            let transcriptIntervals: [(start: Double, end: Double)]
+            if chunkMaxEnd != nil {
+                transcriptIntervals = fastIntervals[id] ?? []
+            } else if let transcriptCovered = fastCoveredSec {
+                transcriptIntervals = [(start: 0, end: transcriptCovered)]
+            } else {
+                transcriptIntervals = []
+            }
+
             let analysisCoveredSec: Double?
-            if let frontier = analysisFrontierSec, let transcriptCovered = fastCoveredSec {
-                let transcriptIntervals: [(start: Double, end: Double)]
-                if chunkMaxEnd != nil {
-                    // Real chunk intervals: gap-aware clip to the frontier.
-                    transcriptIntervals = fastIntervals[id] ?? []
-                } else {
-                    // Watermark-only transcript (no chunk intervals): model
-                    // the covered region as one contiguous [0, watermark] span
-                    // so the clip degrades to
-                    // min(transcriptWatermark, analysisFrontier).
-                    transcriptIntervals = [(start: 0, end: transcriptCovered)]
-                }
+            if let frontier = analysisFrontierSec, fastCoveredSec != nil {
+                // Gap-aware clip of the transcribed region to the frontier.
                 analysisCoveredSec = AnalysisCoverageMath.unionedSecondsClipped(
                     transcriptIntervals,
                     upperBound: frontier
@@ -9869,14 +9970,28 @@ actor AnalysisStore {
                 analysisCoveredSec = nil
             }
 
-            // playhead-pz32: semantic ad-scan AREA. Independent of every
-            // watermark above — this is the union of windows a semantic scan
-            // actually read. `nil` only when no coverage-lane row exists at
-            // all; a scan that ran and examined nothing reports a measured 0.
+            // playhead-pz32: semantic ad-scan AREA — audio a semantic scan
+            // actually read. Independent of every watermark above.
+            //
+            // INTERSECTED with the transcribed region, not taken at face value.
+            // A persisted window's `[windowStartTime, windowEndTime]` is
+            // `first.startTime ... last.endTime` over the segments that fit one
+            // prompt, so where the transcript has a hole between two consecutive
+            // segments the window's BOUNDS straddle audio whose text never
+            // entered the prompt. A transcript covering only `[0,60]` and
+            // `[3540,3600]` of an hour can fit in a single window whose bounds
+            // read `[0,3600]` — and reporting that as a fully screened episode
+            // would be this bead's own bug one layer down.
+            //
+            // `nil` only when no coverage-lane row exists at all; a scan that
+            // ran and examined nothing reports a measured 0.
             let adScanCoveredSec: Double?
             let adScanCoveredSource: AnalysisCoverageSummary.CoverageProvenance
             if adScanRowSeen.contains(id) {
-                adScanCoveredSec = AnalysisCoverageMath.unionedSeconds(adScanIntervals[id] ?? [])
+                adScanCoveredSec = AnalysisCoverageMath.unionedSecondsIntersecting(
+                    adScanIntervals[id] ?? [],
+                    within: transcriptIntervals
+                )
                 adScanCoveredSource = .semanticScanResults
             } else {
                 adScanCoveredSec = nil

@@ -127,6 +127,49 @@ struct SemanticScanResult: Sendable, Equatable {
         self.permissiveFallbackReason = permissiveFallbackReason
     }
 
+    /// playhead-pz32: `errorContext` prefix marking a NO-WORK SENTINEL row —
+    /// see `BackfillJobRunner.makeNoWorkSentinelScanResult`. Such a row carries
+    /// `status == .noAds` (whose ``SemanticScanStatus/didExamineWindow`` is
+    /// `true`, because `.noAds` is normally the permissive path's genuine "I
+    /// looked and there is nothing here" verdict) and spans the WHOLE attempted
+    /// transcript range — while explicitly meaning **no work was performed**.
+    ///
+    /// Any coverage accounting that treats it as examined therefore reports an
+    /// entire episode as screened off a job that made zero FM calls. The status
+    /// alone cannot distinguish the two, so the `errorContext` marker is the
+    /// discriminator, and it lives here so the writer, the pipeline breadcrumb
+    /// and the user-facing readiness predicate all agree.
+    static let noWorkSentinelErrorContextPrefix = "noWork:"
+
+    /// playhead-pz32: true when this row is a no-work sentinel rather than a
+    /// real examination. NEVER count it as scanned audio.
+    var isNoWorkSentinel: Bool {
+        Self.isNoWorkSentinel(errorContext: errorContext)
+    }
+
+    /// playhead-pz32: did this row screen its window and produce a verdict? The
+    /// single definition of "we looked", combining the status semantics with the
+    /// no-work-sentinel exclusion.
+    var didExamineWindow: Bool {
+        Self.didExamineWindow(status: status, errorContext: errorContext)
+    }
+
+    static func isNoWorkSentinel(errorContext: String?) -> Bool {
+        errorContext?.hasPrefix(noWorkSentinelErrorContextPrefix) == true
+    }
+
+    /// playhead-pz32: THE definition of "this row screened its window", stated
+    /// over the two raw column values so a narrow SQL projection can apply it
+    /// without decoding a whole row.
+    /// ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)`` calls this; do not
+    /// re-implement the condition at a call site. A `nil` status is an
+    /// unrecognised persisted string (forward-compat) and is NOT an examination —
+    /// under-claim.
+    static func didExamineWindow(status: SemanticScanStatus?, errorContext: String?) -> Bool {
+        guard let status, status.didExamineWindow else { return false }
+        return !isNoWorkSentinel(errorContext: errorContext)
+    }
+
     func isReusable(
         scanCohortJSON: String,
         transcriptVersion: String
@@ -197,8 +240,8 @@ struct SemanticScanResult: Sendable, Equatable {
 /// and negative-width rows are ignored: they carry no coverage information
 /// (and a `0.0 ... 0.0` row is the passB coordinate bug this bead fixed).
 struct SemanticScanCoverage: Sendable, Equatable {
-    /// Union of the time ranges of rows whose status says a verdict was
-    /// actually obtained (`SemanticScanStatus.didExamineWindow`).
+    /// Union of the time ranges of rows that actually obtained a verdict
+    /// (`SemanticScanResult.didExamineWindow`).
     let examinedSeconds: Double
     /// Union of attempted-or-expected time that produced no verdict, with
     /// `examinedSeconds` subtracted out. A window that refused and was then
@@ -255,14 +298,19 @@ struct SemanticScanCoverage: Sendable, Equatable {
         episodeDuration: Double? = nil
     ) -> SemanticScanCoverage {
         let passRows = rows.filter { $0.scanPass == scanPass && $0.windowEndTime > $0.windowStartTime }
+        // playhead-pz32: `didExamineWindow` is the row-level predicate (status
+        // semantics MINUS no-work sentinels), not the bare status. A sentinel
+        // spans the whole attempted range while meaning "no work performed", so
+        // counting it as examined turned a job that made zero FM calls into a
+        // fully-screened episode. It is correctly reported as a HOLE instead.
         let examined = merge(
             passRows
-                .filter(\.status.didExamineWindow)
+                .filter(\.didExamineWindow)
                 .map { $0.windowStartTime ... $0.windowEndTime }
         )
         var unexamined = merge(
             passRows
-                .filter { !$0.status.didExamineWindow }
+                .filter { !$0.didExamineWindow }
                 .map { $0.windowStartTime ... $0.windowEndTime }
         )
         if let episodeDuration, episodeDuration > 0 {

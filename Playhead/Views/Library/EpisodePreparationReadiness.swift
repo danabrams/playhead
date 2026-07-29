@@ -197,12 +197,32 @@ func deriveEpisodePreparationReadiness(
     //        `completeTranscriptPartial`), where the transcript never
     //        advanced far enough for the scan to read the audio;
     //      * a nominally-full terminal whose MEASURED ad-scan coverage is
-    //        short (or unmeasurable).
+    //        short.
     //    It must not read as `.analyzing` either: nothing is running, so a
     //    working bar would promise progress that will never arrive. A
-    //    completion terminal is about analysis, not about the audio cache,
-    //    so this outranks the download branches below.
-    if inputs.analysisTerminatedComplete, !inputs.analysisActive {
+    //    completion terminal is about analysis, not about the audio cache, so
+    //    this outranks the download branches below — EXCEPT while a transfer is
+    //    genuinely in flight, where the live download is the more useful truth
+    //    and a frozen ◐ would hide it.
+    if inputs.analysisTerminatedComplete, !inputs.analysisActive, !inputs.downloadInFlight {
+        // ◐ asserts a MEASUREMENT ("this much was scanned"). With no ad-scan
+        // measurement at all there is nothing to assert: rendering ◐ would put a
+        // fabricated "0% scanned" against a quantity the store explicitly tagged
+        // unknown, and ◐ is not actionable, so the user would be stranded.
+        //
+        // This is the state after a cohort bump — `semantic_scan_results` rows
+        // are deleted whenever the prompt/schema/plan/normalization revs, the
+        // locale changes, the OS updates or the app build changes
+        // (`pruneOrphanedScansForCurrentCohort`), which also means the pipeline
+        // itself no longer trusts those verdicts. "Nothing is prepared; tap to
+        // prepare" is exactly true, and ✦ is the actionable glyph that says it.
+        guard inputs.adScanFraction != nil else {
+            return EpisodePreparationReadiness(
+                state: .idle,
+                downloadFraction: inputs.isDownloaded ? 1 : download,
+                analysisFraction: 0
+            )
+        }
         return EpisodePreparationReadiness(
             state: .partiallyAnalyzed,
             downloadFraction: inputs.isDownloaded ? 1 : download,
@@ -414,6 +434,58 @@ func episodePreparationTerminalCompletion(analysisState: String) -> SessionState
         return nil
     }
     return sessionState
+}
+
+// MARK: - Persisted-artifact projection (pure)
+
+/// playhead-pz32: the ANALYSIS half of the control's inputs.
+///
+/// Extracted so the one decision this bead is about — WHICH persisted quantity
+/// the ✓ resolves from — lives in a pure function instead of inside an
+/// `@Observable` `@MainActor` model that needs a live `PlayheadRuntime` to
+/// exercise. Before the extraction, swapping `adScanFraction` back to the DSP
+/// feature watermark (or to a constant `1.0`) was a one-line mutation that the
+/// entire test suite let through.
+struct EpisodePreparationAnalysisInputs: Equatable, Sendable {
+    var analysisActive: Bool = false
+    var analysisComplete: Bool = false
+    var analysisTerminatedComplete: Bool = false
+    var analysisFailed: Bool = false
+    var adScanFraction: Double?
+}
+
+/// playhead-pz32: project the two persisted artifacts an episode row consults —
+/// its `analysis_assets` row and its ``AnalysisCoverageSummary`` — into the
+/// control's analysis inputs.
+///
+/// - Parameters:
+///   - asset: the latest `analysis_assets` row, or `nil` when the episode has
+///     never been queued for analysis (everything false, coverage unknown).
+///   - coverage: the coverage summary for THAT asset. A summary whose `assetId`
+///     does not match is ignored rather than trusted — a mis-joined batch read
+///     must under-claim, never lend one episode's coverage to another.
+func episodePreparationAnalysisInputs(
+    asset: AnalysisAsset?,
+    coverage: AnalysisCoverageSummary?
+) -> EpisodePreparationAnalysisInputs {
+    guard let asset else { return EpisodePreparationAnalysisInputs() }
+    let status = EpisodeSurfaceStatusObserver.analysisState(from: asset).persistedStatus
+    // The RAW column, not the projected status: `PersistedStatus` folds all four
+    // completion terminals into `.done` and so cannot tell a degraded terminal
+    // from a full one.
+    let terminal = episodePreparationTerminalCompletion(analysisState: asset.analysisState)
+    let adScanFraction = coverage?.assetId == asset.id ? coverage?.adScanFraction : nil
+    return EpisodePreparationAnalysisInputs(
+        analysisActive: episodePreparationAnalysisActive(status: status),
+        analysisComplete: episodePreparationAnalysisComplete(
+            status: status,
+            adScanFraction: adScanFraction,
+            isDegradedTerminal: terminal?.isDegradedTerminalCompletion ?? false
+        ),
+        analysisTerminatedComplete: terminal != nil,
+        analysisFailed: status == .failed || status == .cancelled,
+        adScanFraction: adScanFraction
+    )
 }
 
 // MARK: - Private

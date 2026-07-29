@@ -251,6 +251,53 @@ struct EpisodePreparationReadinessTests {
         #expect(r.state == .analyzing)
     }
 
+    @Test("no ad-scan measurement at a completion terminal → actionable ✦, never a fabricated ◐ 0%")
+    func testTerminalWithNoMeasurementIsActionableIdle() {
+        // `semantic_scan_results` rows are deleted whenever the scan cohort revs
+        // — prompt/schema/plan/normalization bumps, a locale change, an OS
+        // update, or simply a new app build
+        // (`pruneOrphanedScansForCurrentCohort`). After that the coverage is
+        // genuinely UNKNOWN, and the pipeline no longer trusts those verdicts
+        // either. ◐ would assert a measurement ("0% scanned") that does not
+        // exist, and ◐ is not actionable — so the whole library would strand on
+        // a dead glyph after every release. ✦ is true and tappable.
+        let readiness = deriveEpisodePreparationReadiness(
+            inputs(
+                isDownloaded: true,
+                analysisTerminatedComplete: true,
+                adScanFraction: nil
+            )
+        )
+        #expect(readiness.state == .idle)
+        #expect(readiness.downloadFraction == 1)
+        // A MEASURED zero is different: it stays ◐, because 0 is a real answer.
+        let measuredZero = deriveEpisodePreparationReadiness(
+            inputs(
+                isDownloaded: true,
+                analysisTerminatedComplete: true,
+                adScanFraction: 0
+            )
+        )
+        #expect(measuredZero.state == .partiallyAnalyzed)
+    }
+
+    @Test("an in-flight download outranks ◐ so the live transfer stays visible")
+    func testDownloadInFlightOutranksPartiallyAnalyzed() {
+        // Re-downloading evicted audio for a terminal-but-short episode: a
+        // frozen ◐ would hide the transfer that is actually happening.
+        let readiness = deriveEpisodePreparationReadiness(
+            inputs(
+                isDownloaded: false,
+                downloadInFlight: true,
+                downloadFraction: 0.42,
+                analysisTerminatedComplete: true,
+                adScanFraction: 0.47
+            )
+        )
+        #expect(readiness.state == .downloading)
+        #expect(readiness.downloadFraction == 0.42)
+    }
+
     @Test("terminal-but-short on an un-downloaded episode still reads ◐, not ✦")
     func testTerminalShortWithoutCachedAudio() {
         // The audio cache can be evicted after analysis; a completion terminal
@@ -505,13 +552,46 @@ struct EpisodePreparationReadinessTests {
 
     // MARK: - Terminal SessionState → resting disposition (end-to-end)
 
+    private static let assetId = "asset"
+    private static let episodeDuration: Double = 1000
+
+    /// An asset whose every DISCREDITED watermark is parked at the end of the
+    /// episode. Any implementation that resolves readiness from
+    /// `featureCoverageEndTime` or `confirmedAdCoverageEndTime` reads 1.0 here.
     private func asset(state: SessionState) -> AnalysisAsset {
         AnalysisAsset(
-            id: "asset", episodeId: "ep", assetFingerprint: "fp",
+            id: Self.assetId, episodeId: "ep", assetFingerprint: "fp",
             weakFingerprint: nil, sourceURL: "https://example.com/a.mp3",
-            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
-            confirmedAdCoverageEndTime: nil,
-            analysisState: state.rawValue, analysisVersion: 1, capabilitySnapshot: nil
+            featureCoverageEndTime: Self.episodeDuration,
+            fastTranscriptCoverageEndTime: Self.episodeDuration,
+            confirmedAdCoverageEndTime: Self.episodeDuration,
+            analysisState: state.rawValue, analysisVersion: 1, capabilitySnapshot: nil,
+            episodeDurationSec: Self.episodeDuration
+        )
+    }
+
+    /// A coverage summary in which EVERY scalar except `adScanCoveredSec` is at
+    /// full coverage — including the gap-aware `analysisCoveredSec` the Activity
+    /// screen shows. So a mutation that swaps the readiness predicate onto any
+    /// other scalar of this same read model is caught, not just one that reverts
+    /// to the raw asset watermarks.
+    private func coverage(assetId: String = assetId, adScanCoveredSec: Double?) -> AnalysisCoverageSummary {
+        AnalysisCoverageSummary(
+            assetId: assetId,
+            episodeDurationSec: Self.episodeDuration,
+            fastTranscriptCoveredSec: Self.episodeDuration,
+            fastTranscriptCoveredSource: .fastTranscriptChunks,
+            fastTranscriptCoverageEndSec: Self.episodeDuration,
+            fastTranscriptCoverageEndSource: .fastTranscriptChunks,
+            featureCoverageEndSec: Self.episodeDuration,
+            featureCoverageEndSource: .assetWatermark,
+            confirmedAdCoverageEndSec: Self.episodeDuration,
+            confirmedAdCoverageEndSource: .assetWatermark,
+            finalPassCoverageEndSec: Self.episodeDuration,
+            finalPassCoverageEndSource: .finalPassChunks,
+            analysisCoveredSec: Self.episodeDuration,
+            adScanCoveredSec: adScanCoveredSec,
+            adScanCoveredSource: adScanCoveredSec == nil ? .unknown : .semanticScanResults
         )
     }
 
@@ -519,31 +599,99 @@ struct EpisodePreparationReadinessTests {
         EpisodeSurfaceStatusObserver.analysisState(from: asset(state: state)).persistedStatus
     }
 
-    /// Reproduces exactly what `EpisodePreparationStatusModel.refresh` does for
-    /// one asset, so the projection + terminal classification + predicate are
-    /// exercised as a unit rather than as three separately-mocked booleans.
+    /// Drives the PRODUCTION projection (`episodePreparationAnalysisInputs`) —
+    /// the same call `EpisodePreparationStatusModel.refresh` makes — rather than
+    /// re-deriving the booleans in the test. Without this, swapping the model's
+    /// one `adScanFraction` line back to any other quantity was a mutation the
+    /// whole suite let through.
     private func derive(
         sessionState: SessionState,
         adScanFraction: Double?,
         isDownloaded: Bool = true
     ) -> EpisodePreparationReadiness {
-        let assetRow = asset(state: sessionState)
-        let status = EpisodeSurfaceStatusObserver.analysisState(from: assetRow).persistedStatus
-        let terminal = episodePreparationTerminalCompletion(analysisState: assetRow.analysisState)
+        let analysis = episodePreparationAnalysisInputs(
+            asset: asset(state: sessionState),
+            coverage: coverage(
+                adScanCoveredSec: adScanFraction.map { $0 * Self.episodeDuration }
+            )
+        )
+        #expect(analysis.adScanFraction == adScanFraction)
         return deriveEpisodePreparationReadiness(
             inputs(
                 isDownloaded: isDownloaded,
-                analysisActive: episodePreparationAnalysisActive(status: status),
-                analysisComplete: episodePreparationAnalysisComplete(
-                    status: status,
-                    adScanFraction: adScanFraction,
-                    isDegradedTerminal: terminal?.isDegradedTerminalCompletion ?? false
-                ),
-                analysisTerminatedComplete: terminal != nil,
-                analysisFailed: status == .failed || status == .cancelled,
-                adScanFraction: adScanFraction
+                analysisActive: analysis.analysisActive,
+                analysisComplete: analysis.analysisComplete,
+                analysisTerminatedComplete: analysis.analysisTerminatedComplete,
+                analysisFailed: analysis.analysisFailed,
+                adScanFraction: analysis.adScanFraction
             )
         )
+    }
+
+    // MARK: - playhead-pz32: the persisted-artifact projection
+
+    @Test("projection reads ad-scan coverage, not any watermark on the same row")
+    func testProjectionReadsAdScanCoverage() {
+        // Every other coverage scalar is at 1000/1000 here; only the ad-scan area
+        // is short. This is the mutation guard for the single line the bead is
+        // about — any other scalar yields 1.0 and flips the ✓ back on.
+        let analysis = episodePreparationAnalysisInputs(
+            asset: asset(state: .backfill),
+            coverage: coverage(adScanCoveredSec: 470)
+        )
+        #expect(analysis.adScanFraction == 0.47)
+        #expect(!analysis.analysisComplete)
+        #expect(analysis.analysisActive)
+        #expect(!analysis.analysisTerminatedComplete)
+        #expect(!analysis.analysisFailed)
+    }
+
+    @Test("projection distinguishes the four completion terminals from the RAW column")
+    func testProjectionUsesRawAnalysisStateColumn() {
+        // Passing the PROJECTED status string instead of the raw column would
+        // make `analysisTerminatedComplete` always false and disarm the degraded
+        // guard entirely, because `PersistedStatus.done`'s raw value is not a
+        // `SessionState` raw value.
+        for state in SessionState.allCases {
+            let analysis = episodePreparationAnalysisInputs(
+                asset: asset(state: state),
+                coverage: coverage(adScanCoveredSec: Self.episodeDuration)
+            )
+            #expect(
+                analysis.analysisTerminatedComplete == state.isTerminalCompletion,
+                "\(state) terminal-completion projection is wrong"
+            )
+            // At FULL coverage only the two non-degraded completion terminals —
+            // and the still-running states — may read complete.
+            let mayBeComplete = !state.isDegradedTerminalCompletion && !state.isTerminalFailure
+            #expect(
+                analysis.analysisComplete == mayBeComplete,
+                "\(state) completeness at full coverage should be \(mayBeComplete)"
+            )
+        }
+    }
+
+    @Test("projection with no asset row claims nothing")
+    func testProjectionWithoutAssetClaimsNothing() {
+        let analysis = episodePreparationAnalysisInputs(
+            asset: nil,
+            coverage: coverage(adScanCoveredSec: Self.episodeDuration)
+        )
+        #expect(analysis == EpisodePreparationAnalysisInputs())
+        #expect(analysis.adScanFraction == nil)
+        #expect(!analysis.analysisComplete)
+    }
+
+    @Test("a coverage summary for a DIFFERENT asset is ignored, not borrowed")
+    func testProjectionRejectsMismatchedCoverage() {
+        // A mis-joined batch read must under-claim rather than lend one
+        // episode's coverage to another and light every row's ✓ at once.
+        let analysis = episodePreparationAnalysisInputs(
+            asset: asset(state: .completeFull),
+            coverage: coverage(assetId: "some-other-asset", adScanCoveredSec: Self.episodeDuration)
+        )
+        #expect(analysis.adScanFraction == nil)
+        #expect(!analysis.analysisComplete)
     }
 
     /// playhead-pz32 acceptance (c): each DEGRADED terminal must be
@@ -638,9 +786,10 @@ struct EpisodePreparationReadinessTests {
             let readiness = derive(sessionState: sessionState, adScanFraction: 0.01)
             #expect(readiness.state != .ready, "\(sessionState) must not read ready at 1% scanned")
         }
-        // Zero and unknown coverage are both under-claims, never ✓.
+        // Zero and unknown coverage are both under-claims, never ✓ — but they
+        // are different claims: 0 is measured (◐), nil is unmeasured (✦).
         #expect(derive(sessionState: .completeFull, adScanFraction: 0).state == .partiallyAnalyzed)
-        #expect(derive(sessionState: .completeFull, adScanFraction: nil).state == .partiallyAnalyzed)
+        #expect(derive(sessionState: .completeFull, adScanFraction: nil).state == .idle)
         #expect(derive(sessionState: .backfill, adScanFraction: nil).state == .analyzing)
     }
 

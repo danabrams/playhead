@@ -312,6 +312,117 @@ struct AnalysisCoverageMathClippedTests {
         #expect(result == 0)
     }
 
+    // MARK: - playhead-pz32: unionedSecondsIntersecting
+
+    /// The canonical case: ONE wide span against a gappy bound set. Bare union
+    /// would say 3600; the intersection says 120.
+    @Test("(pz32) one wide interval against gappy bounds yields only the covered part")
+    func intersectionOfWideSpanWithGappyBounds() {
+        let result = AnalysisCoverageMath.unionedSecondsIntersecting(
+            [(start: 0, end: 3600)],
+            within: [(start: 0, end: 60), (start: 3540, end: 3600)]
+        )
+        #expect(result == 120)
+    }
+
+    @Test("(pz32) empty bounds or empty intervals yield zero")
+    func intersectionWithEmptySideIsZero() {
+        #expect(AnalysisCoverageMath.unionedSecondsIntersecting([(start: 0, end: 10)], within: []) == 0)
+        #expect(AnalysisCoverageMath.unionedSecondsIntersecting([], within: [(start: 0, end: 10)]) == 0)
+        #expect(AnalysisCoverageMath.unionedSecondsIntersecting([], within: []) == 0)
+    }
+
+    @Test("(pz32) overlapping intervals on BOTH sides are de-overlapped, not double-counted")
+    func intersectionDeOverlapsBothSides() {
+        // Left union = [0,100]; right union = [50,150]; intersection = [50,100].
+        let result = AnalysisCoverageMath.unionedSecondsIntersecting(
+            [(start: 0, end: 80), (start: 40, end: 100)],
+            within: [(start: 50, end: 120), (start: 90, end: 150)]
+        )
+        #expect(result == 50)
+    }
+
+    @Test("(pz32) disjoint interval and bound sets interleave correctly")
+    func intersectionInterleaves() {
+        // [0,10]∩[5,20]=5, [30,40]∩[35,50]=5, [100,110] has no bound → 0.
+        let result = AnalysisCoverageMath.unionedSecondsIntersecting(
+            [(start: 0, end: 10), (start: 30, end: 40), (start: 100, end: 110)],
+            within: [(start: 5, end: 20), (start: 35, end: 50)]
+        )
+        #expect(result == 10)
+    }
+
+    @Test("(pz32) touching-only intervals contribute zero (no negative-width overlap)")
+    func intersectionOfTouchingIsZero() {
+        let result = AnalysisCoverageMath.unionedSecondsIntersecting(
+            [(start: 0, end: 10)],
+            within: [(start: 10, end: 20)]
+        )
+        #expect(result == 0)
+    }
+
+    @Test("(pz32) non-finite and degenerate endpoints are dropped on both sides")
+    func intersectionDropsNonFiniteAndDegenerate() {
+        let result = AnalysisCoverageMath.unionedSecondsIntersecting(
+            [(start: 0, end: 100), (start: .nan, end: 200), (start: 50, end: 50), (start: 90, end: 10)],
+            within: [(start: 0, end: 100), (start: .infinity, end: 500), (start: 20, end: .nan)]
+        )
+        #expect(result == 100)
+        #expect(result.isFinite)
+    }
+
+    /// Core invariant: the intersection is a subset of BOTH sides, so it can
+    /// never exceed either union. Swept over many bound windows so an
+    /// off-by-one in the linear merge sweep shows up as an overshoot.
+    @Test("(pz32) intersection never exceeds either side's union")
+    func intersectionNeverExceedsEitherUnion() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 0, end: 140),
+            (start: 300, end: 390),
+            (start: 500, end: 560),
+            (start: 900, end: 1000)
+        ]
+        let leftUnion = AnalysisCoverageMath.unionedSeconds(intervals)
+        for width in stride(from: 1.0, through: 400.0, by: 13.0) {
+            for offset in stride(from: -50.0, through: 1100.0, by: 71.0) {
+                let bounds = [
+                    (start: offset, end: offset + width),
+                    (start: offset + width * 2, end: offset + width * 3)
+                ]
+                let rightUnion = AnalysisCoverageMath.unionedSeconds(bounds)
+                let intersection = AnalysisCoverageMath.unionedSecondsIntersecting(
+                    intervals, within: bounds
+                )
+                #expect(intersection >= 0)
+                #expect(intersection <= leftUnion + 1e-9,
+                        "intersection \(intersection) exceeded left union \(leftUnion)")
+                #expect(intersection <= rightUnion + 1e-9,
+                        "intersection \(intersection) exceeded right union \(rightUnion)")
+            }
+        }
+    }
+
+    /// Intersecting with a single `[0, upperBound]` bound must agree exactly with
+    /// `unionedSecondsClipped` — two routes to the same clip.
+    @Test("(pz32) intersecting with [0, bound] equals unionedSecondsClipped")
+    func intersectionAgreesWithClippedForSingleBound() {
+        let intervals: [(start: Double, end: Double)] = [
+            (start: 0, end: 140),
+            (start: 300, end: 390),
+            (start: 900, end: 1000)
+        ]
+        for upperBound in stride(from: 1.0, through: 1200.0, by: 37.0) {
+            let clipped = AnalysisCoverageMath.unionedSecondsClipped(
+                intervals, upperBound: upperBound
+            )
+            let intersected = AnalysisCoverageMath.unionedSecondsIntersecting(
+                intervals, within: [(start: 0, end: upperBound)]
+            )
+            #expect(abs(clipped - intersected) < 1e-9,
+                    "clip \(clipped) != intersect \(intersected) at \(upperBound)")
+        }
+    }
+
     /// Core invariant (AN <= TX at the math layer): for arbitrary gappy
     /// intervals and ANY frontier, the clipped area never exceeds the
     /// unclipped union, because each clipped interval is a subset of its
@@ -1550,6 +1661,10 @@ struct AnalysisStoreAdScanCoverageTests {
         return String(decoding: data, as: UTF8.self)
     }()
 
+    /// `fastTranscriptCoverageEndTime` defaults to the full episode duration —
+    /// a completely transcribed episode, the case in which the ad-scan area is
+    /// bounded only by the scan windows themselves. Tests that need a gappy or
+    /// over-reaching transcript pass their own value (or insert real chunks).
     private func makeAsset(
         id: String,
         episodeDurationSec: Double? = 3600,
@@ -1565,7 +1680,7 @@ struct AnalysisStoreAdScanCoverageTests {
             weakFingerprint: nil,
             sourceURL: "file:///\(id).m4a",
             featureCoverageEndTime: featureCoverageEndTime,
-            fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
+            fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime ?? episodeDurationSec,
             confirmedAdCoverageEndTime: confirmedAdCoverageEndTime,
             analysisState: analysisState,
             analysisVersion: 1,
@@ -1580,7 +1695,8 @@ struct AnalysisStoreAdScanCoverageTests {
         start: Double,
         end: Double,
         status: SemanticScanStatus = .success,
-        scanPass: String = SemanticScanCoverage.coverageScanPass
+        scanPass: String = SemanticScanCoverage.coverageScanPass,
+        errorContext: String? = nil
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: "\(assetId)-scan-\(scanPass)-\(index)",
@@ -1595,7 +1711,7 @@ struct AnalysisStoreAdScanCoverageTests {
             spansJSON: "[]",
             status: status,
             attemptCount: 1,
-            errorContext: nil,
+            errorContext: errorContext,
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: nil,
@@ -1771,8 +1887,12 @@ struct AnalysisStoreAdScanCoverageTests {
     @Test("unknown or zero duration → nil fraction, never a claim of readiness")
     func unmeasurableDurationYieldsNilFraction() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeAsset(id: "a-nodur", episodeDurationSec: nil))
-        try await store.insertAsset(makeAsset(id: "a-zerodur", episodeDurationSec: 0))
+        try await store.insertAsset(makeAsset(
+            id: "a-nodur", episodeDurationSec: nil, fastTranscriptCoverageEndTime: 900
+        ))
+        try await store.insertAsset(makeAsset(
+            id: "a-zerodur", episodeDurationSec: 0, fastTranscriptCoverageEndTime: 900
+        ))
         for id in ["a-nodur", "a-zerodur"] {
             try await store.insertSemanticScanResult(
                 makeScan(assetId: id, index: 0, start: 0, end: 900)
@@ -1790,19 +1910,50 @@ struct AnalysisStoreAdScanCoverageTests {
         }
     }
 
-    /// Scan windows running past the declared duration must clamp to 1.0, not
-    /// overshoot — the fraction is a `[0, 1]` contract for the bar.
-    @Test("scan coverage past the declared duration clamps to 1.0")
+    /// A scan window overrunning the declared duration by LESS than one shard is
+    /// ordinary feed-vs-measured drift: clamp to 1.0.
+    @Test("scan coverage a fraction past the declared duration clamps to 1.0")
     func coveragePastDurationClamps() async throws {
         let store = try await makeTestStore()
-        try await store.insertAsset(makeAsset(id: "a-over", episodeDurationSec: 500))
+        // 510s scanned against a declared 500s — 10s of drift, well under a shard.
+        try await store.insertAsset(makeAsset(
+            id: "a-over", episodeDurationSec: 500, fastTranscriptCoverageEndTime: 510
+        ))
         try await store.insertSemanticScanResult(
-            makeScan(assetId: "a-over", index: 0, start: 0, end: 900)
+            makeScan(assetId: "a-over", index: 0, start: 0, end: 510)
         )
 
         let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-over"])
         let summary = try #require(summaries["a-over"])
+        #expect(summary.adScanCoveredSec == 510)
         #expect(summary.adScanFraction == 1)
+    }
+
+    /// A coverage:duration ratio ABOVE 1 by more than one shard means the two
+    /// numbers describe different audio — the 2026-04-27 libsyn/flightcast shape
+    /// (704s declared for ~9,700s of real audio, playhead-csbq). Clamping that to
+    /// exactly 1.0 would turn a broken denominator into a confident ✓ on ~10% of
+    /// the episode, so it must read as UNMEASURABLE instead.
+    @Test("a poisoned duration denominator reads unmeasurable, not 100%")
+    func poisonedDurationIsUnmeasurable() async throws {
+        let store = try await makeTestStore()
+        // Declared 704s; the transcript and the scan both reach 970s.
+        try await store.insertAsset(makeAsset(
+            id: "a-poisoned", episodeDurationSec: 704, fastTranscriptCoverageEndTime: 970
+        ))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-poisoned", index: 0, start: 0, end: 970)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-poisoned"])
+        let summary = try #require(summaries["a-poisoned"])
+        #expect(summary.adScanCoveredSec == 970)
+        // 970/704 = 1.378 — a clamp would say "100% scanned"; the honest answer
+        // is that this episode cannot be measured.
+        #expect(summary.adScanFraction == nil)
+        #expect(!episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: summary.adScanFraction, isDegradedTerminal: false
+        ))
     }
 
     /// Batched reads must not cross-contaminate: each asset gets only its own
@@ -1854,6 +2005,97 @@ struct AnalysisStoreAdScanCoverageTests {
         // Sanity-check the number itself so the agreement isn't 0 == 0:
         // [0,600] = 600, [900,1425.9] = 525.9, [2000,2100] = 100.
         #expect(abs(breadcrumb.examinedSeconds - 1225.9) < 0.0001)
+    }
+
+    /// A scan window's persisted bounds are `first.startTime ... last.endTime`
+    /// over the segments that fit one prompt
+    /// (`FoundationModelClassifier.planPassA`), so a gappy transcript can produce
+    /// ONE window whose bounds straddle the whole episode while its prompt
+    /// carried two minutes of text. Taking the bounds at face value reports that
+    /// episode as fully screened — this bead's own bug, one layer down.
+    @Test("a window spanning a transcript gap counts only the transcribed part")
+    func windowSpanningTranscriptGapCountsOnlyTranscribedAudio() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-gapwindow", episodeDurationSec: 3600))
+        // Transcript landed only the first and last minute (the playhead-0sro /
+        // "AN 100% / TX 39%" shape).
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-gapwindow", index: 0, start: 0, end: 60),
+            makeGapChunk(assetId: "a-gapwindow", index: 1, start: 3540, end: 3600)
+        ])
+        // Both segments fit one prompt → one row, bounds [0, 3600].
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-gapwindow", index: 0, start: 0, end: 3600)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-gapwindow"])
+        let summary = try #require(summaries["a-gapwindow"])
+        // Bare bounds would say 3600 (100%). Intersecting with the transcript
+        // says 120s = 3.3%.
+        #expect(summary.adScanCoveredSec == 120)
+        let fraction = try #require(summary.adScanFraction)
+        #expect(abs(fraction - 120.0 / 3600.0) < 0.0001)
+        #expect(fraction < episodePreparationCompleteThreshold)
+        // The load-bearing invariant: you cannot read audio you never
+        // transcribed, so the ad-scan area is a subset of the transcript union.
+        #expect(summary.adScanCoveredSec! <= summary.fastTranscriptCoveredSec!)
+    }
+
+    /// `BackfillJobRunner.makeNoWorkSentinelScanResult` writes a passA row with
+    /// `status == .noAds` spanning the WHOLE attempted range, meaning **no work
+    /// was performed**. `.noAds` is otherwise a genuine "I looked, nothing here"
+    /// verdict, so the status alone cannot tell them apart — and counting the
+    /// sentinel reports a whole episode as screened off a job that made zero FM
+    /// calls.
+    @Test("a no-work sentinel row is never counted as scanned audio")
+    func noWorkSentinelIsNotScannedAudio() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-sentinel", episodeDurationSec: 1000))
+        let sentinel = makeScan(
+            assetId: "a-sentinel",
+            index: 0,
+            start: 0,
+            end: 1000,
+            status: .noAds,
+            errorContext: "\(SemanticScanResult.noWorkSentinelErrorContextPrefix)emptySegments"
+        )
+        try await store.insertSemanticScanResult(sentinel)
+        // A REAL `.noAds` examination alongside it must still count.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-sentinel", index: 1, start: 0, end: 120, status: .noAds)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-sentinel"])
+        let summary = try #require(summaries["a-sentinel"])
+        #expect(summary.adScanCoveredSec == 120)
+        #expect(summary.adScanFraction == 0.12)
+        // The row-level predicate and the pipeline breadcrumb agree.
+        #expect(!sentinel.didExamineWindow)
+        #expect(sentinel.isNoWorkSentinel)
+        #expect(sentinel.status.didExamineWindow, "the STATUS still says examined — that is the trap")
+        #expect(SemanticScanCoverage.compute(rows: [sentinel]).examinedSeconds == 0)
+    }
+
+    private func makeGapChunk(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "\(assetId)-chunk-\(index)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "\(assetId)-fp-\(index)",
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "t",
+            normalizedText: "t",
+            pass: "fast",
+            modelVersion: "test-asr",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
     }
 
     /// The analyzed AREA (`analysisCoveredSec`, playhead-sd71) is gap-aware and
