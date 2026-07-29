@@ -492,6 +492,104 @@ struct MergedChildRowDedupeV40MigrationTests {
         #expect(try scalarInt(db, "SELECT count(*) FROM transcript_chunks") == 1)
     }
 
+    @Test("V40 does NOT step over a rolled-back V39 — a database left at 38 stays retryable")
+    func v40DoesNotStepOverARolledBackV39() async throws {
+        let dir = try makeTempDir(prefix: "V40NoStepOver")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        // Rewind to the state a device is in when V39 rolled back: no unique
+        // asset-identity index, `schema_version` at 38.
+        let db = try openRaw(dir)
+        try exec(db, "DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint")
+        // A trigger that makes V39's delete abort, exactly as the 0hi9
+        // containment tests do — so V39 rolls back and stays at 38.
+        try exec(db, """
+            INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+            VALUES ('dupe-old', 'ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 1.0)
+            """)
+        try exec(db, """
+            INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+            VALUES ('dupe-new', 'ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 2.0)
+            """)
+        try exec(db, """
+            CREATE TRIGGER bd6av0_v39_guard BEFORE DELETE ON analysis_assets
+            BEGIN SELECT RAISE(ABORT, 'v40 step-over fixture'); END
+            """)
+        try exec(db, "UPDATE _meta SET value = '38' WHERE key = 'schema_version'")
+        sqlite3_close_v2(db)
+
+        try await store.migrateOnlyForTesting()
+
+        // V39 rolled back. V40 must NOT have stamped 40 over it: if it had, the
+        // asset-identity index would be unreachable forever, because every
+        // later launch short-circuits on `schemaVersion < 39`.
+        #expect(try await store.schemaVersion() == 38)
+        let after = try openRaw(dir)
+        #expect(try scalarInt(after, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_chunks_asset_pass_fingerprint'") == 0)
+        // And the retry a later launch performs completes BOTH rungs.
+        try exec(after, "DROP TRIGGER bd6av0_v39_guard")
+        sqlite3_close_v2(after)
+        try await store.migrateOnlyForTesting()
+        #expect(try await store.schemaVersion() == 40)
+        #expect(try probeIndexExists(in: dir, indexName: "idx_chunks_asset_pass_fingerprint"))
+    }
+
+    @Test("a within-batch duplicate does not throw under the new UNIQUE index — the batch still lands")
+    func withinBatchDuplicateDoesNotLoseTheBatch() async throws {
+        let dir = try makeTempDir(prefix: "V40BatchDupe")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        let db = try openRaw(dir)
+        try exec(db, """
+            INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+            VALUES ('ASSET', 'ep-1', 'ffee', 'file:///tmp/x.mp3', 'pending', 1.0)
+            """)
+        sqlite3_close_v2(db)
+
+        func chunk(id: String, fingerprint: String, index: Int) -> TranscriptChunk {
+            TranscriptChunk(
+                id: id,
+                analysisAssetId: "ASSET",
+                segmentFingerprint: fingerprint,
+                chunkIndex: index,
+                startTime: Double(index),
+                endTime: Double(index) + 1,
+                text: "words",
+                normalizedText: "words",
+                pass: "fast",
+                modelVersion: "test-model",
+                transcriptVersion: nil,
+                atomOrdinal: nil,
+                weakAnchorMetadata: nil,
+                speakerId: nil,
+                avgConfidence: nil
+            )
+        }
+
+        // Both writers accumulate a batch and insert it in ONE transaction, so
+        // their pre-insert read cannot see a duplicate that is only in the
+        // batch. Under a bare INSERT the UNIQUE index turns that into a throw
+        // that rolls back the WHOLE batch and loses the shard's transcript.
+        try await store.insertTranscriptChunks([
+            chunk(id: "a", fingerprint: "fp-A", index: 0),
+            chunk(id: "b", fingerprint: "fp-A", index: 1),
+            chunk(id: "c", fingerprint: "fp-B", index: 2),
+        ])
+
+        let after = try openRaw(dir)
+        defer { sqlite3_close_v2(after) }
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks") == 2)
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks WHERE id = 'a'") == 1)
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks WHERE id = 'c'") == 1)
+    }
+
     @Test("the isolated ladder (migrateOnlyForTesting) also reaches v40 and creates the index")
     func isolatedLadderReachesV40() async throws {
         let dir = try makeTempDir(prefix: "V40IsolatedLadder")

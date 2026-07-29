@@ -1403,7 +1403,7 @@ struct FastTranscriptCoverageV37MigrationTests {
     func freshDbReachesV37() async throws {
         let (store, _) = try await makeTestStoreWithDirectory()
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 39)
+        #expect(AnalysisStore.currentSchemaVersion == 40)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

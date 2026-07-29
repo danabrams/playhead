@@ -98,7 +98,7 @@ struct SpecialistScanResultsV31MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 39)
+        #expect(AnalysisStore.currentSchemaVersion == 40)
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 

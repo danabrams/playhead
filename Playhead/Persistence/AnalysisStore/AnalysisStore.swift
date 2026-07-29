@@ -1264,6 +1264,10 @@ struct DuplicateAssetMergeSummary: Sendable, Equatable {
     /// Placeholder rows left in place because one side carried no usable
     /// `sourceURL` at all, so no artifact identity could be compared.
     var skippedUnknownSource = 0
+    /// playhead-6av0: duplicate child rows swept AFTER the re-point, for the
+    /// tables where `UPDATE OR IGNORE` cannot discard on its own because the
+    /// table carries no constraint to conflict on.
+    var duplicateChildRowsRemoved = 0
 }
 
 /// Whether one placeholder may be folded into one survivor.
@@ -1348,7 +1352,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 39
+    nonisolated static let currentSchemaVersion = 40
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2090,6 +2094,9 @@ actor AnalysisStore {
             // most one row per content identity. Deduplicates first, because a
             // UNIQUE index cannot be created over existing violations.
             try migrateUniqueEpisodeFingerprintIndexV39IfNeeded()
+            // playhead-6av0: repair the child rows V39's re-point duplicated,
+            // then add the constraint that makes the re-point self-correcting.
+            try migrateDeduplicateMergedChildRowsV40IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2400,6 +2407,11 @@ actor AnalysisStore {
         // `tableExists`, so seeded fixtures without `analysis_assets` still
         // reach v39.
         try migrateUniqueEpisodeFingerprintIndexV39IfNeeded()
+        // playhead-6av0 (v40): mirror the merged-child-row dedupe + the unique
+        // `(analysisAssetId, pass, segmentFingerprint)` index into the ladder
+        // seam. Both helpers guard on `tableExists`, so seeded fixtures without
+        // `transcript_chunks` / `decoded_spans` still reach v40.
+        try migrateDeduplicateMergedChildRowsV40IfNeeded()
     }
     #endif
 
@@ -5972,6 +5984,283 @@ actor AnalysisStore {
         }
     }
 
+    // MARK: - V40: repair (and prevent) the child rows the merge duplicated
+    //
+    // playhead-6av0 — THE REGRESSION V39 SHIPPED. ``repointChildRows`` moves a
+    // loser asset's child rows onto the survivor with an UNPREDICATED
+    // `UPDATE OR IGNORE "<table>" SET "<column>" = ? WHERE "<column>" = ?`.
+    // `OR IGNORE` only skips on a CONSTRAINT conflict — and `transcript_chunks`
+    // had none to conflict on. Its per-asset dedupe is a PRE-INSERT READ
+    // (``hasTranscriptChunk``), not an index, so every loser row landed on the
+    // survivor beside the survivor's own copy of the same segment. Measured on
+    // the owner's device after the one-shot sweep ran: 64,749 rows against
+    // 57,410 distinct `(analysisAssetId, pass, segmentFingerprint)` — 7,339
+    // excess, every group exactly two copies, 7,105 of them carrying DIFFERENT
+    // `chunkIndex` values because each run numbered from zero.
+    //
+    // The user sees it on the transcript screen: `TranscriptChunkSelection` is
+    // keyed on `(startTime, endTime)`, so the pair collapses into one selection
+    // element while both rows still draw — "select one, selects the duplicate
+    // as well". It is not a display bug and must NOT be fixed in the view: the
+    // atomizer, the lexical scanner, the FTS index and every coverage
+    // denominator are all counting the same rows twice.
+    //
+    // PREVENTION IS ONE LINE. `UPDATE OR IGNORE` is ALREADY written to do the
+    // right thing — discard the loser's copy where the survivor already has
+    // that segment, move it where the survivor does not — the moment a
+    // constraint exists for it to conflict on. That is the unique index below.
+    // It was inert, never wrong.
+
+    /// V40 — collapse the duplicate child rows the V39 / launch-sweep re-point
+    /// imported, then make `transcript_chunks` structurally unable to hold them.
+    ///
+    /// CLEANUP FIRST, CONSTRAINT SECOND, for the same reason as V39:
+    /// `CREATE UNIQUE INDEX` fails outright on an existing violation, and every
+    /// device that ran the V39 sweep today is carrying thousands of them.
+    ///
+    /// PREVENTION ALONE WOULD BE USELESS HERE. The duplicate rows are already
+    /// on disk and `_meta.did_duplicate_asset_reconcile_v1` is already set, so
+    /// the sweep will never revisit them. Only a data-repair rung fixes the
+    /// devices that already shipped.
+    ///
+    /// R2 CONTAINMENT (inherited verbatim from V39, and for the same reason).
+    /// Everything here is DATA-DEPENDENT — it deletes rows and builds an index
+    /// that fails outright on a violation it did not manage to clear. A thrown
+    /// `migrate()` at launch is answered by `PlayheadRuntime` with
+    /// `removeItem(at: AnalysisStore.defaultDirectory())` and a retry that
+    /// succeeds on the now-empty directory: the user's entire analysis database,
+    /// silently discarded. So the rung runs inside a SAVEPOINT, rolls back to it
+    /// on any throw, logs a fault, and **leaves `schema_version` at 39** so the
+    /// next launch retries. The cost of that path is exactly today's shipped
+    /// state — duplicates still on disk, no index. The cost of the alternative
+    /// is the user's library.
+    ///
+    /// Idempotent: both sweeps are no-ops once no group has more than one row,
+    /// and the index is `IF NOT EXISTS`.
+    private func migrateDeduplicateMergedChildRowsV40IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 40 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39. V39 is the first rung in this
+        // ladder that is allowed to FAIL WITHOUT THROWING: on any error it
+        // rolls back to its savepoint and leaves `schema_version` at 38 so the
+        // next launch retries. Every rung before it either succeeds or throws,
+        // so "the version is N-1" has always meant "N has not run yet" — and a
+        // plain `< 40` guard would quietly break that, stamping 40 onto a
+        // database whose unique asset-identity index was never built and can
+        // now never be retried. V40 runs only from a database that actually
+        // reached 39. A device sitting at 38 gets V39 again on the next launch
+        // and V40 immediately after, in the same `migrate()` call.
+        guard observed >= 39 else { return }
+        let savepoint = "v40_merged_child_row_dedupe"
+        try exec("SAVEPOINT \(savepoint)")
+        do {
+            let chunks = try dedupeMergedTranscriptChunks()
+            let spans = try dedupeMergedDecodedSpans()
+            if try tableExists("transcript_chunks") {
+                try exec("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_fingerprint
+                    ON transcript_chunks(analysisAssetId, pass, segmentFingerprint)
+                    """)
+            }
+            try exec("RELEASE SAVEPOINT \(savepoint)")
+            if chunks > 0 || spans > 0 {
+                logger.notice("V40 merged-child-row dedupe removed \(chunks, privacy: .public) duplicate transcript_chunks row(s) and \(spans, privacy: .public) duplicate decoded_spans row(s)")
+            }
+        } catch {
+            // `ROLLBACK TO` does not pop the savepoint; `RELEASE` must follow
+            // or the enclosing transaction is left with a stale frame.
+            try? exec("ROLLBACK TO SAVEPOINT \(savepoint)")
+            try? exec("RELEASE SAVEPOINT \(savepoint)")
+            logger.fault("V40 merged-child-row dedupe could not complete and was rolled back; schema stays at 39 and the next launch retries. The analysis database is UNCHANGED — this is deliberately not fatal, because a thrown migrate() at launch is answered by deleting the whole store. Error: \(String(describing: error), privacy: .public)")
+            return
+        }
+        try setSchemaVersion(40)
+    }
+
+    /// Collapse `transcript_chunks` to one row per
+    /// `(analysisAssetId, pass, segmentFingerprint)`, keeping the LOWEST rowid.
+    ///
+    /// WHY `pass` IS IN THE KEY, AND MUST STAY THERE.
+    /// ``FinalPassRetranscriptionRunner/computeFinalPassFingerprint(text:startTime:endTime:)``
+    /// deliberately prefixes its input with `fp-final-` precisely so a final-pass
+    /// row can never be mistaken for its fast-pass twin. Keying on
+    /// `(asset, fingerprint)` alone would work by accident today and silently
+    /// eat one of the two the moment a future writer stops prefixing.
+    ///
+    /// WHY THE LOWEST rowid. ``fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)``
+    /// is an unordered `LIMIT 1`, which the `idx_chunks_asset` search returns in
+    /// rowid order — so the lowest rowid is the row `TranscriptEngineService`'s
+    /// dedupe guard, and every metadata upgrade behind it, has been reading all
+    /// along. Keeping it is the choice that changes nothing for any consumer.
+    ///
+    /// WHY THE DELETE IS SQL AND NOT A SWIFT LOOP OVER `deleteTranscriptChunk`.
+    /// `transcript_chunks_fts` is an EXTERNAL-CONTENT FTS5 table kept in sync by
+    /// the `transcript_chunks_ad` AFTER DELETE trigger. Rows removed by any path
+    /// that does not fire that trigger stay in the FTS index as ghosts, and the
+    /// lexical scanner keeps matching text that no longer exists. The `rebuild`
+    /// first is the same guard ``migrateTranscriptChunksPhase1()`` uses: an old
+    /// database can hold rows that predate the FTS table, and deleting one whose
+    /// index entry is missing trips SQLite's corruption checks.
+    ///
+    /// `chunkIndex` IS LEFT ALONE. ``FinalPassRetranscriptionRunner`` picks the
+    /// next index with `max(chunkIndex) + 1`, so renumbering survivors would
+    /// hand a future final pass an index that is already taken. The surviving
+    /// row keeps whatever index it was written with; gaps in the sequence are
+    /// harmless because `fetchTranscriptChunks` only ORDERs by it.
+    @discardableResult
+    func dedupeMergedTranscriptChunks() throws -> Int {
+        guard try tableExists("transcript_chunks"),
+              try columnExists(table: "transcript_chunks", column: "pass")
+        else { return 0 }
+
+        let duplicateFilter = """
+            rowid NOT IN (
+                SELECT MIN(rowid) FROM transcript_chunks
+                GROUP BY analysisAssetId, pass, segmentFingerprint
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+
+        if try tableExists("transcript_chunks_fts") {
+            try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+        }
+        try exec("DELETE FROM transcript_chunks WHERE \(duplicateFilter)")
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Collapse `decoded_spans` to one row per
+    /// `(assetId, firstAtomOrdinal, lastAtomOrdinal)` — which is exactly
+    /// ``DecodedSpan/makeId(assetId:firstAtomOrdinal:lastAtomOrdinal)``'s
+    /// preimage, so the row that BELONGS to this asset is the one whose stored
+    /// `id` still hashes from its own key. An imported row's id was computed
+    /// against the LOSER's asset id and no longer matches.
+    ///
+    /// WHY THIS MATTERS EVEN THOUGH THE TRANSCRIPT SCREEN CANNOT SHOW IT. Every
+    /// span consumer is set-membership, so a duplicate is invisible there — but
+    /// `loadSyntheticOrdinalTimeMap` is last-write-wins, so one synthetic
+    /// ordinal can end up naming two different time ranges and a user correction
+    /// resolves against the WRONG AUDIO. `CorpusExporter` and the egress
+    /// baseline also double-count, so every corpus export for an affected
+    /// episode carries each ad span twice.
+    ///
+    /// TWO EXCEPTIONS, BOTH DELIBERATE:
+    ///
+    ///   * A group where NO row is id-consistent is ENTIRELY IMPORTED — the
+    ///     survivor never decoded that range itself, so the imported rows are
+    ///     all the coverage there is. Kept, untouched. (This is the span mirror
+    ///     of why the merge re-points instead of deleting.)
+    ///   * NEGATIVE `firstAtomOrdinal` rows are SYNTHETIC ordinals, minted
+    ///     per-asset. Identical negative ordinals on two assets do NOT imply
+    ///     identical audio, so the id-consistency test is meaningless for them
+    ///     and collapsing them would destroy a real span. Excluded from the
+    ///     group scan entirely.
+    ///
+    /// WIDTH OWNERSHIP SURVIVES THE DROP. A dropped row can carry a
+    /// `.rediffSlot` / `.spliceSlot` anchor the keeper lacks — the byte-exact
+    /// and acoustic width oracles, which exempt a span from the boundary
+    /// refiners and the pre-roll clamp. Those anchors are unioned into the
+    /// keeper before its duplicates go. If the keeper's own provenance JSON
+    /// cannot be decoded the whole group is skipped rather than risk dropping a
+    /// width marker we could not read.
+    @discardableResult
+    func dedupeMergedDecodedSpans() throws -> Int {
+        guard try tableExists("decoded_spans") else { return 0 }
+
+        var groups: [(assetId: String, first: Int, last: Int)] = []
+        let groupStmt = try prepare("""
+            SELECT assetId, firstAtomOrdinal, lastAtomOrdinal
+            FROM decoded_spans
+            WHERE firstAtomOrdinal >= 0
+            GROUP BY assetId, firstAtomOrdinal, lastAtomOrdinal
+            HAVING COUNT(*) > 1
+            ORDER BY assetId, firstAtomOrdinal, lastAtomOrdinal
+            """)
+        defer { sqlite3_finalize(groupStmt) }
+        while try nextRow(groupStmt) {
+            groups.append((
+                text(groupStmt, 0),
+                Int(sqlite3_column_int64(groupStmt, 1)),
+                Int(sqlite3_column_int64(groupStmt, 2))
+            ))
+        }
+        guard !groups.isEmpty else { return 0 }
+
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        var deleted = 0
+        for group in groups {
+            let keeperId = DecodedSpan.makeId(
+                assetId: group.assetId,
+                firstAtomOrdinal: group.first,
+                lastAtomOrdinal: group.last
+            )
+            var rows: [(id: String, provenanceJSON: String)] = []
+            let rowStmt = try prepare("""
+                SELECT id, anchorProvenanceJSON FROM decoded_spans
+                WHERE assetId = ? AND firstAtomOrdinal = ? AND lastAtomOrdinal = ?
+                ORDER BY rowid
+                """)
+            defer { sqlite3_finalize(rowStmt) }
+            bind(rowStmt, 1, group.assetId)
+            bind(rowStmt, 2, group.first)
+            bind(rowStmt, 3, group.last)
+            while try nextRow(rowStmt) {
+                rows.append((text(rowStmt, 0), text(rowStmt, 1)))
+            }
+            // EXCEPTION A: nothing here is this asset's own work.
+            guard let keeper = rows.first(where: { $0.id == keeperId }) else { continue }
+            let losers = rows.filter { $0.id != keeperId }
+            guard !losers.isEmpty else { continue }
+            guard var keeperAnchors = try? decoder.decode(
+                [AnchorRef].self,
+                from: Data(keeper.provenanceJSON.utf8)
+            ) else {
+                logger.warning("V40 decoded_spans dedupe: SKIPPING group \(keeperId, privacy: .public) — the keeper's anchorProvenanceJSON did not decode, so a width-ownership anchor on a duplicate could not be preserved")
+                continue
+            }
+
+            var adoptedWidthAnchor = false
+            for loser in losers {
+                let loserAnchors = (try? decoder.decode(
+                    [AnchorRef].self,
+                    from: Data(loser.provenanceJSON.utf8)
+                )) ?? []
+                for anchor in loserAnchors where anchor.isWidthOwnership {
+                    guard !keeperAnchors.contains(anchor) else { continue }
+                    keeperAnchors.append(anchor)
+                    adoptedWidthAnchor = true
+                }
+            }
+            if adoptedWidthAnchor {
+                let data = try encoder.encode(keeperAnchors)
+                let update = try prepare("UPDATE decoded_spans SET anchorProvenanceJSON = ? WHERE id = ?")
+                defer { sqlite3_finalize(update) }
+                bind(update, 1, String(decoding: data, as: UTF8.self))
+                bind(update, 2, keeperId)
+                try step(update, expecting: SQLITE_DONE)
+            }
+
+            let delete = try prepare("DELETE FROM decoded_spans WHERE id = ?")
+            defer { sqlite3_finalize(delete) }
+            for loser in losers {
+                sqlite3_reset(delete)
+                bind(delete, 1, loser.id)
+                try step(delete, expecting: SQLITE_DONE)
+                deleted += Int(sqlite3_changes(db))
+            }
+        }
+        return deleted
+    }
+
+    /// `SELECT COUNT(*)` behind a raw predicate. The predicate is a compile-time
+    /// literal at every call site — never caller input.
+    private func countRows(in table: String, where predicate: String) throws -> Int {
+        let stmt = try prepare("SELECT COUNT(*) FROM \(Self.quotedIdentifier(table)) WHERE \(predicate)")
+        defer { sqlite3_finalize(stmt) }
+        guard try nextRow(stmt) else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
     /// Upsert one asset's day-0 attempt record.
     /// `DayZeroRediffAttemptPolicy.advance` has already folded the prior row's
     /// `attemptCount` / `totalFullFetchBytes` into the value.
@@ -8717,9 +9006,27 @@ actor AnalysisStore {
 
     // MARK: - CRUD: transcript_chunks
 
-    func insertTranscriptChunk(_ chunk: TranscriptChunk) throws {
+    /// playhead-6av0: `INSERT OR IGNORE`, not a bare `INSERT`, now that
+    /// `idx_chunks_asset_pass_fingerprint` makes
+    /// `(analysisAssetId, pass, segmentFingerprint)` UNIQUE.
+    ///
+    /// Both writers already dedupe with a PRE-INSERT READ
+    /// (``hasTranscriptChunk``/``fetchTranscriptChunk``), but both then
+    /// ACCUMULATE a batch and insert it in one transaction — so two segments
+    /// with byte-identical text and identical timing inside a single batch each
+    /// see "not present" and both get appended.
+    /// ``FinalPassRetranscriptionRunner`` accumulates across every shard of a
+    /// window, where an overlapping shard boundary can genuinely re-emit one.
+    /// Under a bare `INSERT` the new constraint would turn that from "two
+    /// harmless identical rows" into a throw that rolls back the WHOLE batch and
+    /// loses the shard's transcript. `OR IGNORE` applies exactly the rule the
+    /// pre-insert read already intends, at the one place it cannot reach.
+    ///
+    /// - Returns: `true` when a row was actually written.
+    @discardableResult
+    func insertTranscriptChunk(_ chunk: TranscriptChunk) throws -> Bool {
         let sql = """
-            INSERT INTO transcript_chunks
+            INSERT OR IGNORE INTO transcript_chunks
             (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime,
              text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal,
              weakAnchorMetadataJSON, speakerId, avgConfidence)
@@ -8743,19 +9050,27 @@ actor AnalysisStore {
         bind(stmt, 14, chunk.speakerId)
         bind(stmt, 15, chunk.avgConfidence.map(Double.init))
         try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
     }
 
     func insertTranscriptChunks(_ chunks: [TranscriptChunk]) throws {
         guard !chunks.isEmpty else { return }
         try exec("BEGIN TRANSACTION")
+        var skipped = 0
         do {
             for chunk in chunks {
-                try insertTranscriptChunk(chunk)
+                if try !insertTranscriptChunk(chunk) { skipped += 1 }
             }
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
             throw error
+        }
+        // playhead-6av0: never silent. A skip means the batch carried a segment
+        // the asset already holds under the same pass — benign, but it is also
+        // the only signal that a writer's pre-insert dedupe missed something.
+        if skipped > 0 {
+            logger.notice("insertTranscriptChunks: \(skipped, privacy: .public) of \(chunks.count, privacy: .public) chunk(s) already present for this (asset, pass, fingerprint) and were not re-inserted")
         }
     }
 
@@ -15551,6 +15866,18 @@ actor AnalysisStore {
                 if mergedHere, !summary.survivingAssetIds.contains(survivor.id) {
                     summary.survivingAssetIds.append(survivor.id)
                 }
+            }
+            // playhead-6av0: the re-point is only as safe as the constraints the
+            // child tables happen to carry. `transcript_chunks` now has one, so
+            // `UPDATE OR IGNORE` discards there — but `decoded_spans` has no
+            // constraint it CAN have (a group that is entirely imported must be
+            // kept, which a unique index would forbid), so its duplicates are
+            // swept here instead. The transcript sweep runs too: it is a no-op
+            // with the index present, and the honest fallback if the V40 rung
+            // rolled back and the index is missing.
+            if summary.placeholdersMerged > 0 {
+                summary.duplicateChildRowsRemoved =
+                    try dedupeMergedTranscriptChunks() + dedupeMergedDecodedSpans()
             }
             try exec("COMMIT")
         } catch {
