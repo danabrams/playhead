@@ -15263,6 +15263,14 @@ actor AnalysisStore {
                 let rows = try assetMergeRows(episodeId: episodeId)
                 guard let survivor = Self.chooseMergeSurvivor(rows) else { continue }
                 var mergedHere = false
+                // `survivor` is the snapshot taken before this episode's first
+                // fold. With more than one placeholder carrying a completion
+                // terminal — not the reported shape, which is pairs — the LAST
+                // one folded wins the adopted state, because the guard in
+                // `foldAssetRow` reads that snapshot rather than re-reading the
+                // row. Contained by design: the sweep re-scores the merged
+                // row's terminal claim against its real coverage afterwards, so
+                // whichever state is adopted is verified, not trusted.
                 for victim in rows where victim.id != survivor.id && victim.isPlaceholder {
                     let moved = try repointChildRows(
                         from: victim.id,
