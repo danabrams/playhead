@@ -88,7 +88,13 @@ struct DuplicateAssetReconcileTests {
         ))
     }
 
-    private func insertSession(store: AnalysisStore, id: String, assetId: String, state: String) async throws {
+    private func insertSession(
+        store: AnalysisStore,
+        id: String,
+        assetId: String,
+        state: String,
+        failureReason: String? = nil
+    ) async throws {
         let now = Date().timeIntervalSince1970
         try await store.insertSession(AnalysisSession(
             id: id,
@@ -96,7 +102,7 @@ struct DuplicateAssetReconcileTests {
             state: state,
             startedAt: now,
             updatedAt: now,
-            failureReason: nil
+            failureReason: failureReason
         ))
     }
 
@@ -1953,5 +1959,310 @@ struct DuplicateAssetReconcileTests {
                 "the terminal must come from the row the device wrote FIRST (got \(survivor.analysisState))")
         #expect(survivor.terminalReason == "written-first",
                 "and with it the coverage numbers that verdict was scored against")
+    }
+
+    // MARK: - R5: the two claims round 4 reasoned about but never executed
+
+    /// R5 target 1. The V39 dedup groups on `(episodeId, assetFingerprint)`
+    /// with no blank-id guard at all, while the merge three rungs away refuses
+    /// to treat a blank or whitespace-only `episodeId` as a group key — a
+    /// discrepancy rounds 1, 2 and 3 each hit from a different angle (blank,
+    /// `TRIM`-stripped ASCII space, then tab/newline/NBSP). Round 4 judged the
+    /// dedup correct on the argument that the unique index forces it, and did
+    /// not run it. This runs it.
+    ///
+    /// The two SQLite facts the argument rests on, measured with sqlite3 3.54
+    /// before the fixture was written rather than assumed:
+    ///
+    ///   * `CREATE UNIQUE INDEX ON analysis_assets(episodeId, assetFingerprint)`
+    ///     really does raise `UNIQUE constraint failed` on a `''` pair and on a
+    ///     tab-only pair. So the dedup collapses nothing the index would have
+    ///     tolerated: skipping those groups the way the merge does would send
+    ///     the whole V39 rung into its savepoint rollback and pin the schema at
+    ///     38 on every future launch.
+    ///   * `GROUP BY` compares those ids BYTE-EXACTLY, so `''`, `' '`, tab and
+    ///     NBSP are four separate keys even under one shared fingerprint. That
+    ///     is what makes the absent blank-guard safe rather than a repeat of
+    ///     the R1 false merge: the merge needs the guard because
+    ///     `safeFilename("")` collapses unrelated episodes onto ONE basename
+    ///     and the basename is all the evidence it has, whereas here the second
+    ///     key component is a content hash and no collapse happens.
+    ///
+    /// Two mutations this kills, both of which look like corrections to
+    /// somebody who has just read the R1/R2/R3 note on
+    /// `episodeIdsWithMultipleAssets`:
+    ///   * teaching the dedup the same blank/whitespace skip — the index then
+    ///     fails, the savepoint rolls back, and `schemaVersion()` stays 38;
+    ///   * normalising the group key (`TRIM(episodeId)`, or trimming in Swift)
+    ///     — the four mixed-class rows collapse to one and a migration
+    ///     destroys three rows of analysis.
+    @Test("the v39 dedup collapses blank- and whitespace-id collisions, and ONLY exact-key ones")
+    func v39DedupCollapsesBlankAndWhitespaceCollisionsExactly() async throws {
+        let store = try await makeTestStore()
+        // Get behind the index before planting violations it would reject.
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await store.setMetaValue(forKey: "schema_version", value: "38")
+
+        func fingerprint(_ char: String) -> String { String(repeating: char, count: 64) }
+
+        // One exact-key collision per whitespace class, plus a control under a
+        // real episode id. Every one of these pairs violates the index.
+        let collisions: [(label: String, episodeId: String, fingerprint: String)] = [
+            ("real", "ep-r5-real", fingerprint("1")),
+            ("blank", "", fingerprint("2")),
+            ("space", " ", fingerprint("3")),
+            ("tab", "\t", fingerprint("4")),
+            ("newline", "\n", fingerprint("5")),
+            ("nbsp", "\u{00A0}", fingerprint("6"))
+        ]
+        for entry in collisions {
+            try await insertCanonical(
+                store: store, id: "\(entry.label)-loser",
+                episodeId: entry.episodeId, fingerprint: entry.fingerprint
+            )
+            try await insertCanonical(
+                store: store, id: "\(entry.label)-winner",
+                episodeId: entry.episodeId, fingerprint: entry.fingerprint
+            )
+        }
+        // The loser of the blank pair owns a transcript chunk, so the pass has
+        // to MOVE it rather than let `ON DELETE CASCADE` take it.
+        try await insertChunk(
+            store: store, id: "chunk-blank-loser", assetId: "blank-loser",
+            index: 0, start: 0, end: 120
+        )
+
+        // Four rows under ONE fingerprint whose episodeIds differ only by which
+        // whitespace they are made of. Byte-exact grouping says these are four
+        // distinct identities; a normalising group key says they are one.
+        let sharedFingerprint = fingerprint("7")
+        let mixedIds = ["", " ", "\t", "\u{00A0}"]
+        for (index, episodeId) in mixedIds.enumerated() {
+            try await insertCanonical(
+                store: store, id: "mixed-\(index)",
+                episodeId: episodeId, fingerprint: sharedFingerprint
+            )
+        }
+
+        try await store.migrateOnlyForTesting()
+
+        // The rung completed. A dedup that skipped the blank/whitespace groups
+        // would have left the index to fail, rolled back to the savepoint, and
+        // stopped here at 38 — forever, on every launch.
+        #expect(try await store.schemaVersion() == 39,
+                "a dedup that refuses blank/whitespace keys cannot build the index it exists to enable")
+
+        for entry in collisions {
+            #expect(try await store.fetchAsset(id: "\(entry.label)-winner") != nil,
+                    "\(entry.label): newest-wins keeps the winner")
+            #expect(try await store.fetchAsset(id: "\(entry.label)-loser") == nil,
+                    "\(entry.label): the colliding row the index would reject must be gone")
+        }
+        #expect(try await store.fetchTranscriptChunks(assetId: "blank-winner").count == 1,
+                "the blank-id loser's transcript is re-pointed, not cascaded away")
+
+        for index in mixedIds.indices {
+            #expect(try await store.fetchAsset(id: "mixed-\(index)") != nil,
+                    "mixed-\(index): ids differing only in whitespace class are DIFFERENT keys — collapsing them is a false merge a migration cannot undo")
+        }
+
+        // The index really is live on the blank key, which is the whole reason
+        // the dedup had to touch those rows at all.
+        await #expect(throws: (any Error).self) {
+            try await self.insertCanonical(
+                store: store, id: "blank-post-migrate",
+                episodeId: "", fingerprint: fingerprint("2")
+            )
+        }
+    }
+
+    /// R5 target 2, first half. `PlayheadRuntime` runs
+    /// `recoverCoverageGuardFailures()` BEFORE the merge, and that sweep scores
+    /// each stranded session against only the chunks hanging off ITS OWN asset
+    /// — which, in the pair shape, is half the episode's transcript. Round 4
+    /// called that residual on the grounds that the sweep carries no `_meta`
+    /// key, so it re-runs next launch and heals itself. Nothing ran it; the
+    /// structurally identical claim about the terminal reconcile inverted the
+    /// moment R3 executed it.
+    ///
+    /// It holds here, and this is the execution that says so. On the launch the
+    /// merge lands, the sweep sees the placeholder's 400 s against the
+    /// denominator preserved in the failure reason and correctly declines. The
+    /// merge then unions both halves onto the survivor and re-points the
+    /// session with them. The NEXT call — the next launch, since there is no
+    /// idempotence marker to short-circuit it — scores 990/1000 and recovers.
+    ///
+    /// The mutation this kills is `duplicateAssetReconcileV1MetaKey`-shaped:
+    /// gate this sweep the way its three sibling sweeps are gated and the
+    /// second pass short-circuits, leaving the session `.failed` forever with
+    /// a transcript that has demonstrably caught up.
+    @Test("the coverage-guard sweep scores split coverage before the merge, and self-heals after it")
+    func coverageGuardSweepSelfHealsAfterTheMergeUnionsTheTranscript() async throws {
+        let store = try await makeTestStore()
+        let coordinator = makeCoordinator(store: store)
+        let episodeId = "ep-r5-split"
+
+        try await insertPlaceholder(
+            store: store, id: "ph-split", episodeId: episodeId,
+            state: SessionState.queued.rawValue,
+            transcriptCoverage: 400, duration: 543
+        )
+        try await insertCanonical(
+            store: store, id: "canon-split", episodeId: episodeId,
+            fingerprint: canonicalSHA, state: SessionState.queued.rawValue,
+            transcriptCoverage: 990, duration: 1_000
+        )
+        // The split: the first half of the transcript is on the placeholder,
+        // the second half on the canonical row. Neither asset alone clears the
+        // guard; together they do.
+        try await insertChunk(
+            store: store, id: "chunk-split-head", assetId: "ph-split",
+            index: 0, start: 0, end: 400
+        )
+        try await insertChunk(
+            store: store, id: "chunk-split-tail", assetId: "canon-split",
+            index: 1, start: 400, end: 990
+        )
+        try await insertSession(
+            store: store, id: "sess-split", assetId: "ph-split",
+            state: SessionState.failed.rawValue,
+            failureReason: "transcript coverage 400.0/1000.0s (ratio 0.400 < 0.950)"
+        )
+
+        // Launch 1, in the shipped order: the sweep runs first and sees only
+        // the placeholder's half.
+        let beforeMerge = await coordinator.recoverCoverageGuardFailures()
+        #expect(beforeMerge.recoveredCount == 0,
+                "scoring one half of a split transcript cannot clear the guard")
+        #expect(beforeMerge.stillBelowThreshold == 1,
+                "and the session is left stranded, not discarded")
+
+        let summary = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in nil }
+        )
+        #expect(summary.merge.placeholdersMerged == 1)
+        let mergedChunks = try await store.fetchTranscriptChunks(assetId: "canon-split")
+        #expect(mergedChunks.map(\.endTime).max() == 990,
+                "the merged row owns both halves")
+
+        // Launch 2. No `_meta` gate, so the sweep really does run again — and
+        // now it is scoring the union.
+        let afterMerge = await coordinator.recoverCoverageGuardFailures()
+        #expect(afterMerge.recoveredSessionIds == ["sess-split"],
+                "the next launch heals what the split coverage hid; a _meta gate here would strand it forever")
+        let session = try #require(try await store.fetchSession(id: "sess-split"))
+        #expect(session.state == SessionState.backfill.rawValue)
+        #expect(session.failureReason == nil)
+        #expect(session.analysisAssetId == "canon-split",
+                "the sweep could only re-score it because the merge moved the session onto the survivor")
+    }
+
+    /// R5 target 2, second half — the question round 4's "residual" framing did
+    /// not ask: whether running the coverage-guard sweep FIRST changes what the
+    /// merge produces. It does.
+    ///
+    /// A recovery does not only touch the session: it writes `.backfill` onto
+    /// the session's ASSET. Aimed at a placeholder that carries a completion
+    /// terminal — the ordinary shape, since terminal writes land on the pinned
+    /// placeholder while a stale coverage-guard failure sits on an earlier
+    /// session of the same asset — that write erases the very terminal
+    /// `foldAssetRow` exists to adopt, one step before the merge looks for it.
+    /// This is the R2 shape exactly: a sibling sweep repairs the placeholder's
+    /// claim away and the merge finds nothing to carry across.
+    ///
+    /// The divergence is real but BOUNDED, and the bound is what keeps the
+    /// shipped order defensible: both orders end non-terminal, because in the
+    /// merge-first order the same sweep simply arrives one step later and
+    /// writes `.backfill` onto the survivor instead. No completion survives
+    /// either way, so the ordering costs the merged row a resumability hint
+    /// (`queued` rather than `backfill`), not an analysis. Moving the merge
+    /// ahead of the coverage-guard sweep would not preserve a terminal; only
+    /// teaching the sweep not to downgrade an asset it has no evidence about
+    /// would, and that is the coverage guard's contract, not this bead's.
+    ///
+    /// Pinned so the bound is checked rather than asserted: if a future change
+    /// makes merge-first preserve the completion, this test fails and the
+    /// ordering in `PlayheadRuntime` becomes load-bearing for a second reason.
+    @Test("the coverage-guard sweep costs the merge its adopted terminal — in BOTH orders")
+    func coverageGuardRecoveryOutranksTheAdoptedTerminalInEitherOrder() async throws {
+        let audioURL = try writeSynthAudio(seconds: 30)
+
+        func buildFixture(_ store: AnalysisStore) async throws {
+            try await insertPlaceholder(
+                store: store, id: "ph-guard", episodeId: "ep-r5-guard",
+                state: SessionState.completeFull.rawValue,
+                featureCoverage: 29, transcriptCoverage: 29, duration: 543
+            )
+            try await insertCanonical(
+                store: store, id: "canon-guard", episodeId: "ep-r5-guard",
+                fingerprint: canonicalSHA, state: SessionState.queued.rawValue,
+                featureCoverage: nil, transcriptCoverage: nil, duration: nil
+            )
+            try await insertChunk(
+                store: store, id: "chunk-guard", assetId: "ph-guard",
+                index: 0, start: 0, end: 29
+            )
+            // An earlier session of the SAME asset, stranded by the guard while
+            // the transcript was still catching up. It has since caught up:
+            // 29 s against the 30 s denominator the failure reason preserved.
+            try await insertSession(
+                store: store, id: "sess-guard", assetId: "ph-guard",
+                state: SessionState.failed.rawValue,
+                failureReason: "transcript coverage 12.0/30.0s (ratio 0.400 < 0.950)"
+            )
+        }
+
+        // The shipped order: coverage-guard sweep, then merge.
+        let guardFirstStore = try await makeTestStore()
+        try await buildFixture(guardFirstStore)
+        let guardFirst = makeCoordinator(store: guardFirstStore)
+        let recovery = await guardFirst.recoverCoverageGuardFailures()
+        #expect(recovery.recoveredSessionIds == ["sess-guard"],
+                "the stranded session's transcript has caught up, so the sweep recovers it")
+        #expect(try await guardFirstStore.fetchAsset(id: "ph-guard")?.analysisState
+                == SessionState.backfill.rawValue,
+                "and recovery writes .backfill onto the placeholder, erasing the completion the merge was about to adopt")
+        let guardFirstSummary = await guardFirst.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in audioURL }
+        )
+        #expect(guardFirstSummary.merge.placeholdersMerged == 1)
+        #expect(guardFirstSummary.merge.adoptedTerminalStates == 0,
+                "there is no completion terminal left on the placeholder to adopt")
+
+        // The other order: merge, then coverage-guard sweep.
+        let mergeFirstStore = try await makeTestStore()
+        try await buildFixture(mergeFirstStore)
+        let mergeFirst = makeCoordinator(store: mergeFirstStore)
+        let mergeFirstSummary = await mergeFirst.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in audioURL }
+        )
+        #expect(mergeFirstSummary.merge.adoptedTerminalStates == 1,
+                "merging first DOES adopt the completion")
+        #expect(try await mergeFirstStore.fetchAsset(id: "canon-guard")?.analysisState
+                == SessionState.completeFull.rawValue,
+                "and the re-score against the measured 30 s duration confirms it rather than repairing it away")
+        _ = await mergeFirst.recoverCoverageGuardFailures()
+
+        // What both orders agree on: one row, a measured duration, the union of
+        // the pair's coverage.
+        for (label, store) in [("guard-first", guardFirstStore), ("merge-first", mergeFirstStore)] {
+            let rows = try await allAssets(store: store, episodeId: "ep-r5-guard")
+            #expect(rows.count == 1, "\(label): the pair converges either way")
+            let survivor = try #require(rows.first)
+            #expect(survivor.id == "canon-guard", "\(label)")
+            #expect(survivor.fastTranscriptCoverageEndTime == 29, "\(label): watermarks are the max of the pair")
+            let duration = try #require(survivor.episodeDurationSec, "\(label)")
+            #expect(abs(duration - 30) < 1.0,
+                    "\(label): a measured duration, not the 543 s artefact (got \(duration))")
+            #expect(SessionState(rawValue: survivor.analysisState)?.isTerminalCompletion == false,
+                    "\(label): the coverage-guard recovery outranks the adopted terminal whichever side of the merge it lands on")
+        }
+
+        // And where they differ: merging first at least leaves the survivor
+        // resumable from the merged watermarks instead of restarting it.
+        #expect(try await guardFirstStore.fetchAsset(id: "canon-guard")?.analysisState
+                == SessionState.queued.rawValue)
+        #expect(try await mergeFirstStore.fetchAsset(id: "canon-guard")?.analysisState
+                == SessionState.backfill.rawValue)
     }
 }
