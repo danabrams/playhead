@@ -687,6 +687,21 @@ actor AnalysisJobRunner {
         }
         let transcriptCoverage = transcriptObservation.coverage
         let transcriptFailure = transcriptObservation.failure
+        // playhead-ngev, A TRADEOFF TAKEN DELIBERATELY. An interruption is now
+        // terminal for this observation, where before the loop said nothing and
+        // the group ran to its 300 s ceiling. During that window the observer
+        // was still subscribed, so a SUCCESSOR loop (the playback lane
+        // re-tasking the shared engine after a scrub) completing the same asset
+        // could rescue this job. Bailing immediately gives that up.
+        //
+        // It is still the right trade: the alternative costs a five-minute hold
+        // on the scheduler's single running slot for every scrub — the shape
+        // behind 147 acquisitions and 9 finalizations — and the work is not
+        // lost, because the successor's coverage is durable and the retry after
+        // backoff finds it already persisted. What it buys is the row: an
+        // instant, named account of an interruption that used to be exported as
+        // `asr_failed` five minutes after a listener touched the scrubber.
+        //
         // playhead-ngev: what the runner itself observed, which it always
         // knows — unlike the class, which is absent on most routes here.
         let runObservation = TranscriptRunObservation.classify(
