@@ -1589,7 +1589,13 @@ struct SchedulerBugFixRegressionTests {
 
         let currentAsset = try #require(await store.fetchAsset(id: currentAssetId))
         #expect(currentAsset.assetFingerprint == currentSHA)
-        #expect(currentAsset.weakFingerprint == nil)
+        // playhead-0hi9: the freshly-minted row now records the observed weak
+        // fingerprint instead of leaving it NULL. The invariant this test
+        // exists for is untouched — a STALE canonical asset that merely shares
+        // the current weak must NOT be upgraded — and is still asserted by
+        // `currentAssetId != "stale-canonical-with-current-weak"` above and by
+        // the stale row's own fingerprints below.
+        #expect(currentAsset.weakFingerprint == currentWeakFingerprint)
 
         let staleAsset = try #require(await store.fetchAsset(id: "stale-canonical-with-current-weak"))
         #expect(staleAsset.assetFingerprint == oldSHA)

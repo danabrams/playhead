@@ -1228,15 +1228,16 @@ actor AnalysisCoordinator {
         // (file not found, unreadable asset, decoder failure).
         logger.info("Spooling: decoding audio for episode \(episodeId)")
         let decodeStart = ContinuousClock.now
-        let shards: [AnalysisShard]
+        let outcome: AnalysisDecodeOutcome
         do {
-            shards = try await audioService.decode(fileURL: audioURL, episodeID: episodeId)
+            outcome = try await audioService.decodeOutcome(fileURL: audioURL, episodeID: episodeId)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             logger.error("Audio decode failed for episode \(episodeId): \(error)")
             throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
         }
+        let shards = outcome.shards
         let decodeElapsed = ContinuousClock.now - decodeStart
         guard !shards.isEmpty else {
             throw AnalysisCoordinatorError.noAudioAvailable(episodeId: episodeId)
@@ -1246,28 +1247,11 @@ actor AnalysisCoordinator {
         activeShards = shards
         activeAudioURL = audioURL
 
-        // playhead-gtt9.1.1: persist the shard-sum duration onto the
-        // `analysis_assets` row so the coverage guard has a durable
-        // denominator if the pipeline is restarted directly into
-        // `.backfill` (where `activeShards` is never rehydrated). We
-        // also cache it locally so `currentEpisodeDuration()` has a
-        // fallback when `activeShards` is later cleared.
-        if totalAudio > 0 {
-            do {
-                try await store.updateEpisodeDuration(
-                    id: assetId,
-                    episodeDurationSec: totalAudio
-                )
-                cachedPersistedEpisodeDuration = totalAudio
-            } catch {
-                // A failed duration write is not fatal to the pipeline
-                // — `activeShards` is still authoritative for the
-                // in-memory guard. Log and continue; the only cost is
-                // that if the process is killed before another write,
-                // the resume guard will fail safe (gtt9.1.1 intent).
-                logger.warning("Failed to persist episodeDurationSec=\(totalAudio) for asset \(assetId): \(error)")
-            }
-        }
+        await persistSpooledEpisodeDuration(
+            assetId: assetId,
+            episodeId: episodeId,
+            outcome: outcome
+        )
 
         // Start streaming decode — feeds download bytes directly into
         // the decoder, emitting shards as audio arrives.
@@ -1297,6 +1281,62 @@ actor AnalysisCoordinator {
 
         try await transition(sessionId: sessionId, assetId: assetId, to: .featuresReady)
         try await runFromFeaturesReady(sessionId: sessionId, assetId: assetId)
+    }
+
+    /// playhead-gtt9.1.1: persist the shard-sum duration onto the
+    /// `analysis_assets` row so the coverage guard has a durable denominator
+    /// if the pipeline is restarted directly into `.backfill` (where
+    /// `activeShards` is never rehydrated). Also cached locally so
+    /// ``currentEpisodeDuration()`` has a fallback once `activeShards` is
+    /// cleared.
+    ///
+    /// playhead-0hi9: ONLY from a decode that covered the whole asset.
+    /// `DownloadManager.defaultPlayableThreshold` (8 MiB) resumes playback
+    /// mid-download, which fires `.playStarted` and spools against a byte
+    /// prefix — on a ~123 kbps show that prefix decodes to ~543 s no matter
+    /// how long the episode really is, which is why episodes of 2933 s,
+    /// 1746 s and 4379 s all recorded ~540 s. Persisting that shard sum
+    /// turned `episodeDurationSec` into a measurement of the download
+    /// threshold rather than of the episode, and every coverage ratio scored
+    /// against it came out above 1.0 (playhead-csbq).
+    ///
+    /// `ShardCache` already refuses to persist a truncated decode, on the
+    /// stated grounds that a cached partial result would be returned
+    /// permanently. A persisted partial *duration* is the same poison, in the
+    /// database instead of on disk, and it outlives the cache. So this
+    /// applies the identical guard: on a truncated decode the row keeps
+    /// whatever duration it already had (normally NULL, which the coverage
+    /// guard fails safe on) until a complete decode or the launch-time
+    /// `AudioFileDurationProbe` sweep supplies a real one.
+    ///
+    /// Takes the whole ``AnalysisDecodeOutcome`` rather than a caller-supplied
+    /// flag so the truncation verdict cannot drift from the decode it came
+    /// out of.
+    func persistSpooledEpisodeDuration(
+        assetId: String,
+        episodeId: String,
+        outcome: AnalysisDecodeOutcome
+    ) async {
+        let totalAudio = outcome.shards.map(\.duration).reduce(0, +)
+        guard totalAudio > 0 else { return }
+        guard !outcome.isTruncated else {
+            logger.info("Spooling: decode of episode \(episodeId, privacy: .public) is truncated (\(String(format: "%.0f", totalAudio), privacy: .public)s decoded) — NOT persisting episodeDurationSec")
+            return
+        }
+        do {
+            try await store.updateEpisodeDuration(
+                id: assetId,
+                episodeDurationSec: totalAudio
+            )
+            cachedPersistedEpisodeDuration = totalAudio
+        } catch {
+            // A failed duration write is not fatal to the pipeline —
+            // `activeShards` is still authoritative for the in-memory guard.
+            // Log and continue; the only cost is that if the process is
+            // killed before another write, the resume guard will fail safe
+            // (gtt9.1.1 intent).
+            logger.warning("Failed to persist episodeDurationSec=\(totalAudio) for asset \(assetId): \(error)")
+        }
     }
 
     // MARK: - Stage: FeaturesReady -> HotPathReady
@@ -1534,36 +1574,12 @@ actor AnalysisCoordinator {
         }
     }
 
-    /// Resolve or create an analysis asset ID for an episode without starting
-    /// the pipeline. Use this to wire up the transcript UI while audio is
-    /// still downloading.
-    func resolveAssetId(episodeId: String) async -> String? {
-        do {
-            if let existing = try await store.fetchAssetByEpisodeId(episodeId) {
-                return existing.id
-            }
-            // Create a placeholder asset so the UI has an ID to bind to.
-            let assetId = UUID().uuidString
-            let asset = AnalysisAsset(
-                id: assetId,
-                episodeId: episodeId,
-                assetFingerprint: assetId,
-                weakFingerprint: nil,
-                sourceURL: "",
-                featureCoverageEndTime: nil,
-                fastTranscriptCoverageEndTime: nil,
-                confirmedAdCoverageEndTime: nil,
-                analysisState: SessionState.queued.rawValue,
-                analysisVersion: 1,
-                capabilitySnapshot: nil
-            )
-            try await store.insertAsset(asset)
-            return assetId
-        } catch {
-            logger.error("Failed to resolve asset ID for episode \(episodeId): \(error)")
-            return nil
-        }
-    }
+    // playhead-0hi9: `resolveAssetId(episodeId:)` was deleted here. It had
+    // zero callers repo-wide, and it minted a third flavour of placeholder
+    // row — `assetFingerprint: assetId`, `weakFingerprint: nil`, and an EMPTY
+    // `sourceURL` — that no reconciliation path could ever have matched.
+    // Keeping a second, worse placeholder factory alive next to the one this
+    // bead is fixing was an invitation to reintroduce the bug.
 
     // MARK: - Session Resolution
 
@@ -1679,11 +1695,30 @@ actor AnalysisCoordinator {
             capabilityJSON = nil
         }
 
+        // playhead-0hi9: `assetFingerprint` is still the row's own UUID —
+        // Pipeline A mints this row the moment playback starts, long before
+        // the full-file SHA exists. What changed is `weakFingerprint`: it now
+        // carries the enclosure-URL/ETag/Content-Length/Last-Modified identity
+        // the download manager already knows at this point, which is the
+        // column's entire purpose.
+        //
+        // Without it, `canUpgradeWeakAssetToCanonicalSHA` could never fire on
+        // this row — its final gate is `assetFingerprint == currentWeak ||
+        // weakFingerprint == currentWeak`, and a UUID never equals a weak
+        // fingerprint while the other side was permanently NULL. The only
+        // writer of the column, `updateAssetFingerprint`, was reachable solely
+        // from inside the upgrade path that required it to already be
+        // populated. That closed loop is what let a second row be minted for
+        // the same episode by `AnalysisWorkScheduler.resolveAnalysisAssetId`
+        // once the download finished and the SHA became known.
+        let weakFingerprint = AudioFingerprint.nonEmptyWeak(
+            await downloadManager?.fingerprint(for: episodeId)?.weak
+        )
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: episodeId,
             assetFingerprint: assetId, // Placeholder until content hashing
-            weakFingerprint: nil,
+            weakFingerprint: weakFingerprint,
             sourceURL: audioURL.url.absoluteString,
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
@@ -1708,6 +1743,30 @@ actor AnalysisCoordinator {
 
         return (sessionId, assetId, .queued)
     }
+
+#if DEBUG
+    /// playhead-0hi9 test seam: run `resolveSession` without starting the
+    /// pipeline, so a test can assert what the Pipeline A insert actually
+    /// writes into `analysis_assets` (in particular `weakFingerprint`, whose
+    /// absence made the canonical-SHA upgrade unreachable). Production code
+    /// reaches `resolveSession` only through `handlePlayStarted`.
+    func resolveSessionForTesting(
+        episodeId: String,
+        audioURL: LocalAudioURL
+    ) async throws -> (String, String, SessionState) {
+        try await resolveSession(episodeId: episodeId, audioURL: audioURL)
+    }
+
+    /// R3 test seam: the coverage guard's IN-MEMORY denominator. A truncated
+    /// decode is barred from `analysis_assets.episodeDurationSec`, and this is
+    /// the other place the same number can land — `currentEpisodeDuration()`
+    /// falls back to it once `activeShards` is cleared, so a poisoned value
+    /// here reproduces the >100 % coverage ratios of playhead-csbq without
+    /// ever touching the database.
+    func cachedPersistedEpisodeDurationForTesting() -> Double? {
+        cachedPersistedEpisodeDuration
+    }
+#endif
 
     // MARK: - Capability Changes
 
@@ -2796,6 +2855,167 @@ actor AnalysisCoordinator {
         return summary
     }
 
+    // MARK: - Duplicate placeholder-asset reconcile (playhead-0hi9 part 3)
+
+    /// `_meta.key` flag. Once set, subsequent calls short-circuit.
+    ///
+    /// A NEW key, not a bump of an existing one: `did_duration_backfill_v1` and
+    /// `did_terminal_state_reconcile_v1` are already marked done on the
+    /// affected device, and both are per-row duplicate-blind — reusing either
+    /// would either not run at all or re-run work that is not the repair
+    /// needed here.
+    static let duplicateAssetReconcileV1MetaKey = "did_duplicate_asset_reconcile_v1"
+
+    /// One-shot launch-time sweep that merges the `analysis_assets` pairs
+    /// already on disk, then repairs what the merge exposes.
+    ///
+    /// Three ordered steps, because each depends on the previous one:
+    ///
+    ///  1. ``AnalysisStore/reconcileDuplicatePlaceholderAssets()`` — one
+    ///     transaction, re-points every child row, takes the max of each
+    ///     coverage watermark, deletes the placeholder. See that method for
+    ///     the merge policy.
+    ///  2. Re-probe `episodeDurationSec` for each survivor from the cached
+    ///     audio file. The merged row inherits the survivor's duration, which
+    ///     may itself be a mid-download artifact from before part 1 landed;
+    ///     `AudioFileDurationProbe` reads container metadata and is the only
+    ///     measurement either row can be checked against. Probed when the
+    ///     duration is missing, contradicted by the row's own coverage, or
+    ///     INHERITED from the folded-in placeholder (see
+    ///     ``DuplicateAssetMergeSummary/survivorsWithInheritedDuration`` — that
+    ///     value is a mid-download artefact by construction and can look
+    ///     perfectly self-consistent). A duration the survivor brought itself
+    ///     and that nothing contradicts is left alone.
+    ///  3. Re-score the survivor's terminal claim with the EXISTING
+    ///     ``reconcilePersistedTerminalAssetVerdict(asset:transcriptCoverageEnd:featureCoverageEnd:episodeDuration:)``.
+    ///     The merge may have adopted a `completeFull` from the folded-in row;
+    ///     this is what stops that adoption from being an unchecked assertion.
+    ///     Reuses the hygc.1.3 rules rather than inventing parallel ones.
+    ///
+    /// - Parameter cachedFileURL: local file URL for an episodeId, or nil when
+    ///   the audio is not on disk. In production
+    ///   `await downloadManager.cachedFileURL(for:)`.
+    ///
+    /// Errors are logged and swallowed — a launch sweep must never block the
+    /// app. The merge itself is atomic, so a failure there leaves the database
+    /// exactly as it was and the next launch retries (the `_meta` marker is
+    /// only written after a completed pass).
+    func reconcileDuplicateAnalysisAssetsIfNeeded(
+        cachedFileURL: @escaping @Sendable (String) async -> URL?
+    ) async -> DuplicateAssetReconcileSummary {
+        var summary = DuplicateAssetReconcileSummary()
+
+        do {
+            if let flag = try await store.fetchMetaValue(forKey: Self.duplicateAssetReconcileV1MetaKey),
+               flag == "1" {
+                summary.alreadyDone = true
+                return summary
+            }
+        } catch {
+            logger.warning("Duplicate-asset reconcile: meta read failed (\(String(describing: error), privacy: .public)); proceeding without idempotence guard")
+        }
+
+        let merge: DuplicateAssetMergeSummary
+        do {
+            merge = try await store.reconcileDuplicatePlaceholderAssets()
+        } catch {
+            // Do NOT set the marker — the transaction rolled back, so the next
+            // launch must try again rather than skip the repair forever.
+            logger.error("Duplicate-asset reconcile: merge failed, database unchanged: \(String(describing: error), privacy: .public)")
+            summary.failed = true
+            return summary
+        }
+        summary.merge = merge
+
+        for assetId in merge.survivingAssetIds {
+            await repairMergedAsset(
+                assetId: assetId,
+                // R1: a duration the survivor took FROM the placeholder is
+                // untrustworthy by construction — it is the shard sum of an
+                // 8 MiB mid-download prefix, the artefact this whole bead
+                // exists to kill. The ordinary "missing or contradicted"
+                // check cannot see it, because a poisoned ~543 s that happens
+                // to exceed the merged coverage watermark looks plausible.
+                // This sweep is one-shot, so it would then be kept forever.
+                forceDurationReprobe: merge.survivorsWithInheritedDuration.contains(assetId),
+                cachedFileURL: cachedFileURL,
+                summary: &summary
+            )
+        }
+
+        do {
+            try await store.setMetaValue(
+                forKey: Self.duplicateAssetReconcileV1MetaKey,
+                value: "1"
+            )
+        } catch {
+            logger.warning("Duplicate-asset reconcile: failed to set idempotence marker: \(String(describing: error), privacy: .public)")
+        }
+
+        if merge.placeholdersMerged > 0 {
+            logger.info("Duplicate-asset reconcile: merged \(merge.placeholdersMerged, privacy: .public) placeholder row(s) across \(merge.episodesInspected, privacy: .public) episode(s); re-pointed \(merge.childRowsRepointed, privacy: .public) child row(s), discarded \(merge.childRowsDiscarded, privacy: .public) conflicting duplicate(s), re-probed \(summary.durationsRewritten, privacy: .public) duration(s), repaired \(summary.terminalStatesRepaired, privacy: .public) terminal state(s)")
+        }
+        return summary
+    }
+
+    /// Steps 2 and 3 for one merged row.
+    ///
+    /// - Parameter forceDurationReprobe: re-probe even when the row's duration
+    ///   is self-consistent. Set for survivors that INHERITED their duration
+    ///   from the folded-in placeholder; a value that never came off this row
+    ///   has not earned the benefit of the doubt. Rows carrying their own
+    ///   duration are still left alone — always re-probing would let a
+    ///   still-downloading file on disk overwrite a good measurement.
+    private func repairMergedAsset(
+        assetId: String,
+        forceDurationReprobe: Bool,
+        cachedFileURL: @escaping @Sendable (String) async -> URL?,
+        summary: inout DuplicateAssetReconcileSummary
+    ) async {
+        guard let asset = try? await store.fetchAsset(id: assetId) else { return }
+
+        let transcriptEnd = (try? await store.fetchMaxTranscriptEndTimeByAssetIds([assetId]))?[assetId] ?? 0
+        var duration = asset.episodeDurationSec ?? 0
+        let featureEnd = asset.featureCoverageEndTime ?? 0
+        let watermarkEnd = max(featureEnd, max(asset.fastTranscriptCoverageEndTime ?? 0, transcriptEnd))
+        let durationLooksWrong = forceDurationReprobe || duration <= 0 || watermarkEnd > duration
+
+        if durationLooksWrong, let fileURL = await cachedFileURL(asset.episodeId) {
+            summary.durationsProbed += 1
+            if let probed = await AudioFileDurationProbe.probeDuration(at: fileURL), probed > 0 {
+                do {
+                    try await store.updateEpisodeDuration(id: assetId, episodeDurationSec: probed)
+                    summary.durationsRewritten += 1
+                    duration = probed
+                    logger.info("Duplicate-asset reconcile: asset \(assetId, privacy: .public) duration re-probed \(asset.episodeDurationSec.map { "\($0)" } ?? "nil", privacy: .public) -> \(probed, privacy: .public)s")
+                } catch {
+                    logger.warning("Duplicate-asset reconcile: duration write failed for \(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+            } else {
+                summary.durationProbeFailed += 1
+            }
+        }
+
+        guard let refreshed = try? await store.fetchAsset(id: assetId) else { return }
+        let verdict = Self.reconcilePersistedTerminalAssetVerdict(
+            asset: refreshed,
+            transcriptCoverageEnd: transcriptEnd,
+            featureCoverageEnd: refreshed.featureCoverageEndTime,
+            episodeDuration: refreshed.episodeDurationSec
+        )
+        guard case .repair(let state, let reason) = verdict else { return }
+        do {
+            try await store.updateAssetState(
+                id: assetId,
+                state: state.rawValue,
+                terminalReason: reason
+            )
+            summary.terminalStatesRepaired += 1
+        } catch {
+            logger.warning("Duplicate-asset reconcile: terminal repair failed for \(assetId, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
     // MARK: - Persisted terminal-state reconcile (playhead-hygc.1.3)
 
     /// `_meta.key` flag controlling idempotence of
@@ -3495,6 +3715,29 @@ actor AnalysisCoordinator {
 }
 
 // MARK: - EpisodeDurationBackfillSummary (playhead-gyvb.2)
+
+/// playhead-0hi9 part 3: outcome of one
+/// ``AnalysisCoordinator/reconcileDuplicateAnalysisAssetsIfNeeded(cachedFileURL:)``
+/// pass.
+struct DuplicateAssetReconcileSummary: Sendable, Equatable {
+    /// What the transactional SQL merge did.
+    var merge = DuplicateAssetMergeSummary()
+    /// Merged rows whose duration was missing or contradicted and therefore
+    /// re-probed from the audio file.
+    var durationsProbed = 0
+    /// Of those, the ones a probe actually rewrote.
+    var durationsRewritten = 0
+    /// Probes that returned nil (row left untouched).
+    var durationProbeFailed = 0
+    /// Merged rows whose terminal claim the hygc.1.3 verdict contradicted
+    /// against the re-probed duration, and repaired.
+    var terminalStatesRepaired = 0
+    /// `true` when the sweep had already run on this install and was a no-op.
+    var alreadyDone = false
+    /// `true` when the merge threw. The transaction rolled back, the `_meta`
+    /// marker was NOT written, and the next launch retries.
+    var failed = false
+}
 
 /// Result of one duration-backfill sweep — see
 /// `AnalysisCoordinator.runEpisodeDurationBackfillIfNeeded`.

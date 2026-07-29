@@ -87,8 +87,10 @@ struct AnalysisAsset: Sendable {
     let artifactClass: ArtifactClass
     /// playhead-gtt9.1.1: durable total-audio duration persisted at
     /// spool time. `nil` on legacy rows predating the column and on
-    /// placeholder rows created before the pipeline has decoded audio
-    /// yet (`resolveAssetId`). ``AnalysisCoordinator/resolveEpisodeDuration``
+    /// placeholder rows created before the pipeline has decoded audio yet
+    /// (`AnalysisCoordinator.resolveSession` — playhead-0hi9 deleted the
+    /// other placeholder factory, `resolveAssetId`, which had no callers).
+    /// ``AnalysisCoordinator/resolveEpisodeDuration``
     /// treats `nil` or non-positive as "missing" and routes the
     /// coverage guards to their fail-safe shortcuts.
     ///
@@ -1220,13 +1222,133 @@ struct AdListenRewindRow: Sendable, Hashable {
 
 // MARK: - AnalysisStore actor
 
+// MARK: - Duplicate placeholder-asset reconciliation (playhead-0hi9 part 3)
+
+/// What one ``AnalysisStore/reconcileDuplicatePlaceholderAssets()`` pass did.
+/// Counts are cumulative across every episode inspected in the pass.
+struct DuplicateAssetMergeSummary: Sendable, Equatable {
+    /// Episodes found holding more than one `analysis_assets` row.
+    var episodesInspected = 0
+    /// Placeholder rows folded into a canonical row and deleted.
+    var placeholdersMerged = 0
+    /// Child rows re-pointed from a placeholder to its survivor.
+    var childRowsRepointed = 0
+    /// Child rows that could NOT be re-pointed because the survivor already
+    /// held an equivalent row under a UNIQUE/PRIMARY KEY on the asset column
+    /// (`ad_decision_results.analysisAssetId` is `UNIQUE`;
+    /// `episode_fingerprints`, `feature_extraction_state`, `episode_summaries`,
+    /// `rediff_refetch_state`, `rediff_day_zero_attempts` and
+    /// `explicit_feedback_egress_baselines` key on it). Deleted explicitly so
+    /// the placeholder can go without an FK violation and without orphans.
+    var childRowsDiscarded = 0
+    /// Rows that survived a merge, so an async caller can re-probe their
+    /// duration and re-score their terminal claim.
+    var survivingAssetIds: [String] = []
+    /// Survivors whose `episodeDurationSec` was FILLED IN from a folded-in
+    /// placeholder because they had none of their own.
+    ///
+    /// R1: such a value is untrustworthy BY CONSTRUCTION — the placeholder's
+    /// duration is the shard sum of an 8 MiB mid-download prefix (part 1 of
+    /// this bead), which is why the whole bead exists. The caller's ordinary
+    /// "does this duration look wrong" check (`missing, or contradicted by its
+    /// own coverage`) cannot see it: a poisoned ~543 s that happens to exceed
+    /// the merged coverage watermark looks perfectly plausible and would be
+    /// kept forever, because the sweep is one-shot. These ids force a re-probe
+    /// against the audio file regardless.
+    var survivorsWithInheritedDuration: [String] = []
+    /// Completion terminals adopted from a folded-in row.
+    var adoptedTerminalStates = 0
+    /// Placeholder rows LEFT IN PLACE because their `sourceURL` names a
+    /// different artifact than the survivor's. See ``AssetMergeGuard``.
+    var skippedDifferentSource = 0
+    /// Placeholder rows left in place because one side carried no usable
+    /// `sourceURL` at all, so no artifact identity could be compared.
+    var skippedUnknownSource = 0
+}
+
+/// Whether one placeholder may be folded into one survivor.
+///
+/// playhead-0hi9: 13 of the 14 duplicated episodes on the owner's device hold
+/// two rows naming the SAME file. The 14th holds two DIFFERENT `sourceURL`s.
+/// That one is filed separately (playhead-9x4c tracks `sourceURL` storing
+/// absolute container paths) and is explicitly out of scope here — but it is
+/// in the same table, and this sweep will meet it.
+///
+/// The merge is irreversible: it re-points child rows and deletes a row. The
+/// risk is asymmetric. Skipping a pair leaves the user exactly as broken as
+/// before and the sweep can be re-armed later; merging two rows that describe
+/// DIFFERENT audio fuses one episode's transcript onto another's analysis and
+/// nothing can take that apart afterwards. So the sweep merges only on
+/// positive evidence that both rows name the same artifact, and records a
+/// reason otherwise.
+///
+/// The comparison is on the last path component, not the whole URL, precisely
+/// because playhead-9x4c makes the leading container path unstable across
+/// reinstalls: `DownloadManager.safeFilename(for:)` derives the basename from
+/// the episode id, so it survives a container move that rewrites everything to
+/// its left.
+enum AssetMergeGuard: Sendable, Equatable {
+    /// Both rows name the same on-disk artifact.
+    case merge
+    /// The rows name different artifacts. Left alone, deliberately.
+    case skipDifferentSource(victim: String, survivor: String)
+    /// One side has no usable `sourceURL`, so nothing can be compared.
+    case skipUnknownSource
+}
+
+
+/// One schema location holding an `analysis_assets.id`, discovered at runtime.
+struct ChildAssetColumn: Sendable, Equatable {
+    let table: String
+    let column: String
+}
+
+/// The subset of `analysis_assets` the merge reasons about. Read with an
+/// explicit column list rather than `assetSelectColumns` so the merge stays
+/// stable as the row type grows fields it has no opinion about.
+struct AssetMergeRow: Sendable, Equatable {
+    let rowId: Int64
+    let id: String
+    let assetFingerprint: String
+    let createdAt: Double
+    let analysisState: String
+    let terminalReason: String?
+    let sourceURL: String
+    /// Declared with a default so the merge's pure helpers can still be
+    /// exercised without inventing a duration.
+    var episodeDurationSec: Double? = nil
+
+    /// The stable part of `sourceURL`: the hashed filename the download
+    /// manager derives from the episode id. `nil` when the value is empty or
+    /// carries no path component at all.
+    var artifactBasename: String? {
+        let trimmed = sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let component = URL(string: trimmed)?.lastPathComponent
+            ?? trimmed.split(separator: "/").last.map(String.init)
+        guard let component, !component.isEmpty, component != "/" else { return nil }
+        return component.lowercased()
+    }
+
+    /// A Pipeline A placeholder writes its own row id into `assetFingerprint`.
+    /// That self-reference is the signature: it is exactly what makes the row
+    /// unmatchable by every fingerprint-keyed query, and it cannot arise by
+    /// accident because every other writer supplies a content hash or a job
+    /// fingerprint.
+    var isPlaceholder: Bool { assetFingerprint == id }
+
+    var hasCanonicalSHA: Bool {
+        CrossUserAnalysisShareKey.isCanonicalFullFileSHA(assetFingerprint)
+    }
+}
+
 actor AnalysisStore {
 
     /// Latest persisted schema version. Tests reference this so migration
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 38
+    nonisolated static let currentSchemaVersion = 39
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -1964,6 +2086,10 @@ actor AnalysisStore {
             // playhead-p70f: day-0 rediff attempt accountability table + the
             // day-0 bandwidth-ledger counter. Additive-only and idempotent.
             try migrateRediffDayZeroAttemptsV38IfNeeded()
+            // playhead-0hi9: the structural guarantee that one episode owns at
+            // most one row per content identity. Deduplicates first, because a
+            // UNIQUE index cannot be created over existing violations.
+            try migrateUniqueEpisodeFingerprintIndexV39IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2269,6 +2395,11 @@ actor AnalysisStore {
         // helper is fully idempotent and guards the column ALTER on
         // `tableExists`, so seeded fixtures without the ledger still reach v38.
         try migrateRediffDayZeroAttemptsV38IfNeeded()
+        // playhead-0hi9 (v39): mirror the unique `(episodeId,
+        // assetFingerprint)` index into the ladder seam. The helper guards on
+        // `tableExists`, so seeded fixtures without `analysis_assets` still
+        // reach v39.
+        try migrateUniqueEpisodeFingerprintIndexV39IfNeeded()
     }
     #endif
 
@@ -5682,6 +5813,165 @@ actor AnalysisStore {
         try setSchemaVersion(38)
     }
 
+    // MARK: - V39: one row per (episode, content identity) (playhead-0hi9)
+    //
+    // `analysis_assets` had `PRIMARY KEY(id)` and a NON-unique
+    // `idx_assets_episode` on `(episodeId)`. Nothing in the schema said an
+    // episode may not accumulate rows, and nothing in the code checked — so
+    // when `AnalysisCoordinator.resolveSession` minted a placeholder keyed by
+    // its own UUID and `AnalysisWorkScheduler.resolveAnalysisAssetId` later
+    // minted a second row keyed by the file's SHA, the database accepted both
+    // and analysis state split across them.
+    //
+    // Parts 1–3 fix the writers and repair what is already on disk. This index
+    // is the rail underneath: after it, a second INSERT for the same
+    // `(episodeId, assetFingerprint)` fails loudly at the point of the defect
+    // instead of silently forking an episode's state.
+    //
+    // WHY NOT UNIQUE ON `episodeId` ALONE. Two rows for one episode under
+    // DIFFERENT fingerprints is legitimate — a feed correction or re-download
+    // genuinely changes the bytes, and `resolveAnalysisAssetId` deliberately
+    // keeps the old analysis anchored to its own SHA. The defect is two rows
+    // for the same identity, and that is exactly what this constrains.
+
+    /// V39 — deduplicate `(episodeId, assetFingerprint)` collisions, then make
+    /// the pairing unique.
+    ///
+    /// The dedup runs FIRST and unconditionally, because `CREATE UNIQUE INDEX`
+    /// fails outright on an existing violation and would take the whole
+    /// migration transaction — and therefore app launch — down with it. It
+    /// keeps the newest row of each colliding group (`createdAt DESC, rowid
+    /// DESC`, matching `fetchAssetByEpisodeId`) and folds the rest into it.
+    ///
+    /// NOTE ON SCOPE. This is NOT the placeholder/SHA merge — that pair holds
+    /// two DIFFERENT fingerprints (a UUID and a hash), so it never violates
+    /// this index and is untouched here. It is repaired by the launch sweep
+    /// `AnalysisCoordinator.reconcileDuplicateAnalysisAssetsIfNeeded`, which
+    /// has the async file access the duration re-probe needs and therefore
+    /// cannot run inside a synchronous migration. Exact-fingerprint collisions
+    /// are a different and rarer shape (two racing inserts under one
+    /// fingerprint); they carry no distinct identity to merge on, so
+    /// newest-wins is the honest resolution.
+    ///
+    /// Idempotent: `CREATE UNIQUE INDEX IF NOT EXISTS`, and the dedup is a
+    /// no-op once no group has more than one row.
+    ///
+    /// R2 — CONTAINMENT, AND WHY IT IS NOT OPTIONAL. Everything this rung does
+    /// is DATA-DEPENDENT: it deletes rows, moves child rows between parents,
+    /// and builds an index that fails outright on a violation it did not
+    /// manage to clear. That is a much larger throw surface than the additive
+    /// `CREATE TABLE` / `ADD COLUMN` rungs above, and the consequence of a
+    /// throw here is not a failed migration — it is total data loss:
+    /// `PlayheadRuntime` answers a thrown `migrate()` at launch with
+    /// `removeItem(at: AnalysisStore.defaultDirectory())` followed by a retry,
+    /// and the retry succeeds because the directory is now empty. The user's
+    /// entire analysis database is discarded, silently, with nothing surfaced.
+    ///
+    /// So the rung runs inside a SAVEPOINT and treats its own failure as
+    /// survivable. On a throw it rolls back to the savepoint — undoing any
+    /// half-finished re-point — logs a fault, and **leaves `schema_version` at
+    /// 38** so the next launch retries rather than marking the repair
+    /// permanently done. The cost of that path is exactly the state `main`
+    /// ships today: no unique index, duplicates still possible, and the launch
+    /// sweep still able to repair the pairs on disk. The cost of the
+    /// alternative is the user's library. The index is a rail, not data, and a
+    /// rail is never worth the thing it protects.
+    ///
+    /// The savepoint nests correctly in both callers: inside
+    /// `runSchemaMigration`'s `BEGIN IMMEDIATE` it is a nested savepoint, and
+    /// under `migrateOnlyForTesting` (not transaction-wrapped) `SAVEPOINT`
+    /// opens a transaction that the matching `RELEASE` commits.
+    private func migrateUniqueEpisodeFingerprintIndexV39IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 39 else { return }
+        guard try tableExists("analysis_assets") else {
+            try setSchemaVersion(39)
+            return
+        }
+        let savepoint = "v39_unique_asset_identity"
+        try exec("SAVEPOINT \(savepoint)")
+        do {
+            try dedupeExactFingerprintCollisionsForV39()
+            try exec("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_episode_fingerprint
+                ON analysis_assets(episodeId, assetFingerprint)
+                """)
+            try exec("RELEASE SAVEPOINT \(savepoint)")
+        } catch {
+            // `ROLLBACK TO` does not pop the savepoint; `RELEASE` must follow
+            // or the enclosing transaction is left with a stale frame.
+            try? exec("ROLLBACK TO SAVEPOINT \(savepoint)")
+            try? exec("RELEASE SAVEPOINT \(savepoint)")
+            logger.fault("V39 unique-asset-identity migration could not complete and was rolled back; schema stays at 38 and the next launch retries. The analysis database is UNCHANGED — this is deliberately not fatal, because a thrown migrate() at launch is answered by deleting the whole store. Error: \(String(describing: error), privacy: .public)")
+            return
+        }
+        try setSchemaVersion(39)
+    }
+
+    /// Collapse every `(episodeId, assetFingerprint)` group down to its newest
+    /// row, moving the losers' child rows onto the winner before deleting them.
+    ///
+    /// R1: THE CHILD ROWS ARE WHY THIS IS NOT ONE `DELETE`. A bare
+    /// `DELETE FROM analysis_assets` here is two defects at once, and the
+    /// second one is severe:
+    ///
+    ///   * `training_examples.analysisAssetId` is `ON DELETE RESTRICT`, so the
+    ///     delete raises `FOREIGN KEY constraint failed` and aborts the whole
+    ///     migration transaction. A thrown `migrate()` at launch is not a
+    ///     crash — `PlayheadRuntime` answers it by removing
+    ///     `AnalysisStore.defaultDirectory()` and retrying, so the user's
+    ///     ENTIRE analysis database is silently discarded and re-created empty.
+    ///   * every other child table is `ON DELETE CASCADE`, so the loser's
+    ///     transcript chunks, ad windows and scan rows were destroyed rather
+    ///     than moved — the opposite of what the launch sweep does two steps
+    ///     later for the placeholder/SHA shape, and for rows the index itself
+    ///     declares to be the SAME content identity.
+    ///
+    /// Re-pointing reuses the same runtime schema discovery the sweep uses, so
+    /// a child table added by a later migration is covered here too.
+    private func dedupeExactFingerprintCollisionsForV39() throws {
+        // `createdAt` is not guaranteed to exist here. Raw-schema test fixtures
+        // (and any pre-v9 database) seed `analysis_assets` without it, and
+        // referencing a missing column aborts the whole migration transaction —
+        // which is app launch. Order by it only when it is there; `rowid DESC`
+        // alone is a correct, if coarser, newest-wins.
+        let hasCreatedAt = try columnExists(table: "analysis_assets", column: "createdAt")
+        let ordering = hasCreatedAt ? "createdAt DESC, rowid DESC" : "rowid DESC"
+
+        var collidingKeys: [(episodeId: String, fingerprint: String)] = []
+        let keyStmt = try prepare("""
+            SELECT episodeId, assetFingerprint FROM analysis_assets
+            GROUP BY episodeId, assetFingerprint HAVING COUNT(*) > 1
+            ORDER BY episodeId, assetFingerprint
+            """)
+        defer { sqlite3_finalize(keyStmt) }
+        while try nextRow(keyStmt) {
+            collidingKeys.append((text(keyStmt, 0), text(keyStmt, 1)))
+        }
+        // The overwhelmingly common case: nothing to do, and no schema scan.
+        guard !collidingKeys.isEmpty else { return }
+
+        let childColumns = try assetReferencingChildColumns()
+        for key in collidingKeys {
+            var ids: [String] = []
+            let idStmt = try prepare("""
+                SELECT id FROM analysis_assets
+                WHERE episodeId = ? AND assetFingerprint = ?
+                ORDER BY \(ordering)
+                """)
+            defer { sqlite3_finalize(idStmt) }
+            bind(idStmt, 1, key.episodeId)
+            bind(idStmt, 2, key.fingerprint)
+            while try nextRow(idStmt) {
+                ids.append(text(idStmt, 0))
+            }
+            guard let winner = ids.first else { continue }
+            for loser in ids.dropFirst() {
+                _ = try repointChildRows(from: loser, to: winner, childColumns: childColumns)
+                try deleteAssetRow(id: loser)
+            }
+        }
+    }
+
     /// Upsert one asset's day-0 attempt record.
     /// `DayZeroRediffAttemptPolicy.advance` has already folded the prior row's
     /// `attemptCount` / `totalFullFetchBytes` into the value.
@@ -7354,8 +7644,10 @@ actor AnalysisStore {
         // playhead-gtt9.1.1: `episodeDurationSec` is bound at insert
         // time only if the caller pre-populated it; spool-time writes
         // go through ``updateEpisodeDuration`` once the shard sum is
-        // known. Placeholder inserts from `resolveAssetId` pass nil
-        // and the column lands NULL.
+        // known. Placeholder inserts from
+        // `AnalysisCoordinator.resolveSession` pass nil and the column
+        // lands NULL. (playhead-0hi9 deleted `resolveAssetId`, the
+        // callerless second placeholder factory this used to name.)
         // playhead-i9dj: `episodeTitle` is bound at insert time when the
         // caller passed it on `AnalysisAsset.episodeTitle`. Existing
         // call-sites that don't yet thread the title leave it `nil`, and
@@ -14205,6 +14497,15 @@ actor AnalysisStore {
         try exec(sql)
     }
 
+    /// playhead-0hi9 test seam: throw from inside
+    /// ``reconcileDuplicatePlaceholderAssets()`` once `afterPlaceholders`
+    /// placeholders have been folded, so a test can prove the whole pass rolls
+    /// back rather than leaving half a merge. Jetsam mid-sweep during a
+    /// background launch is the real-world version of this.
+    func setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders: Int?) {
+        duplicateAssetMergeFaultAfterPlaceholders = afterPlaceholders
+    }
+
     func setFeatureBatchPersistenceFaultInjectionForTesting(
         _ injection: FeatureBatchPersistenceFaultInjection?
     ) {
@@ -15070,6 +15371,507 @@ actor AnalysisStore {
     }
 
     // MARK: - SQLite helpers
+
+    // MARK: - Duplicate placeholder-asset reconciliation (playhead-0hi9)
+
+    #if DEBUG
+    /// Test-only: fold this many placeholders, then throw. See
+    /// ``setDuplicateAssetMergeFaultInjectionForTesting(afterPlaceholders:)``.
+    private var duplicateAssetMergeFaultAfterPlaceholders: Int?
+    #endif
+
+    /// Fold Pipeline A placeholder rows into the canonical-SHA row for the
+    /// same episode.
+    ///
+    /// THE SHAPE ON DISK. Row identity is `(episodeId, assetFingerprint)`, and
+    /// `AnalysisCoordinator.resolveSession` mints its row before any content
+    /// hash exists, writing the row's own UUID as `assetFingerprint`. When the
+    /// download later completes, `AnalysisWorkScheduler.resolveAnalysisAssetId`
+    /// inserts a second row keyed by the full-file SHA. State then splits:
+    /// `activeAssetId` is pinned to the OLD row so every terminal-state write
+    /// lands there, while `analysis_jobs.analysisAssetId` and the newest-wins
+    /// resolvers (``fetchAssetByEpisodeId(_:)``,
+    /// ``fetchLatestAssetByEpisodeIdMap()``) see the NEW one. Neither row is
+    /// complete, and the surface shows the one that says `queued`.
+    ///
+    /// playhead-0hi9 parts 1 and 2 stop new pairs forming. They cannot repair
+    /// the pairs already on disk — both existing launch sweeps
+    /// (`did_duration_backfill_v1`, `did_terminal_state_reconcile_v1`) are
+    /// one-shot, already marked done on the affected device, and per-row
+    /// duplicate-blind. This is that repair.
+    ///
+    /// Per episode holding more than one row:
+    ///   * pick the survivor — the newest row whose `assetFingerprint` is a
+    ///     canonical full-file SHA, else simply the newest row;
+    ///   * for every OTHER row that is a placeholder (`assetFingerprint == id`)
+    ///     re-point every child row at the survivor, raise the survivor's
+    ///     coverage watermarks to the max of the pair, fill survivor NULLs from
+    ///     the placeholder, adopt a completion terminal the survivor lacks,
+    ///     then delete the placeholder.
+    ///
+    /// CHILD TABLES ARE ENUMERATED FROM THE LIVE SCHEMA, not from a list.
+    /// `sqlite_master` + `PRAGMA table_info` find every table carrying an
+    /// `analysisAssetId` or `assetId` column, so a table added by a later
+    /// migration — or one whose column arrived via `ALTER TABLE`, as
+    /// `ad_listen_rewinds.analysisAssetId` did in V34, which no `CREATE TABLE`
+    /// body would reveal — is covered without editing this method.
+    ///
+    /// TRANSACTIONAL AND IDEMPOTENT. The whole pass runs inside one
+    /// `BEGIN IMMEDIATE`, so an interruption (jetsam mid-sweep is a routine
+    /// background fate) rolls back to the pre-sweep state rather than leaving
+    /// half a merge; the caller just runs it again. A second pass over
+    /// reconciled data finds no duplicate episodes and returns a zero summary.
+    ///
+    /// NO ORPHANS. `PRAGMA foreign_keys = ON` and most child tables cascade on
+    /// delete, so re-pointing must complete before the placeholder is removed
+    /// or the cascade would take the data with it. `training_examples` is
+    /// `ON DELETE RESTRICT`, which aborts the transaction instead —
+    /// deliberately left as a hard failure rather than routed around.
+    func reconcileDuplicatePlaceholderAssets() throws -> DuplicateAssetMergeSummary {
+        var summary = DuplicateAssetMergeSummary()
+        let childColumns = try assetReferencingChildColumns()
+
+        try exec("BEGIN IMMEDIATE")
+        do {
+            for episodeId in try episodeIdsWithMultipleAssets() {
+                summary.episodesInspected += 1
+                let rows = try assetMergeRows(episodeId: episodeId)
+                guard let survivor = Self.chooseMergeSurvivor(rows) else { continue }
+                var mergedHere = false
+                // `survivor` is the snapshot taken before this episode's first
+                // fold. With more than one placeholder carrying a completion
+                // terminal — not the reported shape, which is pairs — the LAST
+                // one folded wins the adopted state, because the guard in
+                // `foldAssetRow` reads that snapshot rather than re-reading the
+                // row. Contained by design: the sweep re-scores the merged
+                // row's terminal claim against its real coverage afterwards, so
+                // whichever state is adopted is verified, not trusted.
+                for victim in rows where victim.id != survivor.id && victim.isPlaceholder {
+                    switch Self.mergeGuard(victim: victim, survivor: survivor) {
+                    case .skipDifferentSource(let victimName, let survivorName):
+                        summary.skippedDifferentSource += 1
+                        logger.warning("Duplicate-asset merge: LEAVING episode \(episodeId, privacy: .public) alone — placeholder names \(victimName, privacy: .public) but survivor names \(survivorName, privacy: .public); merging rows that describe different audio is not reversible (see playhead-9x4c)")
+                        continue
+                    case .skipUnknownSource:
+                        summary.skippedUnknownSource += 1
+                        logger.warning("Duplicate-asset merge: LEAVING episode \(episodeId, privacy: .public) alone — one row carries no usable sourceURL, so the two artifacts cannot be shown to be the same")
+                        continue
+                    case .merge:
+                        break
+                    }
+                    let moved = try repointChildRows(
+                        from: victim.id,
+                        to: survivor.id,
+                        childColumns: childColumns
+                    )
+                    summary.childRowsRepointed += moved.repointed
+                    summary.childRowsDiscarded += moved.discarded
+                    let fold = try foldAssetRow(victim: victim, into: survivor)
+                    if fold.adoptedTerminalState {
+                        summary.adoptedTerminalStates += 1
+                    }
+                    if fold.inheritedDuration,
+                       !summary.survivorsWithInheritedDuration.contains(survivor.id) {
+                        summary.survivorsWithInheritedDuration.append(survivor.id)
+                    }
+                    try deleteAssetRow(id: victim.id)
+                    summary.placeholdersMerged += 1
+                    mergedHere = true
+                    #if DEBUG
+                    if let limit = duplicateAssetMergeFaultAfterPlaceholders,
+                       summary.placeholdersMerged >= limit {
+                        throw AnalysisStoreError.queryFailed(
+                            "injected duplicate-asset merge fault after \(summary.placeholdersMerged) placeholder(s)"
+                        )
+                    }
+                    #endif
+                }
+                if mergedHere, !summary.survivingAssetIds.contains(survivor.id) {
+                    summary.survivingAssetIds.append(survivor.id)
+                }
+            }
+            try exec("COMMIT")
+        } catch {
+            try? exec("ROLLBACK")
+            throw error
+        }
+        return summary
+    }
+
+    /// Decide whether one placeholder may be folded into one survivor. Pure,
+    /// so the 14th-pair case can be exercised without standing up a database.
+    /// See ``AssetMergeGuard`` for why this is evidence-based rather than
+    /// merge-by-default.
+    nonisolated static func mergeGuard(victim: AssetMergeRow, survivor: AssetMergeRow) -> AssetMergeGuard {
+        guard let victimName = victim.artifactBasename,
+              let survivorName = survivor.artifactBasename
+        else { return .skipUnknownSource }
+        guard victimName == survivorName else {
+            return .skipDifferentSource(victim: victimName, survivor: survivorName)
+        }
+        return .merge
+    }
+
+    /// The survivor is the row a fingerprint-keyed lookup will find: prefer a
+    /// canonical full-file SHA, newest first, and fall back to the newest row
+    /// when no SHA row exists yet (an episode that has only ever been played,
+    /// never fully downloaded). Ordering matches ``fetchAssetByEpisodeId(_:)``'s
+    /// `createdAt DESC, rowid DESC`, so the merge keeps whichever row the rest
+    /// of the app already treats as current.
+    nonisolated static func chooseMergeSurvivor(_ rows: [AssetMergeRow]) -> AssetMergeRow? {
+        let ordered = rows.sorted {
+            $0.createdAt == $1.createdAt ? $0.rowId > $1.rowId : $0.createdAt > $1.createdAt
+        }
+        return ordered.first(where: \.hasCanonicalSHA) ?? ordered.first
+    }
+
+    /// Every `(table, column)` pair in the LIVE schema that holds an
+    /// `analysis_assets.id`. Read from `sqlite_master` + `PRAGMA table_info`
+    /// + `PRAGMA foreign_key_list` so no hand-maintained list can drift out of
+    /// date.
+    ///
+    /// TWO DISCOVERY RULES, DELIBERATELY UNIONED — they cover different
+    /// mistakes and neither subsumes the other:
+    ///
+    ///   * BY NAME (`analysisAssetId` / `assetId`). Catches the columns that
+    ///     hold an asset id without declaring a foreign key —
+    ///     `shadow_fm_responses.assetId` and `background_task_runs.assetId`
+    ///     are real examples, and `ad_listen_rewinds.analysisAssetId` arrived
+    ///     via `ALTER TABLE` in V34 so no `CREATE TABLE` body reveals it.
+    ///   * BY DECLARED FOREIGN KEY into `analysis_assets`, WHATEVER the column
+    ///     is called. R2: the name rule alone is a data-loss hazard, not a
+    ///     coverage nicety. A future table referencing `analysis_assets(id)`
+    ///     under any other spelling is invisible to ``repointChildRows``, and
+    ///     the outcome is decided by that FK's delete action, neither of which
+    ///     is acceptable:
+    ///       - `ON DELETE CASCADE` — ``deleteAssetRow`` silently destroys rows
+    ///         the merge was supposed to move.
+    ///       - `ON DELETE RESTRICT` — ``deleteAssetRow`` raises
+    ///         `FOREIGN KEY constraint failed`. Inside the V39 migration that
+    ///         aborts `migrate()`, and `PlayheadRuntime` answers a thrown
+    ///         `migrate()` by removing `AnalysisStore.defaultDirectory()` and
+    ///         retrying — which succeeds on an empty directory. The whole
+    ///         analysis database, gone, silently.
+    ///     The schema is the authority on what references this table, so ask
+    ///     it rather than trusting a naming convention to hold forever.
+    func assetReferencingChildColumns() throws -> [ChildAssetColumn] {
+        let assetColumnNames: Set<String> = ["analysisAssetId", "assetId"]
+        var tables: [String] = []
+        let tableStmt = try prepare("""
+            SELECT name FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+              AND name != 'analysis_assets'
+            ORDER BY name
+            """)
+        defer { sqlite3_finalize(tableStmt) }
+        while try nextRow(tableStmt) {
+            tables.append(text(tableStmt, 0))
+        }
+
+        var out: [ChildAssetColumn] = []
+        for table in tables {
+            var columns: Set<String> = []
+            // `PRAGMA table_info(...)` cannot be parameterized. These names come
+            // from `sqlite_master`, never from a caller, and are quoted anyway.
+            let infoStmt = try prepare("PRAGMA table_info(\(Self.quotedIdentifier(table)))")
+            defer { sqlite3_finalize(infoStmt) }
+            while try nextRow(infoStmt) {
+                let column = text(infoStmt, 1)
+                if assetColumnNames.contains(column) {
+                    columns.insert(column)
+                }
+            }
+
+            // `PRAGMA foreign_key_list` columns: id, seq, table, from, to,
+            // on_update, on_delete, match. `table` is the PARENT, `from` the
+            // child column. SQLite records the parent name as written in the
+            // DDL, so compare case-insensitively.
+            let fkStmt = try prepare("PRAGMA foreign_key_list(\(Self.quotedIdentifier(table)))")
+            defer { sqlite3_finalize(fkStmt) }
+            while try nextRow(fkStmt) {
+                guard text(fkStmt, 2).lowercased() == "analysis_assets" else { continue }
+                let from = text(fkStmt, 3)
+                guard !from.isEmpty else { continue }
+                columns.insert(from)
+            }
+
+            for column in columns.sorted() {
+                out.append(ChildAssetColumn(table: table, column: column))
+            }
+        }
+        return out
+    }
+
+    /// SQLite identifier quoting: wrap in double quotes, double any embedded
+    /// quote. Unconditional so no future caller can turn this into an
+    /// injection site.
+    nonisolated static func quotedIdentifier(_ raw: String) -> String {
+        "\"\(raw.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    /// Episodes holding more than one `analysis_assets` row.
+    ///
+    /// R1: A BLANK `episodeId` IS NOT A GROUP KEY. Grouping by `episodeId` is
+    /// what makes ``mergeGuard``'s basename comparison safe — every row in a
+    /// group already shares an episode identity, so a basename match really
+    /// does mean "the same artifact". The empty string breaks that: it lumps
+    /// every blank-id row together, and since
+    /// `DownloadManager.safeFilename(for:)` is `SHA256(episodeId)`, two rows
+    /// born of two DIFFERENT episodes but written with a blank id land on the
+    /// SAME basename and the guard votes `.merge`. That is exactly the
+    /// irreversible false merge — one episode's transcript fused onto
+    /// another's analysis — the guard exists to refuse. Blank ids are skipped;
+    /// leaving them alone costs nothing and cannot be undone if we get it
+    /// wrong.
+    ///
+    /// R3: THE BLANK TEST IS IN SWIFT, NOT SQL. It used to be
+    /// `WHERE TRIM(episodeId) != ''`, and SQLite's one-argument `TRIM` strips
+    /// ASCII SPACE and nothing else — a tab-, newline- or NBSP-only id walked
+    /// straight through a filter whose whole job was to stop it, with exactly
+    /// the consequence above. `trimmingCharacters(in: .whitespacesAndNewlines)`
+    /// is the same predicate ``AssetMergeRow/artifactBasename`` already
+    /// applies to `sourceURL`, so both ends of the guard now agree on what
+    /// "blank" means, over the whole Unicode whitespace set rather than one
+    /// code point.
+    private func episodeIdsWithMultipleAssets() throws -> [String] {
+        let stmt = try prepare("""
+            SELECT episodeId FROM analysis_assets
+            GROUP BY episodeId HAVING COUNT(*) > 1
+            ORDER BY episodeId
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var out: [String] = []
+        while try nextRow(stmt) {
+            let episodeId = text(stmt, 0)
+            guard !episodeId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            out.append(episodeId)
+        }
+        return out
+    }
+
+    /// R3: `ORDER BY rowid` is load-bearing, not tidiness. The fold order
+    /// decides which placeholder's completion terminal the merged row ends up
+    /// with when an episode holds more than one, and an unordered scan makes
+    /// that SQLite's choice rather than ours. `rowid` is insert order, so the
+    /// row the device wrote first is folded first.
+    ///
+    /// R4 — MEASURED, because the tempting equivalence argument ("a scan
+    /// returns rowid order anyway, so the clause is a no-op") is wrong twice
+    /// over. This is not a scan: `WHERE episodeId = ?` is an index SEARCH, and
+    /// WHICH index the planner picks decides the order. With both
+    /// `idx_assets_episode` and the V39 `idx_assets_episode_fingerprint`
+    /// present and no `sqlite_stat1`, SQLite 3.54 picks the former and does
+    /// return rowid order — but drop `idx_assets_episode`, or let stats exist
+    /// (any future `ANALYZE` / `PRAGMA optimize`; the app runs neither today),
+    /// and it picks the fingerprint index instead and returns rows in
+    /// `assetFingerprint` order. Measured on a fixture whose fingerprints sort
+    /// in reverse of insert order: 1,2,3 with the clause, 3,2,1 without.
+    /// `foldOrderIsRowIdEvenWhenThePlannerWouldOrderByFingerprint` runs that
+    /// case, so the clause is pinned by behaviour rather than by argument.
+    private func assetMergeRows(episodeId: String) throws -> [AssetMergeRow] {
+        let stmt = try prepare("""
+            SELECT rowid, id, assetFingerprint, createdAt, analysisState,
+                   terminalReason, sourceURL, episodeDurationSec
+            FROM analysis_assets
+            WHERE episodeId = ?
+            ORDER BY rowid
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        var out: [AssetMergeRow] = []
+        while try nextRow(stmt) {
+            out.append(AssetMergeRow(
+                rowId: sqlite3_column_int64(stmt, 0),
+                id: text(stmt, 1),
+                assetFingerprint: text(stmt, 2),
+                createdAt: sqlite3_column_double(stmt, 3),
+                analysisState: text(stmt, 4),
+                terminalReason: optionalText(stmt, 5),
+                sourceURL: text(stmt, 6),
+                episodeDurationSec: sqlite3_column_type(stmt, 7) == SQLITE_NULL
+                    ? nil
+                    : sqlite3_column_double(stmt, 7)
+            ))
+        }
+        return out
+    }
+
+#if DEBUG
+    /// R3 test seam: the rows one episode's fold will walk, in fold order.
+    func assetMergeRowsForTesting(episodeId: String) throws -> [AssetMergeRow] {
+        try assetMergeRows(episodeId: episodeId)
+    }
+#endif
+
+    /// Move every child row from `victim` to `survivor`.
+    ///
+    /// `UPDATE OR IGNORE` rather than a plain `UPDATE`: several child tables
+    /// key on the asset column, and both rows can already hold a record under
+    /// the same identity. On such a conflict the survivor's copy is kept — it
+    /// is the row the rest of the app has been reading — and the placeholder's
+    /// leftover is deleted outright, because leaving it would either orphan it
+    /// or be silently swept by the `ON DELETE CASCADE` a moment later (and,
+    /// for `training_examples`, would abort the whole transaction on
+    /// `ON DELETE RESTRICT`).
+    private func repointChildRows(
+        from victimId: String,
+        to survivorId: String,
+        childColumns: [ChildAssetColumn]
+    ) throws -> (repointed: Int, discarded: Int) {
+        var repointed = 0
+        var discarded = 0
+        for child in childColumns {
+            let table = Self.quotedIdentifier(child.table)
+            let column = Self.quotedIdentifier(child.column)
+
+            let update = try prepare("UPDATE OR IGNORE \(table) SET \(column) = ? WHERE \(column) = ?")
+            defer { sqlite3_finalize(update) }
+            bind(update, 1, survivorId)
+            bind(update, 2, victimId)
+            try step(update, expecting: SQLITE_DONE)
+            repointed += Int(sqlite3_changes(db))
+
+            let delete = try prepare("DELETE FROM \(table) WHERE \(column) = ?")
+            defer { sqlite3_finalize(delete) }
+            bind(delete, 1, victimId)
+            try step(delete, expecting: SQLITE_DONE)
+            discarded += Int(sqlite3_changes(db))
+        }
+        return (repointed, discarded)
+    }
+
+    /// Fold the victim's own column values into the survivor.
+    ///
+    /// Coverage watermarks take the MAX of the pair — they are monotonic
+    /// claims about how far analysis reached, and the merged row's children are
+    /// the union, so the higher claim is the true one. Nullable descriptive
+    /// columns are filled from the victim only where the survivor has nothing.
+    ///
+    /// `episodeDurationSec` deliberately prefers the SURVIVOR's value and only
+    /// falls back to the victim's. It is NOT a max: the placeholder's duration
+    /// is the poisoned one — the shard sum of an 8 MiB mid-download prefix
+    /// (part 1 of this bead) — and a max would let it win whenever it happened
+    /// to exceed the real value. The caller re-probes the survivor's duration
+    /// from the audio file afterwards, which is the only measurement either row
+    /// can be checked against.
+    ///
+    /// What one fold changed that the caller has to follow up on.
+    struct AssetFoldOutcome: Sendable, Equatable {
+        /// A completion terminal was adopted from the folded-in row.
+        var adoptedTerminalState = false
+        /// The survivor had no `episodeDurationSec` and took the victim's.
+        /// See ``DuplicateAssetMergeSummary/survivorsWithInheritedDuration``.
+        var inheritedDuration = false
+    }
+
+    /// Returns what the caller must follow up on. See ``AssetFoldOutcome``.
+    private func foldAssetRow(
+        victim: AssetMergeRow,
+        into survivor: AssetMergeRow
+    ) throws -> AssetFoldOutcome {
+        var outcome = AssetFoldOutcome()
+        // Recorded BEFORE the UPDATE, because after it the survivor's column
+        // is populated either way and the two cases are indistinguishable.
+        outcome.inheritedDuration =
+            survivor.episodeDurationSec == nil && victim.episodeDurationSec != nil
+        let sql = """
+            UPDATE analysis_assets AS s
+            SET featureCoverageEndTime = MAX(
+                    COALESCE(s.featureCoverageEndTime, 0),
+                    COALESCE((SELECT v.featureCoverageEndTime FROM analysis_assets v WHERE v.id = :victim), 0)
+                ),
+                fastTranscriptCoverageEndTime = MAX(
+                    COALESCE(s.fastTranscriptCoverageEndTime, 0),
+                    COALESCE((SELECT v.fastTranscriptCoverageEndTime FROM analysis_assets v WHERE v.id = :victim), 0)
+                ),
+                confirmedAdCoverageEndTime = MAX(
+                    COALESCE(s.confirmedAdCoverageEndTime, 0),
+                    COALESCE((SELECT v.confirmedAdCoverageEndTime FROM analysis_assets v WHERE v.id = :victim), 0)
+                ),
+                finalPassCoverageEndTime = MAX(
+                    COALESCE(s.finalPassCoverageEndTime, 0),
+                    COALESCE((SELECT v.finalPassCoverageEndTime FROM analysis_assets v WHERE v.id = :victim), 0)
+                ),
+                episodeDurationSec = COALESCE(
+                    s.episodeDurationSec,
+                    (SELECT v.episodeDurationSec FROM analysis_assets v WHERE v.id = :victim)
+                ),
+                episodeTitle = COALESCE(
+                    s.episodeTitle,
+                    (SELECT v.episodeTitle FROM analysis_assets v WHERE v.id = :victim)
+                ),
+                capabilitySnapshot = COALESCE(
+                    s.capabilitySnapshot,
+                    (SELECT v.capabilitySnapshot FROM analysis_assets v WHERE v.id = :victim)
+                ),
+                weakFingerprint = COALESCE(
+                    s.weakFingerprint,
+                    (SELECT v.weakFingerprint FROM analysis_assets v WHERE v.id = :victim)
+                )
+            WHERE s.id = :survivor
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, sqlite3_bind_parameter_index(stmt, ":victim"), victim.id)
+        bind(stmt, sqlite3_bind_parameter_index(stmt, ":survivor"), survivor.id)
+        try step(stmt, expecting: SQLITE_DONE)
+
+        // Adopt a completion terminal the survivor does not have. The claim is
+        // at least as true of the merged row as it was of the victim — the
+        // merged row now owns a superset of the victim's transcript chunks and
+        // ad windows. It is NOT asserted blindly: the sweep re-scores it with
+        // `AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict` against
+        // the re-probed duration and repairs it when coverage contradicts it.
+        //
+        // Mid-pipeline states (`spooling`, `backfill`, `waitingForBackfill`)
+        // are NOT adopted: they describe work in flight against a row that no
+        // longer exists, and leaving the survivor `queued` lets the pipeline
+        // resume from the merged watermarks instead.
+        //
+        // R3: the survivor's state is RE-READ, not taken from the `survivor`
+        // snapshot the caller captured before the episode's first fold. With
+        // two placeholders each carrying a completion terminal, the snapshot
+        // still says `queued` on the second fold, so the second placeholder
+        // overwrote the terminal the first one supplied — `completeFull`
+        // replaced by `completeTranscriptPartial`, and with it the
+        // `terminalReason` holding the coverage numbers. That is the same
+        // downgrade the second half of this guard exists to refuse (see
+        // `survivorOwnTerminalClaimIsNotReplaced`), and the sweep's re-score
+        // does not contain it: a downgrade is not a claim coverage
+        // contradicts, so it stands, permanently, on a one-shot sweep.
+        guard let victimState = SessionState(rawValue: victim.analysisState),
+              victimState.isTerminalCompletion,
+              let survivorState = SessionState(rawValue: try currentAnalysisState(id: survivor.id)),
+              !survivorState.isTerminalCompletion
+        else { return outcome }
+        try updateAssetState(
+            id: survivor.id,
+            state: victim.analysisState,
+            terminalReason: victim.terminalReason
+        )
+        outcome.adoptedTerminalState = true
+        return outcome
+    }
+
+    /// The `analysisState` currently on disk for one asset. R3: the fold's
+    /// adoption guard needs the LIVE value, because a previous fold in the same
+    /// episode may already have written one. Returns `""` when the row is gone,
+    /// which parses to no `SessionState` and therefore adopts nothing.
+    private func currentAnalysisState(id: String) throws -> String {
+        let stmt = try prepare("SELECT analysisState FROM analysis_assets WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        guard try nextRow(stmt) else { return "" }
+        return text(stmt, 0)
+    }
+
+    private func deleteAssetRow(id: String) throws {
+        let stmt = try prepare("DELETE FROM analysis_assets WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, id)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
 
     private func exec(_ sql: String) throws {
         // playhead-6boz: every SQL surface routes through the lazy

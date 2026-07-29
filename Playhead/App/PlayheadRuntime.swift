@@ -2278,7 +2278,58 @@ final class PlayheadRuntime {
             // Errors inside the sweep are logged and swallowed — the
             // pipeline start below must not be blocked by diagnostic
             // recovery work.
+            //
+            // R5 — WHAT THIS COSTS THE 0hi9 MERGE BELOW, measured in
+            // `coverageGuardSweepSelfHealsAfterTheMergeUnionsTheTranscript`
+            // and `coverageGuardRecoveryOutranksTheAdoptedTerminalInEitherOrder`:
+            //
+            //   * Running ahead of the merge, this sweep scores each stranded
+            //     session against only the chunks on ITS OWN asset — half the
+            //     episode in the pair shape — so it under-recovers on the
+            //     launch the merge lands. That is genuinely self-correcting:
+            //     unlike its three sibling sweeps it carries NO `_meta` key,
+            //     so the next launch re-runs it against the merged union and
+            //     recovers. Do not "tidy" that up by gating it.
+            //   * A recovery also writes `.backfill` onto the session's ASSET.
+            //     Aimed at a placeholder holding a completion terminal, that
+            //     erases what the merge's `foldAssetRow` was about to adopt.
+            //     Bounded, and this is why the order is NOT worth changing:
+            //     merge-first adopts the terminal and then this same sweep
+            //     arrives one step later and writes `.backfill` onto the
+            //     survivor instead. No completion survives either order, so
+            //     the cost is a resumability hint (`queued` vs `backfill`),
+            //     not an analysis. Only the coverage guard's own contract —
+            //     not this ordering — could preserve it.
             _ = await analysisCoordinator.recoverCoverageGuardFailures()
+
+            // playhead-0hi9: one-shot launch sweep that merges the
+            // `analysis_assets` PAIRS already on disk — one episode, two
+            // rows, state split across both. It carries its own `_meta` key
+            // (`did_duplicate_asset_reconcile_v1`) and does the merge, the
+            // duration re-probe and the terminal re-score itself. The merge
+            // is one SQL transaction, so an interrupted launch leaves the
+            // database untouched and the next launch retries.
+            //
+            // R3 — IT RUNS FIRST, and the order is load-bearing, measured
+            // (`sweepMustRunBeforeTheTerminalReconcile`). Behind the terminal
+            // reconcile the two sweeps fight: the reconcile scores the
+            // PLACEHOLDER's `completeFull` against the placeholder's own
+            // poisoned ~543 s duration, finds it contradicted, and repairs it
+            // away — so by the time the merge runs there is no completion
+            // terminal left to adopt and the merged row falls back to
+            // `queued`, discarding analysis that the measured duration shows
+            // was genuinely complete. Merging first hands both later sweeps
+            // one row carrying the union of the pair's coverage and a
+            // re-probed duration, which is the denominator they each want
+            // anyway. (On the install that motivated this bead both later
+            // sweeps are already marked done, so there they no-op either
+            // way — the ordering matters for anyone who hits the pair shape
+            // before those markers are set.)
+            _ = await analysisCoordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+                cachedFileURL: { episodeId in
+                    await downloadManager.cachedFileURL(for: episodeId)
+                }
+            )
 
             // playhead-gyvb.2: one-shot launch-time sweep that re-probes
             // the actual duration of every cached audio file whose

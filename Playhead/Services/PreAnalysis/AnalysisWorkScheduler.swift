@@ -4815,11 +4815,44 @@ actor AnalysisWorkScheduler {
                 sourceFingerprint: job.sourceFingerprint
             )
         )
+        // playhead-0hi9: record the weak fingerprint alongside the canonical
+        // SHA. This is the row Pipeline B mints; carrying the weak identity
+        // makes the pair symmetric with the Pipeline A placeholder, so
+        // whichever row a later run finds first, `fetchAssetsByEpisodeId(_:
+        // weakFingerprint:)` and `canUpgradeWeakAssetToCanonicalSHA` can
+        // recognise it as the same audio instead of minting a third row.
+        // `currentAudioFingerprint` is already resolved above for the
+        // canonical-SHA case; the second read covers the non-canonical case,
+        // and `fingerprint(for:)` now survives relaunch via the `.pin`
+        // sidecar.
+        let observedWeak: String?
+        if let currentAudioFingerprint {
+            observedWeak = currentAudioFingerprint.weak
+        } else {
+            observedWeak = await downloadManager.fingerprint(for: job.episodeId)?.weak
+        }
+        let insertWeakFingerprint = AudioFingerprint.nonEmptyWeak(observedWeak)
+        // playhead-0hi9: `downloadManager.fingerprint(for:)` above is a NEW
+        // suspension point on this path, and the lease-renewal task flips
+        // `lostOwnership` from outside. Inserting after the lease was
+        // reclaimed mints a second `analysis_assets` row for an episode the
+        // new owner is already working — the exact defect this bead removes.
+        //
+        // R4: that window is closed by the pre-existing
+        // `guard !lostOwnership` a few lines below, and R3's duplicate guard
+        // at this point has been REMOVED rather than left in place as an
+        // "untested but additive" rail. It was neither: `AnalysisAsset(...)`
+        // is a memberwise struct init containing no `await`, so on this actor
+        // no suspension can occur between the two points and `lostOwnership`
+        // is provably identical at both. The guard had no behaviour distinct
+        // from its neighbour, which is why no test could reach it — and a
+        // comment claiming an untested safety property that does not exist
+        // costs the next reader more than the line saved.
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: job.episodeId,
             assetFingerprint: job.sourceFingerprint,
-            weakFingerprint: nil,
+            weakFingerprint: insertWeakFingerprint,
             sourceURL: localAudioURL.absoluteString,
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
