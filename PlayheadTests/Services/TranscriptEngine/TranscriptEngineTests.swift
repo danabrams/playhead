@@ -659,6 +659,20 @@ struct IncrementalShardAppendTests {
     @Test("appendShards processes new shards after initial loop completes", .timeLimit(.minutes(1)))
     func appendShardsAfterCompletion() async throws {
         let store = try await makeTestStore()
+        // playhead-8ysk: this was the ONE test in this file that started
+        // transcription without seeding the asset row — every sibling seeds.
+        // Chunk persistence therefore failed for every shard, and the test
+        // passed anyway because the loop emitted `.completed` after a TOTAL
+        // failure. It was, unintentionally, a live demonstration of the defect
+        // that bead removes: `recognizer.transcribedShardIds.count >= 3` was
+        // true (the recognizer really did run) while zero chunks reached
+        // SQLite, and nothing downstream could tell the difference.
+        //
+        // With the loop now reporting `.failed` when a run produces nothing,
+        // the missing row makes the first `.completed` wait hang forever. The
+        // fixture is what was wrong, so the fixture is what is fixed — the
+        // test can finally exercise what its name claims.
+        try await store.insertAsset(makeTranscriptAsset(id: "asset-1", episodeId: "ep-1"))
         let recognizer = TrackingRecognizer()
         let speech = SpeechService(
             recognizer: recognizer,
@@ -695,6 +709,12 @@ struct IncrementalShardAppendTests {
         // Verify initial shards were transcribed.
         let initialCount = recognizer.transcribedShardIds.count
         #expect(initialCount >= 3, "Expected at least 3 shards transcribed, got \(initialCount)")
+        // playhead-8ysk: and that they actually LANDED. Counting recognizer
+        // calls alone is what let the missing asset row go unnoticed — the
+        // recognizer ran three times and persisted nothing.
+        let initialChunks = try await store.fetchTranscriptChunks(assetId: "asset-1")
+        #expect(!initialChunks.isEmpty,
+                "the initial batch must persist chunks, or `.completed` is being reported over a total failure")
 
         // Subscribe to events before appending so we don't miss .completed.
         let appendEvents = await engine.events()
