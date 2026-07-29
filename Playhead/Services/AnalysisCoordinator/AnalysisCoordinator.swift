@@ -1957,6 +1957,89 @@ actor AnalysisCoordinator {
         }
     }
 
+    /// playhead-8ysk (review r2): what the transcript-event observer should do
+    /// after handling one event.
+    ///
+    /// Exists so the observer's *decisions* can be measured. The loop below is
+    /// unreachable from a test — `AnalysisCoordinator` holds a concrete
+    /// `TranscriptEngineService` with no protocol seam, and the loop only ends
+    /// by returning out of a detached `Task` — so before this extraction the
+    /// `.failed` arm was asserted by nothing but the compiler's exhaustiveness
+    /// check, which would have accepted a body that finalized the backfill
+    /// anyway.
+    enum TranscriptObservationStep: Sendable, Equatable {
+        /// Not our asset, or work that leaves the session running.
+        case keepObserving
+        /// Terminal for this session: the observer stops.
+        case stopObserving
+    }
+
+    /// Handle one transcript event on behalf of `startObservingTranscriptEvents`.
+    ///
+    /// Every branch that used to `continue` returns ``TranscriptObservationStep/keepObserving``
+    /// and every branch that used to `return` returns
+    /// ``TranscriptObservationStep/stopObserving``, so the loop below is a
+    /// mechanical rewrite and the behaviour under test is the shipping one.
+    private func handleTranscriptEvent(
+        _ event: TranscriptEngineEvent,
+        sessionId: String,
+        assetId: String
+    ) async -> TranscriptObservationStep {
+        switch event {
+        case .chunksPersisted(let analysisAssetId, let chunks):
+            guard analysisAssetId == assetId else { return .keepObserving }
+            await handlePersistedTranscriptChunks(chunks, assetId: assetId)
+            return .keepObserving
+
+        case .completed(let analysisAssetId):
+            guard analysisAssetId == assetId else { return .keepObserving }
+            do {
+                try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
+            } catch {
+                logger.error("Backfill finalization failed for asset \(assetId): \(error.localizedDescription)")
+            }
+            return .stopObserving
+
+        case .failed(let analysisAssetId, let reason):
+            // playhead-8ysk: this observer used to see `.completed`
+            // for a run that produced nothing and would go on to
+            // finalize a backfill over an empty transcript. A total
+            // failure is terminal for the session — stop observing,
+            // and do NOT finalize.
+            guard analysisAssetId == assetId else { return .keepObserving }
+            logger.error("""
+                Transcription failed for asset \(assetId): \
+                \(reason.failureClass.rawValue) \
+                across \(reason.failedShardCount) shard(s) — not finalizing backfill
+                """)
+            // playhead-8ysk (review r3): RELEASE THE OBSERVER HANDLE, the way
+            // `finalizeBackfill`'s `defer` does on the `.completed` side.
+            //
+            // Not finalizing is right, but stopping without clearing
+            // `transcriptEventTask` leaves a handle to a task that has already
+            // returned — and that handle is not bookkeeping, it is a decision
+            // variable. `runFromBackfill` branches on
+            // `transcriptEventTask == nil`: nil means "no transcription is
+            // running, so consult `resumeBackfillDecision` and either finalize
+            // or throw for a full restart", and non-nil means "transcription is
+            // live, just wait". A session that resumes at `.backfill` in this
+            // process — a `.waitingForBackfill` thermal resume, or another
+            // playback event for the episode — would therefore log "Backfill
+            // waiting for transcript completion" and park forever, waiting on a
+            // transcription that has already failed. The recovery path is
+            // skipped precisely for the runs that need it.
+            //
+            // Guarded on the ACTIVE asset because the handle is
+            // session-scoped: if a newer session has already installed its own
+            // observer, this arm belongs to a superseded one and must not clear
+            // the successor's handle.
+            if activeAssetId == assetId {
+                transcriptEventTask = nil
+            }
+            return .stopObserving
+        }
+    }
+
     private func startObservingTranscriptEvents(sessionId: String, assetId: String) {
         transcriptEventTask?.cancel()
         transcriptEventTask = Task {
@@ -1964,20 +2047,10 @@ actor AnalysisCoordinator {
             for await event in stream {
                 guard !Task.isCancelled else { return }
 
-                switch event {
-                case .chunksPersisted(let analysisAssetId, let chunks):
-                    guard analysisAssetId == assetId else { continue }
-                    await self.handlePersistedTranscriptChunks(chunks, assetId: assetId)
-
-                case .completed(let analysisAssetId):
-                    guard analysisAssetId == assetId else { continue }
-                    do {
-                        try await self.finalizeBackfill(sessionId: sessionId, assetId: assetId)
-                    } catch {
-                        self.logger.error("Backfill finalization failed for asset \(assetId): \(error.localizedDescription)")
-                    }
-                    return
-                }
+                let step = await self.handleTranscriptEvent(
+                    event, sessionId: sessionId, assetId: assetId
+                )
+                if step == .stopObserving { return }
             }
         }
     }
@@ -3588,6 +3661,24 @@ actor AnalysisCoordinator {
     // MARK: - Test seams (playhead-gtt9.1.1)
 
     #if DEBUG
+    /// playhead-8ysk (review r3): is an observer handle still installed?
+    ///
+    /// This is the variable `runFromBackfill` branches on, so "did the terminal
+    /// arm release it" is a behavioural question, not an implementation detail.
+    var hasTranscriptObserverForTesting: Bool { transcriptEventTask != nil }
+
+    /// Install a placeholder observer handle.
+    ///
+    /// `startObservingTranscriptEvents` is private and needs a live engine
+    /// stream, but the handle's identity is irrelevant to the guard under test:
+    /// `runFromBackfill` asks only whether it is nil. A task that has already
+    /// finished is in fact the exact production state after a `.failed` —
+    /// which is what makes the stale handle dangerous rather than merely untidy.
+    func installTranscriptObserverForTesting() {
+        transcriptEventTask?.cancel()
+        transcriptEventTask = Task {}
+    }
+
     /// Test seam that mirrors the production resume-from-persisted-`.backfill`
     /// path without requiring audio, a download manager, or a
     /// playback snapshot.
@@ -3688,6 +3779,50 @@ actor AnalysisCoordinator {
         activePodcastId = podcastId
         self.activeShards = activeShards
         try await finalizeBackfill(sessionId: sessionId, assetId: assetId)
+    }
+
+    /// playhead-8ysk (review r2) test seam: drive ONE transcript event through
+    /// the observer's decision function with the same in-memory state
+    /// `startObservingTranscriptEvents` would have primed.
+    ///
+    /// This is the only way to measure the `.failed` arm. The observer loop
+    /// itself is unreachable: it lives inside a detached `Task` started from
+    /// the private `runPipeline`, and the coordinator holds a CONCRETE
+    /// `TranscriptEngineService`, so no test can substitute an engine that
+    /// emits `.failed` on demand. Round 1 of this review reported the arm as
+    /// unmeasured rather than claim it survived; the seam closes that.
+    ///
+    /// The state priming mirrors ``finalizeBackfillForTesting`` exactly,
+    /// including the restore-on-exit, so that `.completed` — the POSITIVE
+    /// control — really does reach `finalizeBackfill` and really does move the
+    /// session. Without that control, "`.failed` does not finalize" would pass
+    /// against a coordinator that never finalizes anything.
+    func handleTranscriptEventForTesting(
+        _ event: TranscriptEngineEvent,
+        sessionId: String,
+        assetId: String,
+        episodeId: String,
+        activeShards: [AnalysisShard]?,
+        podcastId: String? = nil
+    ) async -> TranscriptObservationStep {
+        let priorSessionId = activeSessionId
+        let priorAssetId = activeAssetId
+        let priorEpisodeId = activeEpisodeId
+        let priorPodcastId = activePodcastId
+        let priorShards = self.activeShards
+        defer {
+            activeSessionId = priorSessionId
+            activeAssetId = priorAssetId
+            activeEpisodeId = priorEpisodeId
+            activePodcastId = priorPodcastId
+            self.activeShards = priorShards
+        }
+        activeSessionId = sessionId
+        activeAssetId = assetId
+        activeEpisodeId = episodeId
+        activePodcastId = podcastId
+        self.activeShards = activeShards
+        return await handleTranscriptEvent(event, sessionId: sessionId, assetId: assetId)
     }
     #endif
 

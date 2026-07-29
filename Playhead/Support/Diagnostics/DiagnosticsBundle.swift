@@ -79,6 +79,37 @@ enum BuildType: String, Sendable, Hashable, Codable, CaseIterable {
     }
 }
 
+// MARK: - Diagnostics failure keys (playhead-8ysk)
+
+/// The `work_journal.metadata` keys that carry a transcription failure from
+/// the emitter to the bundle projection.
+///
+/// One namespace shared by both ends on purpose. The write side
+/// (`AnalysisJobRunner.emitTranscriptionTimeoutJournal`) and the read side
+/// (`DiagnosticsBundleBuilder.extractFailure`) sit in different files and
+/// different layers; a hand-copied string literal in each would fail silently
+/// the first time one was renamed, and the only symptom would be diagnostics
+/// bundles quietly reverting to "`asr_failed`, cause unknown" — the exact
+/// condition this bead exists to end.
+///
+/// NOT ALL THREE CROSS THE PROJECTION (clarified in review r2, where the
+/// wording above read as though they all did). `failureClass` and
+/// `failureCode` are projected into `DefaultBundle.WorkJournalRecord`.
+/// `failedShardCount` is written and read ON DEVICE only: it is a count of a
+/// private episode's structure, and in a total failure it equals the shard
+/// count, which discloses the episode's duration to ±30 s — a usable
+/// fingerprint in a bundle that goes to the trouble of hashing episode ids.
+/// It stays in `metadata` for on-device forensics, where the raw episode id
+/// is available anyway. `writeSideRoundTripsThroughTheProjection` pins both
+/// halves of that split.
+enum DiagnosticsFailureKeys {
+    static let failureClass = "failure_class"
+    static let failureCode = "failure_code"
+    /// On-device only — see the note above. Do not add to the projection
+    /// without a privacy review.
+    static let failedShardCount = "failed_shard_count"
+}
+
 // MARK: - Default bundle
 
 /// Always-safe bundle emitted on every diagnostics export. Contains no
@@ -493,6 +524,25 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// are deliberately omitted — they may carry PII (callers stash
     /// arbitrary JSON in `metadata`, and the artifact-class column adds
     /// no diagnostic value at the bundle layer).
+    ///
+    /// playhead-8ysk adds two fields that are RECOVERED from `metadata`
+    /// rather than forwarded from it. `cause` alone could not distinguish
+    /// nine transcription failures — a silent shard, an unloaded model, a
+    /// missing locale asset, a analyzer-format failure and five others all
+    /// landed as `asr_failed`, which names the ABSENCE of coverage rather
+    /// than any error, because no `Error` value was in scope at the emitter.
+    ///
+    /// The recovery is safe by construction, not by review, and that is the
+    /// point: the builder parses `metadata` for exactly two keys and admits
+    /// `failure_class` ONLY if it round-trips through
+    /// `TranscriptFailureClass(rawValue:)`. Anything a caller has stashed
+    /// under that key that is not one of the enum's compile-time strings is
+    /// dropped — free text cannot reach the bundle through this path even if
+    /// a future emitter tries to put it there. `failure_code` is parsed to
+    /// an `Int`, which cannot carry PII at all. Same shape as
+    /// playhead-p70f's `precheck_bytes` / `full_fetch_bytes`, which are
+    /// parsed out of a free-form ledger annotation into integers instead of
+    /// shipping the annotation.
     struct WorkJournalRecord: Codable, Sendable, Equatable {
         let id: String
         let episodeIdHash: String
@@ -501,6 +551,12 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         let timestamp: Double
         let eventType: String
         let cause: String?
+        /// A `TranscriptFailureClass` raw value, or `nil` when the row
+        /// carries none / carries something outside the vocabulary.
+        let failureClass: String?
+        /// The underlying framework error's `NSError.code`, when there was
+        /// one. Never a Swift enum's synthesised case ordinal.
+        let failureCode: Int?
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -510,6 +566,8 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             case timestamp
             case eventType = "event_type"
             case cause
+            case failureClass = "failure_class"
+            case failureCode = "failure_code"
         }
     }
 

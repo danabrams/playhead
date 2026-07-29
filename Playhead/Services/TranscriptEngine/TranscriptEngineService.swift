@@ -79,9 +79,213 @@ enum TranscriptEngineServiceError: Error, CustomStringConvertible {
     }
 }
 
+// MARK: - TranscriptFailureClass (playhead-8ysk)
+
+/// Redacted, closed-vocabulary class of a transcription failure.
+///
+/// WHY A CLOSED ENUM AND NOT THE ERROR. Six days of `scheduler_events` from
+/// the owner's device attribute 17 failures to `asr_failed`, and that label
+/// carries no information: its sole emitter is
+/// `AnalysisJobRunner.emitTranscriptionTimeoutJournal`, fired on
+/// `transcriptCoverage == 0`, with no `Error` value in scope anywhere in the
+/// block. It names an ABSENCE, not a failure, and at least nine distinct
+/// causes are indistinguishable behind it.
+///
+/// The obvious fix — forward the error text — is not available. `runner_reason`
+/// already survives to SQLite and is then dropped by
+/// `DiagnosticsBundle`'s projection on PII grounds, because callers stash
+/// arbitrary JSON in `metadata`. So the diagnostic value has to arrive in a
+/// shape that is safe BY CONSTRUCTION. This is the same move
+/// `playhead-p70f` made for the rediff lane's day-0 exits: the free-form
+/// `lastDetail` (which can carry an enclosure URL) is not projected, and the
+/// run ledger's free-form annotation is parsed into integers rather than
+/// forwarded.
+///
+/// Every case here is a fixed compile-time string. None is derived from
+/// audio, a feed, a URL, a title, or anything a user typed, so the whole
+/// vocabulary can be exported without review. Adding a case is a deliberate
+/// act with a test (`TranscriptFailureTaxonomyTests`) that pins the set.
+enum TranscriptFailureClass: String, Sendable, Hashable, CaseIterable, Codable {
+    /// `TranscriptEngine` rejected a shard whose samples are all zero. This
+    /// is the sub-millisecond failure: a pure CPU scan, no ASR involved.
+    case silentShard = "silent_shard"
+    /// A shard arrived with no samples at all.
+    case emptyShard = "empty_shard"
+    /// A shard contained NaN or infinite samples.
+    case nonFiniteSamples = "non_finite_samples"
+    /// No ASR recognizer was ready (`TranscriptEngineError.modelNotLoaded`).
+    /// Its usual antecedent is a model load that failed at launch and was
+    /// never retried.
+    case modelNotLoaded = "model_not_loaded"
+    /// The device has no on-device Speech assets for the episode's locale.
+    case speechAssetsUnsupported = "speech_assets_unsupported"
+    /// `SpeechAnalyzer` did not negotiate a usable audio format.
+    case analyzerFormatUnavailable = "analyzer_format_unavailable"
+    /// PCM could not be bridged into the analyzer's input stream.
+    case audioBridgeFailure = "audio_bridge_failure"
+    /// The analyzer was handed a non-monotonic or overlapping timeline.
+    case invalidAnalyzerTimeline = "invalid_analyzer_timeline"
+    /// The analyzer session itself failed or ended abnormally.
+    case analyzerSessionFailure = "analyzer_session_failure"
+    /// Recognition ran and reported an error. `code` carries the underlying
+    /// `NSError.code`; the domain and message are deliberately not exported.
+    case transcriptionFailed = "transcription_failed"
+    /// Voice-activity detection failed, so the shard could not be chunked.
+    case vadFailed = "vad_failed"
+    /// A shard arrived at a sample rate the engine does not accept.
+    case unsupportedSampleRate = "unsupported_sample_rate"
+    /// The engine was asked to transcribe with no shards at all.
+    case noShards = "no_shards"
+    /// `SpeechService.isReady()` was false, so the loop never started. Before
+    /// this bead this path returned in silence and the runner waited out its
+    /// full 300 s timeout for a `.completed` that could never arrive.
+    case speechEngineNotReady = "speech_engine_not_ready"
+    /// Persisting chunks to SQLite failed — every `AnalysisStoreError` out of
+    /// `transcribeShard`'s `insertTranscriptChunks` / coverage writes lands
+    /// here.
+    ///
+    /// This is not a hypothetical class. It is the failure that produced this
+    /// bead's most instructive artifact: `appendShardsAfterCompletion` never
+    /// seeded its `analysis_assets` row, so every chunk insert hit the foreign
+    /// key and failed, and the test passed anyway because the loop reported
+    /// `.completed` over a total failure. A run in that state does ASR work,
+    /// writes nothing, and — until this case was wired up (round-1 review) —
+    /// reported `unknown`, which is the same "names an absence" defect as
+    /// `asr_failed` one layer down.
+    case persistenceFailed = "persistence_failed"
+    /// Anything not yet classified. A rising count here is the signal that
+    /// this taxonomy needs another case — never a reason to log free text.
+    case unknown
+
+    /// Classify a thrown error. Total by construction: everything that is not
+    /// recognised is `.unknown`, so no call site can leak a description.
+    static func classify(_ error: Error) -> TranscriptFailureClass {
+        // playhead-8ysk review: the store's own errors, which reach this
+        // classifier through `transcribeShard`'s persistence writes. Only the
+        // TYPE is inspected — `AnalysisStoreError`'s payloads are free-form
+        // SQLite messages and none of them is read here, so nothing this
+        // classifier returns can carry one. (Its bridged NSError domain is
+        // `Playhead.AnalysisStoreError`, so `TranscriptFailureReason.classify`
+        // also drops the synthesised case ordinal.)
+        if error is AnalysisStoreError {
+            return .persistenceFailed
+        }
+        if let engineError = error as? TranscriptEngineError {
+            switch engineError {
+            case .modelNotLoaded:
+                return .modelNotLoaded
+            case .unsupportedSampleRate:
+                return .unsupportedSampleRate
+            case .vadFailed:
+                return .vadFailed
+            case .transcriptionFailed:
+                return .transcriptionFailed
+            }
+        }
+#if canImport(Speech)
+        if let boundaryError = error as? AppleSpeechBoundaryError {
+            switch boundaryError {
+            case .speechAssetsUnsupported:
+                return .speechAssetsUnsupported
+            case .analyzerFormatUnavailable:
+                return .analyzerFormatUnavailable
+            case .invalidAnalyzerInputTimeline:
+                return .invalidAnalyzerTimeline
+            case .analyzerSessionFailure:
+                return .analyzerSessionFailure
+            case .audioBridgeFailure(let reason):
+                // `TranscriptEngine.makeSourceBuffer`'s three sample guards
+                // are all raised as `.audioBridgeFailure`, so the sub-cases
+                // are recovered here rather than by widening that enum, which
+                // would ripple through every existing catch. They are worth
+                // separating: a silent shard is rejected by a CPU scan in well
+                // under a millisecond, which is what makes a whole episode
+                // fail instantly, and collapsing all three would leave the
+                // dominant mode unnamed all over again.
+                return SampleGuardMarker.classify(reason) ?? .audioBridgeFailure
+            }
+        }
+#endif
+        return .unknown
+    }
+
+    /// Substrings identifying the three sample guards in
+    /// `TranscriptEngine.makeSourceBuffer`.
+    ///
+    /// These are matched, not constructed, so they are a coupling to message
+    /// text in another file. `TranscriptFailureTaxonomyTests` closes that by
+    /// throwing through the REAL guards and asserting the classification, so a
+    /// reworded message fails a test instead of silently degrading every
+    /// future diagnostic bundle to `audio_bridge_failure`.
+    enum SampleGuardMarker: String, CaseIterable {
+        case empty = "empty audio shard"
+        case nonFinite = "NaN and"
+        case silent = "is entirely silent"
+
+        var failureClass: TranscriptFailureClass {
+            switch self {
+            case .empty: .emptyShard
+            case .nonFinite: .nonFiniteSamples
+            case .silent: .silentShard
+            }
+        }
+
+        static func classify(_ reason: String) -> TranscriptFailureClass? {
+            allCases.first { reason.contains($0.rawValue) }?.failureClass
+        }
+    }
+}
+
+/// playhead-8ysk: what a transcription failure was, in exportable form.
+///
+/// `code` is an `NSError.code` when the underlying error carried one. An
+/// integer cannot carry PII, and it is what separates one Speech-domain
+/// failure from another once the class is known.
+struct TranscriptFailureReason: Sendable, Hashable {
+    let failureClass: TranscriptFailureClass
+    let code: Int?
+    /// How many shards failed before the loop gave up. `0` for failures
+    /// raised before any shard was attempted.
+    let failedShardCount: Int
+
+    init(failureClass: TranscriptFailureClass, code: Int? = nil, failedShardCount: Int = 0) {
+        self.failureClass = failureClass
+        self.code = code
+        self.failedShardCount = failedShardCount
+    }
+
+    /// Classify a thrown error into an exportable reason.
+    static func classify(_ error: Error, failedShardCount: Int = 0) -> TranscriptFailureReason {
+        // Every Swift error bridges to an NSError, so `error as NSError` never
+        // fails and `error is NSError` is always true — measured, not assumed.
+        // A Swift-native enum bridges to the synthesised domain
+        // "<Module>.<TypeName>" with the case's ORDINAL as its code, so
+        // exporting that would be noise dressed as data (`.modelNotLoaded`
+        // would ship `code: 0`). Only a genuine framework error — Speech,
+        // AVFoundation, POSIX — carries a code worth having, and none of those
+        // domains is one of ours.
+        let nsError = error as NSError
+        let isOurSyntheticDomain = nsError.domain.hasPrefix("Playhead.")
+        return TranscriptFailureReason(
+            failureClass: TranscriptFailureClass.classify(error),
+            code: isOurSyntheticDomain ? nil : nsError.code,
+            failedShardCount: failedShardCount
+        )
+    }
+}
+
 enum TranscriptEngineEvent: Sendable {
     case chunksPersisted(analysisAssetId: String, chunks: [TranscriptChunk])
     case completed(analysisAssetId: String)
+    /// playhead-8ysk: the transcription loop ended having produced nothing.
+    ///
+    /// Before this case existed the event type could not express a failure at
+    /// all, so the catch in `runTranscriptionLoop` logged the error and moved
+    /// on — and after EVERY shard had failed the loop fell through and emitted
+    /// `.completed`. A total failure was reported upward as success,
+    /// distinguishable only by the coverage number being zero, which is why
+    /// the journal could only ever say `asr_failed`.
+    case failed(analysisAssetId: String, reason: TranscriptFailureReason)
 }
 
 /// Thrown by `transcribeShard` when the playhead-01t8 preemption
@@ -147,6 +351,65 @@ actor TranscriptEngineService {
     /// True while the transcription loop is actively processing.
     /// Used by appendShards to decide whether to start a new loop.
     private var loopRunning: Bool = false
+
+    /// playhead-8ysk (review r3): transcript chunks THIS run inserted.
+    ///
+    /// Reset at the top of every `runTranscriptionLoop` and incremented at the
+    /// single batch-insert site in `transcribeShard`, so it counts durable rows
+    /// this pass produced and nothing else.
+    ///
+    /// It exists because the obvious alternative is wrong.
+    /// `store.fetchTranscriptChunks(assetId:)` is
+    /// `WHERE analysisAssetId = ?` with no pass or generation scoping, and the
+    /// asset row is REUSED across passes — `AnalysisCoordinator` resolves it
+    /// with `fetchAssetByEpisodeId` and keeps `existing.id`. So on a retry of
+    /// an asset that once made progress, that query returns the EARLIER pass's
+    /// chunks, and a total failure now would read as "we produced something".
+    /// A retry of a partly-transcribed asset is the exact shape of this bead's
+    /// incident (147 acquisitions, 9 finalizations), so the cumulative read
+    /// would have failed in the case the failure event exists for — the same
+    /// per-pass-vs-cumulative confusion review r2 found in the runner's
+    /// `fastTranscriptCoverageEndTime` fallback, one layer down.
+    ///
+    /// `AnalysisJobRunner` already does this correctly and is the model:
+    /// it snapshots `existingChunkCount` before transcription and reports
+    /// `currentChunkCount - existingChunkCount`.
+    private var chunksInsertedThisRun: Int = 0
+
+    /// playhead-8ysk (review r4): shards THIS run carried to a clean finish.
+    ///
+    /// Same lifetime as `chunksInsertedThisRun` — reset at the top of every
+    /// `runTranscriptionLoop`, incremented only at `transcribeShard`'s
+    /// successful exits, so it too is strictly per-pass.
+    ///
+    /// IT EXISTS BECAUSE COUNTING INSERTS IS NOT THE SAME AS COUNTING WORK,
+    /// and the total-failure gate needs the second one. `transcribeShard`
+    /// returns without inserting a row in two ordinary, successful cases:
+    /// a shard whose recognizer yields no segments (silence, music — it still
+    /// advances the coverage watermark and returns), and a shard whose
+    /// segments all match an existing `segmentFingerprint` and are therefore
+    /// deduped. The second is not an edge case here: a re-run over an asset
+    /// that is already transcribed dedups EVERY segment, and re-running
+    /// already-covered assets is this bead's own incident shape (147
+    /// acquisitions, 9 finalizations) — the loop deliberately does not filter
+    /// shards by coverage, precisely so the fingerprint dedup can do it.
+    ///
+    /// So `chunksInsertedThisRun == 0` alone reads a fully-successful re-run
+    /// that happened to also hit one bad shard as "this run produced
+    /// nothing", and reports a total failure for it. That is the same lie the
+    /// gate removes, pointing the other way: `.failed` over a run that did its
+    /// work, which costs a spurious `work_journal` row, a wrong
+    /// `lastErrorCode`, a requeue with backoff, and a skipped
+    /// `finalizeBackfill`. `retryThatPersistsSomethingStillCompletes` already
+    /// names "the store gained no rows, which a dedup-heavy retry can also
+    /// satisfy" as a rejected alternative — a per-run insert count has the
+    /// identical blind spot.
+    ///
+    /// A shard that finishes has done durable work even with no row to show
+    /// for it: the coverage watermark moved, so that audio is not re-attempted.
+    /// That is the same bar `partialSuccessStillCompletes` already sets — one
+    /// bad shard among good ones is a partial success, not a failure.
+    private var shardsCompletedThisRun: Int = 0
 
     /// Optional preemption context threaded in by AnalysisJobRunner
     /// (playhead-01t8). Polled after each TranscriptChunk batch
@@ -473,6 +736,20 @@ actor TranscriptEngineService {
     var appendWaiterCountForTesting: Int {
         appendWaiters.count
     }
+
+    /// playhead-8ysk test seam: push a `.failed` through `emitEvent` for an
+    /// arbitrary asset id.
+    ///
+    /// `.failed` has to obey the same per-asset stop gate `.completed` does,
+    /// and that branch is not reachable from the loop: `startTranscription`
+    /// rescinds a stop for the asset it is starting, so no production
+    /// sequence can have the loop emit for an asset that is still gated. The
+    /// seam exercises the gate directly rather than leaving the branch
+    /// asserted only by the compiler's exhaustiveness check, which would
+    /// happily accept `stopped = false`.
+    func emitFailedForTesting(analysisAssetId: String, reason: TranscriptFailureReason) {
+        emitEvent(.failed(analysisAssetId: analysisAssetId, reason: reason))
+    }
 #endif
 
     func events() -> AsyncStream<TranscriptEngineEvent> {
@@ -504,13 +781,40 @@ actor TranscriptEngineService {
         logger.info("Starting transcription loop: \(shards.count) shards for asset \(analysisAssetId)")
         let loopStart = ContinuousClock.now
 
+        // playhead-8ysk: the errors this loop used to destroy. The catches
+        // below still `continue` — partial coverage is better than none — but
+        // they no longer throw the diagnosis away with the shard.
+        var shardFailures: [TranscriptFailureReason] = []
+        // playhead-8ysk (review r3): this run's own production. See the
+        // declaration for why the store cannot answer this question.
+        chunksInsertedThisRun = 0
+        // playhead-8ysk (review r4): and this run's own progress, which is not
+        // the same quantity — see the declaration.
+        shardsCompletedThisRun = 0
+
         guard !shards.isEmpty || !appendedShards.isEmpty else {
             logger.warning("No shards to transcribe")
+            // playhead-8ysk: this used to return in silence. The runner then
+            // sat in `withTaskGroup` waiting for a `.completed` that could
+            // never arrive, until its 300 s timeout fired — one of the two
+            // paths behind `task_expired`.
+            emitEvent(.failed(
+                analysisAssetId: analysisAssetId,
+                reason: TranscriptFailureReason(failureClass: .noShards)
+            ))
             return
         }
 
         guard await speechService.isReady() else {
             logger.error("Speech engine not ready — aborting transcription")
+            // playhead-8ysk: likewise silent before. This is the observable
+            // end of the swallowed launch-time `loadFastModel()` failure —
+            // its empty catch claims "the transcript engine will surface
+            // failures when first used", and until now it did not.
+            emitEvent(.failed(
+                analysisAssetId: analysisAssetId,
+                reason: TranscriptFailureReason(failureClass: .speechEngineNotReady)
+            ))
             return
         }
 
@@ -560,6 +864,7 @@ actor TranscriptEngineService {
                     samples=\(shard.sampleCount), \
                     episode=\(shard.episodeID)]: \(error)
                     """)
+                shardFailures.append(TranscriptFailureReason.classify(error))
                 // Continue with next shard — partial coverage is better than none.
                 continue
             }
@@ -598,6 +903,7 @@ actor TranscriptEngineService {
                             Transcription failed for appended shard \(shard.id) \
                             [start=\(String(format: "%.2f", shard.startTime))s]: \(error)
                             """)
+                        shardFailures.append(TranscriptFailureReason.classify(error))
                         continue
                     }
                 }
@@ -664,6 +970,26 @@ actor TranscriptEngineService {
                     return
                 } catch {
                     logger.error("Shard-0 backfill failed: \(error)")
+                    // playhead-8ysk (review r4): DELIBERATELY NOT recorded into
+                    // `shardFailures`, and the reason is an invariant rather
+                    // than an oversight — round 4 tried adding it here and the
+                    // suite rejected the change.
+                    //
+                    // This is the third `transcribeShard` call site, and unlike
+                    // the other two it can only ever re-attempt a shard the
+                    // main loop already attempted: it selects
+                    // `shards.first(where: { $0.id == 0 })` out of the same
+                    // array the loop iterated in full. So whatever it throws,
+                    // that shard's class is already in `shardFailures`.
+                    // Appending would add no diagnosis and would turn
+                    // `failedShardCount` from a count of failed SHARDS into a
+                    // count of failed ATTEMPTS — double-counting shard 0, and
+                    // breaking the on-device duration-proxy invariant that
+                    // `DiagnosticsBundleFailureClassTests` reasons about ("in a
+                    // total failure it equals the shard count").
+                    // `shardZeroBackfillDoesNotInflateTheFailedShardCount`
+                    // pins it.
+                    //
                     // Best-effort: continue to .completed below since the
                     // rest of the transcript is already persisted.
                 }
@@ -676,8 +1002,79 @@ actor TranscriptEngineService {
         await reconcileCoverageAtCompletion(analysisAssetId: analysisAssetId)
 
         let loopElapsed = ContinuousClock.now - loopStart
+
+        // playhead-8ysk: STOP LYING ABOUT TOTAL FAILURE.
+        //
+        // Every shard could fail and the loop would still fall through to
+        // `.completed`. The runner treats that event as "coverage is durable"
+        // and queues downstream work; the only trace of the failure was a
+        // coverage number of zero, and by then no `Error` was in scope
+        // anywhere — which is exactly why `asr_failed` names an absence
+        // rather than a cause.
+        //
+        // The bar is deliberately "produced nothing", not "any shard failed".
+        // A run that persisted some chunks genuinely did partial work, and the
+        // catches above keep continuing on purpose; downgrading those to
+        // failures would discard usable transcript.
+        //
+        // "Produced nothing" means THIS RUN produced nothing, which is why the
+        // counts come from this run's own tallies and not from the store. See
+        // `chunksInsertedThisRun`'s declaration: `fetchTranscriptChunks(assetId:)`
+        // is cumulative over the asset's whole lifetime and the asset row is
+        // reused across passes, so asking it here would have let a retry of a
+        // partly-transcribed asset report `.completed` over a total failure —
+        // reinstating the very lie this block removes, in the retry case this
+        // bead was filed for.
+        //
+        // BOTH tallies are required (review r4). Rows inserted is not a
+        // measure of work done: a shard that yields no segments, and a shard
+        // whose segments all dedup against an earlier pass, both finish
+        // successfully and insert nothing. Gating on the insert count alone
+        // therefore reports a total failure for a re-run that transcribed
+        // everything it was asked to and merely also hit one bad shard — see
+        // `shardsCompletedThisRun`. A run is a total failure only when it
+        // wrote nothing AND carried no shard to a clean finish.
+        if !shardFailures.isEmpty, chunksInsertedThisRun == 0, shardsCompletedThisRun == 0 {
+            let reason = Self.dominantFailure(shardFailures)
+            logger.error("""
+                Transcription produced nothing for asset \(analysisAssetId) in \(loopElapsed): \
+                \(reason.failureClass.rawValue) \
+                across \(reason.failedShardCount) shard(s)
+                """)
+            emitEvent(.failed(analysisAssetId: analysisAssetId, reason: reason))
+            return
+        }
+
         logger.info("Transcription loop complete for asset \(analysisAssetId) in \(loopElapsed)")
         emitEvent(.completed(analysisAssetId: analysisAssetId))
+    }
+
+    /// playhead-8ysk: reduce a run's per-shard failures to the one class worth
+    /// exporting — the most frequent, ties broken by first occurrence.
+    ///
+    /// A run that dies at shard 0 for one reason and at shards 1..n for
+    /// another should report the reason that actually characterises it, not
+    /// whichever happened to be last.
+    static func dominantFailure(_ failures: [TranscriptFailureReason]) -> TranscriptFailureReason {
+        guard let first = failures.first else {
+            return TranscriptFailureReason(failureClass: .unknown)
+        }
+        var counts: [TranscriptFailureClass: Int] = [:]
+        for failure in failures {
+            counts[failure.failureClass, default: 0] += 1
+        }
+        // `max(by:)` over the ORDER OF OCCURRENCE, not over the dictionary,
+        // so ties resolve to the earliest class deterministically rather than
+        // to whatever the hash seed puts first.
+        var seen: Set<TranscriptFailureClass> = []
+        let ordered = failures.map(\.failureClass).filter { seen.insert($0).inserted }
+        let dominantClass = ordered.max(by: { (counts[$0] ?? 0) < (counts[$1] ?? 0) }) ?? first.failureClass
+        let exemplar = failures.first { $0.failureClass == dominantClass } ?? first
+        return TranscriptFailureReason(
+            failureClass: dominantClass,
+            code: exemplar.code,
+            failedShardCount: failures.count
+        )
     }
 
     // MARK: - Append-wait plumbing
@@ -781,6 +1178,10 @@ actor TranscriptEngineService {
                 analysisAssetId: analysisAssetId,
                 endTime: shard.startTime + shard.duration
             )
+            // playhead-8ysk (review r4): a silent shard produced no row but it
+            // DID finish, and the watermark it just advanced is durable. Count
+            // it, or a music-heavy run reads as having produced nothing.
+            shardsCompletedThisRun += 1
             return
         }
 
@@ -902,6 +1303,10 @@ actor TranscriptEngineService {
         // Batch-insert to SQLite.
         if !chunksToInsert.isEmpty {
             try await store.insertTranscriptChunks(chunksToInsert)
+            // playhead-8ysk (review r3): count AFTER the insert returns, so a
+            // throwing insert (the `persistence_failed` class) does not credit
+            // this run with rows it never wrote.
+            chunksInsertedThisRun += chunksToInsert.count
         }
         if !emittedChunks.isEmpty {
             emitEvent(.chunksPersisted(analysisAssetId: analysisAssetId, chunks: emittedChunks))
@@ -913,6 +1318,13 @@ actor TranscriptEngineService {
             analysisAssetId: analysisAssetId,
             endTime: shardEnd
         )
+
+        // playhead-8ysk (review r4): the shard is finished and everything it
+        // produced is durable. Counted BEFORE the preemption safe point below
+        // on purpose — a preempted loop returns without reaching the
+        // total-failure gate, so the ordering cannot matter there, and
+        // counting after the throw would under-report work that did land.
+        shardsCompletedThisRun += 1
 
         logger.info("Wrote \(emittedChunks.count) chunks for shard \(shard.id) [\(String(format: "%.1f", shard.startTime))-\(String(format: "%.1f", shardEnd))s]")
 
@@ -1117,6 +1529,12 @@ actor TranscriptEngineService {
         case .chunksPersisted(let assetId, _):
             stopped = stoppedAssetIds.contains(assetId)
         case .completed(let assetId):
+            stopped = stoppedAssetIds.contains(assetId)
+        case .failed(let assetId, _):
+            // playhead-8ysk: a `.failed` for a stopped asset is dropped for
+            // the same reason `.completed` is — the runner has moved on and
+            // any event it observes now would be attributed to whatever it is
+            // doing next.
             stopped = stoppedAssetIds.contains(assetId)
         }
         if stopped {

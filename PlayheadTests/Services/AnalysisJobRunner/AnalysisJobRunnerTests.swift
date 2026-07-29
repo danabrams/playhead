@@ -1451,10 +1451,21 @@ struct AnalysisJobRunnerTests {
         // Pin the precondition: we did land on the zero-coverage failure
         // branch. If the upstream pipeline ever changes such that this
         // branch no longer fires, the entire test premise is invalid.
+        //
+        // playhead-8ysk: the reason is no longer the fixed literal
+        // `transcription:zeroCoverage`. That one string stood for nine
+        // distinguishable causes, so `lastErrorCode` could not tell a silent
+        // shard from an unloaded model from a missing locale asset. It now
+        // names the class the engine actually reported — here
+        // `transcription_failed`, because `MockSpeechRecognizer` throws
+        // `TranscriptEngineError.transcriptionFailed` from every shard.
         if case .failed(let msg) = outcome.stopReason {
-            #expect(msg.contains("transcription:zeroCoverage"))
+            #expect(msg == "transcription:\(TranscriptFailureClass.transcriptionFailed.rawValue)",
+                    "got \(msg)")
+            #expect(msg != "transcription:zeroCoverage",
+                    "the fallback literal means the engine's .failed event never reached the runner")
         } else {
-            Issue.record("Expected .failed(transcription:zeroCoverage), got \(outcome.stopReason)")
+            Issue.record("Expected .failed(transcription:...), got \(outcome.stopReason)")
         }
 
         // The journal row should be discoverable via the {episode,
@@ -1506,6 +1517,41 @@ struct AnalysisJobRunnerTests {
             #expect((parsed["chunks_persisted"] as? String) == "0")
             // No coverage advance — the asset's watermark stayed nil.
             #expect((parsed["transcript_coverage_end_time"] as? String) == "0.000")
+
+            // playhead-8ysk: the keys that make this row diagnostic rather
+            // than merely present. This is the ONLY end-to-end assertion
+            // that the engine's `.failed` reason actually traverses
+            // `AnalysisJobRunner.run` into the journal — every other test of
+            // the taxonomy stops at one seam or the other.
+            #expect(
+                (parsed[DiagnosticsFailureKeys.failureClass] as? String)
+                    == TranscriptFailureClass.transcriptionFailed.rawValue,
+                "metadata must name the cause; got keys=\(Array(parsed.keys).sorted())"
+            )
+            // Four shards were decoded and every one of them failed.
+            #expect((parsed[DiagnosticsFailureKeys.failedShardCount] as? String) == "4")
+            // `TranscriptEngineError` is a Swift-native enum, so its bridged
+            // NSError code is just a case ordinal — the emitter must omit
+            // the key rather than export a meaningless 0 that would read as
+            // a real framework code.
+            #expect(parsed[DiagnosticsFailureKeys.failureCode] == nil)
+
+            // And the whole point: it survives the projection into a bundle
+            // a support engineer reads without a device attached. Before
+            // this bead the row reached SQLite and died there.
+            let bundle = DiagnosticsBundleBuilder.buildDefault(
+                appVersion: "1.0", osVersion: "iOS 27", deviceClass: .iPhone17Pro,
+                buildType: .debug,
+                eligibility: AnalysisEligibility(
+                    hardwareSupported: true, appleIntelligenceEnabled: true,
+                    regionSupported: true, languageSupported: true,
+                    modelAvailableNow: true, capturedAt: Date()
+                ),
+                workJournalEntries: [row], installID: UUID()
+            )
+            let projected = bundle.workJournalTail.first { $0.id == row.id }
+            #expect(projected?.failureClass == TranscriptFailureClass.transcriptionFailed.rawValue,
+                    "the cause must survive the bundle projection, not just SQLite")
         }
     }
 }
