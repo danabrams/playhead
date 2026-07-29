@@ -91,9 +91,22 @@ enum BuildType: String, Sendable, Hashable, Codable, CaseIterable {
 /// the first time one was renamed, and the only symptom would be diagnostics
 /// bundles quietly reverting to "`asr_failed`, cause unknown" — the exact
 /// condition this bead exists to end.
+///
+/// NOT ALL THREE CROSS THE PROJECTION (clarified in review r2, where the
+/// wording above read as though they all did). `failureClass` and
+/// `failureCode` are projected into `DefaultBundle.WorkJournalRecord`.
+/// `failedShardCount` is written and read ON DEVICE only: it is a count of a
+/// private episode's structure, and in a total failure it equals the shard
+/// count, which discloses the episode's duration to ±30 s — a usable
+/// fingerprint in a bundle that goes to the trouble of hashing episode ids.
+/// It stays in `metadata` for on-device forensics, where the raw episode id
+/// is available anyway. `writeSideRoundTripsThroughTheProjection` pins both
+/// halves of that split.
 enum DiagnosticsFailureKeys {
     static let failureClass = "failure_class"
     static let failureCode = "failure_code"
+    /// On-device only — see the note above. Do not add to the projection
+    /// without a privacy review.
     static let failedShardCount = "failed_shard_count"
 }
 

@@ -674,6 +674,54 @@ struct ShardCacheSourceIdentityTests {
         #expect(served[0].samples.count == 480_000)
     }
 
+    /// REVIEW R2. `attributesOfItem` does not traverse a terminal symbolic
+    /// link, so without `resolvingSymlinksInPath` the stamp would describe the
+    /// LINK — measured off-budget at 101 bytes for a link to a 100 KB file,
+    /// and unchanged after the target grew fivefold. That is a stamp that can
+    /// never invalidate: the immortal cache this bead exists to close,
+    /// reintroduced for any source reached through a link.
+    ///
+    /// `LocalAudioURL` accepts any `file://` path, so the type permits this
+    /// even though production sources come from
+    /// `DownloadManager.servingURLIfComplete` and are regular files.
+    @Test("a symlinked source is measured through the link, so it can still invalidate")
+    func symlinkedSourceIsMeasuredThroughTheLink() async throws {
+        let real = try makeAudioURL()
+        try writeSynthAudio(seconds: 45, to: real)
+        let link = real.deletingLastPathComponent()
+            .appendingPathComponent("link-\(UUID().uuidString).caf")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let throughLink = try #require(AnalysisAudioService.sourceIdentity(of: link))
+        let direct = try #require(AnalysisAudioService.sourceIdentity(of: real))
+        #expect(
+            throughLink == direct,
+            """
+            the stamp describes the link itself, not the file the decoder \
+            opens. A link's own length never changes, so the entry would \
+            validate forever
+            """
+        )
+
+        // And it tracks the TARGET changing, which is the whole point.
+        try writeSynthAudio(seconds: 6, to: real)
+        let afterShrink = try #require(AnalysisAudioService.sourceIdentity(of: link))
+        #expect(afterShrink != throughLink)
+        #expect(afterShrink == AnalysisAudioService.sourceIdentity(of: real))
+    }
+
+    /// A directory is not a decode source, and reporting a size for one is how
+    /// a nonsense stamp gets written. `attributesOfItem` happily returns 128
+    /// bytes for a directory — measured — so the regular-file check is load
+    /// bearing, not decoration.
+    @Test("a directory is unmeasurable, not 128 bytes")
+    func directoryIsUnmeasurable() throws {
+        let dir = try makeTempDir(prefix: "Bd8yskDirProbe")
+        Self.tempDirs.track(dir)
+        #expect(AnalysisAudioService.sourceIdentity(of: dir) == nil)
+        #expect(AnalysisAudioService.sourceByteLength(of: dir) == nil)
+    }
+
     /// RUN THE SELF-HEALING CLAIM ROUND 1 ONLY REASONED ABOUT.
     ///
     /// Round 1 judged the `?? 0` mutant's impact bounded because an entry

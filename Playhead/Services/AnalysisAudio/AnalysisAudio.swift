@@ -516,10 +516,6 @@ actor AnalysisAudioService {
     /// playhead-8ysk: length in bytes of a decode's source file, or `nil`
     /// when it cannot be measured (the file is missing or unreadable).
     ///
-    /// Note this measures the path's own inode: `attributesOfItem` does not
-    /// traverse a terminal symbolic link. Production decode sources come from
-    /// `DownloadManager.servingURLIfComplete`, which is always a regular file
-    /// in the managed complete directory, so the two coincide there.
     nonisolated static func sourceByteLength(of url: URL) -> Int64? {
         sourceIdentity(of: url)?.byteLength
     }
@@ -570,8 +566,25 @@ actor AnalysisAudioService {
 
     /// Measure the file at `url`, or `nil` when it cannot be measured
     /// (missing, unreadable, or not a regular file).
+    ///
+    /// SYMLINKS ARE RESOLVED FIRST, and that is not cosmetic:
+    /// `attributesOfItem` does not traverse a terminal symbolic link, so
+    /// without this it would report the LINK's own size and mtime — measured
+    /// here at 101 bytes for a link to a 100 KB file, and unchanged after the
+    /// target grew fivefold. A stamp taken that way describes a different
+    /// object from the one `AVURLAsset` opens, and it is frozen: the entry
+    /// would validate forever, which is precisely the immortal-cache defect
+    /// this bead exists to close, reintroduced through the back door.
+    ///
+    /// Production decode sources come from
+    /// `DownloadManager.servingURLIfComplete`, a regular file in the managed
+    /// complete directory, so this is hardening rather than a live fix — but
+    /// the invariant the stamp claims ("measured from the decode's ACTUAL
+    /// input") should hold for any URL the type accepts, and `LocalAudioURL`
+    /// accepts any `file://` path.
     nonisolated static func sourceIdentity(of url: URL) -> SourceIdentity? {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+        let resolved = url.resolvingSymlinksInPath()
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolved.path),
               let type = attributes[.type] as? FileAttributeType,
               type == .typeRegular,
               let size = attributes[.size] as? NSNumber,
@@ -604,6 +617,23 @@ actor AnalysisAudioService {
     ///   boundary refinement and the chapter snapshots read
     ///   ``AnalysisShardPCMReader``, which goes straight to the manifest and
     ///   never consults this predicate at all.
+    ///
+    ///   WHAT THIS BRANCH STILL COSTS, stated exactly because the bead asks
+    ///   whether 8ysk fixes playhead-0hi9 and the answer is NO on this path.
+    ///   A partial decode can still be cached: `saveShards` runs whenever
+    ///   `isTruncated` is false, and a headerless CBR prefix declares its own
+    ///   length, so it reads as complete to itself (measured — see the note
+    ///   at the `saveShards` call site). The stamp kills that entry the
+    ///   moment the file GROWS. It cannot kill it if the file is DELETED
+    ///   first: `DownloadManager.evictIfNeeded()` can evict the audio while
+    ///   the prefix's shards remain, and a decode after that measures
+    ///   nothing, fails open, and serves the prefix. 0hi9's
+    ///   `persistSpooledEpisodeDuration` then records the PREFIX duration as
+    ///   the episode duration — which is 0hi9's original symptom (placeholder
+    ///   rows at 528-561 s, i.e. 8 MiB at ~123 kbps). Closing it needs the
+    ///   manifest to record decode COMPLETENESS, not just source identity,
+    ///   and that is 0hi9's job, not this bead's. Do not read the fail-open
+    ///   branch as safe; read it as bounded and owned elsewhere.
     /// - `recorded == nil` → **discard**. A pre-8ysk manifest carries no
     ///   record of its input, so it can never be shown to match; treating
     ///   "unknown" as "matches" would preserve exactly the immortal entries
