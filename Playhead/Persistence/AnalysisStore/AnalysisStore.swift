@@ -15655,6 +15655,20 @@ actor AnalysisStore {
     /// with when an episode holds more than one, and an unordered scan makes
     /// that SQLite's choice rather than ours. `rowid` is insert order, so the
     /// row the device wrote first is folded first.
+    ///
+    /// R4 — MEASURED, because the tempting equivalence argument ("a scan
+    /// returns rowid order anyway, so the clause is a no-op") is wrong twice
+    /// over. This is not a scan: `WHERE episodeId = ?` is an index SEARCH, and
+    /// WHICH index the planner picks decides the order. With both
+    /// `idx_assets_episode` and the V39 `idx_assets_episode_fingerprint`
+    /// present and no `sqlite_stat1`, SQLite 3.54 picks the former and does
+    /// return rowid order — but drop `idx_assets_episode`, or let stats exist
+    /// (any future `ANALYZE` / `PRAGMA optimize`; the app runs neither today),
+    /// and it picks the fingerprint index instead and returns rows in
+    /// `assetFingerprint` order. Measured on a fixture whose fingerprints sort
+    /// in reverse of insert order: 1,2,3 with the clause, 3,2,1 without.
+    /// `foldOrderIsRowIdEvenWhenThePlannerWouldOrderByFingerprint` runs that
+    /// case, so the clause is pinned by behaviour rather than by argument.
     private func assetMergeRows(episodeId: String) throws -> [AssetMergeRow] {
         let stmt = try prepare("""
             SELECT rowid, id, assetFingerprint, createdAt, analysisState,

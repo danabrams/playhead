@@ -534,4 +534,50 @@ struct TruncatedDecodeDurationTests {
         let cached = try #require(await coordinator.cachedPersistedEpisodeDurationForTesting())
         #expect(abs(cached - 2933) < 0.001, "got \(cached)")
     }
+
+    /// R4. `persistSpooledEpisodeDuration`'s `guard totalAudio > 0` was carried
+    /// over from `runFromSpooling` and written off as unreachable, on the
+    /// grounds that the caller already rejects an empty shard array. Two things
+    /// are wrong with that. Non-empty is not the same as non-zero — a shard
+    /// array whose durations sum to zero clears `!shards.isEmpty` — and the
+    /// method is `internal`, so this suite is itself a caller: five tests above
+    /// invoke it directly, and none of them passes a zero total.
+    ///
+    /// The guard is load-bearing because ``AnalysisStore/updateEpisodeDuration``
+    /// has no guard of its own: it writes whatever it is handed. Without this
+    /// one a zero-length decode would OVERWRITE a real measured duration with
+    /// 0, and `resolveEpisodeDuration` treats non-positive as missing — so the
+    /// row silently loses the durable denominator the coverage guards depend
+    /// on, exactly the failure mode this bead exists to stop, arrived at from
+    /// the other side.
+    @Test("a zero-duration decode writes nothing and never clears a real duration")
+    func zeroDurationOutcomeNeitherWritesNorClears() async throws {
+        let store = try await makeStore()
+        let coordinator = makeCoordinator(store: store)
+        let assetId = "asset-zero-\(UUID().uuidString)"
+        try await seedAsset(store: store, assetId: assetId)
+        try await store.updateEpisodeDuration(id: assetId, episodeDurationSec: 2933)
+
+        // Non-empty — so `runFromSpooling`'s `!shards.isEmpty` guard passes —
+        // but summing to zero, and NOT truncated, so only `totalAudio > 0`
+        // stands between this and the write.
+        let zeroLengthShards = [
+            AnalysisShard(id: 0, episodeID: "ep", startTime: 0, duration: 0, samples: []),
+            AnalysisShard(id: 1, episodeID: "ep", startTime: 0, duration: 0, samples: [])
+        ]
+        #expect(!zeroLengthShards.isEmpty, "the fixture has to clear the caller's own guard to be meaningful")
+
+        await coordinator.persistSpooledEpisodeDuration(
+            assetId: assetId,
+            episodeId: "ep-\(assetId)",
+            outcome: AnalysisDecodeOutcome(shards: zeroLengthShards, isTruncated: false)
+        )
+
+        let asset = try await store.fetchAsset(id: assetId)
+        let persisted = try #require(asset?.episodeDurationSec)
+        #expect(abs(persisted - 2933) < 0.001,
+                "a zero-length decode must not overwrite the measured duration with 0 (got \(persisted))")
+        #expect(await coordinator.cachedPersistedEpisodeDurationForTesting() == nil,
+                "and must not poison the in-memory denominator with 0 either")
+    }
 }

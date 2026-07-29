@@ -1719,4 +1719,166 @@ struct DuplicateAssetReconcileTests {
         #expect(mergedLast.analysisState == SessionState.queued.rawValue,
                 "and merging last loses it — the reconcile repaired the placeholder's claim against the poisoned denominator before the merge could adopt it. This is why PlayheadRuntime runs the merge first.")
     }
+
+    // MARK: - R4: claims that were justified by reading, now run
+
+    /// R4. ``AnalysisStore/assetReferencingChildColumns()`` compares
+    /// `PRAGMA foreign_key_list`'s parent-table cell case-insensitively, and
+    /// nothing exercised the `.lowercased()`:
+    /// `foreignKeyUnderAnyColumnNameIsFollowed` above spells its reference in
+    /// the same lower case the table was created in, so deleting `.lowercased()`
+    /// passes every other test in this file.
+    ///
+    /// Measured with sqlite3 3.54 rather than assumed. `PRAGMA
+    /// foreign_key_list` reports the parent name EXACTLY as written in the DDL
+    /// — `REFERENCES Analysis_Assets(id)` reports `Analysis_Assets` — while the
+    /// engine still ENFORCES the constraint, because SQLite resolves table
+    /// names case-insensitively. A child table spelled any other way is
+    /// therefore invisible to discovery and fully live at delete time, which is
+    /// the worst of both: `repointChildRows` skips the column, `deleteAssetRow`
+    /// raises `FOREIGN KEY constraint failed` inside the V39 migration,
+    /// `migrate()` throws, and `PlayheadRuntime` answers a thrown `migrate()`
+    /// by removing `AnalysisStore.defaultDirectory()` and retrying — which
+    /// succeeds on an empty directory. The whole analysis database, gone.
+    ///
+    /// Same RESTRICT shape as the lower-case test, for the same reason: it is
+    /// the spelling that reaches the data-loss path rather than merely losing
+    /// child rows to a cascade.
+    @Test("a foreign key whose parent name is spelled in a different case is still followed")
+    func foreignKeyWithMixedCaseParentNameIsFollowed() async throws {
+        let (store, directory) = try await makeTestStoreWithDirectory()
+        try await store.execForTesting("""
+            CREATE TABLE cased_asset_children (
+                id TEXT PRIMARY KEY,
+                ownerAssetId TEXT NOT NULL
+                    REFERENCES Analysis_Assets(id) ON DELETE RESTRICT
+            )
+            """)
+
+        let columns = try await store.assetReferencingChildColumns()
+        #expect(
+            columns.contains(
+                ChildAssetColumn(table: "cased_asset_children", column: "ownerAssetId")
+            ),
+            "SQLite records the parent as spelled in the DDL but enforces it case-insensitively; discovery has to do the same or the constraint is live and unseen"
+        )
+
+        // Load-bearing, not merely reported: plant a v39-visible collision
+        // whose loser owns one of these RESTRICT-protected rows and migrate.
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await insertCanonical(
+            store: store, id: "cased-loser", episodeId: "ep-cased", fingerprint: canonicalSHA
+        )
+        try await insertCanonical(
+            store: store, id: "cased-winner", episodeId: "ep-cased", fingerprint: canonicalSHA
+        )
+        try await store.execForTesting(
+            "INSERT INTO cased_asset_children VALUES ('cased-child', 'cased-loser')"
+        )
+        try await store.setMetaValue(forKey: "schema_version", value: "38")
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == 39,
+                "the migration must COMPLETE — a throw here is answered at launch by deleting the store")
+        #expect(try probeRowCount(
+            in: directory,
+            table: "analysis_assets WHERE episodeId = 'ep-cased'"
+        ) == 1)
+        #expect(try probeRowCount(
+            in: directory,
+            table: "cased_asset_children WHERE ownerAssetId = 'cased-winner'"
+        ) == 1, "the row must have been MOVED to the winner, not blocked by a RESTRICT discovery never saw")
+    }
+
+    /// R4. ``AnalysisStore/quotedIdentifier(_:)`` doubles embedded quotes so no
+    /// future caller can turn `PRAGMA table_info(...)` or the `UPDATE`/`DELETE`
+    /// in ``AnalysisStore/repointChildRows(from:to:childColumns:)`` into an
+    /// injection site. Prior rounds accepted the quote-doubling mutation as
+    /// equivalent — true for today's schema, where every identifier comes from
+    /// `sqlite_master` and none contains a quote, and therefore an argument
+    /// about the CALLERS, not about this function. The function's stated
+    /// contract is unconditional, so pin it directly.
+    @Test("identifier quoting doubles embedded quotes unconditionally")
+    func quotedIdentifierDoublesEmbeddedQuotes() {
+        #expect(AnalysisStore.quotedIdentifier("analysis_assets") == "\"analysis_assets\"")
+        #expect(AnalysisStore.quotedIdentifier("we\"ird") == "\"we\"\"ird\"")
+        #expect(AnalysisStore.quotedIdentifier("\"") == "\"\"\"\"")
+        // The shape that would close the identifier and append a statement.
+        #expect(
+            AnalysisStore.quotedIdentifier("t\"; DROP TABLE analysis_assets; --")
+                == "\"t\"\"; DROP TABLE analysis_assets; --\"",
+            "the closing quote must be neutralised, not passed through"
+        )
+        #expect(AnalysisStore.quotedIdentifier("") == "\"\"")
+    }
+
+    /// R4. `assetMergeRows`'s `ORDER BY rowid` was accepted as an equivalent
+    /// mutation on the argument that "SQLite's full scan already returns rowid
+    /// order". Measured, that argument is wrong twice: `WHERE episodeId = ?` is
+    /// an index SEARCH rather than a scan, and which index the planner picks
+    /// decides the row order. With `idx_assets_episode` present SQLite 3.54
+    /// happens to pick it and does return rowid order — which is why every
+    /// existing test passes with the clause deleted — but the V39 unique index
+    /// on `(episodeId, assetFingerprint)` is an equally legal choice for the
+    /// same predicate and returns rows in FINGERPRINT order. The planner
+    /// switches to it once `sqlite_stat1` exists (any future `ANALYZE` or
+    /// `PRAGMA optimize`), and here deterministically once the other index is
+    /// out of the way.
+    ///
+    /// The consequence is not cosmetic. Fold order decides which placeholder's
+    /// completion terminal the merged row keeps, because R3's re-read guard in
+    /// `foldAssetRow` makes the FIRST adopted terminal the winner. So this
+    /// fixture pins the ordering through its behavioural consequence: the
+    /// placeholder the device wrote FIRST supplies the terminal, whatever order
+    /// the planner would have handed the rows back in.
+    @Test("the fold order stays rowid order even when the planner would order by fingerprint")
+    func foldOrderIsRowIdEvenWhenThePlannerWouldOrderByFingerprint() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-plan-order"
+
+        // Fingerprints sort in the exact REVERSE of insert order, because
+        // a placeholder's `assetFingerprint` is its own id.
+        try await insertCanonical(
+            store: store, id: "canon-plan", episodeId: episodeId,
+            fingerprint: canonicalSHA, state: SessionState.queued.rawValue
+        )
+        try await insertPlaceholder(
+            store: store, id: "ph-zzz-written-first", episodeId: episodeId,
+            state: SessionState.completeFull.rawValue,
+            featureCoverage: 2_900, transcriptCoverage: 2_900, duration: 2_933
+        )
+        try await insertPlaceholder(
+            store: store, id: "ph-aaa-written-second", episodeId: episodeId,
+            state: SessionState.completeTranscriptPartial.rawValue,
+            featureCoverage: 100, transcriptCoverage: 120, duration: 543
+        )
+        try await store.execForTesting(
+            "UPDATE analysis_assets SET terminalReason = 'written-first' WHERE id = 'ph-zzz-written-first'"
+        )
+        try await store.execForTesting(
+            "UPDATE analysis_assets SET terminalReason = 'written-second' WHERE id = 'ph-aaa-written-second'"
+        )
+
+        // Make the fingerprint-ordered plan the only one available. In
+        // production the same plan arrives via `sqlite_stat1`; here it is
+        // forced so the assertion cannot depend on planner heuristics.
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode")
+
+        let rows = try await store.assetMergeRowsForTesting(episodeId: episodeId)
+        #expect(
+            rows.map(\.id) == ["canon-plan", "ph-zzz-written-first", "ph-aaa-written-second"],
+            "insert order, not the fingerprint order the available index would have produced (got \(rows.map(\.id)))"
+        )
+
+        let summary = try await store.reconcileDuplicatePlaceholderAssets()
+        #expect(summary.placeholdersMerged == 2)
+        #expect(summary.adoptedTerminalStates == 1)
+
+        let survivor = try #require(try await store.fetchAsset(id: "canon-plan"))
+        #expect(survivor.analysisState == SessionState.completeFull.rawValue,
+                "the terminal must come from the row the device wrote FIRST (got \(survivor.analysisState))")
+        #expect(survivor.terminalReason == "written-first",
+                "and with it the coverage numbers that verdict was scored against")
+    }
 }

@@ -4832,19 +4832,22 @@ actor AnalysisWorkScheduler {
             observedWeak = await downloadManager.fingerprint(for: job.episodeId)?.weak
         }
         let insertWeakFingerprint = AudioFingerprint.nonEmptyWeak(observedWeak)
-        // playhead-0hi9: re-check the lease before minting the row. Everything
-        // above this line suspends — `capabilitiesService.currentSnapshot` did
-        // already, and the `downloadManager.fingerprint` read added another
-        // window — and the lease-renewal task flips `lostOwnership` from
-        // outside. Inserting after the lease was reclaimed creates a second
-        // `analysis_assets` row for an episode the new owner is already
-        // working, which is the exact defect this bead exists to remove.
-        // R3: NOT COVERED BY A TEST. `lostOwnership` is only reachable through
-        // a failed lease renewal on a timer, and forcing it would need new
-        // production seams for both the flag and this private method; the
-        // guard is strictly additive over `main`, so the untested state is no
-        // worse than not having it.
-        guard !lostOwnership else { throw CancellationError() }
+        // playhead-0hi9: `downloadManager.fingerprint(for:)` above is a NEW
+        // suspension point on this path, and the lease-renewal task flips
+        // `lostOwnership` from outside. Inserting after the lease was
+        // reclaimed mints a second `analysis_assets` row for an episode the
+        // new owner is already working — the exact defect this bead removes.
+        //
+        // R4: that window is closed by the pre-existing
+        // `guard !lostOwnership` a few lines below, and R3's duplicate guard
+        // at this point has been REMOVED rather than left in place as an
+        // "untested but additive" rail. It was neither: `AnalysisAsset(...)`
+        // is a memberwise struct init containing no `await`, so on this actor
+        // no suspension can occur between the two points and `lostOwnership`
+        // is provably identical at both. The guard had no behaviour distinct
+        // from its neighbour, which is why no test could reach it — and a
+        // comment claiming an untested safety property that does not exist
+        // costs the next reader more than the line saved.
         let asset = AnalysisAsset(
             id: assetId,
             episodeId: job.episodeId,
