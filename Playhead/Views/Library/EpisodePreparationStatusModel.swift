@@ -25,13 +25,16 @@
 //     audio lies at or before the analysis frontier" (pipeline progress).
 //   * This control's readiness ✓ and analyze zone show `adScanFraction` —
 //     "how much audio was actually read for ads" (the user-facing promise).
-// Both are subsets of the transcript union, and NEITHER dominates the other:
-// AN can exceed the ad-scan fraction (the frontier has passed audio the scan has
-// not reached, the usual case), and the ad-scan fraction can exceed AN (a scan
-// window read text lying past the feature/ad frontier). So the two surfaces can
-// legitimately show different numbers for one episode; do not "reconcile" them
-// by making one read the other. What may never happen again is the ✓ resolving
-// from a quantity that is not ad-scan coverage.
+// NEITHER dominates the other: AN can exceed the ad-scan fraction (the frontier
+// has passed audio the scan has not reached, the usual case), and the ad-scan
+// fraction can exceed AN (a scan window read text lying past the feature/ad
+// frontier). Nor is either a strict subset of the transcript union — AN is, but
+// the ad-scan area bridges sub-ad-width transcript gaps
+// (`AnalysisCoverageMath.adScanBridgeableGapSec`) and so can exceed the raw union
+// by those bridged seconds, bounded by the transcript's outer span. So the two
+// surfaces can legitimately show different numbers for one episode; do not
+// "reconcile" them by making one read the other. What may never happen again is
+// the ✓ resolving from a quantity that is not ad-scan coverage.
 
 import Foundation
 import OSLog
@@ -90,12 +93,16 @@ final class EpisodePreparationStatusModel {
         switch readiness(for: episodeId).state {
         case .idle, .waitingForWifi: return true
         // playhead-pz32: `.partiallyAnalyzed` is informational, not
-        // actionable. Tapping would route into
-        // `prepareEpisodeForAnalysis`, and whether re-driving a
-        // session that already reached a completion terminal does
-        // anything is a PIPELINE question (playhead-gqx4 /
-        // playhead-i7qe own coverage). Offering a tap that may
-        // silently no-op would be a second dishonest affordance.
+        // actionable, and that is a measured conclusion rather than
+        // caution. A tap routes to `prepareEpisodeForAnalysis` →
+        // `AnalysisWorkScheduler.enqueue`, which computes the SAME
+        // `workKey` the finished job already owns and inserts with
+        // `INSERT OR IGNORE`; only `queued`/`paused`/retryable-`failed`
+        // rows dispatch, and a `complete` row is GC'd only after 7
+        // days. So the tap would re-drive nothing. An enabled button
+        // that provably does nothing is a second dishonest affordance
+        // — worse than an honest inert glyph. Re-drive belongs to
+        // playhead-gqx4 / playhead-i7qe, which own coverage.
         case .downloading, .analyzing, .partiallyAnalyzed, .ready: return false
         }
     }
