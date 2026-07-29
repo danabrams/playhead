@@ -411,9 +411,19 @@ struct ManualVetoReachesPersistedAnalysisTests {
 
     /// End to end, through the production seam the sheet calls: highlighted
     /// before, not highlighted after, and the correction durable in the store.
+    ///
+    /// THREE MINUTES, NOT ONE, and only on the two `@MainActor` tests here.
+    /// The limit is a hang guard, not an assertion — every expectation below
+    /// is unchanged. A `@MainActor` test round-trips to the main actor on
+    /// every `await` while ~9,200 tests saturate the cooperative pool, so it
+    /// is materially more load-sensitive than its siblings: measured at 0.10s
+    /// alone, 5.5s in a four-suite run, and past 60s inside the full gate on a
+    /// loaded box — where the non-`MainActor` tests in this same suite came in
+    /// at 105s, i.e. the same starvation, just under the old guard. Three
+    /// minutes still catches a real hang.
     @Test(
         "Mark not-an-ad → the transcript stops highlighting the span",
-        .timeLimit(.minutes(1))
+        .timeLimit(.minutes(3))
     )
     @MainActor
     func transcriptStopsHighlightingAfterTheVeto() async throws {
@@ -527,9 +537,12 @@ struct ManualVetoReachesPersistedAnalysisTests {
     /// filter, so vetoing an ad the user marked themselves left it lit. The
     /// reverted decision state IS the durable correction — reading it is the
     /// fix, not hiding the row.
+    ///
+    /// Three minutes for the same reason as the test above: `@MainActor` under
+    /// full-gate load, hang guard only, assertions unchanged.
     @Test(
         "A reverted user-marked window stops highlighting its rows",
-        .timeLimit(.minutes(1))
+        .timeLimit(.minutes(3))
     )
     @MainActor
     func revertedUserMarkedWindowStopsHighlighting() async throws {
