@@ -505,7 +505,15 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(chunks[0].avgConfidence == 0.9)
     }
 
-    @Test("final-pass duplicate segment fills missing speakerId and avgConfidence across duplicate rows")
+    /// playhead-6av0 REWRITE, for the same reason as
+    /// `TranscriptEngineTests.duplicateFingerprintFillsSpeakerIdAndAvgConfidenceAcrossMatchingRows`:
+    /// `transcript_chunks` is now UNIQUE on
+    /// `(analysisAssetId, pass, segmentFingerprint)`, so a SECOND final-pass row
+    /// under one fingerprint cannot be created and the "reach every duplicate"
+    /// premise is unreachable. What is worth pinning is that the second insert
+    /// is refused and the survivor — which here already HAS a speakerId and an
+    /// avgConfidence — is left exactly as it was by the idempotent re-run.
+    @Test("a second final-pass row for one fingerprint is refused, and the survivor is left intact")
     func testFinalPassDuplicateFillsMissingSpeakerIdAndAvgConfidenceAcrossDuplicateRows() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
@@ -533,7 +541,7 @@ struct FinalPassRetranscriptionRunnerTests {
             speakerId: 42,
             avgConfidence: 0.61
         ))
-        try await store.insertTranscriptChunk(TranscriptChunk(
+        let insertedDuplicate = try await store.insertTranscriptChunk(TranscriptChunk(
             id: "existing-final-missing-speaker",
             analysisAssetId: "asset-fp",
             segmentFingerprint: fingerprint,
@@ -549,6 +557,8 @@ struct FinalPassRetranscriptionRunnerTests {
             speakerId: nil,
             avgConfidence: nil
         ))
+        #expect(!insertedDuplicate,
+                "the UNIQUE (analysisAssetId, pass, segmentFingerprint) index refuses the second row")
 
         let audio = StubAnalysisAudioProvider()
         audio.shardsToReturn = [
@@ -567,10 +577,11 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(result.reTranscribedWindowIds == ["w1"])
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
             .filter { $0.segmentFingerprint == fingerprint }
-        #expect(chunks.count == 2)
+        #expect(chunks.count == 1,
+                "one row per (asset, pass, fingerprint) — the duplicate never landed")
         #expect(chunks.allSatisfy { $0.speakerId == 42 })
-        #expect(abs((chunks[0].avgConfidence ?? 0) - 0.61) < 0.001)
-        #expect(abs((chunks[1].avgConfidence ?? 0) - 0.9) < 0.001)
+        #expect(abs((chunks[0].avgConfidence ?? 0) - 0.61) < 0.001,
+                "the survivor already had both fields, so the idempotent re-run leaves them alone")
     }
 
     @Test("watermark advances to max retranscribed window endTime")

@@ -1264,15 +1264,31 @@ struct TranscriptEngineSpeakerIdTests {
         #expect(abs((upgradedEventChunks[0].avgConfidence ?? 0) - 0.82) < 0.001)
     }
 
-    @Test("duplicate fingerprint fills missing speakerId and avgConfidence across matching rows", .timeLimit(.minutes(1)))
+    /// playhead-6av0 REWRITE. This test used to manufacture a SECOND row under
+    /// one `(analysisAssetId, segmentFingerprint)` and assert that the
+    /// metadata-upgrade UPDATEs — which carry no `LIMIT` — reached both. That
+    /// premise is gone: `transcript_chunks` is now UNIQUE on
+    /// `(analysisAssetId, pass, segmentFingerprint)`, so the duplicate cannot
+    /// exist. The regression it guarded against (a duplicate row left behind
+    /// with a NULL `speakerId` after an upgrade pass) is now prevented rather
+    /// than tolerated, and the two halves of that are what this pins: the
+    /// second insert is REFUSED, and the one surviving row still takes the
+    /// upgrade.
+    @Test("a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade", .timeLimit(.minutes(1)))
     func duplicateFingerprintFillsSpeakerIdAndAvgConfidenceAcrossMatchingRows() async throws {
         let assetId = "asset-speaker-duplicate-rows"
         let store = try await makeTestStore()
         try await store.insertAsset(makeTranscriptAsset(id: assetId, episodeId: "ep-speaker-duplicate-rows"))
 
         let recognizer = MockSpeechRecognizer()
+        // playhead-6av0 review r1: the FIRST pass deliberately carries NO
+        // speakerId. The rewrite as first landed gave pass 1 `speakerId: 7`, so
+        // the closing `allSatisfy { $0.speakerId == 7 }` was already true before
+        // the second pass ran — the assertion passed without exercising
+        // `updateTranscriptChunkSpeakerIdIfMissing` at all, which is the one
+        // production path this test names. Starting from nil makes the claim real.
         recognizer.transcribeResult = [
-            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7, avgConfidence: 0.61)
+            makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: nil, avgConfidence: 0.61)
         ]
         let speech = SpeechService(
             recognizer: recognizer,
@@ -1295,7 +1311,7 @@ struct TranscriptEngineSpeakerIdTests {
         }
 
         let original = try #require((try await store.fetchTranscriptChunks(assetId: assetId)).first)
-        try await store.insertTranscriptChunk(TranscriptChunk(
+        let insertedDuplicate = try await store.insertTranscriptChunk(TranscriptChunk(
             id: "duplicate-missing-speaker",
             analysisAssetId: original.analysisAssetId,
             segmentFingerprint: original.segmentFingerprint,
@@ -1312,6 +1328,8 @@ struct TranscriptEngineSpeakerIdTests {
             speakerId: nil,
             avgConfidence: nil
         ))
+        #expect(!insertedDuplicate,
+                "the UNIQUE (analysisAssetId, pass, segmentFingerprint) index refuses the second row")
 
         recognizer.transcribeResult = [
             makeSegment(id: 0, text: "same words", startTime: 0, endTime: 5, speakerId: 7, avgConfidence: 0.77)
@@ -1331,10 +1349,13 @@ struct TranscriptEngineSpeakerIdTests {
 
         let matchingChunks = try await store.fetchTranscriptChunks(assetId: assetId)
             .filter { $0.segmentFingerprint == original.segmentFingerprint }
-        #expect(matchingChunks.count == 2)
-        #expect(matchingChunks.allSatisfy { $0.speakerId == 7 })
-        #expect(abs((matchingChunks[0].avgConfidence ?? 0) - 0.61) < 0.001)
-        #expect(abs((matchingChunks[1].avgConfidence ?? 0) - 0.77) < 0.001)
+        #expect(matchingChunks.count == 1,
+                "one row per (asset, pass, fingerprint) — the duplicate never landed")
+        let survivor = try #require(matchingChunks.first)
+        #expect(survivor.speakerId == 7,
+                "the survivor's speakerId was NULL after pass 1 and is filled by pass 2 — updateTranscriptChunkSpeakerIdIfMissing still reaches the one surviving row")
+        #expect(abs((matchingChunks[0].avgConfidence ?? 0) - 0.61) < 0.001,
+                "avgConfidence was already set on the survivor, so the IfMissing upgrade correctly no-ops")
     }
 }
 

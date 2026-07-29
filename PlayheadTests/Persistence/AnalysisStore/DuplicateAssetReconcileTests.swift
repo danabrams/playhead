@@ -597,7 +597,7 @@ struct DuplicateAssetReconcileTests {
 
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 39)
+        #expect(try await store.schemaVersion() == 40)
         // The placeholder/SHA pair holds two DIFFERENT fingerprints, so the
         // index does not touch it — repairing that pair is the launch sweep's
         // job, and the migration must not have destroyed either row.
@@ -643,7 +643,7 @@ struct DuplicateAssetReconcileTests {
         let rows = try await allAssets(store: store, episodeId: "ep-collide")
         #expect(rows.count == 1, "the migration must clear its own violations before CREATE UNIQUE INDEX")
         #expect(rows.first?.id == "collide-new", "newest-wins on an exact-identity collision")
-        #expect(try await store.schemaVersion() == 39)
+        #expect(try await store.schemaVersion() == 40)
     }
 
     // MARK: - R1 findings
@@ -708,7 +708,7 @@ struct DuplicateAssetReconcileTests {
         // directory is deleted and re-created empty.
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 39)
+        #expect(try await store.schemaVersion() == 40)
         let rows = try await allAssets(store: store, episodeId: "ep-children")
         #expect(rows.count == 1)
         #expect(rows.first?.id == "collide-winner", "newest-wins on an exact-identity collision")
@@ -796,7 +796,7 @@ struct DuplicateAssetReconcileTests {
 
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 39)
+        #expect(try await store.schemaVersion() == 40)
         #expect(try probeRowCount(in: directory, table: "analysis_assets") == 1)
         #expect(try probeRowCount(
             in: directory,
@@ -1060,7 +1060,7 @@ struct DuplicateAssetReconcileTests {
 
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 39,
+        #expect(try await store.schemaVersion() == 40,
                 "the migration must COMPLETE — a throw here is answered at launch by deleting the store")
         #expect(try probeRowCount(
             in: directory,
@@ -1133,7 +1133,7 @@ struct DuplicateAssetReconcileTests {
         // The retry a later launch performs, once whatever blocked it is gone.
         try await store.execForTesting("DROP TRIGGER bd0hi9_v39_guard")
         try await store.migrateOnlyForTesting()
-        #expect(try await store.schemaVersion() == 39)
+        #expect(try await store.schemaVersion() == 40)
         #expect(try probeRowCount(in: directory, table: "analysis_assets") == 1)
         #expect(try await store.fetchTranscriptChunks(assetId: "contained-winner").count == 1)
         #expect(try probeRowCount(
@@ -1209,7 +1209,7 @@ struct DuplicateAssetReconcileTests {
         let secondLaunch = try AnalysisStore(directory: directory)
         try await secondLaunch.migrate()
 
-        #expect(try await secondLaunch.schemaVersion() == 39)
+        #expect(try await secondLaunch.schemaVersion() == 40)
         #expect(try probeRowCount(in: directory, table: "analysis_assets") == 1)
         #expect(try await secondLaunch.fetchTranscriptChunks(assetId: "real-winner").count == 1,
                 "and the child row is MOVED by the completing retry, not cascaded away")
@@ -1858,7 +1858,7 @@ struct DuplicateAssetReconcileTests {
 
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 39,
+        #expect(try await store.schemaVersion() == 40,
                 "the migration must COMPLETE — a throw here is answered at launch by deleting the store")
         #expect(try probeRowCount(
             in: directory,
@@ -2049,7 +2049,7 @@ struct DuplicateAssetReconcileTests {
         // The rung completed. A dedup that skipped the blank/whitespace groups
         // would have left the index to fail, rolled back to the savepoint, and
         // stopped here at 38 — forever, on every launch.
-        #expect(try await store.schemaVersion() == 39,
+        #expect(try await store.schemaVersion() == 40,
                 "a dedup that refuses blank/whitespace keys cannot build the index it exists to enable")
 
         for entry in collisions {
