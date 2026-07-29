@@ -1279,4 +1279,55 @@ struct DuplicateAssetReconcileTests {
         #expect(abs(duration - 30) < 1.0,
                 "the merged row must carry a MEASURED duration, not the 560 s the merge just contradicted (got \(duration))")
     }
+
+    /// R2 finding 7, found by a SURVIVING mutation. Step 3 of the sweep
+    /// re-scores the merged row's terminal claim, and it deliberately re-reads
+    /// the row first — the whole point is to score against the duration step 2
+    /// just probed. Replacing that re-read with the pre-probe snapshot survived
+    /// every test, because no fixture made the two verdicts differ.
+    ///
+    /// They differ in exactly the shape this sweep creates. Here the survivor
+    /// inherits the placeholder's 5000 s artefact, adopts its `completeFull`,
+    /// and is then measured at 30 s. Against the REAL duration the claim holds
+    /// (29.5 s of coverage over 30 s = 0.98, clear of
+    /// `finalizeBackfillMinCoverageRatio`); against the stale 5000 it reads as
+    /// 0.6 % coverage and the row is wrongly torn down. The sweep is one-shot,
+    /// so that mistaken repair is permanent.
+    @Test("the terminal re-score runs against the RE-PROBED duration, not the pre-probe row")
+    func terminalReScoreUsesTheReProbedDuration() async throws {
+        let store = try await makeTestStore()
+        let coordinator = makeCoordinator(store: store)
+        let episodeId = "ep-rescore"
+        let audioURL = try writeSynthAudio(seconds: 30)
+
+        try await insertPlaceholder(
+            store: store, id: "ph-rescore", episodeId: episodeId,
+            state: SessionState.completeFull.rawValue,
+            featureCoverage: 29.5, transcriptCoverage: 29.5, duration: 5_000
+        )
+        try await insertCanonical(
+            store: store, id: "canon-rescore", episodeId: episodeId,
+            fingerprint: canonicalSHA, state: SessionState.queued.rawValue,
+            featureCoverage: nil, transcriptCoverage: nil, duration: nil
+        )
+        try await insertChunk(
+            store: store, id: "chunk-rescore", assetId: "ph-rescore",
+            index: 0, start: 0, end: 29.5
+        )
+
+        let summary = await coordinator.reconcileDuplicateAnalysisAssetsIfNeeded(
+            cachedFileURL: { _ in audioURL }
+        )
+        #expect(summary.merge.placeholdersMerged == 1)
+        #expect(summary.merge.adoptedTerminalStates == 1)
+        #expect(summary.durationsRewritten == 1)
+        #expect(summary.terminalStatesRepaired == 0,
+                "29.5 s of coverage over a MEASURED 30 s episode is a claim that holds; only the stale 5000 s makes it look false")
+
+        let survivor = try #require(try await store.fetchAsset(id: "canon-rescore"))
+        #expect(survivor.analysisState == SessionState.completeFull.rawValue,
+                "a verdict scored against the pre-probe duration tears down a row that is actually complete")
+        let duration = try #require(survivor.episodeDurationSec)
+        #expect(abs(duration - 30) < 1.0, "got \(duration)")
+    }
 }

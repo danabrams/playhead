@@ -449,6 +449,46 @@ struct PlaceholderAssetUpgradeTests {
         #expect(recovered.weak == weak)
     }
 
+    /// R2, found by a SURVIVING mutation. `fingerprintFromPin` rebuilds a
+    /// legacy pin's weak from `sourceURL`/`etag`/`expectedBytes`, and guards
+    /// `expectedBytes != Int64.max`. Deleting that guard survived every test —
+    /// yet `Int64.max` is not an edge case: it is what FIVE pin write sites
+    /// record (`totalContentLength ?? Int64.max` when the server omits
+    /// Content-Length, plus the always-incomplete streaming seeds). Baking the
+    /// sentinel into the weak yields `…|9223372036854775807|`, which can never
+    /// equal the live weak, so `canUpgradeWeakAssetToCanonicalSHA` never
+    /// matches and the episode splits into two rows again — the exact failure
+    /// this bead exists to close, for the whole no-Content-Length cohort.
+    @Test("the unknown-length sentinel is never baked into a rehydrated weak")
+    func unknownLengthSentinelIsNotBakedIntoTheWeak() async throws {
+        let dir = try makeTempDir(prefix: "Bd0hi9PinSentinel")
+        Self.tempDirs.track(dir)
+        let episodeId = "ep-sentinel"
+        let sourceURL = try #require(URL(string: "https://cdn.example.com/sentinel.mp3"))
+        let manager = DownloadManager(cacheDirectory: dir)
+        let pinURL = await manager.pinFileURL(for: episodeId)
+        try FileManager.default.createDirectory(
+            at: pinURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // Pre-0hi9 shape: no `weakFingerprint` field, length unknown.
+        let legacyJSON = """
+            {"expectedBytes":9223372036854775807,"sourceURL":"\(sourceURL.absoluteString)","etag":"\\"etag-s\\""}
+            """
+        try Data(legacyJSON.utf8).write(to: pinURL)
+
+        let rehydrated = try #require(await manager.fingerprint(for: episodeId))
+        let liveWeak = AudioFingerprint.makeWeak(
+            url: sourceURL,
+            metadata: HTTPAssetMetadata(
+                etag: "\"etag-s\"", contentLength: nil, lastModified: nil
+            )
+        )
+        #expect(rehydrated.weak == liveWeak,
+                "the reconstruction has to match what makeWeak produces for a response with no Content-Length, or the upgrade can never fire")
+        #expect(!rehydrated.weak.contains("9223372036854775807"))
+    }
+
     @Test("nonEmptyWeak rejects the empty sentinel that no-metadata paths write")
     func nonEmptyWeakRejectsSentinels() {
         #expect(AudioFingerprint.nonEmptyWeak(nil) == nil)
