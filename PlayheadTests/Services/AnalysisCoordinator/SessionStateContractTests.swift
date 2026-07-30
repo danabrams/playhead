@@ -77,13 +77,30 @@ struct SessionStateContractTests {
 
     // MARK: - Case cardinality
 
-    @Test("SessionState.allCases has exactly 14 cases after gtt9.8")
-    func cardinalityIsFourteen() {
+    @Test("SessionState.allCases has exactly 15 cases after gtt9.8 + gqx4")
+    func cardinalityIsFifteen() {
         // 7 legacy cases (queued, spooling, featuresReady, hotPathReady,
-        // backfill, complete, failed) + 7 new (waitingForBackfill,
+        // backfill, complete, failed) + 7 from gtt9.8 (waitingForBackfill,
         // completeFull, completeFeatureOnly, completeTranscriptPartial,
-        // failedTranscript, failedFeature, cancelledBudget) = 14.
-        #expect(SessionState.allCases.count == 14)
+        // failedTranscript, failedFeature, cancelledBudget) + 1 from
+        // playhead-gqx4 (completeAdScanPartial: transcript and feature both
+        // complete, semantic ad scan short) = 15.
+        #expect(SessionState.allCases.count == 15)
+    }
+
+    /// playhead-gqx4: the new terminal's contract, stated where the rest of
+    /// the state machine's contract lives.
+    @Test("completeAdScanPartial is a degraded completion terminal reachable from backfill")
+    func completeAdScanPartialContract() {
+        #expect(SessionState.completeAdScanPartial.rawValue == "completeAdScanPartial")
+        #expect(SessionState(rawValue: "completeAdScanPartial") == .completeAdScanPartial)
+        #expect(SessionState.backfill.canTransition(to: .completeAdScanPartial))
+        #expect(SessionState.completeAdScanPartial.isTerminalCompletion)
+        #expect(SessionState.completeAdScanPartial.isDegradedTerminalCompletion)
+        #expect(!SessionState.completeAdScanPartial.isTerminalFailure)
+        // Recovery only — it can never fall back into a working state on its
+        // own, which is what keeps the degraded terminal from becoming a loop.
+        #expect(SessionState.completeAdScanPartial.validTransitions == [.queued])
     }
 
     // MARK: - validTransitions

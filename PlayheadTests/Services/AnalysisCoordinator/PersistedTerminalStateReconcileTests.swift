@@ -262,10 +262,21 @@ struct PersistedTerminalStateReconcileTests {
             return
         }
         // Both coverage values match the canonical duration, so the
-        // classifier returns .completeFull — and the audited reason will
-        // make clear this row was reclassified, with the original
+        // transcript and feature terms are satisfied — and the audited reason
+        // will make clear this row was reclassified, with the original
         // impossible-ratio text preserved for support.
-        #expect(state == .completeFull)
+        //
+        // playhead-gqx4: the repaired state is the DEGRADED
+        // `.completeAdScanPartial`, not `.completeFull`. This sweep reads
+        // `analysis_assets` plus transcript maxima only — it has no ad-scan
+        // measurement in scope — so it passes `AdScanCoverage.unmeasured` and
+        // the classifier under-claims. That is the point: a repair must never
+        // be able to MINT a clean "fully analysed" terminal for a row whose
+        // audio may never have been screened. A repair can only ever land on a
+        // terminal at least as honest as the one it replaced.
+        #expect(state == .completeAdScanPartial)
+        #expect(!SessionState.completeFull.isDegradedTerminalCompletion)
+        #expect(state.isDegradedTerminalCompletion)
         // R2: audit-trail invariant — the only signal that distinguishes
         // a reconciled row from an organically-completeFull row is the
         // prefix + preserved original reason. Without these assertions a
