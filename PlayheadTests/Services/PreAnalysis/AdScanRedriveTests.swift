@@ -1,0 +1,1121 @@
+// AdScanRedriveTests.swift
+// playhead-onn6: an episode that finished its tiers under-scanned must get
+// another ad-scan pass — bounded, and only when another pass can actually do
+// something.
+//
+// **The stranding.** `AnalysisJobRunner.shouldSkipSemanticBackfill`
+// (playhead-i7qe) governs a run that is already being dispatched; it cannot
+// cause one. Once the tiers finish, `analysis_jobs.state` is `'complete'`,
+// `workKey` is `UNIQUE` and `insertJob` is `INSERT OR IGNORE`, so no new job is
+// ever minted at the same key and only `queued`/`paused`/retryable-`failed` rows
+// dispatch. Measured on the product owner's device (analysis.sqlite, pulled
+// 2026-07-29): of the 34 episodes over 15 minutes, 20 had NO dispatchable job at
+// all, and 35 `backfill_jobs` rows sat `queued` across 12 assets — real,
+// still-resumable scan work that nothing anywhere selected.
+//
+// **Why the coverage lane is the trigger.** `BackfillJobRunner.runPendingBackfill`
+// cannot be invoked standalone (it needs `AssetInputs` only the analysis lane
+// assembles), so "drain the queued rows" and "re-drive the episode" are the same
+// action. Resumable coverage-lane rows are therefore both the reason to mint a
+// pass AND the proof the pass will not be a no-op: with zero of them, a fresh
+// pass re-derives the same deterministic jobIds, finds them `complete`, skips
+// every one, and produces no coverage. That is the no-progress guard, and it is
+// structural rather than historical.
+//
+// **Why bounded.** playhead-gqx4 terminates an under-scanned episode into a
+// degraded state rather than declining to terminate, because an unbounded retry
+// is a worse bug than the one it fixed. Two independent guards hold: the ordinal
+// carried in the UNIQUE `workKey` (absolute cap), and the resumable-row count
+// (stops on its own as soon as a pass drains or exhausts the lane).
+
+import Foundation
+import Testing
+
+@testable import Playhead
+
+// MARK: - The pure decision
+
+@Suite("Ad-scan re-drive — decision matrix (playhead-onn6)")
+struct AdScanRedriveDecisionTests {
+
+    /// Asset 820134BF, the audited episode: transcript 100%, coverage-lane scan
+    /// 47% of the audio, one `queued` `fullEpisodeScan` row that has been sitting
+    /// since 2026-07-28. The scan can advance and nothing was going to run it.
+    @Test("820134BF's exact shape mints a re-drive")
+    func auditedEpisodeShapeMintsRedrive() {
+        #expect(
+            AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                adScanFraction: 0.47,
+                resumableCoverageJobCount: 1
+            )
+        )
+    }
+
+    /// The rest of the device's stranded cohort, with their real resumable-row
+    /// counts. Every one of them is an episode the pipeline had declared done.
+    @Test(
+        "every stranded device asset with outstanding coverage work mints",
+        arguments: [
+            (0.394, 4),  // 8FECFDDE — completeFull, 4 rows queued
+            (0.026, 3),  // B10C7BC8 — completeFull at 2.6%
+            (0.387, 3),  // 144C8A80 — completeFull
+            (0.095, 1),  // 1A9616D1
+            (0.211, 1),  // D75D7584
+            (0.544, 5),  // B5786B41
+            (0.053, 8),  // E71CF852
+            (0.095, 2),  // 1E32428C
+            (0.000, 2),  // 4E4730D8 — scan examined nothing
+        ]
+    )
+    func strandedDeviceAssetsMint(adScanFraction: Double, resumable: Int) {
+        #expect(
+            AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                adScanFraction: adScanFraction,
+                resumableCoverageJobCount: resumable
+            )
+        )
+    }
+
+    /// **The no-progress guard, at the device's own counter-example.** Asset
+    /// 644F2551 is 7% scanned and every one of its eight `backfill_jobs` rows is
+    /// `complete`. A re-drive there would re-derive the same jobIds, hit the M-5
+    /// `complete → continue` branch for all of them, and finish having read no
+    /// audio at all. A job that runs and achieves nothing is the bug, not the
+    /// fix — so a low fraction alone must never license a pass.
+    @Test("a drained coverage lane never mints, however low the coverage")
+    func drainedCoverageLaneNeverMints() {
+        for fraction in [0.0, 0.067, 0.5, 0.9] {
+            #expect(
+                AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                    adScanFraction: fraction,
+                    resumableCoverageJobCount: 0
+                ) == false,
+                "fraction \(fraction) with no resumable rows must not mint"
+            )
+        }
+    }
+
+    /// The complement of the runner's skip. If these two floors ever diverge the
+    /// scheduler starts minting passes the runner then declines to run (or stops
+    /// minting for episodes the runner would still scan) — either way, motion
+    /// without coverage.
+    @Test("the mint floor is exactly the runner's skip floor")
+    func mintFloorMatchesSkipFloor() {
+        #expect(
+            AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+                == episodePreparationCompleteThreshold
+        )
+        #expect(
+            AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                adScanFraction: episodePreparationCompleteThreshold,
+                resumableCoverageJobCount: 1
+            ) == false
+        )
+        #expect(
+            AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                adScanFraction: episodePreparationCompleteThreshold - 0.001,
+                resumableCoverageJobCount: 1
+            )
+        )
+    }
+
+    /// Stated as a property rather than at sample points: with outstanding work,
+    /// "mint a re-drive" and "skip the semantic backfill" must be exact opposites
+    /// across the whole range. A future edit to either floor breaks this.
+    @Test("mint and skip are complementary across the coverage range")
+    func mintAndSkipAreComplementary() {
+        for step in 0...100 {
+            let fraction = Double(step) / 100.0
+            let mints = AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                adScanFraction: fraction,
+                resumableCoverageJobCount: 1
+            )
+            let skips = AnalysisJobRunner.shouldSkipSemanticBackfill(
+                wroteNewChunks: false,
+                hasExistingWindows: true,
+                hasCandidateWindows: false,
+                adScanFraction: fraction
+            )
+            #expect(mints == !skips, "disagreement at fraction \(fraction)")
+        }
+    }
+
+    /// `nil` arrives for real: no coverage-lane row at all (the scan never ran —
+    /// the most under-scanned state there is), or a duration the transcript's own
+    /// reach contradicts. Unmeasured is not sufficient. It cannot spin, because
+    /// this arm is only reachable when the lane provably still holds work and the
+    /// ordinal budget still applies.
+    @Test("unmeasured coverage with outstanding work still mints")
+    func unmeasuredCoverageMints() {
+        #expect(
+            AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                adScanFraction: nil,
+                resumableCoverageJobCount: 1
+            )
+        )
+        for poisoned in [Double.nan, .infinity, -.infinity] {
+            #expect(
+                AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                    adScanFraction: poisoned,
+                    resumableCoverageJobCount: 1
+                ),
+                "non-finite \(poisoned) must not read as sufficient coverage"
+            )
+        }
+    }
+
+    /// …but unmeasured coverage still cannot conjure work out of an empty lane.
+    @Test("unmeasured coverage with a drained lane does not mint")
+    func unmeasuredCoverageWithDrainedLaneDoesNotMint() {
+        #expect(
+            AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                adScanFraction: nil,
+                resumableCoverageJobCount: 0
+            ) == false
+        )
+    }
+}
+
+// MARK: - The budget, carried in the work key
+
+@Suite("Ad-scan re-drive — work-key budget (playhead-onn6)")
+struct AdScanRedriveWorkKeyTests {
+
+    private func job(workKey: String, jobType: String = "preAnalysis") -> AnalysisJob {
+        makeAnalysisJob(
+            jobType: jobType,
+            workKey: workKey,
+            sourceFingerprint: "fp-onn6"
+        )
+    }
+
+    @Test("a plain tier job starts the chain at ordinal 1")
+    func plainJobStartsAtOne() {
+        let key = AnalysisWorkScheduler.nextAdScanRedriveWorkKey(
+            for: job(workKey: "fp-onn6:1:preAnalysis")
+        )
+        #expect(key == "fp-onn6:\(PreAnalysisConfig.analysisVersion):preAnalysis:adScanRedrive:1")
+    }
+
+    /// The key is rebuilt from the fingerprint, not appended to — so a job that
+    /// reached the 600 s tier does not produce `…:600:adScanRedrive:1`, which
+    /// would make the ordinal unreadable on the next hop.
+    @Test("a tier-advanced job does not nest the marker under the tier suffix")
+    func tierSuffixIsReplacedNotNested() {
+        let key = AnalysisWorkScheduler.nextAdScanRedriveWorkKey(
+            for: job(workKey: "fp-onn6:1:preAnalysis:600")
+        )
+        #expect(key?.contains(":600:") == false)
+        #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: key ?? "") == 1)
+    }
+
+    @Test("the chain advances 1 → 2 and then stops")
+    func chainIsBounded() {
+        var current = "fp-onn6:\(PreAnalysisConfig.analysisVersion):preAnalysis"
+        var seen: [String] = []
+        // Drive far past the budget: a bug that lets the ordinal keep climbing
+        // shows up as a chain longer than `maxAdScanRedrives`.
+        for _ in 0..<50 {
+            guard let next = AnalysisWorkScheduler.nextAdScanRedriveWorkKey(
+                for: job(workKey: current)
+            ) else {
+                break
+            }
+            seen.append(next)
+            current = next
+        }
+        #expect(seen.count == AnalysisWorkScheduler.maxAdScanRedrives)
+        #expect(Set(seen).count == seen.count, "each hop must produce a distinct key")
+        #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: seen.last ?? "")
+                == AnalysisWorkScheduler.maxAdScanRedrives)
+    }
+
+    @Test("the playback lane takes no re-drives")
+    func playbackLaneIsExcluded() {
+        #expect(
+            AnalysisWorkScheduler.nextAdScanRedriveWorkKey(
+                for: job(workKey: "fp-onn6:1:playback", jobType: "playback")
+            ) == nil
+        )
+    }
+
+    /// A retired stale-fingerprint tombstone (`…:staleFingerprint:<jobId>`) is not
+    /// a re-drive key. That row has been superseded and is never processed again;
+    /// its live successor carries the real ordinal, because
+    /// `replacementWorkKeyForCurrentCanonicalAudio` preserves the suffix past the
+    /// job type when it rebases onto the new fingerprint.
+    @Test("a retired tombstone key does not read as a re-drive")
+    func tombstoneKeyIsNotARedrive() {
+        #expect(
+            AnalysisWorkScheduler.adScanRedriveOrdinal(
+                workKey: "fp-onn6:1:preAnalysis:adScanRedrive:1:staleFingerprint:job-7"
+            ) == nil
+        )
+    }
+
+    @Test("non-re-drive keys parse as no ordinal")
+    func nonRedriveKeysHaveNoOrdinal() {
+        for key in [
+            "fp:1:preAnalysis",
+            "fp:1:preAnalysis:600",
+            "fp:1:preAnalysis:adScanRedrive:0",
+            "fp:1:preAnalysis:adScanRedrive:x",
+            "adScanRedrive",
+            "",
+        ] {
+            #expect(
+                AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: key) == nil,
+                "\(key) must not parse as a re-drive ordinal"
+            )
+        }
+    }
+}
+
+// MARK: - The selector that did not exist
+
+@Suite("Ad-scan re-drive — coverage-lane selector (playhead-onn6)")
+struct ResumableBackfillJobSelectorTests {
+
+    private func seedAsset(_ store: AnalysisStore, id: String) async throws {
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: id,
+                episodeId: "ep-\(id)",
+                assetFingerprint: "fp-\(id)",
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/\(id).m4a",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.completeFull.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: 2113
+            )
+        )
+    }
+
+    /// The count is the exact mirror of the runner's M-5 resume predicate. Any
+    /// status but `complete` counts, any retryCount at or past
+    /// `AdmissionController.maxRetries` does not, and `running` is excluded so a
+    /// concurrent drain is not mistaken for outstanding work.
+    @Test("resumability mirrors the runner's M-5 predicate")
+    func countMirrorsM5() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, id: "a1")
+        let rows: [(BackfillJobStatus, Int)] = [
+            (.queued, 0),
+            (.deferred, 0),
+            (.failed, AdmissionController.maxRetries - 1),
+            (.failed, AdmissionController.maxRetries),      // exhausted — M-5 skips
+            (.complete, 0),                                  // done
+            (.running, 0),                                   // someone else's
+        ]
+        for (index, row) in rows.enumerated() {
+            try await store.insertBackfillJob(
+                makeBackfillJob(
+                    jobId: "bf-\(index)",
+                    analysisAssetId: "a1",
+                    retryCount: row.1,
+                    status: row.0
+                )
+            )
+        }
+        #expect(try await store.countResumableBackfillJobs(assetId: "a1") == 3)
+    }
+
+    @Test("an asset with no coverage-lane rows counts zero")
+    func emptyLaneCountsZero() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, id: "a-empty")
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-empty") == 0)
+    }
+
+    @Test("the set selector returns only assets with resumable work, capped")
+    func setSelectorFiltersAndCaps() async throws {
+        let store = try await makeTestStore()
+        for id in ["a-queued", "a-done", "a-exhausted"] {
+            try await seedAsset(store, id: id)
+        }
+        try await store.insertBackfillJob(
+            makeBackfillJob(jobId: "bf-q", analysisAssetId: "a-queued", status: .queued)
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(jobId: "bf-d", analysisAssetId: "a-done", status: .complete)
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "bf-x",
+                analysisAssetId: "a-exhausted",
+                retryCount: AdmissionController.maxRetries,
+                status: .failed
+            )
+        )
+
+        let all = try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 100)
+        #expect(all == ["a-queued"])
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 0).isEmpty)
+    }
+
+    /// Highest phase priority first, then oldest — so a capped sweep drains the
+    /// most valuable and most stale work rather than an arbitrary slice.
+    @Test("the set selector orders by phase priority, then age")
+    func setSelectorOrdering() async throws {
+        let store = try await makeTestStore()
+        for id in ["low-new", "low-old", "high"] {
+            try await seedAsset(store, id: id)
+        }
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "bf-low-new", analysisAssetId: "low-new",
+                priority: 5, status: .queued, createdAt: 2_000
+            )
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "bf-low-old", analysisAssetId: "low-old",
+                priority: 5, status: .queued, createdAt: 1_000
+            )
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "bf-high", analysisAssetId: "high",
+                priority: 30, status: .queued, createdAt: 3_000
+            )
+        )
+        let ordered = try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10)
+        #expect(ordered == ["high", "low-old", "low-new"])
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 2) == ["high", "low-old"])
+    }
+}
+
+// MARK: - Reaching the episodes already stranded
+
+@Suite("Ad-scan re-drive — reconciler mint (playhead-onn6)")
+struct AdScanRedriveReconcilerTests {
+
+    private static let episodeId = "ep-820134BF"
+    private static let assetId = "asset-820134BF"
+    private static let fingerprint = "fp-820134BF"
+
+    /// Asset 820134BF's shape: 2,113 s of audio, a fast transcript that reaches
+    /// the end, a coverage-lane scan that examined roughly 47% of it, one
+    /// `queued` `fullEpisodeScan` row, and an `analysis_jobs` row that is already
+    /// `complete` — so nothing was ever going to run again.
+    private func seedStrandedDeviceAsset(
+        _ store: AnalysisStore,
+        scannedSeconds: Double = 1_000,
+        analysisState: SessionState = .completeFull
+    ) async throws {
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: Self.assetId,
+                episodeId: Self.episodeId,
+                assetFingerprint: Self.fingerprint,
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/820134BF.m4a",
+                featureCoverageEndTime: 2_113,
+                fastTranscriptCoverageEndTime: 2_113,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: analysisState.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: 2_113
+            )
+        )
+        _ = try await store.insertTranscriptChunks([
+            makeCoverageChunk(assetId: Self.assetId, index: 0, start: 0, end: 2_113)
+        ])
+        try await store.insertSemanticScanResult(
+            makeCoverageScan(assetId: Self.assetId, index: 0, start: 0, end: scannedSeconds)
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "fm-f65a371a7",
+                analysisAssetId: Self.assetId,
+                phase: .fullEpisodeScan,
+                status: .queued
+            )
+        )
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-terminal",
+                jobType: "preAnalysis",
+                episodeId: Self.episodeId,
+                analysisAssetId: Self.assetId,
+                workKey: AnalysisJob.computeWorkKey(
+                    fingerprint: Self.fingerprint,
+                    analysisVersion: PreAnalysisConfig.analysisVersion,
+                    jobType: "preAnalysis"
+                ),
+                sourceFingerprint: Self.fingerprint,
+                desiredCoverageSec: 2_113,
+                state: "complete"
+            )
+        )
+    }
+
+    private func makeReconciler(
+        store: AnalysisStore,
+        downloads: StubDownloadProvider
+    ) -> AnalysisJobReconciler {
+        AnalysisJobReconciler(
+            store: store,
+            downloadManager: downloads,
+            capabilitiesService: StubCapabilitiesProvider()
+        )
+    }
+
+    private func cachedDownloads() -> StubDownloadProvider {
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs[Self.episodeId] = URL(fileURLWithPath: "/tmp/820134BF.m4a")
+        // The SAME fingerprint the terminal job carries, so step 7's
+        // "discover un-enqueued download" insert collides on the UNIQUE work key
+        // and is ignored — which is precisely the collision this bead is about.
+        downloads.fingerprints[Self.episodeId] = AudioFingerprint(
+            weak: Self.fingerprint,
+            strong: Self.fingerprint
+        )
+        return downloads
+    }
+
+    private func redriveJobs(_ store: AnalysisStore) async throws -> [AnalysisJob] {
+        try await store.fetchJobsByState("queued").filter {
+            AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: $0.workKey) != nil
+        }
+    }
+
+    @Test("a stranded device asset gets a dispatchable re-drive")
+    func strandedAssetGetsRedrive() async throws {
+        let store = try await makeTestStore()
+        try await seedStrandedDeviceAsset(store)
+        let downloads = cachedDownloads()
+
+        // Before: the episode's only job is terminal. Nothing dispatchable.
+        #expect(try await store.fetchNextEligibleJob(
+            deferredWorkAllowed: true,
+            t0ThresholdSec: 300,
+            now: Date().timeIntervalSince1970
+        ) == nil)
+
+        let report = try await makeReconciler(store: store, downloads: downloads).reconcile()
+
+        #expect(report.adScanRedrivesMinted == 1)
+        let minted = try await redriveJobs(store)
+        #expect(minted.count == 1)
+        let job = try #require(minted.first)
+        #expect(job.analysisAssetId == Self.assetId)
+        #expect(job.sourceFingerprint == Self.fingerprint)
+        #expect(job.priority == 0, "repair work must stay in the background lane")
+        #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: job.workKey) == 1)
+        // And it is genuinely dispatchable — the whole point.
+        #expect(try await store.fetchNextEligibleJob(
+            deferredWorkAllowed: true,
+            t0ThresholdSec: 300,
+            now: Date().timeIntervalSince1970
+        )?.jobId == job.jobId)
+    }
+
+    /// **Termination across launches.** Reconcile runs at every app launch. If
+    /// the coverage lane never drains (a stuck `queued` row that no pass can
+    /// finish), repeated launches must not manufacture unbounded work: the
+    /// ordinal in the UNIQUE work key caps the chain at `maxAdScanRedrives` and
+    /// every later launch is a no-op.
+    @Test("repeated reconciles stop at the budget and never oscillate")
+    func repeatedReconcilesTerminate() async throws {
+        let store = try await makeTestStore()
+        try await seedStrandedDeviceAsset(store)
+        let downloads = cachedDownloads()
+        let reconciler = makeReconciler(store: store, downloads: downloads)
+
+        var mintedPerPass: [Int] = []
+        for _ in 0..<12 {
+            // Each pass simulates the next launch: the previous re-drive ran,
+            // achieved nothing, and terminated `complete`.
+            for job in try await redriveJobs(store) {
+                try await store.updateJobState(
+                    jobId: job.jobId,
+                    state: "complete",
+                    nextEligibleAt: nil,
+                    lastErrorCode: nil
+                )
+            }
+            mintedPerPass.append(try await reconciler.reconcile().adScanRedrivesMinted)
+        }
+
+        #expect(mintedPerPass.reduce(0, +) == AnalysisWorkScheduler.maxAdScanRedrives)
+        #expect(mintedPerPass.suffix(8).allSatisfy { $0 == 0 },
+                "the chain must go quiet, not keep minting: \(mintedPerPass)")
+        // No oscillation: the coverage-lane row is untouched and the original
+        // terminal job is still terminal.
+        #expect(try await store.fetchBackfillJob(byId: "fm-f65a371a7")?.status == .queued)
+        #expect(try await store.fetchJob(byId: "job-terminal")?.state == "complete")
+    }
+
+    /// A drained coverage lane is the 644F2551 shape: nothing left to resume, so
+    /// a pass would read no audio. No mint, at any coverage.
+    @Test("an asset whose coverage lane is drained gets no re-drive")
+    func drainedLaneGetsNoRedrive() async throws {
+        let store = try await makeTestStore()
+        try await seedStrandedDeviceAsset(store, scannedSeconds: 140)
+        try await store.markBackfillJobComplete(jobId: "fm-f65a371a7", progressCursor: nil)
+        let report = try await makeReconciler(
+            store: store,
+            downloads: cachedDownloads()
+        ).reconcile()
+        #expect(report.adScanRedrivesMinted == 0)
+        #expect(try await redriveJobs(store).isEmpty)
+    }
+
+    /// A stale coverage-lane row whose media is gone must not mint work that can
+    /// only fail. Same guard `enqueueReplacement` applies.
+    @Test("no re-drive when the episode's audio is no longer cached")
+    func missingAudioGetsNoRedrive() async throws {
+        let store = try await makeTestStore()
+        try await seedStrandedDeviceAsset(store)
+        let report = try await makeReconciler(
+            store: store,
+            downloads: StubDownloadProvider()   // nothing cached
+        ).reconcile()
+        #expect(report.adScanRedrivesMinted == 0)
+    }
+
+    /// An episode that already has non-terminal work will be scanned without our
+    /// help — the runner's M-5 branch resumes its coverage-lane rows when that
+    /// pass lands. Minting here would only add a redundant FM pass.
+    @Test("no re-drive when the episode already has a pending job")
+    func pendingJobSuppressesRedrive() async throws {
+        let store = try await makeTestStore()
+        try await seedStrandedDeviceAsset(store)
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-pending",
+                jobType: "preAnalysis",
+                episodeId: Self.episodeId,
+                analysisAssetId: Self.assetId,
+                workKey: "\(Self.fingerprint):\(PreAnalysisConfig.analysisVersion):preAnalysis:600",
+                sourceFingerprint: Self.fingerprint,
+                state: "queued"
+            )
+        )
+        let report = try await makeReconciler(
+            store: store,
+            downloads: cachedDownloads()
+        ).reconcile()
+        #expect(report.adScanRedrivesMinted == 0)
+        #expect(try await redriveJobs(store).isEmpty)
+    }
+
+    /// A fully-scanned asset does not get a pass even with a stuck row: the
+    /// audio has demonstrably been read, and burning an FM pass on it is exactly
+    /// the waste the i7qe skip exists to prevent.
+    @Test("a fully-scanned asset gets no re-drive")
+    func fullyScannedAssetGetsNoRedrive() async throws {
+        let store = try await makeTestStore()
+        try await seedStrandedDeviceAsset(store, scannedSeconds: 2_113)
+        let report = try await makeReconciler(
+            store: store,
+            downloads: cachedDownloads()
+        ).reconcile()
+        #expect(report.adScanRedrivesMinted == 0)
+    }
+
+    /// One reconcile does not dump the whole backlog into the queue.
+    @Test("a reconcile pass is capped")
+    func reconcilePassIsCapped() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let total = AnalysisJobReconciler.maxAdScanRedrivesPerReconcile + 4
+        for index in 0..<total {
+            let assetId = "asset-\(index)"
+            let episodeId = "ep-\(index)"
+            let fingerprint = "fp-\(index)"
+            try await store.insertAsset(
+                AnalysisAsset(
+                    id: assetId,
+                    episodeId: episodeId,
+                    assetFingerprint: fingerprint,
+                    weakFingerprint: nil,
+                    sourceURL: "file:///tmp/\(assetId).m4a",
+                    featureCoverageEndTime: nil,
+                    fastTranscriptCoverageEndTime: nil,
+                    confirmedAdCoverageEndTime: nil,
+                    analysisState: SessionState.completeFull.rawValue,
+                    analysisVersion: 1,
+                    capabilitySnapshot: nil,
+                    episodeDurationSec: 2_113
+                )
+            )
+            try await store.insertBackfillJob(
+                makeBackfillJob(jobId: "bf-\(index)", analysisAssetId: assetId, status: .queued)
+            )
+            try await store.insertJob(
+                makeAnalysisJob(
+                    jobId: "job-\(index)",
+                    jobType: "preAnalysis",
+                    episodeId: episodeId,
+                    analysisAssetId: assetId,
+                    workKey: AnalysisJob.computeWorkKey(
+                        fingerprint: fingerprint,
+                        analysisVersion: PreAnalysisConfig.analysisVersion,
+                        jobType: "preAnalysis"
+                    ),
+                    sourceFingerprint: fingerprint,
+                    state: "complete"
+                )
+            )
+            downloads.cachedURLs[episodeId] = URL(fileURLWithPath: "/tmp/\(assetId).m4a")
+            downloads.fingerprints[episodeId] = AudioFingerprint(
+                weak: fingerprint,
+                strong: fingerprint
+            )
+        }
+
+        let report = try await makeReconciler(store: store, downloads: downloads).reconcile()
+        #expect(report.adScanRedrivesMinted == AnalysisJobReconciler.maxAdScanRedrivesPerReconcile)
+    }
+}
+
+// MARK: - The forward-looking path, through the real scheduler
+
+@Suite("Ad-scan re-drive — scheduler terminal arms (playhead-onn6)")
+struct AdScanRedriveSchedulerTests {
+
+    private static let episodeId = "ep-onn6-sched"
+    private static let assetId = "asset-onn6-sched"
+    private static let fingerprint = "fp-onn6-sched"
+    private static let durationSec: Double = 2_113
+
+    /// An ad-detection double that does what a real coverage-lane drain does:
+    /// writes `semantic_scan_results` rows for the audio it read and completes
+    /// the `backfill_jobs` row it consumed. `scanTo == nil` is the pathological
+    /// case — a pass that runs and reads nothing.
+    private final class CoverageWritingAdDetectionStub: AdDetectionProviding, @unchecked Sendable {
+        let store: AnalysisStore
+        /// Seconds of audio each `runBackfill` call reads, or `nil` for "reads
+        /// nothing and leaves the coverage-lane row exactly as it found it".
+        let scanTo: Double?
+        let backfillJobId: String
+        /// When true, the double reads nothing until a re-drive row exists — so
+        /// any coverage it produces is attributable to the re-drive rather than
+        /// to the episode's original pass.
+        let armedOnlyAfterRedriveExists: Bool
+        private(set) var backfillCallCount = 0
+
+        init(
+            store: AnalysisStore,
+            scanTo: Double?,
+            backfillJobId: String,
+            armedOnlyAfterRedriveExists: Bool = false
+        ) {
+            self.store = store
+            self.scanTo = scanTo
+            self.backfillJobId = backfillJobId
+            self.armedOnlyAfterRedriveExists = armedOnlyAfterRedriveExists
+        }
+
+        func runHotPath(
+            chunks: [TranscriptChunk],
+            analysisAssetId: String,
+            episodeDuration: Double,
+            podcastId: String?
+        ) async throws -> [AdWindow] { [] }
+
+        func runBackfill(
+            chunks: [TranscriptChunk],
+            analysisAssetId: String,
+            podcastId: String,
+            episodeDuration: Double,
+            sessionId: String?
+        ) async throws {
+            backfillCallCount += 1
+            guard let scanTo else { return }
+            if armedOnlyAfterRedriveExists {
+                var redriveExists = false
+                for state in ["queued", "running", "complete"] {
+                    for job in try await store.fetchJobsByState(state)
+                    where AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: job.workKey) != nil {
+                        redriveExists = true
+                    }
+                }
+                guard redriveExists else { return }
+            }
+            try await store.insertSemanticScanResult(
+                makeCoverageScan(
+                    assetId: analysisAssetId,
+                    index: 100 + backfillCallCount,
+                    start: 0,
+                    end: scanTo
+                )
+            )
+            try await store.markBackfillJobComplete(jobId: backfillJobId, progressCursor: nil)
+        }
+
+        func revalidateFromFeatures(
+            analysisAssetId: String,
+            podcastId: String,
+            episodeDuration: Double,
+            sessionId: String?
+        ) async throws {}
+    }
+
+    private func seedUnderScannedAsset(
+        _ store: AnalysisStore,
+        scannedSeconds: Double
+    ) async throws {
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: Self.assetId,
+                episodeId: Self.episodeId,
+                assetFingerprint: Self.fingerprint,
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/onn6.m4a",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: Self.durationSec,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.backfill.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: Self.durationSec
+            )
+        )
+        _ = try await store.insertTranscriptChunks([
+            makeCoverageChunk(assetId: Self.assetId, index: 0, start: 0, end: Self.durationSec)
+        ])
+        try await store.insertSemanticScanResult(
+            makeCoverageScan(assetId: Self.assetId, index: 0, start: 0, end: scannedSeconds)
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "bf-onn6",
+                analysisAssetId: Self.assetId,
+                phase: .fullEpisodeScan,
+                status: .queued
+            )
+        )
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-onn6-base",
+                jobType: "preAnalysis",
+                episodeId: Self.episodeId,
+                analysisAssetId: Self.assetId,
+                workKey: AnalysisJob.computeWorkKey(
+                    fingerprint: Self.fingerprint,
+                    analysisVersion: PreAnalysisConfig.analysisVersion,
+                    jobType: "preAnalysis"
+                ),
+                sourceFingerprint: Self.fingerprint,
+                priority: 10,
+                desiredCoverageSec: 120,
+                state: "queued"
+            )
+        )
+    }
+
+    private func makeScheduler(
+        store: AnalysisStore,
+        adDetection: any AdDetectionProviding,
+        clock: @escaping @Sendable () -> Date
+    ) async throws -> (AnalysisWorkScheduler, StubDownloadProvider) {
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs[Self.episodeId] = URL(fileURLWithPath: "/tmp/onn6.m4a")
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = (0..<4).map {
+            makeShard(id: $0, episodeID: Self.episodeId, startTime: Double($0) * 30, duration: 30)
+        }
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        try await speechService.loadFastModel()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audio,
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: adDetection
+        )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
+        let scheduler = AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: StubCapabilitiesProvider(),
+            downloadManager: downloads,
+            batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
+            config: PreAnalysisConfig(),
+            clock: clock
+        )
+        return (scheduler, downloads)
+    }
+
+    private func redriveWorkKeys(_ store: AnalysisStore) async throws -> [String] {
+        var keys: [String] = []
+        for state in ["queued", "paused", "complete", "failed", "superseded", "running"] {
+            for job in try await store.fetchJobsByState(state)
+            where AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: job.workKey) != nil {
+                keys.append(job.workKey)
+            }
+        }
+        return keys
+    }
+
+    private func adScanFraction(_ store: AnalysisStore) async throws -> Double? {
+        try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]?
+            .adScanFraction
+    }
+
+    /// **Termination.** Many cycles against a scan that never advances must stop.
+    /// Each dispatch runs the whole real pipeline; the ad-detection double reads
+    /// nothing, so the coverage lane stays resumable forever and only the ordinal
+    /// budget can end the chain. It must, and the asset must not be left
+    /// oscillating between states.
+    @Test("a never-progressing scan terminates at the re-drive budget")
+    func nonProgressingScanTerminates() async throws {
+        let store = try await makeTestStore()
+        try await seedUnderScannedAsset(store, scannedSeconds: 300)
+        let before = try await adScanFraction(store)
+
+        // The scheduler's own clock, so a re-queue's exponential backoff can be
+        // stepped over deterministically instead of slept through.
+        let now = AdScanRedriveClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let adDetection = CoverageWritingAdDetectionStub(
+            store: store,
+            scanTo: nil,
+            backfillJobId: "bf-onn6"
+        )
+        let (scheduler, _) = try await makeScheduler(
+            store: store,
+            adDetection: adDetection,
+            clock: { now.value }
+        )
+
+        var dispatches = 0
+        for _ in 0..<15 {
+            if await scheduler.processNextDispatchableJobForTesting() {
+                dispatches += 1
+            }
+            now.advance(by: 7_200)
+        }
+
+        let keys = try await redriveWorkKeys(store)
+        #expect(Set(keys).count == AnalysisWorkScheduler.maxAdScanRedrives,
+                "expected exactly \(AnalysisWorkScheduler.maxAdScanRedrives) re-drives, got \(keys)")
+        #expect(dispatches < 15, "the queue must go quiet, not keep dispatching forever")
+        // Nothing dispatchable remains, and the coverage-lane row is untouched.
+        #expect(try await store.fetchNextEligibleJob(
+            deferredWorkAllowed: true,
+            t0ThresholdSec: 300,
+            now: now.value.timeIntervalSince1970
+        ) == nil)
+        #expect(try await store.fetchBackfillJob(byId: "bf-onn6")?.status == .queued)
+        #expect(try await adScanFraction(store) == before,
+                "a scan that read nothing must not move measured coverage")
+    }
+
+    /// **Coverage genuinely moves, and the re-drive is what moved it.**
+    ///
+    /// Asserting only "coverage is higher at the end" would pass even if the
+    /// re-drive did nothing, because the episode's ORIGINAL pass also calls
+    /// `runBackfill`. So the double is armed to read the audio only once a
+    /// re-drive row exists, and the test checks the attribution directly: on
+    /// every pass where measured `adScanFraction` rose, a re-drive had already
+    /// been minted. A job that runs and achieves nothing is the bug, not the fix.
+    ///
+    /// It also pins the other half — once the audio HAS been read, the chain
+    /// stops on its own without spending the ordinal budget.
+    @Test("the re-drive is what moves measured coverage, and then the chain stops")
+    func progressingRedriveMovesCoverageThenStops() async throws {
+        let store = try await makeTestStore()
+        try await seedUnderScannedAsset(store, scannedSeconds: 300)
+        let initial = try #require(try await adScanFraction(store))
+        #expect(initial < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+
+        let now = AdScanRedriveClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let adDetection = CoverageWritingAdDetectionStub(
+            store: store,
+            scanTo: Self.durationSec,
+            backfillJobId: "bf-onn6",
+            // The original pass reads nothing (the thermal/rate-limited shape
+            // that strands an episode in the first place). Only a pass licensed
+            // by a re-drive reads the audio.
+            armedOnlyAfterRedriveExists: true
+        )
+        let (scheduler, _) = try await makeScheduler(
+            store: store,
+            adDetection: adDetection,
+            clock: { now.value }
+        )
+
+        var sawAttributedIncrease = false
+        for _ in 0..<10 {
+            let redrivesBefore = try await redriveWorkKeys(store).count
+            let fractionBefore = try await adScanFraction(store)
+            _ = await scheduler.processNextDispatchableJobForTesting()
+            let fractionAfter = try await adScanFraction(store)
+            if let fractionAfter, let fractionBefore, fractionAfter > fractionBefore {
+                sawAttributedIncrease = true
+                #expect(redrivesBefore >= 1,
+                        "coverage rose on a pass no re-drive had licensed")
+            }
+            now.advance(by: 7_200)
+        }
+
+        #expect(sawAttributedIncrease, "the re-drive never produced any coverage")
+        let after = try #require(try await adScanFraction(store))
+        #expect(after > initial, "coverage must actually increase: \(initial) → \(after)")
+        #expect(after >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+        #expect(try await store.fetchBackfillJob(byId: "bf-onn6")?.status == .complete,
+                "the orphaned coverage-lane row must have been drained")
+        // One re-drive sufficed: the structural guard ended the chain before the
+        // absolute cap was reached.
+        #expect(try await redriveWorkKeys(store).count == 1)
+        #expect(try await store.fetchNextEligibleJob(
+            deferredWorkAllowed: true,
+            t0ThresholdSec: 300,
+            now: now.value.timeIntervalSince1970
+        ) == nil, "a fully-scanned asset must not keep re-driving")
+    }
+
+    /// The scheduler tests above drive the `coverageInsufficient.noProgress` arm
+    /// end-to-end. The other two terminal-success arms (`allTiersDone`,
+    /// `coverageInsufficient.maxAttempts`) need a full cue-coverage pipeline to
+    /// reach in stub form — see the header of
+    /// `AnalysisWorkSchedulerJournalEmissionTests`. They are pinned the way
+    /// playhead-beh3's grant-window wiring is pinned: a source canary, so a
+    /// refactor that drops the mint from one arm regresses here instead of
+    /// silently re-stranding a third of the terminal shapes.
+    @Test("every terminal-success arm carries the re-drive mint")
+    func everyTerminalArmMintsRedrive() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // PreAnalysis
+            .deletingLastPathComponent()   // Services
+            .deletingLastPathComponent()   // PlayheadTests
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+
+        for tag in ["\"allTiersDone\"", "\"coverageInsufficient.noProgress\"", "\"coverageInsufficient.maxAttempts\""] {
+            guard let tagRange = source.range(of: tag) else {
+                Issue.record("terminal arm tag \(tag) missing from AnalysisWorkScheduler.swift")
+                continue
+            }
+            // The commit is built immediately after the arm tag; the mint is
+            // computed just before it and threaded in as `insertNextJob`.
+            let windowStart = source.index(tagRange.lowerBound, offsetBy: -2_000, limitedBy: source.startIndex)
+                ?? source.startIndex
+            let windowEnd = source.index(tagRange.upperBound, offsetBy: 1_500, limitedBy: source.endIndex)
+                ?? source.endIndex
+            let window = source[windowStart..<windowEnd]
+            #expect(window.contains("adScanRedriveJob("),
+                    "expected the ad-scan re-drive decision in the \(tag) arm")
+            #expect(window.contains("insertNextJob: redrive"),
+                    "expected the \(tag) arm to insert the minted re-drive")
+        }
+    }
+
+    /// The 644F2551 shape driven through the real scheduler: coverage is short,
+    /// but the lane is drained, so a further pass could read nothing. No re-drive
+    /// may be minted.
+    @Test("a drained coverage lane mints nothing through the scheduler either")
+    func drainedLaneMintsNothingThroughScheduler() async throws {
+        let store = try await makeTestStore()
+        try await seedUnderScannedAsset(store, scannedSeconds: 140)
+        try await store.markBackfillJobComplete(jobId: "bf-onn6", progressCursor: nil)
+
+        let now = AdScanRedriveClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let adDetection = CoverageWritingAdDetectionStub(
+            store: store,
+            scanTo: nil,
+            backfillJobId: "bf-onn6"
+        )
+        let (scheduler, _) = try await makeScheduler(
+            store: store,
+            adDetection: adDetection,
+            clock: { now.value }
+        )
+        for _ in 0..<6 {
+            _ = await scheduler.processNextDispatchableJobForTesting()
+            now.advance(by: 7_200)
+        }
+        #expect(try await redriveWorkKeys(store).isEmpty)
+    }
+}
+
+/// A settable clock so scheduler tests can step over exponential backoff
+/// deterministically rather than sleeping through it.
+private final class AdScanRedriveClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: Date
+
+    init(start: Date) { current = start }
+
+    var value: Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func advance(by seconds: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        current = current.addingTimeInterval(seconds)
+    }
+}
+
+// MARK: - Shared fixtures
+
+/// A fast-pass transcript chunk spanning `[start, end]`. The ad-scan area is the
+/// scan windows INTERSECTED with the transcribed region, so a fixture that wants
+/// measurable coverage has to state both.
+private func makeCoverageChunk(
+    assetId: String,
+    index: Int,
+    start: Double,
+    end: Double
+) -> TranscriptChunk {
+    TranscriptChunk(
+        id: "\(assetId)-chunk-\(index)",
+        analysisAssetId: assetId,
+        segmentFingerprint: "\(assetId)-seg-\(index)",
+        chunkIndex: index,
+        startTime: start,
+        endTime: end,
+        text: "segment \(index)",
+        normalizedText: "segment \(index)",
+        pass: "fast",
+        modelVersion: "test-asr",
+        transcriptVersion: "tx-v1",
+        atomOrdinal: index
+    )
+}
+
+/// A coverage-lane (`passA`) semantic scan row spanning `[start, end]`.
+private func makeCoverageScan(
+    assetId: String,
+    index: Int,
+    start: Double,
+    end: Double
+) -> SemanticScanResult {
+    SemanticScanResult(
+        id: "\(assetId)-scan-\(index)",
+        analysisAssetId: assetId,
+        windowFirstAtomOrdinal: index * 10,
+        windowLastAtomOrdinal: index * 10 + 9,
+        windowStartTime: start,
+        windowEndTime: end,
+        scanPass: SemanticScanCoverage.coverageScanPass,
+        transcriptQuality: .good,
+        disposition: .noAds,
+        spansJSON: "[]",
+        status: .success,
+        attemptCount: 1,
+        errorContext: nil,
+        inputTokenCount: nil,
+        outputTokenCount: nil,
+        latencyMs: nil,
+        prewarmHit: false,
+        scanCohortJSON: makeCohortJSON(promptLabel: "onn6"),
+        transcriptVersion: "tx-v1",
+        reuseScope: "\(assetId)-scan-\(index)"
+    )
+}

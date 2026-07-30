@@ -3813,11 +3813,21 @@ actor AnalysisWorkScheduler {
                     PreAnalysisInstrumentation.logTierCompletion(tier: "\(Int(job.desiredCoverageSec))s", completed: true)
                     logger.info("Tier advancement: \(job.desiredCoverageSec)s -> \(nextCoverage)s for episode \(job.episodeId)")
                 } else {
+                    // playhead-onn6: the tiers are done, but "done" has never
+                    // meant "the audio was read for ads". Mint a bounded
+                    // re-drive when the coverage lane still holds resumable work
+                    // and measured ad-scan coverage is not proven sufficient.
+                    let redrive = await adScanRedriveJob(
+                        for: job,
+                        assetId: assetId,
+                        outcome: outcome
+                    )
                     await commitOutcomeArm(
                         "allTiersDone",
                         AnalysisStore.ProcessJobOutcomeArmCommit(
                             jobId: job.jobId,
                             progress: progress,
+                            insertNextJob: redrive,
                             stateUpdate: .init(state: "complete", nextEligibleAt: nil, lastErrorCode: nil)
                         )
                     )
@@ -3842,11 +3852,20 @@ actor AnalysisWorkScheduler {
                 // Re-queue, but with a guard against infinite loops for short episodes
                 // or episodes that can never reach the desired coverage.
                 if !Self.shouldRetryCoverageInsufficient(job: job, outcome: outcome) {
+                    // playhead-onn6: cue coverage stalled, which says nothing
+                    // about whether the semantic scan reached the audio. Same
+                    // bounded re-drive decision as `allTiersDone`.
+                    let redrive = await adScanRedriveJob(
+                        for: job,
+                        assetId: assetId,
+                        outcome: outcome
+                    )
                     await commitOutcomeArm(
                         "coverageInsufficient.noProgress",
                         AnalysisStore.ProcessJobOutcomeArmCommit(
                             jobId: job.jobId,
                             progress: progress,
+                            insertNextJob: redrive,
                             stateUpdate: .init(
                                 state: "complete",
                                 nextEligibleAt: nil,
@@ -3885,12 +3904,20 @@ actor AnalysisWorkScheduler {
                     // atomically without a mid-arm fetch.
                     let attempts = job.attemptCount + 1
                     if attempts >= Self.maxAttemptCount {
+                        // playhead-onn6: the tier gave up on cue coverage. The
+                        // ad scan is a separate question with its own budget.
+                        let redrive = await adScanRedriveJob(
+                            for: job,
+                            assetId: assetId,
+                            outcome: outcome
+                        )
                         await commitOutcomeArm(
                             "coverageInsufficient.maxAttempts",
                             AnalysisStore.ProcessJobOutcomeArmCommit(
                                 jobId: job.jobId,
                                 progress: progress,
                                 incrementAttempt: true,
+                                insertNextJob: redrive,
                                 stateUpdate: .init(
                                     state: "complete",
                                     nextEligibleAt: nil,
@@ -4765,6 +4792,119 @@ actor AnalysisWorkScheduler {
         return nil
     }
 
+    // MARK: - Ad-scan re-drive minting (playhead-onn6)
+
+    /// playhead-onn6: the re-drive `analysis_jobs` row to insert alongside a
+    /// terminal outcome arm, or `nil` when this episode gets no further pass.
+    ///
+    /// **Why the terminal arms are the hook.** `shouldSkipSemanticBackfill`
+    /// (playhead-i7qe) governs a run that is ALREADY being dispatched; it cannot
+    /// cause one. Once the tiers finish, `analysis_jobs.state` is `'complete'` and
+    /// only `queued` / `paused` / retryable-`failed` rows dispatch, so the episode
+    /// had no dispatchable job and no path to another scan — measured on the
+    /// 2026-07-29 device pull, 20 of the 34 episodes over 15 minutes were in
+    /// exactly that state. These three arms are the only places the scheduler
+    /// says "this episode is done", so they are the only places that can decide
+    /// it is not.
+    ///
+    /// **Why this drains the orphaned coverage lane rather than duplicating it.**
+    /// `BackfillJobRunner.runPendingBackfill` cannot be invoked standalone — it
+    /// needs `AssetInputs` (transcript segments, evidence catalog, transcript
+    /// version, planner context, acoustic breaks) that only the analysis-job lane
+    /// assembles. So the queued `backfill_jobs` rows are SELECTED here (the query
+    /// that did not exist) and DISPATCHED by the pass this mint causes: the
+    /// runner's M-5 idempotency branch re-enqueues every non-complete row for the
+    /// asset through the admission controller instead of inserting duplicates.
+    /// Building a second standalone drain lane would mean re-architecting the
+    /// scheduler, which is out of this bead's scope.
+    ///
+    /// Reads are ordered cheapest-first so an episode that is not a candidate
+    /// pays almost nothing: the budget check is pure string work, the resumable
+    /// count is one indexed `COUNT(*)`, and only then do we pay for the coverage
+    /// summary (four prepared statements plus an interval union over the asset's
+    /// fast-chunk set). Same idiom as the i7qe call site.
+    private func adScanRedriveJob(
+        for job: AnalysisJob,
+        assetId: String,
+        outcome: AnalysisOutcome
+    ) async -> AnalysisJob? {
+        guard let workKey = Self.nextAdScanRedriveWorkKey(for: job) else { return nil }
+
+        let resumableCount: Int
+        do {
+            resumableCount = try await store.countResumableBackfillJobs(assetId: assetId)
+        } catch {
+            // A read failure must not mint: we would be guessing that work is
+            // outstanding, and guessing "yes" is how an unbounded retry starts.
+            logger.warning(
+                "playhead-onn6: resumable coverage-lane count failed for asset \(assetId): \(error); no ad-scan re-drive"
+            )
+            return nil
+        }
+        guard resumableCount > 0 else { return nil }
+
+        let adScanFraction: Double?
+        do {
+            adScanFraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction
+        } catch {
+            logger.warning(
+                "playhead-onn6: ad-scan coverage read failed for asset \(assetId): \(error); no ad-scan re-drive"
+            )
+            return nil
+        }
+
+        guard Self.shouldMintAdScanRedrive(
+            adScanFraction: adScanFraction,
+            resumableCoverageJobCount: resumableCount
+        ) else {
+            return nil
+        }
+
+        let now = clock().timeIntervalSince1970
+        logger.info(
+            """
+            playhead-onn6: minting ad-scan re-drive for asset \(assetId) \
+            (workKey suffix \(Self.adScanRedriveWorkKeyMarker):\
+            \(Self.adScanRedriveOrdinal(workKey: workKey) ?? 0), \
+            resumableCoverageJobs=\(resumableCount))
+            """
+        )
+        return AnalysisJob(
+            jobId: UUID().uuidString,
+            jobType: job.jobType,
+            episodeId: job.episodeId,
+            podcastId: job.podcastId,
+            analysisAssetId: assetId,
+            workKey: workKey,
+            sourceFingerprint: job.sourceFingerprint,
+            downloadId: job.downloadId,
+            // Background lane. A re-drive is repair work behind everything the
+            // user is waiting on; it must never preempt a `.now`/`.soon` job.
+            priority: 0,
+            // The tier this episode already reached — a re-drive finishes the
+            // scan, it does not deepen coverage targets.
+            desiredCoverageSec: job.desiredCoverageSec,
+            // Seeded from the OUTCOME, not zero. `shouldRetryCoverageInsufficient`
+            // compares the next outcome against these fields, so zeroes would make
+            // a no-op re-drive look like progress and re-queue it.
+            featureCoverageSec: outcome.featureCoverageSec,
+            transcriptCoverageSec: outcome.transcriptCoverageSec,
+            cueCoverageSec: outcome.cueCoverageSec,
+            // `queued`, not the tier ladder's `paused`: this row has never run,
+            // and `paused` is in `fetchStrandedActiveJobs`' active set.
+            state: "queued",
+            attemptCount: 0,
+            nextEligibleAt: nil,
+            leaseOwner: nil,
+            leaseExpiresAt: nil,
+            lastErrorCode: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
     private func resolveAnalysisAssetId(
         for job: AnalysisJob,
         localAudioURL: LocalAudioURL
@@ -5165,6 +5305,126 @@ actor AnalysisWorkScheduler {
         let cuesCreated = outcome.newCueCount > 0
 
         return featureAdvanced || transcriptAdvanced || cueAdvanced || cuesCreated
+    }
+
+    // MARK: - Ad-scan re-drive (playhead-onn6)
+
+    /// playhead-onn6: `workKey` discriminator that marks a job as an ad-scan
+    /// re-drive, and carries its ordinal.
+    ///
+    /// **Why the workKey and not a new column or a new jobType.** Once an
+    /// episode's tiers finish, `analysis_jobs.state` is `'complete'` and
+    /// `workKey` is `TEXT NOT NULL UNIQUE` with `INSERT OR IGNORE` inserts, so a
+    /// re-enqueue at the same key is a silent no-op — that collision is exactly
+    /// why an under-scanned episode had no re-drive. The tier ladder already
+    /// solves the same problem the same way (`…:preAnalysis:600`), and
+    /// `replacementWorkKeyForCurrentCanonicalAudio` already preserves any suffix
+    /// past the jobType across a fingerprint rebase, so the ordinal survives a
+    /// re-download of the same audio. A new `jobType` would need parallel
+    /// handling in every dispatch/lane/reconcile path; a new column would need a
+    /// migration. This needs neither.
+    ///
+    /// The ordinal IS the budget ledger: it is read back off the terminating
+    /// job's own key, so the chain is `base → …:adScanRedrive:1 →
+    /// …:adScanRedrive:2 → stop`, and `INSERT OR IGNORE` makes even a duplicated
+    /// mint idempotent. See ``maxAdScanRedrives``.
+    static let adScanRedriveWorkKeyMarker = "adScanRedrive"
+
+    /// playhead-onn6: how many ad-scan re-drive passes one episode may ever get,
+    /// per `(sourceFingerprint, analysisVersion)`.
+    ///
+    /// **Bounded is the whole point.** playhead-gqx4 chose to terminate an
+    /// under-scanned episode into a degraded state rather than decline to
+    /// terminate, precisely because an unbounded retry is a worse bug than the
+    /// one it fixed. Two guards hold here and they are independent:
+    ///
+    ///   1. This absolute cap. The ordinal lives in the UNIQUE `workKey`, so the
+    ///      chain cannot exceed it even if every other guard is wrong.
+    ///   2. The no-progress guard in ``shouldMintAdScanRedrive`` — a pass is only
+    ///      minted when the coverage lane still holds work the runner would
+    ///      actually resume. A pass that drains its rows to `complete`, or fails
+    ///      them past `AdmissionController.maxRetries`, drives that count to zero
+    ///      and the chain stops on its own, usually after one re-drive.
+    ///
+    /// Two, not more: one pass drains the outstanding rows, and the second exists
+    /// for the case the first was deferred wholesale by a thermal/battery
+    /// admission gate (which defers every job in the batch — see the H-1
+    /// orchestration block in `BackfillJobRunner`). Past that, more passes buy
+    /// FM time and no coverage.
+    static let maxAdScanRedrives = 2
+
+    /// playhead-onn6: the re-drive ordinal encoded in `workKey`, or `nil` when
+    /// this is not a re-drive key.
+    ///
+    /// Matches on the SUFFIX so it is indifferent to the base key's shape
+    /// (`…:preAnalysis`, `…:preAnalysis:600`, or a fingerprint-rebased variant).
+    /// A retired tombstone key (`…:adScanRedrive:1:staleFingerprint:<jobId>`,
+    /// see ``retiredStaleCanonicalWorkKey(for:)``) deliberately does NOT parse as
+    /// a re-drive: that row has been retired and must not extend a chain.
+    static func adScanRedriveOrdinal(workKey: String) -> Int? {
+        let components = workKey.split(separator: ":", omittingEmptySubsequences: false)
+        guard components.count >= 2,
+              components[components.count - 2] == Substring(adScanRedriveWorkKeyMarker),
+              let ordinal = Int(components[components.count - 1]),
+              ordinal > 0 else {
+            return nil
+        }
+        return ordinal
+    }
+
+    /// playhead-onn6: the `workKey` for the next re-drive after `job`, or `nil`
+    /// when the budget is spent or the lane does not take re-drives.
+    ///
+    /// Rebuilt from `job.sourceFingerprint` rather than by string-appending to
+    /// `job.workKey`, mirroring the tier-advance arm — so a chained re-drive
+    /// replaces its predecessor's ordinal instead of nesting markers.
+    static func nextAdScanRedriveWorkKey(for job: AnalysisJob) -> String? {
+        // Only the pre-analysis lane runs the semantic scan. `playback` jobs are
+        // hot-path only and have no coverage lane to re-drive.
+        guard job.jobType == "preAnalysis" else { return nil }
+        let ordinal = (adScanRedriveOrdinal(workKey: job.workKey) ?? 0) + 1
+        guard ordinal <= maxAdScanRedrives else { return nil }
+        let base = AnalysisJob.computeWorkKey(
+            fingerprint: job.sourceFingerprint,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            jobType: job.jobType
+        )
+        return "\(base):\(adScanRedriveWorkKeyMarker):\(ordinal)"
+    }
+
+    /// playhead-onn6: should a terminating episode get another ad-scan pass?
+    ///
+    /// Pure, so the decision matrix is unit-testable without the scheduler graph
+    /// (same reason `classifyBackfillTerminal` is static).
+    ///
+    /// - Parameter adScanFraction: MEASURED semantic ad-scan coverage, from
+    ///   ``AnalysisCoverageSummary/adScanFraction`` (playhead-pz32). Never
+    ///   recomputed here — the re-drive decision, the runner's skip decision and
+    ///   the library ✓ must divide the same numerator by the same denominator.
+    ///   `nil` means UNMEASURED, which is not the same as sufficient: erring
+    ///   towards running the scan costs one bounded pass, erring the other way is
+    ///   the bug (the same call this bead's sibling
+    ///   ``AnalysisJobRunner/measuredAdScanFraction(assetId:)`` makes on a store
+    ///   failure). It is only ever reached when `resumableCoverageJobCount > 0`,
+    ///   so an unmeasurable asset cannot spin: there is provably outstanding work
+    ///   and the absolute cap still applies.
+    /// - Parameter resumableCoverageJobCount: from
+    ///   ``AnalysisStore/countResumableBackfillJobs(assetId:)``. **This is the
+    ///   no-progress guard**, and it is structural rather than historical: zero
+    ///   resumable rows means a fresh pass would re-derive the same deterministic
+    ///   jobIds, find them `complete` (or retry-exhausted), skip every one, and
+    ///   produce no coverage at all. Refusing to mint there is what keeps this
+    ///   from being "a job that runs and achieves nothing".
+    static func shouldMintAdScanRedrive(
+        adScanFraction: Double?,
+        resumableCoverageJobCount: Int
+    ) -> Bool {
+        guard resumableCoverageJobCount > 0 else { return false }
+        guard let adScanFraction, adScanFraction.isFinite else { return true }
+        // The SAME floor the runner uses to decide it may skip the semantic
+        // backfill. If this were lower, the scheduler would mint passes the
+        // runner then declines to run.
+        return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
     }
 }
 

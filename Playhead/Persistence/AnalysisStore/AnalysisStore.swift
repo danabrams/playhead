@@ -14700,6 +14700,88 @@ actor AnalysisStore {
         }
     }
 
+    /// playhead-onn6: how many coverage-lane rows for `assetId` a future
+    /// `BackfillJobRunner.runPendingBackfill` invocation would still RESUME.
+    ///
+    /// **Why this query did not exist, and why its absence was the bug.** Before
+    /// this bead the only reads of `backfill_jobs` were
+    /// ``fetchBackfillJob(byId:)`` and ``probeBackfillJobStatus(jobId:)`` — both
+    /// keyed by a jobId the caller already had. Nothing anywhere selected PENDING
+    /// coverage-lane work, so a row that outlived the `runPendingBackfill`
+    /// invocation that minted it was orphaned: on the 2026-07-29 device pull 35
+    /// rows sat `queued` (some for six days) across 12 assets. The rows were not
+    /// debris — they were real, still-actionable scan work with no selector.
+    ///
+    /// **This is deliberately the EXACT mirror of the runner's M-5 resume
+    /// predicate** (`BackfillJobRunner.runPendingBackfill`, the
+    /// `fetchBackfillJob(byId:)` branch): a row is resumable when it is not
+    /// `complete` and its persisted `retryCount` is still under
+    /// ``AdmissionController/maxRetries``. If the two ever drift, the scheduler
+    /// starts minting re-drive passes for work the runner will skip — a job that
+    /// runs and achieves nothing, which is the failure this bead exists to
+    /// prevent rather than reproduce.
+    ///
+    /// `running` is the ONE deliberate narrowing. A live row belongs to whoever
+    /// holds the admission ticket (the session lane can be mid-drain on the same
+    /// asset), and a row stranded in `running` by a process death is normalised
+    /// back to `queued` by ``resetStrandedBackfillJobs()`` before it is counted.
+    /// Counting `running` here would let a concurrent drain look like outstanding
+    /// work and mint a redundant pass.
+    func countResumableBackfillJobs(assetId: String) throws -> Int {
+        let sql = """
+            SELECT COUNT(*) FROM backfill_jobs
+            WHERE analysisAssetId = ?
+              AND status <> ?
+              AND status <> ?
+              AND retryCount < ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, BackfillJobStatus.complete.rawValue)
+        bind(stmt, 3, BackfillJobStatus.running.rawValue)
+        bind(stmt, 4, AdmissionController.maxRetries)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// playhead-onn6: assets that still hold resumable coverage-lane work, most
+    /// urgent first, capped at `limit`.
+    ///
+    /// The set-shaped companion to ``countResumableBackfillJobs(assetId:)`` and
+    /// the reason `idx_backfill_jobs_status_priority` has existed unused since
+    /// the table was created: an orphaned `queued` row is invisible to every
+    /// other read, so the backlog it represents could only ever grow. Ordering is
+    /// highest phase priority first, then oldest work, so a capped sweep drains
+    /// the most valuable and most stale rows rather than an arbitrary slice.
+    ///
+    /// Resumability is the same predicate as the per-asset count, for the same
+    /// reason — see that method.
+    func fetchAssetIdsWithResumableBackfillJobs(limit: Int) throws -> [String] {
+        guard limit > 0 else { return [] }
+        let sql = """
+            SELECT analysisAssetId, MAX(priority) AS topPriority, MIN(createdAt) AS oldest
+            FROM backfill_jobs
+            WHERE status <> ?
+              AND status <> ?
+              AND retryCount < ?
+            GROUP BY analysisAssetId
+            ORDER BY topPriority DESC, oldest ASC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, BackfillJobStatus.complete.rawValue)
+        bind(stmt, 2, BackfillJobStatus.running.rawValue)
+        bind(stmt, 3, AdmissionController.maxRetries)
+        bind(stmt, 4, limit)
+        var ids: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            ids.append(text(stmt, 0))
+        }
+        return ids
+    }
+
     /// C3-2: small helper used by the guarded terminal transitions to
     /// distinguish "no row" from "row present in a disallowed state". Returns
     /// `nil` when no row exists for `jobId`.
