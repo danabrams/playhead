@@ -72,14 +72,35 @@ enum TranscriptAtomizer {
     /// Convert TranscriptChunks into TranscriptAtoms with stable ordinal identity.
     /// Each chunk becomes one atom. The transcriptVersion is computed from the
     /// ordered atom content.
+    ///
+    /// Atoms come out in TIME order (playhead-r5um). They used to come out in
+    /// `chunkIndex` order, which is not time order and never was:
+    /// `TranscriptEngineService` numbers chunks from an in-memory counter in
+    /// shard EMISSION order, and `prioritizeShards` emits by playhead
+    /// proximity — `shard0 + hotPath + coldAhead + behindWithoutShard0`, the
+    /// last group DESCENDING. On the 2026-07-30 device pull that made 27 of
+    /// 30 assets non-monotone in time when read in chunkIndex order, worst
+    /// backward step −3538.9 s: asset 8FECFDDE has a chunk at t=3540.0 s
+    /// numbered 0, so the final 30 seconds of a 59-minute episode sorted to
+    /// ordinal 2. Everything built on the atom sequence — the FM prompt text,
+    /// `TranscriptSegmenter`'s pause/max-duration breaks, and the scan-window
+    /// bounds `playhead-csbq` had to repair — read a scrambled transcript.
+    ///
+    /// `TranscriptChunkCanonicalizer` re-sorted only the MIXED fast/final
+    /// path, so single-pass assets (7 affected on the pull) were unprotected,
+    /// and five of the six production atomize call sites do not canonicalize
+    /// at all. Ordering HERE is what closes both holes with one mechanism.
     static func atomize(
         chunks: [TranscriptChunk],
         analysisAssetId: String,
         normalizationHash: String,
         sourceHash: String
     ) -> (atoms: [TranscriptAtom], version: TranscriptVersion) {
-        // Sort by chunkIndex for deterministic ordering
-        let sorted = chunks.sorted { $0.chunkIndex < $1.chunkIndex }
+        // One ordering authority, shared with the canonicalizer and the
+        // transcript-peek display path. It is a total order, so this is
+        // idempotent over already-canonicalized input and deterministic even
+        // where `chunkIndex` collides (it does, on 21 of 30 device assets).
+        let sorted = chunks.sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
 
         // Compute transcript version hash from ordered content.
         // Length-prefix each chunk to prevent boundary ambiguity:
