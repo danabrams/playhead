@@ -2978,9 +2978,9 @@ struct AnalysisStoreCoverageRulerTests {
         #expect(fraction < episodePreparationCompleteThreshold)
     }
 
-    /// Whatever the rows say, the fraction is bounded. Windows that sprawl far
-    /// past the episode cannot mint a ratio above 1 — the numerator is clipped
-    /// to the transcribed region and the quotient is capped.
+    /// Whatever the rows say, the persisted fraction is bounded. Windows that
+    /// sprawl far past the episode cannot mint a ratio above 1 — the numerator
+    /// is clipped to the transcribed region before the quotient is taken.
     @Test("ad-scan fraction can never exceed 1.0 however far the windows sprawl")
     func adScanFractionIsBoundedAboveByOne() async throws {
         let store = try await makeTestStore()
@@ -2996,5 +2996,65 @@ struct AnalysisStoreCoverageRulerTests {
         let fraction = try #require(summary.adScanFraction)
         #expect(fraction <= 1.0)
         #expect(fraction == 1.0)
+    }
+
+    /// The bound, tested where it lives rather than only through the store, so
+    /// a numerator that DOES exceed the denominator is exercised directly.
+    /// `adScanFraction` must WITHHOLD — a numerator materially past the
+    /// denominator proves the two describe different audio, and clamping such
+    /// an overshoot to exactly 1.0 is how a broken denominator becomes a
+    /// confident ✓ on a fraction of the audio. It reads as unmeasurable, which
+    /// gqx4 then names `unmeasurableDuration`.
+    @Test("a numerator past the denominator is withheld, never clamped to 1.0")
+    func overshootingNumeratorIsWithheldNotClamped() {
+        func summary(
+            adScanCoveredSec: Double?,
+            episodeDurationSec: Double?,
+            transcriptReach: Double?
+        ) -> AnalysisCoverageSummary {
+            AnalysisCoverageSummary(
+                assetId: "a-bound",
+                episodeDurationSec: episodeDurationSec,
+                fastTranscriptCoveredSec: transcriptReach,
+                fastTranscriptCoveredSource: .fastTranscriptChunks,
+                fastTranscriptCoverageEndSec: transcriptReach,
+                fastTranscriptCoverageEndSource: .fastTranscriptChunks,
+                featureCoverageEndSec: episodeDurationSec,
+                featureCoverageEndSource: .assetWatermark,
+                confirmedAdCoverageEndSec: nil,
+                confirmedAdCoverageEndSource: .unknown,
+                finalPassCoverageEndSec: nil,
+                finalPassCoverageEndSource: .unknown,
+                analysisCoveredSec: nil,
+                adScanCoveredSec: adScanCoveredSec,
+                adScanCoveredSource: adScanCoveredSec == nil ? .unknown : .semanticScanResults
+            )
+        }
+
+        // The bead's own shape: 3210 s of scan against a declared 608 s.
+        #expect(
+            summary(adScanCoveredSec: 3210, episodeDurationSec: 608, transcriptReach: 3210)
+                .adScanFraction == nil
+        )
+        // Even a healthy-LOOKING ratio is withheld when the transcript's own
+        // reach has already disproved the denominator (device asset E8F0F867:
+        // 563.8 s scanned, 552.9 s declared, transcript reaching 3810 s). This
+        // is the arm that would otherwise render a confident ✓ on 14.8%.
+        #expect(
+            summary(adScanCoveredSec: 563.8, episodeDurationSec: 552.9, transcriptReach: 3810)
+                .adScanFraction == nil
+        )
+        // Within tolerance (min(30 s, 5%)), a real ratio is still produced and
+        // is capped at 1.0 rather than withheld — decoder tail drift must not
+        // cost an episode its ✓.
+        let drifted = summary(
+            adScanCoveredSec: 1010, episodeDurationSec: 1000, transcriptReach: 1010
+        ).adScanFraction
+        #expect(drifted == 1.0)
+        // And an ordinary partial scan is unaffected.
+        #expect(
+            summary(adScanCoveredSec: 470, episodeDurationSec: 1000, transcriptReach: 1000)
+                .adScanFraction == 0.47
+        )
     }
 }
