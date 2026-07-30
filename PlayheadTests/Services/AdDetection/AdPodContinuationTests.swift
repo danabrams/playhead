@@ -251,6 +251,84 @@ struct AdPodContinuationTests {
         #expect(barriers.first == barrier(500.0 - radius, 503.0 + radius))
     }
 
+    /// The defect an audit caught on real data: a host sign-off sitting between a
+    /// confirmed sponsor CTA and a post-roll pod, bridged by the chain, claiming
+    /// ~9 s of show as ad. Two arms differing ONLY in whether the sign-off prose
+    /// is visible to the barrier derivation.
+    @Test("a host sign-off between two ads is a barrier and stops the bridge")
+    func hostSignOffIsABarrier() {
+        let signOff = TranscriptChunk(
+            id: "signoff",
+            analysisAssetId: Self.assetId,
+            segmentFingerprint: "fp",
+            chunkIndex: 0,
+            startTime: 2966.8,
+            endTime: 2973.1,
+            text: "Wow, we were all over the place today. Thanks for tuning in everybody. See you tomorrow.",
+            normalizedText: "wow, we were all over the place today. thanks for tuning in everybody. see you tomorrow.",
+            pass: "final",
+            modelVersion: "test",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+        let barriers = AdPodContinuation.contentBarriers(
+            semanticScanResults: [],
+            lexicalHits: [],
+            chunks: [signOff]
+        )
+        #expect(barriers == [barrier(2966.8, 2973.1)])
+
+        // The bridge: a confirmed sponsor CTA, the sign-off, then the post-roll pod.
+        let seed = window(start: 2952.3, end: 2964.1)
+        let postRollLink = [link(2973.1, 3025.6)]
+        let bridged = AdPodContinuation.compose(
+            existingWindows: [seed],
+            adCopyLinks: postRollLink,
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 3052.7,
+            analysisAssetId: Self.assetId
+        )
+        #expect(
+            bridged.first?.startTime == 2964.1,
+            "control arm: with no barrier the chain bridges the sign-off"
+        )
+        let stopped = AdPodContinuation.compose(
+            existingWindows: [seed],
+            adCopyLinks: postRollLink,
+            contentBarriers: barriers,
+            protectedRegions: [],
+            episodeDuration: 3052.7,
+            analysisAssetId: Self.assetId
+        )
+        #expect(stopped.isEmpty, "the sign-off must stop the chain, not be claimed as ad")
+    }
+
+    @Test("ad copy is never mistaken for a show-boundary phrase")
+    func adCopyIsNotAShowBoundary() {
+        let adRead = TranscriptChunk(
+            id: "ad",
+            analysisAssetId: Self.assetId,
+            segmentFingerprint: "fp",
+            chunkIndex: 0,
+            startTime: 100.0,
+            endTime: 115.0,
+            text: "Visit example.com today and use code SHOW for twenty percent off.",
+            normalizedText: "visit example.com today and use code show for twenty percent off.",
+            pass: "final",
+            modelVersion: "test",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+        #expect(
+            AdPodContinuation.contentBarriers(
+                semanticScanResults: [],
+                lexicalHits: [],
+                chunks: [adRead]
+            ).isEmpty
+        )
+    }
+
     @Test("a metadata-origin transition phrase is not an utterance and is not a barrier")
     func metadataTransitionMarkerIsNotABarrier() {
         let hit = LexicalHit(
@@ -625,147 +703,214 @@ struct AdPodContinuationTests {
 
     // MARK: - Link derivation delegates to the vetted rule
 
-    @Test("a lone URL with no sponsor disclosure is not an ad-copy link")
-    func loneURLIsNotALink() {
-        let hits = [
-            LexicalHit(
-                category: .urlCTA,
-                matchedText: "example.com",
-                startTime: 100.0,
-                endTime: 101.0,
-                weight: 0.9
+    /// Helper: build the link set for a hit stream plus optional prose chunks.
+    private func links(
+        hits: [LexicalHit],
+        chunkTexts: [(start: Double, end: Double, text: String)] = []
+    ) -> [AdPodContinuation.AdCopyLink] {
+        let chunks = chunkTexts.enumerated().map { index, chunk in
+            TranscriptChunk(
+                id: "chunk-\(index)",
+                analysisAssetId: Self.assetId,
+                segmentFingerprint: "fp-\(index)",
+                chunkIndex: index,
+                startTime: chunk.start,
+                endTime: chunk.end,
+                text: chunk.text,
+                normalizedText: chunk.text.lowercased(),
+                pass: "final",
+                modelVersion: "test",
+                transcriptVersion: nil,
+                atomOrdinal: nil
             )
-        ]
+        }
+        return AdPodContinuation.adCopyLinks(chunks: chunks, hits: hits)
+    }
+
+    private func hit(
+        _ category: LexicalPatternCategory,
+        _ text: String,
+        _ start: Double,
+        _ end: Double,
+        metadata: Bool = false,
+        negative: Bool = false
+    ) -> LexicalHit {
+        LexicalHit(
+            category: category,
+            matchedText: text,
+            startTime: start,
+            endTime: end,
+            weight: 1.0,
+            isMetadataOrigin: metadata,
+            isNegativePattern: negative
+        )
+    }
+
+    /// A domain mentioned editorially is `urlCTA`-only: one kind, and a weak one.
+    /// This is the dominant false-positive shape and it must not fire.
+    @Test("a lone URL is not an ad-copy link")
+    func loneURLIsNotALink() {
+        #expect(links(hits: [hit(.urlCTA, "example.com", 100, 101)]).isEmpty)
+    }
+
+    /// Two URLs are two hits of ONE weak kind. Counting hits rather than KINDS is
+    /// the mistake this asserts against — a tech show naming three domains in a
+    /// row would otherwise read as an ad pod.
+    @Test("several URLs and no strong kind are still not a link")
+    func manyWeakHitsAreNotALink() {
         #expect(
-            AdPodContinuation.adCopyLinks(hits: hits, analysisAssetId: Self.assetId).isEmpty
+            links(hits: [
+                hit(.urlCTA, "example.com", 100, 101),
+                hit(.urlCTA, "other.com", 108, 109),
+                hit(.purchaseLanguage, "free trial", 112, 113)
+            ]).isEmpty
         )
     }
 
     @Test("a sponsor disclosure plus a nearby CTA is an ad-copy link")
     func sponsorPlusCTAIsALink() {
-        let links = AdPodContinuation.adCopyLinks(
-            hits: [
-                LexicalHit(
-                    category: .sponsor,
-                    matchedText: "brought to you by",
-                    startTime: 100.0,
-                    endTime: 102.0,
-                    weight: 1.0
-                ),
-                LexicalHit(
-                    category: .urlCTA,
-                    matchedText: "example.com",
-                    startTime: 110.0,
-                    endTime: 111.0,
-                    weight: 0.9
-                )
-            ],
-            analysisAssetId: Self.assetId
+        #expect(
+            links(hits: [
+                hit(.sponsor, "brought to you by", 100, 102),
+                hit(.urlCTA, "example.com", 110, 111)
+            ]) == [AdPodContinuation.AdCopyLink(start: 100.0, end: 111.0)]
         )
-        #expect(links == [AdPodContinuation.AdCopyLink(start: 100.0, end: 111.0)])
+    }
+
+    /// The case the first build of this pass MISSED entirely, and the reason it
+    /// recovered 0.0 s on the corpus: a programmatically stitched DAI creative
+    /// carries no sponsor disclosure — "brought to you by" is a HOST-READ
+    /// convention. What it carries is offer boilerplate plus a URL.
+    @Test("offer-terms boilerplate plus a URL is a link, with no sponsor disclosure")
+    func offerTermsPlusURLIsALink() {
+        let result = links(
+            hits: [hit(.urlCTA, "windows.com", 70, 71)],
+            chunkTexts: [
+                (start: 60.0, end: 75.0,
+                 text: "While supplies last, ends June 30th, see website for more details.")
+            ]
+        )
+        #expect(result.count == 1)
+        #expect(result.first?.start == 60.0)
+        #expect(result.first?.end == 75.0)
+    }
+
+    /// SPECIFICATION CHANGE, recorded so the reversal is auditable. An earlier
+    /// draft required TWO distinct kinds, so offer boilerplate alone was not a
+    /// link. It is one now, because a strong kind is near-exclusive to
+    /// advertising and this rule only ever extends a chain a CONFIRMED ad window
+    /// anchored — see the bar's rationale on `adCopyLinks`. Measured on
+    /// rediff-confirmed pod boundaries, the change recovered 209 s more ad audio
+    /// and added ZERO seconds outside a byte-confirmed DAI slot.
+    @Test("offer-terms boilerplate alone IS a link (one strong kind is the bar)")
+    func offerTermsAloneIsALink() {
+        #expect(
+            links(
+                hits: [],
+                chunkTexts: [
+                    (start: 60.0, end: 75.0, text: "Terms and conditions apply.")
+                ]
+            ) == [AdPodContinuation.AdCopyLink(start: 60.0, end: 75.0)]
+        )
+    }
+
+    /// The stricter bar is still reachable, and the corpus eval keeps it as the
+    /// conservative comparison arm.
+    @Test("with the two-kind bar, offer-terms boilerplate alone is not a link")
+    func offerTermsAloneIsNotALinkUnderTwoKindBar() {
+        let chunk = TranscriptChunk(
+            id: "c0",
+            analysisAssetId: Self.assetId,
+            segmentFingerprint: "fp0",
+            chunkIndex: 0,
+            startTime: 60.0,
+            endTime: 75.0,
+            text: "Terms and conditions apply.",
+            normalizedText: "terms and conditions apply.",
+            pass: "final",
+            modelVersion: "test",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+        #expect(
+            AdPodContinuation.adCopyLinks(
+                chunks: [chunk],
+                hits: [],
+                allowSingleStrongKindLinks: false
+            ).isEmpty
+        )
+    }
+
+    @Test("a promo code plus offer language is a link")
+    func promoCodePlusOfferIsALink() {
+        #expect(
+            !links(hits: [
+                hit(.promoCode, "use code SHOW", 100, 101),
+                hit(.purchaseLanguage, "free trial", 106, 107)
+            ]).isEmpty
+        )
+    }
+
+    /// A distant weak signal does not WIDEN a strong link's interval: the strong
+    /// signal still carries its own narrow link, but the far-away URL is not
+    /// folded into it.
+    @Test("a weak signal beyond the co-occurrence window does not widen the link")
+    func distantSignalsDoNotPair() {
+        let window = LexicalAutoAdEvidenceBuilder.Config.default.cooccurrenceWindow
+        let result = links(hits: [
+            hit(.sponsor, "brought to you by", 100, 101),
+            hit(.urlCTA, "example.com", 100 + window + 5, 100 + window + 6)
+        ])
+        #expect(result == [AdPodContinuation.AdCopyLink(start: 100.0, end: 101.0)])
     }
 
     /// The show plugging its OWN domain is exactly what must not be treated as
-    /// commercial copy. Here the sponsor + CTA pair is perfectly well-formed, so
-    /// the pair-forming step accepts it and the suppression can only come from
-    /// the vetted rule — which is the point: the authority on "is this ad copy"
-    /// stays `LexicalAutoAdEvidenceBuilder` and is not re-implemented here.
+    /// commercial copy. The pair here is well-formed, so the suppression can only
+    /// come from the guardrail.
     @Test("a show-owned-domain negative pattern suppresses the link")
     func negativePatternSuppressesLink() {
-        let sponsor = LexicalHit(
-            category: .sponsor,
-            matchedText: "brought to you by",
-            startTime: 100.0,
-            endTime: 102.0,
-            weight: 1.0
-        )
-        let cta = LexicalHit(
-            category: .promoCode,
-            matchedText: "use code SHOW",
-            startTime: 110.0,
-            endTime: 111.0,
-            weight: 1.0
-        )
-        let showOwnedDomain = LexicalHit(
-            category: .urlCTA,
-            matchedText: "theshow.com",
-            startTime: 105.0,
-            endTime: 106.0,
-            weight: 0.9,
-            isNegativePattern: true
-        )
+        let sponsor = hit(.sponsor, "brought to you by", 100, 102)
+        let code = hit(.promoCode, "use code SHOW", 110, 111)
+        let showOwnedDomain = hit(.urlCTA, "theshow.com", 105, 106, negative: true)
         #expect(
-            !AdPodContinuation.adCopyLinks(
-                hits: [sponsor, cta],
-                analysisAssetId: Self.assetId
-            ).isEmpty,
+            !links(hits: [sponsor, code]).isEmpty,
             "control arm: the same pair without the show-owned domain DOES fire"
         )
-        #expect(
-            AdPodContinuation.adCopyLinks(
-                hits: [sponsor, cta, showOwnedDomain],
-                analysisAssetId: Self.assetId
-            ).isEmpty
-        )
+        #expect(links(hits: [sponsor, code, showOwnedDomain]).isEmpty)
     }
 
-    /// The vetted rule's editorial guardrail: a brand being DISCUSSED, not sold.
-    /// Also delegated — nothing in this file re-decides it.
-    @Test("an editorial-context cue in a nearby hit suppresses the link")
+    /// The editorial guardrail — a brand being DISCUSSED, not sold. This calls
+    /// `LexicalAutoAdEvidenceBuilder.hasNegativeContext`, the same function the
+    /// vetted rule uses, rather than a copy of it.
+    @Test("an editorial-context cue near the pair suppresses the link")
     func editorialContextSuppressesLink() {
-        let sponsor = LexicalHit(
-            category: .sponsor,
-            matchedText: "brought to you by",
-            startTime: 100.0,
-            endTime: 102.0,
-            weight: 1.0
-        )
-        let cta = LexicalHit(
-            category: .urlCTA,
-            matchedText: "example.com",
-            startTime: 110.0,
-            endTime: 111.0,
-            weight: 0.9
-        )
-        let editorial = LexicalHit(
-            category: .sponsor,
-            matchedText: "according to the lawsuit",
-            startTime: 112.0,
-            endTime: 114.0,
-            weight: 1.0
-        )
+        let sponsor = hit(.sponsor, "brought to you by", 100, 102)
+        let cta = hit(.urlCTA, "example.com", 110, 111)
+        let editorial = hit(.sponsor, "according to the lawsuit", 112, 114)
+        #expect(links(hits: [sponsor, cta, editorial]).isEmpty)
+    }
+
+    @Test("metadata-origin legs cannot carry a link")
+    func metadataOnlyLegsDoNotFire() {
         #expect(
-            AdPodContinuation.adCopyLinks(
-                hits: [sponsor, cta, editorial],
-                analysisAssetId: Self.assetId
-            ).isEmpty
+            links(hits: [
+                hit(.sponsor, "sponsored by", 100, 102, metadata: true),
+                hit(.promoCode, "use code SHOW", 110, 111, metadata: true)
+            ]).isEmpty
         )
     }
 
-    @Test("a metadata-origin leg cannot carry a link on its own")
-    func metadataOnlyLegsDoNotFire() {
-        let links = AdPodContinuation.adCopyLinks(
-            hits: [
-                LexicalHit(
-                    category: .sponsor,
-                    matchedText: "sponsored by",
-                    startTime: 100.0,
-                    endTime: 102.0,
-                    weight: 1.0,
-                    isMetadataOrigin: true
-                ),
-                LexicalHit(
-                    category: .promoCode,
-                    matchedText: "use code SHOW",
-                    startTime: 110.0,
-                    endTime: 111.0,
-                    weight: 1.0,
-                    isMetadataOrigin: true
-                )
-            ],
-            analysisAssetId: Self.assetId
+    /// A return marker is a CONTENT signal consumed as a barrier; it must never
+    /// double as ad-copy evidence, or the stopping signal would also be a reason
+    /// to keep walking.
+    @Test("a transition marker is never ad-copy evidence")
+    func transitionMarkerIsNotAdCopyEvidence() {
+        #expect(
+            AdPodContinuation.adCopySignals(
+                chunks: [],
+                hits: [hit(.transitionMarker, "back to the show", 100, 101)]
+            ).isEmpty
         )
-        #expect(links.isEmpty)
     }
 
     @Test("overlapping links merge into one interval")

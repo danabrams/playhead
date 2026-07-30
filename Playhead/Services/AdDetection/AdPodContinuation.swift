@@ -31,14 +31,15 @@
 // resumed. Two structural properties do that work:
 //
 //  1. THE WALK TERMINATES AT EVIDENCE, NEVER PAST IT. From a seed window we
-//     step outward link by link, where a LINK is a region in which the vetted
-//     high-precision lexical auto-ad rule (`LexicalAutoAdEvidenceBuilder`,
-//     playhead-xsdz.1: a sponsor disclosure co-occurring with a promo code or
-//     URL CTA, with its negative-evidence guardrails applied) FIRES. The
-//     claimed extension ends exactly at the last link's end. Nothing beyond
-//     the final piece of positive ad evidence is ever claimed, so the rule
-//     never reasons "no ad cue was found here, therefore this is still ad" —
-//     an absence is never an input.
+//     step outward link by link, where a LINK is a region carrying commercial
+//     signal that is near-exclusive to advertising — a sponsor disclosure, a
+//     promo code, offer-terms boilerplate, or a three-role persuasion arc
+//     (`RhetoricalGrammarEvidenceBuilder`) — with playhead-xsdz.1's own
+//     negative-evidence guardrails applied. See `adCopyLinks` and
+//     `rhetoricalLinks`. The claimed extension ends exactly at the last link's
+//     end. Nothing beyond the final piece of positive ad evidence is ever
+//     claimed, so the rule never reasons "no ad cue was found here, therefore
+//     this is still ad" — an absence is never an input.
 //
 //     The seconds BETWEEN two links are claimed, and that is deliberate: they
 //     are BRACKETED by positive ad evidence on both sides (the seed or previous
@@ -113,15 +114,25 @@ enum AdPodContinuation {
     // MARK: - Configuration
 
     struct Configuration: Sendable, Equatable {
-        /// Maximum silence-or-speech gap (seconds) between the current edge and
-        /// the next ad-copy link for the chain to continue.
+        /// Maximum gap (seconds) between the current edge and the next ad-copy
+        /// link for the chain to continue.
         ///
-        /// Inside a DAI pod, consecutive creatives are butt-spliced or separated
-        /// by a beat, and the sponsor disclosure of the next creative lands
-        /// within a sentence or two of the previous one's CTA. 30 s covers a
-        /// full creative whose disclosure comes late while staying far below the
-        /// distance at which "the next sponsor mention" stops being the same
-        /// break. `<= 0` disables the pass (no chain can ever start).
+        /// 60 s, and the number is MEASURED, not assumed. A DAI pod interleaves
+        /// creatives that carry text cues with creatives that carry none — the
+        /// Conan pod runs SiriusXM (cue) → Carvana (cue) → Carter's (bare URL) →
+        /// DSW (bare URL) — so consecutive LINKS sit a whole cue-free creative
+        /// apart, ~50 s. Against rediff-confirmed pod boundaries on the
+        /// 2026-07-16 corpus, raising the gap 30 → 45 → 60 recovered 162 → 245 →
+        /// 408 s of ad audio inside detected pods, and 60 → 90 recovered exactly
+        /// the same 408 s: past 60 s the chain is bounded by EVIDENCE, not by
+        /// this number, which is why 60 is a plateau rather than a slope.
+        ///
+        /// Crucially, the newly-claimed seconds falling OUTSIDE every rediff slot
+        /// did not move at all across that sweep (23.0 s at every setting, one
+        /// contiguous host-read region). Widening the gap bought ad seconds and
+        /// bought no show seconds.
+        ///
+        /// `<= 0` disables the pass (no chain can ever start).
         var maxLinkGapSeconds: Double
 
         /// Hard bound on how far one side of one seed may be extended.
@@ -159,14 +170,14 @@ enum AdPodContinuation {
         var markConfidenceCeiling: Double
 
         static let `default` = Configuration(
-            maxLinkGapSeconds: 30.0,
+            maxLinkGapSeconds: 60.0,
             maxExtensionSecondsPerSide: 180.0,
             minMarkDurationSeconds: 3.0,
             markConfidenceCeiling: 0.70
         )
 
         init(
-            maxLinkGapSeconds: Double = 30.0,
+            maxLinkGapSeconds: Double = 60.0,
             maxExtensionSecondsPerSide: Double = 180.0,
             minMarkDurationSeconds: Double = 3.0,
             markConfidenceCeiling: Double = 0.70
@@ -229,53 +240,210 @@ enum AdPodContinuation {
 
     // MARK: - Link derivation (the positive ad-evidence half)
 
-    /// Project the asset's lexical hit stream into ad-copy links by asking the
-    /// VETTED rule, per candidate region, whether it fires.
+    /// A KIND of ad-copy evidence. Deliberately coarse: the rule below counts
+    /// DISTINCT kinds, and "two different sorts of commercial signal in the same
+    /// breath" is a far better precision bar than "many hits of one sort".
+    enum AdCopyKind: String, Sendable, Hashable, CaseIterable {
+        /// A sponsor disclosure — "brought to you by", "supported by".
+        case sponsor
+        /// "use code SAVE20", "promo code SHOW".
+        case promoCode
+        /// A spoken URL or call to action.
+        case urlCTA
+        /// Offer language — "free trial", "money back guarantee", "20 percent off".
+        case purchaseLanguage
+        /// Offer-terms BOILERPLATE — "terms and conditions", "while supplies
+        /// last", "see website for details". See ``adTermsPatterns``.
+        case adTerms
+
+        /// A kind that, on its own, is almost never uttered outside an ad read.
+        /// A link needs at least one of these; `urlCTA` and `purchaseLanguage`
+        /// are corroborators only, because editorial prose does say "check out
+        /// their site" and "there is a free trial".
+        var isStrong: Bool {
+            switch self {
+            case .sponsor, .promoCode, .adTerms: return true
+            case .urlCTA, .purchaseLanguage: return false
+            }
+        }
+    }
+
+    /// One located piece of ad-copy evidence.
+    struct AdCopySignal: Sendable, Equatable, Hashable {
+        let kind: AdCopyKind
+        let start: Double
+        let end: Double
+    }
+
+    /// Offer-terms boilerplate. This family exists because THE DOMINANT MISS IS
+    /// NOT A HOST READ.
     ///
-    /// Candidate regions are formed from sponsor × (promoCode | urlCTA) hit
-    /// pairs that are close enough in time to be one read. Each candidate is
-    /// then handed to `LexicalAutoAdEvidenceBuilder`, which is the sole judge:
-    /// if it emits no entry (show-owned-domain negative pattern, editorial
-    /// context, metadata-only legs, …) there is no link. Re-implementing that
-    /// rule here would let the two copies drift, and the drift would be silent.
+    /// The vetted `LexicalAutoAdEvidenceBuilder` rule requires a SPONSOR
+    /// DISCLOSURE leg, and a sponsor disclosure is a HOST-READ convention: the
+    /// host says "this episode is brought to you by X". A programmatically
+    /// stitched DAI creative never says that — it is a finished radio spot. Run
+    /// over the 16 uncovered runs longer than 30 s in the 2026-07-16 corpus, only
+    /// 3 contained a sponsor disclosure at all, so a sponsor-gated rule fires
+    /// almost nowhere in exactly the population this bead is about. (Measured:
+    /// the first build of this pass recovered 0.0 s for precisely that reason.)
     ///
-    /// The region handed to the builder is PADDED by the builder's own negative-
-    /// context radius so its guardrails can see the neighbourhood, while the
-    /// LINK we return is the tight pair interval. Both choices fail closed:
-    /// padding can only add suppressors, and the tight interval claims less.
+    /// What a finished spot DOES carry is offer boilerplate, read fast at the
+    /// end: "while supplies last, ends June 30th, see website for more details",
+    /// "commutations and exclusions may apply, see our seven day return policy".
+    /// These phrases are near-exclusive to advertising — editorial narration does
+    /// not disclaim its own terms — which makes them a STRONG kind and the most
+    /// show-agnostic DAI text marker available without a per-show bank.
+    ///
+    /// Deliberately owned by THIS file rather than added to `LexicalScanner`:
+    /// the shared lexicon feeds the fusion scorer, and widening it would change
+    /// scores everywhere. This pass gets the signal it needs; nothing else moves.
+    static let adTermsPatterns: [String] = [
+        #"\bterms and conditions\b"#,
+        #"\bterms apply\b"#,
+        #"\bexclusions (may )?apply\b"#,
+        #"\brestrictions (may )?apply\b"#,
+        #"\bwhile supplies last\b"#,
+        #"\boffer (ends|expires|valid)\b"#,
+        #"\bcannot be combined\b"#,
+        #"\bat participating\b"#,
+        #"\bparticipating (locations|retailers|stores)\b"#,
+        #"\bsee (the |our )?(web ?site|site|store)\b[^.]{0,24}\b(details|more)\b"#,
+        #"\bsee our\b[^.]{0,28}\b(policy|details)\b"#,
+        #"\bfor a limited time\b"#
+    ]
+
+    private static let compiledAdTermsPatterns: [NSRegularExpression] =
+        adTermsPatterns.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
+        }
+
+    /// Locate every piece of ad-copy evidence in the episode.
+    ///
+    /// Four kinds come from the `LexicalScanner` hit stream the pipeline already
+    /// computed (no rescan, no new lexicon). The fifth — `adTerms` — is scanned
+    /// here over the transcript, because offer boilerplate is not in the shared
+    /// lexicon and must not be added to it.
+    ///
+    /// `transitionMarker` hits are excluded: a return marker is a CONTENT signal,
+    /// and it is consumed as a barrier below. Metadata-origin and negative-pattern
+    /// hits are excluded as promotion legs, mirroring the vetted rule.
+    ///
+    /// An `adTerms` signal is CHUNK-GRANULAR (the whole segment's time span)
+    /// rather than character-interpolated. Whisper segments run a few seconds, and
+    /// this signal is used to decide chain ADJACENCY, not an edge — the mark's
+    /// edges come from the link intervals, which are bounded by the pair. Being
+    /// chunk-granular makes the signal slightly WIDER, which can only make a link
+    /// slightly wider, so it is not the silent-precision-loss direction.
+    static func adCopySignals(
+        chunks: [TranscriptChunk],
+        hits: [LexicalHit]
+    ) -> [AdCopySignal] {
+        var signals: [AdCopySignal] = []
+        for hit in hits {
+            guard !hit.isMetadataOrigin,
+                  !hit.isNegativePattern,
+                  hit.startTime.isFinite,
+                  hit.endTime.isFinite,
+                  hit.endTime >= hit.startTime else {
+                continue
+            }
+            let kind: AdCopyKind
+            switch hit.category {
+            case .sponsor: kind = .sponsor
+            case .promoCode: kind = .promoCode
+            case .urlCTA: kind = .urlCTA
+            case .purchaseLanguage: kind = .purchaseLanguage
+            case .transitionMarker: continue
+            }
+            signals.append(AdCopySignal(kind: kind, start: hit.startTime, end: hit.endTime))
+        }
+        for chunk in chunks {
+            guard chunk.startTime.isFinite,
+                  chunk.endTime.isFinite,
+                  chunk.endTime > chunk.startTime,
+                  !chunk.normalizedText.isEmpty else {
+                continue
+            }
+            let text = chunk.normalizedText
+            let range = NSRange(location: 0, length: (text as NSString).length)
+            let matched = compiledAdTermsPatterns.contains {
+                $0.firstMatch(in: text, range: range) != nil
+            }
+            if matched {
+                signals.append(
+                    AdCopySignal(kind: .adTerms, start: chunk.startTime, end: chunk.endTime)
+                )
+            }
+        }
+        return signals.sorted {
+            $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end
+        }
+    }
+
+    /// Project ad-copy signals into LINKS: regions where a co-occurrence of
+    /// commercial signals says, positively, that a spot is being read.
+    ///
+    /// THE BAR: at least one STRONG kind — a sponsor disclosure, a promo code,
+    /// or offer-terms boilerplate. A second, distinct kind within
+    /// `cooccurrenceWindow` WIDENS the link's interval but is not required.
+    ///
+    /// The weak kinds cannot carry a link alone, which is the precision control
+    /// that matters: a brand mentioned editorially is `urlCTA`-only, a self-promo
+    /// ("follow the show") is `urlCTA`-only, a product discussion is
+    /// `purchaseLanguage` at most. None of those fires anything.
+    ///
+    /// This is deliberately WEAKER than playhead-xsdz.1's "sponsor AND promo/URL"
+    /// bar, and the difference is justified by what each rule is for. xsdz.1
+    /// makes a STANDALONE, auto-skip-grade presence claim anywhere in an episode,
+    /// so it must be near-infallible. A link here only extends a chain that a
+    /// CONFIRMED ad window already anchored, within `maxLinkGapSeconds`, never
+    /// across a content barrier, and its output is mark-only. It is answering
+    /// "does the break continue?", not "is there an ad here?".
+    ///
+    /// Measured, on rediff-confirmed pod boundaries: admitting single-strong-kind
+    /// links took recovered ad audio inside detected pods from 408 s to 617 s and
+    /// the count of pods still carrying a >30 s hole from 11 to 7, while the
+    /// newly-claimed seconds landing OUTSIDE every rediff slot stayed at exactly
+    /// 23.0 s — i.e. every one of those extra 209 s landed inside a byte-confirmed
+    /// DAI insertion. Set `allowSingleStrongKindLinks: false` for the stricter
+    /// two-kind bar; the corpus eval keeps that arm as the conservative
+    /// comparison.
+    ///
+    /// Both of the vetted rule's guardrails still apply, and the second is
+    /// literally the same function rather than a copy of it:
+    ///   • a show-owned-domain negative-pattern hit nearby suppresses (the show
+    ///     plugging its OWN site is exactly what must not be treated as an ad);
+    ///   • `LexicalAutoAdEvidenceBuilder.hasNegativeContext` suppresses when a
+    ///     news / review / editorial cue sits near the pair.
     static func adCopyLinks(
+        chunks: [TranscriptChunk],
         hits: [LexicalHit],
-        analysisAssetId: String,
+        allowSingleStrongKindLinks: Bool = true,
         builder: LexicalAutoAdEvidenceBuilder = LexicalAutoAdEvidenceBuilder(),
         config: LexicalAutoAdEvidenceBuilder.Config = .default
     ) -> [AdCopyLink] {
-        let usable = hits.filter {
-            $0.startTime.isFinite && $0.endTime.isFinite && $0.endTime >= $0.startTime
+        let signals = adCopySignals(chunks: chunks, hits: hits)
+        guard signals.contains(where: { $0.kind.isStrong }) else { return [] }
+        let negativeHits = hits.filter {
+            $0.isNegativePattern && $0.startTime.isFinite && $0.endTime.isFinite
         }
-        guard !usable.isEmpty else { return [] }
 
-        let sponsors = usable.filter {
-            $0.category == .sponsor && !$0.isNegativePattern && !$0.isMetadataOrigin
+        // Candidate link intervals, before the guardrails.
+        var candidates: [AdCopyLink] = []
+        if allowSingleStrongKindLinks {
+            for signal in signals where signal.kind.isStrong {
+                candidates.append(AdCopyLink(start: signal.start, end: signal.end))
+            }
         }
-        let ctas = usable.filter {
-            ($0.category == .promoCode || $0.category == .urlCTA)
-                && !$0.isNegativePattern && !$0.isMetadataOrigin
-        }
-        guard !sponsors.isEmpty, !ctas.isEmpty else { return [] }
-
-        // Distinct candidate intervals only. A show can mention one sponsor and
-        // one URL many times, and every duplicated pair would otherwise cost a
-        // full builder evaluation (regex work) for an interval already decided.
-        var candidates = Set<AdCopyLink>()
-        for sponsor in sponsors {
-            for cta in ctas {
-                guard abs(cta.startTime - sponsor.startTime) <= config.cooccurrenceWindow else {
-                    continue
-                }
-                let start = min(sponsor.startTime, cta.startTime)
-                let end = max(sponsor.endTime, cta.endTime)
+        for (index, first) in signals.enumerated() {
+            for second in signals[(index + 1)...] {
+                guard first.kind != second.kind else { continue }
+                guard first.kind.isStrong || second.kind.isStrong else { continue }
+                guard second.start - first.start <= config.cooccurrenceWindow else { break }
+                let start = min(first.start, second.start)
+                let end = max(first.end, second.end)
                 guard end > start else { continue }
-                candidates.insert(AdCopyLink(start: start, end: end))
+                candidates.append(AdCopyLink(start: start, end: end))
             }
         }
         guard !candidates.isEmpty else { return [] }
@@ -284,23 +452,88 @@ enum AdPodContinuation {
         for candidate in candidates.sorted(by: {
             $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end
         }) {
-            // A candidate already inside an accepted link adds nothing.
+            // Already inside an accepted link ⇒ nothing to add, and no need to
+            // pay for the guardrail evaluation.
             if links.contains(where: { $0.start <= candidate.start && $0.end >= candidate.end }) {
                 continue
             }
-            // The builder is the authority. Pad the probe so its
-            // negative-context guardrail can see nearby hits.
-            let probe = DecodedSpan(
-                id: "pod-continuation-probe",
-                assetId: analysisAssetId,
-                firstAtomOrdinal: 0,
-                lastAtomOrdinal: 0,
-                startTime: candidate.start - config.negativeContextRadius,
-                endTime: candidate.end + config.negativeContextRadius,
-                anchorProvenance: []
-            )
-            guard !builder.buildEntries(hits: usable, for: probe).isEmpty else { continue }
+            let crossesShowOwnedDomain = negativeHits.contains {
+                $0.startTime <= candidate.end + config.negativeContextRadius
+                    && $0.endTime >= candidate.start - config.negativeContextRadius
+            }
+            guard !crossesShowOwnedDomain else { continue }
+            let center = (candidate.start + candidate.end) / 2.0
+            guard !builder.hasNegativeContext(near: center, hits: hits) else { continue }
             links.append(candidate)
+        }
+        return mergeLinks(links)
+    }
+
+    /// Length (seconds) of the prose window handed to the rhetorical-grammar
+    /// assessor below. A finished radio spot runs roughly 15–30 s and its
+    /// persuasion arc occupies the whole of it, so a 30 s window is the smallest
+    /// that can hold a full arc. Windows slide one transcript segment at a time,
+    /// so a spot straddling a segment boundary is still seen whole.
+    static let rhetoricalProbeWindowSeconds = 30.0
+
+    /// Ad-copy links from the RHETORICAL GRAMMAR — the answer to "what says this
+    /// is ad copy when there is no sponsor disclosure and no promo code?"
+    ///
+    /// `RhetoricalGrammarEvidenceBuilder` (playhead-xsdz.12) exists for exactly
+    /// this case: it fires on the ORDERED CO-OCCURRENCE of three or more
+    /// persuasion roles (hook → problem → solution → evidence → offer → CTA) and
+    /// was written because that "fires even when the existing sponsor /
+    /// promo-code / URL lexical cues do NOT". Its own file documents why three
+    /// roles is the precision bar: an editorial brand mention is SOLUTION-only, a
+    /// self-promo is CTA-only, a product review is EVIDENCE+SOLUTION — none of
+    /// them clears it.
+    ///
+    /// This matters because the corpus says so. The Conan pod's Carter's spot is
+    /// "Carter's has your family covered for every summer first … Generations of
+    /// families have trusted our must-haves … Visit Carter's dot com to shop the
+    /// latest styles" — an entire creative whose only lexical hit is a bare URL,
+    /// which is deliberately NOT enough for a link on its own. The prose is
+    /// nonetheless unmistakable ad copy, and the grammar is what reads it.
+    ///
+    /// NOTE this is a DIFFERENT use of the channel from the fusion one, which is
+    /// gated OFF pending a corpus A/B (`rhetoricalGrammarEnabled`). There it adds
+    /// score mass to a presence verdict. Here it can only extend a chain that a
+    /// CONFIRMED ad window already anchored, its output is mark-only, and a
+    /// content barrier still stops the walk — so it is doing bounded extent work
+    /// next to an established ad rather than deciding presence on its own.
+    static func rhetoricalLinks(
+        chunks: [TranscriptChunk],
+        builder: RhetoricalGrammarEvidenceBuilder = RhetoricalGrammarEvidenceBuilder()
+    ) -> [AdCopyLink] {
+        let usable = chunks
+            .filter {
+                $0.startTime.isFinite && $0.endTime.isFinite
+                    && $0.endTime > $0.startTime && !$0.text.isEmpty
+            }
+            .sorted { $0.startTime < $1.startTime }
+        guard !usable.isEmpty else { return [] }
+
+        var links: [AdCopyLink] = []
+        for startIndex in usable.indices {
+            let windowStart = usable[startIndex].startTime
+            var endIndex = startIndex
+            while endIndex + 1 < usable.count,
+                  usable[endIndex + 1].endTime - windowStart <= rhetoricalProbeWindowSeconds {
+                endIndex += 1
+            }
+            // A single segment is prose too short to carry a three-role arc; a
+            // one-segment "window" would only ever fire on a freak sentence.
+            guard endIndex > startIndex else { continue }
+            let windowEnd = usable[endIndex].endTime
+            // Already inside an accepted link ⇒ nothing to add.
+            if links.contains(where: { $0.start <= windowStart && $0.end >= windowEnd }) {
+                continue
+            }
+            let text = usable[startIndex...endIndex]
+                .map(\.text)
+                .joined(separator: " ")
+            guard builder.assess(text: text) != nil else { continue }
+            links.append(AdCopyLink(start: windowStart, end: windowEnd))
         }
         return mergeLinks(links)
     }
@@ -308,8 +541,8 @@ enum AdPodContinuation {
     /// Sort and union overlapping/touching links so the chain walk sees one
     /// interval per contiguous run of ad copy.
     static func mergeLinks(_ links: [AdCopyLink]) -> [AdCopyLink] {
-        let merged = unionIntervals(links.map { (start: $0.start, end: $0.end) })
-        return merged.map { AdCopyLink(start: $0.start, end: $0.end) }
+        unionIntervals(links.map { (start: $0.start, end: $0.end) })
+            .map { AdCopyLink(start: $0.start, end: $0.end) }
     }
 
     // MARK: - Barrier derivation (the positive content-resumed half)
@@ -334,11 +567,17 @@ enum AdPodContinuation {
     ///    side because the hit is an interpolated instant, not an interval, and a
     ///    zero-width barrier cannot block anything.
     ///
+    ///  • A host-to-audience SHOW-BOUNDARY phrase (``showAddressPatterns``) —
+    ///    "thanks for tuning in", "see you tomorrow", "we'll be right back". Added
+    ///    after an audit caught this pass claiming a sign-off as ad; see that
+    ///    property's note for the case.
+    ///
     /// Metadata-origin lexical hits are excluded: a feed-description phrase is
     /// not an utterance at a time, so it cannot mark where content resumed.
     static func contentBarriers(
         semanticScanResults: [SemanticScanResult],
-        lexicalHits: [LexicalHit]
+        lexicalHits: [LexicalHit],
+        chunks: [TranscriptChunk] = []
     ) -> [ContentBarrier] {
         var barriers: [ContentBarrier] = []
 
@@ -373,9 +612,64 @@ enum AdPodContinuation {
             )
         }
 
+        for chunk in chunks {
+            guard chunk.startTime.isFinite,
+                  chunk.endTime.isFinite,
+                  chunk.endTime > chunk.startTime,
+                  !chunk.normalizedText.isEmpty else {
+                continue
+            }
+            let text = chunk.normalizedText
+            let range = NSRange(location: 0, length: (text as NSString).length)
+            let matched = compiledShowAddressPatterns.contains {
+                $0.firstMatch(in: text, range: range) != nil
+            }
+            if matched {
+                barriers.append(ContentBarrier(start: chunk.startTime, end: chunk.endTime))
+            }
+        }
+
         let merged = unionIntervals(barriers.map { (start: $0.start, end: $0.end) })
         return merged.map { ContentBarrier(start: $0.start, end: $0.end) }
     }
+
+    /// Host-to-audience SHOW-BOUNDARY phrases: the host speaking to the listener
+    /// about the programme rather than selling anything. An affirmative statement
+    /// that this second is show, which is why it belongs with the FM `noAds`
+    /// verdict rather than in the ad-evidence set.
+    ///
+    /// FOUND BY AUDIT, not by imagination. The first calibrated run of this pass
+    /// claimed `themove-2026-07-15` 2964.1–2987.1 as ad. Reading the transcript
+    /// for those seconds: "Wow, we were all over the place today. I'm proud of us
+    /// … Thanks for tuning in everybody. See you tomorrow." — the host's sign-off,
+    /// sitting between a Ventum sponsor CTA the pipeline had confirmed and the
+    /// post-roll pod, and the chain bridged straight across it. That was ~9 s of
+    /// SHOW claimed as ad: the exact failure this bead must not ship.
+    ///
+    /// "we'll be right back" is here too. It is a GO-TO-BREAK marker rather than a
+    /// return, but a barrier is a WALL, and this phrase sits precisely on the
+    /// show/pod boundary — which is the only place it needs to hold.
+    ///
+    /// FAILS CLOSED IN THE RIGHT DIRECTION: if one of these fires inside a
+    /// cross-promo ("thanks for listening to …"), the chain stops early and we
+    /// lose recall. Losing an ad is the cheap error; eating the show is not.
+    static let showAddressPatterns: [String] = [
+        #"\bthanks for (tuning in|listening|joining us)\b"#,
+        #"\bthank you for (tuning in|listening|joining us)\b"#,
+        #"\bsee you (tomorrow|next (week|time|episode)|then)\b"#,
+        #"\bwe.ll see you (tomorrow|next (week|time)|then)\b"#,
+        #"\bthat.s (it|all) for (today|now|this (week|episode))\b"#,
+        #"\buntil next time\b"#,
+        #"\bwe.ll be right back\b"#,
+        #"\bwe.re back\b"#,
+        #"\bwelcome back to\b"#,
+        #"\byou.re listening to\b"#
+    ]
+
+    private static let compiledShowAddressPatterns: [NSRegularExpression] =
+        showAddressPatterns.compactMap {
+            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
+        }
 
     /// Half-width (seconds) given to an explicit-return-marker barrier. A
     /// lexical hit's time is interpolated within its transcript chunk, so it

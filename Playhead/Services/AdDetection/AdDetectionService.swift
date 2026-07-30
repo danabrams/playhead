@@ -6297,12 +6297,13 @@ actor AdDetectionService {
                 .filter { $0.boundaryState == "userMarked" }
                 .map { (start: $0.startTime, end: $0.endTime) }
             let podLinks = AdPodContinuation.adCopyLinks(
-                hits: lexicalHits,
-                analysisAssetId: analysisAssetId
+                chunks: canonicalChunks,
+                hits: lexicalHits
             )
             let podBarriers = AdPodContinuation.contentBarriers(
                 semanticScanResults: semanticScanResults,
-                lexicalHits: lexicalHits
+                lexicalHits: lexicalHits,
+                chunks: canonicalChunks
             )
             let continuationMarks = AdPodContinuation.compose(
                 existingWindows: existingWindows,

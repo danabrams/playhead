@@ -286,7 +286,11 @@ struct LexicalAutoAdEvidenceBuilder: Sendable {
     /// deliberate follow-up (would require threading transcript text into
     /// this seam); the strong co-occurrence bar is the primary precision
     /// control today.
-    private func hasNegativeContext(near center: Double, hits: [LexicalHit]) -> Bool {
+    ///
+    /// NOT `private` (playhead-xsdz.65): `AdPodContinuation` applies the SAME
+    /// guardrail to its ad-copy links, and a second copy of this rule would drift
+    /// from this one silently. One definition, two callers.
+    func hasNegativeContext(near center: Double, hits: [LexicalHit]) -> Bool {
         for hit in hits {
             let hitCenter = (hit.startTime + hit.endTime) / 2.0
             guard abs(hitCenter - center) <= config.negativeContextRadius else { continue }
