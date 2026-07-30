@@ -753,6 +753,23 @@ struct AdDetectionConfig: Sendable {
     /// `<= 0` to disable the clamp.
     let preRollStartClampSeconds: Double
 
+    /// playhead-xsdz.65: recover the ad-pod NEIGHBOURS of an ad we already found
+    /// (`AdPodContinuation`, applied as backfill Step 18b).
+    ///
+    /// A DAI pod is a chain of creatives; measured against rediff-confirmed pod
+    /// boundaries, 13 of the 17 slots the pipeline detected at all carried an
+    /// uncovered run longer than 30 s — 994 s of ad audio inside pods we had
+    /// already located. This pass walks outward from a confirmed window over
+    /// regions where the vetted lexical auto-ad rule fires, stopping at a
+    /// positive content-resumed barrier, and emits the recovered material as NEW
+    /// mark-only rows. It modifies no existing window.
+    ///
+    /// Ships OFF (this repo's convention for anything that moves production
+    /// boundaries — xsdz.37, fl4j, b6jq PR5 all shipped flag-off): flag-off
+    /// short-circuits BEFORE any derivation or write, so a backfill is
+    /// byte-identical to pre-xsdz.65. Flip after a corpus A/B.
+    let podContinuationEnabled: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -854,7 +871,8 @@ struct AdDetectionConfig: Sendable {
         hostReadConfidenceFloor: Double = 0.9,
         postRollGuardSeconds: Double = 90.0,
         unanchoredExtentBlocksAutoSkip: Bool = true,
-        preRollStartClampSeconds: Double = 20.0
+        preRollStartClampSeconds: Double = 20.0,
+        podContinuationEnabled: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -930,6 +948,7 @@ struct AdDetectionConfig: Sendable {
         self.postRollGuardSeconds = postRollGuardSeconds
         self.unanchoredExtentBlocksAutoSkip = unanchoredExtentBlocksAutoSkip
         self.preRollStartClampSeconds = preRollStartClampSeconds
+        self.podContinuationEnabled = podContinuationEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -992,7 +1011,8 @@ struct AdDetectionConfig: Sendable {
         hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); inert while certaintyTieredSkipEnabled is false
         postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
-        preRollStartClampSeconds: 20.0  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
+        preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
+        podContinuationEnabled: false  // playhead-xsdz.65: ad-pod continuation ships OFF and fully inert (zero ad_windows writes, byte-identical backfill); flip after corpus A/B
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip
@@ -6241,6 +6261,74 @@ actor AdDetectionService {
             }
         }
 
+        // ── Step 18b: ad-pod continuation (playhead-xsdz.65) ──────────────────
+        // We catch ad #1 of a multi-ad pod and miss #2 and #3: measured against
+        // rediff-confirmed (byte-derived) pod boundaries, 13 of the 17 slots the
+        // pipeline detected at all carried an uncovered run longer than 30 s —
+        // 994 s of ad audio inside pods we had ALREADY located, largest hole
+        // 175 s. `AdPodContinuation` walks outward from each confirmed window
+        // over regions where the vetted lexical auto-ad rule fires and stops at
+        // a POSITIVE content-resumed barrier (FM `noAds` over good transcript,
+        // or an explicit spoken return marker), emitting the recovered pod
+        // material as NEW mark-only rows.
+        //
+        // Placed HERE, after specialist compose, for two reasons: the pass needs
+        // the asset's final persisted window set (so it seeds off the reconciled
+        // fusion geometry rather than a mid-pipeline snapshot), and being purely
+        // additive it cannot perturb anything computed above.
+        //
+        // NOTHING EXISTING IS MODIFIED. No seed's geometry, gate, anchors or id
+        // changes — so playhead-ye0n (never demote a whole window for extending
+        // one edge) holds by construction, and playhead-2350's gate is untouched:
+        // every emitted row is `markOnly` with both edge anchors `.unanchored`,
+        // which can never auto-skip.
+        //
+        // Hard-gated on `podContinuationEnabled` (default OFF): flag-off
+        // short-circuits BEFORE any fetch/derivation/write, so this backfill is
+        // byte-identical to pre-xsdz.65.
+        if config.podContinuationEnabled {
+            let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+            // A LISTENER'S MARK IS OFF LIMITS (playhead-lc4c). `userMarked` rows
+            // are persisted separately from the fusion set, so the walk must be
+            // TOLD about them; it refuses to cross one. Read here rather than
+            // reusing `protectedUserMarkedRegions` from the clamp because Step 18
+            // may have written rows since.
+            let protectedRegions = existingWindows
+                .filter { $0.boundaryState == "userMarked" }
+                .map { (start: $0.startTime, end: $0.endTime) }
+            let podLinks = AdPodContinuation.adCopyLinks(
+                hits: lexicalHits,
+                analysisAssetId: analysisAssetId
+            )
+            let podBarriers = AdPodContinuation.contentBarriers(
+                semanticScanResults: semanticScanResults,
+                lexicalHits: lexicalHits
+            )
+            let continuationMarks = AdPodContinuation.compose(
+                existingWindows: existingWindows,
+                adCopyLinks: podLinks,
+                contentBarriers: podBarriers,
+                protectedRegions: protectedRegions,
+                episodeDuration: episodeDuration,
+                analysisAssetId: analysisAssetId
+            )
+            let reconciledContinuation = Self.reconcileVersionScopedMarkSets(
+                newMarks: continuationMarks,
+                existingWindows: existingWindows,
+                detectorVersion: AdPodContinuation.detectorVersion
+            )
+            if !reconciledContinuation.windows.isEmpty
+                || !reconciledContinuation.retiredIDs.isEmpty {
+                try await store.reconcileBackfillAdWindows(
+                    reconciledContinuation.windows,
+                    retiredIDs: reconciledContinuation.retiredIDs
+                )
+            }
+            logger.info(
+                "Backfill Step 18b [xsdz.65]: links=\(podLinks.count) barriers=\(podBarriers.count) protected=\(protectedRegions.count) composed=\(reconciledContinuation.windows.count) retired=\(reconciledContinuation.retiredIDs.count)"
+            )
+        }
+
         // ── Post-pipeline: priors + coverage watermark ────────────────────────
 
         if podcastId.isEmpty {
@@ -8467,10 +8555,32 @@ actor AdDetectionService {
         newMarks: [AdWindow],
         existingWindows: [AdWindow]
     ) -> (windows: [AdWindow], retiredIDs: Set<String>) {
+        reconcileVersionScopedMarkSets(
+            newMarks: newMarks,
+            existingWindows: existingWindows,
+            detectorVersion: specialistDetectorVersion
+        )
+    }
+
+    /// The version-scoped mark reconcile, generalized over `detectorVersion` so
+    /// every additive mark producer shares ONE reconcile invariant instead of
+    /// copying it. Today: specialist marks (`"specialist-ft-v2"`, playhead-b6jq
+    /// PR5) and ad-pod continuation marks (`"pod-continuation-v1"`,
+    /// playhead-xsdz.65).
+    ///
+    /// Rows of any OTHER detector version are not reconcilable under this scope,
+    /// so they land in `protectedIDs` and can neither be retired nor replaced —
+    /// which is what keeps two additive producers from clobbering each other, and
+    /// keeps both away from FM (`"detection-v1"`), `shared-` and user-owned rows.
+    static func reconcileVersionScopedMarkSets(
+        newMarks: [AdWindow],
+        existingWindows: [AdWindow],
+        detectorVersion: String
+    ) -> (windows: [AdWindow], retiredIDs: Set<String>) {
         var reconcilableIDs = Set<String>()
         var protectedIDs = Set<String>()
         for row in existingWindows {
-            if isReconcilableBackfillWindow(row, detectorVersion: specialistDetectorVersion) {
+            if isReconcilableBackfillWindow(row, detectorVersion: detectorVersion) {
                 reconcilableIDs.insert(row.id)
             } else {
                 protectedIDs.insert(row.id)
