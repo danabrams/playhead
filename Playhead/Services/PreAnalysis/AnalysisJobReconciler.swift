@@ -185,7 +185,7 @@ actor AnalysisJobReconciler {
         // playhead-onn6: AFTER the backfill reaper (rows it just rescued from
         // `running` are now resumable and must be counted) and after step 7 (an
         // episode receiving a fresh job is already excluded as active).
-        let stepAdScanRedrive = try await mintAdScanRedrives()
+        let stepAdScanRedrive = await mintAdScanRedrives()
         // playhead-dqfm: LAST — runs after `discoverUnEnqueuedDownloads`
         // (step 7) so freshly-minted priority-0 background rows are part of
         // the backlog it ranks, and after the reapers (disjoint tables) so it
@@ -725,7 +725,23 @@ actor AnalysisJobReconciler {
     /// this process just rescued from `running` are counted as resumable, and
     /// after `discoverUnEnqueuedDownloads` so an episode that is getting a fresh
     /// job anyway is already excluded by the active-episode check below.
-    private func mintAdScanRedrives() async throws -> Int {
+    ///
+    /// **Best-effort by contract**, like `reprioritizeScarceBacklog`: `async`, not
+    /// `async throws`, and every store error is logged and swallowed. This is
+    /// opportunistic repair. Letting a coverage read fail `reconcile()` would mask
+    /// lease recovery — a critical step — and would make a `BGProcessingTask`
+    /// report `.failed` for a hiccup in a step whose only job is to top up
+    /// coverage. Minting nothing is always safe; the next reconcile retries.
+    private func mintAdScanRedrives() async -> Int {
+        do {
+            return try await mintAdScanRedrivesThrowing()
+        } catch {
+            logger.warning("ad_scan_redrive sweep failed (skipped): \(error)")
+            return 0
+        }
+    }
+
+    private func mintAdScanRedrivesThrowing() async throws -> Int {
         let assetIds = try await store.fetchAssetIdsWithResumableBackfillJobs(
             limit: Self.maxAdScanRedriveCandidatesPerReconcile
         )
@@ -740,70 +756,19 @@ actor AnalysisJobReconciler {
         var minted = 0
         for assetId in assetIds {
             guard minted < Self.maxAdScanRedrivesPerReconcile else { break }
-            guard let asset = try await store.fetchAsset(id: assetId) else { continue }
-            guard !episodesWithPendingWork.contains(asset.episodeId) else { continue }
-            // The re-drive inherits the episode's fingerprint / download / tier
-            // from its most recent job row. No row means we cannot name the audio
-            // this asset came from, so there is nothing safe to mint.
-            guard let latest = try await store.fetchLatestJobForEpisode(asset.episodeId) else {
-                continue
-            }
-            guard let workKey = AnalysisWorkScheduler.nextAdScanRedriveWorkKey(for: latest) else {
-                continue
-            }
-            // Same guard `enqueueReplacement` uses: never mint a pass for an
-            // episode whose audio is gone. Without it, a stale coverage-lane row
-            // whose media was deleted would mint work that can only fail.
-            guard await downloadManager.cachedFileURL(for: asset.episodeId) != nil else {
-                continue
-            }
-
-            let adScanFraction = try await store
-                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
-                .adScanFraction
-            let resumableCount = try await store.countResumableBackfillJobs(assetId: assetId)
-            guard AnalysisWorkScheduler.shouldMintAdScanRedrive(
-                adScanFraction: adScanFraction,
-                resumableCoverageJobCount: resumableCount
+            guard let candidate = try await adScanRedriveCandidate(
+                assetId: assetId,
+                episodesWithPendingWork: episodesWithPendingWork
             ) else {
                 continue
             }
-
-            let now = Date().timeIntervalSince1970
-            let redrive = AnalysisJob(
-                jobId: UUID().uuidString,
-                jobType: latest.jobType,
-                episodeId: asset.episodeId,
-                podcastId: latest.podcastId,
-                analysisAssetId: assetId,
-                workKey: workKey,
-                sourceFingerprint: latest.sourceFingerprint,
-                downloadId: latest.downloadId,
-                // Background lane: repair work never preempts what the user is
-                // waiting on.
-                priority: 0,
-                desiredCoverageSec: latest.desiredCoverageSec,
-                // Carry the predecessor's coverage so a no-op pass reads as
-                // no-progress rather than as fresh advancement.
-                featureCoverageSec: latest.featureCoverageSec,
-                transcriptCoverageSec: latest.transcriptCoverageSec,
-                cueCoverageSec: latest.cueCoverageSec,
-                state: "queued",
-                attemptCount: 0,
-                nextEligibleAt: nil,
-                leaseOwner: nil,
-                leaseExpiresAt: nil,
-                lastErrorCode: nil,
-                createdAt: now,
-                updatedAt: now
-            )
-            if try await store.insertJob(redrive) {
+            if try await store.insertJob(candidate.job) {
                 minted += 1
                 logger.info(
                     """
                     ad_scan_redrive_minted asset=\(assetId, privacy: .public) \
-                    resumableCoverageJobs=\(resumableCount) \
-                    ordinal=\(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: workKey) ?? 0)
+                    resumableCoverageJobs=\(candidate.resumableCount) \
+                    ordinal=\(candidate.ordinal)
                     """
                 )
             }
@@ -812,6 +777,84 @@ actor AnalysisJobReconciler {
             logger.info("ad_scan_redrive_minted total=\(minted)")
         }
         return minted
+    }
+
+    private struct AdScanRedriveCandidate {
+        let job: AnalysisJob
+        let resumableCount: Int
+        let ordinal: Int
+    }
+
+    /// The per-asset half of the sweep: every reason NOT to mint, in
+    /// cheapest-first order, then the row to insert.
+    private func adScanRedriveCandidate(
+        assetId: String,
+        episodesWithPendingWork: Set<String>
+    ) async throws -> AdScanRedriveCandidate? {
+        guard let asset = try await store.fetchAsset(id: assetId) else { return nil }
+        guard !episodesWithPendingWork.contains(asset.episodeId) else { return nil }
+        // The re-drive inherits the episode's fingerprint / download / tier from
+        // its most recent job row. No row means we cannot name the audio this
+        // asset came from, so there is nothing safe to mint. (Those episodes are
+        // not abandoned: `discoverUnEnqueuedDownloads` re-mints a full analysis
+        // job for them when their download is still cached.)
+        guard let latest = try await store.fetchLatestJobForEpisode(asset.episodeId) else {
+            return nil
+        }
+        guard let workKey = AnalysisWorkScheduler.nextAdScanRedriveWorkKey(for: latest) else {
+            return nil
+        }
+        // Same guard `enqueueReplacement` uses: never mint a pass for an episode
+        // whose audio is gone. Without it, a stale coverage-lane row whose media
+        // was deleted would mint work that can only fail.
+        guard await downloadManager.cachedFileURL(for: asset.episodeId) != nil else {
+            return nil
+        }
+
+        let adScanFraction = try await store
+            .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+            .adScanFraction
+        let resumableCount = try await store.countResumableBackfillJobs(assetId: assetId)
+        guard AnalysisWorkScheduler.shouldMintAdScanRedrive(
+            adScanFraction: adScanFraction,
+            resumableCoverageJobCount: resumableCount
+        ) else {
+            return nil
+        }
+
+        let now = Date().timeIntervalSince1970
+        let redrive = AnalysisJob(
+            jobId: UUID().uuidString,
+            jobType: latest.jobType,
+            episodeId: asset.episodeId,
+            podcastId: latest.podcastId,
+            analysisAssetId: assetId,
+            workKey: workKey,
+            sourceFingerprint: latest.sourceFingerprint,
+            downloadId: latest.downloadId,
+            // Background lane: repair work never preempts what the user is
+            // waiting on.
+            priority: 0,
+            desiredCoverageSec: latest.desiredCoverageSec,
+            // Carry the predecessor's coverage so a no-op pass reads as
+            // no-progress rather than as fresh advancement.
+            featureCoverageSec: latest.featureCoverageSec,
+            transcriptCoverageSec: latest.transcriptCoverageSec,
+            cueCoverageSec: latest.cueCoverageSec,
+            state: "queued",
+            attemptCount: 0,
+            nextEligibleAt: nil,
+            leaseOwner: nil,
+            leaseExpiresAt: nil,
+            lastErrorCode: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        return AdScanRedriveCandidate(
+            job: redrive,
+            resumableCount: resumableCount,
+            ordinal: AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: workKey) ?? 0
+        )
     }
 
     // MARK: - Step: Scarcity-aware backfill re-prioritization (playhead-dqfm)
