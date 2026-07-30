@@ -92,8 +92,12 @@ struct SpecialistScanPlanner: Sendable {
             }
             return lhs.segmentIndex < rhs.segmentIndex
         }
-        guard let episodeStart = ordered.first?.startTime,
-              let episodeEnd = ordered.last?.endTime,
+        // playhead-r5um / playhead-csbq: min/max over the segments, not
+        // first/last of an array ordered by `segmentIndex`. Byte-identical
+        // whenever the segments run forwards; it simply cannot produce an
+        // inverted episode span, which every anchor below is clamped to.
+        guard let episodeStart = ordered.map(\.startTime).min(),
+              let episodeEnd = ordered.map(\.endTime).max(),
               episodeStart < episodeEnd else { return [] }
 
         // 1. Collect UNPADDED anchor spans from every candidate source. These
