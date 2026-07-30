@@ -1813,6 +1813,12 @@ actor BackgroundProcessingService {
                     + report.unEnqueuedDownloadsCreated
                     + report.strandedBackfillJobsReset
                     + report.strandedFinalPassJobsReset
+                    // playhead-onn6: a sweep whose only yield was minting ad-scan
+                    // re-drives DID recover work — real queued, dispatchable rows.
+                    // Omitting it would classify that run `.noOp` with
+                    // `jobsCompleted: 0`, hiding the fix from the ledger built to
+                    // make background recovery visible.
+                    + report.adScanRedrivesMinted
                 let outcome: BackgroundTaskRunOutcome =
                     (recovered > 0 || jobsSeen > 0) ? .recoveredWork : .noOp
                 // Wait for the row insert to land before the UPDATE.

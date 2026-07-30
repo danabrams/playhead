@@ -13627,8 +13627,11 @@ actor AnalysisStore {
         /// `attemptCount + 1` (it owns the lease, so no concurrent
         /// writer) instead of round-tripping a fetch.
         var incrementAttempt: Bool = false
-        /// If non-nil, runs `insertJob` for the next-tier child row
-        /// (only used by the tier-advance arm).
+        /// If non-nil, runs `insertJob` for a child row minted by the arm: the
+        /// next-tier job (`tierAdvance`) or a playhead-onn6 ad-scan re-drive (the
+        /// three terminal-success arms). `insertJob` is `INSERT OR IGNORE`, so a
+        /// child whose work key already exists is a silent no-op rather than a
+        /// torn arm.
         var insertNextJob: AnalysisJob?
         /// If non-nil, rewrites the unique work key before the terminal
         /// state update. Used only for stale canonical-SHA tombstones so a
@@ -14712,28 +14715,53 @@ actor AnalysisStore {
     /// rows sat `queued` (some for six days) across 12 assets. The rows were not
     /// debris — they were real, still-actionable scan work with no selector.
     ///
-    /// **This is deliberately the EXACT mirror of the runner's M-5 resume
-    /// predicate** (`BackfillJobRunner.runPendingBackfill`, the
-    /// `fetchBackfillJob(byId:)` branch): a row is resumable when it is not
-    /// `complete` and its persisted `retryCount` is still under
-    /// ``AdmissionController/maxRetries``. If the two ever drift, the scheduler
-    /// starts minting re-drive passes for work the runner will skip — a job that
-    /// runs and achieves nothing, which is the failure this bead exists to
-    /// prevent rather than reproduce.
+    /// **Scoped to the asset's most recent enqueue batch, and that scoping is
+    /// load-bearing.** The obvious predicate — "any row that is not `complete` and
+    /// is under ``AdmissionController/maxRetries``" — reads like an exact mirror of
+    /// the runner's M-5 resume branch, and is not one. The runner does not iterate
+    /// rows; it RE-DERIVES jobIds from
+    /// `(analysisAssetId, transcriptVersion, phase, offset)` and looks each one up
+    /// (`BackfillJobRunner.runPendingBackfill`). A row whose tuple the current
+    /// invocation does not regenerate is never fetched, never enqueued, and its
+    /// `retryCount` never moves — so it stays "resumable" forever while being
+    /// permanently invisible to the runner. Three real producers of such orphans:
+    /// `transcriptVersion` is a content hash and changes on any re-transcription;
+    /// `CoveragePlanner` flips between the one-phase `fullCoverage` plan and the
+    /// three-phase `targetedWithAudit` plan, and offsets are positional; and the
+    /// specialist phase is flag-gated. On the 2026-07-29 device pull, 4 of the 16
+    /// assets with non-complete rows had orphans of exactly this shape.
     ///
-    /// `running` is the ONE deliberate narrowing. A live row belongs to whoever
-    /// holds the admission ticket (the session lane can be mid-drain on the same
-    /// asset), and a row stranded in `running` by a process death is normalised
-    /// back to `queued` by ``resetStrandedBackfillJobs()`` before it is counted.
-    /// Counting `running` here would let a concurrent drain look like outstanding
-    /// work and mint a redundant pass.
+    /// Counting only the newest batch fixes it without a schema change. Every row
+    /// a single `runPendingBackfill` invocation inserts shares one `now` snapshot
+    /// (phases are separated by `offset * 0.0001` s), and a RESUMED row keeps its
+    /// original `createdAt`, so the newest batch is by construction the one minted
+    /// under the newest `(transcriptVersion, plan)` the asset has seen. A
+    /// non-complete row in it means the last invocation genuinely left work
+    /// unfinished; an all-complete newest batch means the next pass would re-derive
+    /// the same ids, skip every one, and read no audio — the "job that runs and
+    /// achieves nothing" this guard exists to prevent.
+    ///
+    /// It errs toward NOT minting: an older batch that a future plan flip could
+    /// revive is not counted. That is the safe direction — a missed opportunity
+    /// costs nothing, a wasted Foundation Models pass costs the user battery.
+    ///
+    /// `running` is excluded. A live row belongs to whoever holds the admission
+    /// ticket (the session lane can be mid-drain on the same asset). Rows stranded
+    /// in `running` by a process death are normalised back to `queued` by
+    /// ``resetStrandedBackfillJobs()`` — but only on the reconciler path, and only
+    /// past its freshness floor, so on the scheduler path a freshly-stranded row
+    /// can under-count for a few minutes. Under-counting only ever suppresses a
+    /// mint, so the direction is safe.
     func countResumableBackfillJobs(assetId: String) throws -> Int {
         let sql = """
             SELECT COUNT(*) FROM backfill_jobs
-            WHERE analysisAssetId = ?
-              AND status <> ?
-              AND status <> ?
-              AND retryCount < ?
+            WHERE analysisAssetId = ?1
+              AND status <> ?2
+              AND status <> ?3
+              AND retryCount < ?4
+              AND createdAt >= (
+                    SELECT MAX(createdAt) FROM backfill_jobs WHERE analysisAssetId = ?1
+                  ) - ?5
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -14741,9 +14769,20 @@ actor AnalysisStore {
         bind(stmt, 2, BackfillJobStatus.complete.rawValue)
         bind(stmt, 3, BackfillJobStatus.running.rawValue)
         bind(stmt, 4, AdmissionController.maxRetries)
+        bind(stmt, 5, Self.backfillEnqueueBatchWindowSec)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(stmt, 0))
     }
+
+    /// playhead-onn6: how far back from an asset's newest `backfill_jobs.createdAt`
+    /// still counts as the SAME enqueue batch.
+    ///
+    /// One `runPendingBackfill` invocation stamps every row it inserts from a
+    /// single `clock()` reading, spreading phases by `offset * 0.0001` s — under a
+    /// millisecond for the whole plan. Half a second is three orders of magnitude
+    /// of headroom for that spread while staying far below any plausible gap
+    /// between two separate invocations (they are separated by an FM pass).
+    static let backfillEnqueueBatchWindowSec: Double = 0.5
 
     /// playhead-onn6: assets that still hold resumable coverage-lane work, most
     /// urgent first, capped at `limit`.
@@ -14764,8 +14803,17 @@ actor AnalysisStore {
     /// Oldest-first is the honest ordering for a backlog drain and matches the
     /// `createdAt ASC` tiebreak the table's own index already carries.
     ///
-    /// Resumability is the same predicate as the per-asset count, for the same
-    /// reason — see that method.
+    /// Deliberately the BROADER predicate: it does not apply the newest-batch
+    /// scoping that ``countResumableBackfillJobs(assetId:)`` does. This is the
+    /// candidate sweep — cheap, index-friendly, and allowed false positives; the
+    /// per-asset count is the authority and rejects them one line later in
+    /// `AnalysisJobReconciler.adScanRedriveCandidate`. Splitting it this way keeps
+    /// the correlated-subquery cost off the set scan.
+    ///
+    /// No index serves this shape (two `status <>` inequalities plus a
+    /// `GROUP BY`/`ORDER BY`), so it full-scans `backfill_jobs` and builds a temp
+    /// b-tree. That is acceptable at exactly one call per `reconcile()` on a table
+    /// with tens of rows; it would not be on a hot path.
     func fetchAssetIdsWithResumableBackfillJobs(limit: Int) throws -> [String] {
         guard limit > 0 else { return [] }
         let sql = """

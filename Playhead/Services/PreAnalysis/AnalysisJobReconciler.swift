@@ -718,8 +718,22 @@ actor AnalysisJobReconciler {
     /// capped at ``maxAdScanRedrivesPerReconcile`` inserts. Across passes the
     /// budget is the ordinal in the UNIQUE `workKey`
     /// (``AnalysisWorkScheduler/maxAdScanRedrives``), so relaunching the app
-    /// repeatedly cannot manufacture unbounded work: once the ordinal is spent,
-    /// `nextAdScanRedriveWorkKey` returns `nil` and this step is a no-op forever.
+    /// repeatedly cannot manufacture more work: once the ordinal is spent,
+    /// `nextAdScanRedriveWorkKey` returns `nil` and this step is a no-op.
+    ///
+    /// **The budget is per ANALYSIS GENERATION, not per episode-for-all-time, and
+    /// that is deliberate.** The ledger is the `workKey` string on `analysis_jobs`
+    /// rows, and `garbageCollectOldJobs` deletes `complete`/`superseded` rows older
+    /// than seven days. Once an episode's whole job history ages out,
+    /// `fetchLatestJobForEpisode` returns `nil` and this step goes permanently
+    /// quiet for it — UNLESS `discoverUnEnqueuedDownloads` re-mints a base job
+    /// because the audio is still downloaded, which is a full fresh analysis of the
+    /// episode that would have happened with or without this bead. A new analysis
+    /// that AGAIN leaves the scan short should get re-drives; that is the whole
+    /// point. So the worst case is a full re-analysis plus at most
+    /// ``AnalysisWorkScheduler/maxAdScanRedrives`` extra passes per episode per
+    /// seven days, dominated by the re-analysis itself — bounded per unit time, and
+    /// gated on the episode still being downloaded AND still measuring short.
     ///
     /// Position in `reconcile()`: after `reconcileStrandedBackfillJobs` so rows
     /// this process just rescued from `running` are counted as resumable, and
@@ -801,6 +815,16 @@ actor AnalysisJobReconciler {
         guard let latest = try await store.fetchLatestJobForEpisode(asset.episodeId) else {
             return nil
         }
+        // The latest job is looked up by EPISODE, and an episode can carry several
+        // assets — a re-download mints a new asset while the old one keeps its
+        // coverage-lane rows. Minting from a job that belongs to a different asset
+        // would stamp the row with the wrong `sourceFingerprint` and `downloadId`
+        // while pointing `analysisAssetId` at this one: the stale-fingerprint
+        // detector would compare the OTHER asset's fingerprint against the cached
+        // audio and never fire, and the re-drive ordinal would be charged to the
+        // other asset's work key, silently spending ITS budget. Require the
+        // identities to agree.
+        guard latest.analysisAssetId == assetId else { return nil }
         guard let workKey = AnalysisWorkScheduler.nextAdScanRedriveWorkKey(for: latest) else {
             return nil
         }

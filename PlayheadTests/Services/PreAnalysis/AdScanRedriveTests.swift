@@ -209,6 +209,14 @@ struct AdScanRedriveWorkKeyTests {
         #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: key ?? "") == 1)
     }
 
+    /// Pinned as a literal so the bound cannot be widened by editing the constant
+    /// alone — `chainIsBounded` below uses the symbol as its own oracle and would
+    /// otherwise pass at any value.
+    @Test("the re-drive budget is two")
+    func budgetIsTwo() {
+        #expect(AnalysisWorkScheduler.maxAdScanRedrives == 2)
+    }
+
     @Test("the chain advances 1 → 2 and then stops")
     func chainIsBounded() {
         var current = "fp-onn6:\(PreAnalysisConfig.analysisVersion):preAnalysis"
@@ -317,11 +325,74 @@ struct ResumableBackfillJobSelectorTests {
                     jobId: "bf-\(index)",
                     analysisAssetId: "a1",
                     retryCount: row.1,
-                    status: row.0
+                    status: row.0,
+                    // One batch: a single `runPendingBackfill` stamps every row it
+                    // inserts from one clock reading.
+                    createdAt: 5_000
                 )
             )
         }
         #expect(try await store.countResumableBackfillJobs(assetId: "a1") == 3)
+    }
+
+    /// **The orphan-batch guard.** `runPendingBackfill` re-derives jobIds from
+    /// `(assetId, transcriptVersion, phase, offset)` rather than iterating rows, so
+    /// a row whose tuple the current invocation no longer regenerates — a
+    /// superseded transcript version, a `CoveragePlanner` policy flip — can never
+    /// be resumed and its `retryCount` never moves. Counting it would license a
+    /// pass that re-derives the current ids, finds them all `complete`, and reads
+    /// no audio at all.
+    @Test("a stale earlier batch does not count as resumable work")
+    func staleBatchIsNotResumable() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, id: "a-batches")
+        // Batch 1 (an older transcript version): left queued forever.
+        for (index, phase) in [BackfillJobPhase.scanHarvesterProposals,
+                               .scanLikelyAdSlots,
+                               .scanRandomAuditWindows].enumerated() {
+            try await store.insertBackfillJob(
+                makeBackfillJob(
+                    jobId: "old-\(index)", analysisAssetId: "a-batches",
+                    phase: phase, status: .queued, createdAt: 1_000 + Double(index) * 0.0001
+                )
+            )
+        }
+        // Batch 2 (the current version): finished.
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "new-0", analysisAssetId: "a-batches",
+                phase: .fullEpisodeScan, status: .complete, createdAt: 9_000
+            )
+        )
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-batches") == 0,
+                "three orphaned rows from a superseded batch are not work the runner can do")
+
+        // …but an unfinished row in the NEWEST batch is real work.
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "new-1", analysisAssetId: "a-batches",
+                phase: .specialistHostReadScan, status: .queued, createdAt: 9_000.0003
+            )
+        )
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-batches") == 1)
+    }
+
+    /// The batch window must absorb the sub-millisecond spread one invocation
+    /// stamps across its phases without swallowing a genuinely older batch.
+    @Test("the batch window covers one plan's phase spread")
+    func batchWindowCoversOnePlan() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, id: "a-spread")
+        for index in 0..<5 {
+            try await store.insertBackfillJob(
+                makeBackfillJob(
+                    jobId: "spread-\(index)", analysisAssetId: "a-spread",
+                    status: .queued, createdAt: 7_000 + Double(index) * 0.0001
+                )
+            )
+        }
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-spread") == 5)
+        #expect(AnalysisStore.backfillEnqueueBatchWindowSec > 0.0005 * 100)
     }
 
     @Test("an asset with no coverage-lane rows counts zero")
@@ -331,30 +402,48 @@ struct ResumableBackfillJobSelectorTests {
         #expect(try await store.countResumableBackfillJobs(assetId: "a-empty") == 0)
     }
 
+    /// `deferred` is the thermal/battery outcome and the most common non-terminal
+    /// state on a warm device — it MUST qualify. `running` must not: that row
+    /// belongs to whoever holds the admission ticket.
     @Test("the set selector returns only assets with resumable work, capped")
     func setSelectorFiltersAndCaps() async throws {
         let store = try await makeTestStore()
-        for id in ["a-queued", "a-done", "a-exhausted"] {
+        for id in ["a-queued", "a-deferred", "a-done", "a-exhausted", "a-running"] {
             try await seedAsset(store, id: id)
         }
         try await store.insertBackfillJob(
-            makeBackfillJob(jobId: "bf-q", analysisAssetId: "a-queued", status: .queued)
+            makeBackfillJob(jobId: "bf-q", analysisAssetId: "a-queued",
+                            status: .queued, createdAt: 1_000)
         )
         try await store.insertBackfillJob(
-            makeBackfillJob(jobId: "bf-d", analysisAssetId: "a-done", status: .complete)
+            makeBackfillJob(jobId: "bf-df", analysisAssetId: "a-deferred",
+                            status: .deferred, createdAt: 2_000)
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(jobId: "bf-d", analysisAssetId: "a-done",
+                            status: .complete, createdAt: 3_000)
         )
         try await store.insertBackfillJob(
             makeBackfillJob(
                 jobId: "bf-x",
                 analysisAssetId: "a-exhausted",
                 retryCount: AdmissionController.maxRetries,
-                status: .failed
+                status: .failed,
+                createdAt: 4_000
             )
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(jobId: "bf-r", analysisAssetId: "a-running",
+                            status: .running, createdAt: 5_000)
         )
 
         let all = try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 100)
-        #expect(all == ["a-queued"])
+        #expect(all == ["a-queued", "a-deferred"])
         #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 0).isEmpty)
+        // And the per-asset authority agrees on each.
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-deferred") == 1)
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-running") == 0)
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-exhausted") == 0)
     }
 
     /// Oldest stranded work first — and explicitly NOT by `priority`.
@@ -607,6 +696,56 @@ struct AdScanRedriveReconcilerTests {
                 state: "queued"
             )
         )
+        let report = try await makeReconciler(
+            store: store,
+            downloads: cachedDownloads()
+        ).reconcile()
+        #expect(report.adScanRedrivesMinted == 0)
+        #expect(try await redriveJobs(store).isEmpty)
+    }
+
+    /// **Cross-asset identity.** An episode can carry several assets — a
+    /// re-download mints a new one while the old keeps its coverage-lane rows —
+    /// and `fetchLatestJobForEpisode` is keyed by EPISODE. Minting from another
+    /// asset's job would stamp the row with that asset's `sourceFingerprint` and
+    /// `downloadId` (so the stale-fingerprint detector would compare the wrong
+    /// audio and never fire) and would charge the ordinal to that asset's work
+    /// key, silently spending its budget.
+    @Test("no re-drive when the episode's newest job belongs to a different asset")
+    func crossAssetLatestJobIsRejected() async throws {
+        let store = try await makeTestStore()
+        try await seedStrandedDeviceAsset(store)
+        // A re-download: same episode, different asset and fingerprint, and its
+        // job row is the most recently updated.
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: "asset-redownload",
+                episodeId: Self.episodeId,
+                assetFingerprint: "fp-redownload",
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/redownload.m4a",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.completeFull.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: 2_113
+            )
+        )
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-redownload",
+                jobType: "preAnalysis",
+                episodeId: Self.episodeId,
+                analysisAssetId: "asset-redownload",
+                workKey: "fp-redownload:\(PreAnalysisConfig.analysisVersion):preAnalysis",
+                sourceFingerprint: "fp-redownload",
+                state: "complete",
+                updatedAt: Date().timeIntervalSince1970 + 60
+            )
+        )
+
         let report = try await makeReconciler(
             store: store,
             downloads: cachedDownloads()
@@ -923,17 +1062,17 @@ struct AdScanRedriveSchedulerTests {
             .adScanFraction
     }
 
-    /// **Termination.** Many cycles against a scan that never advances must stop.
-    /// Each dispatch runs the whole real pipeline; the ad-detection double reads
-    /// nothing, so the coverage lane stays resumable forever and only the ordinal
-    /// budget can end the chain. It must, and the asset must not be left
-    /// oscillating between states.
-    @Test("a never-progressing scan terminates at the re-drive budget")
-    func nonProgressingScanTerminates() async throws {
+    /// Runs the fixture to quiescence and reports what it cost.
+    /// `coverageLaneDrained` seeds the control: the same episode, equally
+    /// under-scanned, but with nothing left for a pass to resume.
+    private func driveToQuiescence(
+        coverageLaneDrained: Bool
+    ) async throws -> (dispatches: Int, backfillCalls: Int, store: AnalysisStore) {
         let store = try await makeTestStore()
         try await seedUnderScannedAsset(store, scannedSeconds: 300)
-        let before = try await adScanFraction(store)
-
+        if coverageLaneDrained {
+            try await store.markBackfillJobComplete(jobId: "bf-onn6", progressCursor: nil)
+        }
         // The scheduler's own clock, so a re-queue's exponential backoff can be
         // stepped over deterministically instead of slept through.
         let now = AdScanRedriveClock(start: Date(timeIntervalSince1970: 1_700_000_000))
@@ -947,7 +1086,6 @@ struct AdScanRedriveSchedulerTests {
             adDetection: adDetection,
             clock: { now.value }
         )
-
         var dispatches = 0
         for _ in 0..<15 {
             if await scheduler.processNextDispatchableJobForTesting() {
@@ -955,11 +1093,52 @@ struct AdScanRedriveSchedulerTests {
             }
             now.advance(by: 7_200)
         }
+        return (dispatches, adDetection.backfillCallCount, store)
+    }
+
+    /// **Termination, measured differentially.** Many cycles against a scan that
+    /// never advances must stop. Each dispatch runs the whole real pipeline; the
+    /// ad-detection double reads nothing, so the coverage lane stays resumable
+    /// forever and only the ordinal budget can end the chain.
+    ///
+    /// The cost assertion is the difference against a control episode whose
+    /// coverage lane is drained (so no re-drive is ever minted) rather than an
+    /// absolute count, because how many passes the ORIGINAL job needs before it
+    /// terminates is fixture detail this bead does not own. What this bead owns is
+    /// exactly how many EXTRA full pipeline passes a re-drive costs the user's
+    /// battery: `maxAdScanRedrives`, and not one more.
+    @Test("a never-progressing scan terminates at the re-drive budget")
+    func nonProgressingScanTerminates() async throws {
+        let control = try await driveToQuiescence(coverageLaneDrained: true)
+        let (dispatches, backfillCalls, store) = try await driveToQuiescence(
+            coverageLaneDrained: false
+        )
+        let before = try await adScanFraction(store)
+        let now = AdScanRedriveClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        now.advance(by: 15 * 7_200)
+
+        #expect(dispatches == control.dispatches + AnalysisWorkScheduler.maxAdScanRedrives,
+                "re-drives cost \(dispatches - control.dispatches) extra passes, expected \(AnalysisWorkScheduler.maxAdScanRedrives)")
+        #expect(backfillCalls == dispatches,
+                "every dispatch must reach the semantic backfill exactly once")
+        #expect(try await redriveWorkKeys(control.store).isEmpty,
+                "the control must not mint — otherwise the difference measures nothing")
 
         let keys = try await redriveWorkKeys(store)
         #expect(Set(keys).count == AnalysisWorkScheduler.maxAdScanRedrives,
                 "expected exactly \(AnalysisWorkScheduler.maxAdScanRedrives) re-drives, got \(keys)")
-        #expect(dispatches < 15, "the queue must go quiet, not keep dispatching forever")
+        // The minted rows are background-lane repair work and carry the
+        // predecessor's coverage, so a no-op pass reads as no-progress rather than
+        // as fresh advancement (which would re-queue it instead of terminating).
+        let base = try #require(try await store.fetchJob(byId: "job-onn6-base"))
+        for job in try await store.fetchJobsByState("complete")
+        where AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: job.workKey) != nil {
+            #expect(job.priority == 0, "a re-drive must never preempt user-facing work")
+            #expect(job.analysisAssetId == Self.assetId)
+            #expect(job.featureCoverageSec == base.featureCoverageSec)
+            #expect(job.transcriptCoverageSec == base.transcriptCoverageSec)
+            #expect(job.cueCoverageSec == base.cueCoverageSec)
+        }
         // Nothing dispatchable remains, and the coverage-lane row is untouched.
         #expect(try await store.fetchNextEligibleJob(
             deferredWorkAllowed: true,
