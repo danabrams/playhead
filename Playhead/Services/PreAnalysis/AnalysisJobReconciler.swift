@@ -92,9 +92,25 @@ actor AnalysisJobReconciler {
     /// orphaned coverage lane does not wake up to dozens of FM passes competing
     /// with whatever the user actually wants analysed. 8 is roughly one
     /// background window's worth of work at the observed per-episode cost, and
-    /// the ordering in `fetchAssetIdsWithResumableBackfillJobs` puts the most
-    /// valuable rows in the first slice.
+    /// the oldest-first ordering in `fetchAssetIdsWithResumableBackfillJobs`
+    /// drains the longest-stranded work first.
+    ///
+    /// This counts MINTS, not candidates — see
+    /// ``maxAdScanRedriveCandidatesPerReconcile``.
     static let maxAdScanRedrivesPerReconcile = 8
+
+    /// playhead-onn6: how many candidate assets one `reconcile()` will EXAMINE
+    /// before stopping, regardless of how many it mints.
+    ///
+    /// Separate from the mint cap because a skipped candidate must not consume a
+    /// mint slot. Some candidates are permanently unmintable AND sort to the
+    /// FRONT of the oldest-first ordering: on the 2026-07-29 device pull three
+    /// assets had every `analysis_jobs` row garbage-collected (they are covered by
+    /// `discoverUnEnqueuedDownloads` instead), and they were the three oldest. A
+    /// candidate budget would let those three silently consume 3 of the 8 slots on
+    /// every launch, forever. Examining is a handful of indexed reads, so this
+    /// bound keeps the sweep's cost fixed without letting skips starve it.
+    static let maxAdScanRedriveCandidatesPerReconcile = 64
 
     init(
         store: AnalysisStore,
@@ -711,7 +727,7 @@ actor AnalysisJobReconciler {
     /// job anyway is already excluded by the active-episode check below.
     private func mintAdScanRedrives() async throws -> Int {
         let assetIds = try await store.fetchAssetIdsWithResumableBackfillJobs(
-            limit: Self.maxAdScanRedrivesPerReconcile
+            limit: Self.maxAdScanRedriveCandidatesPerReconcile
         )
         guard !assetIds.isEmpty else { return 0 }
 
@@ -723,6 +739,7 @@ actor AnalysisJobReconciler {
 
         var minted = 0
         for assetId in assetIds {
+            guard minted < Self.maxAdScanRedrivesPerReconcile else { break }
             guard let asset = try await store.fetchAsset(id: assetId) else { continue }
             guard !episodesWithPendingWork.contains(asset.episodeId) else { continue }
             // The re-drive inherits the episode's fingerprint / download / tier

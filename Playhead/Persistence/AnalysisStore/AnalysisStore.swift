@@ -14748,25 +14748,34 @@ actor AnalysisStore {
     /// playhead-onn6: assets that still hold resumable coverage-lane work, most
     /// urgent first, capped at `limit`.
     ///
-    /// The set-shaped companion to ``countResumableBackfillJobs(assetId:)`` and
-    /// the reason `idx_backfill_jobs_status_priority` has existed unused since
-    /// the table was created: an orphaned `queued` row is invisible to every
-    /// other read, so the backlog it represents could only ever grow. Ordering is
-    /// highest phase priority first, then oldest work, so a capped sweep drains
-    /// the most valuable and most stale rows rather than an arbitrary slice.
+    /// The set-shaped companion to ``countResumableBackfillJobs(assetId:)``: an
+    /// orphaned `queued` row is invisible to every other read, so the backlog it
+    /// represents could only ever grow.
+    ///
+    /// **Ordered oldest-stranded-first, and deliberately NOT by
+    /// `backfill_jobs.priority`.** That column ranks PHASES within one asset's
+    /// plan for admission — `scanLikelyAdSlots` is 30, `fullEpisodeScan` is 5 —
+    /// and it does not survive being reused as a cross-asset ranking: it would put
+    /// every targeted-phase asset ahead of every `fullEpisodeScan` asset, which is
+    /// backwards, because `fullEpisodeScan` is the phase that reads the WHOLE
+    /// episode and therefore the one that moves coverage most. Measured on the
+    /// 2026-07-29 device pull, ordering by phase priority pushed 8 of the 11
+    /// eligible assets — including the audited 820134BF — past the sweep's cap.
+    /// Oldest-first is the honest ordering for a backlog drain and matches the
+    /// `createdAt ASC` tiebreak the table's own index already carries.
     ///
     /// Resumability is the same predicate as the per-asset count, for the same
     /// reason — see that method.
     func fetchAssetIdsWithResumableBackfillJobs(limit: Int) throws -> [String] {
         guard limit > 0 else { return [] }
         let sql = """
-            SELECT analysisAssetId, MAX(priority) AS topPriority, MIN(createdAt) AS oldest
+            SELECT analysisAssetId, MIN(createdAt) AS oldest
             FROM backfill_jobs
             WHERE status <> ?
               AND status <> ?
               AND retryCount < ?
             GROUP BY analysisAssetId
-            ORDER BY topPriority DESC, oldest ASC
+            ORDER BY oldest ASC
             LIMIT ?
             """
         let stmt = try prepare(sql)

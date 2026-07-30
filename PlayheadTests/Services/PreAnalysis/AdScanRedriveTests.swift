@@ -357,35 +357,44 @@ struct ResumableBackfillJobSelectorTests {
         #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 0).isEmpty)
     }
 
-    /// Highest phase priority first, then oldest — so a capped sweep drains the
-    /// most valuable and most stale work rather than an arbitrary slice.
-    @Test("the set selector orders by phase priority, then age")
+    /// Oldest stranded work first — and explicitly NOT by `priority`.
+    ///
+    /// `backfill_jobs.priority` ranks PHASES inside one asset's plan
+    /// (`scanLikelyAdSlots` 30, `fullEpisodeScan` 5). Reusing it across assets
+    /// inverts the thing that matters: `fullEpisodeScan` reads the whole episode
+    /// and moves coverage most, yet carries the lowest phase priority. On the
+    /// 2026-07-29 device pull that ordering pushed 8 of the 11 eligible assets —
+    /// including the audited 820134BF — past the sweep's cap. The fixture below
+    /// is that exact trap: the high-priority row is the NEWEST, so a
+    /// priority-ordered implementation returns it first and fails.
+    @Test("the set selector orders oldest-first, not by phase priority")
     func setSelectorOrdering() async throws {
         let store = try await makeTestStore()
-        for id in ["low-new", "low-old", "high"] {
+        for id in ["full-oldest", "targeted-newest", "full-middle"] {
             try await seedAsset(store, id: id)
         }
         try await store.insertBackfillJob(
             makeBackfillJob(
-                jobId: "bf-low-new", analysisAssetId: "low-new",
-                priority: 5, status: .queued, createdAt: 2_000
+                jobId: "bf-full-oldest", analysisAssetId: "full-oldest",
+                phase: .fullEpisodeScan, priority: 5, status: .queued, createdAt: 1_000
             )
         )
         try await store.insertBackfillJob(
             makeBackfillJob(
-                jobId: "bf-low-old", analysisAssetId: "low-old",
-                priority: 5, status: .queued, createdAt: 1_000
+                jobId: "bf-full-middle", analysisAssetId: "full-middle",
+                phase: .fullEpisodeScan, priority: 5, status: .queued, createdAt: 2_000
             )
         )
         try await store.insertBackfillJob(
             makeBackfillJob(
-                jobId: "bf-high", analysisAssetId: "high",
-                priority: 30, status: .queued, createdAt: 3_000
+                jobId: "bf-targeted-newest", analysisAssetId: "targeted-newest",
+                phase: .scanLikelyAdSlots, priority: 30, status: .queued, createdAt: 3_000
             )
         )
         let ordered = try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10)
-        #expect(ordered == ["high", "low-old", "low-new"])
-        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 2) == ["high", "low-old"])
+        #expect(ordered == ["full-oldest", "full-middle", "targeted-newest"])
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 2)
+                == ["full-oldest", "full-middle"])
     }
 }
 
@@ -620,35 +629,45 @@ struct AdScanRedriveReconcilerTests {
         #expect(report.adScanRedrivesMinted == 0)
     }
 
-    /// One reconcile does not dump the whole backlog into the queue.
-    @Test("a reconcile pass is capped")
-    func reconcilePassIsCapped() async throws {
-        let store = try await makeTestStore()
-        let downloads = StubDownloadProvider()
-        let total = AnalysisJobReconciler.maxAdScanRedrivesPerReconcile + 4
-        for index in 0..<total {
-            let assetId = "asset-\(index)"
-            let episodeId = "ep-\(index)"
-            let fingerprint = "fp-\(index)"
-            try await store.insertAsset(
-                AnalysisAsset(
-                    id: assetId,
-                    episodeId: episodeId,
-                    assetFingerprint: fingerprint,
-                    weakFingerprint: nil,
-                    sourceURL: "file:///tmp/\(assetId).m4a",
-                    featureCoverageEndTime: nil,
-                    fastTranscriptCoverageEndTime: nil,
-                    confirmedAdCoverageEndTime: nil,
-                    analysisState: SessionState.completeFull.rawValue,
-                    analysisVersion: 1,
-                    capabilitySnapshot: nil,
-                    episodeDurationSec: 2_113
-                )
+    /// Seeds one stranded asset whose coverage lane holds a resumable row.
+    /// `withJobHistory == false` reproduces the device's garbage-collected shape:
+    /// the asset survives but every `analysis_jobs` row for its episode is gone,
+    /// so there is no fingerprint to mint against.
+    private func seedStrandedAsset(
+        _ store: AnalysisStore,
+        _ downloads: StubDownloadProvider,
+        index: Int,
+        createdAt: Double,
+        withJobHistory: Bool = true
+    ) async throws {
+        let assetId = "asset-\(index)"
+        let episodeId = "ep-\(index)"
+        let fingerprint = "fp-\(index)"
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: assetId,
+                episodeId: episodeId,
+                assetFingerprint: fingerprint,
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/\(assetId).m4a",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.completeFull.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: 2_113
             )
-            try await store.insertBackfillJob(
-                makeBackfillJob(jobId: "bf-\(index)", analysisAssetId: assetId, status: .queued)
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "bf-\(index)",
+                analysisAssetId: assetId,
+                status: .queued,
+                createdAt: createdAt
             )
+        )
+        if withJobHistory {
             try await store.insertJob(
                 makeAnalysisJob(
                     jobId: "job-\(index)",
@@ -664,15 +683,55 @@ struct AdScanRedriveReconcilerTests {
                     state: "complete"
                 )
             )
-            downloads.cachedURLs[episodeId] = URL(fileURLWithPath: "/tmp/\(assetId).m4a")
-            downloads.fingerprints[episodeId] = AudioFingerprint(
-                weak: fingerprint,
-                strong: fingerprint
+        }
+        downloads.cachedURLs[episodeId] = URL(fileURLWithPath: "/tmp/\(assetId).m4a")
+        downloads.fingerprints[episodeId] = AudioFingerprint(
+            weak: fingerprint,
+            strong: fingerprint
+        )
+    }
+
+    /// One reconcile does not dump the whole backlog into the queue.
+    @Test("a reconcile pass is capped")
+    func reconcilePassIsCapped() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        for index in 0..<(AnalysisJobReconciler.maxAdScanRedrivesPerReconcile + 4) {
+            try await seedStrandedAsset(
+                store, downloads, index: index, createdAt: 1_000 + Double(index)
+            )
+        }
+        let report = try await makeReconciler(store: store, downloads: downloads).reconcile()
+        #expect(report.adScanRedrivesMinted == AnalysisJobReconciler.maxAdScanRedrivesPerReconcile)
+    }
+
+    /// **Skips must not consume mint slots.** The three oldest assets on the
+    /// device pull are permanently unmintable — every `analysis_jobs` row for
+    /// their episode was garbage-collected, so `discoverUnEnqueuedDownloads`
+    /// owns them, not this step — and oldest-first ordering puts them at the
+    /// head of the queue. If the cap counted candidates rather than mints they
+    /// would silently eat three slots on every launch, forever.
+    @Test("permanently-skipped candidates at the head of the queue do not starve the sweep")
+    func skippedCandidatesDoNotConsumeMintBudget() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        // Three unmintable assets, OLDEST — they sort first.
+        for index in 0..<3 {
+            try await seedStrandedAsset(
+                store, downloads,
+                index: index, createdAt: 1_000 + Double(index), withJobHistory: false
+            )
+        }
+        // Then a full cap's worth of genuinely mintable ones.
+        for index in 3..<(3 + AnalysisJobReconciler.maxAdScanRedrivesPerReconcile) {
+            try await seedStrandedAsset(
+                store, downloads, index: index, createdAt: 2_000 + Double(index)
             )
         }
 
         let report = try await makeReconciler(store: store, downloads: downloads).reconcile()
-        #expect(report.adScanRedrivesMinted == AnalysisJobReconciler.maxAdScanRedrivesPerReconcile)
+        #expect(report.adScanRedrivesMinted == AnalysisJobReconciler.maxAdScanRedrivesPerReconcile,
+                "skipped head-of-queue candidates must not reduce the mint yield")
     }
 }
 

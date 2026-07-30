@@ -4823,6 +4823,13 @@ actor AnalysisWorkScheduler {
     /// count is one indexed `COUNT(*)`, and only then do we pay for the coverage
     /// summary (four prepared statements plus an interval union over the asset's
     /// fast-chunk set). Same idiom as the i7qe call site.
+    ///
+    /// **Lease safety.** These reads suspend, so the renewer can flip
+    /// `lostOwnership` between them and the commit. That is safe and does not
+    /// weaken the playhead-5uvz.3 Gap-3 invariant: the reads are OUTSIDE the arm,
+    /// the arm itself is still one atomic `commitOutcomeArm` await, and that
+    /// helper re-checks `lostOwnership` before writing. A reclaim mid-decision
+    /// costs two wasted reads and inserts nothing.
     private func adScanRedriveJob(
         for job: AnalysisJob,
         assetId: String,
