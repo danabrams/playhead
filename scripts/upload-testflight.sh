@@ -239,6 +239,40 @@ plutil -create xml1 "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c "Add :teamID string $TEAM_ID" "$UPLOAD_OPTIONS_PLIST"
 /usr/libexec/PlistBuddy -c 'Add :uploadSymbols bool true' "$UPLOAD_OPTIONS_PLIST"
 
+# TestFlight INTERNAL-ONLY (playhead-i94g).
+#
+# ⚠️ THIS FLAG DOES NOT EXEMPT YOU FROM THE SDK REQUIREMENT. I assumed it did,
+# set it, and the upload was refused with exactly the same error. Recording that
+# so nobody repeats the experiment:
+#
+#     error: exportArchive Unsupported SDK or Xcode version. ... you need to use
+#     the latest Release Candidates (RC) for SDKs and Xcode to submit the app.
+#
+# THE ACTUAL RULE, from App Store Connect's release notes (2026-07-21):
+# "You can now submit apps built with Xcode 27 beta 4 ... for internal and
+# external testing." A beta SDK IS accepted — but only the CURRENT beta. This
+# machine had Xcode 27 beta 2 (27A5209h, 22 Jun); beta 4 is 27A5228h (20 Jul).
+# Being two betas behind was the entire cause. Neither internal-only mode nor an
+# API key nor the signing identity had anything to do with it.
+#
+# So when an upload is refused for "Unsupported SDK", CHECK YOUR BUILD NUMBER
+# against the current beta FIRST (`xcodebuild -version`, then xcodereleases.com).
+# The error text is generic boilerplate that names neither the required version
+# nor the one you used.
+#
+# The flag is kept because it is still correct for what it does — it marks the
+# build so it cannot reach external testers or the App Store, which is the right
+# posture for a dogfood upload, and internal testing skips Beta App Review
+# entirely. Requires Xcode 15+. Set PLAYHEAD_TESTFLIGHT_INTERNAL_ONLY=0 for an
+# externally-distributable build.
+INTERNAL_ONLY="${PLAYHEAD_TESTFLIGHT_INTERNAL_ONLY:-1}"
+if [ "$INTERNAL_ONLY" = "1" ]; then
+  /usr/libexec/PlistBuddy -c 'Add :testFlightInternalTestingOnly bool true' "$UPLOAD_OPTIONS_PLIST"
+  echo "TestFlight mode: INTERNAL ONLY (beta SDK permitted; no Beta App Review; not externally distributable)"
+else
+  echo "TestFlight mode: EXTERNALLY DISTRIBUTABLE — requires a non-beta Xcode; will fail on a beta SDK"
+fi
+
 xcodebuild archive \
   -project Playhead.xcodeproj \
   -scheme "$SCHEME" \
