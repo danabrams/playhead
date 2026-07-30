@@ -919,6 +919,80 @@ struct AdPodContinuationTests {
         #expect(merged == [link(100, 200), link(300, 320)])
     }
 
+    // MARK: - Reconcile isolation
+
+    /// Without this, a stale continuation row could NEVER be retired: the
+    /// version-scoped reconcile treats a protected `boundaryState` as
+    /// non-reconcilable, so a mark stamped with one would outlive the evidence
+    /// that produced it forever. Mirrors the specialist axis test.
+    @Test("the continuation boundaryState is reconcilable, not user-protected")
+    func continuationRowsAreReconcilable() {
+        #expect(
+            !AdDetectionService.reconcileProtectedBoundaryStates
+                .contains(AdPodContinuation.boundaryState)
+        )
+        let mark = AdPodContinuation.makeMark(
+            start: 100,
+            end: 130,
+            confidence: 0.7,
+            analysisAssetId: Self.assetId
+        )
+        #expect(
+            AdDetectionService.isReconcilableBackfillWindow(
+                mark,
+                detectorVersion: AdPodContinuation.detectorVersion
+            )
+        )
+    }
+
+    /// Two additive mark producers now share one reconcile function. Prove they
+    /// cannot retire each other, and that neither can touch an FM row — the
+    /// property that made the generalization safe.
+    @Test("version-scoped reconcile keeps additive producers isolated")
+    func reconcileKeepsProducersIsolated() {
+        let continuationMark = AdPodContinuation.makeMark(
+            start: 100,
+            end: 130,
+            confidence: 0.7,
+            analysisAssetId: Self.assetId
+        )
+        let specialistMark = SpecialistMarkComposer.makeMark(
+            SpecialistMarkComposer.MergedSpan(
+                start: 400,
+                end: 430,
+                confidence: 0.8,
+                adClass: nil
+            ),
+            analysisAssetId: Self.assetId
+        )
+        let fmWindow = window(start: 700, end: 760)
+        let existing = [continuationMark, specialistMark, fmWindow]
+
+        // A continuation recompose that produces NOTHING retires only its own row.
+        let continuationSweep = AdDetectionService.reconcileVersionScopedMarkSets(
+            newMarks: [],
+            existingWindows: existing,
+            detectorVersion: AdPodContinuation.detectorVersion
+        )
+        #expect(continuationSweep.retiredIDs == [continuationMark.id])
+
+        // And the specialist sweep retires only ITS own row.
+        let specialistSweep = AdDetectionService.reconcileSpecialistMarkSets(
+            newMarks: [],
+            existingWindows: existing
+        )
+        #expect(specialistSweep.retiredIDs == [specialistMark.id])
+
+        // Re-producing the identical continuation mark retires nothing.
+        let idempotent = AdDetectionService.reconcileVersionScopedMarkSets(
+            newMarks: [continuationMark],
+            existingWindows: existing,
+            detectorVersion: AdPodContinuation.detectorVersion
+        )
+        #expect(idempotent.retiredIDs.isEmpty)
+        #expect(idempotent.windows.map(\.id) == [continuationMark.id])
+    }
+
     // MARK: - Scan-row helper
 
     private func scanRow(
