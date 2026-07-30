@@ -2778,6 +2778,27 @@ actor AnalysisCoordinator {
     /// quotient that provoked the fault would make the repair sweep
     /// re-litigate a verdict written precisely because it is untrustworthy.
     ///
+    /// WHY THIS IS APPLIED AT EXACTLY ONE SITE, and must not be sprinkled on
+    /// the three sibling `covered / episodeDuration` ratios in this file. All
+    /// three test only a 0.95 FLOOR and are unbounded above, which looks like
+    /// the same bug — but none of them is a terminal decision, and guarding two
+    /// of them would do harm:
+    ///   * ``finalizeBackfillVerdict`` has NO production caller. It is
+    ///     referenced only by `PipelineSnapshotTests`.
+    ///   * ``resumeBackfillDecision``'s `.finalize` routes straight into
+    ///     ``classifyBackfillTerminal``, i.e. into this guard, with a freshly
+    ///     resolved duration. Making it `.restart` on a contradicted
+    ///     denominator would force a full re-decode AND skip the adjudication.
+    ///   * ``coverageGuardRecoveryVerdict`` divides by a denominator PARSED OUT
+    ///     OF THE PERSISTED FAILURE STRING, which is a snapshot from failure
+    ///     time. Refusing to recover on it would permanently strand precisely
+    ///     the sessions whose duration the backfill sweep has since repaired —
+    ///     the sweep is the only path that un-fails them. Recovering and
+    ///     letting the guarded classifier re-decide against the CURRENT
+    ///     duration is the correct order.
+    /// One adjudicator, consulted with a fresh denominator. Adding a second
+    /// would be the "two numbers for one quantity" mistake again.
+    ///
     /// STATUS ON THE 2026-07-30 DEVICE PULL, stated honestly: no asset is
     /// currently in this state. The two rows quoted above survive only inside
     /// `[autoRepaired:…]` archive prefixes — `runEpisodeDurationBackfillIfNeeded`
