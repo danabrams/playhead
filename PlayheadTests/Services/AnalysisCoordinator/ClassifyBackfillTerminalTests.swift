@@ -711,7 +711,11 @@ struct ClassifyBackfillTerminalRatioBoundsTests {
             adScan: fullyScanned
         )
         #expect(verdict.state != .completeFull)
-        #expect(verdict.state == .completeTranscriptPartial)
+        // `.failedTranscript` is this function's OWN fail-safe for an unusable
+        // denominator (the `episodeDuration <= 0` guard), so a contradicted one
+        // lands in the same place: retryable and actionable, not a completion
+        // terminal the UI renders inert.
+        #expect(verdict.state == .failedTranscript)
         // NAMED with a stable token, the way `AdScanLimit` is, so a diagnostics
         // capture can separate it without a device attached.
         #expect(
@@ -719,8 +723,14 @@ struct ClassifyBackfillTerminalRatioBoundsTests {
                 AnalysisCoordinator.CoverageDenominatorFault.contradictedDuration.rawValue
             )
         )
-        // And it says which term is wrong, with both numbers.
+        // And it says which term is wrong, in ABSOLUTE SECONDS.
         #expect(verdict.reason.contains("transcript reaches 3210.0s of a declared 608.0s"))
+        // Crucially it must NOT echo the bogus quotient: this string is scanned
+        // by `parseHighestRatioInTerminalReason`, and a "5.277" in it would make
+        // the repair sweep re-litigate the verdict just written because that
+        // very quotient is untrustworthy.
+        #expect(!verdict.reason.contains("5.277"))
+        #expect(!verdict.reason.contains("transcript 5"))
     }
 
     /// The second device row: transcript 2.158 and feature 5.110, disagreeing.
@@ -736,6 +746,7 @@ struct ClassifyBackfillTerminalRatioBoundsTests {
             adScan: fullyScanned
         )
         #expect(verdict.state != .completeFull)
+        #expect(verdict.state == .failedTranscript)
         #expect(
             verdict.reason.contains(
                 AnalysisCoordinator.CoverageDenominatorFault.contradictedDuration.rawValue
@@ -782,23 +793,59 @@ struct ClassifyBackfillTerminalRatioBoundsTests {
         )
     }
 
-    /// The guard is purely RESTRICTIVE: it can only ever remove `.completeFull`.
-    /// When the ad scan is also unmeasurable, gqx4's richer naming must still
-    /// win, because "the audio was never read for ads" is the more explanatory
-    /// answer than "the denominator is wrong".
-    @Test("gqx4's ad-scan naming still wins when both terms are unusable")
-    func adScanNamingTakesPrecedence() {
+    /// The new guard must not STEAL gqx4's cases. With a sound denominator and
+    /// an ad scan that is short for its own reason, the verdict and the naming
+    /// are exactly what gqx4 established — this guard is invisible.
+    @Test("gqx4's ad-scan naming is untouched when the denominator is sound")
+    func adScanNamingSurvivesOnSoundDenominator() {
         let verdict = classify(
-            coverageEnd: 3210,
-            episodeDuration: 608,
-            featureCoverage: 3210,
-            adScan: AnalysisCoordinator.AdScanCoverage(
-                fraction: nil,
-                limit: .unmeasurableDuration
-            )
+            coverageEnd: 3600,
+            episodeDuration: 3600,
+            featureCoverage: 3600,
+            adScan: AnalysisCoordinator.AdScanCoverage(fraction: 0.026, limit: .refusal)
         )
         #expect(verdict.state == .completeAdScanPartial)
-        #expect(verdict.reason.contains("unmeasurableDuration"))
+        #expect(verdict.reason.contains("refusal"))
+    }
+
+    /// THE PRIORITY-ORDER RAIL. An inflated `featureRatio` does not merely
+    /// mis-report — it RESCUES an asset from the feature-shortfall arm, because
+    /// that arm only tests a 0.95 FLOOR. Device asset D75D7584 escaped
+    /// `.failedFeature` while reading `feature 5.110`; at its repaired
+    /// denominator the truth is `ratio 0.921 < 0.950`.
+    ///
+    /// So the denominator guard has to run BEFORE priority 4. If it ran after,
+    /// this asset would land on a COMPLETION terminal, which
+    /// `EpisodePreparationReadiness` renders as the deliberately inert ◐ —
+    /// converting a retryable feature failure into a dead end. Assert the
+    /// verdict is a FAILURE state, which is the property that matters.
+    @Test("a contradicted feature denominator cannot rescue an asset from failure")
+    func contradictedFeatureDoesNotRescueFromFeatureShortfall() {
+        // The real shape: 2932.9s episode, feature covering 2700s (0.921 —
+        // genuinely short), but scored against a 528s denominator ⇒ 5.110.
+        let verdict = classify(
+            coverageEnd: 2932.9,
+            episodeDuration: 528,
+            featureCoverage: 2700,
+            adScan: fullyScanned
+        )
+        #expect(verdict.state == .failedTranscript)
+        #expect(verdict.state != .completeFull)
+        #expect(verdict.state != .completeTranscriptPartial)
+        #expect(verdict.state != .completeAdScanPartial)
+        #expect(verdict.state != .completeFeatureOnly)
+
+        // And with the denominator repaired, the pre-existing feature-shortfall
+        // verdict is reached unchanged — the guard did not swallow the case,
+        // it deferred it until the number was trustworthy.
+        let repaired = classify(
+            coverageEnd: 2932.9,
+            episodeDuration: 2932.9,
+            featureCoverage: 2700,
+            adScan: fullyScanned
+        )
+        #expect(repaired.state == .failedFeature)
+        #expect(repaired.reason.contains("0.921"))
     }
 
     /// The pure helper, at its boundary. A ratio at or below 1 (plus tolerance)

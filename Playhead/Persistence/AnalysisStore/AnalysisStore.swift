@@ -15732,30 +15732,36 @@ actor AnalysisStore {
     /// BOUNDS are wrong — the verdict was not invented for a region never
     /// examined.
     ///
-    /// The store cannot repair it: given `[767.04, 131.82]` it has no way to
-    /// know which of the two numbers is the wrong one, and the two plausible
-    /// coercions are both worse than rejecting.
-    ///   * Swapping the bounds, or widening to `min…max`, MANUFACTURES a
-    ///     coverage claim over audio the prompt never contained. Since
-    ///     playhead-pz32 the readiness ✓ keys on measured ad-scan coverage and
-    ///     playhead-gqx4 makes `.completeFull` REQUIRE it, so an over-claim can
-    ///     now promote an episode into a clean TERMINAL state that nothing
-    ///     returns from. Over-claiming is strictly the more dangerous
-    ///     direction.
-    ///   * Silently dropping the row would make the asset read as
-    ///     ``AnalysisCoordinator/AdScanLimit/neverRan`` — a quantity that names
-    ///     an absence, which is the shape this project keeps re-finding.
-    /// Throwing names the anomaly at the only place that still knows the
-    /// producer, the asset, and both numbers.
+    /// THIS IS A BACKSTOP, NOT THE FIX. The defect is upstream, in three
+    /// places that projected a window onto two numbers by taking `first`/`last`
+    /// of an array that was never sorted by time:
+    /// `BackfillJobRunner.makeRefinementScanResult` (spans, which
+    /// `mergeSpans` APPENDS to), `BackfillJobRunner.attemptedRange` and
+    /// `FoundationModelClassifier.planPassA` (segments, ordered by
+    /// `segmentIndex`, which tracks time only while the atom sequence is
+    /// monotone — on 27 of 30 device assets it is not). All three now take
+    /// `min`/`max`, which is byte-identical for ordered input. With those
+    /// fixed, no production path can reach this throw; it exists so a FOURTH
+    /// such site cannot land silently.
+    ///
+    /// Why throw rather than coerce, if it ever does fire: the store has no way
+    /// to know which of `[767.04, 131.82]` is the wrong number. Swapping the
+    /// bounds MANUFACTURES a coverage claim over audio the prompt may never
+    /// have contained, and since pz32/gqx4 an over-claim can promote an episode
+    /// into a clean TERMINAL state that nothing returns from. Note that
+    /// throwing and dropping leave the SAME database state — no row — so this
+    /// names the anomaly in the log, not in the schema; an asset whose only
+    /// rows were refused reads as
+    /// ``AnalysisCoordinator/AdScanLimit/neverRan``, which is why the
+    /// upstream fix, not this guard, is what preserves the measurement.
     ///
     /// WHAT THIS DELIBERATELY DOES NOT REJECT. A false positive here silently
     /// loses REAL coverage, which is worse than the bug, so the predicate is
     /// the narrowest one that still excludes every impossible row:
     ///   * `windowEndTime == windowStartTime` is LEGAL. The no-work sentinel
     ///     (`BackfillJobRunner.makeNoWorkSentinelScanResult`) writes a
-    ///     structurally-honest `0.0 … 0.0` when an asset has no segments, and
-    ///     `FinalPassRetranscriptionRunner` has its own zero-width rows. They
-    ///     contribute zero seconds to every union, so they cannot inflate
+    ///     structurally-honest `0.0 … 0.0` when an asset has no segments. Such
+    ///     rows contribute zero seconds to every union, so they cannot inflate
     ///     anything.
     ///   * Atom ordinals are NOT checked. `windowFirstAtomOrdinal` /
     ///     `windowLastAtomOrdinal` are bookkeeping, not geometry — no coverage

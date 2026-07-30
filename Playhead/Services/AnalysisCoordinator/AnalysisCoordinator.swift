@@ -2752,7 +2752,7 @@ actor AnalysisCoordinator {
     /// shortfall without a device attached. Same contract as
     /// ``AnalysisCoordinator/AdScanLimit`` — an unnamed absence is
     /// indistinguishable from every other absence.
-    enum CoverageDenominatorFault: String, Sendable, CaseIterable {
+    enum CoverageDenominatorFault: String, Sendable {
         /// The declared `episodeDurationSec` is contradicted by an artifact
         /// measured against the same audio: a numerator materially larger
         /// than the denominator means the two describe different audio, and
@@ -2772,7 +2772,22 @@ actor AnalysisCoordinator {
     /// Returns `nil` when the pair is usable (including when the denominator is
     /// non-positive or non-finite — that case is already handled, and more
     /// specifically, by the classifier's own priority-6 guard), otherwise a
-    /// short human-readable description of the disagreement.
+    /// short human-readable description of the disagreement in ABSOLUTE
+    /// SECONDS. Never a ratio: the caller writes this into `terminalReason`,
+    /// which ``parseHighestRatioInTerminalReason`` scans, and echoing the
+    /// quotient that provoked the fault would make the repair sweep
+    /// re-litigate a verdict written precisely because it is untrustworthy.
+    ///
+    /// STATUS ON THE 2026-07-30 DEVICE PULL, stated honestly: no asset is
+    /// currently in this state. The two rows quoted above survive only inside
+    /// `[autoRepaired:…]` archive prefixes — `runEpisodeDurationBackfillIfNeeded`
+    /// corrected both denominators and
+    /// ``reconcilePersistedTerminalAssetVerdict`` rewrote both verdicts. So
+    /// this guard is PREVENTION for a fault two mechanisms already repair
+    /// after the fact, not a fix for live corruption. It is worth having
+    /// because pz32/gqx4 turned the terminal into a decision input: repairing
+    /// a clean terminal after an episode has already been presented as ready
+    /// is strictly worse than never minting it.
     static func contradictedCoverageDenominator(
         transcriptCoveredSec: Double,
         featureCoveredSec: Double,
@@ -2892,8 +2907,55 @@ actor AnalysisCoordinator {
             )
         }
 
-        let transcriptRatio = coverageEnd / episodeDuration
         let featureSeconds = featureCoverage ?? 0
+
+        // playhead-csbq, priority 6b — a denominator the numerators have
+        // already DISPROVED, handled here for the same reason `<= 0` is: no
+        // ratio taken against it means anything, so none of the branches below
+        // may run. Both ratios are `covered / episodeDuration` and neither had
+        // ever had an UPPER bound — only a 0.95 floor — so a numerator
+        // describing different audio passed as full coverage, which is what
+        // wrote `full coverage: transcript 5.277, feature 5.277` onto a real
+        // asset. (Two later mechanisms repair that row AFTER the fact:
+        // `runEpisodeDurationBackfillIfNeeded` corrects the duration and
+        // `reconcilePersistedTerminalAssetVerdict` rewrites a reason claiming a
+        // ratio above `terminalStateRepairRatioCeiling`. Since pz32/gqx4 made
+        // the terminal a decision input, catching it at the WRITE is worth more
+        // than repairing it later, and this makes the two agree.)
+        //
+        // Placed BEFORE priority 4 deliberately. An inflated `featureRatio`
+        // does not merely mis-report — it RESCUES an asset from the
+        // feature-shortfall arm, which is how device asset D75D7584 escaped
+        // `.failedFeature` while reading `feature 5.110`; at its repaired
+        // denominator the truth is `ratio 0.921 < 0.950`. Letting the guard run
+        // later would convert a retryable feature failure into a completion
+        // terminal the UI renders as inert.
+        //
+        // `.failedTranscript` is this function's OWN established fail-safe for
+        // an unusable denominator (the `<= 0` guard directly above): we cannot
+        // prove coverage, so re-queue rather than mint a terminal. That keeps
+        // the asset actionable and lets it resolve correctly once the
+        // duration-backfill sweep repairs the row.
+        //
+        // The reason deliberately carries ABSOLUTE SECONDS and no ratio.
+        // `parseHighestRatioInTerminalReason` scans this string for
+        // `transcript`/`feature` ratios, so echoing the bogus quotient here
+        // would make the repair sweep re-litigate a verdict written precisely
+        // because that quotient is untrustworthy.
+        if let contradiction = Self.contradictedCoverageDenominator(
+            transcriptCoveredSec: coverageEnd,
+            featureCoveredSec: featureSeconds,
+            episodeDuration: episodeDuration
+        ) {
+            return BackfillTerminalVerdict(
+                state: .failedTranscript,
+                reason: "coverage unmeasurable "
+                    + "(\(CoverageDenominatorFault.contradictedDuration.rawValue)): "
+                    + contradiction
+            )
+        }
+
+        let transcriptRatio = coverageEnd / episodeDuration
         let featureRatio = featureSeconds / episodeDuration
 
         // Priority 4: feature-side shortfall. When the feature pipeline
@@ -2925,51 +2987,15 @@ actor AnalysisCoordinator {
                     )
                 )
             }
-            // playhead-csbq: the clean terminal additionally requires that
-            // both ratios are MEASURABLE, not merely above the floor. Both
-            // are `covered / episodeDuration` and neither has ever had an
-            // upper bound, so a numerator describing different audio than the
-            // denominator passed a lower-bound test and was reported as full
-            // coverage — the device rows say so in their own words
-            // ("full coverage: transcript 5.277, feature 5.277" and
-            // "transcript 2.158, feature 5.110", where the two disagreeing
-            // ratios prove at least one numerator is independently wrong).
-            //
-            // gqx4's `adScanFraction` already withholds on this shape, which
-            // covers the case where the FAST transcript overshoots. It does
-            // NOT cover the two live holes closed here, because it never looks
-            // at either quantity: `coverageEnd` is `MAX(endTime)` over ALL
-            // canonical chunks, so a FINAL-pass overshoot past the declared
-            // duration passes gqx4's fast-only reach guard; and the FEATURE
-            // watermark is not an input to `adScanFraction` at all.
-            //
-            // Named, not clamped: clamping to 1.0 is precisely how a broken
-            // denominator becomes a confident ✓ on a fraction of the audio.
-            guard let denominatorContradiction = Self.contradictedCoverageDenominator(
-                transcriptCoveredSec: coverageEnd,
-                featureCoveredSec: featureSeconds,
-                episodeDuration: episodeDuration
-            ) else {
-                return BackfillTerminalVerdict(
-                    state: .completeFull,
-                    reason: String(
-                        format: "full coverage: transcript %.3f, feature %.3f, ad scan %.3f",
-                        transcriptRatio, featureRatio, adScan.fraction ?? 0
-                    )
-                )
-            }
-            // Under-claim into the existing partial-transcript terminal rather
-            // than mint a new state: it is a COMPLETE terminal (no re-drive
-            // loop), it is not promotion-eligible, and the reason string
-            // carries the stable `contradictedDuration` token the way
-            // `AdScanLimit` does.
+            // playhead-csbq: both ratios reaching here are already known
+            // MEASURABLE — priority 6b above refuses an unusable denominator
+            // before any of these branches can run — so `%.3f` on either of
+            // them is a number the reader can act on.
             return BackfillTerminalVerdict(
-                state: .completeTranscriptPartial,
+                state: .completeFull,
                 reason: String(
-                    format: "coverage unmeasurable (%@): %@ (transcript %.3f, feature %.3f)",
-                    CoverageDenominatorFault.contradictedDuration.rawValue,
-                    denominatorContradiction,
-                    transcriptRatio, featureRatio
+                    format: "full coverage: transcript %.3f, feature %.3f, ad scan %.3f",
+                    transcriptRatio, featureRatio, adScan.fraction ?? 0
                 )
             )
         }
