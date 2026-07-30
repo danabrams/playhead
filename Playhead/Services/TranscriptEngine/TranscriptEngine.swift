@@ -668,11 +668,20 @@ actor SpeechService {
     /// recognizer could contradict. `transcribe` reads it to tag
     /// `passType`, which means a fast-path run that finds a model already
     /// loaded by a final pass inherits `.asrFinal` and tags its chunks
-    /// `final`. That is pre-existing (the previous `isReady()` gate
-    /// behaved identically) and is NOT fixed here: the honest fix is to
-    /// stop deriving `passType` from shared mutable state and pass the
-    /// intended pass into `transcribe`, which changes a signature several
-    /// owners share. Recorded rather than silently inherited.
+    /// `final`. THAT IS A DEFECT, not a design: nothing resets the role
+    /// (`unloadCurrentModel` has no production caller) and both owners
+    /// share one `SpeechService`, so a launch final-pass sweep silently
+    /// re-labels every later fast-path chunk.
+    ///
+    /// It predates this bead — the previous `isReady()` gate behaved
+    /// identically — and is filed as playhead-h7pr rather than fixed here,
+    /// because the fix changes the persisted meaning of
+    /// `transcript_chunks.pass` and must be reviewed against the mixed-pass
+    /// display canonicalization and the unique index on
+    /// `(assetId, pass, segmentFingerprint)`. The honest shape is to stop
+    /// deriving `passType` from shared mutable state and pass the intended
+    /// pass into `transcribe`. Recorded here so it cannot be mistaken for
+    /// intent.
     private(set) var activeModelRole: ModelRole?
 
     /// playhead-se2h: durable record of load attempts, so a failure is

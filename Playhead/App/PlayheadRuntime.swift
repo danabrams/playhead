@@ -2877,17 +2877,31 @@ final class PlayheadRuntime {
             //
             // IT IS STILL AWAITED INLINE, in the same position the old
             // `try await loadFastModel()` occupied, so the four `start()`
-            // calls below still wait for it — and it can take as long as an
-            // asset download. That is pre-existing and deliberately NOT
-            // changed here: moving it would re-order entitlement
-            // resolution, iCloud sync and BPS startup relative to each
-            // other, which is a launch-sequencing decision rather than an
-            // error-handling one. Saying so is the point — the bug this
-            // bead fixes was a comment that asserted behaviour the code did
-            // not have, and "non-throwing" must not be read as
-            // "non-blocking". Detaching it into its own `Task` is now SAFE
-            // (a concurrent load from the transcription loop is declined by
-            // `loadInFlightSince`) and is the obvious follow-up.
+            // calls below DO wait for it — and it can take as long as an
+            // asset download. "Non-throwing" must not be read as
+            // "non-blocking". Spelling that out is the point: the bug this
+            // bead fixes was a comment asserting behaviour the code did not
+            // have, and a comment here claiming launch is not gated on a
+            // speech asset would be the same defect wearing a new hat.
+            //
+            // KEPT INLINE DELIBERATELY, and not merely out of caution. The
+            // obvious change — `Task { await speechService.prepareFastModel() }`
+            // — looks free now that a concurrent load is declined rather
+            // than duplicated, but the decline is exactly what makes it
+            // unsafe: `backgroundProcessingService.start()` would be free to
+            // begin analysis while the launch load is still in flight, the
+            // first transcription run would get `.loadInFlight`, and it
+            // would report `speech_engine_not_ready` on a device that is
+            // perfectly healthy and three seconds from being ready. That
+            // trades a launch-latency cost for a first-run FAILURE, which is
+            // the wrong direction for a bead about not misreporting the
+            // speech stack. Awaiting here is what guarantees the model is
+            // ready before any consumer starts.
+            //
+            // The latency itself is real and unaddressed; fixing it properly
+            // means giving the transcription loop a way to WAIT for an
+            // in-flight load instead of declining, which is a change to the
+            // retry contract and belongs in its own bead.
             await speechService.prepareFastModel()
 
             await backgroundProcessingService.start()

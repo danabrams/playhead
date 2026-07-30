@@ -530,10 +530,25 @@ struct SpeechModelLoadBoundTests {
 struct SpeechModelLoadStateHonestyTests {
 
     /// `prepareFastModel` runs on every transcription run, including runs
-    /// that happen while a charge-gated final pass owns the recognizer. If
-    /// it reloaded, or merely re-stamped the role, every chunk of that
-    /// pass would be mis-tagged `fast`.
-    @Test("prepareFastModel does not disturb an already-loaded final model")
+    /// that happen while a charge-gated final pass owns the recognizer, so
+    /// what it must NOT do is reload or re-stamp anything.
+    ///
+    /// SCOPE OF THIS TEST — read the assertion on `activeModelRole`
+    /// carefully. It pins that `prepareFastModel` DID NOT WRITE the field,
+    /// which is this bead's business. It does NOT claim the resulting value
+    /// is the right one to transcribe under, and an earlier version of this
+    /// comment did: `AppleSpeechAssetBootstrapper.prepare()` is
+    /// role-agnostic, so `activeModelRole` records the last loader's INTENT
+    /// rather than anything the recognizer could contradict. A fast-path run
+    /// that finds a final model already loaded therefore inherits
+    /// `.asrFinal` and tags its chunks `final`. That is a real defect, it
+    /// predates this bead (the previous `isReady()` gate behaved
+    /// identically), and it is filed as playhead-h7pr — the fix touches the
+    /// persisted meaning of `transcript_chunks.pass` and needs its own
+    /// review. Do not "fix" it by writing `.asrFast` here: that breaks
+    /// `FinalPassRetranscriptionRunner`'s `activeModelRole != .asrFinal`
+    /// idempotence guard.
+    @Test("prepareFastModel neither reloads nor re-stamps an already-loaded model")
     func alreadyLoadedFinalModelIsNotClobbered() async throws {
         let recognizer = TransientlyFailingRecognizer(failuresBeforeSuccess: 0)
         let service = SpeechService(recognizer: recognizer)
@@ -545,7 +560,15 @@ struct SpeechModelLoadStateHonestyTests {
         #expect(outcome == .alreadyLoaded)
         #expect(recognizer.loadAttempts == attemptsAfterFinalLoad, "nothing must be reloaded")
         let role = await service.activeModelRole
-        #expect(role == .asrFinal, "the role must still describe the model actually loaded")
+        #expect(
+            role == .asrFinal,
+            """
+            `prepareFastModel` wrote `activeModelRole`. It must leave the field alone: writing \
+            `.asrFast` over a live final pass would break that runner's idempotence guard and \
+            re-tag its chunks mid-drain. (Whether `.asrFinal` is the correct value for a \
+            fast-path run to transcribe under is playhead-h7pr, not this assertion.)
+            """
+        )
         let spent = await service.loadAttemptsInCurrentEpochForTesting
         #expect(spent == 0, "a no-op must not consume the retry budget")
     }
