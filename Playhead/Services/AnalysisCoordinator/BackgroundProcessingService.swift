@@ -1805,14 +1805,12 @@ actor BackgroundProcessingService {
                     self.logger.info("Pre-analysis recovery work task cancelled during drain")
                     return
                 }
-                let recovered = report.expiredLeasesRecovered
-                    + report.recoveredStrandedSessionJobs
-                    + report.missingFilesUnblocked
-                    + report.modelsUnblocked
-                    + report.staleVersionsReenqueued
-                    + report.unEnqueuedDownloadsCreated
-                    + report.strandedBackfillJobsReset
-                    + report.strandedFinalPassJobsReset
+                // playhead-onn6: the membership of this sum now lives on
+                // `ReconciliationReport` itself. It used to be spelled out here,
+                // and a new counter was added to the report without being added
+                // to the sum — a sweep whose only yield was real recovered work
+                // reported `.noOp` with `jobsCompleted: 0`.
+                let recovered = report.recoveredWorkCount
                 let outcome: BackgroundTaskRunOutcome =
                     (recovered > 0 || jobsSeen > 0) ? .recoveredWork : .noOp
                 // Wait for the row insert to land before the UPDATE.

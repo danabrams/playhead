@@ -57,6 +57,43 @@ struct ReconciliationReport: Sendable {
     /// ranked as next-to-play. Zero whenever the backlog fit the window (not
     /// scarce) or no ranking provider is wired (plain FIFO preserved).
     let scarcityReprioritizedJobs: Int
+    /// playhead-onn6: bounded ad-scan re-drive `analysis_jobs` rows minted for
+    /// assets that still hold resumable `backfill_jobs` work but had no
+    /// non-terminal analysis job to carry it. Zero once every stranded asset has
+    /// spent its re-drive budget (`AnalysisWorkScheduler.maxAdScanRedrives`),
+    /// which is what makes repeated launches safe.
+    let adScanRedrivesMinted: Int
+
+    /// playhead-onn6: how many rows this pass actually RECOVERED — the number the
+    /// background-task ledger reports as `jobsCompleted` and uses to decide
+    /// `.recoveredWork` vs `.noOp`.
+    ///
+    /// It lives here, on the type that owns the fields, because it was previously
+    /// an inline sum in `BackgroundProcessingService` and a new counter was added
+    /// without being added to it: a sweep whose only yield was minting ad-scan
+    /// re-drives — real queued, dispatchable work — reported `.noOp` with
+    /// `jobsCompleted: 0`, hiding the recovery from the ledger built to make it
+    /// visible. A named property next to the fields makes the omission obvious.
+    ///
+    /// The membership is unchanged from the inline sum it replaces, plus
+    /// `adScanRedrivesMinted`. Four counters stay OUT, and each for a reason:
+    /// `missingFilesStillBlocked` is a diagnosis rather than a repair;
+    /// `staleVersionsSuperseded` retires rows whose replacements are already
+    /// counted by `staleVersionsReenqueued`; `completedJobsGarbageCollected` and
+    /// `failedJobsBackedOff` remove or delay work rather than recovering it; and
+    /// `queuedJobEpochsRestamped` / `scarcityReprioritizedJobs` act on rows that
+    /// were already queued and dispatchable — only their metadata moved.
+    var recoveredWorkCount: Int {
+        expiredLeasesRecovered
+            + recoveredStrandedSessionJobs
+            + missingFilesUnblocked
+            + modelsUnblocked
+            + staleVersionsReenqueued
+            + unEnqueuedDownloadsCreated
+            + strandedBackfillJobsReset
+            + strandedFinalPassJobsReset
+            + adScanRedrivesMinted
+    }
 }
 
 // MARK: - AnalysisJobReconciler
@@ -78,6 +115,33 @@ actor AnalysisJobReconciler {
     /// The current analysis version. Jobs whose workKey encodes a different
     /// version are considered stale and will be superseded.
     static var currentAnalysisVersion: Int { PreAnalysisConfig.analysisVersion }
+
+    /// playhead-onn6: per-`reconcile()` ceiling on ad-scan re-drive inserts.
+    ///
+    /// A cap, not a quota: the stranded backlog is drained across launches
+    /// rather than dumped into one queue, so a device that accumulated a large
+    /// orphaned coverage lane does not wake up to dozens of FM passes competing
+    /// with whatever the user actually wants analysed. 8 is roughly one
+    /// background window's worth of work at the observed per-episode cost, and
+    /// the oldest-first ordering in `fetchAssetIdsWithResumableBackfillJobs`
+    /// drains the longest-stranded work first.
+    ///
+    /// This counts MINTS, not candidates — see
+    /// ``maxAdScanRedriveCandidatesPerReconcile``.
+    static let maxAdScanRedrivesPerReconcile = 8
+
+    /// playhead-onn6: how many candidate assets one `reconcile()` will EXAMINE
+    /// before stopping, regardless of how many it mints.
+    ///
+    /// Separate from the mint cap because a skipped candidate must not consume a
+    /// mint slot. Some candidates are permanently unmintable AND sort to the
+    /// FRONT of the oldest-first ordering: on the 2026-07-29 device pull three
+    /// assets had every `analysis_jobs` row garbage-collected (they are covered by
+    /// `discoverUnEnqueuedDownloads` instead), and they were the three oldest. A
+    /// candidate budget would let those three silently consume 3 of the 8 slots on
+    /// every launch, forever. Examining is a handful of indexed reads, so this
+    /// bound keeps the sweep's cost fixed without letting skips starve it.
+    static let maxAdScanRedriveCandidatesPerReconcile = 64
 
     init(
         store: AnalysisStore,
@@ -117,7 +181,8 @@ actor AnalysisJobReconciler {
                 strandedBackfillJobsReset: 0,
                 strandedFinalPassJobsReset: 0,
                 queuedJobEpochsRestamped: 0,
-                scarcityReprioritizedJobs: 0
+                scarcityReprioritizedJobs: 0,
+                adScanRedrivesMinted: 0
             )
         }
         isReconciling = true
@@ -148,6 +213,10 @@ actor AnalysisJobReconciler {
         let step7 = try await discoverUnEnqueuedDownloads()
         let stepBackfillReaper = try await reconcileStrandedBackfillJobs()
         let stepFinalPassReaper = try await reconcileStrandedFinalPassJobs()
+        // playhead-onn6: AFTER the backfill reaper (rows it just rescued from
+        // `running` are now resumable and must be counted) and after step 7 (an
+        // episode receiving a fresh job is already excluded as active).
+        let stepAdScanRedrive = await mintAdScanRedrives()
         // playhead-dqfm: LAST — runs after `discoverUnEnqueuedDownloads`
         // (step 7) so freshly-minted priority-0 background rows are part of
         // the backlog it ranks, and after the reapers (disjoint tables) so it
@@ -168,7 +237,8 @@ actor AnalysisJobReconciler {
             strandedBackfillJobsReset: stepBackfillReaper,
             strandedFinalPassJobsReset: stepFinalPassReaper,
             queuedJobEpochsRestamped: stepRestamped,
-            scarcityReprioritizedJobs: stepScarcity
+            scarcityReprioritizedJobs: stepScarcity,
+            adScanRedrivesMinted: stepAdScanRedrive
         )
 
         logger.info("""
@@ -186,7 +256,8 @@ actor AnalysisJobReconciler {
         strandedBackfillJobs=\(report.strandedBackfillJobsReset), \
         strandedFinalPassJobs=\(report.strandedFinalPassJobsReset), \
         queuedEpochsRestamped=\(report.queuedJobEpochsRestamped), \
-        scarcityReprioritized=\(report.scarcityReprioritizedJobs)
+        scarcityReprioritized=\(report.scarcityReprioritizedJobs), \
+        adScanRedrivesMinted=\(report.adScanRedrivesMinted)
         """)
 
         return report
@@ -653,6 +724,192 @@ actor AnalysisJobReconciler {
             logger.info("stranded_final_pass_reset count=\(count)")
         }
         return count
+    }
+
+    // MARK: - Step: Ad-scan re-drive for the orphaned coverage lane (playhead-onn6)
+
+    /// Mint a bounded ad-scan re-drive for each asset that still holds resumable
+    /// `backfill_jobs` work but has no non-terminal `analysis_jobs` row to carry
+    /// it. Returns the number of `analysis_jobs` rows inserted.
+    ///
+    /// **The stranding this repairs.** `backfill_jobs` rows are minted inside
+    /// `BackfillJobRunner.runPendingBackfill` and re-driven only by a LATER
+    /// invocation of the same function, which only happens when the analysis lane
+    /// dispatches a job for that asset. Nothing selected pending rows, so a row
+    /// that outlived its invocation was orphaned: on the 2026-07-29 device pull 35
+    /// rows sat `queued` across 12 assets — 9 of them assets whose every
+    /// `analysis_jobs` row was already terminal, so no pass would ever come. The
+    /// terminal-arm mint in `AnalysisWorkScheduler` fixes this going forward; this
+    /// step is what reaches the episodes already stranded.
+    ///
+    /// **Bounds, and why this cannot become a drain loop.** It runs only inside
+    /// `reconcile()` — at launch and at explicit reconciliation points, never on a
+    /// timer and never on a playback tick — so it cannot busy-spin under the write
+    /// lock the way playhead-bbut's `drainEligible` did. Within one pass it is
+    /// capped at ``maxAdScanRedrivesPerReconcile`` inserts. Across passes the
+    /// budget is the ordinal in the UNIQUE `workKey`
+    /// (``AnalysisWorkScheduler/maxAdScanRedrives``), so relaunching the app
+    /// repeatedly cannot manufacture more work: once the ordinal is spent,
+    /// `nextAdScanRedriveWorkKey` returns `nil` and this step is a no-op.
+    ///
+    /// **The budget is per ANALYSIS GENERATION, not per episode-for-all-time, and
+    /// that is deliberate.** The ledger is the `workKey` string on `analysis_jobs`
+    /// rows, and `garbageCollectOldJobs` deletes `complete`/`superseded` rows older
+    /// than seven days. Once an episode's whole job history ages out,
+    /// `fetchLatestJobForEpisode` returns `nil` and this step goes permanently
+    /// quiet for it — UNLESS `discoverUnEnqueuedDownloads` re-mints a base job
+    /// because the audio is still downloaded, which is a full fresh analysis of the
+    /// episode that would have happened with or without this bead. A new analysis
+    /// that AGAIN leaves the scan short should get re-drives; that is the whole
+    /// point. So the worst case is a full re-analysis plus at most
+    /// ``AnalysisWorkScheduler/maxAdScanRedrives`` extra passes per episode per
+    /// seven days, dominated by the re-analysis itself — bounded per unit time, and
+    /// gated on the episode still being downloaded AND still measuring short.
+    ///
+    /// Position in `reconcile()`: after `reconcileStrandedBackfillJobs` so rows
+    /// this process just rescued from `running` are counted as resumable, and
+    /// after `discoverUnEnqueuedDownloads` so an episode that is getting a fresh
+    /// job anyway is already excluded by the active-episode check below.
+    ///
+    /// **Best-effort by contract**, like `reprioritizeScarceBacklog`: `async`, not
+    /// `async throws`, and every store error is logged and swallowed. This is
+    /// opportunistic repair. Letting a coverage read fail `reconcile()` would mask
+    /// lease recovery — a critical step — and would make a `BGProcessingTask`
+    /// report `.failed` for a hiccup in a step whose only job is to top up
+    /// coverage. Minting nothing is always safe; the next reconcile retries.
+    private func mintAdScanRedrives() async -> Int {
+        do {
+            return try await mintAdScanRedrivesThrowing()
+        } catch {
+            logger.warning("ad_scan_redrive sweep failed (skipped): \(error)")
+            return 0
+        }
+    }
+
+    private func mintAdScanRedrivesThrowing() async throws -> Int {
+        let assetIds = try await store.fetchAssetIdsWithResumableBackfillJobs(
+            limit: Self.maxAdScanRedriveCandidatesPerReconcile
+        )
+        guard !assetIds.isEmpty else { return 0 }
+
+        // Episodes that already have a non-terminal `analysis_jobs` row will get
+        // a pass without our help, and the runner's M-5 branch will resume their
+        // coverage-lane rows when it lands. Minting for them would only add a
+        // redundant pass.
+        let episodesWithPendingWork = try await store.fetchActiveJobEpisodeIds()
+
+        var minted = 0
+        for assetId in assetIds {
+            guard minted < Self.maxAdScanRedrivesPerReconcile else { break }
+            guard let candidate = try await adScanRedriveCandidate(
+                assetId: assetId,
+                episodesWithPendingWork: episodesWithPendingWork
+            ) else {
+                continue
+            }
+            if try await store.insertJob(candidate.job) {
+                minted += 1
+                logger.info(
+                    """
+                    ad_scan_redrive_minted asset=\(assetId, privacy: .public) \
+                    resumableCoverageJobs=\(candidate.resumableCount) \
+                    ordinal=\(candidate.ordinal)
+                    """
+                )
+            }
+        }
+        if minted > 0 {
+            logger.info("ad_scan_redrive_minted total=\(minted)")
+        }
+        return minted
+    }
+
+    private struct AdScanRedriveCandidate {
+        let job: AnalysisJob
+        let resumableCount: Int
+        let ordinal: Int
+    }
+
+    /// The per-asset half of the sweep: every reason NOT to mint, in
+    /// cheapest-first order, then the row to insert.
+    private func adScanRedriveCandidate(
+        assetId: String,
+        episodesWithPendingWork: Set<String>
+    ) async throws -> AdScanRedriveCandidate? {
+        guard let asset = try await store.fetchAsset(id: assetId) else { return nil }
+        guard !episodesWithPendingWork.contains(asset.episodeId) else { return nil }
+        // The re-drive inherits the episode's fingerprint / download / tier from
+        // its most recent job row. No row means we cannot name the audio this
+        // asset came from, so there is nothing safe to mint. (Those episodes are
+        // not abandoned: `discoverUnEnqueuedDownloads` re-mints a full analysis
+        // job for them when their download is still cached.)
+        guard let latest = try await store.fetchLatestJobForEpisode(asset.episodeId) else {
+            return nil
+        }
+        // The latest job is looked up by EPISODE, and an episode can carry several
+        // assets — a re-download mints a new asset while the old one keeps its
+        // coverage-lane rows. Minting from a job that belongs to a different asset
+        // would stamp the row with the wrong `sourceFingerprint` and `downloadId`
+        // while pointing `analysisAssetId` at this one: the stale-fingerprint
+        // detector would compare the OTHER asset's fingerprint against the cached
+        // audio and never fire, and the re-drive ordinal would be charged to the
+        // other asset's work key, silently spending ITS budget. Require the
+        // identities to agree.
+        guard latest.analysisAssetId == assetId else { return nil }
+        guard let workKey = AnalysisWorkScheduler.nextAdScanRedriveWorkKey(for: latest) else {
+            return nil
+        }
+        // Same guard `enqueueReplacement` uses: never mint a pass for an episode
+        // whose audio is gone. Without it, a stale coverage-lane row whose media
+        // was deleted would mint work that can only fail.
+        guard await downloadManager.cachedFileURL(for: asset.episodeId) != nil else {
+            return nil
+        }
+
+        let adScanFraction = try await store
+            .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+            .adScanFraction
+        let resumableCount = try await store.countResumableBackfillJobs(assetId: assetId)
+        guard AnalysisWorkScheduler.shouldMintAdScanRedrive(
+            adScanFraction: adScanFraction,
+            resumableCoverageJobCount: resumableCount
+        ) else {
+            return nil
+        }
+
+        let now = Date().timeIntervalSince1970
+        let redrive = AnalysisJob(
+            jobId: UUID().uuidString,
+            jobType: latest.jobType,
+            episodeId: asset.episodeId,
+            podcastId: latest.podcastId,
+            analysisAssetId: assetId,
+            workKey: workKey,
+            sourceFingerprint: latest.sourceFingerprint,
+            downloadId: latest.downloadId,
+            // Background lane: repair work never preempts what the user is
+            // waiting on.
+            priority: 0,
+            desiredCoverageSec: latest.desiredCoverageSec,
+            // Carry the predecessor's coverage so a no-op pass reads as
+            // no-progress rather than as fresh advancement.
+            featureCoverageSec: latest.featureCoverageSec,
+            transcriptCoverageSec: latest.transcriptCoverageSec,
+            cueCoverageSec: latest.cueCoverageSec,
+            state: "queued",
+            attemptCount: 0,
+            nextEligibleAt: nil,
+            leaseOwner: nil,
+            leaseExpiresAt: nil,
+            lastErrorCode: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        return AdScanRedriveCandidate(
+            job: redrive,
+            resumableCount: resumableCount,
+            ordinal: AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: workKey) ?? 0
+        )
     }
 
     // MARK: - Step: Scarcity-aware backfill re-prioritization (playhead-dqfm)
