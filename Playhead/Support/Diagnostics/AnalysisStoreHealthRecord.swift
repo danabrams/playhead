@@ -348,9 +348,20 @@ struct AnalysisStoreHealthState: Codable, Sendable, Equatable {
     /// stays a few kilobytes.
     static let maxFailureRecords = 20
 
-    /// Quarantines retained. A listener who has started fresh more than
-    /// five times has a different problem than this document can express.
-    static let maxQuarantineRecords = 5
+    /// Quarantines retained.
+    ///
+    /// DELIBERATELY UNBOUNDED IN PRACTICE. Every other list here is
+    /// capped because it is forensics and old entries stop mattering. A
+    /// quarantine record is not forensics — it is the only pointer to a
+    /// directory of the listener's data that is still on the device,
+    /// possibly tens of megabytes of it. Dropping the oldest record would
+    /// leave that directory orphaned: occupying disk, unreportable, and
+    /// unfindable by anyone who did not already know the name. Each
+    /// record is ~120 bytes and producing one requires an explicit
+    /// listener action, so the list is bounded by human effort. The cap
+    /// exists only as a runaway guard and is set far above any plausible
+    /// count.
+    static let maxQuarantineRecords = 200
 
     let status: AnalysisStoreHealthStatus
     /// Consecutive escalation-counting failures since the last success.

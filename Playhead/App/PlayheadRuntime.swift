@@ -51,6 +51,15 @@ final class PlayheadRuntime {
     let playbackService: PlaybackService
     let capabilitiesService: CapabilitiesService
     let analysisStore: AnalysisStore
+
+    /// playhead-wvdz: decides what happens when `analysisStore` will not
+    /// open. Holds no state of its own beyond the durable failure
+    /// journal, and is constructed here (rather than at the call site)
+    /// so the listener-facing "try again" / "start fresh" actions and
+    /// the launch-time open share one instance and therefore one
+    /// escalation counter.
+    let analysisStoreRecovery: AnalysisStoreRecoveryCoordinator
+
     let entitlementManager: EntitlementManager
 
     /// playhead-5c1t: cross-device sync coordinator for podcast
@@ -774,6 +783,7 @@ final class PlayheadRuntime {
         // branch compilable and untouched.
         let storeError: String? = nil
         self.analysisStore = resolvedStore
+        self.analysisStoreRecovery = AnalysisStoreRecoveryCoordinator()
 
         self.entitlementManager = EntitlementManager()
 
@@ -2041,7 +2051,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [weak self, analysisStore, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, negativeFingerprintBank, skipOrchestrator, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
+        Task { [weak self, analysisStore, analysisStoreRecovery, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, negativeFingerprintBank, skipOrchestrator, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
             // skeptical-review-cycle-9 L-4: pin the implicit MainActor
             // isolation that cycle-8 M1 relies on. PlayheadRuntime is
             // declared `@MainActor` (file:line 19), and an unannotated
@@ -2101,38 +2111,32 @@ final class PlayheadRuntime {
             // the bead. A persistent open failure now disables the
             // pre-analysis pipeline for this launch and surfaces a
             // fault to Console; the next launch retries.
-            // playhead-wvdz (observability half): every outcome of this
-            // open is now recorded to `AnalysisStoreHealthJournal`, a
-            // JSON document under Application Support that does NOT live
-            // in the database being opened. Before this, a failure here
-            // was Console-only: nothing survived to the next launch, and
-            // the diagnostics bundle — which reads the work journal out
-            // of this very store — could not even be built. A wipe
-            // caused by one bad migration rung was indistinguishable
-            // from a fresh install.
+            // playhead-wvdz: this used to answer a thrown `migrate()` by
+            // deleting `AnalysisStore.defaultDirectory()` and retrying —
+            // and the retry succeeded BECAUSE the directory was now
+            // empty. Every transcript chunk, ad window, fingerprint,
+            // learned threshold and hand-made correction was destroyed,
+            // silently, with the app launching as if freshly installed.
             //
-            // Recording only. The delete below is unchanged by this
-            // commit and is removed in the next one; the point of
-            // landing the signal first is that it is independently
-            // shippable and would have made the incident legible even
-            // without the behaviour change.
-            do {
-                try await analysisStore.migrate()
-                await AnalysisStoreHealthJournal.shared.recordSuccess()
-            } catch {
-                await AnalysisStoreHealthJournal.shared.recordFailure(error: error)
-                Logger(subsystem: "com.playhead", category: "Runtime")
-                    .warning("Analysis store first-open failed; attempting delete-corrupted-dir recovery: \(error.localizedDescription, privacy: .public)")
-                try? FileManager.default.removeItem(at: AnalysisStore.defaultDirectory())
-                do {
-                    try await analysisStore.migrate()
-                    await AnalysisStoreHealthJournal.shared.recordSuccess()
-                } catch {
-                    await AnalysisStoreHealthJournal.shared.recordFailure(error: error)
-                    Logger(subsystem: "com.playhead", category: "Runtime")
-                        .fault("Analysis store migration failed after delete-corrupted-dir retry — pre-analysis pipeline disabled: \(error)")
-                    return  // Don't start the pipeline if tables don't exist
-                }
+            // Nothing on this path destroys anything now. The failure is
+            // recorded, the store is left exactly as it is, and the next
+            // launch retries — `AnalysisStore.runSchemaMigration` already
+            // rolls its whole ladder back on error, so a thrown rung
+            // leaves `_meta.schema_version` unchanged and a retry is
+            // meaningful. After a few consecutive failures the listener
+            // is asked what to do; the app never chooses destruction
+            // itself. See `AnalysisStoreRecoveryCoordinator`.
+            //
+            // The `return` below is unchanged and is the DEGRADED LAUNCH:
+            // it skips the pre-analysis pipeline only. `PlaybackService`
+            // was constructed in `init` above, the playback-state
+            // observer Task is installed outside this one, and the play
+            // path loads and starts the transport before it touches the
+            // store — so a listener who opens the app to play a podcast
+            // can play a podcast.
+            let storeOutcome = await analysisStoreRecovery.openAtLaunch(analysisStore)
+            guard storeOutcome.isOpen else {
+                return  // Degraded launch: playback works, analysis does not.
             }
 
             // playhead-hygc.1.4 (R1 fix): reap orphan `.running` ledger
