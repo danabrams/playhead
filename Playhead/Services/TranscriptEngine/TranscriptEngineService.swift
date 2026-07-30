@@ -1066,6 +1066,17 @@ actor TranscriptEngineService {
         // touching the recognizer, and the run falls through to the same
         // named failure it reported before.
         let readiness = await speechService.prepareFastModel()
+        // A load cut short by a scrub or a stop is an INTERRUPTION, not a
+        // verdict on the speech stack. Routing it through
+        // `reportInterruption` keeps the name honest (and lets the gated-asset
+        // arm upgrade it to `.stopped`), where reporting
+        // `speech_engine_not_ready` would blame the engine for the user's
+        // scrub — the same mislabelling playhead-ngev removed one layer down.
+        if readiness == .cancelled {
+            logger.info("Speech model load cancelled — reporting the interruption, not an engine fault")
+            reportInterruption(.cancelled)
+            return
+        }
         guard readiness.isReady else {
             logger.error(
                 "Speech engine not ready (\(readiness.rawValue, privacy: .public)) — aborting transcription"

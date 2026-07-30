@@ -761,6 +761,35 @@ actor SpeechService {
             logger.info("Fast-path Speech model loaded on attempt \(attemptNumber)")
             return .loaded
         } catch {
+            // A CANCELLED attempt is not a failed one, and must not reach
+            // the journal. `stopTranscription` and every scrub cancel the
+            // transcription task, so on a device that is merely being
+            // scrubbed this catch runs often — and a cancellation recorded
+            // as a load failure would walk the counter that decides whether
+            // the speech stack looks broken straight to
+            // `persistentlyFailing`. That is playhead-ngev's lesson
+            // ("Scrubbing was recorded as an ASR failure") applied one layer
+            // down.
+            //
+            // `Task.isCancelled` rather than `error is CancellationError`:
+            // `AppleSpeechRecognizer.loadModel()` wraps anything it does not
+            // recognise into `TranscriptEngineError.transcriptionFailed`, so
+            // by the time a cancellation reaches here its TYPE has usually
+            // been rewritten. The task's own cancellation flag cannot be
+            // rewritten by a wrapper.
+            //
+            // The budget slot IS still consumed. Refunding it would make the
+            // attempt count a function of how often the user scrubs, and the
+            // rule this bead is held to is that the bound must be a
+            // guarantee — erring toward fewer attempts, never more. A
+            // foreground refreshes the budget, which is the escape hatch for
+            // a session that spent it on cancellations.
+            if Task.isCancelled {
+                logger.info(
+                    "Fast-path Speech model load cancelled (attempt \(attemptNumber)) — not recorded as a failure"
+                )
+                return .cancelled
+            }
             logger.error(
                 """
                 Fast-path Speech model FAILED to load (attempt \(attemptNumber) of \
@@ -970,6 +999,13 @@ enum SpeechModelLoadOutcome: String, Sendable, Equatable, CaseIterable {
     /// The epoch's attempts are spent. Nothing attempted — this is the
     /// case that proves the retry cannot spin.
     case budgetExhausted = "budget_exhausted"
+    /// The calling task was cancelled during the load — a scrub, a stop, a
+    /// preempt. Distinct from `.failed` because NOTHING WAS LEARNED about
+    /// whether the model can load, so this must not be journaled as a load
+    /// failure. Recording it would put a scrub in the counter that decides
+    /// whether the speech stack looks broken, which is the same "a quantity
+    /// that names an absence" defect that made `asr_failed` unusable.
+    case cancelled
 
     /// Whether the recognizer is usable as a result of this call.
     var isReady: Bool {

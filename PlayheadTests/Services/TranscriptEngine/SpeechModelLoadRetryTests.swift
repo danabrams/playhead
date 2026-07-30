@@ -96,6 +96,32 @@ private final class TransientlyFailingRecognizer: SpeechRecognizer, @unchecked S
     }
 }
 
+/// Recognizer whose `loadModel()` throws only because the calling task
+/// was cancelled — the shape a scrub or `stopTranscription` produces while
+/// a load is in flight.
+///
+/// It wraps the cancellation in `TranscriptEngineError.transcriptionFailed`
+/// ON PURPOSE: that is what `AppleSpeechRecognizer.loadModel()` does to
+/// anything it does not recognise, so a double that threw a bare
+/// `CancellationError` would test a shape production never produces.
+private final class CancellationObservingRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let state = OSAllocatedUnfairLock(initialState: 0)
+
+    var loadAttempts: Int { state.withLock { $0 } }
+
+    func loadModel() async throws {
+        state.withLock { $0 += 1 }
+        guard !Task.isCancelled else {
+            throw TranscriptEngineError.transcriptionFailed("cancelled: \(CancellationError())")
+        }
+    }
+
+    func unloadModel() async {}
+    func isModelLoaded() async -> Bool { false }
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] { [] }
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
+}
+
 /// Recognizer whose `loadModel()` parks until released, so a second
 /// caller can be observed arriving while the first is still inside the
 /// asset download.
@@ -412,6 +438,51 @@ struct SpeechModelLoadJournalRecordingTests {
         #expect(state.lastSuccessfulRole == nil)
     }
 #endif
+
+    /// A SCRUB IS NOT A BROKEN SPEECH STACK.
+    ///
+    /// Every scrub and every `stopTranscription` cancels the transcription
+    /// task, so on a device whose model is not loaded this catch runs often.
+    /// Journaling those would walk `consecutive_failure_count` to
+    /// `persistently_failing` on a device nobody has established anything
+    /// about — a counter that names an absence, which is precisely why
+    /// `asr_failed` was unusable.
+    @Test("A load cancelled by the caller is not journaled as a failure")
+    func cancelledLoadIsNotJournaledAsAFailure() async {
+        let (journal, directory) = makeJournal()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recognizer = CancellationObservingRecognizer()
+        let service = SpeechService(recognizer: recognizer, loadJournal: journal)
+
+        // A task that is already cancelled when it reaches the load.
+        let task = Task {
+            await service.prepareFastModel()
+        }
+        task.cancel()
+        let outcome = await task.value
+
+        #expect(
+            outcome == .cancelled,
+            "got \(outcome.rawValue) — a cancelled attempt learned nothing and must say so"
+        )
+        let state = await journal.load()
+        #expect(
+            state.status == .unknown,
+            """
+            got \(state.status.rawValue). A cancellation must leave the journal saying nothing \
+            was established — recording it as a failure blames the speech stack for a scrub.
+            """
+        )
+        #expect(state.consecutiveFailureCount == 0)
+        #expect(state.recentFailures.isEmpty)
+
+        // The budget slot IS consumed, deliberately: the bound must be a
+        // guarantee, so it errs toward fewer attempts rather than making the
+        // attempt count a function of how often the user scrubs.
+        let spent = await service.loadAttemptsInCurrentEpoch
+        #expect(spent == 1)
+    }
 
     @Test("A successful load is journaled with the role it established")
     func successIsJournaledWithItsRole() async {
