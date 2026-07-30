@@ -27,6 +27,59 @@ import Testing
 
 @testable import Playhead
 
+// MARK: - Test gate
+
+/// A one-shot gate that any number of tasks can wait on and that opens for
+/// all of them at once.
+///
+/// NOT an `AsyncStream`. The first version of these doubles parked callers
+/// with `for await _ in stream { break }`, which HUNG the suite: `AsyncStream`
+/// supports a single consumer, so concurrent iterators compete for elements
+/// and a `yield`/`finish` does not reliably wake every waiter. A continuation
+/// list is the correct primitive for a broadcast, and it is deterministic —
+/// no polling, no sleeping, no timing assumption.
+private actor SpeechLoadTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = waiters
+        waiters = []
+        for continuation in pending { continuation.resume() }
+    }
+}
+
+/// Counts arrivals and lets a test wait until a target is reached.
+private actor SpeechLoadArrivalLatch {
+    private var count = 0
+    private var target: Int?
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func arrive() {
+        count += 1
+        resumeIfSatisfied()
+    }
+
+    func waitUntil(_ wanted: Int) async {
+        if count >= wanted { return }
+        target = wanted
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    private func resumeIfSatisfied() {
+        guard let target, count >= target, let pending = waiter else { return }
+        waiter = nil
+        pending.resume()
+    }
+}
+
 // MARK: - Doubles
 
 /// Recognizer whose first `failCount` loads throw and whose later loads
@@ -96,21 +149,36 @@ private final class TransientlyFailingRecognizer: SpeechRecognizer, @unchecked S
     }
 }
 
-/// Recognizer whose `loadModel()` throws only because the calling task
-/// was cancelled — the shape a scrub or `stopTranscription` produces while
-/// a load is in flight.
+/// Recognizer whose `loadModel()` parks until the test releases it, then
+/// throws if the calling task was cancelled meanwhile — the shape a scrub
+/// or `stopTranscription` produces while a load is in flight.
+///
+/// The park is what makes the cancellation DETERMINISTIC. `Task {}` starts
+/// eagerly, so a test that merely calls `cancel()` after creating the task
+/// is racing it: on a loaded machine the load can complete first and the
+/// assertion flips. Here the test releases the load only after `cancel()`
+/// has landed, so there is no ordering to lose.
 ///
 /// It wraps the cancellation in `TranscriptEngineError.transcriptionFailed`
 /// ON PURPOSE: that is what `AppleSpeechRecognizer.loadModel()` does to
 /// anything it does not recognise, so a double that threw a bare
-/// `CancellationError` would test a shape production never produces.
+/// `CancellationError` would test a shape production never produces — and
+/// would let a `error is CancellationError` implementation pass.
 private final class CancellationObservingRecognizer: SpeechRecognizer, @unchecked Sendable {
     private let state = OSAllocatedUnfairLock(initialState: 0)
+    private let arrivals = SpeechLoadArrivalLatch()
+    private let gate = SpeechLoadTestGate()
 
     var loadAttempts: Int { state.withLock { $0 } }
 
+    func waitUntilLoadEntered() async { await arrivals.waitUntil(1) }
+
+    func releaseLoad() { Task { await gate.open() } }
+
     func loadModel() async throws {
         state.withLock { $0 += 1 }
+        await arrivals.arrive()
+        await gate.wait()
         guard !Task.isCancelled else {
             throw TranscriptEngineError.transcriptionFailed("cancelled: \(CancellationError())")
         }
@@ -118,6 +186,49 @@ private final class CancellationObservingRecognizer: SpeechRecognizer, @unchecke
 
     func unloadModel() async {}
     func isModelLoaded() async -> Bool { false }
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] { [] }
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
+}
+
+/// Recognizer that parks inside `isModelLoaded()` — the suspension point
+/// `prepareFastModel` awaits BEFORE its budget block.
+///
+/// This is the double that makes the atomicity claim testable: it holds
+/// every concurrent caller at exactly the reentrancy window, so an
+/// implementation whose budget check and consumption were separated by a
+/// suspension would demonstrably overspend.
+private final class SuspendingReadinessRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private struct State {
+        var loaded = false
+        var loadAttempts = 0
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let arrivals = SpeechLoadArrivalLatch()
+    private let gate = SpeechLoadTestGate()
+
+    var loadAttempts: Int { state.withLock { $0.loadAttempts } }
+
+    /// Suspends until `count` callers are parked inside `isModelLoaded()`.
+    func waitUntilReadinessCallsReach(_ count: Int) async { await arrivals.waitUntil(count) }
+
+    func releaseAllReadinessCalls() { Task { await gate.open() } }
+
+    func isModelLoaded() async -> Bool {
+        await arrivals.arrive()
+        // Park EVERY caller here — the suspension point `prepareFastModel`
+        // awaits immediately before its budget block — until the test opens
+        // the gate for all of them at once.
+        await gate.wait()
+        return state.withLock { $0.loaded }
+    }
+
+    func loadModel() async throws {
+        state.withLock { $0.loadAttempts += 1 }
+        throw TranscriptEngineError.transcriptionFailed("assets unavailable")
+    }
+
+    func unloadModel() async { state.withLock { $0.loaded = false } }
     func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] { [] }
     func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] { [] }
 }
@@ -132,31 +243,23 @@ private final class SuspendingLoadRecognizer: SpeechRecognizer, @unchecked Senda
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
-    private let entered: AsyncStream<Void>
-    private let enteredContinuation: AsyncStream<Void>.Continuation
-    private let release: AsyncStream<Void>
-    private let releaseContinuation: AsyncStream<Void>.Continuation
-
-    init() {
-        (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
-        (release, releaseContinuation) = AsyncStream<Void>.makeStream()
-    }
+    private let arrivals = SpeechLoadArrivalLatch()
+    private let gate = SpeechLoadTestGate()
 
     var loadAttempts: Int { state.withLock { $0.loadAttempts } }
 
-    /// Suspends until `loadModel()` has been entered.
-    func waitUntilLoadEntered() async {
-        var iterator = entered.makeAsyncIterator()
-        _ = await iterator.next()
-    }
+    /// Suspends until `count` callers are parked inside `loadModel()`.
+    func waitUntilLoadEntered(count: Int = 1) async { await arrivals.waitUntil(count) }
 
-    func releaseLoad() { releaseContinuation.yield(()) }
+    /// Releases every parked load. Plural matters: the stale-supersede test
+    /// has TWO callers inside `loadModel()` at once, and an AsyncStream
+    /// `yield` would wake only one of them and hang the test.
+    func releaseLoad() { Task { await gate.open() } }
 
     func loadModel() async throws {
         state.withLock { $0.loadAttempts += 1 }
-        enteredContinuation.yield(())
-        var iterator = release.makeAsyncIterator()
-        _ = await iterator.next()
+        await arrivals.arrive()
+        await gate.wait()
         state.withLock { $0.loaded = true }
     }
 
@@ -232,19 +335,29 @@ struct SpeechModelLoadBoundTests {
         #expect(!ready)
     }
 
-    /// The bound must survive REENTRANCY. `prepareFastModel` is an actor
-    /// method with awaits in it, so a budget check separated from its
-    /// consumption by a suspension point would let concurrent callers both
-    /// pass the guard and overspend.
-    @Test("Concurrent callers cannot overspend the budget")
+    /// The bound must survive REENTRANCY. `prepareFastModel` awaits
+    /// `recognizer.isModelLoaded()` before its budget block, so a budget
+    /// check separated from its consumption by a suspension point would let
+    /// concurrent callers both pass the guard and overspend.
+    ///
+    /// `SuspendingReadinessRecognizer` is what makes that window real: it
+    /// parks INSIDE `isModelLoaded()`, so all 32 callers pile up at exactly
+    /// the suspension point the atomicity claim is about. A recognizer whose
+    /// `isModelLoaded()` returns immediately never opens the window, and the
+    /// test would pass against a non-atomic implementation.
+    @Test("Concurrent callers cannot overspend the budget", .timeLimit(.minutes(1)))
     func concurrentCallersCannotOverspendTheBudget() async {
-        let recognizer = TransientlyFailingRecognizer(failuresBeforeSuccess: .max)
+        let recognizer = SuspendingReadinessRecognizer()
         let service = SpeechService(recognizer: recognizer)
 
         await withTaskGroup(of: SpeechModelLoadOutcome.self) { group in
             for _ in 0..<32 {
                 group.addTask { await service.prepareFastModel() }
             }
+            // Let every caller reach the suspension inside isModelLoaded()
+            // before any of them is allowed past it.
+            await recognizer.waitUntilReadinessCallsReach(32)
+            recognizer.releaseAllReadinessCalls()
             for await _ in group {}
         }
 
@@ -252,12 +365,75 @@ struct SpeechModelLoadBoundTests {
             recognizer.loadAttempts <= SpeechService.maxLoadAttemptsPerEpoch,
             "32 concurrent callers produced \(recognizer.loadAttempts) attempts — the bound is not atomic"
         )
+        // Without this, an implementation that never loads at all — or one
+        // whose in-flight latch wedges permanently — passes the assertion
+        // above trivially.
+        #expect(
+            recognizer.loadAttempts >= 1,
+            "no attempt was made at all; the bound is satisfied vacuously"
+        )
+    }
+
+    /// THE LATCH MUST NOT OUTLIVE THE LOAD IT GUARDS.
+    ///
+    /// `loadInFlightSince` makes a second caller decline so a slow asset
+    /// download is never joined by a duplicate. But nothing beneath
+    /// `loadFastModel` is bounded — `AssetInventory`'s
+    /// `downloadAndInstall()` is an unbounded network download — so as a
+    /// plain boolean latch it was never cleared when a load simply never
+    /// returned. Every later run got `.loadInFlight`, the foreground refresh
+    /// cleared the budget but not the latch, and the journal recorded
+    /// neither success nor failure: permanent, silent, unretried,
+    /// undiagnosable. Exactly the four properties this bead removes,
+    /// reintroduced by its own fix.
+    @Test("A load that never returns does not wedge every later attempt", .timeLimit(.minutes(1)))
+    func aStalledLoadIsSupersededRatherThanWedgingTheActor() async {
+        let recognizer = SuspendingLoadRecognizer()
+        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
+        let service = SpeechService(
+            recognizer: recognizer,
+            loadJournal: nil,
+            now: { clock.withLock { $0 } }
+        )
+
+        // A load that parks forever — the stalled download.
+        let stalled = Task { await service.prepareFastModel() }
+        await recognizer.waitUntilLoadEntered()
+
+        // While it is plausibly still running, a second caller declines.
+        #expect(await service.prepareFastModel() == .loadInFlight)
+        #expect(recognizer.loadAttempts == 1)
+
+        // Once it has been in flight longer than any real install could be,
+        // the latch must no longer speak for it.
+        clock.withLock { $0 = $0.advanced(by: SpeechService.staleInFlightLoadThreshold) }
+        let superseding = Task { await service.prepareFastModel() }
+
+        // The superseding caller parks in `loadModel()` too, so its arrival
+        // is the proof that it got PAST the latch. Waiting on the arrival —
+        // rather than on the call's return value — is what keeps this
+        // deterministic: a wedged implementation never arrives and the
+        // suite's time limit reports it, instead of the test hanging on a
+        // value that will never come.
+        await recognizer.waitUntilLoadEntered(count: 2)
+        #expect(
+            recognizer.loadAttempts == 2,
+            """
+            a load in flight for over \(SpeechService.staleInFlightLoadThreshold) still blocks \
+            every new attempt — the guard has outlived the load, so this device can never \
+            transcribe again without being force-quit
+            """
+        )
+
+        recognizer.releaseLoad()
+        #expect(await superseding.value != .loadInFlight)
+        _ = await stalled.value
     }
 
     /// A caller that arrives mid-load must DECLINE, not queue behind an
     /// asset download it cannot cancel, and must not spend a budget slot
     /// for an attempt it did not make.
-    @Test("A caller arriving mid-load declines without consuming the budget")
+    @Test("A caller arriving mid-load declines without consuming the budget", .timeLimit(.minutes(1)))
     func concurrentCallerDeclinesWhileALoadIsInFlight() async throws {
         let recognizer = SuspendingLoadRecognizer()
         let service = SpeechService(recognizer: recognizer)
@@ -447,7 +623,7 @@ struct SpeechModelLoadJournalRecordingTests {
     /// `persistently_failing` on a device nobody has established anything
     /// about — a counter that names an absence, which is precisely why
     /// `asr_failed` was unusable.
-    @Test("A load cancelled by the caller is not journaled as a failure")
+    @Test("A load cancelled by the caller is not journaled as a failure", .timeLimit(.minutes(1)))
     func cancelledLoadIsNotJournaledAsAFailure() async {
         let (journal, directory) = makeJournal()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -455,11 +631,13 @@ struct SpeechModelLoadJournalRecordingTests {
         let recognizer = CancellationObservingRecognizer()
         let service = SpeechService(recognizer: recognizer, loadJournal: journal)
 
-        // A task that is already cancelled when it reaches the load.
-        let task = Task {
-            await service.prepareFastModel()
-        }
+        // Deterministic ordering: park the load, cancel, THEN release. A
+        // bare `Task { … }; task.cancel()` races the eagerly-started task
+        // and passes only when cancellation happens to win.
+        let task = Task { await service.prepareFastModel() }
+        await recognizer.waitUntilLoadEntered()
         task.cancel()
+        recognizer.releaseLoad()
         let outcome = await task.value
 
         #expect(

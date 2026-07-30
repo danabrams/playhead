@@ -617,6 +617,37 @@ actor SpeechService {
     /// comes forward makes at most three attempts, ever.
     static let maxLoadAttemptsPerEpoch = 3
 
+    /// playhead-se2h (review): how long an in-flight load may run before a
+    /// later caller is allowed to supersede it.
+    ///
+    /// WHY THIS EXISTS. `loadInFlight` began as a plain latch cleared only
+    /// by the `defer` around the load — and nothing in the chain beneath it
+    /// is bounded: `loadFastModel` → `AppleSpeechRecognizer.loadModel` →
+    /// `AppleSpeechAssetBootstrapper.prepare` →
+    /// `AssetInventory` … `downloadAndInstall()`, an unbounded network
+    /// download. A download that never returns (stalled connection, captive
+    /// portal) meant the latch never cleared, so every later transcription
+    /// run got `.loadInFlight` forever, the foreground refresh cleared the
+    /// attempt budget but not the latch, and the journal recorded neither a
+    /// success nor a failure. That is permanent, silent, unretried and
+    /// undiagnosable — the four properties this bead exists to remove,
+    /// reintroduced by its own fix.
+    ///
+    /// A staleness window is preferred over a timeout on the download
+    /// itself: this actor has no business deciding that a legitimately slow
+    /// asset install has failed, and cancelling Apple's install request
+    /// would throw away real progress. Superseding only lets a NEW attempt
+    /// start; the old one is left to finish or die on its own, and
+    /// `loadModel`'s assignments are idempotent, so whichever completes
+    /// leaves consistent state.
+    ///
+    /// Two minutes: long enough that an ordinary first-launch asset install
+    /// on a slow connection is never superseded, short enough that a wedged
+    /// one costs one session rather than the install's lifetime. Superseding
+    /// still spends a budget slot, so a permanently wedged download costs at
+    /// most `maxLoadAttemptsPerEpoch` concurrent attempts, not one per run.
+    static let staleInFlightLoadThreshold: Duration = .seconds(120)
+
     /// The underlying recognizer (Apple Speech or stub).
     private let recognizer: any SpeechRecognizer
     private let serializesRecognizerRequests: Bool
@@ -627,8 +658,21 @@ actor SpeechService {
     /// has succeeded and no `unloadModel()` has run since. The recognizer
     /// is private to this actor, so nothing outside can desynchronise
     /// them — and both load paths advance this only AFTER the load
-    /// returns. A role that claims a model the recognizer does not hold
-    /// is the whole defect class this bead exists to remove.
+    /// returns. State that claims a loaded model the recognizer does not
+    /// hold is the defect class this bead exists to remove.
+    ///
+    /// WHAT IT DOES NOT MEAN. The recognizer is role-AGNOSTIC:
+    /// `AppleSpeechAssetBootstrapper.prepare()` takes no role and both
+    /// roles resolve through the same asset bootstrap, so this field is
+    /// the INTENT OF THE LAST SUCCESSFUL LOADER, not a property the
+    /// recognizer could contradict. `transcribe` reads it to tag
+    /// `passType`, which means a fast-path run that finds a model already
+    /// loaded by a final pass inherits `.asrFinal` and tags its chunks
+    /// `final`. That is pre-existing (the previous `isReady()` gate
+    /// behaved identically) and is NOT fixed here: the honest fix is to
+    /// stop deriving `passType` from shared mutable state and pass the
+    /// intended pass into `transcribe`, which changes a signature several
+    /// owners share. Recorded rather than silently inherited.
     private(set) var activeModelRole: ModelRole?
 
     /// playhead-se2h: durable record of load attempts, so a failure is
@@ -640,10 +684,17 @@ actor SpeechService {
     /// Attempts consumed since the last success or foreground.
     private var loadAttemptsThisEpoch = 0
 
-    /// Whether a load is executing right now. Guards against a second
-    /// caller starting a duplicate asset download while the first is
-    /// still inside `AssetInventory.installAssets`.
-    private var loadInFlight = false
+    /// When the currently-executing load started, or nil if none is.
+    ///
+    /// Guards against a second caller starting a duplicate asset download
+    /// while the first is still inside `AssetInventory.installAssets` — but
+    /// stores an INSTANT rather than a bool so the guard cannot outlive the
+    /// load that set it. See ``staleInFlightLoadThreshold``.
+    private var loadInFlightSince: ContinuousClock.Instant?
+
+    /// Injected clock reading, so the staleness window is testable without
+    /// sleeping. Production passes `{ .now }`.
+    private let now: @Sendable () -> ContinuousClock.Instant
 
     /// Callback for segment-level results as they arrive.
     private let segmentContinuation: AsyncStream<TranscriptSegment>.Continuation
@@ -655,11 +706,13 @@ actor SpeechService {
 
     init(
         vocabularyProvider: ASRVocabularyProvider? = nil,
-        loadJournal: SpeechModelLoadJournal? = nil
+        loadJournal: SpeechModelLoadJournal? = nil,
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }
     ) {
         self.recognizer = makeDefaultSpeechRecognizer(vocabularyProvider: vocabularyProvider)
         self.serializesRecognizerRequests = true
         self.loadJournal = loadJournal
+        self.now = now
 
         let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
         self.segmentStream = stream
@@ -669,11 +722,13 @@ actor SpeechService {
     init(
         recognizer: any SpeechRecognizer,
         serializesRecognizerRequests: Bool = true,
-        loadJournal: SpeechModelLoadJournal? = nil
+        loadJournal: SpeechModelLoadJournal? = nil,
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }
     ) {
         self.recognizer = recognizer
         self.serializesRecognizerRequests = serializesRecognizerRequests
         self.loadJournal = loadJournal
+        self.now = now
 
         let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
         self.segmentStream = stream
@@ -719,7 +774,10 @@ actor SpeechService {
     ///   * and it declines rather than waits when another caller is
     ///     already loading, so a slow asset download is never joined by a
     ///     second one and no caller is parked on an await it cannot
-    ///     cancel.
+    ///     cancel — but that decline expires
+    ///     (``staleInFlightLoadThreshold``), because a guard that can
+    ///     outlive the load it guards is the same permanent-silent-failure
+    ///     shape this bead exists to remove.
     ///
     /// No timer, no polling, no backoff clock: the trigger is the work
     /// itself, which is already rate-limited by the scheduler.
@@ -737,21 +795,65 @@ actor SpeechService {
             return .alreadyLoaded
         }
 
+        // An ALREADY-CANCELLED caller must not spend a slot, and must not
+        // be able to produce a `.cancelled` that hides a real verdict.
+        //
+        // Without this guard the only cancellation check was in the catch,
+        // which conflated two different things: a load cut short by a
+        // scrub, and a load that ran to a genuine failure inside a task
+        // that had already been cancelled. `AppleSpeechAssetBootstrapper`
+        // throws `speechAssetsUnsupported` with no suspension at all — the
+        // bead's own headline cause — so that second case is reachable, and
+        // it filed a real, actionable failure as a cancellation: no journal
+        // entry, budget slot gone. A run of those left the bundle reporting
+        // `unknown`, which this shape documents as meaning "the recording
+        // call is not wired" — sending a support engineer after a wiring
+        // bug that does not exist.
+        //
+        // Checked here, before anything is consumed, the two are separable:
+        // a caller cancelled on arrival spends nothing, and a `.cancelled`
+        // from the catch below can only mean cancellation arrived DURING
+        // the load.
+        guard !Task.isCancelled else { return .cancelled }
+
         // ---- One synchronous step: decide and consume. ----
         // There is deliberately NO await between the guards and the
         // mutation. Actor reentrancy at an await here would let two
         // callers both pass the budget check and both spend an attempt,
         // so the "at most N attempts" bound would be a hope rather than a
         // guarantee.
-        guard !loadInFlight else { return .loadInFlight }
+        let startedAt = now()
+        if let inFlightSince = loadInFlightSince {
+            // A load is running. Decline — UNLESS it has been running long
+            // enough that it is no longer plausibly running at all, in
+            // which case the latch is the thing that has failed and must
+            // not be allowed to outlive it. See
+            // `staleInFlightLoadThreshold` for why this is not a timeout.
+            guard startedAt - inFlightSince >= Self.staleInFlightLoadThreshold else {
+                return .loadInFlight
+            }
+            logger.fault(
+                """
+                A Speech model load has been in flight for over \
+                \(Self.staleInFlightLoadThreshold, privacy: .public) and has neither \
+                succeeded nor failed — most likely a stalled asset download. Superseding it \
+                so this device is not left permanently unable to transcribe.
+                """
+            )
+        }
         guard loadAttemptsThisEpoch < Self.maxLoadAttemptsPerEpoch else {
             return .budgetExhausted
         }
         loadAttemptsThisEpoch += 1
         let attemptNumber = loadAttemptsThisEpoch
-        loadInFlight = true
+        loadInFlightSince = startedAt
         // ---- End synchronous step. ----
-        defer { loadInFlight = false }
+        defer {
+            // Only clear the latch if it is still OURS. A superseding
+            // attempt has already overwritten the stamp, and a late
+            // returning predecessor must not clear the successor's.
+            if loadInFlightSince == startedAt { loadInFlightSince = nil }
+        }
 
         do {
             try await loadFastModel()
@@ -1791,9 +1893,21 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
     private var analyzerFormat: AVAudioFormat?
     private var prepared = false
 
-    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
+    /// playhead-se2h: `assetBootstrapper` is injectable so `loadModel()` is
+    /// reachable from the gate.
+    ///
+    /// It was hardcoded, which made this whole actor untestable — nothing
+    /// constructs it under XCTest (`makeDefaultSpeechRecognizer` returns the
+    /// stub), so its error handling could only be pinned by a source grep.
+    /// The bootstrapper already had both of its own seams; this one line is
+    /// what turns that grep into a behavioural test. The default keeps every
+    /// production call site unchanged.
+    init(
+        vocabularyProvider: ASRVocabularyProvider? = nil,
+        assetBootstrapper: AppleSpeechAssetBootstrapper = AppleSpeechAssetBootstrapper()
+    ) {
         self.vocabularyProvider = vocabularyProvider
-        self.assetBootstrapper = AppleSpeechAssetBootstrapper()
+        self.assetBootstrapper = assetBootstrapper
         self.analyzerRunner = AppleSpeechAnalyzerRunner(vocabularyProvider: vocabularyProvider)
     }
 

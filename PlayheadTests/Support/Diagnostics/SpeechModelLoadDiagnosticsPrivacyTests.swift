@@ -300,10 +300,6 @@ struct SpeechModelLoadDiagnosticsPrivacyTests {
     /// rather than failing or inventing health.
     @Test("A bundle predating the field decodes as unknown")
     func bundlePredatingTheFieldDecodesAsUnknown() throws {
-        let state = SpeechLoadFixture.fullyPopulatedState()
-        let coordinator = Self.makeCoordinator(speechModelLoadFetch: { state })
-        _ = coordinator
-
         let bundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: "1.0.0",
             osVersion: "iPhone OS 27.0",

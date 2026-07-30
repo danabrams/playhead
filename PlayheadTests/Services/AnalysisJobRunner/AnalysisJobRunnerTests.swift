@@ -1854,8 +1854,8 @@ struct AnalysisJobRunnerTests {
         #expect(
             row.cause == .pipelineError,
             """
-            the recognizer was never invoked — `SpeechService.isReady()` was \
-            false before a single shard was handed over — and the row still \
+            the recognizer never transcribed anything — the model could not be \
+            loaded, so not a single shard was handed over — and the row still \
             says \(row.cause?.rawValue ?? "nil"). That contradiction is what \
             makes an `asr_failed` count unusable
             """

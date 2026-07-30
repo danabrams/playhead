@@ -18,9 +18,16 @@
 //     append log;
 //   * `.completeUntilFirstUserAuthentication`, re-applied after every
 //     write because `.atomic` replaces the inode;
-//   * and the refuse-to-write rule: an unreadable document is NOT an
-//     empty one, so `mutate` declines to clobber it rather than resetting
-//     a real escalation history to zero.
+//   * and the refuse-to-write rule: a document that exists but cannot be
+//     READ AT ALL is not an empty one, so `mutate` declines to clobber it
+//     rather than resetting a real escalation history to zero.
+//
+// Note the precise scope of that last rule: it covers an UNREADABLE file
+// (the container still under Data Protection, a permissions failure), not
+// an unparseable one. A document whose bytes are readable but are not
+// JSON IS replaced — see `load()` — because refusing forever would wedge
+// the counter permanently, which costs exactly as much as the reset while
+// also never self-healing.
 //
 // Reusing that shape is deliberate. Two journals that describe two
 // subsystems in the same way is one thing to learn; two journals with

@@ -43,10 +43,15 @@ import Foundation
 /// diagnostics field that reports health no matter how broken the device
 /// is, which is the failure playhead-wvdz was filed to end.
 enum SpeechModelLoadStatus: String, Codable, Sendable, CaseIterable {
-    /// No load attempt has ever been recorded. On a device running a
-    /// build that contains this signal, this state should not survive
-    /// the first launch — seeing it in a bundle means the recording call
-    /// is not wired, not that the device is healthy.
+    /// No load attempt has ever been recorded.
+    ///
+    /// On a device running a build that contains this signal, a launch
+    /// that reached `prepareFastModel()` normally replaces this on its
+    /// first attempt, so `unknown` in a bundle is strong evidence that
+    /// nothing recorded — most often a wiring regression. It is NOT proof
+    /// of one: an attempt cancelled on arrival records nothing by design,
+    /// and a load still in flight has not concluded. So read it as "no
+    /// determination has been made", never as "the device is healthy".
     case unknown
     /// The most recent recorded event was a successful load.
     case loaded
@@ -70,9 +75,12 @@ struct SpeechModelLoadFailureRecord: Codable, Sendable, Equatable {
     /// `work_journal_tail` is reading one taxonomy, not two.
     let failureClass: TranscriptFailureClass
     /// Which attempt within the process's retry budget this was (1-based).
-    /// `attemptNumber == SpeechService.maxLoadAttemptsPerEpoch` beside a
-    /// later failure-free stretch is how "the budget ran out" is read off
-    /// the record rather than inferred.
+    ///
+    /// A gap in the sequence is meaningful and expected: attempts that end
+    /// in cancellation spend a slot without recording anything, so a
+    /// recorded `attemptNumber` of 3 with no 1 or 2 means the first two
+    /// were cancelled rather than that records were lost. Treat it as
+    /// "which slot this was", not as a count of recorded failures.
     let attemptNumber: Int
     /// The consecutive-failure counter AFTER this failure. Recorded so the
     /// escalation history can be reconstructed from the list alone — the

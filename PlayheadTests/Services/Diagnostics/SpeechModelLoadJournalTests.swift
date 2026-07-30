@@ -197,30 +197,52 @@ struct SpeechModelLoadJournalTests {
         let url = directory.appendingPathComponent(SpeechModelLoadJournal.filename)
         let good = try Data(contentsOf: url)
 
-        // Make the file exist but be unreadable, the shape a protected
-        // container presents. A directory at the path is the portable way
-        // to make `Data(contentsOf:)` fail while `fileExists` succeeds.
-        try FileManager.default.removeItem(at: url)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        // UNREADABLE-BUT-WRITABLE is the fixture that actually discriminates.
+        //
+        // The first version of this test put a DIRECTORY at the path. That
+        // makes `Data(contentsOf:)` fail — but it also makes the subsequent
+        // `.atomic` write fail, so deleting the guard under test changed
+        // nothing and every assertion still held. The test could not fail.
+        //
+        // A mode-000 file is the honest shape: reads fail EACCES while an
+        // `.atomic` write still succeeds, because `.atomic` writes a temp
+        // file and `rename()`s over the target — the permissions of the file
+        // being replaced are irrelevant. So without the refuse-to-clobber
+        // guard the history IS destroyed here, and the final assertion
+        // catches it.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000], ofItemAtPath: url.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path
+            )
+        }
+        try #require(
+            (try? Data(contentsOf: url)) == nil,
+            "fixture premise: the document must be unreadable for this test to mean anything"
+        )
 
         let returned = await journal.recordFailure(error: loadError(), attemptNumber: 4)
         #expect(
             returned.consecutiveFailureCount == 1,
             "the caller is still told the failure happened, from a fresh base"
         )
-        #expect(
-            (try? Data(contentsOf: url)) == nil,
-            "and nothing was written over the unreadable path"
-        )
 
         // Restore readability: the real history must be intact.
-        try FileManager.default.removeItem(at: url)
-        try good.write(to: url)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: url.path
+        )
         let restored = await journal.load()
         #expect(
             restored.consecutiveFailureCount == 3,
-            "got \(restored.consecutiveFailureCount) — the pre-existing history must survive"
+            """
+            got \(restored.consecutiveFailureCount) — the pre-existing history must survive an \
+            unreadable-read window. A 1 here means the write went ahead and reset a real \
+            escalation counter, which on a device is how the listener stops ever being told.
+            """
         )
+        #expect(try Data(contentsOf: url) == good, "the bytes must be untouched, not merely equivalent")
     }
 
     @Test("A document that is not JSON at all reads unknown and is then replaced")

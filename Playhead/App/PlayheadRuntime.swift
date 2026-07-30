@@ -2872,9 +2872,22 @@ final class PlayheadRuntime {
             // `prepareFastModel()` logs the failure, classifies it into
             // `SpeechModelLoadJournal` where a diagnostics bundle can see
             // it, and — crucially — leaves a retry budget that the next
-            // transcription run spends. Non-throwing by design: launch
-            // must not be gated on a speech asset, and there is no longer
-            // an error here to swallow.
+            // transcription run spends. It does not throw, so there is no
+            // longer an error here to swallow.
+            //
+            // IT IS STILL AWAITED INLINE, in the same position the old
+            // `try await loadFastModel()` occupied, so the four `start()`
+            // calls below still wait for it — and it can take as long as an
+            // asset download. That is pre-existing and deliberately NOT
+            // changed here: moving it would re-order entitlement
+            // resolution, iCloud sync and BPS startup relative to each
+            // other, which is a launch-sequencing decision rather than an
+            // error-handling one. Saying so is the point — the bug this
+            // bead fixes was a comment that asserted behaviour the code did
+            // not have, and "non-throwing" must not be read as
+            // "non-blocking". Detaching it into its own `Task` is now SAFE
+            // (a concurrent load from the transcription loop is declined by
+            // `loadInFlightSince`) and is the obvious follow-up.
             await speechService.prepareFastModel()
 
             await backgroundProcessingService.start()
