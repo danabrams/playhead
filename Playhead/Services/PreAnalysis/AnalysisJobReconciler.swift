@@ -63,6 +63,37 @@ struct ReconciliationReport: Sendable {
     /// spent its re-drive budget (`AnalysisWorkScheduler.maxAdScanRedrives`),
     /// which is what makes repeated launches safe.
     let adScanRedrivesMinted: Int
+
+    /// playhead-onn6: how many rows this pass actually RECOVERED — the number the
+    /// background-task ledger reports as `jobsCompleted` and uses to decide
+    /// `.recoveredWork` vs `.noOp`.
+    ///
+    /// It lives here, on the type that owns the fields, because it was previously
+    /// an inline sum in `BackgroundProcessingService` and a new counter was added
+    /// without being added to it: a sweep whose only yield was minting ad-scan
+    /// re-drives — real queued, dispatchable work — reported `.noOp` with
+    /// `jobsCompleted: 0`, hiding the recovery from the ledger built to make it
+    /// visible. A named property next to the fields makes the omission obvious.
+    ///
+    /// The membership is unchanged from the inline sum it replaces, plus
+    /// `adScanRedrivesMinted`. Four counters stay OUT, and each for a reason:
+    /// `missingFilesStillBlocked` is a diagnosis rather than a repair;
+    /// `staleVersionsSuperseded` retires rows whose replacements are already
+    /// counted by `staleVersionsReenqueued`; `completedJobsGarbageCollected` and
+    /// `failedJobsBackedOff` remove or delay work rather than recovering it; and
+    /// `queuedJobEpochsRestamped` / `scarcityReprioritizedJobs` act on rows that
+    /// were already queued and dispatchable — only their metadata moved.
+    var recoveredWorkCount: Int {
+        expiredLeasesRecovered
+            + recoveredStrandedSessionJobs
+            + missingFilesUnblocked
+            + modelsUnblocked
+            + staleVersionsReenqueued
+            + unEnqueuedDownloadsCreated
+            + strandedBackfillJobsReset
+            + strandedFinalPassJobsReset
+            + adScanRedrivesMinted
+    }
 }
 
 // MARK: - AnalysisJobReconciler

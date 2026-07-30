@@ -830,6 +830,54 @@ struct AdScanRedriveReconcilerTests {
         )
     }
 
+    /// A sweep whose ONLY yield was minting re-drives has recovered real work.
+    /// Before this bead the background-task ledger's `recovered` sum was spelled
+    /// out inline in `BackgroundProcessingService` and did not know about the new
+    /// counter, so such a run reported `.noOp` with `jobsCompleted: 0` — the
+    /// ledger built to make background recovery visible would have hidden it.
+    @Test("minted re-drives count as recovered work in the background ledger")
+    func mintedRedrivesCountAsRecoveredWork() async throws {
+        let empty = ReconciliationReport(
+            expiredLeasesRecovered: 0,
+            recoveredStrandedSessionJobs: 0,
+            missingFilesUnblocked: 0,
+            missingFilesStillBlocked: 3,
+            modelsUnblocked: 0,
+            staleVersionsSuperseded: 2,
+            staleVersionsReenqueued: 0,
+            completedJobsGarbageCollected: 7,
+            failedJobsBackedOff: 1,
+            unEnqueuedDownloadsCreated: 0,
+            strandedBackfillJobsReset: 0,
+            strandedFinalPassJobsReset: 0,
+            queuedJobEpochsRestamped: 4,
+            scarcityReprioritizedJobs: 5,
+            adScanRedrivesMinted: 0
+        )
+        // The excluded counters are loaded above and must still sum to nothing:
+        // they diagnose, retire, delay or re-rank, they do not recover.
+        #expect(empty.recoveredWorkCount == 0)
+
+        let withRedrives = ReconciliationReport(
+            expiredLeasesRecovered: 0,
+            recoveredStrandedSessionJobs: 0,
+            missingFilesUnblocked: 0,
+            missingFilesStillBlocked: 0,
+            modelsUnblocked: 0,
+            staleVersionsSuperseded: 0,
+            staleVersionsReenqueued: 0,
+            completedJobsGarbageCollected: 0,
+            failedJobsBackedOff: 0,
+            unEnqueuedDownloadsCreated: 0,
+            strandedBackfillJobsReset: 0,
+            strandedFinalPassJobsReset: 0,
+            queuedJobEpochsRestamped: 0,
+            scarcityReprioritizedJobs: 0,
+            adScanRedrivesMinted: 6
+        )
+        #expect(withRedrives.recoveredWorkCount == 6)
+    }
+
     /// One reconcile does not dump the whole backlog into the queue.
     @Test("a reconcile pass is capped")
     func reconcilePassIsCapped() async throws {
