@@ -369,7 +369,18 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                  // does not abort its cross-user snapshot via
                  // `hasKnownExportDisposition`. Mirrors
                  // `AdDetectionService.dayZeroRediffByteExactBoundaryState`.
-                 "dayZeroRediffByteExact":
+                 "dayZeroRediffByteExact",
+                 // playhead-b6jq PR5 / playhead-xsdz.65: additive MARK-ONLY
+                 // producers (`SpecialistMarkComposer`, `AdPodContinuation`) stamp
+                 // boundary states that are not `AdBoundaryState` cases. They are
+                 // local derived guesses and are never exported — but they must be
+                 // RECOGNIZED, because `hasKnownExportDisposition` is an
+                 // ALL-or-nothing gate: one unrecognized `candidate` row aborts the
+                 // whole asset's cross-user snapshot silently, with no log and no
+                 // error. Both producers ship flag-off, which is the only reason
+                 // this never bit.
+                 SpecialistMarkComposer.boundaryState,
+                 AdPodContinuation.boundaryState:
                 return true
             default:
                 return false

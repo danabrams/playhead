@@ -312,9 +312,29 @@ final class AdPodContinuationCorpusEvalTests: XCTestCase {
                     rhetorical: true, singleStrongKind: true, gap: gap)
             )
         }
-        // The SHIPPING arm is the production default in every respect, so the
-        // assertions below gate exactly what a flag flip would turn on.
+        // The SHIPPING arm must be byte-equal to what `runBackfill` Step 18b
+        // composes — both link sources, the default bar, the default gap — so the
+        // assertions below gate exactly what a flag flip would turn on. Getting
+        // this wrong once already measured a configuration production does not
+        // run: `rhetoricalLinks` was in every arm and in NO production call site,
+        // so the reported "13 -> 12" described a strict superset of the shipped
+        // link set. The uniqueness assertion below is the other half of that
+        // lesson.
         let shippingArmName = "E gap=\(Int(defaultGap)) + single-strong-kind links"
+        XCTAssertEqual(
+            Set(arms.map(\.name)).count,
+            arms.count,
+            "two arms share a name — they would accumulate into one bucket and double every count"
+        )
+        XCTAssertTrue(
+            arms.contains {
+                $0.name == shippingArmName
+                    && $0.lexical && $0.rhetorical
+                    && $0.singleStrongKind
+                    && $0.gap == defaultGap
+            },
+            "the shipping arm must match the production configuration exactly"
+        )
         var outcomes: [String: Outcome] = [:]
         var episodesEvaluated = 0
         var episodesSkipped = 0
@@ -488,6 +508,18 @@ final class AdPodContinuationCorpusEvalTests: XCTestCase {
             """
         print(report)
 
+        // THE NUMBER THAT DECIDES WHETHER THIS SHIPS, asserted rather than printed.
+        // A frozen budget of zero: at the shipping configuration every newly
+        // claimed second landed inside a byte-confirmed DAI insertion, and there
+        // is no reason for that to loosen. It was printed-only for one round, and
+        // a printed number gates nothing — a change that started claiming minutes
+        // of out-of-slot audio would have passed green.
+        XCTAssertEqual(
+            shipping.recoveredOutsideSlots,
+            0.0,
+            accuracy: 0.05,
+            "newly claimed seconds outside every rediff slot must stay at the measured zero"
+        )
         XCTAssertTrue(
             shipping.worsened.isEmpty,
             "no detected slot may lose coverage: \(shipping.worsened)"

@@ -919,6 +919,225 @@ struct AdPodContinuationTests {
         #expect(merged == [link(100, 200), link(300, 320)])
     }
 
+    // MARK: - Backward-walk bounds (the mirror of the forward ones)
+
+    /// The forward gap bound had a test; the backward one did not, and the
+    /// mutation `end >= edge - maxLinkGapSeconds * 3` survived the whole suite.
+    /// That is the parameter this file calls the most safety-relevant number.
+    @Test("a link beyond maxLinkGapSeconds does not start a BACKWARD chain")
+    func backwardGapBoundIsRespected() {
+        let gap = AdPodContinuation.Configuration.default.maxLinkGapSeconds
+        let seed = window(start: 1000.0, end: 1020.0)
+        let justInside = AdPodContinuation.compose(
+            existingWindows: [seed],
+            adCopyLinks: [link(900.0, 1000.0 - gap + 0.5)],
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 2000.0,
+            analysisAssetId: Self.assetId
+        )
+        #expect(justInside.count == 1)
+        #expect(justInside.first?.startTime == 900.0)
+
+        let justOutside = AdPodContinuation.compose(
+            existingWindows: [seed],
+            adCopyLinks: [link(900.0, 1000.0 - gap - 0.5)],
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 2000.0,
+            analysisAssetId: Self.assetId
+        )
+        #expect(justOutside.isEmpty)
+    }
+
+    /// Likewise the per-side extension bound: the mutation that measured it
+    /// PER-STEP instead of cumulatively (making the backward blast radius
+    /// unbounded) survived the whole suite.
+    @Test("the per-side extension bound truncates a runaway BACKWARD chain")
+    func backwardExtensionBoundIsRespected() throws {
+        // Twenty links descending from the seed, 20 s apart, each individually
+        // within the gap — only the cumulative bound can stop this.
+        let links = (0..<20).map { index -> AdPodContinuation.AdCopyLink in
+            let end = 980.0 - Double(index) * 20.0
+            return link(end - 10.0, end)
+        }
+        let config = AdPodContinuation.Configuration(maxExtensionSecondsPerSide: 60.0)
+        let marks = AdPodContinuation.compose(
+            existingWindows: [window(start: 1000.0, end: 1020.0)],
+            adCopyLinks: links,
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 2000.0,
+            analysisAssetId: Self.assetId,
+            config: config
+        )
+        let mark = try #require(marks.first)
+        #expect(1000.0 - mark.startTime <= 60.0)
+    }
+
+    // MARK: - User-owned rows the listener resolved
+
+    /// Accepting a suggest banner mints a `userConfirmedSuggested` row that
+    /// INHERITS this pass's `detectorVersion`. A version-only self-exclusion
+    /// treated that promoted row as ours, dropped it from the coverage set, and
+    /// let the next backfill re-claim audio the listener had already resolved.
+    @Test("an accepted-banner row is neither a seed nor invisible to the residue")
+    func acceptedBannerRowIsNotMistakenForOurOwn() {
+        let accepted = AdWindow(
+            id: "accepted",
+            analysisAssetId: Self.assetId,
+            startTime: 770.0,
+            endTime: 800.0,
+            confidence: 0.9,
+            boundaryState: "userConfirmedSuggested",
+            decisionState: AdDecisionState.applied.rawValue,
+            detectorVersion: AdPodContinuation.detectorVersion,
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: nil,
+            metadataSource: AdPodContinuation.metadataSource,
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: true,
+            userDismissedBanner: false,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
+        #expect(!AdPodContinuation.isOwnRow(accepted))
+        #expect(!AdPodContinuation.isSeed(accepted))
+
+        // It is VISIBLE, so the residue excludes it even with no protected region.
+        let marks = AdPodContinuation.compose(
+            existingWindows: [window(start: 800.0, end: 815.0), accepted],
+            adCopyLinks: [link(780.0, 795.0)],
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 1470.0,
+            analysisAssetId: Self.assetId
+        )
+        #expect(marks.isEmpty, "the span the listener accepted must not be re-claimed")
+    }
+
+    /// The byte-exact rediff pod boundary is the highest-certainty ad window the
+    /// pipeline produces and the most obviously correct seed for a pod walk. The
+    /// first implementation reused the reconcile-protection set for the user-row
+    /// exclusion, which contains `dayZeroRediffByteExact`, and so refused it.
+    @Test("a byte-exact rediff window IS a valid seed")
+    func rediffByteExactWindowSeeds() {
+        #expect(
+            AdPodContinuation.isSeed(
+                window(start: 700, end: 760, boundaryState: "dayZeroRediffByteExact")
+            )
+        )
+    }
+
+    @Test("every user-owned boundary state is refused as a seed")
+    func userOwnedBoundaryStatesNeverSeed() {
+        for state in AdPodContinuation.userOwnedBoundaryStates {
+            #expect(
+                !AdPodContinuation.isSeed(window(start: 700, end: 760, boundaryState: state)),
+                "\(state) must not seed a continuation chain"
+            )
+        }
+    }
+
+    // MARK: - Pattern-set integrity
+
+    /// `compactMap { try? NSRegularExpression(...) }` drops a malformed pattern
+    /// SILENTLY. Without this, a typo would quietly disable a rule — including
+    /// "we'll be right back", which is the go-to-break wall.
+    @Test("every declared pattern compiles")
+    func everyPatternCompiles() {
+        for pattern in AdPodContinuation.adTermsPatterns
+            + AdPodContinuation.showAddressPatterns {
+            #expect(
+                (try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])) != nil,
+                "pattern failed to compile: \(pattern)"
+            )
+        }
+    }
+
+    @Test("each offer-terms pattern is reachable from real ad prose")
+    func offerTermsPatternsFire() {
+        let samples = [
+            "terms and conditions apply",
+            "terms apply, see details",
+            "exclusions may apply",
+            "restrictions apply",
+            "while supplies last",
+            "offer ends June 30th",
+            "cannot be combined with other offers",
+            "at participating retailers",
+            "participating locations only",
+            "see website for more details",
+            "see our seven day return policy",
+            "for a limited time"
+        ]
+        for sample in samples {
+            let chunk = TranscriptChunk(
+                id: "s", analysisAssetId: Self.assetId, segmentFingerprint: "f",
+                chunkIndex: 0, startTime: 10, endTime: 20,
+                text: sample, normalizedText: sample,
+                pass: "final", modelVersion: "t", transcriptVersion: nil, atomOrdinal: nil
+            )
+            #expect(
+                AdPodContinuation.adCopySignals(chunks: [chunk], hits: [])
+                    .contains { $0.kind == .adTerms },
+                "no offer-terms signal for: \(sample)"
+            )
+        }
+    }
+
+    @Test("each show-boundary pattern is reachable from real host prose")
+    func showAddressPatternsFire() {
+        let samples = [
+            "thanks for tuning in everybody",
+            "thank you for listening",
+            "see you tomorrow",
+            "we'll see you next week",
+            "that's it for today",
+            "until next time",
+            "we'll be right back",
+            "we're back",
+            "welcome back to the show",
+            "you're listening to the programme"
+        ]
+        for sample in samples {
+            let chunk = TranscriptChunk(
+                id: "s", analysisAssetId: Self.assetId, segmentFingerprint: "f",
+                chunkIndex: 0, startTime: 10, endTime: 20,
+                text: sample, normalizedText: sample,
+                pass: "final", modelVersion: "t", transcriptVersion: nil, atomOrdinal: nil
+            )
+            #expect(
+                !AdPodContinuation.contentBarriers(
+                    semanticScanResults: [], lexicalHits: [], chunks: [chunk]
+                ).isEmpty,
+                "no content barrier for: \(sample)"
+            )
+        }
+    }
+
+    // MARK: - Cross-user sharing disposition
+
+    /// `hasKnownExportDisposition` is an ALL-or-nothing gate: ONE unrecognized
+    /// `candidate` boundaryState aborts the whole asset's cross-user snapshot,
+    /// silently. A continuation mark must therefore be a RECOGNIZED (local-only)
+    /// disposition even though it is never exported.
+    @Test("a continuation mark does not abort the asset's cross-user snapshot")
+    func continuationMarksAreAKnownExportDisposition() {
+        let mark = AdPodContinuation.makeMark(
+            start: 100,
+            end: 130,
+            confidence: 0.7,
+            analysisAssetId: Self.assetId
+        )
+        #expect(
+            CrossUserAnalysisSnapshot.Window.hasKnownExportDisposition(mark)
+        )
+    }
+
     // MARK: - Reconcile isolation
 
     /// Without this, a stale continuation row could NEVER be retired: the

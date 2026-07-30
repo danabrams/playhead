@@ -291,10 +291,23 @@ struct AdPodContinuationWireInTests {
             podContinuationEnabled: true,
             extraWindows: [mark]
         )
+        // TWO ARMS, differing only in whether the listener's mark exists. An
+        // overlap-only assertion on a single arm cannot catch the wire-in passing
+        // `protectedRegions: []`: the residue subtraction removes the mark's own
+        // span either way, so non-overlap proves the rows AVOID the mark, not that
+        // the WALK stopped at it. The contrast proves the walk stopped.
+        let unmarked = continuationRows(try await runArm(podContinuationEnabled: true))
+        #expect(
+            unmarked.contains { $0.startTime < mark.startTime },
+            "control arm: without the mark the chain reaches past \(mark.startTime)"
+        )
+        // With the mark in place, nothing may sit on its far side. Empty is a
+        // legitimate outcome — a mark between the seed and the rest of the pod
+        // blocks the whole walk, which is the fail-closed behaviour lc4c asked for.
         for row in continuationRows(windows) {
             #expect(
-                !(row.startTime < mark.endTime && row.endTime > mark.startTime),
-                "continuation row \(row.startTime)-\(row.endTime) overlaps the listener's mark"
+                row.startTime >= mark.endTime,
+                "continuation row \(row.startTime)-\(row.endTime) crossed the listener's mark at \(mark.startTime)-\(mark.endTime)"
             )
         }
         let persistedMark = try #require(windows.first { $0.id == mark.id })

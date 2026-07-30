@@ -8,10 +8,10 @@
 // 2026-07-30 against rediff-confirmed slots (byte-derived pod boundaries, so
 // independent of any human labelling): of the 17 slots the pipeline detected at
 // all, 14 were covered by exactly ONE pipeline window, mean slot coverage 0.33,
-// and 13 slots carried an uncovered run longer than 30 s — 994 s of ad audio
-// sitting INSIDE pods we had already located, with a largest single hole of
-// 175 s. A 175 s hole is not an edge that stopped short; it is two or three
-// whole additional ads. Concretely, on `conan-2026-07-09` the pipeline emitted
+// and 13 slots carried an uncovered run longer than 30 s. 1324 s of ad audio
+// sits uncovered INSIDE pods we had already located (994 s of it in those 13
+// slots' single largest holes), with a largest single hole of 175 s. A 175 s
+// hole is not an edge that stopped short; it is two or three whole extra ads. Concretely, on `conan-2026-07-09` the pipeline emitted
 // `[797.2, 810.7)` inside the pod `[~657.6, 810.7)` — it caught the tail of the
 // FOURTH ad and left the SiriusXM promo, Carvana and Carter's reads untouched.
 // That is exactly what the product owner hears: a banner fires, one ad is
@@ -41,11 +41,17 @@
 //     claimed, so the rule never reasons "no ad cue was found here, therefore
 //     this is still ad" — an absence is never an input.
 //
-//     The seconds BETWEEN two links are claimed, and that is deliberate: they
-//     are BRACKETED by positive ad evidence on both sides (the seed or previous
-//     link before, the next link after). Bracketing is positive evidence about
-//     the interior of a pod — it is what makes this a pod-continuation rule
-//     rather than an extrapolation.
+//     BE PRECISE ABOUT THE BRIDGE, because it is the one place the rule is
+//     weaker than the sentence above. The seconds BETWEEN two links carry no
+//     evidence of their own; they are claimed because they are BRACKETED by
+//     positive ad evidence on both sides and no barrier stands between. That is
+//     BOUNDED EXTRAPOLATION, not positive evidence per second, and calling it
+//     anything else would be the "absence dressed as a quantity" mistake. The
+//     only control over it is `maxLinkGapSeconds` — which is why that default is
+//     30 s, set by a held-out measurement that caught the bridge crossing a
+//     sponsored show segment at 60 s (see `Configuration.maxLinkGapSeconds`), and
+//     why the corpus eval asserts a FROZEN budget on seconds claimed outside a
+//     byte-confirmed ad slot rather than merely printing it.
 //
 //  2. A POSITIVE CONTENT-RESUMED BARRIER STOPS THE WALK. A barrier is an
 //     AFFIRMATIVE verdict that the audio is show content, not the absence of an
@@ -770,11 +776,12 @@ enum AdPodContinuation {
         // find zero residue, emit nothing, and therefore RETIRE the rows it wrote
         // last time — a row that flickers in and out on every backfill.
         // Idempotency rides on content-addressed ids over identical residues, not
-        // on self-suppression.
+        // on self-suppression. `isOwnRow` tests BOTH provenance fields; see its
+        // note for the accepted-banner row that a version-only test mis-claimed.
         let visible: [(start: Double, end: Double)] = existingWindows
             .filter {
                 visibleDecisionStates.contains($0.decisionState)
-                    && $0.detectorVersion != detectorVersion
+                    && !isOwnRow($0)
                     && $0.startTime.isFinite
                     && $0.endTime.isFinite
                     && $0.endTime > $0.startTime
@@ -844,24 +851,50 @@ enum AdPodContinuation {
 
     // MARK: - Seed selection
 
+    /// Boundary states that belong to the LISTENER rather than to a detector.
+    ///
+    /// Deliberately its own set rather than reusing
+    /// `AdDetectionService.reconcileProtectedBoundaryStates`, which was the first
+    /// implementation and was wrong in both directions. That set also contains
+    /// `dayZeroRediffByteExact` — not a user row at all, but the BYTE-EXACT
+    /// rediff pod boundary, i.e. the highest-certainty ad window the pipeline
+    /// produces and the most obviously correct thing to chain a pod walk off.
+    /// Reusing it silently refused to seed from exactly the best seed. And it
+    /// omits nothing a listener owns, so the two concerns simply are not the same
+    /// set.
+    static let userOwnedBoundaryStates: Set<String> = [
+        "userMarked",
+        "userConfirmedSuggested",
+        "correctionReplay"
+    ]
+
     /// A window may seed a continuation chain iff it is a CONFIRMED detector
     /// verdict with sane geometry and is not the listener's own row.
     ///
-    /// `userMarked` (and the other user-owned boundary states) are excluded
-    /// deliberately. A manual mark is the highest-fidelity statement about the
-    /// span the listener drew — it says nothing about the neighbouring audio, and
-    /// the listener who marked one creative has already told us what they wanted
-    /// marked. Deriving more marks off their boundary would put a guess in a
-    /// place they curated.
+    /// User-owned rows are excluded deliberately. A manual mark is the
+    /// highest-fidelity statement about the span the listener drew — it says
+    /// nothing about the neighbouring audio, and the listener who marked one
+    /// creative has already told us what they wanted marked. Deriving more marks
+    /// off their boundary would put a guess in a place they curated.
     static func isSeed(_ window: AdWindow) -> Bool {
         seedDecisionStates.contains(window.decisionState)
-            && !AdDetectionService.reconcileProtectedBoundaryStates
-                .contains(window.boundaryState)
-            && window.boundaryState != boundaryState
-            && window.detectorVersion != detectorVersion
+            && !userOwnedBoundaryStates.contains(window.boundaryState)
+            && !isOwnRow(window)
             && window.startTime.isFinite
             && window.endTime.isFinite
             && window.endTime > window.startTime
+    }
+
+    /// `true` when this row is one THIS pass minted.
+    ///
+    /// Both fields, not just `detectorVersion`: when the listener ACCEPTS a
+    /// continuation banner the orchestrator mints a promoted row that inherits our
+    /// `detectorVersion` but carries `boundaryState == "userConfirmedSuggested"`.
+    /// A `detectorVersion`-only test treated that promoted row as ours and
+    /// excluded it from the coverage set, so the next backfill re-claimed the
+    /// span the listener had already resolved.
+    static func isOwnRow(_ window: AdWindow) -> Bool {
+        window.detectorVersion == detectorVersion && window.boundaryState == boundaryState
     }
 
     // MARK: - The chain walk

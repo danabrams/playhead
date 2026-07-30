@@ -6286,48 +6286,85 @@ actor AdDetectionService {
         // Hard-gated on `podContinuationEnabled` (default OFF): flag-off
         // short-circuits BEFORE any fetch/derivation/write, so this backfill is
         // byte-identical to pre-xsdz.65.
+        //
+        // A FAILURE HERE MUST NEVER COST THE BACKFILL. This is the last
+        // additive step before the priors update and the coverage watermark, so
+        // a throwing store read would abort a run that had already done all its
+        // real work — a recall improvement is not worth losing a good analysis.
+        // Errors are logged and swallowed; the only consequence is no
+        // continuation marks this run, and a later run recomputes them from the
+        // same inputs (content-addressed ids, so nothing churns).
+        //
+        // The protected-region read is INSIDE the same do-block deliberately: if
+        // it fails we emit nothing at all, rather than proceeding with an empty
+        // protected list and risking a mark over a listener's span.
         if config.podContinuationEnabled {
-            let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
-            // A LISTENER'S MARK IS OFF LIMITS (playhead-lc4c). `userMarked` rows
-            // are persisted separately from the fusion set, so the walk must be
-            // TOLD about them; it refuses to cross one. Read here rather than
-            // reusing `protectedUserMarkedRegions` from the clamp because Step 18
-            // may have written rows since.
-            let protectedRegions = existingWindows
-                .filter { $0.boundaryState == "userMarked" }
-                .map { (start: $0.startTime, end: $0.endTime) }
-            let podLinks = AdPodContinuation.adCopyLinks(
-                chunks: canonicalChunks,
-                hits: lexicalHits
-            )
-            let podBarriers = AdPodContinuation.contentBarriers(
-                semanticScanResults: semanticScanResults,
-                lexicalHits: lexicalHits,
-                chunks: canonicalChunks
-            )
-            let continuationMarks = AdPodContinuation.compose(
-                existingWindows: existingWindows,
-                adCopyLinks: podLinks,
-                contentBarriers: podBarriers,
-                protectedRegions: protectedRegions,
-                episodeDuration: episodeDuration,
-                analysisAssetId: analysisAssetId
-            )
-            let reconciledContinuation = Self.reconcileVersionScopedMarkSets(
-                newMarks: continuationMarks,
-                existingWindows: existingWindows,
-                detectorVersion: AdPodContinuation.detectorVersion
-            )
-            if !reconciledContinuation.windows.isEmpty
-                || !reconciledContinuation.retiredIDs.isEmpty {
-                try await store.reconcileBackfillAdWindows(
-                    reconciledContinuation.windows,
-                    retiredIDs: reconciledContinuation.retiredIDs
+            do {
+                let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+                // A LISTENER'S MARK IS OFF LIMITS (playhead-lc4c). `userMarked` rows
+                // are persisted separately from the fusion set, so the walk must be
+                // TOLD about them; it refuses to cross one. Read here rather than
+                // reusing `protectedUserMarkedRegions` from the clamp because Step 18
+                // may have written rows since.
+                //
+                // EVERY user-owned boundary state, not just `userMarked`: when the
+                // listener ACCEPTS a suggest banner the orchestrator mints a
+                // `userConfirmedSuggested` row, and a `userMarked`-only filter left
+                // that span unwalled — so the next backfill re-claimed audio the
+                // listener had already resolved.
+                let protectedRegions = existingWindows
+                    .filter {
+                        AdPodContinuation.userOwnedBoundaryStates
+                            .contains($0.boundaryState)
+                    }
+                    .map { (start: $0.startTime, end: $0.endTime) }
+                // BOTH link sources, which is what the corpus eval measures and
+                // what the calibration swept. The lexical co-occurrence carries the
+                // DAI creatives that announce themselves; the rhetorical grammar
+                // carries the ones whose only lexical trace is a bare URL (the
+                // Conan pod's Carter's spot). On the held-out device lane the
+                // lexical source alone recovered NOTHING — every mark came from the
+                // grammar — so shipping only one of them would ship a pass that
+                // does not fire on real episodes.
+                let podLinks = AdPodContinuation.mergeLinks(
+                    AdPodContinuation.adCopyLinks(
+                        chunks: canonicalChunks,
+                        hits: lexicalHits
+                    ) + AdPodContinuation.rhetoricalLinks(chunks: canonicalChunks)
+                )
+                let podBarriers = AdPodContinuation.contentBarriers(
+                    semanticScanResults: semanticScanResults,
+                    lexicalHits: lexicalHits,
+                    chunks: canonicalChunks
+                )
+                let continuationMarks = AdPodContinuation.compose(
+                    existingWindows: existingWindows,
+                    adCopyLinks: podLinks,
+                    contentBarriers: podBarriers,
+                    protectedRegions: protectedRegions,
+                    episodeDuration: episodeDuration,
+                    analysisAssetId: analysisAssetId
+                )
+                let reconciledContinuation = Self.reconcileVersionScopedMarkSets(
+                    newMarks: continuationMarks,
+                    existingWindows: existingWindows,
+                    detectorVersion: AdPodContinuation.detectorVersion
+                )
+                if !reconciledContinuation.windows.isEmpty
+                    || !reconciledContinuation.retiredIDs.isEmpty {
+                    try await store.reconcileBackfillAdWindows(
+                        reconciledContinuation.windows,
+                        retiredIDs: reconciledContinuation.retiredIDs
+                    )
+                }
+                logger.info(
+                    "Backfill Step 18b [xsdz.65]: links=\(podLinks.count) barriers=\(podBarriers.count) protected=\(protectedRegions.count) composed=\(reconciledContinuation.windows.count) retired=\(reconciledContinuation.retiredIDs.count)"
+                )
+            } catch {
+                logger.warning(
+                    "Backfill Step 18b [xsdz.65] skipped for asset \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
                 )
             }
-            logger.info(
-                "Backfill Step 18b [xsdz.65]: links=\(podLinks.count) barriers=\(podBarriers.count) protected=\(protectedRegions.count) composed=\(reconciledContinuation.windows.count) retired=\(reconciledContinuation.retiredIDs.count)"
-            )
         }
 
         // ── Post-pipeline: priors + coverage watermark ────────────────────────
