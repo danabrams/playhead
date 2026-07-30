@@ -115,6 +115,7 @@ func runDebugDiagnosticsExport(
         bannerTalliesFetch: DebugDiagnosticsHatch.bannerTalliesFetch,
         rediffFetch: DebugDiagnosticsHatch.makeRediffFetch(store: runtime.analysisStore),
         analysisStoreHealthFetch: DebugDiagnosticsHatch.analysisStoreHealthFetch,
+        speechModelLoadFetch: DebugDiagnosticsHatch.speechModelLoadFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -227,6 +228,14 @@ enum DebugDiagnosticsHatch {
     /// the same anti-drift reason `makeRediffFetch` does.
     static let analysisStoreHealthFetch: DiagnosticsAnalysisStoreHealthFetch =
         AnalysisStoreHealthDiagnosticsFetchAdapter.shared
+
+    // MARK: Speech-model-load adapter (playhead-se2h)
+
+    /// Reads the durable record of whether the ASR model ever loaded.
+    /// Forwards to the single unconditionally-compiled implementation for
+    /// the same anti-drift reason `analysisStoreHealthFetch` does.
+    static let speechModelLoadFetch: DiagnosticsSpeechModelLoadFetch =
+        SpeechModelLoadDiagnosticsFetchAdapter.shared
 
     // MARK: Environment construction
 

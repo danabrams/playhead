@@ -1799,9 +1799,17 @@ struct AnalysisJobRunnerTests {
         let audioStub = StubAnalysisAudioProvider()
         audioStub.shardsToReturn = makeShards(count: 4)
 
-        // The post-swallow device state: a recognizer that never loaded.
+        // The post-swallow device state: a recognizer that cannot load.
         // Deliberately NO `loadFastModel()`.
-        let speechService = SpeechService(recognizer: MockSpeechRecognizer())
+        //
+        // playhead-se2h: `shouldThrow` is what makes this state REAL. The
+        // loop now retries the load before giving up, so a mock whose
+        // `loadModel()` would succeed recovers instead of failing — which
+        // is the fix working, not a regression. Reaching the zero-coverage
+        // branch requires a device whose assets genuinely will not load.
+        let failingRecognizer = MockSpeechRecognizer()
+        failingRecognizer.shouldThrow = true
+        let speechService = SpeechService(recognizer: failingRecognizer)
         let runner = AnalysisJobRunner(
             store: store,
             audioProvider: audioStub,
@@ -1846,8 +1854,8 @@ struct AnalysisJobRunnerTests {
         #expect(
             row.cause == .pipelineError,
             """
-            the recognizer was never invoked — `SpeechService.isReady()` was \
-            false before a single shard was handed over — and the row still \
+            the recognizer never transcribed anything — the model could not be \
+            loaded, so not a single shard was handed over — and the row still \
             says \(row.cause?.rawValue ?? "nil"). That contradiction is what \
             makes an `asr_failed` count unusable
             """

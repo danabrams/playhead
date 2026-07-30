@@ -198,7 +198,8 @@ enum DiagnosticsBundleBuilder {
         stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
         bannerTallies: [BannerTallySession] = [],
         rediff: DiagnosticsRediffSnapshot = .empty,
-        analysisStoreHealth: AnalysisStoreHealthState = .healthy
+        analysisStoreHealth: AnalysisStoreHealthState = .healthy,
+        speechModelLoad: SpeechModelLoadState = .unknown
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -311,7 +312,8 @@ enum DiagnosticsBundleBuilder {
             // place for them to disagree — the same reasoning as
             // `stabilityDiagnostics` above. There is nothing to hash:
             // the shape carries no episode, asset, or show reference.
-            analysisStoreHealth: analysisStoreHealth
+            analysisStoreHealth: analysisStoreHealth,
+            speechModelLoad: speechModelLoad
         )
     }
 

@@ -576,7 +576,7 @@ actor SpeechRecognitionRequestGate {
 /// The functional role a recognizer model serves in the analysis pipeline.
 /// Tracked by `SpeechService.activeModelRole` so downstream code can
 /// distinguish fast-path lookahead transcription from final-path backfill.
-enum ModelRole: String, Sendable, CaseIterable {
+enum ModelRole: String, Sendable, CaseIterable, Codable {
     /// Fast-path ASR — small, low-latency, used for real-time ad lookahead.
     case asrFast = "asr_fast"
 
@@ -595,12 +595,115 @@ actor SpeechService {
     private let logger = Logger(subsystem: "com.playhead", category: "SpeechEngine")
     private static let requestGate = SpeechRecognitionRequestGate()
 
+    /// playhead-se2h: load attempts allowed between successes.
+    ///
+    /// THE BOUND. `prepareFastModel()` is driven by a natural trigger —
+    /// the next transcription run — so it cannot spin on its own; this
+    /// caps how much work a genuinely unavailable asset can cost even so.
+    /// Three, because the failure this exists for (a locale asset still
+    /// installing, an analyzer format briefly unavailable, a cold-start
+    /// resource pinch) either clears within the first minutes of a
+    /// session or is not transient at all, and each attempt can be a real
+    /// network asset download rather than a cheap probe.
+    ///
+    /// The budget resets on exactly two events, both of which represent
+    /// genuine progress or a genuine change of circumstances:
+    ///   * a SUCCESSFUL load — the run of failures is over, provably; and
+    ///   * an app FOREGROUND (``noteAppDidBecomeActive()``) — a
+    ///     human-paced signal that cannot be produced faster than a
+    ///     person can tap, and the only thing standing between "recovers"
+    ///     and "dead until the user force-quits".
+    /// Nothing else resets it, so a device that never loads and never
+    /// comes forward makes at most three attempts, ever.
+    static let maxLoadAttemptsPerEpoch = 3
+
+    /// playhead-se2h (review): how long an in-flight load may run before a
+    /// later caller is allowed to supersede it.
+    ///
+    /// WHY THIS EXISTS. `loadInFlight` began as a plain latch cleared only
+    /// by the `defer` around the load — and nothing in the chain beneath it
+    /// is bounded: `loadFastModel` → `AppleSpeechRecognizer.loadModel` →
+    /// `AppleSpeechAssetBootstrapper.prepare` →
+    /// `AssetInventory` … `downloadAndInstall()`, an unbounded network
+    /// download. A download that never returns (stalled connection, captive
+    /// portal) meant the latch never cleared, so every later transcription
+    /// run got `.loadInFlight` forever, the foreground refresh cleared the
+    /// attempt budget but not the latch, and the journal recorded neither a
+    /// success nor a failure. That is permanent, silent, unretried and
+    /// undiagnosable — the four properties this bead exists to remove,
+    /// reintroduced by its own fix.
+    ///
+    /// A staleness window is preferred over a timeout on the download
+    /// itself: this actor has no business deciding that a legitimately slow
+    /// asset install has failed, and cancelling Apple's install request
+    /// would throw away real progress. Superseding only lets a NEW attempt
+    /// start; the old one is left to finish or die on its own, and
+    /// `loadModel`'s assignments are idempotent, so whichever completes
+    /// leaves consistent state.
+    ///
+    /// Two minutes: long enough that an ordinary first-launch asset install
+    /// on a slow connection is never superseded, short enough that a wedged
+    /// one costs one session rather than the install's lifetime. Superseding
+    /// still spends a budget slot, so a permanently wedged download costs at
+    /// most `maxLoadAttemptsPerEpoch` concurrent attempts, not one per run.
+    static let staleInFlightLoadThreshold: Duration = .seconds(120)
+
     /// The underlying recognizer (Apple Speech or stub).
     private let recognizer: any SpeechRecognizer
     private let serializesRecognizerRequests: Bool
 
     /// Which model role is currently loaded.
+    ///
+    /// INVARIANT (playhead-se2h): non-nil if and only if a `loadModel()`
+    /// has succeeded and no `unloadModel()` has run since. The recognizer
+    /// is private to this actor, so nothing outside can desynchronise
+    /// them — and both load paths advance this only AFTER the load
+    /// returns. State that claims a loaded model the recognizer does not
+    /// hold is the defect class this bead exists to remove.
+    ///
+    /// WHAT IT DOES NOT MEAN. The recognizer is role-AGNOSTIC:
+    /// `AppleSpeechAssetBootstrapper.prepare()` takes no role and both
+    /// roles resolve through the same asset bootstrap, so this field is
+    /// the INTENT OF THE LAST SUCCESSFUL LOADER, not a property the
+    /// recognizer could contradict. `transcribe` reads it to tag
+    /// `passType`, which means a fast-path run that finds a model already
+    /// loaded by a final pass inherits `.asrFinal` and tags its chunks
+    /// `final`. THAT IS A DEFECT, not a design: nothing resets the role
+    /// (`unloadCurrentModel` has no production caller) and both owners
+    /// share one `SpeechService`, so a launch final-pass sweep silently
+    /// re-labels every later fast-path chunk.
+    ///
+    /// It predates this bead — the previous `isReady()` gate behaved
+    /// identically — and is filed as playhead-h7pr rather than fixed here,
+    /// because the fix changes the persisted meaning of
+    /// `transcript_chunks.pass` and must be reviewed against the mixed-pass
+    /// display canonicalization and the unique index on
+    /// `(assetId, pass, segmentFingerprint)`. The honest shape is to stop
+    /// deriving `passType` from shared mutable state and pass the intended
+    /// pass into `transcribe`. Recorded here so it cannot be mistaken for
+    /// intent.
     private(set) var activeModelRole: ModelRole?
+
+    /// playhead-se2h: durable record of load attempts, so a failure is
+    /// visible in a diagnostics bundle instead of only in a log line the
+    /// user will never capture. Nil in tests and previews; production
+    /// injects `SpeechModelLoadJournal.shared` from `PlayheadRuntime`.
+    private let loadJournal: SpeechModelLoadJournal?
+
+    /// Attempts consumed since the last success or foreground.
+    private var loadAttemptsThisEpoch = 0
+
+    /// When the currently-executing load started, or nil if none is.
+    ///
+    /// Guards against a second caller starting a duplicate asset download
+    /// while the first is still inside `AssetInventory.installAssets` — but
+    /// stores an INSTANT rather than a bool so the guard cannot outlive the
+    /// load that set it. See ``staleInFlightLoadThreshold``.
+    private var loadInFlightSince: ContinuousClock.Instant?
+
+    /// Injected clock reading, so the staleness window is testable without
+    /// sleeping. Production passes `{ .now }`.
+    private let now: @Sendable () -> ContinuousClock.Instant
 
     /// Callback for segment-level results as they arrive.
     private let segmentContinuation: AsyncStream<TranscriptSegment>.Continuation
@@ -610,9 +713,15 @@ actor SpeechService {
 
     // MARK: - Init
 
-    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
+    init(
+        vocabularyProvider: ASRVocabularyProvider? = nil,
+        loadJournal: SpeechModelLoadJournal? = nil,
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }
+    ) {
         self.recognizer = makeDefaultSpeechRecognizer(vocabularyProvider: vocabularyProvider)
         self.serializesRecognizerRequests = true
+        self.loadJournal = loadJournal
+        self.now = now
 
         let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
         self.segmentStream = stream
@@ -621,10 +730,14 @@ actor SpeechService {
 
     init(
         recognizer: any SpeechRecognizer,
-        serializesRecognizerRequests: Bool = true
+        serializesRecognizerRequests: Bool = true,
+        loadJournal: SpeechModelLoadJournal? = nil,
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }
     ) {
         self.recognizer = recognizer
         self.serializesRecognizerRequests = serializesRecognizerRequests
+        self.loadJournal = loadJournal
+        self.now = now
 
         let (stream, continuation) = AsyncStream<TranscriptSegment>.makeStream()
         self.segmentStream = stream
@@ -635,6 +748,11 @@ actor SpeechService {
 
     /// Load the fast-path recognizer for real-time ad lookahead.
     /// Apple Speech prepares locale assets on demand.
+    ///
+    /// Throws on failure and records nothing about it — callers that want
+    /// the bounded, journalled retry want ``prepareFastModel()`` instead.
+    /// This stays throwing because `FinalPassRetranscriptionRunner` and a
+    /// large body of tests drive the loads directly and want the error.
     func loadFastModel() async throws {
         logger.info("Preparing fast-path Speech model…")
         let start = ContinuousClock.now
@@ -642,21 +760,220 @@ actor SpeechService {
         activeModelRole = .asrFast
         let elapsed = ContinuousClock.now - start
         logger.info("Fast-path Speech model ready (\(elapsed))")
+        await loadJournal?.recordSuccess(role: .asrFast)
     }
+
+    /// playhead-se2h: load the fast-path model if nothing is loaded,
+    /// retrying a previously failed load within a bounded budget.
+    ///
+    /// THIS IS THE PATH BACK. `loadFastModel()` was invoked exactly once
+    /// per install, at launch, and its failure was swallowed by an empty
+    /// catch — so one transient failure turned every later transcription
+    /// attempt on the device into `modelNotLoaded`, forever, with no user
+    /// signal and no diagnostic. Both the launch attempt and the
+    /// transcription loop now come through here.
+    ///
+    /// It is safe to call on every transcription run:
+    ///   * it does NOTHING when a model is already loaded, so it can
+    ///     never clobber an in-progress final pass by flipping
+    ///     `activeModelRole` back to `.asrFast`;
+    ///   * it does NOTHING once the epoch budget is spent, so a
+    ///     genuinely unavailable asset costs at most
+    ///     ``maxLoadAttemptsPerEpoch`` attempts rather than one per run;
+    ///   * and it declines rather than waits when another caller is
+    ///     already loading, so a slow asset download is never joined by a
+    ///     second one and no caller is parked on an await it cannot
+    ///     cancel — but that decline expires
+    ///     (``staleInFlightLoadThreshold``), because a guard that can
+    ///     outlive the load it guards is the same permanent-silent-failure
+    ///     shape this bead exists to remove.
+    ///
+    /// No timer, no polling, no backoff clock: the trigger is the work
+    /// itself, which is already rate-limited by the scheduler.
+    @discardableResult
+    func prepareFastModel() async -> SpeechModelLoadOutcome {
+        if await recognizer.isModelLoaded() {
+            if activeModelRole == nil {
+                // Unreachable by construction — the recognizer is private
+                // to this actor and both load paths set the role — but
+                // this bead is precisely about state that claims something
+                // the recognizer is not in, so the invariant gets a
+                // tripwire rather than a comment.
+                logger.fault("recognizer reports loaded while activeModelRole is nil — invariant broken")
+            }
+            return .alreadyLoaded
+        }
+
+        // An ALREADY-CANCELLED caller must not spend a slot, and must not
+        // be able to produce a `.cancelled` that hides a real verdict.
+        //
+        // Without this guard the only cancellation check was in the catch,
+        // which conflated two different things: a load cut short by a
+        // scrub, and a load that ran to a genuine failure inside a task
+        // that had already been cancelled. `AppleSpeechAssetBootstrapper`
+        // throws `speechAssetsUnsupported` with no suspension at all — the
+        // bead's own headline cause — so that second case is reachable, and
+        // it filed a real, actionable failure as a cancellation: no journal
+        // entry, budget slot gone. A run of those left the bundle reporting
+        // `unknown`, which this shape documents as meaning "the recording
+        // call is not wired" — sending a support engineer after a wiring
+        // bug that does not exist.
+        //
+        // Checked here, before anything is consumed, the two are separable:
+        // a caller cancelled on arrival spends nothing, and a `.cancelled`
+        // from the catch below can only mean cancellation arrived DURING
+        // the load.
+        guard !Task.isCancelled else { return .cancelled }
+
+        // ---- One synchronous step: decide and consume. ----
+        // There is deliberately NO await between the guards and the
+        // mutation. Actor reentrancy at an await here would let two
+        // callers both pass the budget check and both spend an attempt,
+        // so the "at most N attempts" bound would be a hope rather than a
+        // guarantee.
+        let startedAt = now()
+        if let inFlightSince = loadInFlightSince {
+            // A load is running. Decline — UNLESS it has been running long
+            // enough that it is no longer plausibly running at all, in
+            // which case the latch is the thing that has failed and must
+            // not be allowed to outlive it. See
+            // `staleInFlightLoadThreshold` for why this is not a timeout.
+            guard startedAt - inFlightSince >= Self.staleInFlightLoadThreshold else {
+                return .loadInFlight
+            }
+            logger.fault(
+                """
+                A Speech model load has been in flight for over \
+                \(Self.staleInFlightLoadThreshold, privacy: .public) and has neither \
+                succeeded nor failed — most likely a stalled asset download. Superseding it \
+                so this device is not left permanently unable to transcribe.
+                """
+            )
+        }
+        guard loadAttemptsThisEpoch < Self.maxLoadAttemptsPerEpoch else {
+            return .budgetExhausted
+        }
+        loadAttemptsThisEpoch += 1
+        let attemptNumber = loadAttemptsThisEpoch
+        loadInFlightSince = startedAt
+        // ---- End synchronous step. ----
+        defer {
+            // Only clear the latch if it is still OURS. A superseding
+            // attempt has already overwritten the stamp, and a late
+            // returning predecessor must not clear the successor's.
+            if loadInFlightSince == startedAt { loadInFlightSince = nil }
+        }
+
+        do {
+            try await loadFastModel()
+            // Only a success clears the budget. Anything else would let a
+            // permanently broken device retry without limit.
+            loadAttemptsThisEpoch = 0
+            logger.info("Fast-path Speech model loaded on attempt \(attemptNumber)")
+            return .loaded
+        } catch {
+            // A CANCELLED attempt is not a failed one, and must not reach
+            // the journal. `stopTranscription` and every scrub cancel the
+            // transcription task, so on a device that is merely being
+            // scrubbed this catch runs often — and a cancellation recorded
+            // as a load failure would walk the counter that decides whether
+            // the speech stack looks broken straight to
+            // `persistentlyFailing`. That is playhead-ngev's lesson
+            // ("Scrubbing was recorded as an ASR failure") applied one layer
+            // down.
+            //
+            // `Task.isCancelled` rather than `error is CancellationError`:
+            // `AppleSpeechRecognizer.loadModel()` wraps anything it does not
+            // recognise into `TranscriptEngineError.transcriptionFailed`, so
+            // by the time a cancellation reaches here its TYPE has usually
+            // been rewritten. The task's own cancellation flag cannot be
+            // rewritten by a wrapper.
+            //
+            // The budget slot IS still consumed. Refunding it would make the
+            // attempt count a function of how often the user scrubs, and the
+            // rule this bead is held to is that the bound must be a
+            // guarantee — erring toward fewer attempts, never more. A
+            // foreground refreshes the budget, which is the escape hatch for
+            // a session that spent it on cancellations.
+            if Task.isCancelled {
+                logger.info(
+                    "Fast-path Speech model load cancelled (attempt \(attemptNumber)) — not recorded as a failure"
+                )
+                return .cancelled
+            }
+            logger.error(
+                """
+                Fast-path Speech model FAILED to load (attempt \(attemptNumber) of \
+                \(Self.maxLoadAttemptsPerEpoch)): \
+                \(TranscriptFailureClass.classify(error).rawValue, privacy: .public). \
+                Transcription is unavailable until a later attempt succeeds.
+                """
+            )
+            await loadJournal?.recordFailure(error: error, attemptNumber: attemptNumber)
+            return .failed
+        }
+    }
+
+    /// playhead-se2h: the app came to the foreground — refresh the retry
+    /// budget so a device that exhausted it earlier can try again.
+    ///
+    /// Deliberately does NO work: it neither loads nor probes, so it adds
+    /// nothing to a lifecycle path that runs on every return from a
+    /// system sheet. The next transcription run is what actually retries.
+    /// A foreground is the coarsest human-paced trigger available, which
+    /// is what makes refreshing on it non-spinnable — a person cannot
+    /// produce them faster than they can tap, and each one still buys at
+    /// most ``maxLoadAttemptsPerEpoch`` attempts, each gated behind a
+    /// scheduled transcription run.
+    func noteAppDidBecomeActive() {
+        guard loadAttemptsThisEpoch > 0 else { return }
+        logger.info("App became active — refreshing the Speech model load-retry budget")
+        loadAttemptsThisEpoch = 0
+    }
+
+    /// Attempts consumed in the current epoch. A test seam, named as one:
+    /// the bound is the contract this bead is held to, and it is not
+    /// observable from any production API. Nothing in the app reads it.
+    var loadAttemptsInCurrentEpochForTesting: Int { loadAttemptsThisEpoch }
 
     /// Load the final-path recognizer for backfill transcription.
     /// Apple Speech prepares locale assets on demand.
+    ///
+    /// playhead-se2h: THE REPLACEMENT IS LOADED WITHOUT UNLOADING FIRST.
+    ///
+    /// This used to call `recognizer.unloadModel()` before
+    /// `recognizer.loadModel()`. A throw between those two lines left the
+    /// device with NO model loaded at all *and* `activeModelRole` still
+    /// reading `.asrFast` — so a failed UPGRADE was strictly worse than
+    /// never attempting one: it destroyed a working fast-path model and
+    /// then misreported what was loaded. Every subsequent `transcribe`
+    /// threw `modelNotLoaded`, and nothing on the device retried.
+    ///
+    /// Loading over the top is safe *and* atomic from the caller's side.
+    /// `AppleSpeechRecognizer.loadModel()` assigns `selectedLocale`,
+    /// `analyzerFormat` and `prepared` only AFTER
+    /// `assetBootstrapper.prepare()` has returned a value, so a throw
+    /// leaves the previously-loaded state byte-for-byte untouched. The
+    /// unload it replaced freed nothing a load does not overwrite — both
+    /// roles resolve through the same asset bootstrap — so dropping it
+    /// costs no memory and buys failure atomicity.
+    ///
+    /// It also closes a reentrancy window on the SUCCESS path: this actor
+    /// suspends at every `await`, so the unload/load gap was a state in
+    /// which a concurrent `transcribe` saw no model and threw a spurious
+    /// `modelNotLoaded` on a healthy device.
+    ///
+    /// `activeModelRole` therefore advances ONLY on success, which is the
+    /// invariant the whole bead exists to restore: this actor must never
+    /// claim a state the recognizer is not actually in.
     func loadFinalModel() async throws {
-        if await recognizer.isModelLoaded() {
-            logger.info("Unloading current model before loading final-path model")
-            await recognizer.unloadModel()
-        }
         logger.info("Preparing final-path Speech model…")
         let start = ContinuousClock.now
         try await recognizer.loadModel()
         activeModelRole = .asrFinal
         let elapsed = ContinuousClock.now - start
         logger.info("Final-path Speech model ready (\(elapsed))")
+        await loadJournal?.recordSuccess(role: .asrFinal)
     }
 
     /// Unload whatever model is currently active.
@@ -766,6 +1083,46 @@ actor SpeechService {
             return try await operation()
         }
         return try await Self.requestGate.withExclusiveAccess(operation)
+    }
+}
+
+// MARK: - SpeechModelLoadOutcome
+
+/// playhead-se2h: what a call to `SpeechService.prepareFastModel()` did.
+///
+/// Five cases rather than a `Bool`, because the three not-ready answers
+/// are operationally different and a caller (or a test) that cannot tell
+/// them apart cannot tell "we tried and it failed" from "we deliberately
+/// did not try" — which is the same conflation between a quantity and an
+/// absence that produced this bead.
+enum SpeechModelLoadOutcome: String, Sendable, Equatable, CaseIterable {
+    /// A model was already loaded; nothing was attempted and no budget
+    /// was consumed. The overwhelmingly common case.
+    case alreadyLoaded = "already_loaded"
+    /// A load ran and succeeded. On any call after the first this is a
+    /// RECOVERY — the state that used to be unreachable without a
+    /// relaunch.
+    case loaded
+    /// A load ran and threw. The budget advanced and the failure is in
+    /// the journal.
+    case failed
+    /// Another caller is mid-load. Nothing attempted, no budget consumed;
+    /// this run reports not-ready and the next one will see the result.
+    case loadInFlight = "load_in_flight"
+    /// The epoch's attempts are spent. Nothing attempted — this is the
+    /// case that proves the retry cannot spin.
+    case budgetExhausted = "budget_exhausted"
+    /// The calling task was cancelled during the load — a scrub, a stop, a
+    /// preempt. Distinct from `.failed` because NOTHING WAS LEARNED about
+    /// whether the model can load, so this must not be journaled as a load
+    /// failure. Recording it would put a scrub in the counter that decides
+    /// whether the speech stack looks broken, which is the same "a quantity
+    /// that names an absence" defect that made `asr_failed` unusable.
+    case cancelled
+
+    /// Whether the recognizer is usable as a result of this call.
+    var isReady: Bool {
+        self == .alreadyLoaded || self == .loaded
     }
 }
 
@@ -1545,14 +1902,48 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
     private var analyzerFormat: AVAudioFormat?
     private var prepared = false
 
-    init(vocabularyProvider: ASRVocabularyProvider? = nil) {
+    /// playhead-se2h: `assetBootstrapper` is injectable so `loadModel()` is
+    /// reachable from the gate.
+    ///
+    /// It was hardcoded, which made this whole actor untestable — nothing
+    /// constructs it under XCTest (`makeDefaultSpeechRecognizer` returns the
+    /// stub), so its error handling could only be pinned by a source grep.
+    /// The bootstrapper already had both of its own seams; this one line is
+    /// what turns that grep into a behavioural test. The default keeps every
+    /// production call site unchanged.
+    init(
+        vocabularyProvider: ASRVocabularyProvider? = nil,
+        assetBootstrapper: AppleSpeechAssetBootstrapper = AppleSpeechAssetBootstrapper()
+    ) {
         self.vocabularyProvider = vocabularyProvider
-        self.assetBootstrapper = AppleSpeechAssetBootstrapper()
+        self.assetBootstrapper = assetBootstrapper
         self.analyzerRunner = AppleSpeechAnalyzerRunner(vocabularyProvider: vocabularyProvider)
     }
 
     // MARK: - Model Lifecycle
 
+    /// playhead-se2h: a boundary error is RETHROWN UNCHANGED here.
+    ///
+    /// It used to be collapsed into
+    /// `TranscriptEngineError.transcriptionFailed(error.description)`,
+    /// which threw away exactly the distinction a diagnostics bundle
+    /// needs: the two ways this call fails in the field are
+    /// `speechAssetsUnsupported` (the locale's assets are not installed)
+    /// and `analyzerFormatUnavailable`, and both arrived at
+    /// `TranscriptFailureClass.classify` wearing the name of a failure
+    /// that means "recognition ran and reported an error". A model that
+    /// never loaded filed under `transcription_failed` also reads as
+    /// `asr_failed` in the work journal, which is the self-contradicting
+    /// row `TranscriptFailureClass.isAsrFailure` was written to prevent.
+    ///
+    /// `classify` already has native arms for every `AppleSpeechBoundaryError`
+    /// case, so rethrowing costs nothing and makes them reachable from
+    /// this path. Nothing type-switches on `loadModel()`'s error — both
+    /// production callers either journal the classification or propagate.
+    ///
+    /// `transcribe` and `detectVoiceActivity` keep their existing wrapping:
+    /// their shard-level classification is a separate question with its own
+    /// downstream expectations, and widening it is not this bead's business.
     func loadModel() async throws {
         logger.info("Preparing SpeechAnalyzer backend")
         do {
@@ -1564,7 +1955,7 @@ actor AppleSpeechRecognizer: SpeechRecognizer {
         } catch let error as TranscriptEngineError {
             throw error
         } catch let error as AppleSpeechBoundaryError {
-            throw TranscriptEngineError.transcriptionFailed(error.description)
+            throw error
         } catch {
             throw TranscriptEngineError.transcriptionFailed("Failed to prepare SpeechAnalyzer backend: \(error)")
         }

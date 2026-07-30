@@ -71,6 +71,13 @@ final class PlayheadRuntime {
     let iCloudSyncCoordinator: ICloudSyncCoordinator
     let audioService: AnalysisAudioService
     let featureService: FeatureExtractionService
+    /// playhead-se2h: exposed (it used to be a local `let` inside `init`,
+    /// reachable only by the two owners it was injected into) so the
+    /// App-scope scene-phase observer can refresh the bounded model-load
+    /// retry budget when the user comes back to the app. Without a
+    /// reference here, a device that spent its retry budget stays without
+    /// transcription until the process is killed.
+    let speechService: SpeechService
     let transcriptEngine: TranscriptEngineService
     let trustService: TrustScoringService
     let adDetectionService: AdDetectionService
@@ -806,9 +813,17 @@ final class PlayheadRuntime {
 
         self.audioService = AnalysisAudioService()
 
+        // playhead-se2h: the load journal is what makes a failed model
+        // load visible in a support bundle instead of only in a log line
+        // nobody captures. Injected rather than reached for statically so
+        // the test host never writes to the real Application Support
+        // document — the same isolation rule `StabilityDiagnosticsStore`
+        // and `AnalysisStoreHealthJournal` follow.
         let speechService = SpeechService(
-            vocabularyProvider: ASRVocabularyProvider(store: analysisStore)
+            vocabularyProvider: ASRVocabularyProvider(store: analysisStore),
+            loadJournal: Self.speechModelLoadJournal()
         )
+        self.speechService = speechService
 
         self.featureService = FeatureExtractionService(store: analysisStore)
         self.transcriptEngine = TranscriptEngineService(
@@ -2845,12 +2860,49 @@ final class PlayheadRuntime {
             // mis-wire) is a safe no-op.
             await downloadManager.registerForegroundAssistLifecycleObserver()
 
-            do {
-                try await speechService.loadFastModel()
-            } catch {
-                // Speech asset preparation is best-effort at launch; the
-                // transcript engine will surface failures when first used.
-            }
+            // playhead-se2h: this was `do { try await loadFastModel() }
+            // catch { }` — a literally empty catch whose comment claimed
+            // "the transcript engine will surface failures when first
+            // used". It did not. The failure became an indistinguishable
+            // `modelNotLoaded` on every subsequent shard, nothing retried,
+            // and one transient hiccup at launch disabled transcription
+            // for the life of the install with no user signal and nothing
+            // in a support bundle.
+            //
+            // `prepareFastModel()` logs the failure, classifies it into
+            // `SpeechModelLoadJournal` where a diagnostics bundle can see
+            // it, and — crucially — leaves a retry budget that the next
+            // transcription run spends. It does not throw, so there is no
+            // longer an error here to swallow.
+            //
+            // IT IS STILL AWAITED INLINE, in the same position the old
+            // `try await loadFastModel()` occupied, so the four `start()`
+            // calls below DO wait for it — and it can take as long as an
+            // asset download. "Non-throwing" must not be read as
+            // "non-blocking". Spelling that out is the point: the bug this
+            // bead fixes was a comment asserting behaviour the code did not
+            // have, and a comment here claiming launch is not gated on a
+            // speech asset would be the same defect wearing a new hat.
+            //
+            // KEPT INLINE DELIBERATELY, and not merely out of caution. The
+            // obvious change — `Task { await speechService.prepareFastModel() }`
+            // — looks free now that a concurrent load is declined rather
+            // than duplicated, but the decline is exactly what makes it
+            // unsafe: `backgroundProcessingService.start()` would be free to
+            // begin analysis while the launch load is still in flight, the
+            // first transcription run would get `.loadInFlight`, and it
+            // would report `speech_engine_not_ready` on a device that is
+            // perfectly healthy and three seconds from being ready. That
+            // trades a launch-latency cost for a first-run FAILURE, which is
+            // the wrong direction for a bead about not misreporting the
+            // speech stack. Awaiting here is what guarantees the model is
+            // ready before any consumer starts.
+            //
+            // The latency itself is real and unaddressed; fixing it properly
+            // means giving the transcription loop a way to WAIT for an
+            // in-flight load instead of declining, which is a change to the
+            // retry contract and belongs in its own bead.
+            await speechService.prepareFastModel()
 
             await backgroundProcessingService.start()
             await entitlementManager.start()
@@ -2862,11 +2914,31 @@ final class PlayheadRuntime {
         }
     }
 
-    private static var isRunningUnderXCTest: Bool {
+    nonisolated private static var isRunningUnderXCTest: Bool {
         let env = ProcessInfo.processInfo.environment
         return env["XCTestConfigurationFilePath"] != nil ||
             env["XCTestSessionIdentifier"] != nil ||
             NSClassFromString("XCTestCase") != nil
+    }
+
+    /// playhead-se2h: the durable model-load journal the production
+    /// `SpeechService` records into, or nil under the test host.
+    ///
+    /// The predicate is a PARAMETER so both branches are executable from
+    /// the gate — the shape `MetricKitDiagnosticsInstaller.shouldInstall(environment:)`
+    /// uses for the same reason. A helper whose non-test branch no test
+    /// can reach is how a diagnostics signal ends up wired to nothing
+    /// while the suite stays green, which is the failure mode
+    /// playhead-wvdz's canary exists to catch.
+    ///
+    /// Nil under XCTest because the journal writes to the real
+    /// `Application Support/Diagnostics/` container, which is shared by
+    /// every test in a run. Tests that exercise the journal construct
+    /// their own instance against a temp directory.
+    nonisolated static func speechModelLoadJournal(
+        underTest: Bool = isRunningUnderXCTest
+    ) -> SpeechModelLoadJournal? {
+        underTest ? nil : .shared
     }
 
     deinit {
