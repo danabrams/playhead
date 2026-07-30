@@ -208,6 +208,13 @@ final class AdPodContinuationCorpusEvalTests: XCTestCase {
         }
     }
 
+    /// Ascending, duplicate-free gap list. Two arms sharing a NAME would
+    /// accumulate into one bucket and double every count — which is exactly what
+    /// happened the first time the production default moved onto a swept value.
+    private func uniqueGaps(_ gaps: [Double], excluding: [Double]) -> [Double] {
+        Array(Set(gaps).subtracting(Set(excluding))).sorted()
+    }
+
     // MARK: - The eval
 
     /// One measurement arm: which link sources are enabled.
@@ -290,13 +297,16 @@ final class AdPodContinuationCorpusEvalTests: XCTestCase {
         // ~50 s wide) and the link BAR (several holes carry exactly one strong
         // kind). Measured rather than guessed, with the out-of-slot figure as the
         // show-eating proxy.
-        for gap in [45.0, defaultGap, 90.0] {
+        // Deduplicated: the production default is one of the swept values, and a
+        // repeated arm NAME would accumulate into the same bucket and silently
+        // double every count.
+        for gap in uniqueGaps([45.0, defaultGap, 60.0, 90.0], excluding: [30.0]) {
             arms.append(
                 Arm(name: "D gap=\(Int(gap)) two-kind bar", lexical: true,
                     rhetorical: true, singleStrongKind: false, gap: gap)
             )
         }
-        for gap in [30.0, 45.0, defaultGap, 90.0] {
+        for gap in uniqueGaps([30.0, 45.0, defaultGap, 60.0, 90.0], excluding: []) {
             arms.append(
                 Arm(name: "E gap=\(Int(gap)) + single-strong-kind links", lexical: true,
                     rhetorical: true, singleStrongKind: true, gap: gap)

@@ -115,22 +115,38 @@ enum AdPodContinuation {
 
     struct Configuration: Sendable, Equatable {
         /// Maximum gap (seconds) between the current edge and the next ad-copy
-        /// link for the chain to continue.
+        /// link for the chain to continue. This is the length of UNVERIFIED audio
+        /// one step may annex — the bridge between two positive-evidence points —
+        /// so it is the single most safety-relevant number in this file.
         ///
-        /// 60 s, and the number is MEASURED, not assumed. A DAI pod interleaves
-        /// creatives that carry text cues with creatives that carry none — the
-        /// Conan pod runs SiriusXM (cue) → Carvana (cue) → Carter's (bare URL) →
-        /// DSW (bare URL) — so consecutive LINKS sit a whole cue-free creative
-        /// apart, ~50 s. Against rediff-confirmed pod boundaries on the
-        /// 2026-07-16 corpus, raising the gap 30 → 45 → 60 recovered 162 → 245 →
-        /// 408 s of ad audio inside detected pods, and 60 → 90 recovered exactly
-        /// the same 408 s: past 60 s the chain is bounded by EVIDENCE, not by
-        /// this number, which is why 60 is a plateau rather than a slope.
+        /// 30 s, and it is set by a HELD-OUT measurement overruling an in-sample
+        /// one. The two disagreed, and the held-out one won:
         ///
-        /// Crucially, the newly-claimed seconds falling OUTSIDE every rediff slot
-        /// did not move at all across that sweep (23.0 s at every setting, one
-        /// contiguous host-read region). Widening the gap bought ad seconds and
-        /// bought no show seconds.
+        ///   • IN-SAMPLE (the 2026-07-16 Catalyst corpus, scored against
+        ///     rediff-confirmed pod boundaries) wanted 60. Raising the gap
+        ///     30 → 45 → 60 recovered 191 → 302 → 617 s of ad audio inside
+        ///     detected pods and took the count of pods still carrying a >30 s
+        ///     hole from 12 to 7, with ZERO seconds landing outside a rediff slot
+        ///     at any setting. On that evidence alone 60 looks free.
+        ///
+        ///   • HELD OUT (the device database, 21 real episodes, nothing here used
+        ///     to pick a parameter) says it is not. At gap 60 the pass claimed
+        ///     THEMOVE 2668.6–2708.9, and the transcript for those 40 s is
+        ///     "Yesterday's question. When was the white jersey introduced … the
+        ///     answer, 1975 … and today's question is" — the show's trivia
+        ///     segment, bracketed at both ends by the SAME sponsor's CTA. A
+        ///     sponsored segment is not a pod, and 40 s of show became ad. The
+        ///     mark appears at gap 45 and is absent at 35.
+        ///
+        /// So the bridge is capped below the length of a single creative (15–30 s),
+        /// which is the principled reading of "the next creative starts about now"
+        /// as well as the safe one. 30 rather than 35 deliberately: 35 would be
+        /// fitted to that one observation by one second.
+        ///
+        /// The recall left on the table is real and is not hidden — the corpus eval
+        /// keeps every arm, so the 60 s setting and what it would buy stay visible
+        /// for the flag-flip decision. Recovering it needs a positive content
+        /// signal that can tell a sponsored SEGMENT from a pod, not a wider bridge.
         ///
         /// `<= 0` disables the pass (no chain can ever start).
         var maxLinkGapSeconds: Double
@@ -170,14 +186,14 @@ enum AdPodContinuation {
         var markConfidenceCeiling: Double
 
         static let `default` = Configuration(
-            maxLinkGapSeconds: 60.0,
+            maxLinkGapSeconds: 30.0,
             maxExtensionSecondsPerSide: 180.0,
             minMarkDurationSeconds: 3.0,
             markConfidenceCeiling: 0.70
         )
 
         init(
-            maxLinkGapSeconds: Double = 60.0,
+            maxLinkGapSeconds: Double = 30.0,
             maxExtensionSecondsPerSide: Double = 180.0,
             minMarkDurationSeconds: Double = 3.0,
             markConfidenceCeiling: Double = 0.70
