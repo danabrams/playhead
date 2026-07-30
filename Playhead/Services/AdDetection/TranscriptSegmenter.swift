@@ -30,9 +30,22 @@ struct AdTranscriptSegment: Sendable {
         self.segmentType = segmentType
     }
 
-    var startTime: Double { atoms.first?.startTime ?? 0 }
-    var endTime: Double { atoms.last?.endTime ?? 0 }
+    /// playhead-r5um / playhead-csbq: min/max, not first/last. Since r5um the
+    /// atom sequence is time-ordered, so for the ordinary non-overlapping ASR
+    /// case these are byte-identical to `first`/`last`. They differ — and
+    /// first/last would UNDERSTATE the span — when one atom's interval nests
+    /// inside another's, which the canonicalizer reaches by design: it RETAINS
+    /// a fast chunk that only partially overlaps a final interval
+    /// (`residualFastFinalOverlapCount`), so a long final atom can be followed
+    /// by a short fast one. csbq had to repair three window-bound producers
+    /// that projected a span with first/last; these are the same projection
+    /// one level down, and a segment whose end precedes its start is exactly
+    /// the geometry `AnalysisStore.insertSemanticScanResult` now rejects.
+    var startTime: Double { atoms.map(\.startTime).min() ?? 0 }
+    var endTime: Double { atoms.map(\.endTime).max() ?? 0 }
     var duration: Double { endTime - startTime }
+    /// Ordinals, unlike times, are array positions assigned by `atomize`, so
+    /// first/last is correct by construction here.
     var firstAtomOrdinal: Int { atoms.first?.atomKey.atomOrdinal ?? 0 }
     var lastAtomOrdinal: Int { atoms.last?.atomKey.atomOrdinal ?? 0 }
     var text: String { atoms.map(\.text).joined(separator: " ") }

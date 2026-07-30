@@ -337,10 +337,14 @@ struct DiscourseUnit: Sendable {
     let ref: String
     /// The atoms composing this unit, ordered by ordinal.
     let atoms: [TranscriptAtom]
-    /// Start time of the first atom.
-    var startTime: Double { atoms.first?.startTime ?? 0 }
-    /// End time of the last atom.
-    var endTime: Double { atoms.last?.endTime ?? 0 }
+    /// Earliest atom start. playhead-r5um: min/max rather than first/last, for
+    /// the reason spelled out on `AdTranscriptSegment.startTime` — identical
+    /// for ordinary non-overlapping atoms, but it cannot invert when a
+    /// partially-overlapping retained fast atom nests inside a final one. This
+    /// pair is the geometry an FM boundary window is scored against.
+    var startTime: Double { atoms.map(\.startTime).min() ?? 0 }
+    /// Latest atom end.
+    var endTime: Double { atoms.map(\.endTime).max() ?? 0 }
     /// Duration in seconds.
     var duration: Double { endTime - startTime }
     /// Concatenated text of all atoms.

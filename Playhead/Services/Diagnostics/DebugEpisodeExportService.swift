@@ -188,7 +188,11 @@ enum DebugEpisodeExportService {
         if chunks.isEmpty {
             out += "  (no transcript chunks)\n"
         } else {
-            let sorted = chunks.sorted { $0.chunkIndex < $1.chunkIndex }
+            // playhead-r5um: time order, not chunkIndex order. This dump is
+            // read by a human debugging detection; in chunkIndex order it
+            // printed the episode out of sequence (27 of 30 device assets),
+            // which is the worst possible property for a diagnostic.
+            let sorted = chunks.sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
             for chunk in sorted {
                 let start = formatTime(chunk.startTime)
                 let end = formatTime(chunk.endTime)
