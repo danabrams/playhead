@@ -109,6 +109,20 @@ enum AdPodContinuation {
     /// `metadataConfidence == nil` so `AdBannerView.bannerCopy` uses the generic
     /// "sounds like a sponsor break" copy — we know a pod continues, we do NOT
     /// know which advertiser, and guessing one would be a hallucination.
+    ///
+    /// CAUSAL ATTRIBUTION IS DEFERRED, and the default is the safe one. This tag
+    /// is not in `SkipOrchestrator.causalSource(forMetadataSource:)`, so a veto on
+    /// a continuation mark attributes to `.foundationModel`. That is
+    /// MISATTRIBUTED but harmless, and deliberately left alone: `.foundationModel`
+    /// carries no entry in `CausalSourceDemotionStore`'s rules, so the veto
+    /// demotes nothing. Mapping it to the honest `.lexical` instead would be
+    /// WORSE — `.lexical` IS demotable (delta 0.20, floor 0.30), so a
+    /// false-positive continuation mark would drag down the real lexical
+    /// channel's trust on that show, including for spans that DO auto-skip.
+    /// Correct attribution needs its own `CausalSource` case, exempt from the
+    /// demotion rules for the same reason `.specialist` is (a signal that never
+    /// auto-skips has nothing to demote); that is an enum-widening change with
+    /// its own exhaustive-switch fallout, not this bead's work.
     static let metadataSource = "pod-continuation-v1"
 
     // MARK: - Configuration
