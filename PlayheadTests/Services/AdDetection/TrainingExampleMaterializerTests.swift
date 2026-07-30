@@ -215,6 +215,62 @@ struct TrainingExampleMaterializerTests {
         #expect(loaded.count == 3)
     }
 
+    /// playhead-csbq: two of the six inverted rows on the 2026-07-30 device
+    /// pull carry `status = .success`, so they pass the materializer's spine
+    /// filter. A negative-width example overlaps no `AdWindow`, inherits no
+    /// decision attribution, and would be written into the training corpus as
+    /// a labelled region that does not exist. The write path refuses these now,
+    /// but the product owner declined repairing the rows already on disk, so
+    /// the read side has to tolerate them — as the two coverage reads already
+    /// do. Seeded via raw SQL because no supported API can produce the shape.
+    @Test("inverted scan rows are excluded from the training corpus")
+    func invertedScanRowsAreNotMaterialized() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // One legitimate spine row.
+        try await store.insertSemanticScanResult(scanResult(
+            id: "scan-valid", firstOrdinal: 0, lastOrdinal: 10,
+            startTime: 0, endTime: 10, disposition: .containsAd
+        ))
+        // The device's two inverted `success` rows, verbatim.
+        let cohort = scanCohortJSON.replacingOccurrences(of: "'", with: "''")
+        for (id, start, end) in [
+            ("scan-inv-a", 330.0, 15.18),
+            ("scan-inv-b", 1978.86, 1933.02)
+        ] {
+            try await store.execForTesting(
+                """
+                INSERT INTO semantic_scan_results
+                  (id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
+                   windowStartTime, windowEndTime, scanPass, transcriptQuality,
+                   disposition, spansJSON, status, attemptCount, errorContext,
+                   inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
+                   scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase)
+                VALUES
+                  ('\(id)', '\(assetId)', 0, 69, \(start), \(end), 'coarse',
+                   'good', 'containsAd', '[]', 'success', 1, NULL,
+                   100, 20, 50, 0,
+                   '\(cohort)', '\(transcriptVersion)', 'raw-\(id)', 'targeted',
+                   '\(BackfillJobPhase.fullEpisodeScan.rawValue)')
+                """
+            )
+        }
+        // The rows really are on the spine — this tests tolerance, not absence.
+        #expect(try await store.fetchSemanticScanResults(analysisAssetId: assetId).count == 3)
+
+        let materializer = TrainingExampleMaterializer()
+        try await materializer.materialize(
+            forAsset: assetId,
+            store: store,
+            now: 1_700_000_100
+        )
+
+        let loaded = try await store.loadTrainingExamples(forAsset: assetId)
+        #expect(loaded.count == 1)
+        #expect(loaded.allSatisfy { $0.endTime > $0.startTime })
+    }
+
     @Test("Phase 11 observability evidence is excluded from training examples")
     func observabilityEvidenceExcludedFromTrainingExamples() async throws {
         let store = try await makeTestStore()
