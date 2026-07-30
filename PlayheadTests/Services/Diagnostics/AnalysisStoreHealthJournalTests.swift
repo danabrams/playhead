@@ -227,6 +227,61 @@ struct AnalysisStoreHealthJournalTests {
         #expect(state.recentFailures.allSatisfy { $0.failureClass == .accessDenied })
     }
 
+    /// The exemption must not be indefinite. Measured against a real
+    /// SQLite build, `unable to open database file` is what you get for a
+    /// permanently broken container (a directory where the database file
+    /// belongs, an unresolvable permission problem) as well as for Data
+    /// Protection. A permanent exemption would leave analysis silently
+    /// dead forever with the listener never asked — the same bug class
+    /// this bead removes.
+    @Test("A Data-Protection failure that outlasts Data Protection does eventually escalate")
+    func accessDeniedEscalatesAfterTheGracePeriod() async throws {
+        let (journal, _) = try makeJournal()
+        let locked = AnalysisStoreError.openFailed(
+            code: 14, message: "unable to open database file"
+        )
+
+        // Day 0 through day 6: still exempt, still silent.
+        await journal.recordFailure(error: locked, now: Self.t0)
+        let sixDaysIn = Self.t0.addingTimeInterval(6 * 24 * 60 * 60)
+        let stillExempt = await journal.recordFailure(error: locked, now: sixDaysIn)
+        #expect(stillExempt.consecutiveFailureCount == 0)
+        #expect(stillExempt.status == .retrying)
+
+        // Past the grace period the same failure starts counting.
+        let past = Self.t0.addingTimeInterval(
+            AnalysisStoreHealthState.accessDeniedGracePeriod + 1
+        )
+        var state = await journal.recordFailure(error: locked, now: past)
+        #expect(state.consecutiveFailureCount == 1)
+        for _ in 1..<AnalysisStoreHealthJournal.failuresBeforeAskingListener {
+            state = await journal.recordFailure(error: locked, now: past)
+        }
+        #expect(state.status == .awaitingUserDecision)
+    }
+
+    /// The clock that drives the grace period restarts on success, so a
+    /// device that opens the store normally between locked background
+    /// launches never accumulates toward it.
+    @Test("A success between locked launches resets the grace-period clock")
+    func successResetsTheGracePeriodClock() async throws {
+        let (journal, _) = try makeJournal()
+        let locked = AnalysisStoreError.openFailed(
+            code: 14, message: "unable to open database file"
+        )
+
+        await journal.recordFailure(error: locked, now: Self.t0)
+        await journal.recordSuccess(now: Self.t0.addingTimeInterval(60))
+
+        // Long after the original failure, but the run started over.
+        let muchLater = Self.t0.addingTimeInterval(
+            AnalysisStoreHealthState.accessDeniedGracePeriod * 3
+        )
+        let state = await journal.recordFailure(error: locked, now: muchLater)
+        #expect(state.consecutiveFailureCount == 0)
+        #expect(state.status == .retrying)
+    }
+
     @Test("A non-store error is recorded as unknown rather than guessed at")
     func foreignErrorIsUnknown() {
         struct Unrelated: Error {}

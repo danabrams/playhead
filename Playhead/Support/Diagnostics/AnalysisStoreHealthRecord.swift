@@ -96,10 +96,19 @@ enum AnalysisStoreFailureClass: String, Codable, Sendable, Hashable, CaseIterabl
 
     /// A constraint rejected a migration statement — the failure mode
     /// that produced this bead. playhead-0hi9's v39 rung issued a bare
-    /// `DELETE FROM analysis_assets` against rows referenced by
-    /// `training_examples.analysisAssetId ON DELETE RESTRICT`, raising
+    /// `DELETE FROM analysis_assets` against rows that a child table
+    /// referenced with `ON DELETE RESTRICT`, raising
     /// `FOREIGN KEY constraint failed`. Nothing about the stored data is
     /// damaged; the rung was wrong.
+    ///
+    /// (The child table is deliberately not named here, not even in
+    /// prose. It is one of the local-learning tables, and a privacy
+    /// canary in `PlayheadTests/Services/AdDetection/` enumerates every
+    /// production file that so much as mentions it, asserting the
+    /// consumer set is a closed allowlist. It caught this file on its
+    /// first run — correctly: a diagnostics type has no business
+    /// appearing in that set, and the canary is worth more than the
+    /// extra word.)
     case constraintViolation = "constraint_violation"
 
     /// A statement referenced a table or column that does not exist on
@@ -150,6 +159,18 @@ enum AnalysisStoreFailureClass: String, Codable, Sendable, Hashable, CaseIterabl
     /// forward, and the prompt is the only route to any destructive
     /// action. So the failure direction of this predicate is "keep the
     /// data".
+    ///
+    /// It is NOT an indefinite exemption — see
+    /// ``AnalysisStoreHealthState/accessDeniedGracePeriod``. Measured
+    /// against a real SQLite build, `unable to open database file`
+    /// (`SQLITE_CANTOPEN`) is ALSO what you get for a permanently broken
+    /// container — a directory sitting where the database file belongs,
+    /// or a permission problem that never resolves. Left as a permanent
+    /// exemption, those would leave analysis silently dead forever with
+    /// the listener never asked, which is the same class of bug this
+    /// whole bead removes. (Genuine corruption is a different code:
+    /// a damaged header or a non-database file reports `SQLITE_NOTADB`
+    /// with `file is not a database`, which counts immediately.)
     var countsTowardEscalation: Bool {
         self != .accessDenied
     }
@@ -347,6 +368,21 @@ struct AnalysisStoreHealthState: Codable, Sendable, Equatable {
     /// across several weeks of launches; small enough that the document
     /// stays a few kilobytes.
     static let maxFailureRecords = 20
+
+    /// How long a class that normally does not escalate
+    /// (``AnalysisStoreFailureClass/countsTowardEscalation``) may keep
+    /// failing before it starts counting anyway.
+    ///
+    /// The exemption exists for Data Protection, and Data Protection
+    /// resolves the first time the owner unlocks the device after a
+    /// boot — minutes or hours, not days. A container that has refused
+    /// to open for a week straight with no successful open in between is
+    /// not locked, it is broken, and leaving it exempt forever would
+    /// mean analysis stays silently dead and the listener is never asked
+    /// anything. Seven days is long enough to cover a phone left in a
+    /// drawer over a holiday and short enough that "silently dead
+    /// forever" is not a state this app can reach.
+    static let accessDeniedGracePeriod: TimeInterval = 7 * 24 * 60 * 60
 
     /// Quarantines retained.
     ///

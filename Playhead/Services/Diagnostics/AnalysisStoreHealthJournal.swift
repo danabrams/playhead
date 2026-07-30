@@ -145,7 +145,17 @@ actor AnalysisStoreHealthJournal {
             // is excluded because on iOS it is usually Data Protection
             // doing its job, not a broken database — see
             // `AnalysisStoreFailureClass.countsTowardEscalation`.
+            //
+            // The exemption expires. `SQLITE_CANTOPEN` is also what a
+            // permanently broken container reports, and a failure run
+            // that has already lasted longer than Data Protection ever
+            // could is no longer explained by it. Without this the app
+            // would sit with analysis dead and never ask the listener
+            // anything — the same silent-forever failure this bead
+            // exists to remove, wearing a different hat.
+            let failureRunAge = now.timeIntervalSince(current.firstFailureAt ?? now)
             let counts = failureClass.countsTowardEscalation
+                || failureRunAge >= AnalysisStoreHealthState.accessDeniedGracePeriod
             let newCount = counts ? current.consecutiveFailureCount + 1 : current.consecutiveFailureCount
             let record = AnalysisStoreFailureRecord(
                 occurredAt: now,
