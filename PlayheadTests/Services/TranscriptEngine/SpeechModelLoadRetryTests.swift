@@ -273,7 +273,7 @@ struct SpeechModelLoadBoundTests {
         #expect(await first == .loaded)
         // The declined call consumed nothing: one attempt was made, and the
         // success reset the epoch.
-        let spent = await service.loadAttemptsInCurrentEpoch
+        let spent = await service.loadAttemptsInCurrentEpochForTesting
         #expect(spent == 0)
     }
 
@@ -286,11 +286,11 @@ struct SpeechModelLoadBoundTests {
         let service = SpeechService(recognizer: recognizer)
 
         #expect(await service.prepareFastModel() == .failed)
-        let afterFailure = await service.loadAttemptsInCurrentEpoch
+        let afterFailure = await service.loadAttemptsInCurrentEpochForTesting
         #expect(afterFailure == 1, "a failure must leave its slot spent")
 
         #expect(await service.prepareFastModel() == .loaded)
-        let afterSuccess = await service.loadAttemptsInCurrentEpoch
+        let afterSuccess = await service.loadAttemptsInCurrentEpochForTesting
         #expect(afterSuccess == 0, "a success ends the failure run, so the next one starts fresh")
     }
 
@@ -370,7 +370,7 @@ struct SpeechModelLoadStateHonestyTests {
         #expect(recognizer.loadAttempts == attemptsAfterFinalLoad, "nothing must be reloaded")
         let role = await service.activeModelRole
         #expect(role == .asrFinal, "the role must still describe the model actually loaded")
-        let spent = await service.loadAttemptsInCurrentEpoch
+        let spent = await service.loadAttemptsInCurrentEpochForTesting
         #expect(spent == 0, "a no-op must not consume the retry budget")
     }
 
@@ -480,7 +480,7 @@ struct SpeechModelLoadJournalRecordingTests {
         // The budget slot IS consumed, deliberately: the bound must be a
         // guarantee, so it errs toward fewer attempts rather than making the
         // attempt count a function of how often the user scrubs.
-        let spent = await service.loadAttemptsInCurrentEpoch
+        let spent = await service.loadAttemptsInCurrentEpochForTesting
         #expect(spent == 1)
     }
 

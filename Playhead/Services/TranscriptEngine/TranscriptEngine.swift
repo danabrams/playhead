@@ -820,8 +820,10 @@ actor SpeechService {
         loadAttemptsThisEpoch = 0
     }
 
-    /// Attempts consumed in the current epoch. Test seam for the bound.
-    var loadAttemptsInCurrentEpoch: Int { loadAttemptsThisEpoch }
+    /// Attempts consumed in the current epoch. A test seam, named as one:
+    /// the bound is the contract this bead is held to, and it is not
+    /// observable from any production API. Nothing in the app reads it.
+    var loadAttemptsInCurrentEpochForTesting: Int { loadAttemptsThisEpoch }
 
     /// Load the final-path recognizer for backfill transcription.
     /// Apple Speech prepares locale assets on demand.
