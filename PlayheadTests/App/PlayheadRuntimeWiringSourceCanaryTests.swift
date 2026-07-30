@@ -1198,4 +1198,154 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             """
         )
     }
+
+    // MARK: - playhead-se2h: the model-load failure must not be swallowed again
+
+    /// THE EMPTY CATCH MUST NOT COME BACK.
+    ///
+    /// The launch path used to be `do { try await
+    /// speechService.loadFastModel() } catch { }` — a literally empty
+    /// catch. Nothing about that shape fails a test: the app launches, the
+    /// suite is green, and the only consequence is that transcription is
+    /// dead for the life of the install on any device whose load happened
+    /// to fail. It is invisible by construction, which is why it survived.
+    ///
+    /// `prepareFastModel()` is the only entry point that logs, journals
+    /// and leaves a retry budget. A regression that reverts to the bare
+    /// throwing call would compile and pass everything else here.
+    func testLaunchPreparesTheSpeechModelThroughTheRetryingEntryPoint() throws {
+        let raw = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(raw)
+
+        XCTAssertTrue(
+            stripped.contains("await speechService.prepareFastModel()"),
+            """
+            The launch path no longer calls `speechService.prepareFastModel()`. That is the \
+            ONLY entry point that logs the failure, records it in SpeechModelLoadJournal, and \
+            leaves a retry budget for the next transcription run. Without it a launch-time \
+            load failure is once again silent and permanent (playhead-se2h).
+            """
+        )
+        XCTAssertFalse(
+            stripped.contains("try await speechService.loadFastModel()"),
+            """
+            The launch path calls `loadFastModel()` directly again. It throws, and the only \
+            thing the launch Task can do with the error is swallow it — which is the bug \
+            playhead-se2h exists to remove. Call `prepareFastModel()` instead.
+            """
+        )
+    }
+
+    /// The journal is injected, and the parameter has a default of `nil`.
+    /// Dropping the argument compiles, keeps the gate green, and produces
+    /// a shipped app whose `speech_model_load` block is permanently
+    /// `unknown` — the same silent-omission hazard playhead-wvdz's canary
+    /// covers for the analysis-store journal.
+    func testSpeechServiceIsConstructedWithTheLoadJournal() throws {
+        let code = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(
+                repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+            )
+        )
+        XCTAssertTrue(
+            code.contains("loadJournal: Self.speechModelLoadJournal()"),
+            """
+            PlayheadRuntime no longer passes `loadJournal:` when constructing SpeechService. \
+            The parameter defaults to nil, so this omission is silent: the app would record \
+            nothing about model loads and every bundle would report `unknown` forever, with \
+            every test still passing (playhead-se2h).
+            """
+        )
+    }
+
+    /// The foreground refresh is the only thing that lets a device which
+    /// spent its retry budget try again without the process being killed.
+    /// It lives in `PlayheadApp`'s scene-phase observer, which no unit
+    /// test executes.
+    func testForegroundRefreshesTheModelLoadRetryBudget() throws {
+        let code = SwiftSourceInspector.strippingComments(
+            try SwiftSourceInspector.loadSource(
+                repoRelativePath: "Playhead/App/PlayheadApp.swift"
+            )
+        )
+        XCTAssertTrue(
+            code.contains("runtime.speechService.noteAppDidBecomeActive()"),
+            """
+            The scene-phase observer no longer refreshes the model-load retry budget on \
+            `.active`. Without it a device that spent its three attempts has no way back \
+            short of the process being killed — a shorter version of the exact bug \
+            playhead-se2h was filed for (playhead-se2h).
+            """
+        )
+    }
+
+    /// `AppleSpeechRecognizer` is only ever constructed on a real device
+    /// (`makeDefaultSpeechRecognizer` returns the stub under XCTest), so
+    /// no executable test can reach `loadModel()`. This pins the one line
+    /// in it that a diagnostic depends on.
+    func testAppleSpeechRecognizerLoadDoesNotCollapseBoundaryErrors() throws {
+        let raw = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/TranscriptEngine/TranscriptEngine.swift"
+        )
+        let code = SwiftSourceInspector.strippingComments(raw)
+        let body = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: code, after: "actor AppleSpeechRecognizer"),
+            "could not locate AppleSpeechRecognizer — canary anchor drifted"
+        )
+        let loadBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: body, after: "func loadModel() async throws"),
+            "could not locate AppleSpeechRecognizer.loadModel — canary anchor drifted"
+        )
+        XCTAssertTrue(
+            loadBody.contains("catch let error as AppleSpeechBoundaryError {\n            throw error"),
+            """
+            `AppleSpeechRecognizer.loadModel()` no longer rethrows AppleSpeechBoundaryError \
+            unchanged. Collapsing it into `TranscriptEngineError.transcriptionFailed` discards \
+            the two causes that actually occur in the field — `speechAssetsUnsupported` and \
+            `analyzerFormatUnavailable` — and files a model that never loaded under a class \
+            meaning "recognition ran and reported an error", which reads as `asr_failed` in \
+            the work journal (playhead-se2h).
+            """
+        )
+    }
+}
+
+// MARK: - playhead-se2h: the journal injection predicate (executable)
+
+/// The predicate behind the injection above, tested on BOTH branches.
+///
+/// A helper whose non-test branch no test can reach is how a diagnostics
+/// signal ends up wired to nothing while the suite stays green. Taking the
+/// predicate as a parameter — the shape
+/// `MetricKitDiagnosticsInstaller.shouldInstall(environment:)` uses — makes
+/// both answers assertable.
+final class SpeechModelLoadJournalInjectionTests: XCTestCase {
+
+    func testProductionGetsTheSharedJournal() {
+        XCTAssertTrue(
+            PlayheadRuntime.speechModelLoadJournal(underTest: false) === SpeechModelLoadJournal.shared,
+            """
+            Outside the test host the runtime must inject the shared journal. Returning nil \
+            here would leave production recording nothing while every test still passed.
+            """
+        )
+    }
+
+    func testTestHostGetsNoJournal() {
+        XCTAssertNil(
+            PlayheadRuntime.speechModelLoadJournal(underTest: true),
+            """
+            Under XCTest the journal must be nil: it writes to the real \
+            Application Support container, which is shared by every test in a run.
+            """
+        )
+    }
+
+    func testTheLiveProcessResolvesToNoJournal() {
+        // The live predicate, not an injected one — this process IS the
+        // test host, so the default argument must resolve to nil.
+        XCTAssertNil(PlayheadRuntime.speechModelLoadJournal())
+    }
 }

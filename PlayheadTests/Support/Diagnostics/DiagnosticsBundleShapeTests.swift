@@ -385,7 +385,19 @@ struct DiagnosticsBundleShapeTests {
         // embed the install UUID and the user's home directory). The
         // proof lives in `AnalysisStoreHealthDiagnosticsPrivacyTests`
         // (legal item h).
-        "analysis_store_health"
+        "analysis_store_health",
+        // playhead-se2h: whether the ASR model ever loaded, across
+        // launches. Always encoded, and its default is `unknown` rather
+        // than a healthy value — an unwired signal must read as "no
+        // evidence", never as a working speech stack. Privacy review:
+        // counters, dates, and rawValues of enums this repo defines, with
+        // NO free-text field of any kind (not even the sanitised `detail`
+        // its `analysis_store_health` sibling carries) — a model that will
+        // not load has no episode, show, or URL to name. Failure causes
+        // reuse `TranscriptFailureClass`, the closed set playhead-8ysk
+        // pinned. The proof lives in
+        // `SpeechModelLoadDiagnosticsPrivacyTests`.
+        "speech_model_load"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

@@ -211,6 +211,62 @@ final class MetricKitDiagnosticsWiringSourceCanaryTests: XCTestCase {
         }
     }
 
+    /// playhead-se2h: the identical hazard for `speechModelLoadFetch`.
+    ///
+    /// The parameter defaults to `{ .unknown }`. Drop the argument at any
+    /// one of the three sites and it compiles, the whole gate stays green
+    /// (the test target builds DEBUG, so the Release hatch is compiled by
+    /// nothing any test runs), and every bundle from that surface reports
+    /// `status: "unknown"` forever — which reads as "this build predates
+    /// the signal" rather than "the wiring is broken", so the regression
+    /// hides behind its own default.
+    ///
+    /// The default is deliberately `unknown` rather than a healthy value,
+    /// which is what makes the failure detectable AT ALL in a bundle. This
+    /// canary is what makes it detectable in CI.
+    ///
+    /// Three sites, not two: the listener-feedback channel builds its own
+    /// coordinator and is the easiest one to forget.
+    func testAllThreeHatchesPassTheSpeechModelLoadFetchToTheCoordinator() throws {
+        for (path, symbol) in [
+            ("Playhead/Support/Diagnostics/ReleaseDiagnosticsHatch.swift",
+             "speechModelLoadFetch: ReleaseDiagnosticsHatch.speechModelLoadFetch"),
+            ("Playhead/Support/Diagnostics/DebugDiagnosticsHatch.swift",
+             "speechModelLoadFetch: DebugDiagnosticsHatch.speechModelLoadFetch"),
+            ("Playhead/Support/Feedback/ListenerFeedbackHatch.swift",
+             "speechModelLoadFetch: DiagnosticsHatch.speechModelLoadFetch")
+        ] {
+            let code = try source(path)
+            XCTAssertTrue(
+                code.contains(symbol),
+                """
+                \(path) no longer passes `speechModelLoadFetch` to \
+                DiagnosticsExportCoordinator. The parameter defaults to { .unknown }, so \
+                this omission is SILENT: every bundle from this surface would report that \
+                the ASR model's load history is unknown forever, however broken the device \
+                actually is, and every test would still pass (playhead-se2h).
+                """
+            )
+        }
+    }
+
+    func testBothHatchesForwardToTheSharedSpeechModelLoadAdapter() throws {
+        for path in [
+            "Playhead/Support/Diagnostics/ReleaseDiagnosticsHatch.swift",
+            "Playhead/Support/Diagnostics/DebugDiagnosticsHatch.swift"
+        ] {
+            let code = try source(path)
+            XCTAssertTrue(
+                code.contains("SpeechModelLoadDiagnosticsFetchAdapter.shared"),
+                """
+                \(path) no longer forwards to the single unconditionally-compiled \
+                SpeechModelLoadDiagnosticsFetchAdapter. A local copy here would be compiled \
+                by nothing any test runs, so a divergence would ship green.
+                """
+            )
+        }
+    }
+
     /// Both hatch helpers must forward to the ONE unconditionally-compiled
     /// implementation. A hand-rolled second copy on the Release hatch is
     /// compiled by nothing any test can run — the same drift that made

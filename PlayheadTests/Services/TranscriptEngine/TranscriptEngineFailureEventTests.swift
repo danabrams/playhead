@@ -295,8 +295,19 @@ private final class OverlappingRunRecognizer: SpeechRecognizer, @unchecked Senda
 }
 
 /// Never loads, so `SpeechService.isReady()` is false.
+/// playhead-se2h corrected this double. It used to have a `loadModel()`
+/// that SUCCEEDED silently beside an `isModelLoaded()` that returned false
+/// forever — a state no recognizer can actually be in, and one that only
+/// looked harmless while nothing ever attempted a load. Now that the
+/// transcription loop retries, a double that reports "load worked, still
+/// not loaded" would exercise a path the device cannot reach.
+///
+/// The device state this models — the post-swallow one — is a load that
+/// FAILS, so the load fails here.
 private final class NeverReadyRecognizer: SpeechRecognizer, @unchecked Sendable {
-    func loadModel() async throws {}
+    func loadModel() async throws {
+        throw TranscriptEngineError.transcriptionFailed("assets unavailable")
+    }
     func unloadModel() async {}
     func isModelLoaded() async -> Bool { false }
     func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
@@ -1020,9 +1031,16 @@ struct TranscriptEngineFailureEventTests {
 
     /// The `modelNotLoaded` hypothesis, made observable. A device can be fully
     /// eligible on the Apple Intelligence check while the recognizer actor
-    /// holds `loaded == false`, because `loadFastModel()` is invoked exactly
-    /// once at launch and its failure is swallowed by an empty catch that
-    /// nothing ever retries.
+    /// holds `loaded == false`.
+    ///
+    /// playhead-se2h: the loop now RETRIES the load before it gives up, so
+    /// reaching this failure requires a load that genuinely fails — which is
+    /// what `NeverReadyRecognizer` now does. The terminal class is unchanged:
+    /// a device whose assets are unavailable still reports
+    /// `speech_engine_not_ready` rather than falling silent. What changed is
+    /// that a device whose load would SUCCEED no longer reaches here at all;
+    /// that case is covered by
+    /// `SpeechModelLoadRetryTests.transientLaunchFailureRecoversOnTheNextRun`.
     @Test(.timeLimit(.minutes(1)))
     func notReadyEngineEmitsFailedInsteadOfNothing() async throws {
         let store = try await makeTestStore()
