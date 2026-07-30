@@ -994,22 +994,39 @@ struct AdScanRedriveSchedulerTests {
             .appendingPathComponent("Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
 
-        for tag in ["\"allTiersDone\"", "\"coverageInsufficient.noProgress\"", "\"coverageInsufficient.maxAttempts\""] {
+        // Exactly three call sites plus the definition, and exactly three
+        // insertions. Counting globally is what makes the per-arm check below
+        // honest: a window-based check alone can be satisfied by a NEIGHBOURING
+        // arm's mint bleeding into the window.
+        #expect(source.components(separatedBy: "adScanRedriveJob(").count - 1 == 4,
+                "expected 1 definition + 3 terminal-arm call sites")
+        #expect(source.components(separatedBy: "insertNextJob: redrive").count - 1 == 3,
+                "expected the mint threaded into all three terminal-success arms")
+
+        for tag in [
+            "\"allTiersDone\"",
+            "\"coverageInsufficient.noProgress\"",
+            "\"coverageInsufficient.maxAttempts\"",
+        ] {
             guard let tagRange = source.range(of: tag) else {
                 Issue.record("terminal arm tag \(tag) missing from AnalysisWorkScheduler.swift")
                 continue
             }
-            // The commit is built immediately after the arm tag; the mint is
-            // computed just before it and threaded in as `insertNextJob`.
-            let windowStart = source.index(tagRange.lowerBound, offsetBy: -2_000, limitedBy: source.startIndex)
-                ?? source.startIndex
-            let windowEnd = source.index(tagRange.upperBound, offsetBy: 1_500, limitedBy: source.endIndex)
-                ?? source.endIndex
-            let window = source[windowStart..<windowEnd]
-            #expect(window.contains("adScanRedriveJob("),
-                    "expected the ad-scan re-drive decision in the \(tag) arm")
-            #expect(window.contains("insertNextJob: redrive"),
+            // The mint is computed just before the arm tag and threaded into the
+            // commit that follows it. Bound the forward window at that commit's
+            // own `stateUpdate:` so it cannot reach the next arm.
+            let rest = source[tagRange.upperBound...]
+            guard let stateUpdate = rest.range(of: "stateUpdate:") else {
+                Issue.record("no stateUpdate found after arm tag \(tag)")
+                continue
+            }
+            #expect(rest[..<stateUpdate.lowerBound].contains("insertNextJob: redrive"),
                     "expected the \(tag) arm to insert the minted re-drive")
+
+            let leadIn = source.index(tagRange.lowerBound, offsetBy: -1_200, limitedBy: source.startIndex)
+                ?? source.startIndex
+            #expect(source[leadIn..<tagRange.lowerBound].contains("adScanRedriveJob("),
+                    "expected the ad-scan re-drive decision just before the \(tag) arm")
         }
     }
 
