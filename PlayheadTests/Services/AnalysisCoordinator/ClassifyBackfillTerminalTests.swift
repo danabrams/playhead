@@ -572,6 +572,47 @@ struct ClassifyBackfillTerminalTests {
         #expect(AnalysisCoordinator.adScanLimit(coverageLaneStatuses: [nil]) == .transient)
     }
 
+    /// playhead-gqx4 (adversarial review): the residual causes are chosen by
+    /// whether the FRACTION was measurable, and a genuine scan failure always
+    /// outranks the denominator complaint — a refusal is the more explanatory
+    /// answer even when the duration is also broken.
+    @Test("an unmeasurable denominator is named, and never outranks a real failure")
+    func unmeasurableDurationIsNamed() {
+        // Scan ran, nothing failed, but the fraction is unavailable: the
+        // denominator is the limit, not the scan. Folding this into
+        // `stoppedShort` would send a reader hunting for a scan problem that
+        // does not exist — and it is the commonest nil arm in practice, because
+        // any asset whose declared duration disagrees with its audio by >5%
+        // lands here until the duration-backfill sweep repairs the row.
+        #expect(
+            AnalysisCoordinator.adScanLimit(
+                coverageLaneStatuses: [.success, .noAds],
+                fractionIsMeasurable: false
+            ) == .unmeasurableDuration
+        )
+        // Same rows, measurable denominator: the pass simply stopped short.
+        #expect(
+            AnalysisCoordinator.adScanLimit(
+                coverageLaneStatuses: [.success, .noAds],
+                fractionIsMeasurable: true
+            ) == .stoppedShort
+        )
+        // A real failure still wins over the denominator complaint.
+        #expect(
+            AnalysisCoordinator.adScanLimit(
+                coverageLaneStatuses: [.success, .refusal],
+                fractionIsMeasurable: false
+            ) == .refusal
+        )
+        // No rows at all outranks both: the scan never ran.
+        #expect(
+            AnalysisCoordinator.adScanLimit(
+                coverageLaneStatuses: [],
+                fractionIsMeasurable: false
+            ) == .neverRan
+        )
+    }
+
     /// Every status maps somewhere: a new `SemanticScanStatus` case must not
     /// be able to disappear into `.stoppedShort` by accident, which would
     /// re-create playhead-8ysk's "a label applied to an absence".
@@ -583,7 +624,8 @@ struct ClassifyBackfillTerminalTests {
                 #expect(limit == .stoppedShort, "\(status.rawValue) is a verdict")
             } else {
                 #expect(
-                    limit != .stoppedShort && limit != .neverRan,
+                    limit != .stoppedShort && limit != .neverRan
+                        && limit != .unmeasurableDuration,
                     "\(status.rawValue) must name a limiting cause"
                 )
             }

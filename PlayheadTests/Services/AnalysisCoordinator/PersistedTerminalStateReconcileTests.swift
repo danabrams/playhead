@@ -297,6 +297,61 @@ struct PersistedTerminalStateReconcileTests {
         )
     }
 
+    // MARK: - playhead-gqx4: the ad-scan-degraded terminal is repairable too
+
+    /// The sweep and `DogfoodDiagnosticsAnalysisHealth` must agree about which
+    /// rows can be CONTRADICTED. `.completeAdScanPartial` is degraded about the
+    /// ad scan but still asserts the other two axes — it is only reachable when
+    /// transcript AND feature both cleared the threshold — so a shortfall on
+    /// either contradicts it exactly as it contradicts `.completeFull`.
+    /// Diagnostics raises `terminalStateContradictsCoverage` for it; if the
+    /// sweep ignored it, that would be a filed bug with no self-heal behind it.
+    @Test("completeAdScanPartial with a contradicted transcript is repaired")
+    func adScanPartial_transcriptShort_repairs() {
+        let asset = makeTerminalAsset(
+            id: "adscan-contradicted",
+            analysisState: .completeAdScanPartial,
+            terminalReason: "ad scan 0.400 < 0.980 (stoppedShort) (transcript 0.990, feature 0.990)",
+            episodeDurationSec: 3600,
+            featureCoverageEndTime: 3560,
+            fastTranscriptCoverageEndTime: 200
+        )
+        let verdict = AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict(
+            asset: asset,
+            transcriptCoverageEnd: 200,
+            featureCoverageEnd: 3560,
+            episodeDuration: 3600
+        )
+        guard case .repair(let state, _) = verdict else {
+            #expect(Bool(false), "expected .repair; got \(verdict)")
+            return
+        }
+        #expect(state == .completeTranscriptPartial)
+    }
+
+    /// …and repairing it can only move SIDEWAYS or more honest, never to the
+    /// clean terminal, because `repairVerdict` passes an unmeasured ad scan.
+    @Test("a consistent completeAdScanPartial row is left alone, never promoted")
+    func adScanPartial_consistent_isNotPromoted() {
+        let asset = makeTerminalAsset(
+            id: "adscan-consistent",
+            analysisState: .completeAdScanPartial,
+            terminalReason: "ad scan 0.400 < 0.980 (stoppedShort) (transcript 0.999, feature 1.000)",
+            episodeDurationSec: 3600,
+            featureCoverageEndTime: 3600,
+            fastTranscriptCoverageEndTime: 3596
+        )
+        let verdict = AnalysisCoordinator.reconcilePersistedTerminalAssetVerdict(
+            asset: asset,
+            transcriptCoverageEnd: 3596,
+            featureCoverageEnd: 3600,
+            episodeDuration: 3600
+        )
+        // Unchanged — and crucially NOT `.repair(.completeFull, _)`. The sweep
+        // measures no ad-scan coverage, so it can never mint the clean terminal.
+        #expect(verdict == .unchanged)
+    }
+
     // MARK: - Pure verdict — healthy rows
 
     @Test("Healthy completeFull row stays completeFull")

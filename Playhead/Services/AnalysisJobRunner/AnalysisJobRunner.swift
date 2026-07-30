@@ -878,7 +878,20 @@ actor AnalysisJobRunner {
         // coverage. See `shouldSkipSemanticBackfill` for why the two original
         // terms were not enough.
         let finalWindows: [AdWindow]
-        let adScanFraction = await measuredAdScanFraction(assetId: assetId)
+        // Only pay for the coverage read when it can change the answer. The
+        // three booleans are free; the read is four prepared statements plus an
+        // interval union over the asset's whole fast-chunk set, and during
+        // active transcription (`wroteNewChunks == true`) its result is provably
+        // discarded. The pre-check is the SAME predicate the decision uses, so
+        // the two cannot drift.
+        let noOtherWork = Self.semanticBackfillHasNoOtherWork(
+            wroteNewChunks: wroteNewChunks,
+            hasExistingWindows: !existingWindowsBeforeDetection.isEmpty,
+            hasCandidateWindows: !existingCandidateWindows.isEmpty
+        )
+        let adScanFraction = noOtherWork
+            ? await measuredAdScanFraction(assetId: assetId)
+            : nil
         let skippedBackfill = Self.shouldSkipSemanticBackfill(
             wroteNewChunks: wroteNewChunks,
             hasExistingWindows: !existingWindowsBeforeDetection.isEmpty,
@@ -1103,12 +1116,28 @@ actor AnalysisJobRunner {
     /// honestly measurable) does NOT permit a skip — under-claim, and let the
     /// scan run.
     ///
-    /// Bounded, not a hot loop: not skipping means one call into
-    /// `AdDetectionService.runBackfill` per job run. That path is itself
-    /// idempotent and budgeted — `BackfillJobRunner.runPendingBackfill` skips
-    /// `complete` jobs outright and refuses to re-enqueue a job whose persisted
-    /// `retryCount` has reached `AdmissionController.maxRetries` — so an asset
-    /// whose scan genuinely cannot advance costs a no-op pass, not a spin.
+    /// Bounded, and NOT a spin — but not free either, and the difference is
+    /// worth stating precisely. Not skipping means one call into
+    /// `AdDetectionService.runBackfill` per job run, and that is the whole
+    /// detection pipeline (canonicalization, evidence catalog, lexical scan,
+    /// classifier, feature-window fetch, fusion, boundary refinement), not just
+    /// the Foundation Models layer. What is budgeted is the FM layer inside it:
+    /// `BackfillJobRunner.runPendingBackfill` skips `complete` jobs outright and
+    /// refuses to re-enqueue a job whose persisted `retryCount` has reached
+    /// `AdmissionController.maxRetries`, and the scheduler caps a job at
+    /// `maxAttemptCount` dispatches with backoff. So an asset whose scan cannot
+    /// advance costs a bounded number of full detection passes, never an
+    /// unbounded loop.
+    ///
+    /// SCOPE — what this does NOT do. It governs runs that are already being
+    /// dispatched; it does not cause a run to happen. Once an episode's coverage
+    /// tiers are done `AnalysisWorkScheduler` writes `analysis_jobs.state =
+    /// "complete"`, and `insertJob` is `INSERT OR IGNORE` on a `workKey` that
+    /// completed row already owns, so no new job is minted. An episode that
+    /// finishes its tiers under-scanned therefore keeps its degraded terminal
+    /// until something else re-queues it. Minting that re-drive is a change to
+    /// the scheduler's terminal accounting and is deliberately not in this bead
+    /// — see playhead-i7qe's follow-up.
     ///
     /// - Parameter adScanFraction: ``AnalysisCoverageSummary/adScanFraction``
     ///   for the asset (playhead-pz32), or `nil` when unmeasurable.
@@ -1118,11 +1147,31 @@ actor AnalysisJobRunner {
         hasCandidateWindows: Bool,
         adScanFraction: Double?
     ) -> Bool {
-        guard !wroteNewChunks, hasExistingWindows, !hasCandidateWindows else {
+        guard semanticBackfillHasNoOtherWork(
+            wroteNewChunks: wroteNewChunks,
+            hasExistingWindows: hasExistingWindows,
+            hasCandidateWindows: hasCandidateWindows
+        ) else {
             return false
         }
         guard let adScanFraction, adScanFraction.isFinite else { return false }
         return adScanFraction >= semanticBackfillSufficientAdScanFraction
+    }
+
+    /// playhead-i7qe: the three ORIGINAL skip terms, unchanged in meaning —
+    /// "this run produced no new transcript text and there are no candidate
+    /// windows outstanding". True means the only remaining question is whether
+    /// the audio has been read for ads.
+    ///
+    /// Extracted so the call site can decide whether the ad-scan coverage read
+    /// is worth paying for WITHOUT restating the condition, which is how the two
+    /// would drift apart.
+    static func semanticBackfillHasNoOtherWork(
+        wroteNewChunks: Bool,
+        hasExistingWindows: Bool,
+        hasCandidateWindows: Bool
+    ) -> Bool {
+        !wroteNewChunks && hasExistingWindows && !hasCandidateWindows
     }
 
     /// playhead-i7qe: measured ad-scan coverage at or above which the semantic

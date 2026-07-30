@@ -593,7 +593,7 @@ struct AnalysisJobRunnerTests {
     /// concluded there was "nothing to resolve" and skipped the semantic scan,
     /// so re-running the job could never advance ad-scan coverage, however many
     /// times it ran. The scan must now run.
-    @Test("duplicate transcript pass RUNS backfill when the audio was never scanned")
+    @Test("duplicate transcript pass RUNS backfill when the ad scan is measurably short")
     func testDuplicateTranscriptPassRunsBackfillWhenAdScanIsShort() async throws {
         let store = try await makeTestStore()
         try await seedAsset(
@@ -604,7 +604,12 @@ struct AnalysisJobRunnerTests {
 
         let segment = makeTranscriptSegment()
         try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
-        // Deliberately NO coverage-lane scan row: the audio was never read.
+        // MEASURED and short, not merely unknown: the scan really did run and
+        // really did read only part of the audio (0.2s of 0.5s = 0.4). That is
+        // the device shape — 820134BF sits at 0.388 with 30 persisted passA rows
+        // — and it is a strictly harder case than `nil`, which fails the skip on
+        // the unmeasurable guard rather than on the coverage comparison.
+        try await seedFullAdScanCoverage(store: store, seconds: 0.2)
         try await store.insertAdWindow(
             AdWindow(
                 id: "resolved-window",
