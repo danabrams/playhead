@@ -18,6 +18,7 @@
 // fast chunk dropped, three fast chunks kept, one "brought to you by" hit in
 // the overlap instead of two) encodes behavior main cannot produce.
 
+import CryptoKit
 import Foundation
 import Testing
 
@@ -131,12 +132,96 @@ struct TranscriptChunkCanonicalizerTests {
         #expect(result.chunks.filter { $0.pass == "fast" }
             .allSatisfy { $0.endTime <= 30 || $0.startTime >= 60 })
 
-        // Re-indexed to time order so the atomizer (which sorts by
-        // chunkIndex) yields a time-ordered atom sequence with the final
-        // chunks interleaved at [30,45] and [45,60].
-        let ordered = result.chunks.sorted { $0.chunkIndex < $1.chunkIndex }
-        #expect(ordered.map(\.id) == ["f0", "fin0", "fin1", "f2", "f3"])
-        #expect(ordered.map(\.startTime) == [0, 30, 45, 60, 90])
+        // Emitted in time order, final chunks interleaved at [30,45] and
+        // [45,60]. playhead-r5um: the ARRAY is the contract. This used to
+        // assert the same sequence after re-sorting by `chunkIndex`, because
+        // the canonicalizer rewrote `chunkIndex` to the time-sorted position
+        // to steer an atomizer that sorted by `chunkIndex`. The atomizer now
+        // orders by time itself, so the rewrite is gone.
+        #expect(result.chunks.map(\.id) == ["f0", "fin0", "fin1", "f2", "f3"])
+        #expect(result.chunks.map(\.startTime) == [0, 30, 45, 60, 90])
+
+        // And `chunkIndex` is now the PERSISTED value, not a fabricated
+        // position — f2/f3 keep 2/3 and the final rows keep the high indices
+        // `FinalPassRetranscriptionRunner.nextFinalChunkIndex` gave them.
+        // Sorting by it is exactly the scramble r5um removed, which is why
+        // nothing may.
+        #expect(result.chunks.map(\.chunkIndex) == [0, 4, 5, 2, 3])
+    }
+
+    /// ONE mechanism (playhead-r5um). The canonicalizer's merge order and the
+    /// atomizer's ordering are the SAME total order, so atomization is a
+    /// pass-through over the canonical array — and, the part that bites, the
+    /// atomizer does not DEPEND on the canonicalizer having pre-sorted. Both
+    /// facts have to hold or "one mechanism" is a story rather than a
+    /// property.
+    ///
+    /// This is also why removing the re-index moved no hash on the backfill
+    /// lane. Pre-r5um that lane was: canonicalize (time-sort, then renumber
+    /// `chunkIndex` to the time-sorted position) → atomize (sort by
+    /// `chunkIndex`), which recovers the canonicalizer's own array. Post-r5um
+    /// it is: canonicalize (time-sort) → atomize (time-sort, idempotent).
+    /// Same sequence, so the same `transcriptVersion`.
+    @Test("atomize reproduces the canonical order without depending on it")
+    func atomizationIsIdempotentOverCanonicalOutput() {
+        let input = fastChunks() + finalChunksForAdWindow()
+        let canonical = TranscriptChunkCanonicalizer.canonicalize(input).chunks
+
+        func atomizeChunks(_ chunks: [TranscriptChunk]) -> (
+            atoms: [TranscriptAtom], version: TranscriptVersion
+        ) {
+            TranscriptAtomizer.atomize(
+                chunks: chunks,
+                analysisAssetId: "asset-hc7e",
+                normalizationHash: "norm-v1",
+                sourceHash: "asr-v1"
+            )
+        }
+
+        let (atoms, version) = atomizeChunks(canonical)
+
+        // The atom sequence IS the canonical array, position for position.
+        #expect(atoms.map(\.text) == canonical.map(\.text))
+        #expect(atoms.map(\.startTime) == canonical.map(\.startTime))
+        #expect(atoms.map(\.startTime) == [0, 30, 45, 60, 90])
+
+        // THE COHORT CLAIM, pinned rather than argued. Pre-r5um this lane
+        // hashed the canonicalizer's array after a renumber-then-sort round
+        // trip that is the identity; so the pre-r5um hash is the digest of
+        // `canonical` in ARRAY order. Recompute that independently — the
+        // atomizer's documented recipe, length-prefixed `normalizedText`,
+        // SHA-256, first 16 bytes — and require the post-r5um version to equal
+        // it. If a future change perturbs the mixed-path sequence, this fails
+        // and the whole "no re-scan on the backfill lane" claim fails with it.
+        var hasher = SHA256()
+        for chunk in canonical {
+            let textData = Data(chunk.normalizedText.utf8)
+            withUnsafeBytes(of: UInt32(textData.count).bigEndian) {
+                hasher.update(bufferPointer: $0)
+            }
+            hasher.update(data: textData)
+        }
+        let preChangeHash = hasher.finalize().prefix(16).map { String(format: "%02x", $0) }.joined()
+        #expect(version.transcriptVersion == preChangeHash)
+
+        // The order is recovered from the comparator alone. Feed the canonical
+        // array back in reversed and by ascending persisted `chunkIndex` (the
+        // pre-r5um order, which for this fixture is the WRONG one:
+        // f0,f2,f3,fin0,fin1) — same atoms, same hash, every time. An atomizer
+        // that merely trusted its input order would fail both.
+        for permutation in [
+            Array(canonical.reversed()),
+            canonical.sorted { $0.chunkIndex < $1.chunkIndex },
+        ] {
+            let (permutedAtoms, permutedVersion) = atomizeChunks(permutation)
+            #expect(permutedAtoms.map(\.text) == atoms.map(\.text))
+            #expect(permutedVersion.transcriptVersion == version.transcriptVersion)
+        }
+
+        // Guard the guard: the chunkIndex permutation really is a different
+        // array, so the loop above is not comparing something to itself.
+        #expect(canonical.sorted { $0.chunkIndex < $1.chunkIndex }.map(\.id)
+            == ["f0", "f2", "f3", "fin0", "fin1"])
     }
 
     @Test("mixed pass produces no duplicate lexical evidence in the overlap")

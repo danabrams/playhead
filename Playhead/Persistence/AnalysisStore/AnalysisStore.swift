@@ -2818,6 +2818,28 @@ actor AnalysisStore {
         }
     }
 
+    /// FROZEN. Deliberately still `chunkIndex`-then-`id`, and deliberately NOT
+    /// `TranscriptChunkCanonicalizer.canonicalTimeOrder` (playhead-r5um).
+    ///
+    /// This sort and `legacyTranscriptVersion` below reproduce a one-time
+    /// pre-Phase-1 backfill of `transcript_chunks.transcriptVersion` /
+    /// `.atomOrdinal`. Until r5um it agreed exactly with
+    /// `TranscriptAtomizer.atomize`, which also sorted by `chunkIndex`. It no
+    /// longer does: measured on the 2026-07-30 device pull, the final-only
+    /// subset this backfill covers is non-monotone in time for 22 of 30
+    /// assets (worst −3405.6 s), so these persisted ordinals name a different
+    /// atom than a fresh `atomize` would.
+    ///
+    /// That is safe ONLY because nothing reads them. `transcript_chunks
+    /// .atomOrdinal` and `.transcriptVersion` are written here and at the
+    /// insert, copied through `TranscriptEngineService`, and read by no
+    /// production consumer — every live ordinal comes from the in-memory atom
+    /// array. Do not start reading them without re-deriving them first.
+    ///
+    /// Repointing this at `canonicalTimeOrder` would rewrite historical rows,
+    /// which the product owner has declined three times; the `WHERE
+    /// transcriptVersion IS NULL OR atomOrdinal IS NULL` predicate means it
+    /// would only ever touch rows it has not already stamped anyway.
     private func legacyTranscriptChunkSort(_ lhs: TranscriptChunk, _ rhs: TranscriptChunk) -> Bool {
         if lhs.chunkIndex != rhs.chunkIndex {
             return lhs.chunkIndex < rhs.chunkIndex

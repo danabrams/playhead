@@ -34,17 +34,39 @@
 // no-op for every asset that has not had a final-pass run. That is the
 // no-regression contract the mixed/all-fast/all-final acceptance tests pin.
 //
-// Ordering note: `TranscriptAtomizer.atomize` sorts its input by
-// `chunkIndex`, and final-pass rows are always persisted with a chunkIndex
-// strictly greater than every fast row (see
-// `FinalPassRetranscriptionRunner.nextFinalChunkIndex`). Feeding a merged
-// fast+final set to the atomizer without re-indexing would therefore sink
-// every final chunk to the tail — out of temporal order. For the mixed
-// case we re-sort by time and REASSIGN chunkIndex to the time-sorted
-// position so the atom sequence stays time-ordered with final chunks
-// interleaved at their true position. Re-indexing only ever runs on the
-// mixed path (a genuinely new, higher-quality transcript); single-pass
-// inputs are never re-indexed.
+// ⚠️ READ THIS BEFORE CONSUMING `Result.chunks` (playhead-r5um). Because that
+// passthrough is byte-identical, the array it returns is NOT time-ordered for
+// a single-pass asset — it is whatever `fetchTranscriptChunks` returned, which
+// is `ORDER BY chunkIndex`, and 7 of the 10 single-pass assets on the
+// 2026-07-30 device pull step backward in that order (worst −1470.8 s). The
+// passthrough is kept byte-identical on purpose: hc7e pins it, and
+// playhead-kcz.1 pins the transcript-peek display identity that rides on it.
+// So every DETECTION consumer must order the array itself with
+// `canonicalTimeOrder`. `TranscriptAtomizer.atomize` does. So does
+// `AdDetectionService.runBackfill`, for the consumers that read the chunks raw
+// rather than atomizing (`LexicalAnchorRefiner.buildWordStream`, the
+// `RegionShadowPhase` input). Sorting is idempotent, so doing it is always
+// safe; assuming it has been done is not.
+//
+// ORDERING (playhead-r5um). `canonicalTimeOrder` below is the ONE ordering
+// authority for transcript chunks in this app; `TranscriptAtomizer.atomize`
+// and the transcript-peek display path both sort with it. It is a total
+// order — the trailing `id` tiebreak guarantees that — so applying it twice
+// is idempotent and the array this canonicalizer emits is already the atom
+// sequence the atomizer will produce.
+//
+// This type used to REASSIGN `chunkIndex` to the time-sorted position on the
+// mixed path. That existed for exactly one reason: `atomize` sorted by
+// `chunkIndex`, and final-pass rows are persisted with a chunkIndex strictly
+// greater than every fast row (`FinalPassRetranscriptionRunner
+// .nextFinalChunkIndex`), so an un-reindexed merge sank every final chunk to
+// the tail. Now that `atomize` orders by TIME directly, the re-index is dead
+// weight — and worse, a second ordering mechanism that could drift from this
+// one. It is gone. `chunkIndex` on the returned chunks is the persisted
+// value, not a fabricated position; nothing downstream may read it as a time
+// ordinal (it never was one — see `TranscriptEngineService.chunkCounter`,
+// which numbers chunks in shard EMISSION order, and `prioritizeShards`,
+// which emits by playhead proximity).
 
 import Foundation
 
@@ -156,16 +178,13 @@ enum TranscriptChunkCanonicalizer {
             }
         }
 
-        // Combine, order by time, and re-index so the atomizer's
-        // chunkIndex sort yields a time-ordered sequence (see file header).
+        // Combine and order by time. No re-indexing: `atomize` orders by the
+        // same total order, so the array emitted here IS the atom sequence.
         let combined = retainedFast + finals
-        let ordered = combined.sorted(by: chunkOrdering)
-        let reindexed = ordered.enumerated().map { position, chunk in
-            withChunkIndex(chunk, position)
-        }
+        let ordered = combined.sorted(by: canonicalTimeOrder)
 
         return Result(
-            chunks: reindexed,
+            chunks: ordered,
             diagnostics: Diagnostics(
                 inputCount: chunks.count,
                 finalCount: finals.count,
@@ -174,7 +193,7 @@ enum TranscriptChunkCanonicalizer {
                 retainedFastCount: retainedFast.count,
                 residualFastFinalOverlapCount: residualOverlap,
                 inputCoverageSeconds: inputCoverage,
-                canonicalCoverageSeconds: coveredSeconds(reindexed),
+                canonicalCoverageSeconds: coveredSeconds(ordered),
                 isPassthrough: false
             )
         )
@@ -182,11 +201,30 @@ enum TranscriptChunkCanonicalizer {
 
     // MARK: - Ordering
 
-    /// Deterministic total order: start, then end, then final-before-fast at
-    /// an identical span, then persisted chunkIndex, then id.
-    private static func chunkOrdering(_ lhs: TranscriptChunk, _ rhs: TranscriptChunk) -> Bool {
-        if lhs.startTime != rhs.startTime { return lhs.startTime < rhs.startTime }
-        if lhs.endTime != rhs.endTime { return lhs.endTime < rhs.endTime }
+    /// THE canonical time order for transcript chunks (playhead-r5um).
+    ///
+    /// A deterministic TOTAL order: start, then end, then final-before-fast at
+    /// an identical span, then persisted chunkIndex, then id. Every consumer
+    /// that needs transcript chunks in time order sorts with this and only
+    /// this — `TranscriptAtomizer.atomize`, this canonicalizer's merge, and
+    /// the transcript-peek display path.
+    ///
+    /// Totality is load-bearing, not decoration. `chunkIndex` is NOT unique
+    /// per asset: `TranscriptEngineService.chunkCounter` is an in-memory
+    /// counter reset to 0 whenever the engine stops or switches assets, so a
+    /// re-transcribed episode carries several rows numbered 0, 1, 2… (21 of
+    /// 30 assets on the 2026-07-30 device pull; one asset has five rows at
+    /// index 0). `Array.sorted(by:)` is explicitly not guaranteed stable, so
+    /// a comparator that leaves ties unresolved leaves the atom sequence —
+    /// and therefore `transcriptVersion` — undefined for those assets. The
+    /// trailing `id` tiebreak is what makes the hash mean something.
+    static func canonicalTimeOrder(_ lhs: TranscriptChunk, _ rhs: TranscriptChunk) -> Bool {
+        let lhsStart = orderKey(lhs.startTime)
+        let rhsStart = orderKey(rhs.startTime)
+        if lhsStart != rhsStart { return lhsStart < rhsStart }
+        let lhsEnd = orderKey(lhs.endTime)
+        let rhsEnd = orderKey(rhs.endTime)
+        if lhsEnd != rhsEnd { return lhsEnd < rhsEnd }
         let lr = passRank(lhs.pass)
         let rr = passRank(rhs.pass)
         if lr != rr { return lr < rr }
@@ -198,24 +236,25 @@ enum TranscriptChunkCanonicalizer {
         pass == finalPass ? 0 : 1
     }
 
-    private static func withChunkIndex(_ chunk: TranscriptChunk, _ index: Int) -> TranscriptChunk {
-        TranscriptChunk(
-            id: chunk.id,
-            analysisAssetId: chunk.analysisAssetId,
-            segmentFingerprint: chunk.segmentFingerprint,
-            chunkIndex: index,
-            startTime: chunk.startTime,
-            endTime: chunk.endTime,
-            text: chunk.text,
-            normalizedText: chunk.normalizedText,
-            pass: chunk.pass,
-            modelVersion: chunk.modelVersion,
-            transcriptVersion: chunk.transcriptVersion,
-            atomOrdinal: chunk.atomOrdinal,
-            weakAnchorMetadata: chunk.weakAnchorMetadata,
-            speakerId: chunk.speakerId,
-            avgConfidence: chunk.avgConfidence
-        )
+    /// Collapse non-finite times to a single sentinel so `canonicalTimeOrder`
+    /// stays a strict weak ordering.
+    ///
+    /// Chunk times are ASR-derived doubles with no non-finite guard on the way
+    /// into SQLite. A raw `NaN` would compare unequal to everything and less
+    /// than nothing, so `a < b` and `b < a` would both be false while `a` and
+    /// `b` are each "equivalent" to values that are not equivalent to each
+    /// other — an intransitive comparator, which is undefined behaviour in
+    /// `sorted(by:)` and trips its strict-weak-ordering precondition. The old
+    /// `chunkIndex` comparator was `Int` and could not reach this; ordering by
+    /// time can, on all six atomize lanes.
+    ///
+    /// Mapping every non-finite value to `+infinity` sorts the garbage last,
+    /// deterministically, and leaves the tie to be broken by `pass`,
+    /// `chunkIndex` and finally `id`. Finite values — every row on the
+    /// 2026-07-30 device pull — pass through untouched, so this is
+    /// byte-identical for all real data.
+    private static func orderKey(_ value: Double) -> Double {
+        value.isFinite ? value : .infinity
     }
 
     // MARK: - Interval helpers

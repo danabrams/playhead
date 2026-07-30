@@ -680,11 +680,16 @@ enum RegionProposalBuilder {
             return nil
         }
 
+        // playhead-r5um / playhead-csbq: ORDINALS are array positions, so
+        // first/last is right for them; TIMES take min/max. Identical for
+        // non-overlapping atoms, but `last.endTime` understates the span when
+        // a short atom nests inside a longer one — which the canonicalizer
+        // reaches by design (a retained partially-overlapping fast chunk).
         return CanonicalRange(
             firstAtomOrdinal: first.atomKey.atomOrdinal,
             lastAtomOrdinal: last.atomKey.atomOrdinal,
-            startTime: first.startTime,
-            endTime: last.endTime
+            startTime: overlapping.map(\.startTime).min() ?? first.startTime,
+            endTime: overlapping.map(\.endTime).max() ?? last.endTime
         )
     }
 

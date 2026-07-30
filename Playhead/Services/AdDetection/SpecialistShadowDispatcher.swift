@@ -199,7 +199,10 @@ actor LiveSpecialistShadowDispatcher: SpecialistShadowDispatcher {
         let overlapping = chunks.filter { chunk in
             chunk.endTime > window.start && chunk.startTime < window.end
         }
+        // playhead-r5um: time order, not `fetchTranscriptChunks`' chunkIndex
+        // order — see the same sort in `LiveShadowFMDispatcher.buildPrompt`.
         let lines = overlapping
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
             .map(\.text)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

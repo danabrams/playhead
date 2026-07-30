@@ -184,7 +184,16 @@ actor LiveShadowFMDispatcher: ShadowFMDispatcher {
         }
         // Join with newlines so multi-chunk windows don't smash into a
         // single blob. Blank / whitespace-only chunks are dropped.
+        //
+        // playhead-r5um: sort by TIME first. `fetchTranscriptChunks` returns
+        // `ORDER BY chunkIndex`, and chunkIndex is shard-emission order, not
+        // time — 27 of 30 assets on the 2026-07-30 device pull step BACKWARD
+        // in it, worst −3538.9 s. Joining in array order handed the model a
+        // window whose lines do not run forwards, which is precisely the
+        // defect r5um fixed for the atom lane; this builder bypasses `atomize`
+        // entirely, so it needs the sort itself.
         let lines = overlapping
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
             .map(\.text)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

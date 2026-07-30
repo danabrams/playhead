@@ -157,6 +157,16 @@ final class LiveTranscriptPeekDataSource: TranscriptPeekDataSource {
             // time-ordered array. Preserve the data source's established
             // start-time display ordering for single-pass snapshots; the
             // passthrough path preserves every persisted row identity/index.
+            //
+            // playhead-r5um deliberately did NOT route this through
+            // `canonicalTimeOrder`. This is the DISPLAY lane — no atom, prompt
+            // or scan-window geometry is derived from it — and playhead-kcz.1
+            // pinned the equal-start order to the persisted row order, which
+            // `canonicalTimeOrder`'s `endTime` tiebreak would flip. Changing
+            // what the reader sees is a product decision, not part of fixing
+            // the atom sequence. The residual: `startTime` alone is not a
+            // total order, so equal-start rows rely on `sorted(by:)` being
+            // stable in practice, which it is not guaranteed to be.
             let displayChunks = canonical.diagnostics.isPassthrough
                 ? canonical.chunks.sorted { $0.startTime < $1.startTime }
                 : canonical.chunks

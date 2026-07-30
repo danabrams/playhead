@@ -301,12 +301,18 @@ struct MinimalContiguousSpanDecoder {
 
         var results: [CandidateSpan] = []
 
+        // playhead-r5um / playhead-csbq: ordinals are array positions so
+        // first/last is correct for them; the TIMES take min/max. These two
+        // numbers become the persisted `DecodedSpan` geometry — a real mark
+        // boundary the listener sees — so an understated end from a nested
+        // atom is not a bookkeeping error. Byte-identical for the ordinary
+        // non-overlapping case.
         if let first = leftAtoms.first, let last = leftAtoms.last {
             let left = CandidateSpan(
                 firstOrdinal: first.atomOrdinal,
                 lastOrdinal: last.atomOrdinal,
-                startTime: first.startTime,
-                endTime: last.endTime,
+                startTime: leftAtoms.map(\.startTime).min() ?? first.startTime,
+                endTime: leftAtoms.map(\.endTime).max() ?? last.endTime,
                 anchorProvenance: leftAtoms.flatMap(\.anchorProvenance).uniqued()
             )
             results.append(contentsOf: splitIfNeeded(left, allAtoms: allAtoms, atomsByOrdinal: atomsByOrdinal))
@@ -316,8 +322,8 @@ struct MinimalContiguousSpanDecoder {
             let right = CandidateSpan(
                 firstOrdinal: first.atomOrdinal,
                 lastOrdinal: last.atomOrdinal,
-                startTime: first.startTime,
-                endTime: last.endTime,
+                startTime: rightAtoms.map(\.startTime).min() ?? first.startTime,
+                endTime: rightAtoms.map(\.endTime).max() ?? last.endTime,
                 anchorProvenance: rightAtoms.flatMap(\.anchorProvenance).uniqued()
             )
             results.append(contentsOf: splitIfNeeded(right, allAtoms: allAtoms, atomsByOrdinal: atomsByOrdinal))
