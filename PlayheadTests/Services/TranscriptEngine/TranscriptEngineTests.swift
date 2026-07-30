@@ -49,6 +49,80 @@ final class MockSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     }
 }
 
+/// playhead-se2h: recognizer that records, for every `loadModel()` call,
+/// whether a model was ALREADY loaded when the call began — and that can
+/// be told to throw from its Nth load.
+///
+/// The entry flags are what make "no unloaded window" observable. A
+/// recognizer that only reported its final state cannot distinguish
+/// "loaded over the top" from "unloaded, then loaded again", and those
+/// two differ precisely in the reentrancy window a concurrent
+/// `transcribe` falls into.
+final class UpgradeProbeRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private struct State {
+        var loaded = false
+        var loadCallCount = 0
+        var unloadCallCount = 0
+        var loadedFlagsOnLoadEntry: [Bool] = []
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let throwOnLoadNumber: Int?
+
+    /// Segments returned by `transcribe` once a model is loaded.
+    var transcribeResult: [TranscriptSegment] = []
+
+    init(throwOnLoadNumber: Int? = nil) {
+        self.throwOnLoadNumber = throwOnLoadNumber
+    }
+
+    var loadedFlagsOnLoadEntry: [Bool] { state.withLock { $0.loadedFlagsOnLoadEntry } }
+    var loadCallCount: Int { state.withLock { $0.loadCallCount } }
+    var unloadCallCount: Int { state.withLock { $0.unloadCallCount } }
+
+    func loadModel() async throws {
+        let callNumber: Int = state.withLock { state in
+            state.loadCallCount += 1
+            state.loadedFlagsOnLoadEntry.append(state.loaded)
+            return state.loadCallCount
+        }
+        if callNumber == throwOnLoadNumber {
+            // Deliberately does NOT touch `loaded`: the production
+            // recognizer assigns its prepared state only after the asset
+            // bootstrap returns a value, so a throw leaves whatever was
+            // loaded before exactly as it was.
+            throw TranscriptEngineError.transcriptionFailed("probe: load \(callNumber) failed")
+        }
+        state.withLock { $0.loaded = true }
+    }
+
+    func unloadModel() async {
+        state.withLock {
+            $0.unloadCallCount += 1
+            $0.loaded = false
+        }
+    }
+
+    func isModelLoaded() async -> Bool {
+        state.withLock { $0.loaded }
+    }
+
+    func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
+        guard state.withLock({ $0.loaded }) else { throw TranscriptEngineError.modelNotLoaded }
+        return transcribeResult
+    }
+
+    func detectVoiceActivity(shard: AnalysisShard) async throws -> [VADResult] {
+        guard state.withLock({ $0.loaded }) else { throw TranscriptEngineError.modelNotLoaded }
+        return [VADResult(
+            isSpeech: true,
+            speechProbability: 1.0,
+            startTime: shard.startTime,
+            endTime: shard.startTime + shard.duration
+        )]
+    }
+}
+
 /// Probe recognizer used to detect overlap between async transcribe calls.
 private final class ConcurrentProbeSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     private struct State {
@@ -286,14 +360,71 @@ struct SpeechServiceModelTests {
         #expect(role == .asrFinal)
     }
 
-    @Test("loadFinalModel unloads existing model first")
-    func finalUnloadsCurrent() async throws {
-        let mock = MockSpeechRecognizer()
-        let service = SpeechService(recognizer: mock)
+    /// playhead-se2h. This test used to be called "loadFinalModel unloads
+    /// existing model first" and asserted only the resulting role, so it
+    /// passed either way — it could not see the window it was named for.
+    ///
+    /// The contract it now pins is the one that matters: upgrading to the
+    /// final model must never pass through a state where NO model is
+    /// loaded. `SpeechService` is an actor, so every `await` inside
+    /// `loadFinalModel` is a reentrancy point: a concurrent `transcribe`
+    /// landing in that window saw `isModelLoaded() == false` and threw a
+    /// spurious `modelNotLoaded` on a perfectly healthy device.
+    @Test("loadFinalModel never leaves a window with no model loaded")
+    func finalUpgradeHasNoUnloadedWindow() async throws {
+        let probe = UpgradeProbeRecognizer()
+        let service = SpeechService(recognizer: probe)
         try await service.loadFastModel()
         try await service.loadFinalModel()
+
         let role = await service.activeModelRole
         #expect(role == .asrFinal)
+        #expect(
+            probe.loadedFlagsOnLoadEntry == [false, true],
+            """
+            The final-path load must begin while the fast model is STILL loaded. \
+            Observed \(probe.loadedFlagsOnLoadEntry) — a `false` on the second entry \
+            means something unloaded the working model before its replacement was ready.
+            """
+        )
+        #expect(probe.unloadCallCount == 0)
+    }
+
+    /// playhead-se2h, the compounding defect, tested directly.
+    ///
+    /// `loadFinalModel` used to call `unloadModel()` and then `loadModel()`.
+    /// A throw between those two lines left the device with NO model at all
+    /// and `activeModelRole` still reading `.asrFast` — a failed UPGRADE was
+    /// strictly worse than never attempting one, because it destroyed a
+    /// working state and then misreported it. Every later `transcribe` threw
+    /// `modelNotLoaded`, and nothing on the device retried.
+    @Test("A failed loadFinalModel leaves the previous model loaded and the role accurate")
+    func failedFinalUpgradeDoesNotDegradeTheDevice() async throws {
+        let probe = UpgradeProbeRecognizer(throwOnLoadNumber: 2)
+        probe.transcribeResult = [makeSegment()]
+        let service = SpeechService(recognizer: probe)
+
+        try await service.loadFastModel()
+        await #expect(throws: TranscriptEngineError.self) {
+            try await service.loadFinalModel()
+        }
+
+        // 1. The device is no worse off than before the attempt.
+        let ready = await service.isReady()
+        #expect(ready, "the previously working fast model must survive a failed upgrade")
+
+        // 2. And the actor is not lying about which model that is. A stale
+        //    `.asrFinal` here would mis-tag every subsequent chunk as a
+        //    final-pass chunk; a stale `.asrFast` over an unloaded
+        //    recognizer is the original bug.
+        let role = await service.activeModelRole
+        #expect(role == .asrFast, "activeModelRole must still describe the model actually loaded")
+
+        // 3. The strongest form: transcription still works, tagged for the
+        //    model that is genuinely loaded.
+        let segments = try await service.transcribe(shard: makeShard())
+        #expect(segments.count == 1)
+        #expect(segments[0].passType == .fast)
     }
 
     @Test("unloadCurrentModel clears state")

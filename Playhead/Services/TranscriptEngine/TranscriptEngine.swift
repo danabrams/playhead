@@ -646,11 +646,35 @@ actor SpeechService {
 
     /// Load the final-path recognizer for backfill transcription.
     /// Apple Speech prepares locale assets on demand.
+    ///
+    /// playhead-se2h: THE REPLACEMENT IS LOADED WITHOUT UNLOADING FIRST.
+    ///
+    /// This used to call `recognizer.unloadModel()` before
+    /// `recognizer.loadModel()`. A throw between those two lines left the
+    /// device with NO model loaded at all *and* `activeModelRole` still
+    /// reading `.asrFast` — so a failed UPGRADE was strictly worse than
+    /// never attempting one: it destroyed a working fast-path model and
+    /// then misreported what was loaded. Every subsequent `transcribe`
+    /// threw `modelNotLoaded`, and nothing on the device retried.
+    ///
+    /// Loading over the top is safe *and* atomic from the caller's side.
+    /// `AppleSpeechRecognizer.loadModel()` assigns `selectedLocale`,
+    /// `analyzerFormat` and `prepared` only AFTER
+    /// `assetBootstrapper.prepare()` has returned a value, so a throw
+    /// leaves the previously-loaded state byte-for-byte untouched. The
+    /// unload it replaced freed nothing a load does not overwrite — both
+    /// roles resolve through the same asset bootstrap — so dropping it
+    /// costs no memory and buys failure atomicity.
+    ///
+    /// It also closes a reentrancy window on the SUCCESS path: this actor
+    /// suspends at every `await`, so the unload/load gap was a state in
+    /// which a concurrent `transcribe` saw no model and threw a spurious
+    /// `modelNotLoaded` on a healthy device.
+    ///
+    /// `activeModelRole` therefore advances ONLY on success, which is the
+    /// invariant the whole bead exists to restore: this actor must never
+    /// claim a state the recognizer is not actually in.
     func loadFinalModel() async throws {
-        if await recognizer.isModelLoaded() {
-            logger.info("Unloading current model before loading final-path model")
-            await recognizer.unloadModel()
-        }
         logger.info("Preparing final-path Speech model…")
         let start = ContinuousClock.now
         try await recognizer.loadModel()
