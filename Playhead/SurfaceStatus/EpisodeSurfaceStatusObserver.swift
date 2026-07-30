@@ -269,7 +269,8 @@ actor EpisodeSurfaceStatusObserver {
                 // thermal/budget to allow the backfill drain; the
                 // reducer treats it as an in-progress session.
                 persisted = .running
-            case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+            case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+                 .completeAdScanPartial:
                 // playhead-gtt9.8: the three richer terminals + the
                 // legacy `.complete` all map to `.done` — this
                 // projection is LOSSY by construction and callers that

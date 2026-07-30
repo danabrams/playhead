@@ -37,7 +37,8 @@ enum EpisodePreparationControlState: String, Equatable, Sendable, CaseIterable {
     case analyzing
     /// playhead-pz32: ◐ the pipeline reached a terminal completion but the
     /// episode is NOT fully ad-scanned — either the terminal itself is a
-    /// degraded one (`completeFeatureOnly` / `completeTranscriptPartial`) or
+    /// degraded one (`completeFeatureOnly` / `completeTranscriptPartial` /
+    /// `completeAdScanPartial`) or
     /// measured ad-scan coverage falls short of
     /// ``episodePreparationCompleteThreshold``. Distinct from `.ready`
     /// because it is the honest answer, and distinct from `.analyzing`
@@ -87,7 +88,8 @@ struct EpisodePreparationInputs: Equatable, Sendable {
     var analysisComplete: Bool
     /// playhead-pz32: the pipeline reached a terminal COMPLETION for this
     /// episode (any of `.complete`, `.completeFull`, `.completeFeatureOnly`,
-    /// `.completeTranscriptPartial`) — it will do no further work on its own.
+    /// `.completeTranscriptPartial`, `.completeAdScanPartial`) — it will do no
+    /// further work on its own.
     /// Combined with `analysisComplete == false` this is what distinguishes
     /// "stopped short" (◐ `.partiallyAnalyzed`) from "still working"
     /// (`.analyzing`).
@@ -409,8 +411,8 @@ func episodePreparationAnalysisActive(status: AnalysisState.PersistedStatus?) ->
 ///
 ///   * **A terminal `.done` status.** All four `SessionState` completion
 ///     terminals project to `.done`, and two of them
-///     (`completeFeatureOnly` / `completeTranscriptPartial`) are explicitly
-///     degraded — feature-only means the transcript never advanced past
+///     (`completeFeatureOnly` / `completeTranscriptPartial` /
+///     `completeAdScanPartial`) are explicitly degraded — feature-only means the transcript never advanced past
 ///     preview, so the semantic scan cannot have read the audio. `.done`
 ///     said "the pipeline stopped", never "the audio was screened".
 ///   * **The DSP feature watermark.** Feature extraction sweeps the whole
@@ -444,8 +446,8 @@ func episodePreparationAnalysisComplete(
     return adScanFraction >= episodePreparationCompleteThreshold
 }
 
-/// playhead-pz32: whether the persisted analysis state is one of the four
-/// completion terminals — the pipeline will do no more work for this episode
+/// playhead-pz32: whether the persisted analysis state is one of the five
+/// completion terminals (playhead-gqx4 added `completeAdScanPartial`) — the pipeline will do no more work for this episode
 /// on its own. Feeds
 /// ``EpisodePreparationInputs/analysisTerminatedComplete``.
 ///

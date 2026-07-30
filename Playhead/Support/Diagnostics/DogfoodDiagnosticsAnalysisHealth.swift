@@ -744,7 +744,10 @@ extension DogfoodDiagnosticsAnalysisHealth {
         ) ?? 0
 
         switch asset.analysisState {
-        case "completeFull", "complete":
+        // playhead-gqx4: `completeAdScanPartial` shares `completeFull`'s
+        // transcript+feature contract — it is the same terminal minus the
+        // ad-scan term — so a shortfall on either axis contradicts it too.
+        case "completeFull", "complete", "completeAdScanPartial":
             // OR-axis contract: a shortfall on EITHER axis is a
             // contradiction. (R1 fix; R2 centralizes here.)
             if transcriptAxis < threshold || featureAxis < threshold {
@@ -1031,7 +1034,8 @@ extension DogfoodDiagnosticsAnalysisHealth {
 
     private static func isTerminalCompletionState(_ raw: String) -> Bool {
         switch raw {
-        case "complete", "completeFull", "completeFeatureOnly", "completeTranscriptPartial":
+        case "complete", "completeFull", "completeFeatureOnly", "completeTranscriptPartial",
+             "completeAdScanPartial":
             return true
         default:
             return false

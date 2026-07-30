@@ -18013,7 +18013,13 @@ actor AnalysisStore {
                     a.confirmedAdCoverageEndTime IS NOT NULL
                  OR a.analysisState IN (
                         'complete', 'completeFull',
-                        'completeFeatureOnly', 'completeTranscriptPartial'
+                        'completeFeatureOnly', 'completeTranscriptPartial',
+                        -- playhead-gqx4: same admission rationale as its
+                        -- siblings — reached only by transitioning OUT of
+                        -- `.backfill`, so the ad pipeline has run over the
+                        -- transcribed range. Omitting it would silently deny
+                        -- summaries to the commonest real-hardware terminal.
+                        'completeAdScanPartial'
                     )
               )
               AND (
