@@ -154,6 +154,60 @@ private func seedAsset(
     try await store.insertAsset(asset)
 }
 
+/// playhead-i7qe: seed a coverage-lane `semantic_scan_results` row spanning
+/// `[0, seconds]` so `AnalysisCoverageSummary.adScanFraction` reports the asset
+/// as genuinely read for ads.
+///
+/// Needed because "there are no candidate windows left" is no longer accepted as
+/// proof that the semantic scan finished — candidate windows are produced BY
+/// the scan, so their absence in unscanned audio means nothing was ever
+/// proposed there. A fixture that wants the skip has to state the coverage.
+private func seedFullAdScanCoverage(
+    store: AnalysisStore,
+    assetId: String = "test-asset",
+    seconds: Double
+) async throws {
+    // `insertSemanticScanResult` rejects a `scanCohortJSON` that is not a
+    // decodable `ScanCohort`, so the fixture must carry a real one.
+    let cohort = ScanCohort(
+        promptLabel: "i7qe-test",
+        promptHash: "prompt-v1",
+        schemaHash: "schema-v1",
+        scanPlanHash: "plan-v1",
+        normalizationHash: "norm-v1",
+        osBuild: "26A123",
+        locale: "en_US",
+        appBuild: "1"
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let cohortJSON = String(decoding: try encoder.encode(cohort), as: UTF8.self)
+    try await store.insertSemanticScanResult(
+        SemanticScanResult(
+            id: "\(assetId)-coverage-scan",
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: seconds,
+            scanPass: SemanticScanCoverage.coverageScanPass,
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: cohortJSON,
+            transcriptVersion: "tx-v1",
+            reuseScope: "\(assetId)-coverage-scan"
+        )
+    )
+}
+
 private final class StubCrossUserAnalysisSharingProvider: CrossUserAnalysisSharingProviding, @unchecked Sendable {
     let isEnabled = true
     var snapshot: CrossUserAnalysisSnapshot?
@@ -459,10 +513,21 @@ struct AnalysisJobRunnerTests {
     @Test("duplicate transcript pass skips hot path and backfill when windows are already resolved")
     func testDuplicateTranscriptPassSkipsResolvedDetectionWork() async throws {
         let store = try await makeTestStore()
-        try await seedAsset(store: store, fastTranscriptCoverageEndTime: 30)
+        // playhead-i7qe: the skip now requires MEASURED ad-scan coverage as
+        // well, so this fixture has to describe an asset whose audio really was
+        // read. The seeded transcript chunk spans [0, 0.5], so a 0.5s episode
+        // with a coverage-lane scan row over the same span is a fully-screened
+        // one — the smallest fixture that states the third condition without
+        // perturbing any other input this test depends on.
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: 30,
+            episodeDurationSec: 0.5
+        )
 
         let segment = makeTranscriptSegment()
         try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
+        try await seedFullAdScanCoverage(store: store, seconds: 0.5)
         try await store.insertAdWindow(
             AdWindow(
                 id: "resolved-window",
@@ -517,6 +582,85 @@ struct AnalysisJobRunnerTests {
         } else {
             Issue.record("Expected .reachedTarget but got \(outcome.stopReason)")
         }
+    }
+
+    /// playhead-i7qe, at the integration layer. THE SAME FIXTURE as the test
+    /// above minus the ad-scan coverage: transcript complete, windows present,
+    /// none of them a candidate — and a semantic scan that never read the audio.
+    ///
+    /// This is the shape seven assets sit in on the product owner's device,
+    /// including the audited episode 820134BF. Before the fix the runner
+    /// concluded there was "nothing to resolve" and skipped the semantic scan,
+    /// so re-running the job could never advance ad-scan coverage, however many
+    /// times it ran. The scan must now run.
+    @Test("duplicate transcript pass RUNS backfill when the audio was never scanned")
+    func testDuplicateTranscriptPassRunsBackfillWhenAdScanIsShort() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(
+            store: store,
+            fastTranscriptCoverageEndTime: 30,
+            episodeDurationSec: 0.5
+        )
+
+        let segment = makeTranscriptSegment()
+        try await store.insertTranscriptChunks([makeTranscriptChunk(from: segment)])
+        // Deliberately NO coverage-lane scan row: the audio was never read.
+        try await store.insertAdWindow(
+            AdWindow(
+                id: "resolved-window",
+                analysisAssetId: "test-asset",
+                startTime: 5,
+                endTime: 20,
+                confidence: 0.9,
+                boundaryState: AdBoundaryState.lexical.rawValue,
+                decisionState: AdDecisionState.suppressed.rawValue,
+                detectorVersion: "test-v1",
+                advertiser: nil,
+                product: nil,
+                adDescription: nil,
+                evidenceText: nil,
+                evidenceStartTime: nil,
+                metadataSource: "none",
+                metadataConfidence: nil,
+                metadataPromptVersion: nil,
+                wasSkipped: false,
+                userDismissedBanner: false
+            )
+        )
+
+        let audioStub = StubAnalysisAudioProvider()
+        audioStub.shardsToReturn = makeShards(count: 1)
+
+        let featureService = FeatureExtractionService(store: store)
+        let recognizer = MockSpeechRecognizer()
+        recognizer.transcribeResult = [segment]
+        let speechService = SpeechService(recognizer: recognizer)
+        try await speechService.loadFastModel()
+        let transcriptEngine = TranscriptEngineService(
+            speechService: speechService,
+            store: store
+        )
+        let adStub = StubAdDetectionProvider()
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: audioStub,
+            featureService: featureService,
+            transcriptEngine: transcriptEngine,
+            adDetection: adStub
+        )
+
+        _ = await runner.run(
+            makeTestRequest(desiredCoverageSec: 30, outputPolicy: .writeWindowsOnly)
+        )
+
+        #expect(
+            adStub.backfillCallCount == 1,
+            "an episode whose audio was never read for ads must reach the semantic scan"
+        )
+        // The hot path is still skipped — that decision is about NEW transcript
+        // text, which this run genuinely did not produce, and this bead does not
+        // widen it.
+        #expect(adStub.hotPathCallCount == 0)
     }
 
     @Test("duplicate transcript pass still runs backfill when candidate windows remain")
