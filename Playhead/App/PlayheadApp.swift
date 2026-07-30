@@ -607,6 +607,19 @@ struct PlayheadApp: App {
                 // and, at most once a day, consider an upload. Foreground
                 // only, background QoS, never a wake.
                 AnalyticsService.shared.applicationDidBecomeActive()
+                // playhead-se2h: refresh the ASR model's bounded
+                // load-retry budget. This does NO work — it only clears a
+                // counter, and only when it is non-zero — so it costs
+                // nothing on the healthy path and nothing on a path the
+                // user takes every time they return from a system sheet.
+                // The next scheduled transcription run is what actually
+                // retries. Without it, a device that spent its three
+                // attempts has no way back short of the process being
+                // killed, which is a shorter version of the exact bug
+                // playhead-se2h was filed for.
+                Task {
+                    await runtime.speechService.noteAppDidBecomeActive()
+                }
             case .inactive:
                 break
             @unknown default:

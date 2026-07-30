@@ -1049,12 +1049,31 @@ actor TranscriptEngineService {
             return
         }
 
-        guard await speechService.isReady() else {
-            logger.error("Speech engine not ready — aborting transcription")
-            // playhead-8ysk: likewise silent before. This is the observable
-            // end of the swallowed launch-time `loadFastModel()` failure —
-            // its empty catch claims "the transcript engine will surface
-            // failures when first used", and until now it did not.
+        // playhead-se2h: THE NATURAL RETRY TRIGGER.
+        //
+        // `prepareFastModel()` returns immediately (`.alreadyLoaded`) on
+        // the overwhelmingly common healthy path, so this costs a single
+        // actor hop per run. When the launch load failed it is the ONLY
+        // thing on the device that ever tries again — before this call
+        // existed, `loadFastModel()` had exactly one invocation per
+        // install and a single transient failure at launch made every
+        // subsequent run take the branch below, forever.
+        //
+        // The retry is bounded inside `SpeechService`
+        // (`maxLoadAttemptsPerEpoch`), so a genuinely unavailable asset
+        // does not turn every scheduled run into a download attempt: once
+        // the budget is spent this returns `.budgetExhausted` without
+        // touching the recognizer, and the run falls through to the same
+        // named failure it reported before.
+        let readiness = await speechService.prepareFastModel()
+        guard readiness.isReady else {
+            logger.error(
+                "Speech engine not ready (\(readiness.rawValue, privacy: .public)) — aborting transcription"
+            )
+            // playhead-8ysk: this used to be silent. It is the observable
+            // end of the launch-time `loadFastModel()` failure — the
+            // failure whose empty catch used to claim, falsely, that the
+            // transcript engine would surface it when first used.
             emitFailure(
                 TranscriptFailureReason(failureClass: .speechEngineNotReady),
                 analysisAssetId: analysisAssetId,
