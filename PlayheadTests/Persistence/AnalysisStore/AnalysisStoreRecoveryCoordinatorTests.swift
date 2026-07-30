@@ -349,7 +349,139 @@ struct AnalysisStoreRecoveryCoordinatorTests {
         #expect(await coordinator.currentState().quarantines.isEmpty)
     }
 
-    // MARK: - 5. Nothing else on the launch path destroys anything
+    // MARK: - 5. The overloads production actually calls
+
+    // Everything above drives the CLOSURE overload. Production calls the
+    // three `AnalysisStore`-taking ones, and the difference is not
+    // cosmetic: the closure the tests pass builds a brand-new store on
+    // every invocation, so the suite structurally cannot observe a store
+    // instance carrying `didOpen == true` across a recovery. That is
+    // exactly the state the stale-snapshot hazard lives in.
+
+    @Test("The store overload opens a healthy store and records success")
+    func storeOverloadOpensHealthyStore() async throws {
+        let parent = try makeTempDir(prefix: "AnalysisStoreRecoveryOverload")
+        let dir = parent.appendingPathComponent("AnalysisStore", isDirectory: true)
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        let coordinator = try makeCoordinator(storeDirectory: dir)
+
+        let outcome = await coordinator.openAtLaunch(store, now: Self.t0)
+        #expect(outcome == .opened)
+        #expect(await store.isOpen)
+        #expect(await coordinator.currentState().status == .healthy)
+    }
+
+    @Test("The store overload records a real thrown migration without destroying anything")
+    func storeOverloadRecordsFailure() async throws {
+        let fixture = try await makeSabotagedStore()
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: fixture.directory)
+        let coordinator = try makeCoordinator(storeDirectory: fixture.directory)
+
+        let outcome = await coordinator.openAtLaunch(store, now: Self.t0)
+        #expect(outcome == .willRetryOnNextLaunch(attempt: 1))
+        // `ensureOpen` rolls `didOpen` back and closes the handle on a
+        // failed migration, which is what makes the quarantine guard
+        // below meaningful.
+        #expect(await store.isOpen == false)
+        #expect(try probeRowCount(in: fixture.directory, table: "analysis_assets") == 1)
+    }
+
+    /// THE STALE-SNAPSHOT HAZARD. The Settings row is rendered from a
+    /// snapshot of the health document and can be minutes old. If the
+    /// store opens in the meantime — the launch attempt finishing, or any
+    /// other caller re-entering `ensureOpen()` — and the listener then
+    /// taps "Start fresh", moving the directory would rename it out from
+    /// under a live SQLite handle. POSIX `rename` leaves descriptors
+    /// valid, so the session would keep writing into the quarantine while
+    /// being told it had started fresh, and the next launch would strand
+    /// those writes behind a new empty store.
+    @Test("Start fresh declines when the store is open, so a stale view cannot move a live database")
+    func startFreshDeclinesWhileTheStoreIsOpen() async throws {
+        let parent = try makeTempDir(prefix: "AnalysisStoreRecoveryStale")
+        let dir = parent.appendingPathComponent("AnalysisStore", isDirectory: true)
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        _ = try await seedAsset(store)
+        #expect(await store.isOpen)
+
+        // The journal still says the app gave up — the stale view the
+        // listener is looking at.
+        let journalDir = try makeTempDir(prefix: "AnalysisStoreRecoveryStaleJournal")
+        let journal = AnalysisStoreHealthJournal(directory: journalDir)
+        for _ in 0..<AnalysisStoreHealthJournal.failuresBeforeAskingListener {
+            await journal.recordFailure(
+                error: AnalysisStoreError.migrationFailed("FOREIGN KEY constraint failed"),
+                now: Self.t0
+            )
+        }
+        #expect(await journal.load().status == .awaitingUserDecision)
+
+        let coordinator = AnalysisStoreRecoveryCoordinator(
+            journal: journal, storeDirectory: { dir }
+        )
+        let outcome = try await coordinator.quarantineAndRebuild(store, now: Self.t0)
+
+        // Reports the truth rather than a fiction.
+        #expect(outcome == .opened)
+        // NOTHING MOVED. The live directory still holds the real data.
+        #expect(try probeRowCount(in: dir, table: "analysis_assets") == 1)
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: parent.path)
+        #expect(
+            !siblings.contains {
+                $0.hasPrefix(AnalysisStoreRecoveryCoordinator.quarantineDirectoryPrefix)
+            }
+        )
+        // And the stale prompt clears, so the listener is not asked again
+        // about a store that is working.
+        let state = await coordinator.currentState()
+        #expect(state.status == .healthy)
+        #expect(state.quarantines.isEmpty)
+    }
+
+    /// The guard must not block a genuine recovery: when the store is
+    /// really shut, "start fresh" still works.
+    @Test("Start fresh still proceeds through the store overload when the store is genuinely shut")
+    func startFreshProceedsThroughStoreOverloadWhenClosed() async throws {
+        let fixture = try await makeSabotagedStore()
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: fixture.directory)
+        let coordinator = try makeCoordinator(storeDirectory: fixture.directory)
+
+        _ = await coordinator.openAtLaunch(store, now: Self.t0)
+        #expect(await store.isOpen == false)
+
+        let outcome = try await coordinator.quarantineAndRebuild(store, now: Self.t0)
+        #expect(outcome == .opened)
+        #expect(try probeRowCount(in: fixture.directory, table: "analysis_assets") == 0)
+
+        let quarantine = try #require(await coordinator.currentState().quarantines.last)
+        let quarantinedDir = fixture.directory
+            .deletingLastPathComponent()
+            .appendingPathComponent(quarantine.directoryName, isDirectory: true)
+        #expect(try probeRowCount(in: quarantinedDir, table: "analysis_assets") == 1)
+    }
+
+    @Test("The retry overload clears the counter and re-attempts against the same store")
+    func retryOverloadReattempts() async throws {
+        let fixture = try await makeSabotagedStore()
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: fixture.directory)
+        let coordinator = try makeCoordinator(storeDirectory: fixture.directory)
+
+        for _ in 0..<AnalysisStoreHealthJournal.failuresBeforeAskingListener {
+            _ = await coordinator.openAtLaunch(store, now: Self.t0)
+        }
+        #expect(await coordinator.currentState().status == .awaitingUserDecision)
+
+        let outcome = await coordinator.retryAtListenerRequest(store, now: Self.t0)
+        #expect(outcome == .willRetryOnNextLaunch(attempt: 1))
+        #expect(try probeRowCount(in: fixture.directory, table: "analysis_assets") == 1)
+    }
+
+    // MARK: - 6. Nothing else on the launch path destroys anything
 
     /// A successful open must not touch the directory either — an easy
     /// regression to introduce while "tidying up" the recovery path.

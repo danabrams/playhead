@@ -212,12 +212,44 @@ actor AnalysisStoreRecoveryCoordinator {
 
     /// "Start fresh." Moves the live store aside and rebuilds an empty
     /// one. See the closure form below for the full contract.
+    ///
+    /// THIS OVERLOAD CARRIES A GUARD THE CLOSURE FORM CANNOT, and it is
+    /// the reason production must never call the closure form directly.
+    ///
+    /// The listener reaches this from a Settings row that was rendered
+    /// from a snapshot of the health document. That snapshot can be
+    /// minutes stale, and the store can open successfully in the
+    /// meantime — the launch-time attempt may still have been in flight
+    /// when the row appeared, and separately EVERY `AnalysisStore`
+    /// method re-enters `ensureOpen()` after a failure, so any other
+    /// caller can bring the store up mid-session without anything
+    /// writing to the journal.
+    ///
+    /// Moving the directory in that window is the bad outcome: POSIX
+    /// `rename` leaves open descriptors valid, so the live handle would
+    /// keep serving the MOVED database; `migrate()` would then
+    /// short-circuit on `didOpen == true` and report success; and every
+    /// write for the rest of the session would land in the quarantine,
+    /// to be stranded when the next launch mints an empty store at the
+    /// live path. Nothing is destroyed, but the listener would be told
+    /// "started fresh" while using the old data.
+    ///
+    /// So: if the store is open, there is nothing wrong to recover from
+    /// and this is a no-op that reports the truth. Checked as late as
+    /// possible, immediately before the move.
     @discardableResult
     func quarantineAndRebuild(
         _ store: AnalysisStore,
         now: Date = Date()
     ) async throws -> AnalysisStoreLaunchOutcome {
-        try await quarantineAndRebuild({ try await store.migrate() }, now: now)
+        if await store.isOpen {
+            logger.notice(
+                "Start-fresh declined: the analysis store is open, so the request was made against a stale view. Nothing moved."
+            )
+            await journal.recordSuccess(now: now)
+            return .opened
+        }
+        return try await quarantineAndRebuild({ try await store.migrate() }, now: now)
     }
 
     func retryAtListenerRequest(

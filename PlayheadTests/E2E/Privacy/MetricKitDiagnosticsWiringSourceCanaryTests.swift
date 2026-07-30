@@ -173,6 +173,65 @@ final class MetricKitDiagnosticsWiringSourceCanaryTests: XCTestCase {
         }
     }
 
+    /// playhead-wvdz: the identical hazard for `analysisStoreHealthFetch`,
+    /// and the stakes here are higher than for the stability buffer.
+    ///
+    /// The parameter defaults to `{ .healthy }`. Drop the argument at any
+    /// one of the three sites and it compiles, the whole gate stays green
+    /// (the test target builds DEBUG, so the Release hatch is compiled by
+    /// nothing any test runs), and every bundle from that surface reports
+    /// `status: "healthy", consecutive_failure_count: 0` forever — a
+    /// diagnostics field that says the analysis database is fine no matter
+    /// how badly it is broken. That is precisely the invisible failure
+    /// playhead-wvdz exists to end, reintroduced in the artifact built to
+    /// reveal it.
+    ///
+    /// Three sites, not two: the listener-feedback channel builds its own
+    /// coordinator and is the easiest one to forget.
+    func testAllThreeHatchesPassTheAnalysisStoreHealthFetchToTheCoordinator() throws {
+        for (path, symbol) in [
+            ("Playhead/Support/Diagnostics/ReleaseDiagnosticsHatch.swift",
+             "analysisStoreHealthFetch: ReleaseDiagnosticsHatch.analysisStoreHealthFetch"),
+            ("Playhead/Support/Diagnostics/DebugDiagnosticsHatch.swift",
+             "analysisStoreHealthFetch: DebugDiagnosticsHatch.analysisStoreHealthFetch"),
+            ("Playhead/Support/Feedback/ListenerFeedbackHatch.swift",
+             "analysisStoreHealthFetch: DiagnosticsHatch.analysisStoreHealthFetch")
+        ] {
+            let code = try source(path)
+            XCTAssertTrue(
+                code.contains(symbol),
+                """
+                \(path) no longer passes `analysisStoreHealthFetch` to \
+                DiagnosticsExportCoordinator. The parameter defaults to { .healthy }, so \
+                this omission is SILENT: every bundle from this surface would report a \
+                healthy analysis store forever, however broken it actually is, and every \
+                test would still pass (playhead-wvdz).
+                """
+            )
+        }
+    }
+
+    /// Both hatch helpers must forward to the ONE unconditionally-compiled
+    /// implementation. A hand-rolled second copy on the Release hatch is
+    /// compiled by nothing any test can run — the same drift that made
+    /// `RediffDiagnosticsFetchAdapter` a shared type.
+    func testBothHatchesForwardToTheSharedAnalysisStoreHealthAdapter() throws {
+        for path in [
+            "Playhead/Support/Diagnostics/ReleaseDiagnosticsHatch.swift",
+            "Playhead/Support/Diagnostics/DebugDiagnosticsHatch.swift"
+        ] {
+            let code = try source(path)
+            XCTAssertTrue(
+                code.contains("AnalysisStoreHealthDiagnosticsFetchAdapter.shared"),
+                """
+                \(path) no longer forwards to the single unconditionally-compiled \
+                AnalysisStoreHealthDiagnosticsFetchAdapter. A local copy here would be \
+                compiled by nothing any test runs, so a divergence would ship green.
+                """
+            )
+        }
+    }
+
     // MARK: - Installation predicate (this part IS executable)
 
     func testShouldInstallIsFalseUnderXCTest() {

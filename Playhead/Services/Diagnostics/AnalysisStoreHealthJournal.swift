@@ -161,7 +161,15 @@ actor AnalysisStoreHealthJournal {
                 occurredAt: now,
                 phase: phase,
                 failureClass: failureClass,
-                consecutiveFailureCount: counts ? newCount : 0,
+                // The counter as it stands AFTER this failure, whether or
+                // not this one advanced it. Recording 0 for a
+                // non-counting failure made the record list contradict
+                // the top-level counter during a mixed run (three
+                // counting failures then one in-grace `accessDenied`
+                // appended a `0` beside a top-level `3`), which broke the
+                // one thing the field is for: reconstructing the
+                // escalation history from the list alone.
+                consecutiveFailureCount: newCount,
                 expectedSchemaVersion: AnalysisStore.currentSchemaVersion,
                 detail: detail
             )
@@ -203,13 +211,29 @@ actor AnalysisStoreHealthJournal {
     /// Clear the escalation counter because the LISTENER asked to try
     /// again. Distinct from `recordSuccess` — nothing has succeeded yet;
     /// the app is merely being told to stop asking and retry from zero.
+    ///
+    /// `firstFailureAt` IS DELIBERATELY PRESERVED. It anchors the
+    /// grace-period clock in `recordFailure`, and that clock measures how
+    /// long the failure run has lasted — a question a retry does not
+    /// answer. Clearing it here made the non-destructive option reset the
+    /// gate on the destructive one, which produced a loop with no exit:
+    ///
+    ///   a permanently unreadable container reports `accessDenied`, so
+    ///   the listener waits out the whole grace period before the choice
+    ///   appears; they then do the obviously correct thing and tap "Try
+    ///   again" first; it fails; the counter AND the clock reset, the
+    ///   rows disappear, and the offer is another full grace period away.
+    ///   Repeat forever.
+    ///
+    /// Only a SUCCESS clears it, because a success is the only evidence
+    /// the failure run actually ended.
     @discardableResult
     func recordListenerRequestedRetry() -> AnalysisStoreHealthState {
         mutate { current in
             AnalysisStoreHealthState(
                 status: .retrying,
                 consecutiveFailureCount: 0,
-                firstFailureAt: nil,
+                firstFailureAt: current.firstFailureAt,
                 lastFailureAt: current.lastFailureAt,
                 lastSuccessAt: current.lastSuccessAt,
                 recentFailures: current.recentFailures,
@@ -354,8 +378,23 @@ actor AnalysisStoreHealthJournal {
                 ofItemAtPath: url.path
             )
         } catch {
-            logger.error(
-                "analysis-store-health write failed: \(error.localizedDescription, privacy: .public)"
+            // FAULT, not error: this is the one failure in this file with
+            // a consequence beyond itself. The escalation counter lives
+            // only in this document, so a write that keeps failing pins
+            // it — `load()` returns `.healthy` on the next launch and the
+            // count never accumulates, which means the listener is never
+            // asked. The natural trigger is a full disk, and `diskFull`
+            // is itself a first-class counting failure class, so the two
+            // correlate exactly when it matters most.
+            //
+            // Not repaired here. An in-memory fallback counter would not
+            // help — `recordFailure` runs once per launch, so a
+            // process-local count never reaches the threshold either —
+            // and anything durable enough to help is a second store with
+            // the same failure mode. What this fault buys is that the
+            // condition is visible in the device log instead of silent.
+            logger.fault(
+                "analysis-store-health write FAILED — the escalation counter cannot advance while this persists, so the listener will not be asked: \(error.localizedDescription, privacy: .public)"
             )
         }
     }

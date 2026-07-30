@@ -76,8 +76,16 @@ enum SettingsL274Copy {
     static let analysisHistoryRetryButtonLabel: String = "Try again"
     static let analysisHistoryStartFreshButtonLabel: String = "Start fresh"
     static let analysisHistoryStartFreshConfirmTitle: String = "Start fresh?"
+    /// The final sentence used to read "You can ask for it back." That
+    /// promised a restore flow that does not exist — the app can set the
+    /// old history aside and report where it went, but it cannot put it
+    /// back, and there is no support procedure written down. Promising
+    /// recovery the app cannot perform is a worse failure than the one
+    /// this whole bead removes, because the listener would consent on the
+    /// strength of it. The copy now says exactly what is true: it stays
+    /// on the device, and the app stops using it.
     static let analysisHistoryStartFreshConfirmBody: String =
-        "Your existing analysis history — including everything you've marked by hand — is set aside on this device rather than deleted, and Playhead starts over with an empty one. You can ask for it back."
+        "Your existing analysis history — including everything you've marked by hand — is set aside on this device rather than deleted, and Playhead starts over with an empty one. Playhead won't use the old one again, but it stays on your device and it isn't erased."
     static let analysisHistoryStartFreshConfirmAction: String = "Set aside and start fresh"
     static let analysisHistoryStartFreshCancelAction: String = "Cancel"
     static let analysisHistoryRecoveredCaption: String = "Analysis history opened."

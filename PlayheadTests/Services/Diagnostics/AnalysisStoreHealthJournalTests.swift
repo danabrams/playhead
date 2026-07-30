@@ -282,6 +282,60 @@ struct AnalysisStoreHealthJournalTests {
         #expect(state.status == .retrying)
     }
 
+    /// THE LOOP WITH NO EXIT. "Try again" is the non-destructive option
+    /// and the one a listener will reach for first. If it also reset the
+    /// grace-period clock, a permanently unreadable container would put
+    /// the choice behind a full grace period AGAIN after every retry —
+    /// forever — which defeats the entire reason the grace period exists.
+    @Test("An explicit retry does not reset the grace-period clock")
+    func listenerRetryDoesNotResetTheGracePeriodClock() async throws {
+        let (journal, _) = try makeJournal()
+        let locked = AnalysisStoreError.openFailed(
+            code: 14, message: "unable to open database file"
+        )
+
+        // A run that has already outlasted Data Protection, escalated.
+        await journal.recordFailure(error: locked, now: Self.t0)
+        let past = Self.t0.addingTimeInterval(
+            AnalysisStoreHealthState.accessDeniedGracePeriod + 1
+        )
+        var state = AnalysisStoreHealthState.healthy
+        for _ in 0..<AnalysisStoreHealthJournal.failuresBeforeAskingListener {
+            state = await journal.recordFailure(error: locked, now: past)
+        }
+        #expect(state.status == .awaitingUserDecision)
+
+        // The listener taps "Try again". The counter clears...
+        let retried = await journal.recordListenerRequestedRetry()
+        #expect(retried.consecutiveFailureCount == 0)
+        // ...but the clock does NOT, so the very next failure still
+        // counts instead of restarting a week-long wait.
+        #expect(retried.firstFailureAt == Self.t0)
+
+        let afterRetry = await journal.recordFailure(error: locked, now: past)
+        #expect(afterRetry.consecutiveFailureCount == 1)
+    }
+
+    /// The counter in each record must agree with the top-level counter,
+    /// including across a mixed run — it is the only way to reconstruct
+    /// the escalation history from the record list.
+    @Test("A record's counter reports the state after that failure, even when it did not advance")
+    func recordCounterAgreesWithTheTopLevelCounter() async throws {
+        let (journal, _) = try makeJournal()
+        for _ in 0..<AnalysisStoreHealthJournal.failuresBeforeAskingListener {
+            await journal.recordFailure(error: Self.foreignKeyFailure, now: Self.t0)
+        }
+        // An in-grace `accessDenied` lands next; it must not report 0
+        // beside a top-level 3.
+        let state = await journal.recordFailure(
+            error: AnalysisStoreError.openFailed(code: 14, message: "unable to open database file"),
+            now: Self.t0
+        )
+        #expect(state.consecutiveFailureCount == 3)
+        #expect(state.recentFailures.last?.consecutiveFailureCount == 3)
+        #expect(state.recentFailures.last?.failureClass == .accessDenied)
+    }
+
     @Test("A non-store error is recorded as unknown rather than guessed at")
     func foreignErrorIsUnknown() {
         struct Unrelated: Error {}

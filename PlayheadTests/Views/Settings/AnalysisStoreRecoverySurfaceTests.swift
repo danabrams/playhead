@@ -65,6 +65,13 @@ struct AnalysisStoreRecoverySurfaceTests {
         // The button itself must not call the action directly — it sets
         // the confirmation flag, and only the dialog's destructive
         // button runs it.
+        // Exactly ONE call site, then ordering. `range(of:)` finds only
+        // the first occurrence, so an ordering check alone would still
+        // pass if somebody added a SECOND, ungated invocation after the
+        // dialog.
+        #expect(
+            SwiftSourceInspector.occurrences(of: "startFreshAnalysisHistory()", in: body) == 1
+        )
         let dialogStart = try #require(body.range(of: ".confirmationDialog("))
         let actionCall = try #require(body.range(of: "startFreshAnalysisHistory()"))
         #expect(dialogStart.lowerBound < actionCall.lowerBound)
@@ -75,22 +82,22 @@ struct AnalysisStoreRecoverySurfaceTests {
     /// launch path, no background task.
     @Test("The quarantine path is reachable only from the recovery hatch")
     func quarantineIsOnlyReachableFromTheHatch() throws {
-        let productionRoots = [
-            "Playhead/App", "Playhead/Services", "Playhead/Views",
-            "Playhead/Support", "Playhead/Persistence", "Playhead/SurfaceStatus"
-        ]
+        // The WHOLE production tree, not a hand-listed set of
+        // subdirectories. A canary whose entire value is exhaustiveness
+        // must not be able to miss a directory somebody adds later — the
+        // first version of this test listed six roots and silently
+        // ignored `Playhead/Models`, `Playhead/Design` and
+        // `Playhead/Resources`.
+        let productionRoot = Self.repoRoot.appendingPathComponent("Playhead", isDirectory: true)
         var callSites: [String] = []
-        for root in productionRoots {
-            let dir = Self.repoRoot.appendingPathComponent(root)
-            guard let walker = FileManager.default.enumerator(
-                at: dir, includingPropertiesForKeys: nil
-            ) else { continue }
-            for case let url as URL in walker where url.pathExtension == "swift" {
-                guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-                let stripped = SwiftSourceInspector.strippingComments(text)
-                guard stripped.contains("quarantineAndRebuild") else { continue }
-                callSites.append(url.lastPathComponent)
-            }
+        let walker = try #require(
+            FileManager.default.enumerator(at: productionRoot, includingPropertiesForKeys: nil)
+        )
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let stripped = SwiftSourceInspector.strippingComments(text)
+            guard stripped.contains("quarantineAndRebuild") else { continue }
+            callSites.append(url.lastPathComponent)
         }
         // The declaration (both overloads) plus the single hatch
         // forwarder. Anything else is a new way to reach the listener's
@@ -150,7 +157,7 @@ struct AnalysisStoreRecoverySurfaceTests {
         #expect(SettingsL274Copy.analysisHistoryStartFreshConfirmTitle == "Start fresh?")
         #expect(
             SettingsL274Copy.analysisHistoryStartFreshConfirmBody
-                == "Your existing analysis history — including everything you've marked by hand — is set aside on this device rather than deleted, and Playhead starts over with an empty one. You can ask for it back."
+                == "Your existing analysis history — including everything you've marked by hand — is set aside on this device rather than deleted, and Playhead starts over with an empty one. Playhead won't use the old one again, but it stays on your device and it isn't erased."
         )
         #expect(
             SettingsL274Copy.analysisHistoryStartFreshConfirmAction == "Set aside and start fresh"

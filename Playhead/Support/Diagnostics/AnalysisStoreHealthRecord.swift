@@ -251,9 +251,10 @@ struct AnalysisStoreFailureRecord: Codable, Sendable, Equatable {
     let phase: AnalysisStoreFailurePhase
     let failureClass: AnalysisStoreFailureClass
     /// The value of the consecutive-failure counter AFTER this failure
-    /// was recorded, or 0 when the class does not count toward
-    /// escalation. Lets a reader reconstruct the escalation history from
-    /// the record list alone.
+    /// was recorded — whether or not this particular failure advanced it.
+    /// Lets a reader reconstruct the escalation history from the record
+    /// list alone, and a run of records whose count does not move is
+    /// exactly how a grace-exempt class shows up.
     let consecutiveFailureCount: Int
     /// The schema version this BINARY expects (`AnalysisStore.currentSchemaVersion`).
     /// Recorded rather than the version observed on disk, because when
@@ -382,6 +383,26 @@ struct AnalysisStoreHealthState: Codable, Sendable, Equatable {
     /// anything. Seven days is long enough to cover a phone left in a
     /// drawer over a holiday and short enough that "silently dead
     /// forever" is not a state this app can reach.
+    ///
+    /// TWO KNOWN LIMITS, both bounded by the fact that crossing this
+    /// threshold only ever ASKS a question — it never destroys anything,
+    /// and the answer is still the listener's:
+    ///
+    ///   * It is wall-clock against a persisted timestamp, so a restore
+    ///     from backup or a clock correction can make a fresh failure run
+    ///     look old and bring the prompt forward. Reaching it still
+    ///     requires three real consecutive failures with no successful
+    ///     open in between, so the prompt is legitimate when it appears;
+    ///     it just appears sooner than intended.
+    ///   * The Data-Protection window is self-defending rather than
+    ///     merely exempt, and that is by design, not by luck: this
+    ///     document carries `.completeUntilFirstUserAuthentication`, the
+    ///     SAME class as the store it describes. During a pre-first-unlock
+    ///     background launch the journal is therefore unreadable too, so
+    ///     `AnalysisStoreHealthJournal.mutate` refuses to write and the
+    ///     failure never reaches the counter at all. Do not "fix" the
+    ///     journal's protection class to something weaker — the symmetry
+    ///     is load-bearing.
     static let accessDeniedGracePeriod: TimeInterval = 7 * 24 * 60 * 60
 
     /// Quarantines retained.
