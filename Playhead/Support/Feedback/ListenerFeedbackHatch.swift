@@ -168,6 +168,7 @@ enum ListenerFeedbackHatch {
             // to "Send diagnostics", so it sources the rediff lane too.
             rediffFetch: DiagnosticsHatch.makeRediffFetch(store: runtime.analysisStore),
             analysisStoreHealthFetch: DiagnosticsHatch.analysisStoreHealthFetch,
+            speechModelLoadFetch: DiagnosticsHatch.speechModelLoadFetch,
             optInSink: SwiftDataDiagnosticsOptInSink(context: modelContext),
             optInEpisodes: []
         )

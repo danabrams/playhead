@@ -240,6 +240,34 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// `AnalysisStoreHealthDiagnosticsPrivacyTests`.
     let analysisStoreHealth: AnalysisStoreHealthState
 
+    /// playhead-se2h: whether the ASR model ever loaded, across launches.
+    ///
+    /// WHY IT IS HERE: `loadFastModel()` runs once per install, at
+    /// launch, and its failure was swallowed by an empty catch. A single
+    /// transient failure — a locale asset still installing, an analyzer
+    /// format briefly unavailable — turned every later transcription
+    /// attempt on the device into `modelNotLoaded` for the life of the
+    /// install, and NOTHING said so: not the log, not any surface, and
+    /// not this bundle. `eligibility_snapshot` cannot stand in for it,
+    /// which is the trap this field exists to remove — that snapshot
+    /// reports Apple Intelligence availability, so a device whose
+    /// recognizer has never loaded still reads fully eligible on every
+    /// field.
+    ///
+    /// ALWAYS encoded. A `status` of `loaded` beside a fresh
+    /// `last_success_at` is what distinguishes a healthy speech stack
+    /// from a bundle that predates the signal — and `unknown` on a build
+    /// that HAS the signal means the recording call is not wired, not
+    /// that the device is fine.
+    ///
+    /// Privacy: counters, dates, and rawValues of enums this repo
+    /// defines. There is no free-text field at all — a model that will
+    /// not load has no episode, show, or URL to name. Failure causes
+    /// reuse `TranscriptFailureClass`, the closed set playhead-8ysk
+    /// already pinned. Proof lives in
+    /// `SpeechModelLoadDiagnosticsPrivacyTests`.
+    let speechModelLoad: SpeechModelLoadState
+
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
         case osVersion = "os_version"
@@ -256,6 +284,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case bannerTallies = "banner_tallies"
         case rediffDiagnostics = "rediff_diagnostics"
         case analysisStoreHealth = "analysis_store_health"
+        case speechModelLoad = "speech_model_load"
     }
 
     init(
@@ -273,10 +302,12 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
         bannerTallies: [BannerTallySummary] = [],
         rediffDiagnostics: RediffDiagnostics = .empty,
-        analysisStoreHealth: AnalysisStoreHealthState = .healthy
+        analysisStoreHealth: AnalysisStoreHealthState = .healthy,
+        speechModelLoad: SpeechModelLoadState = .unknown
     ) {
         self.rediffDiagnostics = rediffDiagnostics
         self.analysisStoreHealth = analysisStoreHealth
+        self.speechModelLoad = speechModelLoad
         self.appVersion = appVersion
         self.osVersion = osVersion
         self.deviceClass = deviceClass
@@ -342,6 +373,14 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.analysisStoreHealth = try container.decodeIfPresent(
             AnalysisStoreHealthState.self, forKey: .analysisStoreHealth
         ) ?? .healthy
+        // Absent in bundles minted before playhead-se2h. `.unknown` is
+        // the only honest answer AND the safe one: unlike its sibling
+        // above there is no "healthy" default to fall into, so an old
+        // bundle and an unwired signal read identically — as "no
+        // evidence" — rather than as a working speech stack.
+        self.speechModelLoad = try container.decodeIfPresent(
+            SpeechModelLoadState.self, forKey: .speechModelLoad
+        ) ?? .unknown
     }
 
     // MARK: - playhead-p70f: rediff lane telemetry

@@ -315,6 +315,35 @@ enum AnalysisStoreHealthDiagnosticsFetchAdapter {
     }
 }
 
+/// playhead-se2h — async read of the durable record of whether the ASR
+/// model ever loaded, across launches.
+///
+/// Non-throwing for the same reason as its analysis-store sibling: this
+/// field describes a broken subsystem, so a fetch able to throw could
+/// take the export down at exactly the moment its value is the reason the
+/// export was requested. `SpeechModelLoadJournal` reads a plain JSON
+/// file, swallows its own I/O errors, and returns
+/// `SpeechModelLoadState.unknown` when there is nothing to report.
+///
+/// Defaults to `.unknown` — deliberately NOT a healthy value. A default
+/// of "loaded" would make a dropped wiring argument indistinguishable
+/// from a healthy device, which is precisely the hazard playhead-wvdz's
+/// canary was written to catch.
+typealias DiagnosticsSpeechModelLoadFetch = @Sendable () async -> SpeechModelLoadState
+
+/// The ONE production implementation behind
+/// `DiagnosticsSpeechModelLoadFetch` (playhead-se2h).
+///
+/// Unconditionally compiled, for the reason
+/// `AnalysisStoreHealthDiagnosticsFetchAdapter` documents: the test
+/// target builds DEBUG, so a Release-only copy is compiled by nothing any
+/// test can run and a divergence would ship with the suite green.
+enum SpeechModelLoadDiagnosticsFetchAdapter {
+    static let shared: DiagnosticsSpeechModelLoadFetch = {
+        await SpeechModelLoadJournal.shared.load()
+    }
+}
+
 /// The ONE production implementation behind `DiagnosticsRediffFetch`
 /// (playhead-p70f, review round 2).
 ///

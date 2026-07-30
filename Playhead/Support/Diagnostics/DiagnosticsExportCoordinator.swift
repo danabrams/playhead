@@ -47,6 +47,7 @@ final class DiagnosticsExportCoordinator {
     private let bannerTalliesFetch: DiagnosticsBannerTalliesFetch
     private let rediffFetch: DiagnosticsRediffFetch
     private let analysisStoreHealthFetch: DiagnosticsAnalysisStoreHealthFetch
+    private let speechModelLoadFetch: DiagnosticsSpeechModelLoadFetch
     private let optInSink: DiagnosticsOptInSink
     private let optInEpisodes: [DiagnosticsEpisodeInput]
 
@@ -103,6 +104,12 @@ final class DiagnosticsExportCoordinator {
     ///     `analysis_store_health` key is always emitted, so a healthy
     ///     device is distinguishable from a bundle that predates the
     ///     signal.
+    ///   - speechModelLoadFetch: playhead-se2h — async read of the
+    ///     durable record of whether the ASR model ever loaded, across
+    ///     launches. Defaults to `.unknown`; production wires it to
+    ///     `SpeechModelLoadJournal.shared.load()`. The default is
+    ///     deliberately NOT a healthy value: dropping this argument must
+    ///     read as "no evidence", never as "the speech stack is fine".
     ///   - optInSink: adapter that mutates `Episode.diagnosticsOptIn`.
     ///   - optInEpisodes: per-episode inputs for the OptIn bundle. Only
     ///     entries with `diagnosticsOptIn == true` ship; the builder
@@ -119,6 +126,7 @@ final class DiagnosticsExportCoordinator {
         bannerTalliesFetch: @escaping DiagnosticsBannerTalliesFetch = { [] },
         rediffFetch: @escaping DiagnosticsRediffFetch = { .empty },
         analysisStoreHealthFetch: @escaping DiagnosticsAnalysisStoreHealthFetch = { .healthy },
+        speechModelLoadFetch: @escaping DiagnosticsSpeechModelLoadFetch = { .unknown },
         optInSink: DiagnosticsOptInSink,
         optInEpisodes: [DiagnosticsEpisodeInput] = []
     ) {
@@ -132,6 +140,7 @@ final class DiagnosticsExportCoordinator {
         self.bannerTalliesFetch = bannerTalliesFetch
         self.rediffFetch = rediffFetch
         self.analysisStoreHealthFetch = analysisStoreHealthFetch
+        self.speechModelLoadFetch = speechModelLoadFetch
         self.optInSink = optInSink
         self.optInEpisodes = optInEpisodes
     }
@@ -216,6 +225,7 @@ final class DiagnosticsExportCoordinator {
         let rediff = await rediffFetch()
         let analysisStoreHealth = await analysisStoreHealthFetch()
             .withExportReadFailures(exportReadFailures)
+        let speechModelLoad = await speechModelLoadFetch()
 
         let defaultBundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: environment.appVersion,
@@ -231,7 +241,8 @@ final class DiagnosticsExportCoordinator {
             stabilityDiagnostics: stabilityDiagnostics,
             bannerTallies: bannerTallies,
             rediff: rediff,
-            analysisStoreHealth: analysisStoreHealth
+            analysisStoreHealth: analysisStoreHealth,
+            speechModelLoad: speechModelLoad
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 
