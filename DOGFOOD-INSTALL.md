@@ -1,12 +1,12 @@
-# Dogfood build staged 2026-07-30 ~03:00 ET — one command to install
+# Dogfood build installed 2026-07-30 — main @ 271815c9
 
-Built from **main @ 149721c4**, Release, signed (team 36Z6VYTT9X, `com.playhead.app`),
+**Already installed on the iPhone** (ED78151E…) — `devicectl` reported
+`App installed: bundleID com.playhead.app`. Nothing to run unless you want to reinstall.
+
+Built from **main @ 271815c9**, Release, signed (team 36Z6VYTT9X, `com.playhead.app`),
 389 MB including the 336 MB `qwen3_0_6b_4bit_dynamic_ft_v2` specialist model and `StingerBank.json`.
 
-Verified beyond "BUILD SUCCEEDED": the binary contains the new `partiallyAnalyzed` state and the
-"Partly analyzed" string, which proves the pz32 merge is actually in this artifact.
-
-## Install (phone unlocked + connected)
+## Reinstall (phone unlocked + connected)
 
 ```bash
 cd /Users/dabrams/playhead
@@ -18,45 +18,58 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
 If it prints `CoreDeviceError 4016` ("not able to fulfill the requested usage assertion
 requirements"), the phone is locked or not actively paired — unlock it, confirm
 `xcrun devicectl list devices` shows the iPhone as `connected` rather than `unavailable`,
-then re-run. That is the only failure seen here; the build itself is complete and verified.
+then re-run.
 
-## What is in it
+## Verified beyond "BUILD SUCCEEDED"
 
-Nine merged, reviewed beads: **8m2w, p70f, 0hi9, 8ysk, u45d, ngev, 6av0**, plus tonight's
-**ye0n + lc4c** (#295) and **pz32** (#296), and the `.swiftlint.yml` derived-data glob fix.
+The binary contains `completeAdScanPartial` (×3) and all three residual `AdScanLimit` cause
+tokens (`neverRan`, `stoppedShort`, `unmeasurableDuration`), which proves **#297 is genuinely in
+this artifact**, plus `partiallyAnalyzed` (×2) for pz32's ◐ state.
 
-**playhead-aqo9 is NOT in this build, and never will be** — it was closed as measured-not-viable.
-Its two clamps were dropped: on this device's own data 13 of 21 pre-roll windows already start at 0.0
-and 8 of 9 post-roll windows already reach EOF, so genuinely recoverable edge width is ~4 s, not the
-148 s the bead claimed. The larger gaps are transcribed cold opens — widening into them takes SHOW.
-The two pieces worth keeping were split out and ARE in this build as ye0n and lc4c.
+⚠️ **Do not verify by grepping the binary for `"Partly analyzed"` — it will return zero and that
+is not a defect.** The literal is exactly 15 UTF-8 bytes, which is Swift's small-string limit, so
+it is stored INLINE in the String struct rather than emitted into `__cstring`; `strings` can never
+see it. Grep for the enum case name (`partiallyAnalyzed`), which comes from reflection metadata.
+The previous staging note's claim that the literal was greppable was wrong.
+
+## What is new since the last staged build (main @ 149721c4)
+
+**#297 — playhead-gqx4 + playhead-i7qe: the ad scan now actually reaches the audio.**
+
+The last build made the checkmark honest (pz32). This one goes after the thing the honest
+checkmark exposed — that most episodes were barely scanned at all.
+
+- **gqx4** — `completeFull` used to be declared from transcript + feature coverage only. Neither is
+  the ad scan, so episodes were stamped "fully analysed" with ~3% of their audio ever examined, and
+  because that state is terminal nothing ever went back. It now requires measured ad-scan coverage
+  (the same number the ✓ uses), and a short scan lands in a new degraded terminal
+  `completeAdScanPartial` that records WHY (refusal, guardrail, decode failure, interrupted,
+  stopped short, unmeasurable duration).
+- **i7qe** — the pre-analysis runner skipped the semantic scan whenever the transcript had not grown
+  and no candidate windows were outstanding. But candidate windows are *produced by* the scan, so
+  their absence in unscanned audio meant nothing was ever proposed there — the skip was reading an
+  absence as completion. Seven assets on the last device pull sat in exactly that shape and could
+  never make progress no matter how often the job re-ran.
 
 ## Worth checking on this build
 
-**Expect FEWER checkmarks, and that is the fix, not a regression.** pz32 makes the readiness ✓ key on
-measured ad-scan coverage instead of the DSP feature watermark and last-ad-end. On the device capture,
-4 of 5 episodes read ◐ "Partly analyzed" with a real number (5%, 15%, 19%, 39%). The previous ✓ was
-lying — it could even read MORE complete on an episode where detection did WORSE. The low numbers are
-the real reach problem (playhead-gqx4 / playhead-i7qe), now visible instead of hidden.
+**Expect ◐ to persist on old episodes at first, and expect percentages to start climbing.**
 
-- **pz32** — a half-scanned episode should show ◐ with a percentage, not ✓. **UNVERIFIED VISUALLY:**
-  nobody has looked at the ◐ glyph on a real screen — the state machine, glyph name and VoiceOver
-  strings are unit-tested only. Worth a glance. Also try VoiceOver on a library row: it should say
+- Of the 34 episodes over 15 minutes on the last pull, **14 still have a dispatchable job** and
+  should now actually get scanned — including 2 that were stamped `completeFull` (820134BF at 39%,
+  70EC53D7 at 90%) and 3 stuck in `backfill`. Watch whether their percentages move.
+- The other 20 will NOT improve on their own — see the known limit below. That is expected.
+- Episodes analysed on the previous build read ◐ **"Amount scanned unknown"** on first launch: this
+  build is a cohort rev, so prior scan rows are pruned until re-scanned. Honest but inert.
+- **Still unverified visually** (carried over from the last build): nobody has looked at the ◐ glyph
+  on a real screen. Worth a glance, and worth trying VoiceOver on a library row — it should say
   "Partly analyzed" and "N% scanned for ads".
-- **ye0n / lc4c** — a pre-roll widened to 0:00 should keep auto-skipping rather than dropping to a
-  banner; and a span you mark by hand must never be swallowed by a detector window widening over it.
-- **u45d** — marking a detected span "not an ad" should actually dismiss it, and a manual mark should
-  outrank a banner response.
-- **8ysk** — analysis jobs should finish rather than stalling (147 acquired / 9 finalized was the
-  measured starting point).
-- **p70f / 0hi9** — day-0 rediff should mint, and an episode should no longer split into two asset rows.
-- **6av0** — transcript spans should no longer appear duplicated.
 
-## Known, deliberate under-claim
+## Known limit, deliberate and filed
 
-After a cohort rev (app build, OS build, prompt/schema rev) the scan rows are pruned, so a
-previously-completed episode renders ◐ "Amount scanned unknown" until re-scanned. Honest but inert —
-making it actionable needs a re-drive path in the job state machine.
-
-**This build is a cohort rev.** So expect episodes analysed on the previous build to read
-"Amount scanned unknown" on first launch rather than showing a percentage.
+**playhead-onn6 (P1)** — an episode that finishes its coverage tiers under-scanned has no re-drive.
+Once the scheduler marks the job `complete`, `insertJob`'s `INSERT OR IGNORE` on that row's
+`workKey` prevents a new one, so nothing re-queues the scan. #297 converts a false "fully analysed"
+into a true "partly analysed" and unblocks episodes that still have a live job; it does not by
+itself finish the scan for the rest. Also noted there: no query anywhere selects queued
+`backfill_jobs` rows, so several `fullEpisodeScan` rows have sat queued for six days.
