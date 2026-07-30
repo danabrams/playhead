@@ -2580,3 +2580,421 @@ struct AnalysisStoreAdScanCoverageTests {
         #expect(summary.adScanFraction == 0.01)
     }
 }
+
+// MARK: - playhead-csbq: the ruler itself
+
+/// playhead-csbq. Coverage stopped being a diagnostic on 2026-07-30: pz32 made
+/// the readiness ✓ key on measured ad-scan coverage and gqx4 made
+/// `.completeFull` REQUIRE it, so a wrong number now promotes an episode into a
+/// terminal state nothing returns from. These tests pin the two defects
+/// measured on the device pull that day, using the REAL row shapes.
+///
+///   DEFECT 1 — a naive `SUM` over `semantic_scan_results` windows reports
+///   asset CD1AD629 as 294% of its episode scanned (average 67.5% across 16
+///   assets) because overlapping and duplicated windows are double-counted.
+///
+///   DEFECT 2 — 6 of 248 rows have `windowEndTime < windowStartTime` (worst
+///   −635.2 s, 3 assets) and TWO carry `status = 'success'`.
+///
+/// Existing bad rows are LEFT IN PLACE by product decision, so every read-side
+/// test here seeds its inverted row through `execForTesting` — deliberately
+/// bypassing the write guard, which is the only way a row like this can exist
+/// from now on.
+@Suite("AnalysisStore coverage ruler (playhead-csbq)")
+struct AnalysisStoreCoverageRulerTests {
+
+    private static let cohortJSON: String = {
+        let cohort = ScanCohort(
+            promptLabel: "csbq-test",
+            promptHash: "prompt-v1",
+            schemaHash: "schema-v1",
+            scanPlanHash: "plan-v1",
+            normalizationHash: "norm-v1",
+            osBuild: "26A123",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(cohort)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }()
+
+    private func makeAsset(id: String, episodeDurationSec: Double) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///\(id).m4a",
+            featureCoverageEndTime: episodeDurationSec,
+            fastTranscriptCoverageEndTime: episodeDurationSec,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "backfill",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: episodeDurationSec
+        )
+    }
+
+    private func makeScan(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        status: SemanticScanStatus = .success,
+        scanPass: String = SemanticScanCoverage.coverageScanPass,
+        firstOrdinal: Int? = nil,
+        lastOrdinal: Int? = nil
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: "\(assetId)-scan-\(scanPass)-\(index)",
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: firstOrdinal ?? index * 10,
+            windowLastAtomOrdinal: lastOrdinal ?? (index * 10 + 9),
+            windowStartTime: start,
+            windowEndTime: end,
+            scanPass: scanPass,
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: status,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: Self.cohortJSON,
+            transcriptVersion: "tx-v1",
+            reuseScope: "\(assetId)-\(scanPass)-\(index)"
+        )
+    }
+
+    /// Seed a row the write guard would now refuse, the way the device DB
+    /// already contains six of them. Raw SQL on purpose — there is no
+    /// supported API that can produce this shape any more.
+    private func seedRawScanRow(
+        store: AnalysisStore,
+        id: String,
+        assetId: String,
+        start: Double,
+        end: Double,
+        status: String,
+        scanPass: String = SemanticScanCoverage.coverageScanPass
+    ) async throws {
+        let cohort = Self.cohortJSON.replacingOccurrences(of: "'", with: "''")
+        try await store.execForTesting(
+            """
+            INSERT INTO semantic_scan_results
+              (id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
+               windowStartTime, windowEndTime, scanPass, transcriptQuality,
+               disposition, spansJSON, status, attemptCount, errorContext,
+               inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
+               scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase)
+            VALUES
+              ('\(id)', '\(assetId)', 0, 69, \(start), \(end), '\(scanPass)',
+               'degraded', 'containsAd', '[]', '\(status)', 1, NULL,
+               NULL, NULL, NULL, 0,
+               '\(cohort)', 'tx-v1', 'raw-\(id)', 'shadow', 'fullEpisodeScan')
+            """
+        )
+    }
+
+    // MARK: - Defect 2: impossible geometry is rejected at the write
+
+    /// The real `success` row from device asset 4E4730D8: ordinals 0…69, a
+    /// window running 330.0 → 15.18, disposition `containsAd`, 12.6 s of model
+    /// latency. The scan genuinely ran — only the BOUNDS are impossible — and
+    /// before this guard it was persisted and every consumer folded it into a
+    /// total.
+    @Test("the real inverted `success` row is rejected at the write, and named")
+    func invertedSuccessRowIsRejected() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-inv-success", episodeDurationSec: 4590.58))
+
+        var thrown: AnalysisStoreError?
+        do {
+            try await store.insertSemanticScanResult(makeScan(
+                assetId: "a-inv-success", index: 0,
+                start: 330.0, end: 15.18,
+                status: .success, firstOrdinal: 0, lastOrdinal: 69
+            ))
+        } catch let error as AnalysisStoreError {
+            thrown = error
+        }
+
+        let error = try #require(thrown, "an impossible window must not be persisted")
+        guard case let .insertFailed(message) = error else {
+            Issue.record("expected .insertFailed, got \(error)")
+            return
+        }
+        // NAMED, not a bare failure: the message must carry the token, both
+        // numbers, the asset and the status, so a log line is diagnosable
+        // without a device attached.
+        #expect(message.hasPrefix(AnalysisStore.impossibleWindowGeometryPrefix))
+        #expect(message.contains("330.0"))
+        #expect(message.contains("15.18"))
+        #expect(message.contains("a-inv-success"))
+        #expect(message.contains("success"))
+
+        // And nothing landed.
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "a-inv-success")
+        #expect(rows.isEmpty)
+    }
+
+    /// The worst inversion on the pull (−635.2 s, device asset D75D7584) and a
+    /// non-finite bound. Both are structurally impossible for different
+    /// reasons; both must be refused.
+    @Test("worst real inversion and non-finite bounds are both rejected")
+    func invertedAndNonFiniteRowsAreRejected() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-inv-worst", episodeDurationSec: 2932.94))
+
+        for (index, bounds) in [
+            (start: 767.04, end: 131.82),      // −635.22 s, status refusal on device
+            (start: 118.38, end: 45.24),       // −73.14 s, guardrailViolation
+            (start: 1978.86, end: 1933.02),    // −45.84 s, passB `success`
+            (start: 0.0, end: Double.nan),
+            (start: Double.infinity, end: 10.0)
+        ].enumerated() {
+            var thrown: AnalysisStoreError?
+            do {
+                try await store.insertSemanticScanResult(makeScan(
+                    assetId: "a-inv-worst", index: index,
+                    start: bounds.start, end: bounds.end, status: .refusal
+                ))
+            } catch let error as AnalysisStoreError {
+                thrown = error
+            }
+            let error = try #require(thrown, "row \(index) \(bounds) must be refused")
+            guard case let .insertFailed(message) = error else {
+                Issue.record("row \(index): expected .insertFailed, got \(error)")
+                continue
+            }
+            #expect(message.hasPrefix(AnalysisStore.impossibleWindowGeometryPrefix))
+        }
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "a-inv-worst")
+        #expect(rows.isEmpty)
+    }
+
+    /// THE FALSE-POSITIVE RAIL. A guard that refuses a legitimate row silently
+    /// loses real coverage, which is worse than the bug it fixes. Zero-width
+    /// windows are legal and REAL — `BackfillJobRunner.makeNoWorkSentinelScanResult`
+    /// writes `0.0 … 0.0` when an asset has no segments — and they contribute
+    /// zero seconds to every union, so they cannot inflate anything.
+    @Test("legitimate rows — zero-width, ordinary, and descending ordinals — still persist")
+    func legitimateRowsAreNotRejected() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-legit", episodeDurationSec: 1000))
+
+        // Zero-width at the origin: the no-work sentinel's exact shape.
+        try await store.insertSemanticScanResult(makeScan(
+            assetId: "a-legit", index: 0, start: 0, end: 0, status: .noAds
+        ))
+        // Zero-width mid-episode.
+        try await store.insertSemanticScanResult(makeScan(
+            assetId: "a-legit", index: 1, start: 412.5, end: 412.5
+        ))
+        // An ordinary window.
+        try await store.insertSemanticScanResult(makeScan(
+            assetId: "a-legit", index: 2, start: 0, end: 500
+        ))
+        // Atom ordinals are bookkeeping, not geometry — a descending pair is
+        // not this guard's business and must not be refused.
+        try await store.insertSemanticScanResult(makeScan(
+            assetId: "a-legit", index: 3, start: 500, end: 600,
+            firstOrdinal: 900, lastOrdinal: 100
+        ))
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "a-legit")
+        #expect(rows.count == 4)
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-legit"])
+        let summary = try #require(summaries["a-legit"])
+        // 0–600 examined; the two zero-width rows add nothing.
+        #expect(summary.adScanCoveredSec == 600)
+    }
+
+    /// A rejected row must not burn the retry budget: retrying reproduces the
+    /// same impossible bounds byte for byte.
+    @Test("impossible-geometry rejection is classified permanent by the runner")
+    func rejectionIsPermanent() {
+        let geometry = AnalysisStoreError.insertFailed(
+            "\(AnalysisStore.impossibleWindowGeometryPrefix) windowEndTime 15.18 < windowStartTime 330.0"
+        )
+        #expect(BackfillJobRunner.isPermanentForTesting(geometry))
+        // A transient insert failure must stay retryable — the prefix match
+        // must not have widened to every `insertFailed`.
+        #expect(!BackfillJobRunner.isPermanentForTesting(.insertFailed("disk I/O error")))
+    }
+
+    // MARK: - Defect 2, read side: adScanFraction in the presence of an inverted row
+
+    /// The bead's open question, answered by TEST rather than by inference:
+    /// `adScanFraction` unions and clips, so an inverted window "most likely
+    /// contributes zero". It does — but only because
+    /// `fetchCoverageSummariesByAssetIds` drops it with `endTime > startTime`
+    /// BEFORE the union. Removing that filter makes this test report 100%
+    /// on an episode where 40% was read.
+    @Test("a pre-existing inverted row contributes zero and does not corrupt the union")
+    func invertedRowContributesZeroToAdScanFraction() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-mixed", episodeDurationSec: 1000))
+
+        // Two real windows: 0–200 and 600–800 ⇒ 400 s of 1000 s == 40%.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-mixed", index: 0, start: 0, end: 200)
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-mixed", index: 1, start: 600, end: 800)
+        )
+        // The device's worst inversion, straddling both of them.
+        try await seedRawScanRow(
+            store: store, id: "raw-inv-1", assetId: "a-mixed",
+            start: 767.04, end: 131.82, status: "refusal"
+        )
+        // And the device's inverted `success` row, whose status WOULD count.
+        try await seedRawScanRow(
+            store: store, id: "raw-inv-2", assetId: "a-mixed",
+            start: 330.0, end: 15.18, status: "success"
+        )
+
+        // The rows really are in the table — this is testing tolerance of
+        // existing data, not absence of it.
+        #expect(try await store.fetchSemanticScanResults(analysisAssetId: "a-mixed").count == 4)
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-mixed"])
+        let summary = try #require(summaries["a-mixed"])
+        // Exactly the valid-rows-only answer. Not inflated by the inverted
+        // rows' spans (which would read 800 s), not nil, not zero.
+        #expect(summary.adScanCoveredSec == 400)
+        #expect(summary.adScanFraction == 0.4)
+        #expect(summary.adScanCoveredSource == .semanticScanResults)
+
+        // The pipeline's own breadcrumb must agree with the checkmark.
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "a-mixed")
+        let coverage = SemanticScanCoverage.compute(rows: rows, episodeDuration: 1000)
+        #expect(coverage.examinedSeconds == 400)
+    }
+
+    /// An asset whose ONLY coverage-lane rows are inverted must report a
+    /// MEASURED ZERO, not "unknown" and not a number. Both render not-ready,
+    /// but the provenance has to stay honest about which one it is — an
+    /// unnamed absence is indistinguishable from every other absence.
+    @Test("an asset with only inverted rows reports a measured zero, not unknown")
+    func onlyInvertedRowsReportMeasuredZero() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-all-inv", episodeDurationSec: 4590.58))
+        try await seedRawScanRow(
+            store: store, id: "raw-only-1", assetId: "a-all-inv",
+            start: 330.0, end: 15.18, status: "success"
+        )
+        try await seedRawScanRow(
+            store: store, id: "raw-only-2", assetId: "a-all-inv",
+            start: 389.64, end: 35.4, status: "failedTransient"
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-all-inv"])
+        let summary = try #require(summaries["a-all-inv"])
+        #expect(summary.adScanCoveredSec == 0)
+        #expect(summary.adScanCoveredSource == .semanticScanResults)
+        #expect(summary.adScanFraction == 0)
+        let fraction = try #require(summary.adScanFraction)
+        #expect(fraction < episodePreparationCompleteThreshold)
+    }
+
+    // MARK: - Defect 1: the 294%-of-episode asset
+
+    /// THE BEAD'S HEADLINE FIXTURE — device asset CD1AD629, all 23 persisted
+    /// rows verbatim. A naive `SUM(windowEndTime - windowStartTime)` over the
+    /// examined rows totals 4871.64 s against a 1655.82 s episode: 294% of the
+    /// audio "scanned". Two independent causes stack — every window is
+    /// DUPLICATED (the playhead-6av0 child-row family), and passB extent
+    /// attempts sit INSIDE the passA windows they refine.
+    ///
+    /// The union over the coverage lane is 1576.62 s ⇒ 0.952, which is below
+    /// the 0.98 readiness floor. So the honest answer is "not ready" on an
+    /// asset the naive sum called 294% covered.
+    @Test("the 294%-of-episode asset: naive SUM says 2.94, the union says 0.95")
+    func the294PercentAssetUnionsToNinetyFive() async throws {
+        let duration = 1655.8236734693878
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-cd1ad629", episodeDurationSec: duration))
+
+        // Verbatim device rows. `nil` status ⇒ `.success`.
+        let deviceRows: [(pass: String, start: Double, end: Double, status: SemanticScanStatus)] = [
+            ("passA", 18.96, 105.78, .success),
+            ("passA", 18.96, 105.78, .success),
+            ("passA", 107.03999999999999, 809.94, .success),
+            ("passA", 107.03999999999999, 809.94, .success),
+            ("passA", 810.48, 909.9, .success),
+            ("passA", 810.48, 909.9, .success),
+            ("passA", 913.56, 1556.28, .success),
+            ("passA", 913.56, 1556.28, .success),
+            ("passA", 1566.0, 1610.76, .success),
+            ("passA", 1566.0, 1610.76, .success),
+            ("passA", 1612.32, 1641.66, .permissiveDecodingFailure),
+            ("passA", 1612.32, 1641.66, .permissiveDecodingFailure),
+            ("passB", 18.96, 39.66, .success),
+            ("passB", 18.96, 39.66, .success),
+            ("passB", 107.03999999999999, 809.94, .success),
+            ("passB", 107.03999999999999, 809.94, .success),
+            ("passB", 791.58, 909.9, .permissiveDecodingFailure),
+            ("passB", 810.48, 880.62, .success),
+            ("passB", 810.48, 880.62, .success),
+            ("passB", 1535.58, 1556.28, .success),
+            ("passB", 1535.58, 1556.28, .success),
+            ("passB", 1566.0, 1610.76, .success),
+            ("passB", 1566.0, 1610.76, .success)
+        ]
+        for (index, row) in deviceRows.enumerated() {
+            try await store.insertSemanticScanResult(makeScan(
+                assetId: "a-cd1ad629", index: index,
+                start: row.start, end: row.end,
+                status: row.status, scanPass: row.pass
+            ))
+        }
+
+        // The trap, reproduced from the same rows the store now holds.
+        let persisted = try await store.fetchSemanticScanResults(analysisAssetId: "a-cd1ad629")
+        #expect(persisted.count == deviceRows.count)
+        let naiveSum = persisted
+            .filter { $0.status == .success || $0.status == .noAds }
+            .reduce(0.0) { $0 + ($1.windowEndTime - $1.windowStartTime) }
+        #expect(abs(naiveSum - 4871.64) < 0.01)
+        #expect(naiveSum / duration > 2.94)
+
+        // The one true measure disagrees, and is the one the ✓ and the
+        // terminal both read.
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-cd1ad629"])
+        let summary = try #require(summaries["a-cd1ad629"])
+        #expect(abs(try #require(summary.adScanCoveredSec) - 1576.62) < 0.01)
+        let fraction = try #require(summary.adScanFraction)
+        #expect(abs(fraction - 0.9522) < 0.001)
+        #expect(fraction <= 1.0)
+        // Below the readiness floor: the episode is NOT ready, and the 294%
+        // reading would have said it was long ago.
+        #expect(fraction < episodePreparationCompleteThreshold)
+    }
+
+    /// Whatever the rows say, the fraction is bounded. Windows that sprawl far
+    /// past the episode cannot mint a ratio above 1 — the numerator is clipped
+    /// to the transcribed region and the quotient is capped.
+    @Test("ad-scan fraction can never exceed 1.0 however far the windows sprawl")
+    func adScanFractionIsBoundedAboveByOne() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-sprawl", episodeDurationSec: 600))
+        for index in 0..<5 {
+            try await store.insertSemanticScanResult(makeScan(
+                assetId: "a-sprawl", index: index,
+                start: 0, end: 600 + Double(index) * 100
+            ))
+        }
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-sprawl"])
+        let summary = try #require(summaries["a-sprawl"])
+        let fraction = try #require(summary.adScanFraction)
+        #expect(fraction <= 1.0)
+        #expect(fraction == 1.0)
+    }
+}

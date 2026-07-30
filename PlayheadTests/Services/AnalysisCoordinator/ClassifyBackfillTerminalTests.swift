@@ -632,3 +632,210 @@ struct ClassifyBackfillTerminalTests {
         }
     }
 }
+
+// MARK: - playhead-csbq: ratios consumed as decision inputs must be bounded
+
+/// playhead-csbq. `transcriptRatio` and `featureRatio` are both
+/// `covered / episodeDuration` and neither had ever had an UPPER bound — the
+/// classifier only tested them against a 0.95 floor. The device rows wrote the
+/// consequence in their own words:
+///
+///   `full coverage: transcript 5.277, feature 5.277`
+///   `full coverage: transcript 2.158, feature 5.110`
+///
+/// A ratio of 5.277 says the numerator measured 527.7% of the episode, which
+/// means the numerator and the denominator describe different audio and NO
+/// ratio between them is meaningful. The second row's two ratios DISAGREE
+/// (2.158 vs 5.110), which rules out one shared scaling error and proves at
+/// least one numerator is independently wrong.
+///
+/// gqx4's `adScanFraction` already withholds on the shape where the FAST
+/// transcript overshoots. It cannot see either hole closed here: `coverageEnd`
+/// is `MAX(endTime)` over ALL canonical chunks, so a FINAL-pass overshoot
+/// clears gqx4's fast-only reach guard, and the FEATURE watermark is not an
+/// input to `adScanFraction` at all.
+@Suite("AnalysisCoordinator coverage-ratio bounds — playhead-csbq")
+struct ClassifyBackfillTerminalRatioBoundsTests {
+
+    private let fullyScanned = AnalysisCoordinator.AdScanCoverage(
+        fraction: 1.0,
+        limit: .stoppedShort
+    )
+
+    private func chunk(startTime: Double, endTime: Double) -> TranscriptChunk {
+        let id = UUID().uuidString
+        return TranscriptChunk(
+            id: id,
+            analysisAssetId: "asset-csbq",
+            segmentFingerprint: "fp-\(id)",
+            chunkIndex: 0,
+            startTime: startTime,
+            endTime: endTime,
+            text: "x",
+            normalizedText: "x",
+            pass: TranscriptPassType.fast.rawValue,
+            modelVersion: "speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            weakAnchorMetadata: nil
+        )
+    }
+
+    private func classify(
+        coverageEnd: Double,
+        episodeDuration: Double,
+        featureCoverage: Double,
+        adScan: AnalysisCoordinator.AdScanCoverage
+    ) -> AnalysisCoordinator.BackfillTerminalVerdict {
+        AnalysisCoordinator.classifyBackfillTerminal(
+            chunks: [chunk(startTime: 0, endTime: coverageEnd)],
+            episodeDuration: episodeDuration,
+            featureCoverage: featureCoverage,
+            budgetCancelled: false,
+            transcriptFailed: false,
+            featureFailed: false,
+            adScan: adScan
+        )
+    }
+
+    /// THE BEAD'S ORIGINAL OBSERVATION, reproduced end to end: a 608 s episode
+    /// whose transcript reaches 3210 s — ratio 5.277 — with an ad scan that
+    /// clears its floor. Before this guard the classifier stamped `.completeFull`
+    /// and wrote its own confession into `terminalReason`.
+    @Test("transcript ratio 5.277 can no longer be reported as full coverage")
+    func transcriptRatio5277IsNotFullCoverage() {
+        let verdict = classify(
+            coverageEnd: 3210,
+            episodeDuration: 608,
+            featureCoverage: 3210,
+            adScan: fullyScanned
+        )
+        #expect(verdict.state != .completeFull)
+        #expect(verdict.state == .completeTranscriptPartial)
+        // NAMED with a stable token, the way `AdScanLimit` is, so a diagnostics
+        // capture can separate it without a device attached.
+        #expect(
+            verdict.reason.contains(
+                AnalysisCoordinator.CoverageDenominatorFault.contradictedDuration.rawValue
+            )
+        )
+        // And it says which term is wrong, with both numbers.
+        #expect(verdict.reason.contains("transcript reaches 3210.0s of a declared 608.0s"))
+    }
+
+    /// The second device row: transcript 2.158 and feature 5.110, disagreeing.
+    /// The FEATURE watermark alone is enough to disqualify the clean terminal —
+    /// `adScanFraction` never looks at it, so nothing else would have caught it.
+    @Test("a contradicted FEATURE watermark alone blocks the clean terminal")
+    func featureRatioOvershootAloneBlocksCompleteFull() {
+        // Transcript healthy (ratio 1.0), feature reaching 5.11x the duration.
+        let verdict = classify(
+            coverageEnd: 528,
+            episodeDuration: 528,
+            featureCoverage: 2698,
+            adScan: fullyScanned
+        )
+        #expect(verdict.state != .completeFull)
+        #expect(
+            verdict.reason.contains(
+                AnalysisCoordinator.CoverageDenominatorFault.contradictedDuration.rawValue
+            )
+        )
+        #expect(verdict.reason.contains("feature reaches 2698.0s of a declared 528.0s"))
+        #expect(!verdict.reason.contains("transcript reaches"))
+    }
+
+    /// THE FALSE-POSITIVE RAIL. Feed-vs-measured duration drift is normal and
+    /// must not cost an episode its ✓. The tolerance is
+    /// `AnalysisCoverageSummary.adScanDurationToleranceSec` — deliberately the
+    /// SAME rule `adScanFraction` applies, so the terms cannot disagree about
+    /// how much drift is normal.
+    @Test("healthy and within-tolerance overshoots still reach completeFull")
+    func healthyRatiosStillCompleteFull() {
+        // Exactly complete.
+        #expect(
+            classify(
+                coverageEnd: 3600, episodeDuration: 3600,
+                featureCoverage: 3600, adScan: fullyScanned
+            ).state == .completeFull
+        )
+        // A 1000 s episode tolerates min(30, 5%) == 30 s of overshoot.
+        #expect(
+            classify(
+                coverageEnd: 1029, episodeDuration: 1000,
+                featureCoverage: 1029, adScan: fullyScanned
+            ).state == .completeFull
+        )
+        // A short episode's tolerance is the 5% arm: 200 s tolerates 10 s.
+        #expect(
+            classify(
+                coverageEnd: 209, episodeDuration: 200,
+                featureCoverage: 209, adScan: fullyScanned
+            ).state == .completeFull
+        )
+        // One second past the 5% arm is refused.
+        #expect(
+            classify(
+                coverageEnd: 211, episodeDuration: 200,
+                featureCoverage: 200, adScan: fullyScanned
+            ).state != .completeFull
+        )
+    }
+
+    /// The guard is purely RESTRICTIVE: it can only ever remove `.completeFull`.
+    /// When the ad scan is also unmeasurable, gqx4's richer naming must still
+    /// win, because "the audio was never read for ads" is the more explanatory
+    /// answer than "the denominator is wrong".
+    @Test("gqx4's ad-scan naming still wins when both terms are unusable")
+    func adScanNamingTakesPrecedence() {
+        let verdict = classify(
+            coverageEnd: 3210,
+            episodeDuration: 608,
+            featureCoverage: 3210,
+            adScan: AnalysisCoordinator.AdScanCoverage(
+                fraction: nil,
+                limit: .unmeasurableDuration
+            )
+        )
+        #expect(verdict.state == .completeAdScanPartial)
+        #expect(verdict.reason.contains("unmeasurableDuration"))
+    }
+
+    /// The pure helper, at its boundary. A ratio at or below 1 (plus tolerance)
+    /// is usable; anything above it is not, in either term.
+    @Test("contradictedCoverageDenominator names each offending term")
+    func contradictedDenominatorHelperBoundary() {
+        // Usable.
+        #expect(
+            AnalysisCoordinator.contradictedCoverageDenominator(
+                transcriptCoveredSec: 1000, featureCoveredSec: 1000, episodeDuration: 1000
+            ) == nil
+        )
+        // Exactly at the tolerance edge (30 s for a 1000 s episode).
+        #expect(
+            AnalysisCoordinator.contradictedCoverageDenominator(
+                transcriptCoveredSec: 1030, featureCoveredSec: 1030, episodeDuration: 1000
+            ) == nil
+        )
+        // Both terms wrong ⇒ both named.
+        let both = AnalysisCoordinator.contradictedCoverageDenominator(
+            transcriptCoveredSec: 5277, featureCoveredSec: 5277, episodeDuration: 1000
+        )
+        #expect(both?.contains("transcript reaches") == true)
+        #expect(both?.contains("feature reaches") == true)
+        // A non-finite numerator is not usable either.
+        #expect(
+            AnalysisCoordinator.contradictedCoverageDenominator(
+                transcriptCoveredSec: .nan, featureCoveredSec: 100, episodeDuration: 1000
+            ) != nil
+        )
+        // A non-positive denominator is NOT this helper's business — the
+        // classifier's own priority-6 guard already fails safe on it, and
+        // reporting here would double-name the same fault.
+        #expect(
+            AnalysisCoordinator.contradictedCoverageDenominator(
+                transcriptCoveredSec: 100, featureCoveredSec: 100, episodeDuration: 0
+            ) == nil
+        )
+    }
+}

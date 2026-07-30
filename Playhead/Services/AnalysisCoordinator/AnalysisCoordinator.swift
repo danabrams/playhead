@@ -2746,6 +2746,63 @@ actor AnalysisCoordinator {
         return fractionIsMeasurable ? .stoppedShort : .unmeasurableDuration
     }
 
+    /// playhead-csbq: stable token recorded inside
+    /// `analysis_assets.terminalReason` when a coverage RATIO could not be
+    /// trusted, so a diagnostics capture can separate it from a genuine
+    /// shortfall without a device attached. Same contract as
+    /// ``AnalysisCoordinator/AdScanLimit`` — an unnamed absence is
+    /// indistinguishable from every other absence.
+    enum CoverageDenominatorFault: String, Sendable, CaseIterable {
+        /// The declared `episodeDurationSec` is contradicted by an artifact
+        /// measured against the same audio: a numerator materially larger
+        /// than the denominator means the two describe different audio, and
+        /// no ratio between them is meaningful in either direction.
+        case contradictedDuration = "contradictedDuration"
+    }
+
+    /// playhead-csbq: is a coverage numerator large enough to disprove the
+    /// denominator it would be divided by?
+    ///
+    /// Tolerance is ``AnalysisCoverageSummary/adScanDurationToleranceSec(episodeDurationSec:)``
+    /// — deliberately the SAME rule `adScanFraction` applies, so the three
+    /// coverage terms cannot disagree about how much feed-vs-measured drift is
+    /// normal. Duplicating the threshold here with its own constant is exactly
+    /// the "two numbers for one quantity" mistake this bead is about.
+    ///
+    /// Returns `nil` when the pair is usable (including when the denominator is
+    /// non-positive or non-finite — that case is already handled, and more
+    /// specifically, by the classifier's own priority-6 guard), otherwise a
+    /// short human-readable description of the disagreement.
+    static func contradictedCoverageDenominator(
+        transcriptCoveredSec: Double,
+        featureCoveredSec: Double,
+        episodeDuration: Double
+    ) -> String? {
+        guard episodeDuration.isFinite, episodeDuration > 0 else { return nil }
+        let tolerance = AnalysisCoverageSummary.adScanDurationToleranceSec(
+            episodeDurationSec: episodeDuration
+        )
+        let limit = episodeDuration + tolerance
+        var faults: [String] = []
+        if !transcriptCoveredSec.isFinite || transcriptCoveredSec > limit {
+            faults.append(
+                String(
+                    format: "transcript reaches %.1fs of a declared %.1fs",
+                    transcriptCoveredSec, episodeDuration
+                )
+            )
+        }
+        if !featureCoveredSec.isFinite || featureCoveredSec > limit {
+            faults.append(
+                String(
+                    format: "feature reaches %.1fs of a declared %.1fs",
+                    featureCoveredSec, episodeDuration
+                )
+            )
+        }
+        return faults.isEmpty ? nil : faults.joined(separator: "; ")
+    }
+
     /// playhead-gtt9.8: pure classifier that picks the appropriate
     /// terminal `SessionState` when backfill finishes. Extracted as a
     /// static function so the decision matrix can be unit-tested
@@ -2868,11 +2925,51 @@ actor AnalysisCoordinator {
                     )
                 )
             }
+            // playhead-csbq: the clean terminal additionally requires that
+            // both ratios are MEASURABLE, not merely above the floor. Both
+            // are `covered / episodeDuration` and neither has ever had an
+            // upper bound, so a numerator describing different audio than the
+            // denominator passed a lower-bound test and was reported as full
+            // coverage — the device rows say so in their own words
+            // ("full coverage: transcript 5.277, feature 5.277" and
+            // "transcript 2.158, feature 5.110", where the two disagreeing
+            // ratios prove at least one numerator is independently wrong).
+            //
+            // gqx4's `adScanFraction` already withholds on this shape, which
+            // covers the case where the FAST transcript overshoots. It does
+            // NOT cover the two live holes closed here, because it never looks
+            // at either quantity: `coverageEnd` is `MAX(endTime)` over ALL
+            // canonical chunks, so a FINAL-pass overshoot past the declared
+            // duration passes gqx4's fast-only reach guard; and the FEATURE
+            // watermark is not an input to `adScanFraction` at all.
+            //
+            // Named, not clamped: clamping to 1.0 is precisely how a broken
+            // denominator becomes a confident ✓ on a fraction of the audio.
+            guard let denominatorContradiction = Self.contradictedCoverageDenominator(
+                transcriptCoveredSec: coverageEnd,
+                featureCoveredSec: featureSeconds,
+                episodeDuration: episodeDuration
+            ) else {
+                return BackfillTerminalVerdict(
+                    state: .completeFull,
+                    reason: String(
+                        format: "full coverage: transcript %.3f, feature %.3f, ad scan %.3f",
+                        transcriptRatio, featureRatio, adScan.fraction ?? 0
+                    )
+                )
+            }
+            // Under-claim into the existing partial-transcript terminal rather
+            // than mint a new state: it is a COMPLETE terminal (no re-drive
+            // loop), it is not promotion-eligible, and the reason string
+            // carries the stable `contradictedDuration` token the way
+            // `AdScanLimit` does.
             return BackfillTerminalVerdict(
-                state: .completeFull,
+                state: .completeTranscriptPartial,
                 reason: String(
-                    format: "full coverage: transcript %.3f, feature %.3f, ad scan %.3f",
-                    transcriptRatio, featureRatio, adScan.fraction ?? 0
+                    format: "coverage unmeasurable (%@): %@ (transcript %.3f, feature %.3f)",
+                    CoverageDenominatorFault.contradictedDuration.rawValue,
+                    denominatorContradiction,
+                    transcriptRatio, featureRatio
                 )
             )
         }
