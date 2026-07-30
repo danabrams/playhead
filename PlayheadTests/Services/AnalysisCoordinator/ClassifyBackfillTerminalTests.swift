@@ -369,10 +369,8 @@ struct ClassifyBackfillTerminalTests {
         #expect(verdict.reason.contains("ad scan 1.000"))
     }
 
-    /// Exactly at the floor. `finalizeBackfillMinCoverageRatio` is the same
-    /// number the transcript and feature terms use — the classifier gains a
-    /// third term, not a third threshold.
-    @Test("ad-scan coverage exactly at the finalize floor is clean")
+    /// Exactly at the floor.
+    @Test("ad-scan coverage exactly at the sufficiency floor is clean")
     func adScanAtFloorIsCompleteFull() {
         let verdict = AnalysisCoordinator.classifyBackfillTerminal(
             chunks: [chunk(startTime: 0, endTime: 3600)],
@@ -382,7 +380,7 @@ struct ClassifyBackfillTerminalTests {
             transcriptFailed: false,
             featureFailed: false,
             adScan: .init(
-                fraction: AnalysisCoordinator.finalizeBackfillMinCoverageRatio,
+                fraction: AnalysisCoordinator.AdScanCoverage.sufficientFraction,
                 limit: .stoppedShort
             )
         )
@@ -390,7 +388,7 @@ struct ClassifyBackfillTerminalTests {
     }
 
     /// A hair under the floor is not.
-    @Test("ad-scan coverage just under the finalize floor degrades")
+    @Test("ad-scan coverage just under the sufficiency floor degrades")
     func adScanJustUnderFloorDegrades() {
         let verdict = AnalysisCoordinator.classifyBackfillTerminal(
             chunks: [chunk(startTime: 0, endTime: 3600)],
@@ -400,12 +398,37 @@ struct ClassifyBackfillTerminalTests {
             transcriptFailed: false,
             featureFailed: false,
             adScan: .init(
-                fraction: AnalysisCoordinator.finalizeBackfillMinCoverageRatio - 0.01,
+                fraction: AnalysisCoordinator.AdScanCoverage.sufficientFraction - 0.01,
                 limit: .refusal
             )
         )
         #expect(verdict.state == .completeAdScanPartial)
         #expect(verdict.reason.contains(AnalysisCoordinator.AdScanLimit.refusal.rawValue))
+    }
+
+    /// The three surfaces that consume measured ad-scan coverage must agree on
+    /// ONE number. If they drift, an episode lands in a band where the pipeline
+    /// calls itself done, the runner keeps trying to extend it, and the library
+    /// still shows ◐ — with nothing able to close the gap.
+    ///
+    /// Deliberately NOT the transcript's floor: 0.95 is calibrated for a decoder
+    /// chopping seconds off the end of an episode, which says nothing about how
+    /// much audio a semantic scan read.
+    @Test("the terminal, the checkmark and the scan-stop share one floor")
+    func sufficiencyFloorIsSharedAcrossSurfaces() {
+        #expect(
+            AnalysisCoordinator.AdScanCoverage.sufficientFraction
+                == episodePreparationCompleteThreshold
+        )
+        #expect(
+            AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+                == AnalysisCoordinator.AdScanCoverage.sufficientFraction
+        )
+        #expect(
+            AnalysisCoordinator.AdScanCoverage.sufficientFraction
+                != AnalysisCoordinator.finalizeBackfillMinCoverageRatio,
+            "the ad-scan floor must not silently inherit the transcript's floor"
+        )
     }
 
     /// The higher-priority branches must not be reachable via the new term:

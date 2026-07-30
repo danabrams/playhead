@@ -2590,11 +2590,35 @@ actor AnalysisCoordinator {
         /// terminal.
         static let unmeasured = AdScanCoverage(fraction: nil, limit: .neverRan)
 
-        /// True when measured coverage clears the finalize floor. `nil` is
+        /// Fraction at or above which the ad scan counts as having read the
+        /// episode. `episodePreparationCompleteThreshold` (playhead-pz32), NOT
+        /// `finalizeBackfillMinCoverageRatio`.
+        ///
+        /// The two are different numbers for different quantities and the
+        /// distinction is load-bearing. `finalizeBackfillMinCoverageRatio`
+        /// (0.95) is calibrated for the TRANSCRIPT: its documented rationale is
+        /// tolerating the few seconds a decoder chops off the end of an episode.
+        /// `episodePreparationCompleteThreshold` (0.98) is calibrated for THIS
+        /// quantity, jointly with the 5s gap-bridging that lets the ad-scan area
+        /// reach 1.0 at all — pz32's doc comment says the pair has to be
+        /// revisited together. Borrowing the transcript's floor for the ad scan
+        /// would be applying a number to a quantity it was not measured against,
+        /// which is the class of mistake this whole bead is about.
+        ///
+        /// Using pz32's number also makes three surfaces agree exactly: the
+        /// terminal state, the library ✓
+        /// (``episodePreparationAnalysisComplete(status:adScanFraction:isDegradedTerminal:)``)
+        /// and the pipeline's own decision to stop scanning
+        /// (``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction``). A
+        /// lower floor here would mint clean terminals the UI still renders ◐
+        /// and the runner still tries to extend.
+        static var sufficientFraction: Double { episodePreparationCompleteThreshold }
+
+        /// True when measured coverage clears ``sufficientFraction``. `nil` is
         /// false — see the property doc.
         var clearsFinalizeFloor: Bool {
             guard let fraction, fraction.isFinite else { return false }
-            return fraction + 1e-9 >= AnalysisCoordinator.finalizeBackfillMinCoverageRatio
+            return fraction + 1e-9 >= Self.sufficientFraction
         }
 
         /// Human+machine readable rendering for `terminalReason`.
@@ -2605,7 +2629,7 @@ actor AnalysisCoordinator {
             return String(
                 format: "ad scan %.3f < %.3f (%@)",
                 fraction,
-                AnalysisCoordinator.finalizeBackfillMinCoverageRatio,
+                Self.sufficientFraction,
                 limit.rawValue
             )
         }
