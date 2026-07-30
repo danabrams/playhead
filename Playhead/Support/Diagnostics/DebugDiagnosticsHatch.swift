@@ -114,6 +114,7 @@ func runDebugDiagnosticsExport(
         stabilityFetch: DebugDiagnosticsHatch.stabilityFetch,
         bannerTalliesFetch: DebugDiagnosticsHatch.bannerTalliesFetch,
         rediffFetch: DebugDiagnosticsHatch.makeRediffFetch(store: runtime.analysisStore),
+        analysisStoreHealthFetch: DebugDiagnosticsHatch.analysisStoreHealthFetch,
         optInSink: optInSink,
         optInEpisodes: []
     )
@@ -218,6 +219,14 @@ enum DebugDiagnosticsHatch {
     static func makeRediffFetch(store: AnalysisStore) -> DiagnosticsRediffFetch {
         RediffDiagnosticsFetchAdapter.make(store: store)
     }
+
+    // MARK: Analysis-store-health adapter (playhead-wvdz)
+
+    /// Reads the durable record of whether the analysis database opened.
+    /// Forwards to the single unconditionally-compiled implementation for
+    /// the same anti-drift reason `makeRediffFetch` does.
+    static let analysisStoreHealthFetch: DiagnosticsAnalysisStoreHealthFetch =
+        AnalysisStoreHealthDiagnosticsFetchAdapter.shared
 
     // MARK: Environment construction
 

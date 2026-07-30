@@ -38,27 +38,35 @@ import XCTest
 final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
 
     /// `PlayheadRuntime`'s deferred init Task posts
-    /// `ActivityRefreshNotification` immediately after `analysisStore.migrate()`
-    /// succeeds. The Activity tab (and any other consumer of the
+    /// `ActivityRefreshNotification` immediately after the analysis store
+    /// opens. The Activity tab (and any other consumer of the
     /// notification) relies on this to repopulate when its first
     /// snapshot fetch raced the cold-launch lazy open.
     ///
     /// The canary asserts:
     ///   • the post call appears in `PlayheadRuntime.swift`
-    ///   • it appears AFTER the `analysisStore.migrate()` call
-    /// Both pieces matter — a regression that moves the post above
-    /// `migrate()` would technically still post but the consumer would
+    ///   • it appears AFTER the store open
+    /// Both pieces matter — a regression that moves the post above the
+    /// open would technically still post but the consumer would
     /// re-read an unopened store and short-circuit empty (the very
     /// race playhead-6boz introduced and this commit closes).
+    ///
+    /// playhead-wvdz moved the anchor. The open used to be a bare
+    /// `try await analysisStore.migrate()` in a do/catch whose catch
+    /// deleted the store directory; it is now
+    /// `analysisStoreRecovery.openAtLaunch(analysisStore)`, which never
+    /// destroys anything. The ordering claim is unchanged.
     func testPostMigrateActivityRefreshIsWired() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
         )
 
-        guard let migrateRange = source.range(of: "try await analysisStore.migrate()") else {
+        guard let migrateRange = source.range(
+            of: "analysisStoreRecovery.openAtLaunch(analysisStore)"
+        ) else {
             XCTFail(
-                "Could not locate `try await analysisStore.migrate()` in PlayheadRuntime.swift — " +
-                "either the call moved or the canary anchor needs updating."
+                "Could not locate `analysisStoreRecovery.openAtLaunch(analysisStore)` in " +
+                "PlayheadRuntime.swift — either the call moved or the canary anchor needs updating."
             )
             return
         }
@@ -70,7 +78,7 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             XCTFail(
                 """
                 `AnalysisWorkScheduler.postActivityRefreshNotification()` is missing \
-                AFTER `try await analysisStore.migrate()` in PlayheadRuntime.swift. \
+                AFTER the analysis-store open in PlayheadRuntime.swift. \
                 The Activity tab depends on this post to repopulate when its first \
                 refresh raced the cold-launch lazy AnalysisStore open (playhead-6boz). \
                 Removing the post leaves the Activity view stuck on an empty state \
@@ -82,7 +90,7 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
 
         XCTAssertLessThan(
             migrateRange.upperBound, postRange.lowerBound,
-            "ActivityRefreshNotification post must follow migrate() — found post at offset \(source.distance(from: source.startIndex, to: postRange.lowerBound)), migrate at offset \(source.distance(from: source.startIndex, to: migrateRange.lowerBound))."
+            "ActivityRefreshNotification post must follow the store open — found post at offset \(source.distance(from: source.startIndex, to: postRange.lowerBound)), migrate at offset \(source.distance(from: source.startIndex, to: migrateRange.lowerBound))."
         )
     }
 
@@ -1067,6 +1075,127 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
         XCTAssertFalse(
             stripped.contains("localURL = pinned"),
             "SwiftData's cached URL is a mirror, not an authority that may bypass manager hash/path selection"
+        )
+    }
+
+    // MARK: - playhead-wvdz: the launch path must never destroy the store
+
+    /// THE CANARY FOR THIS BEAD. `PlayheadRuntime` answered a thrown
+    /// `AnalysisStore.migrate()` with `removeItem(at:
+    /// AnalysisStore.defaultDirectory())` and then retried — and the
+    /// retry succeeded BECAUSE the directory was now empty. The
+    /// listener's entire analysis library, including corrections made
+    /// by hand and never copied to any cloud, was destroyed silently.
+    ///
+    /// `AnalysisStoreRecoveryCoordinatorTests` proves the behaviour;
+    /// this proves nobody puts the line back. It is a source grep
+    /// rather than a behavioural test because the runtime constructs
+    /// its store with `try! AnalysisStore()` and no directory
+    /// override, so there is no seam to point a launch-level test at a
+    /// temp directory.
+    func testLaunchPathNeverDeletesTheAnalysisStoreDirectory() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        XCTAssertFalse(
+            stripped.contains("removeItem"),
+            """
+            PlayheadRuntime.swift performs a file-system removal. Before \
+            playhead-wvdz the only one was the delete-the-analysis-store \
+            recovery, which destroyed the listener's entire library on any \
+            thrown migration and left the app looking freshly installed. \
+            There is no cloud copy of that data. If a NEW removal is \
+            genuinely needed here, it must be reviewed against \
+            playhead-wvdz before this canary is relaxed.
+            """
+        )
+        XCTAssertFalse(
+            stripped.contains("AnalysisStore.defaultDirectory()"),
+            """
+            PlayheadRuntime.swift references the analysis store DIRECTORY. \
+            The runtime should only ever talk to the store through the \
+            `analysisStore` actor; reaching for the raw directory is how \
+            the playhead-wvdz delete was written in the first place. \
+            Directory-level recovery belongs in \
+            `AnalysisStoreRecoveryCoordinator`, where it moves rather than \
+            deletes and only ever at the listener's explicit request.
+            """
+        )
+    }
+
+    /// The recovery must run through the coordinator, so the escalation
+    /// counter and the never-destroy rule are enforced in one place
+    /// rather than re-derived at the call site.
+    func testLaunchOpenGoesThroughTheRecoveryCoordinator() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        XCTAssertTrue(
+            stripped.contains("analysisStoreRecovery.openAtLaunch"),
+            """
+            The launch-time analysis-store open no longer goes through \
+            `AnalysisStoreRecoveryCoordinator.openAtLaunch`. That is the \
+            single place that records the failure durably, decides whether \
+            to retry or ask the listener, and guarantees nothing is \
+            destroyed (playhead-wvdz).
+            """
+        )
+    }
+
+    /// THE DEGRADED-LAUNCH CONTRACT: a dead analysis store must cost the
+    /// analysis features and nothing else. Someone who opens the app to
+    /// play a podcast must be able to play a podcast.
+    ///
+    /// Structural rather than behavioural, and the structure is what
+    /// actually carries the guarantee: `PlaybackService` is constructed
+    /// synchronously in `init`, and the early `return` that disables the
+    /// pipeline lives inside the deferred bootstrap `Task`, so it cannot
+    /// reach anything init already built.
+    func testPlaybackIsConstructedBeforeTheAnalysisStoreOpenCanFail() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(source)
+
+        let playbackConstruction = try XCTUnwrap(
+            stripped.range(of: "PlaybackService()"),
+            "PlaybackService is no longer constructed in PlayheadRuntime.swift"
+        )
+        let launchOpen = try XCTUnwrap(
+            stripped.range(of: "analysisStoreRecovery.openAtLaunch"),
+            "The launch-time store open is missing"
+        )
+        XCTAssertTrue(
+            playbackConstruction.upperBound < launchOpen.lowerBound,
+            """
+            `PlaybackService` is now constructed AFTER the analysis-store \
+            open. It must stay ahead of it: the open can fail, and when it \
+            does the bootstrap Task returns early. A playback service built \
+            after that point would never exist on a device whose analysis \
+            database is broken, turning a degraded launch into an app that \
+            cannot play audio (playhead-wvdz).
+            """
+        )
+
+        // The playback-state observer must likewise stay outside the
+        // deferred Task the early return exits.
+        let observerInstall = try XCTUnwrap(
+            stripped.range(of: "playbackStateObserverTask = Task"),
+            "The playback-state observer Task is missing"
+        )
+        XCTAssertTrue(
+            launchOpen.upperBound < observerInstall.lowerBound,
+            """
+            The playback-state observer is now installed BEFORE/inside the \
+            deferred bootstrap Task that the analysis-store failure path \
+            returns from. It must stay a separate Task installed from \
+            `init`, or a broken analysis database would also stop skip-cue \
+            delivery and playback observation (playhead-wvdz).
+            """
         )
     }
 }
