@@ -15710,8 +15710,93 @@ actor AnalysisStore {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// playhead-csbq: prefix on the ``AnalysisStoreError/insertFailed(_:)``
+    /// message raised for a semantic-scan row whose window cannot exist.
+    ///
+    /// Matched by ``BackfillJobRunner`` to classify the rejection as PERMANENT
+    /// — retrying an impossible row reproduces it exactly, so spending the
+    /// retry budget on it only delays the rest of the pass.
+    static let impossibleWindowGeometryPrefix = "impossibleWindowGeometry:"
+
+    /// playhead-csbq: reject a scan row whose window geometry cannot exist,
+    /// AT THE WRITE.
+    ///
+    /// WHAT THIS REJECTS, and why rejection rather than repair. Measured on the
+    /// 2026-07-30 device pull, 6 of 248 `semantic_scan_results` rows have
+    /// `windowEndTime < windowStartTime` — worst inversion −635.2 s, across 3
+    /// assets — and TWO of them carry `status = 'success'`. A successful scan of
+    /// a window that ends ten minutes before it begins is not a coverage
+    /// measurement; it is a corrupted row that every consumer folds silently
+    /// into a total. Both `success` rows carry real model output (real spans,
+    /// 12.6 s and 6.1 s latencies), so the scan genuinely ran and only the
+    /// BOUNDS are wrong — the verdict was not invented for a region never
+    /// examined.
+    ///
+    /// THIS IS A BACKSTOP, NOT THE FIX. The defect is upstream, in three
+    /// places that projected a window onto two numbers by taking `first`/`last`
+    /// of an array that was never sorted by time:
+    /// `BackfillJobRunner.makeRefinementScanResult` (spans, which
+    /// `mergeSpans` APPENDS to), `BackfillJobRunner.attemptedRange` and
+    /// `FoundationModelClassifier.planPassA` (segments, ordered by
+    /// `segmentIndex`, which tracks time only while the atom sequence is
+    /// monotone — on 27 of 30 device assets it is not). All three now take
+    /// `min`/`max`, which is byte-identical for ordered input. With those
+    /// fixed, no production path can reach this throw; it exists so a FOURTH
+    /// such site cannot land silently.
+    ///
+    /// Why throw rather than coerce, if it ever does fire: the store has no way
+    /// to know which of `[767.04, 131.82]` is the wrong number. Swapping the
+    /// bounds MANUFACTURES a coverage claim over audio the prompt may never
+    /// have contained, and since pz32/gqx4 an over-claim can promote an episode
+    /// into a clean TERMINAL state that nothing returns from. Note that
+    /// throwing and dropping leave the SAME database state — no row — so this
+    /// names the anomaly in the log, not in the schema; an asset whose only
+    /// rows were refused reads as
+    /// ``AnalysisCoordinator/AdScanLimit/neverRan``, which is why the
+    /// upstream fix, not this guard, is what preserves the measurement.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT REJECT. A false positive here silently
+    /// loses REAL coverage, which is worse than the bug, so the predicate is
+    /// the narrowest one that still excludes every impossible row:
+    ///   * `windowEndTime == windowStartTime` is LEGAL. The no-work sentinel
+    ///     (`BackfillJobRunner.makeNoWorkSentinelScanResult`) writes a
+    ///     structurally-honest `0.0 … 0.0` when an asset has no segments. Such
+    ///     rows contribute zero seconds to every union, so they cannot inflate
+    ///     anything.
+    ///   * Atom ordinals are NOT checked. `windowFirstAtomOrdinal` /
+    ///     `windowLastAtomOrdinal` are bookkeeping, not geometry — no coverage
+    ///     number divides by them — and `atomOrdinalsJSON` already normalises
+    ///     their order with `min`/`max`.
+    ///   * A window reaching past the episode duration is NOT checked here.
+    ///     That is a DENOMINATOR question, answered where the ratio is taken
+    ///     (``AnalysisCoverageSummary/adScanFraction``), not a claim the row
+    ///     itself can be convicted on.
+    ///
+    /// Non-finite bounds are rejected for the same reason: a `NaN` endpoint
+    /// poisons every downstream comparison, and `AnalysisCoverageMath` already
+    /// has to defend against it on the read side.
+    static func validateSemanticScanWindowGeometry(_ result: SemanticScanResult) throws {
+        guard result.windowStartTime.isFinite, result.windowEndTime.isFinite else {
+            throw AnalysisStoreError.insertFailed(
+                "\(impossibleWindowGeometryPrefix) non-finite window bounds "
+                + "[\(result.windowStartTime), \(result.windowEndTime)] "
+                + "(asset \(result.analysisAssetId), pass \(result.scanPass), id \(result.id))"
+            )
+        }
+        guard result.windowEndTime >= result.windowStartTime else {
+            throw AnalysisStoreError.insertFailed(
+                "\(impossibleWindowGeometryPrefix) windowEndTime "
+                + "\(result.windowEndTime) < windowStartTime \(result.windowStartTime) "
+                + "(inverted by \(result.windowStartTime - result.windowEndTime)s, "
+                + "asset \(result.analysisAssetId), pass \(result.scanPass), "
+                + "status \(result.status.rawValue), id \(result.id))"
+            )
+        }
+    }
+
     func insertSemanticScanResult(_ result: SemanticScanResult) throws {
         try validateScanCohortJSON(result.scanCohortJSON)
+        try Self.validateSemanticScanWindowGeometry(result)
 
         // Fix #9: length caps on the two free-form blob columns. A runaway
         // error blob (e.g. a malformed model response echoed back verbatim)

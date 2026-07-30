@@ -2306,8 +2306,16 @@ struct FoundationModelClassifier: Sendable {
                     lineRefs: windowSegments.map(\.segmentIndex),
                     prompt: bestPrompt,
                     promptTokenCount: bestTokens,
-                    startTime: windowSegments.first?.startTime ?? 0,
-                    endTime: windowSegments.last?.endTime ?? 0,
+                    // playhead-csbq: order-independent bounds — see
+                    // `BackfillJobRunner.attemptedRange`. `ordered` is sorted by
+                    // `segmentIndex`, which tracks time order only while the
+                    // atom sequence is time-monotone, and on 27 of 30 device
+                    // assets it is not. Taking `first`/`last` produced windows
+                    // that end before they begin; `min`/`max` are byte-identical
+                    // whenever the segments ARE in time order, which is every
+                    // healthy asset.
+                    startTime: windowSegments.map(\.startTime).min() ?? 0,
+                    endTime: windowSegments.map(\.endTime).max() ?? 0,
                     transcriptQuality: aggregateTranscriptQuality(for: windowSegments)
                 )
             )

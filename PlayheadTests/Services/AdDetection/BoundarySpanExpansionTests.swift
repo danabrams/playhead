@@ -452,6 +452,149 @@ struct BoundarySpanExpansionTests {
     }
 }
 
+// MARK: - playhead-csbq: window geometry must survive out-of-order input
+
+/// playhead-csbq. A scan row projects a window onto TWO numbers, and three
+/// producers did that by taking `first`/`last` of an array that was never
+/// sorted by time. On the 2026-07-30 device pull that persisted 6 rows with
+/// `windowEndTime < windowStartTime` (worst −635.2 s), two of them
+/// `status = 'success'` — real verdicts on impossible geometry.
+///
+/// The two mechanisms, both reproduced here:
+///   * `mergeSpans` APPENDS an expansion span that overlaps nothing, so an
+///     outward expansion widening LEFTWARD lands at the tail of `spans`.
+///     `spans.first.startTime` is then read from a LATER span than
+///     `spans.last.endTime`. Device row `scan-2a8101dca1638d10` (1978.86 →
+///     1933.02) has spans ordered `[107…108]`, `[105…105]`.
+///   * `attemptedRange` / `planPassA` order segments by `segmentIndex`, which
+///     equals time order only while the atom sequence is time-monotone. It is
+///     not: atom ordinals come from `TranscriptAtomizer.atomize`, which orders
+///     by `chunkIndex`, and 27 of 30 device assets have a backward step there.
+@Suite("Scan window geometry (playhead-csbq)")
+struct ScanWindowGeometryTests {
+
+    /// End to end through the real runner: a leftward expansion must persist a
+    /// window that begins before it ends. Before the fix this row inverted, and
+    /// the store's geometry guard then aborted the whole job — taking the
+    /// refinement pass, its evidence events and the truncation telemetry with
+    /// it.
+    @Test("a leftward outward expansion persists valid window geometry")
+    func leftwardExpansionPersistsValidGeometry() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeExpansionAsset(id: "asset-expansion-leftward"))
+
+        // Same shape as `pathologicalExpansionTruncates`: the base plan sits at
+        // [15..19] and every reply touches the current lower boundary, so each
+        // expansion adds segments BELOW — appending earlier spans to the tail.
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [15], certainty: .strong)
+                )
+            ],
+            refinementResponses: [
+                makeBoundarySpanSchema(firstLineRef: 15, lastLineRef: 16),
+                makeBoundarySpanSchema(firstLineRef: 10, lastLineRef: 11),
+                makeBoundarySpanSchema(firstLineRef: 5, lastLineRef: 6),
+                makeBoundarySpanSchema(firstLineRef: 0, lastLineRef: 1)
+            ],
+            contextSize: 65_536
+        )
+        let runner = makeExpansionRunner(store: store, runtime: fmRuntime.runtime)
+        _ = try await runner.runPendingBackfill(
+            for: makeExpansionInputs(id: "asset-expansion-leftward", segmentCount: 40)
+        )
+
+        let rows = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-expansion-leftward"
+        )
+        // The pass must have got far enough to write rows at all — a job that
+        // aborted on a rejected insert would leave none, which is exactly the
+        // regression this pins.
+        #expect(!rows.isEmpty)
+        for row in rows {
+            #expect(
+                row.windowEndTime >= row.windowStartTime,
+                "\(row.scanPass) row \(row.id) inverted: \(row.windowStartTime) → \(row.windowEndTime)"
+            )
+        }
+        // And the refinement row must actually span the expanded extent rather
+        // than collapsing — the leftward spans are the point.
+        let passB = rows.filter { $0.scanPass == "passB" }
+        #expect(!passB.isEmpty)
+        #expect(passB.allSatisfy { $0.windowEndTime > $0.windowStartTime })
+    }
+
+    /// `planPassA` with segments whose `segmentIndex` order does NOT match time
+    /// order — the device shape. Every plan must still describe a window that
+    /// begins before it ends.
+    @Test("planPassA never emits an inverted window on time-disordered segments")
+    func planPassAHandlesDisorderedSegments() async throws {
+        // segmentIndex 0…5 but times jumping backwards, mirroring the
+        // chunkIndex-vs-time disorder measured on 27 of 30 device assets.
+        let disordered = makeFMSegments(
+            analysisAssetId: "asset-disordered",
+            transcriptVersion: "tx-disordered",
+            lines: [
+                (start: 330.0, end: 340.0, text: "Segment written late but indexed first."),
+                (start: 15.18, end: 25.0, text: "Segment written early but indexed second."),
+                (start: 767.04, end: 777.0, text: "A much later segment."),
+                (start: 131.82, end: 141.0, text: "An earlier segment after it."),
+                (start: 1978.86, end: 1988.0, text: "The far tail of the episode."),
+                (start: 1933.02, end: 1943.0, text: "Slightly before the tail.")
+            ]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: TestFMRuntime(contextSize: 65_536).runtime
+        )
+
+        let plans = try await classifier.planPassA(segments: disordered)
+        #expect(!plans.isEmpty)
+        for plan in plans {
+            #expect(
+                plan.endTime >= plan.startTime,
+                "plan \(plan.windowIndex) inverted: \(plan.startTime) → \(plan.endTime)"
+            )
+        }
+        // The bounds must be the true extremes of the segments the plan covers,
+        // not whichever happened to be first and last in index order.
+        for plan in plans {
+            let covered = disordered.filter { plan.lineRefs.contains($0.segmentIndex) }
+            #expect(plan.startTime == covered.map(\.startTime).min())
+            #expect(plan.endTime == covered.map(\.endTime).max())
+        }
+    }
+
+    /// THE NO-OP RAIL. `min`/`max` must be byte-identical to `first`/`last`
+    /// whenever the segments ARE in time order, which is every healthy asset —
+    /// otherwise this "fix" is a silent behaviour change to the scan planner.
+    @Test("time-ordered segments plan byte-identically to before the fix")
+    func planPassAIsUnchangedForOrderedSegments() async throws {
+        let ordered = makeFMSegments(
+            analysisAssetId: "asset-ordered",
+            transcriptVersion: "tx-ordered",
+            lines: (0..<12).map { idx in
+                let start = Double(idx) * 30.0
+                return (start: start, end: start + 30.0, text: "Ordered line \(idx).")
+            }
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: TestFMRuntime(contextSize: 65_536).runtime
+        )
+        let plans = try await classifier.planPassA(segments: ordered)
+        #expect(!plans.isEmpty)
+        for plan in plans {
+            let covered = ordered.filter { plan.lineRefs.contains($0.segmentIndex) }
+            // `first`/`last` — the pre-fix expressions — and `min`/`max` agree.
+            #expect(plan.startTime == covered.first?.startTime)
+            #expect(plan.endTime == covered.last?.endTime)
+            #expect(plan.startTime == covered.map(\.startTime).min())
+            #expect(plan.endTime == covered.map(\.endTime).max())
+        }
+    }
+}
+
 // MARK: - Local fixture helpers
 
 private func makeRefinedSpan(

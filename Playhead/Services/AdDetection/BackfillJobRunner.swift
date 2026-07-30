@@ -2653,7 +2653,13 @@ actor BackfillJobRunner {
              .encodingFailure:
             return true
         case .insertFailed(let message):
+            // playhead-csbq: an impossible scan window (`windowEndTime <
+            // windowStartTime`, or a non-finite bound) is rejected by
+            // `AnalysisStore.validateSemanticScanWindowGeometry`. Retrying
+            // reproduces the same bounds byte for byte, so the retry budget
+            // would be spent proving that — permanent, like `payloadTooLarge`.
             return message.hasPrefix("payloadTooLarge:")
+                || message.hasPrefix(AnalysisStore.impossibleWindowGeometryPrefix)
         case .openFailed, .migrationFailed, .queryFailed,
              .notFound, .duplicateJobId, .invalidStateTransition,
              .staleAdWindowRevision:
@@ -3107,12 +3113,33 @@ actor BackfillJobRunner {
         let windowSegments = inputs.segments.filter { windowLineRefs.contains($0.segmentIndex) }
         let windowStartTime = windowSegments.map(\.startTime).min() ?? 0
         let windowEndTime = windowSegments.map(\.endTime).max() ?? windowStartTime
-        let startTime = windowOutput.spans.first.flatMap { span in
+        // playhead-csbq: MIN/MAX over every span, not `first`/`last`.
+        //
+        // `spans` is not sorted. `sanitize` appends in the model's emission
+        // order and `mergeSpans` APPENDS any expansion span that does not
+        // overlap an existing one — so an outward expansion that widens
+        // LEFTWARD lands at the tail. `spans.first.startTime` was then read
+        // from a LATER span than `spans.last.endTime`, and the row persisted
+        // `start > end`: a window that ends before it begins.
+        //
+        // This is exactly device row `scan-2a8101dca1638d10` (1978.86 →
+        // 1933.02, `status = success`), whose two spans are ordered
+        // `[107…108]` then `[105…105]` — both carrying `certainty: strong`.
+        // The scan genuinely ran and found two real ads; only the projection
+        // to two numbers was wrong. `bd-1my BoundarySpanExpansion`'s
+        // pathological-truncation case reproduces it on synthetic input.
+        //
+        // For a single span, or spans already in ascending order, `min`/`max`
+        // are byte-identical to `first`/`last` — so this is a no-op for every
+        // healthy window and a fix only where the order was never guaranteed.
+        let spanStarts = windowOutput.spans.compactMap { span in
             inputs.segments.first(where: { $0.segmentIndex == span.firstLineRef })?.startTime
-        } ?? windowStartTime
-        let endTime = windowOutput.spans.last.flatMap { span in
+        }
+        let spanEnds = windowOutput.spans.compactMap { span in
             inputs.segments.first(where: { $0.segmentIndex == span.lastLineRef })?.endTime
-        } ?? windowEndTime
+        }
+        let startTime = spanStarts.min() ?? windowStartTime
+        let endTime = spanEnds.max() ?? windowEndTime
         return SemanticScanResult(
             // H-3: deterministic id (see makeScanResult for the full
             // note). C-R3-2: transcriptVersion must be included so rows
@@ -3317,8 +3344,19 @@ actor BackfillJobRunner {
         return AttemptedRange(
             firstAtomOrdinal: first.firstAtomOrdinal,
             lastAtomOrdinal: last.lastAtomOrdinal,
-            startTime: first.startTime,
-            endTime: last.endTime,
+            // playhead-csbq: order-independent bounds. `ordered` is sorted by
+            // `segmentIndex`, which is only the same thing as time order while
+            // the atom sequence is time-monotone — and it is not. Atom
+            // ordinals come from `TranscriptAtomizer.atomize`, which orders by
+            // `chunkIndex`; measured on the 2026-07-30 device pull, 27 of 30
+            // assets have at least one BACKWARD step in start time when their
+            // chunks are read in `chunkIndex` order (worst −1470.8 s), and the
+            // single-pass assets are not re-ordered by
+            // `TranscriptChunkCanonicalizer` at all (it passes them through by
+            // design). `first.startTime … last.endTime` therefore inverted.
+            // `min`/`max` are identical for time-ordered input.
+            startTime: ordered.map(\.startTime).min() ?? first.startTime,
+            endTime: ordered.map(\.endTime).max() ?? last.endTime,
             transcriptQuality: aggregateTranscriptQuality(for: ordered)
         )
     }

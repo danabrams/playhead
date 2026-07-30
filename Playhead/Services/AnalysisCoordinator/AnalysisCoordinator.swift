@@ -2746,6 +2746,99 @@ actor AnalysisCoordinator {
         return fractionIsMeasurable ? .stoppedShort : .unmeasurableDuration
     }
 
+    /// playhead-csbq: stable token recorded inside
+    /// `analysis_assets.terminalReason` when a coverage RATIO could not be
+    /// trusted, so a diagnostics capture can separate it from a genuine
+    /// shortfall without a device attached. Same contract as
+    /// ``AnalysisCoordinator/AdScanLimit`` — an unnamed absence is
+    /// indistinguishable from every other absence.
+    enum CoverageDenominatorFault: String, Sendable {
+        /// The declared `episodeDurationSec` is contradicted by an artifact
+        /// measured against the same audio: a numerator materially larger
+        /// than the denominator means the two describe different audio, and
+        /// no ratio between them is meaningful in either direction.
+        case contradictedDuration = "contradictedDuration"
+    }
+
+    /// playhead-csbq: is a coverage numerator large enough to disprove the
+    /// denominator it would be divided by?
+    ///
+    /// Tolerance is ``AnalysisCoverageSummary/adScanDurationToleranceSec(episodeDurationSec:)``
+    /// — deliberately the SAME rule `adScanFraction` applies, so the three
+    /// coverage terms cannot disagree about how much feed-vs-measured drift is
+    /// normal. Duplicating the threshold here with its own constant is exactly
+    /// the "two numbers for one quantity" mistake this bead is about.
+    ///
+    /// Returns `nil` when the pair is usable (including when the denominator is
+    /// non-positive or non-finite — that case is already handled, and more
+    /// specifically, by the classifier's own priority-6 guard), otherwise a
+    /// short human-readable description of the disagreement in ABSOLUTE
+    /// SECONDS. Never a ratio: the caller writes this into `terminalReason`,
+    /// which ``parseHighestRatioInTerminalReason`` scans, and echoing the
+    /// quotient that provoked the fault would make the repair sweep
+    /// re-litigate a verdict written precisely because it is untrustworthy.
+    ///
+    /// WHY THIS IS APPLIED AT EXACTLY ONE SITE, and must not be sprinkled on
+    /// the three sibling `covered / episodeDuration` ratios in this file. All
+    /// three test only a 0.95 FLOOR and are unbounded above, which looks like
+    /// the same bug — but none of them is a terminal decision, and guarding two
+    /// of them would do harm:
+    ///   * ``finalizeBackfillVerdict`` has NO production caller. It is
+    ///     referenced only by `PipelineSnapshotTests`.
+    ///   * ``resumeBackfillDecision``'s `.finalize` routes straight into
+    ///     ``classifyBackfillTerminal``, i.e. into this guard, with a freshly
+    ///     resolved duration. Making it `.restart` on a contradicted
+    ///     denominator would force a full re-decode AND skip the adjudication.
+    ///   * ``coverageGuardRecoveryVerdict`` divides by a denominator PARSED OUT
+    ///     OF THE PERSISTED FAILURE STRING, which is a snapshot from failure
+    ///     time. Refusing to recover on it would permanently strand precisely
+    ///     the sessions whose duration the backfill sweep has since repaired —
+    ///     the sweep is the only path that un-fails them. Recovering and
+    ///     letting the guarded classifier re-decide against the CURRENT
+    ///     duration is the correct order.
+    /// One adjudicator, consulted with a fresh denominator. Adding a second
+    /// would be the "two numbers for one quantity" mistake again.
+    ///
+    /// STATUS ON THE 2026-07-30 DEVICE PULL, stated honestly: no asset is
+    /// currently in this state. The two rows quoted above survive only inside
+    /// `[autoRepaired:…]` archive prefixes — `runEpisodeDurationBackfillIfNeeded`
+    /// corrected both denominators and
+    /// ``reconcilePersistedTerminalAssetVerdict`` rewrote both verdicts. So
+    /// this guard is PREVENTION for a fault two mechanisms already repair
+    /// after the fact, not a fix for live corruption. It is worth having
+    /// because pz32/gqx4 turned the terminal into a decision input: repairing
+    /// a clean terminal after an episode has already been presented as ready
+    /// is strictly worse than never minting it.
+    static func contradictedCoverageDenominator(
+        transcriptCoveredSec: Double,
+        featureCoveredSec: Double,
+        episodeDuration: Double
+    ) -> String? {
+        guard episodeDuration.isFinite, episodeDuration > 0 else { return nil }
+        let tolerance = AnalysisCoverageSummary.adScanDurationToleranceSec(
+            episodeDurationSec: episodeDuration
+        )
+        let limit = episodeDuration + tolerance
+        var faults: [String] = []
+        if !transcriptCoveredSec.isFinite || transcriptCoveredSec > limit {
+            faults.append(
+                String(
+                    format: "transcript reaches %.1fs of a declared %.1fs",
+                    transcriptCoveredSec, episodeDuration
+                )
+            )
+        }
+        if !featureCoveredSec.isFinite || featureCoveredSec > limit {
+            faults.append(
+                String(
+                    format: "feature reaches %.1fs of a declared %.1fs",
+                    featureCoveredSec, episodeDuration
+                )
+            )
+        }
+        return faults.isEmpty ? nil : faults.joined(separator: "; ")
+    }
+
     /// playhead-gtt9.8: pure classifier that picks the appropriate
     /// terminal `SessionState` when backfill finishes. Extracted as a
     /// static function so the decision matrix can be unit-tested
@@ -2835,8 +2928,55 @@ actor AnalysisCoordinator {
             )
         }
 
-        let transcriptRatio = coverageEnd / episodeDuration
         let featureSeconds = featureCoverage ?? 0
+
+        // playhead-csbq, priority 6b — a denominator the numerators have
+        // already DISPROVED, handled here for the same reason `<= 0` is: no
+        // ratio taken against it means anything, so none of the branches below
+        // may run. Both ratios are `covered / episodeDuration` and neither had
+        // ever had an UPPER bound — only a 0.95 floor — so a numerator
+        // describing different audio passed as full coverage, which is what
+        // wrote `full coverage: transcript 5.277, feature 5.277` onto a real
+        // asset. (Two later mechanisms repair that row AFTER the fact:
+        // `runEpisodeDurationBackfillIfNeeded` corrects the duration and
+        // `reconcilePersistedTerminalAssetVerdict` rewrites a reason claiming a
+        // ratio above `terminalStateRepairRatioCeiling`. Since pz32/gqx4 made
+        // the terminal a decision input, catching it at the WRITE is worth more
+        // than repairing it later, and this makes the two agree.)
+        //
+        // Placed BEFORE priority 4 deliberately. An inflated `featureRatio`
+        // does not merely mis-report — it RESCUES an asset from the
+        // feature-shortfall arm, which is how device asset D75D7584 escaped
+        // `.failedFeature` while reading `feature 5.110`; at its repaired
+        // denominator the truth is `ratio 0.921 < 0.950`. Letting the guard run
+        // later would convert a retryable feature failure into a completion
+        // terminal the UI renders as inert.
+        //
+        // `.failedTranscript` is this function's OWN established fail-safe for
+        // an unusable denominator (the `<= 0` guard directly above): we cannot
+        // prove coverage, so re-queue rather than mint a terminal. That keeps
+        // the asset actionable and lets it resolve correctly once the
+        // duration-backfill sweep repairs the row.
+        //
+        // The reason deliberately carries ABSOLUTE SECONDS and no ratio.
+        // `parseHighestRatioInTerminalReason` scans this string for
+        // `transcript`/`feature` ratios, so echoing the bogus quotient here
+        // would make the repair sweep re-litigate a verdict written precisely
+        // because that quotient is untrustworthy.
+        if let contradiction = Self.contradictedCoverageDenominator(
+            transcriptCoveredSec: coverageEnd,
+            featureCoveredSec: featureSeconds,
+            episodeDuration: episodeDuration
+        ) {
+            return BackfillTerminalVerdict(
+                state: .failedTranscript,
+                reason: "coverage unmeasurable "
+                    + "(\(CoverageDenominatorFault.contradictedDuration.rawValue)): "
+                    + contradiction
+            )
+        }
+
+        let transcriptRatio = coverageEnd / episodeDuration
         let featureRatio = featureSeconds / episodeDuration
 
         // Priority 4: feature-side shortfall. When the feature pipeline
@@ -2868,6 +3008,10 @@ actor AnalysisCoordinator {
                     )
                 )
             }
+            // playhead-csbq: both ratios reaching here are already known
+            // MEASURABLE — priority 6b above refuses an unusable denominator
+            // before any of these branches can run — so `%.3f` on either of
+            // them is a number the reader can act on.
             return BackfillTerminalVerdict(
                 state: .completeFull,
                 reason: String(

@@ -98,6 +98,16 @@ struct TrainingExampleMaterializer: Sendable {
             // produce empty/garbage training examples that pollute the
             // corpus.
             guard scan.status == .success else { continue }
+            // playhead-csbq: skip rows whose window cannot exist. The write
+            // path now refuses these, but the product owner declined repairing
+            // the ones already on disk — two of the six inverted rows on the
+            // 2026-07-30 device pull carry `status = .success`, so they reach
+            // exactly here. A negative-width example overlaps no `AdWindow`,
+            // inherits no decision attribution, and would be materialised into
+            // the training corpus as a labelled region that does not exist.
+            // The coverage reads (`fetchCoverageSummariesByAssetIds`,
+            // `SemanticScanCoverage.compute`) already apply this same filter.
+            guard scan.windowEndTime > scan.windowStartTime else { continue }
 
             let evidenceForScan = prepared.filter {
                 Self.intervalOverlaps(
