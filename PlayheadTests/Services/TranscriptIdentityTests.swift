@@ -2,6 +2,7 @@
 // Unit tests for Phase 1 transcript identity types: TranscriptAtomizer,
 // TranscriptSegmenter, TranscriptQualityEstimator, and TranscriptChunk migration.
 
+import CryptoKit
 import Foundation
 import SQLite3
 import Testing
@@ -126,8 +127,38 @@ struct TranscriptAtomizerTests {
         #expect(v1.transcriptVersion == v2.transcriptVersion)
     }
 
-    @Test("Atomize sorts by chunkIndex regardless of input order")
+    @Test("Atomize sorts by time regardless of input order")
     func atomizeSortsInput() {
+        // playhead-r5um: this used to be "sorts by chunkIndex", and passed for
+        // the wrong reason — every chunk carried `makeChunk`'s default
+        // 0…5 span, so the comparator never got past the tie. Real, distinct
+        // times now, with chunkIndex DESCENDING against them, so the test
+        // fails if the ordering key regresses to chunkIndex.
+        let chunks = [
+            makeChunk(chunkIndex: 0, startTime: 20, endTime: 30, text: "third"),
+            makeChunk(chunkIndex: 2, startTime: 0, endTime: 10, text: "first"),
+            makeChunk(chunkIndex: 1, startTime: 10, endTime: 20, text: "second"),
+        ]
+
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: chunks, analysisAssetId: "a", normalizationHash: "n", sourceHash: "s"
+        )
+
+        #expect(atoms.map(\.text) == ["first", "second", "third"])
+        #expect(atoms.map(\.startTime) == [0, 10, 20])
+        // The persisted chunkIndex rides along untouched — it is diagnostic,
+        // not the ordering key, and it is not the atom ordinal either.
+        #expect(atoms.map(\.chunkIndex) == [2, 1, 0])
+        #expect(atoms.map(\.atomKey.atomOrdinal) == [0, 1, 2])
+    }
+
+    @Test("chunkIndex breaks ties only when the spans are identical")
+    func atomizeUsesChunkIndexOnlyAsTiebreak() {
+        // Same span, different chunkIndex ⇒ chunkIndex decides. This is the
+        // behavior the old `atomizeSortsInput` was actually exercising, kept
+        // deliberately: several sibling tests in this suite lean on it (they
+        // all use the default 0…5 span), and without it the comparator would
+        // fall through to a random UUID and make them flaky.
         let chunks = [
             makeChunk(chunkIndex: 2, text: "third"),
             makeChunk(chunkIndex: 0, text: "first"),
@@ -138,9 +169,7 @@ struct TranscriptAtomizerTests {
             chunks: chunks, analysisAssetId: "a", normalizationHash: "n", sourceHash: "s"
         )
 
-        #expect(atoms[0].text == "first")
-        #expect(atoms[1].text == "second")
-        #expect(atoms[2].text == "third")
+        #expect(atoms.map(\.text) == ["first", "second", "third"])
     }
 
     @Test("Atomize empty chunks returns empty")
@@ -213,6 +242,339 @@ struct TranscriptAtomizerTests {
         #expect(atoms.count == 1)
         #expect(atoms[0].atomKey.atomOrdinal == 0)
         #expect(!version.transcriptVersion.isEmpty)
+    }
+}
+
+// MARK: - Atom time-order regression (playhead-r5um)
+
+/// Device-shape regression for playhead-r5um: `TranscriptAtomizer.atomize`
+/// ordered atoms by `chunkIndex`, which is not time order.
+///
+/// ROOT CAUSE, for anyone reading a failure here. `chunkIndex` comes from
+/// `TranscriptEngineService.chunkCounter`, an in-memory counter incremented in
+/// shard EMISSION order — and `prioritizeShards` emits by playhead proximity
+/// (`shard0 + hotPath + coldAhead + behindWithoutShard0`, that last group
+/// DESCENDING), not by time. The counter also resets to 0 on every engine
+/// stop or asset switch, so one asset carries several rows numbered 0, 1, 2…
+/// So `chunkIndex` is monotone in the order audio was TRANSCRIBED and has
+/// never been monotone in the order audio is HEARD. `playhead-0sro` recorded
+/// exactly this property when it made the coverage watermark monotonic; the
+/// atom sequence was the second consumer to read the counter as a clock.
+///
+/// The fixtures below are verbatim `(chunkIndex, startTime, endTime, pass)`
+/// tuples from the 2026-07-30 device pull, in `rowid` order. Text is
+/// synthetic: ordering is what is under test, and readable labels make a
+/// failure diagnosable.
+@Suite("TranscriptAtom time order (playhead-r5um)")
+struct TranscriptAtomTimeOrderTests {
+
+    // MARK: - Helpers
+
+    /// The pre-r5um atom order: ascending `chunkIndex`, ties left in the order
+    /// SQLite returned the rows (`rowid`, i.e. insertion). Reproduced locally
+    /// because production can no longer produce it — which is the point.
+    private func legacyChunkIndexOrder(_ chunks: [TranscriptChunk]) -> [TranscriptChunk] {
+        chunks.enumerated()
+            .sorted { lhs, rhs in
+                lhs.element.chunkIndex == rhs.element.chunkIndex
+                    ? lhs.offset < rhs.offset
+                    : lhs.element.chunkIndex < rhs.element.chunkIndex
+            }
+            .map(\.element)
+    }
+
+    /// Most negative step between consecutive start times; 0 when monotone.
+    private func worstBackwardStep(_ starts: [Double]) -> Double {
+        guard starts.count > 1 else { return 0 }
+        return min(0, (1..<starts.count).map { starts[$0] - starts[$0 - 1] }.min() ?? 0)
+    }
+
+    private func atomize(_ chunks: [TranscriptChunk], asset: String = "asset-r5um")
+        -> (atoms: [TranscriptAtom], version: TranscriptVersion) {
+        TranscriptAtomizer.atomize(
+            chunks: chunks,
+            analysisAssetId: asset,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+    }
+
+    private func row(
+        _ id: String,
+        _ index: Int,
+        _ start: Double,
+        _ end: Double,
+        _ pass: String
+    ) -> TranscriptChunk {
+        makeChunk(
+            id: id,
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "t=\(start)",
+            pass: pass
+        )
+    }
+
+    // MARK: - Fixtures
+
+    /// Asset `8FECFDDE-BA12-4635-B1FC-4D7B775CCDF0` — MIXED fast/final, the
+    /// worst backward step on the pull. Three rows are numbered `chunkIndex 0`:
+    /// two byte-identical `(0.42, 1.08, fast)` rows (a duplicated child row,
+    /// the playhead-6av0 family — same `segmentFingerprint`, distinct ids) and
+    /// one at `(3540.0, 3540.42, fast)`, written after the counter restarted.
+    /// The episode runs ~59 minutes, so reading this in `chunkIndex` order put
+    /// its final 30 seconds at ordinal 2.
+    private func mixedDeviceAsset() -> [TranscriptChunk] {
+        [
+            row("BD93A7C2", 0, 0.42, 1.08, "fast"),
+            row("26155B83", 0, 0.42, 1.08, "fast"),
+            row("66D39949", 0, 3540.00, 3540.42, "fast"),
+            row("4E8791B8", 1, 1.08, 1.62, "fast"),
+            row("34143C8D", 1, 1.08, 1.62, "fast"),
+            row("BC1033EA", 1, 3540.42, 3540.72, "fast"),
+            row("02EE7877", 2, 1.62, 2.16, "fast"),
+            row("30641497", 2, 1.62, 2.16, "fast"),
+            row("BD5DEB31", 2, 3540.78, 3540.90, "fast"),
+            row("45ABD5D2", 3, 2.16, 3.36, "fast"),
+            row("32022A12", 3, 2.16, 3.36, "fast"),
+            row("13DDECE5", 3, 3540.90, 3541.14, "fast"),
+            // The final pass re-transcribed [3538.62, 3539.16] and was
+            // persisted far above every fast index, per
+            // `FinalPassRetranscriptionRunner.nextFinalChunkIndex`.
+            row("3709FAST", 3709, 3538.62, 3539.16, "fast"),
+            row("3954FINL", 3954, 3538.62, 3539.16, "final"),
+        ]
+    }
+
+    /// Asset `594732D7-012F-45ED-98B8-655F943173C8` — SINGLE-PASS (all
+    /// `final`), and therefore the case `TranscriptChunkCanonicalizer` passes
+    /// through untouched by design. Three transcription sessions each restarted
+    /// the counter at 0, so every `chunkIndex` names three unrelated moments —
+    /// ~2.6 s, ~270 s and ~1470 s into the episode. Chunk indices 4–7 are
+    /// elided; they continue the same three-way interleave.
+    private func singlePassDeviceAsset() -> [TranscriptChunk] {
+        [
+            row("50257", 0, 2.64, 3.30, "final"),
+            row("52158", 0, 270.30, 270.72, "final"),
+            row("53613", 0, 1470.48, 1471.98, "final"),
+            row("50258", 1, 3.30, 4.50, "final"),
+            row("52159", 1, 270.72, 270.78, "final"),
+            row("53614", 1, 1471.98, 1472.46, "final"),
+            row("50259", 2, 4.50, 6.78, "final"),
+            row("52160", 2, 270.78, 270.84, "final"),
+            row("53615", 2, 1472.46, 1477.98, "final"),
+            row("50260", 3, 6.84, 12.30, "final"),
+            row("52161", 3, 270.84, 271.02, "final"),
+            row("53616", 3, 1477.98, 1479.48, "final"),
+            row("50265", 8, 15.66, 16.50, "final"),
+            row("52166", 8, 274.02, 274.32, "final"),
+            row("53621", 8, 1486.68, 1487.64, "final"),
+            row("50266", 9, 16.50, 16.86, "final"),
+            row("52167", 9, 274.32, 274.56, "final"),
+            row("53622", 9, 1487.64, 1488.30, "final"),
+            row("50267", 10, 16.86, 17.34, "final"),
+            row("52168", 10, 274.56, 274.86, "final"),
+            row("53623", 10, 1488.30, 1488.72, "final"),
+        ]
+    }
+
+    // MARK: - 1. The mixed-pass device shape (worst jump on the pull)
+
+    @Test("mixed-pass device asset: the -3538.9 s backward jump is gone")
+    func mixedDeviceAssetIsTimeOrdered() {
+        let chunks = mixedDeviceAsset()
+
+        // The fixture really does carry the device defect. Without this the
+        // test could pass over a shape that was never broken.
+        let legacyStarts = legacyChunkIndexOrder(chunks).map(\.startTime)
+        #expect(abs(worstBackwardStep(legacyStarts) - (-3538.92)) < 0.005)
+
+        let (atoms, _) = atomize(chunks)
+
+        #expect(atoms.count == chunks.count)
+        #expect(worstBackwardStep(atoms.map(\.startTime)) == 0)
+        #expect(atoms.map(\.atomKey.atomOrdinal) == Array(0..<chunks.count))
+
+        // Specifically: the episode's tail no longer sits at the head. Under
+        // the old order the t=3540 s row was atom ordinal 2 of 14.
+        let tailOrdinal = try? #require(
+            atoms.first { $0.startTime == 3540.00 }?.atomKey.atomOrdinal
+        )
+        #expect(tailOrdinal == 10)
+    }
+
+    // MARK: - 2. The single-pass device shape (the unprotected case)
+
+    @Test("single-pass device asset: canonicalizer passes it through, atomize orders it")
+    func singlePassDeviceAssetIsTimeOrdered() {
+        let chunks = singlePassDeviceAsset()
+
+        // This is genuinely the unprotected shape: hc7e returns single-pass
+        // input verbatim, so nothing upstream of `atomize` reorders it. If
+        // this stops being a passthrough the test below proves nothing.
+        let canonical = TranscriptChunkCanonicalizer.canonicalize(chunks)
+        #expect(canonical.diagnostics.isPassthrough)
+        #expect(canonical.chunks.map(\.id) == chunks.map(\.id))
+
+        let legacyStarts = legacyChunkIndexOrder(canonical.chunks).map(\.startTime)
+        #expect(abs(worstBackwardStep(legacyStarts) - (-1470.78)) < 0.005)
+
+        let (atoms, _) = atomize(canonical.chunks)
+
+        #expect(atoms.count == chunks.count)
+        #expect(worstBackwardStep(atoms.map(\.startTime)) == 0)
+        // The three interleaved sessions are separated back out: everything
+        // from the ~2.6 s session precedes the ~270 s one precedes the
+        // ~1470 s one.
+        #expect(atoms.map(\.startTime) == chunks.map(\.startTime).sorted())
+    }
+
+    // MARK: - 3. The no-op rail
+
+    @Test("already-ordered input is returned byte-identically, hash included")
+    func alreadyOrderedInputIsUnchanged() {
+        // Ordinary well-behaved transcript: contiguous, ascending, chunkIndex
+        // in lockstep with time. Nothing about it may move.
+        let ordered = (0..<8).map { i in
+            row("row-\(i)", i, Double(i) * 30, Double(i) * 30 + 30, "fast")
+        }
+
+        let (atoms, version) = atomize(ordered)
+
+        #expect(atoms.map(\.text) == ordered.map(\.text))
+        #expect(atoms.map(\.startTime) == ordered.map(\.startTime))
+        #expect(atoms.map(\.endTime) == ordered.map(\.endTime))
+        #expect(atoms.map(\.chunkIndex) == ordered.map(\.chunkIndex))
+        #expect(atoms.map(\.atomKey.atomOrdinal) == Array(0..<ordered.count))
+
+        // And the HASH is unchanged, not merely the sequence. Recomputed here
+        // from the atomizer's documented recipe — length-prefixed
+        // `normalizedText`, SHA-256, first 16 bytes hex — over the INPUT
+        // order. r5um moved the ordering key and nothing else; if the digest
+        // recipe ever changes, every persisted `transcriptVersion` silently
+        // re-keys and this is the tripwire.
+        var hasher = SHA256()
+        for chunk in ordered {
+            let textData = Data(chunk.normalizedText.utf8)
+            withUnsafeBytes(of: UInt32(textData.count).bigEndian) {
+                hasher.update(bufferPointer: $0)
+            }
+            hasher.update(data: textData)
+        }
+        let expected = hasher.finalize().prefix(16).map { String(format: "%02x", $0) }.joined()
+        #expect(version.transcriptVersion == expected)
+    }
+
+    // MARK: - 4. Determinism where chunkIndex collides
+
+    @Test("colliding chunkIndex still yields one deterministic atom sequence")
+    func collidingChunkIndexIsDeterministic() {
+        // 21 of 30 device assets carry duplicate chunkIndex values; the old
+        // comparator (`chunkIndex` alone) left those ties unresolved, and
+        // `Array.sorted(by:)` is not guaranteed stable — so the atom sequence,
+        // and therefore `transcriptVersion`, was undefined for them.
+        let chunks = mixedDeviceAsset()
+        let (baseAtoms, baseVersion) = atomize(chunks)
+
+        for permutation in [Array(chunks.reversed()), chunks.shuffled(), chunks.shuffled()] {
+            let (atoms, version) = atomize(permutation)
+            #expect(atoms.map(\.text) == baseAtoms.map(\.text))
+            #expect(atoms.map(\.startTime) == baseAtoms.map(\.startTime))
+            #expect(version.transcriptVersion == baseVersion.transcriptVersion)
+        }
+
+        // The tie that forces it: two rows share chunkIndex 0 AND the exact
+        // span (0.42, 1.08). Only the `id` tiebreak separates them, and it
+        // must separate them the same way every time.
+        let head = baseAtoms.prefix(2)
+        #expect(head.allSatisfy { $0.startTime == 0.42 })
+        #expect(head.map(\.chunkIndex) == [0, 0])
+    }
+
+    @Test("the id tiebreak decides rows that tie on span, pass AND chunkIndex")
+    func idTiebreakResolvesOtherwiseIdenticalKeys() {
+        // The device's two rows at (0.42, 1.08, fast, chunkIndex 0) are byte
+        // duplicates, so their relative order is unobservable and a missing
+        // tiebreak would hide there. It does not hide here: a re-transcription
+        // that restarted the counter can re-emit the SAME span with DIFFERENT
+        // text (DAI rotates the ad in that slot between fetches — device asset
+        // C25FF8CF has "T. Rowe Price" and "Borgata" both covering [0,30]).
+        // Then the tie is on span, pass and chunkIndex, the texts differ, and
+        // an unresolved tie makes `transcriptVersion` depend on row arrival
+        // order.
+        let tied = [
+            makeChunk(id: "bbb", chunkIndex: 0, startTime: 0, endTime: 30,
+                      text: "borgata online", pass: "fast"),
+            makeChunk(id: "aaa", chunkIndex: 0, startTime: 0, endTime: 30,
+                      text: "t rowe price", pass: "fast"),
+        ]
+
+        let (atoms, version) = atomize(tied)
+        #expect(atoms.map(\.text) == ["t rowe price", "borgata online"])
+
+        let (reversedAtoms, reversedVersion) = atomize(Array(tied.reversed()))
+        #expect(reversedAtoms.map(\.text) == atoms.map(\.text))
+        #expect(reversedVersion.transcriptVersion == version.transcriptVersion)
+    }
+
+    // MARK: - 5. Segment/discourse spans cannot invert
+
+    @Test("segment and discourse-unit bounds are min/max, not first/last")
+    func spanProjectionsCannotInvert() {
+        // The real csbq device span pair, in the order the model emitted it:
+        // `first`/`last` reported 1978.86 -> 1934.00, a window ending 45 s
+        // before it begins, and that reached `semantic_scan_results` with
+        // status `success`.
+        let inverted = [
+            makeAtom(ordinal: 0, startTime: 1978.86, endTime: 1979.00, text: "later"),
+            makeAtom(ordinal: 1, startTime: 1933.02, endTime: 1934.00, text: "earlier"),
+        ]
+        let segment = AdTranscriptSegment(atoms: inverted, segmentIndex: 0)
+        #expect(segment.startTime == 1933.02)
+        #expect(segment.endTime == 1979.00)
+        #expect(segment.duration >= 0)
+        #expect(DiscourseUnit(ref: "S0", atoms: inverted).duration >= 0)
+
+        // NESTING, which the canonicalizer reaches by design: it retains a
+        // fast chunk that only partially overlaps a final interval, so a long
+        // atom can be followed by a short one. `atoms.last.endTime` would
+        // understate the span by 38 s even though the atoms ARE time-ordered.
+        let nested = [
+            makeAtom(ordinal: 0, startTime: 10, endTime: 50, text: "long final"),
+            makeAtom(ordinal: 1, startTime: 11, endTime: 12, text: "short fast"),
+        ]
+        #expect(AdTranscriptSegment(atoms: nested, segmentIndex: 0).endTime == 50)
+        #expect(DiscourseUnit(ref: "S0", atoms: nested).endTime == 50)
+
+        // NO-OP RAIL: for ordinary non-overlapping time-ordered atoms, min/max
+        // must be byte-identical to first/last.
+        let tidy = (0..<5).map { i in
+            makeAtom(ordinal: i, startTime: Double(i) * 10, endTime: Double(i) * 10 + 9)
+        }
+        let tidySegment = AdTranscriptSegment(atoms: tidy, segmentIndex: 0)
+        #expect(tidySegment.startTime == tidy.first?.startTime)
+        #expect(tidySegment.endTime == tidy.last?.endTime)
+        let tidyUnit = DiscourseUnit(ref: "S0", atoms: tidy)
+        #expect(tidyUnit.startTime == tidy.first?.startTime)
+        #expect(tidyUnit.endTime == tidy.last?.endTime)
+    }
+
+    @Test("segmenting the device shape yields forward, non-inverted segments")
+    func segmentingDeviceShapeStaysForward() {
+        let (atoms, _) = atomize(singlePassDeviceAsset())
+        let segments = TranscriptSegmenter.segment(atoms: atoms)
+
+        #expect(segments.isEmpty == false)
+        // Every segment has non-negative width...
+        #expect(segments.allSatisfy { $0.endTime >= $0.startTime })
+        // ...and segments run forwards, so a scan window built as the hull of
+        // a segment range claims only audio its prompt contained.
+        let starts = segments.map(\.startTime)
+        #expect(worstBackwardStep(starts) == 0)
+        // Every atom still appears exactly once, in order.
+        #expect(segments.flatMap { $0.atoms }.map(\.atomKey.atomOrdinal)
+            == Array(0..<atoms.count))
     }
 }
 

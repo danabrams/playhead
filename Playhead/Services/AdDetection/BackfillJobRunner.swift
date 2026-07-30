@@ -3346,15 +3346,20 @@ actor BackfillJobRunner {
             lastAtomOrdinal: last.lastAtomOrdinal,
             // playhead-csbq: order-independent bounds. `ordered` is sorted by
             // `segmentIndex`, which is only the same thing as time order while
-            // the atom sequence is time-monotone — and it is not. Atom
-            // ordinals come from `TranscriptAtomizer.atomize`, which orders by
+            // the atom sequence is time-monotone. It was not: atom ordinals
+            // come from `TranscriptAtomizer.atomize`, which ordered by
             // `chunkIndex`; measured on the 2026-07-30 device pull, 27 of 30
-            // assets have at least one BACKWARD step in start time when their
-            // chunks are read in `chunkIndex` order (worst −1470.8 s), and the
-            // single-pass assets are not re-ordered by
-            // `TranscriptChunkCanonicalizer` at all (it passes them through by
-            // design). `first.startTime … last.endTime` therefore inverted.
-            // `min`/`max` are identical for time-ordered input.
+            // assets had at least one BACKWARD step in start time when their
+            // chunks were read in `chunkIndex` order (worst −3538.9 s), and
+            // `TranscriptChunkCanonicalizer` re-ordered only the mixed-pass
+            // path. `first.startTime … last.endTime` therefore inverted.
+            //
+            // playhead-r5um has since made `atomize` order by TIME on every
+            // path, so the upstream cause is gone and these bounds are now
+            // belt-and-braces against a fourth producer regressing. Keep them:
+            // `min`/`max` are byte-identical for time-ordered input, so they
+            // cost nothing, and this is the site that has already been wrong
+            // once.
             startTime: ordered.map(\.startTime).min() ?? first.startTime,
             endTime: ordered.map(\.endTime).max() ?? last.endTime,
             transcriptQuality: aggregateTranscriptQuality(for: ordered)

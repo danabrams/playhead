@@ -153,16 +153,23 @@ final class LiveTranscriptPeekDataSource: TranscriptPeekDataSource {
             // overlap retains the fast row so display coverage is never lost.
             let canonical = TranscriptChunkCanonicalizer.canonicalize(freshChunks)
 
-            // playhead-r5um: ONE ordering authority for both shapes. The
-            // mixed path already emits this exact order, so sorting it again
-            // is idempotent; the single-pass path previously sorted on
-            // `startTime` ALONE, which is not a total order — and
-            // `sorted(by:)` is not guaranteed stable — so rows sharing a start
-            // time could shuffle between refreshes. Persisted row identity and
-            // `chunkIndex` are untouched either way; the view keys highlights
-            // off the array position, not off `chunkIndex`.
-            let displayChunks = canonical.chunks
-                .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
+            // Mixed-pass canonicalization already emits a deterministic
+            // time-ordered array. Preserve the data source's established
+            // start-time display ordering for single-pass snapshots; the
+            // passthrough path preserves every persisted row identity/index.
+            //
+            // playhead-r5um deliberately did NOT route this through
+            // `canonicalTimeOrder`. This is the DISPLAY lane — no atom, prompt
+            // or scan-window geometry is derived from it — and playhead-kcz.1
+            // pinned the equal-start order to the persisted row order, which
+            // `canonicalTimeOrder`'s `endTime` tiebreak would flip. Changing
+            // what the reader sees is a product decision, not part of fixing
+            // the atom sequence. The residual: `startTime` alone is not a
+            // total order, so equal-start rows rely on `sorted(by:)` being
+            // stable in practice, which it is not guaranteed to be.
+            let displayChunks = canonical.diagnostics.isPassthrough
+                ? canonical.chunks.sorted { $0.startTime < $1.startTime }
+                : canonical.chunks
 
             // Asset coverage + session state (best-effort; treat as
             // optional so partial failures don't blow away the
