@@ -61,8 +61,11 @@ FROM (SELECT (SELECT 100.0*max(s.windowEndTime)/a.episodeDurationSec
       FROM analysis_assets a WHERE a.episodeDurationSec > $MIN_DURATION);"
 
 echo
-echo "=== terminal states that under-scanned (playhead-gqx4) ==="
-echo "An asset here was declared finished and will never be revisited."
+echo "=== CLEAN terminals that under-scanned (playhead-gqx4) ==="
+echo "An asset here claims a full analysis it did not perform."
+echo "AFTER the gqx4 fix this set should be EMPTY for newly-analysed episodes:"
+echo "the clean terminal now requires measured ad-scan coverage. Rows that"
+echo "predate the fix are left terminal deliberately and still show up here."
 sqlite3 -header -column "$DB" "
 SELECT substr(a.id,1,8) AS asset,
        round(a.episodeDurationSec) AS dur,
@@ -70,13 +73,30 @@ SELECT substr(a.id,1,8) AS asset,
                     WHERE s.analysisAssetId=a.id)/a.episodeDurationSec) AS scanPct,
        a.terminalReason
 FROM analysis_assets a
-WHERE a.analysisState='completeFull'
+WHERE a.analysisState IN ('completeFull','complete')
   AND coalesce((SELECT 100.0*max(s.windowEndTime)/a.episodeDurationSec
                 FROM semantic_scan_results s WHERE s.analysisAssetId=a.id), 0) < 95
 ORDER BY scanPct;"
 
 echo
-echo "=== stalled: transcript complete, scan incomplete, not terminal (playhead-i7qe) ==="
+echo "=== HONEST degraded terminals (playhead-gqx4, post-fix) ==="
+echo "The fix's own output. A growing set here is the fix working, not a"
+echo "regression — these rows used to be indistinguishable from a full"
+echo "analysis. terminalReason carries the AdScanLimit cause token."
+sqlite3 -header -column "$DB" "
+SELECT substr(a.id,1,8) AS asset,
+       round(a.episodeDurationSec) AS dur,
+       round(100.0*(SELECT max(s.windowEndTime) FROM semantic_scan_results s
+                    WHERE s.analysisAssetId=a.id)/a.episodeDurationSec) AS scanPct,
+       a.terminalReason
+FROM analysis_assets a
+WHERE a.analysisState = 'completeAdScanPartial'
+ORDER BY scanPct;"
+
+echo
+echo "=== stalled: transcript complete, scan incomplete, NOT terminal (playhead-i7qe) ==="
+echo "Non-terminal only — a degraded terminal is a different (honest) state"
+echo "and is listed in its own section above."
 sqlite3 -header -column "$DB" "
 SELECT substr(a.id,1,8) AS asset,
        round(a.episodeDurationSec) AS dur,
@@ -85,7 +105,10 @@ SELECT substr(a.id,1,8) AS asset,
        a.analysisState AS state
 FROM analysis_assets a
 WHERE a.fastTranscriptCoverageEndTime >= 0.98*a.episodeDurationSec
-  AND a.analysisState <> 'completeFull'
+  AND a.analysisState NOT IN (
+        'complete', 'completeFull', 'completeFeatureOnly',
+        'completeTranscriptPartial', 'completeAdScanPartial'
+      )
   AND coalesce((SELECT 100.0*max(s.windowEndTime)/a.episodeDurationSec
                 FROM semantic_scan_results s WHERE s.analysisAssetId=a.id), 0) < 95
 ORDER BY dur DESC;"

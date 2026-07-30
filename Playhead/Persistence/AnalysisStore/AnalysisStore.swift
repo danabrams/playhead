@@ -15758,6 +15758,47 @@ actor AnalysisStore {
         return try readSemanticScanResult(stmt)
     }
 
+    /// playhead-gqx4: the `status` column alone for one asset's rows on one
+    /// scan pass, decoded LENIENTLY — an unrecognised persisted string arrives
+    /// as `nil` rather than throwing.
+    ///
+    /// Deliberately not ``fetchSemanticScanResults(analysisAssetId:scanPass:)``.
+    /// That one decodes whole rows through the strict `readSemanticScanResult`,
+    /// which throws on any unrecognised `status` / `transcriptQuality` /
+    /// `disposition` or a NULL `spansJSON`. A single such row — written by a
+    /// newer build, a future enum case, a partial write — would abort the whole
+    /// call, and a caller that only wanted to know "did anything refuse?" would
+    /// lose the answer for the entire asset.
+    ///
+    /// That matters because the caller is the terminal classifier, whose other
+    /// input (``AnalysisCoverageSummary/adScanFraction``) is derived by a read
+    /// that is ALREADY lenient the same way
+    /// (``fetchCoverageSummariesByAssetIds(_:)`` maps unknown statuses to `nil`
+    /// and treats them as not-examined). Two reads of the same table
+    /// disagreeing about strictness is how a cosmetic field ends up vetoing a
+    /// load-bearing one.
+    ///
+    /// Hits `idx_semantic_scan_results_asset_pass`.
+    func fetchSemanticScanStatuses(
+        analysisAssetId: String,
+        scanPass: String
+    ) throws -> [SemanticScanStatus?] {
+        let stmt = try prepare(
+            """
+            SELECT status FROM semantic_scan_results
+            WHERE analysisAssetId = ? AND scanPass = ?
+            """
+        )
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, scanPass)
+        var statuses: [SemanticScanStatus?] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            statuses.append(SemanticScanStatus(rawValue: text(stmt, 0)))
+        }
+        return statuses
+    }
+
     func fetchSemanticScanResults(
         analysisAssetId: String,
         scanPass: String? = nil
@@ -18013,7 +18054,13 @@ actor AnalysisStore {
                     a.confirmedAdCoverageEndTime IS NOT NULL
                  OR a.analysisState IN (
                         'complete', 'completeFull',
-                        'completeFeatureOnly', 'completeTranscriptPartial'
+                        'completeFeatureOnly', 'completeTranscriptPartial',
+                        -- playhead-gqx4: same admission rationale as its
+                        -- siblings — reached only by transitioning OUT of
+                        -- `.backfill`, so the ad pipeline has run over the
+                        -- transcribed range. Omitting it would silently deny
+                        -- summaries to the commonest real-hardware terminal.
+                        'completeAdScanPartial'
                     )
               )
               AND (

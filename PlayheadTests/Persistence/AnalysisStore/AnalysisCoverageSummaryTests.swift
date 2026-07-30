@@ -1848,6 +1848,62 @@ struct AnalysisStoreAdScanCoverageTests {
         )
     }
 
+    // MARK: - playhead-gqx4: the narrow, lenient status projection
+
+    /// `fetchSemanticScanStatuses` is the read the terminal classifier uses to
+    /// name WHY a scan is short. It must return only the requested pass, and it
+    /// must be a narrow `SELECT status` — not a whole-row decode.
+    ///
+    /// The narrowness is the point. `fetchSemanticScanResults` decodes full rows
+    /// through a strict reader that throws on any unrecognised
+    /// `status`/`transcriptQuality`/`disposition`, so ONE row from a newer build
+    /// would abort the call for the whole asset. Since the fraction read
+    /// (`fetchCoverageSummariesByAssetIds`) is already lenient in exactly this
+    /// way, a strict second read of the same table would let a cosmetic term
+    /// veto the load-bearing one.
+    @Test("coverage-lane status projection returns only that pass's statuses")
+    func scanStatusProjectionIsPassScoped() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-statuses", episodeDurationSec: 1000))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-statuses", index: 0, start: 0, end: 100, status: .success)
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-statuses", index: 1, start: 100, end: 200, status: .refusal)
+        )
+        // A passB row must not contribute — the coverage lane is passA, and
+        // passB rows are localized extent attempts inside already-screened
+        // windows.
+        try await store.insertSemanticScanResult(
+            makeScan(
+                assetId: "a-statuses", index: 2, start: 0, end: 50,
+                status: .guardrailViolation, scanPass: "passB"
+            )
+        )
+
+        let statuses = try await store.fetchSemanticScanStatuses(
+            analysisAssetId: "a-statuses",
+            scanPass: SemanticScanCoverage.coverageScanPass
+        )
+        #expect(statuses.count == 2)
+        #expect(Set(statuses.compactMap { $0 }) == [.success, .refusal])
+        // And the classifier reduces them to the most explanatory cause.
+        #expect(
+            AnalysisCoordinator.adScanLimit(coverageLaneStatuses: statuses) == .refusal
+        )
+
+        // An asset with no coverage-lane rows reports an empty list, which the
+        // classifier reads as "the scan never ran" — distinct from "it ran and
+        // found nothing to say".
+        try await store.insertAsset(makeAsset(id: "a-no-scan", episodeDurationSec: 1000))
+        let none = try await store.fetchSemanticScanStatuses(
+            analysisAssetId: "a-no-scan",
+            scanPass: SemanticScanCoverage.coverageScanPass
+        )
+        #expect(none.isEmpty)
+        #expect(AnalysisCoordinator.adScanLimit(coverageLaneStatuses: none) == .neverRan)
+    }
+
     /// THE BEAD'S FIXTURE (asset 820134BF): DSP feature extraction swept the
     /// whole episode and a late ad detection parked `confirmedAdCoverageEndTime`
     /// at the end, but only 47% of the audio was ever screened for ads. The old

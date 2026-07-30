@@ -744,7 +744,10 @@ extension DogfoodDiagnosticsAnalysisHealth {
         ) ?? 0
 
         switch asset.analysisState {
-        case "completeFull", "complete":
+        // playhead-gqx4: `completeAdScanPartial` shares `completeFull`'s
+        // transcript+feature contract — it is the same terminal minus the
+        // ad-scan term — so a shortfall on either axis contradicts it too.
+        case "completeFull", "complete", "completeAdScanPartial":
             // OR-axis contract: a shortfall on EITHER axis is a
             // contradiction. (R1 fix; R2 centralizes here.)
             if transcriptAxis < threshold || featureAxis < threshold {
@@ -940,6 +943,18 @@ extension DogfoodDiagnosticsAnalysisHealth {
         // surface in the `staleness_flags` list for support
         // visibility — the change is only to the per-asset
         // RECOMMENDATION the user-facing summary card surfaces.
+        // playhead-gqx4: an ad-scan-degraded terminal is NOT healthy. It is the
+        // exact row this report exists to find — the pipeline stopped having
+        // read only part of the audio for ads — and the transcript/feature
+        // contradiction check above cannot catch it, because those two axes pass
+        // by construction on that state. Carry the persisted limiting cause so
+        // the note answers "why" without a device attached.
+        if isAdScanDegradedTerminalState(asset.analysisState) {
+            return Recommendation(
+                action: .wait,
+                note: "degraded_terminal_ad_scan_short"
+            )
+        }
         if isTerminalCompletionState(asset.analysisState) {
             return Recommendation(
                 action: .wait,
@@ -1031,11 +1046,22 @@ extension DogfoodDiagnosticsAnalysisHealth {
 
     private static func isTerminalCompletionState(_ raw: String) -> Bool {
         switch raw {
-        case "complete", "completeFull", "completeFeatureOnly", "completeTranscriptPartial":
+        case "complete", "completeFull", "completeFeatureOnly", "completeTranscriptPartial",
+             "completeAdScanPartial":
             return true
         default:
             return false
         }
+    }
+
+    /// playhead-gqx4: a completion terminal that explicitly means "the audio was
+    /// not read for ads end to end". It must NOT be reported as
+    /// `healthy_terminal_completion` — this report is the instrument for finding
+    /// exactly these rows, and stamping them healthy would blind it. The
+    /// transcript/feature contradiction check cannot catch them either: those two
+    /// axes pass by construction on this state.
+    private static func isAdScanDegradedTerminalState(_ raw: String) -> Bool {
+        raw == "completeAdScanPartial"
     }
 
     private static func isTerminalFailureState(_ raw: String) -> Bool {

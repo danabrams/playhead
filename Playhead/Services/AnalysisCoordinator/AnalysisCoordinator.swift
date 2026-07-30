@@ -64,6 +64,45 @@ enum SessionState: String, Sendable, CaseIterable {
     /// finalize coverage ratio. Scoring ran on the partial range; the
     /// unscored tail is preserved in telemetry for retry.
     case completeTranscriptPartial
+    /// playhead-gqx4: transcript AND feature coverage both cleared the
+    /// finalize threshold, but the SEMANTIC AD SCAN read only part of the
+    /// audio. A DEGRADED completion terminal: the pipeline stopped, and it
+    /// stopped having screened a fraction of the episode for ads.
+    ///
+    /// Why this case has to exist. `.completeFull` used to be reached on
+    /// transcript + feature ratios alone, and neither term is the ad scan:
+    /// feature extraction sweeps the whole episode independently, so a real
+    /// device row read `terminalReason = "full coverage: transcript 0.999,
+    /// feature 1.000"` on an asset whose semantic scan had examined 90 s of
+    /// 3,468 s (2.6%). Measured across the product owner's library
+    /// (2026-07-29 device pull, 34 assets over 15 minutes): every one of the
+    /// six `completeFull` rows was under 91% measured ad-scan coverage and
+    /// four were under 40%. `.completeFull` now asserts measured ad-scan
+    /// coverage as a third term, and this case absorbs what used to be
+    /// mislabelled.
+    ///
+    /// It is a TERMINAL, deliberately: an asset that could not be scanned
+    /// further must stop rather than re-drive the pipeline forever. The
+    /// persisted `terminalReason` names the limiting cause
+    /// (``AnalysisCoordinator/AdScanLimit``) so the next diagnostics capture
+    /// can separate "the model refused" from "the pass never reached the tail".
+    ///
+    /// HOW MUCH BETTER THIS MAKES THINGS, stated honestly. While the episode
+    /// still has a dispatchable `analysis_jobs` row, each dispatch now runs the
+    /// semantic scan instead of skipping it
+    /// (``AnalysisJobRunner/shouldSkipSemanticBackfill(wroteNewChunks:hasExistingWindows:hasCandidateWindows:adScanFraction:)``),
+    /// so coverage climbs and a later finalize can reach `.completeFull`. Once
+    /// the episode's coverage tiers are done, however, the scheduler marks the
+    /// job `complete` and `insertJob`'s `INSERT OR IGNORE` on that row's
+    /// `workKey` prevents a new one — so an episode that finishes its tiers
+    /// under-scanned KEEPS this terminal indefinitely.
+    ///
+    /// That residue is deliberate and is the honest half of the trade: this case
+    /// converts a false "fully analysed" into a true "partly analysed" for such
+    /// an episode; it does not by itself finish the scan. Minting the re-drive
+    /// is a change to the scheduler's terminal accounting and belongs to its own
+    /// bead.
+    case completeAdScanPartial
     /// Deprecated monolithic failure (pre-gtt9.8). Kept only so legacy
     /// persisted rows decode on migrate. Stays as a catch-all for
     /// unclassified failures routed from legacy paths.
@@ -96,8 +135,10 @@ enum SessionState: String, Sendable, CaseIterable {
             return [.backfill, .cancelledBudget, .failed, .failedTranscript, .failedFeature]
         case .backfill:
             return [.completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+                    .completeAdScanPartial,
                     .failedTranscript, .failedFeature, .failed, .cancelledBudget]
-        case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+        case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+             .completeAdScanPartial:
             return [.queued] // recovery: re-run if no data
         case .failed, .failedTranscript, .failedFeature, .cancelledBudget:
             return [.queued] // retry
@@ -115,7 +156,8 @@ enum SessionState: String, Sendable, CaseIterable {
     /// cases at every site.
     var isTerminalCompletion: Bool {
         switch self {
-        case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+        case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+             .completeAdScanPartial:
             return true
         case .queued, .spooling, .featuresReady, .hotPathReady,
              .waitingForBackfill, .backfill,
@@ -131,6 +173,11 @@ enum SessionState: String, Sendable, CaseIterable {
     /// terminals the pipeline reached having read only part of the audio,
     /// so neither may render as calm, unqualified success.
     ///
+    /// playhead-gqx4: `completeAdScanPartial` joins them — transcript and
+    /// feature both cleared the threshold but the semantic ad scan read only
+    /// part of the audio, which is the most common shape on real hardware and
+    /// the one that used to masquerade as `.completeFull`.
+    ///
     /// `.complete` (legacy monolithic) and `.completeFull` are NOT degraded
     /// by this classifier: `.completeFull` asserts the coverage invariant
     /// passed, and `.complete` carries no per-terminal quality information
@@ -139,7 +186,7 @@ enum SessionState: String, Sendable, CaseIterable {
     /// coverage is the only thing that can satisfy the ✓.
     var isDegradedTerminalCompletion: Bool {
         switch self {
-        case .completeFeatureOnly, .completeTranscriptPartial:
+        case .completeFeatureOnly, .completeTranscriptPartial, .completeAdScanPartial:
             return true
         case .complete, .completeFull,
              .queued, .spooling, .featuresReady, .hotPathReady,
@@ -157,7 +204,8 @@ enum SessionState: String, Sendable, CaseIterable {
             return true
         case .queued, .spooling, .featuresReady, .hotPathReady,
              .waitingForBackfill, .backfill,
-             .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+             .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+             .completeAdScanPartial:
             return false
         }
     }
@@ -1151,7 +1199,8 @@ actor AnalysisCoordinator {
                 try await runFromHotPathReady(sessionId: sessionId, assetId: assetId)
             case .backfill:
                 try await runFromBackfill(sessionId: sessionId, assetId: assetId)
-            case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+            case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+                 .completeAdScanPartial:
                 // playhead-gtt9.8: any terminal completion state verifies
                 // the session actually has transcript data. A crash
                 // during backfill can leave the session as "complete"
@@ -2314,10 +2363,24 @@ actor AnalysisCoordinator {
             break
 
         case .complete, .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+             .completeAdScanPartial,
              .failed, .failedTranscript, .failedFeature, .cancelledBudget,
              .queued, .spooling:
             return
         }
+
+        // playhead-gqx4: measure how much of the audio the semantic ad scan
+        // actually read, AFTER `runBackfill` above has had its turn. This is
+        // the third term the terminal verdict needs and it is read, not
+        // recomputed: `AnalysisCoverageSummary.adScanFraction` (playhead-pz32)
+        // is the one definition of "how much of this episode has been read for
+        // ads", and it is also what the library ✓ consults — a second
+        // independently-derived number here would let the terminal state and
+        // the checkmark disagree about the same episode.
+        //
+        // Fail-safe: a read failure yields `.unmeasured`, which cannot satisfy
+        // the clean terminal. A SQLite hiccup must cost us a ✓, never mint one.
+        let adScan = await measuredAdScanCoverage(assetId: assetId)
 
         // playhead-gtt9.8: classify the terminal state using the richer
         // `classifyBackfillTerminal` helper rather than the old allow/
@@ -2343,7 +2406,8 @@ actor AnalysisCoordinator {
             featureCoverage: featureCoverage,
             budgetCancelled: false,
             transcriptFailed: false,
-            featureFailed: false
+            featureFailed: false,
+            adScan: adScan
         )
         if verdict.state.isTerminalFailure {
             logger.warning(
@@ -2360,6 +2424,67 @@ actor AnalysisCoordinator {
             to: verdict.state,
             failureReason: verdict.state.isTerminalFailure ? verdict.reason : nil,
             terminalReason: verdict.reason
+        )
+    }
+
+    /// playhead-gqx4: read the asset's measured semantic ad-scan coverage plus
+    /// its limiting cause, for the terminal verdict.
+    ///
+    /// Two reads, in this ORDER, and the order is load-bearing:
+    ///   1. ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)`` for the
+    ///      fraction. It is pz32's number, unmodified — this function does no
+    ///      coverage arithmetic of its own. This is the LOAD-BEARING term: it
+    ///      alone decides clean-versus-degraded.
+    ///   2. ``AnalysisStore/fetchSemanticScanStatuses(analysisAssetId:scanPass:)``
+    ///      for the limiting cause, reduced by ``adScanLimit(coverageLaneStatuses:)``.
+    ///      This term is DIAGNOSTIC ONLY — it never changes the verdict, only
+    ///      the words in `terminalReason`.
+    ///
+    /// A failure of (2) must therefore never discard (1). Doing it the other way
+    /// round — the shape this function shipped with for one commit — let a
+    /// cosmetic read veto a load-bearing one: `fetchSemanticScanResults` decodes
+    /// WHOLE rows through a strict reader that throws on any unrecognised
+    /// `status`/`transcriptQuality`/`disposition`, so one row from a newer build
+    /// would have degraded a fully-scanned episode into a terminal that nothing
+    /// re-opens. Read (2) through the narrow, lenient projection instead, and
+    /// keep the fraction regardless.
+    ///
+    /// A failure of (1) yields a `nil` fraction, which cannot clear the finalize
+    /// floor. Under-claiming on a storage error is the correct direction: the
+    /// cost is a degraded terminal on an episode that may in fact be fully
+    /// scanned; the alternative cost is a clean ✓ on an episode nobody read.
+    private func measuredAdScanCoverage(assetId: String) async -> AdScanCoverage {
+        var fraction: Double?
+        do {
+            fraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction
+        } catch {
+            logger.warning(
+                "finalizeBackfill: coverage summary fetch failed for asset \(assetId, privacy: .public): \(String(describing: error), privacy: .public); treating ad-scan coverage as unmeasured"
+            )
+            fraction = nil
+        }
+
+        let statuses: [SemanticScanStatus?]
+        do {
+            statuses = try await store.fetchSemanticScanStatuses(
+                analysisAssetId: assetId,
+                scanPass: SemanticScanCoverage.coverageScanPass
+            )
+        } catch {
+            logger.warning(
+                "finalizeBackfill: coverage-lane scan status fetch failed for asset \(assetId, privacy: .public): \(String(describing: error), privacy: .public); reporting the limiting cause as transient"
+            )
+            return AdScanCoverage(fraction: fraction, limit: .transient)
+        }
+
+        return AdScanCoverage(
+            fraction: fraction,
+            limit: Self.adScanLimit(
+                coverageLaneStatuses: statuses,
+                fractionIsMeasurable: fraction != nil
+            )
         )
     }
 
@@ -2421,17 +2546,204 @@ actor AnalysisCoordinator {
     }
 
     /// playhead-gtt9.8: richer terminal verdict for
-    /// ``classifyBackfillTerminal(chunks:episodeDuration:featureCoverage:budgetCancelled:transcriptFailed:featureFailed:)``.
+    /// ``classifyBackfillTerminal(chunks:episodeDuration:featureCoverage:budgetCancelled:transcriptFailed:featureFailed:adScan:)``.
     /// The caller persists the `reason` into
     /// `analysis_assets.terminalReason` and transitions the session to
-    /// the returned `state`. All six non-legacy terminals are
-    /// reachable; `.complete` (legacy) is never produced.
+    /// the returned `state`. All seven non-legacy terminals are
+    /// reachable (playhead-gqx4 added `.completeAdScanPartial`);
+    /// `.complete` (legacy) is never produced.
     struct BackfillTerminalVerdict: Equatable {
-        /// One of the six new terminal `SessionState`s.
+        /// One of the seven non-legacy terminal `SessionState`s.
         let state: SessionState
         /// Short human-readable classifier diagnostic persisted into
         /// `analysis_assets.terminalReason` for telemetry.
         let reason: String
+    }
+
+    /// playhead-gqx4: why the semantic ad scan covers less of the episode
+    /// than the transcript does. Persisted as a stable token inside
+    /// `analysis_assets.terminalReason` so a diagnostics capture can separate
+    /// the causes without a device attached — playhead-8ysk's lesson was that
+    /// an unnamed absence is indistinguishable from every other absence.
+    ///
+    /// Derived from the persisted coverage-lane (`passA`) rows by
+    /// ``AnalysisCoordinator/adScanLimit(coverageLaneStatuses:)``; the order of
+    /// the cases below is the precedence order that helper applies.
+    enum AdScanLimit: String, Sendable, CaseIterable {
+        /// No coverage-lane row exists at all: the scan never ran for this
+        /// asset (no transcript to plan over, capability unavailable at the
+        /// time, or the job was never admitted).
+        case neverRan = "neverRan"
+        /// The model declined to answer for at least one window
+        /// (`refusal` / `permissive_refusal`).
+        case refusal = "refusal"
+        /// A safety guardrail tripped (`guardrailViolation`).
+        case guardrail = "guardrail"
+        /// A structured-decode failure that the retry policy treats as
+        /// permanent for the window (`decodingFailure` /
+        /// `permissive_decoding_failure` / context overflow).
+        case decodeFailure = "decodeFailure"
+        /// The pass was stopped from outside — cancellation, thermal defer,
+        /// or rate limiting.
+        case interrupted = "interrupted"
+        /// The scan ran and nothing failed, but the coverage FRACTION is not
+        /// computable — the episode's persisted duration is missing, or is
+        /// contradicted by the transcript's own reach, so
+        /// ``AnalysisCoverageSummary/adScanFraction`` withholds a number rather
+        /// than divide by a denominator it has already disproved.
+        ///
+        /// Named separately because it is neither "the scan never ran" nor "the
+        /// pass stopped short", and it is not rare: any asset whose declared
+        /// duration disagrees with its audio by more than 5% lands here until
+        /// the duration-backfill sweep repairs the row. Folding it into
+        /// `stoppedShort` would send the reader hunting for a scan problem that
+        /// does not exist.
+        case unmeasurableDuration = "unmeasurableDuration"
+        /// A transient failure that did not recover within the pass.
+        case transient = "transient"
+        /// The model or its assets were unavailable for the window.
+        case unavailable = "unavailable"
+        /// Every persisted window produced a verdict, so nothing FAILED —
+        /// the pass simply never reached the rest of the audio (it ran out of
+        /// grant window, budget, or plan). The commonest shape by far.
+        case stoppedShort = "stoppedShort"
+    }
+
+    /// playhead-gqx4: the ad-scan facts ``classifyBackfillTerminal`` needs in
+    /// order to decide whether a session may claim the CLEAN completion
+    /// terminal.
+    ///
+    /// `fraction` is sourced VERBATIM from
+    /// ``AnalysisCoverageSummary/adScanFraction`` (playhead-pz32) and is never
+    /// recomputed here. That is deliberate: two independently-derived
+    /// ad-scan-coverage numbers that disagree would be worse than the bug this
+    /// bead fixes, because the library ✓ and the terminal state would then be
+    /// telling the user different stories about the same episode.
+    struct AdScanCoverage: Equatable, Sendable {
+        /// Measured ad-scan coverage in `[0, 1]`, or `nil` when the quantity
+        /// is not honestly measurable (no coverage-lane rows, unknown or
+        /// contradicted duration). `nil` is NOT treated as covered — an
+        /// unmeasurable episode must under-claim.
+        let fraction: Double?
+        /// Why coverage is short. Ignored when `fraction` clears the floor.
+        let limit: AdScanLimit
+
+        /// The value to use where nothing is known about the scan. Under-claims
+        /// by construction: `fraction == nil` can never satisfy the clean
+        /// terminal.
+        static let unmeasured = AdScanCoverage(fraction: nil, limit: .neverRan)
+
+        /// Fraction at or above which the ad scan counts as having read the
+        /// episode. `episodePreparationCompleteThreshold` (playhead-pz32), NOT
+        /// `finalizeBackfillMinCoverageRatio`.
+        ///
+        /// The two are different numbers for different quantities and the
+        /// distinction is load-bearing. `finalizeBackfillMinCoverageRatio`
+        /// (0.95) is calibrated for the TRANSCRIPT: its documented rationale is
+        /// tolerating the few seconds a decoder chops off the end of an episode.
+        /// `episodePreparationCompleteThreshold` (0.98) is calibrated for THIS
+        /// quantity, jointly with the 5s gap-bridging that lets the ad-scan area
+        /// reach 1.0 at all — pz32's doc comment says the pair has to be
+        /// revisited together. Borrowing the transcript's floor for the ad scan
+        /// would be applying a number to a quantity it was not measured against,
+        /// which is the class of mistake this whole bead is about.
+        ///
+        /// Using pz32's number also makes three surfaces agree exactly: the
+        /// terminal state, the library ✓
+        /// (``episodePreparationAnalysisComplete(status:adScanFraction:isDegradedTerminal:)``)
+        /// and the pipeline's own decision to stop scanning
+        /// (``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction``). A
+        /// lower floor here would mint clean terminals the UI still renders ◐
+        /// and the runner still tries to extend.
+        static var sufficientFraction: Double { episodePreparationCompleteThreshold }
+
+        /// True when measured coverage clears ``sufficientFraction``. `nil` is
+        /// false — see the property doc.
+        var clearsFinalizeFloor: Bool {
+            guard let fraction, fraction.isFinite else { return false }
+            return fraction + 1e-9 >= Self.sufficientFraction
+        }
+
+        /// Human+machine readable rendering for `terminalReason`.
+        var diagnostic: String {
+            guard let fraction, fraction.isFinite else {
+                return "ad scan unmeasured (\(limit.rawValue))"
+            }
+            return String(
+                format: "ad scan %.3f < %.3f (%@)",
+                fraction,
+                Self.sufficientFraction,
+                limit.rawValue
+            )
+        }
+    }
+
+    /// playhead-gqx4: reduce the persisted coverage-lane statuses for one
+    /// asset to the single limiting cause recorded on the terminal.
+    ///
+    /// Precedence is "most explanatory first": a refusal or guardrail tells
+    /// the reader something a bare `stoppedShort` does not, so it wins even
+    /// when only one window hit it. `stoppedShort` is the residue — every row
+    /// produced a verdict and the pass still did not reach the whole episode,
+    /// which is the shape that dominates real captures.
+    ///
+    /// - Parameter coverageLaneStatuses: the `status` values of the asset's
+    ///   `semantic_scan_results` rows ON THE COVERAGE LANE
+    ///   (``SemanticScanCoverage/coverageScanPass``). An unrecognised
+    ///   persisted string arrives as `nil` and is treated as a transient
+    ///   failure rather than being silently dropped — which is reachable in
+    ///   production precisely because the caller reads these through the lenient
+    ///   ``AnalysisStore/fetchSemanticScanStatuses(analysisAssetId:scanPass:)``
+    ///   projection rather than the strict whole-row decoder.
+    /// - Parameter fractionIsMeasurable: whether
+    ///   ``AnalysisCoverageSummary/adScanFraction`` produced a number. When the
+    ///   scan ran, nothing failed, and the fraction is STILL unavailable, the
+    ///   limiting factor is the denominator rather than the scan — reported as
+    ///   ``AdScanLimit/unmeasurableDuration``. A real scan failure still wins:
+    ///   it is the more explanatory answer.
+    static func adScanLimit(
+        coverageLaneStatuses: [SemanticScanStatus?],
+        fractionIsMeasurable: Bool = true
+    ) -> AdScanLimit {
+        guard !coverageLaneStatuses.isEmpty else { return .neverRan }
+        var seen: Set<AdScanLimit> = []
+        for status in coverageLaneStatuses {
+            guard let status else {
+                seen.insert(.transient)
+                continue
+            }
+            switch status {
+            case .refusal, .permissiveRefusal:
+                seen.insert(.refusal)
+            case .guardrailViolation:
+                seen.insert(.guardrail)
+            case .decodingFailure, .permissiveDecodingFailure,
+                 .exceededContextWindow, .permissiveContextOverflow:
+                seen.insert(.decodeFailure)
+            case .cancelled, .thermalDeferred, .rateLimited:
+                seen.insert(.interrupted)
+            case .failedTransient:
+                seen.insert(.transient)
+            case .unavailable, .unsupportedLocale, .assetsUnavailable:
+                seen.insert(.unavailable)
+            case .queued, .running:
+                // A row still in flight is not a failure and not a verdict;
+                // it means the pass was cut off mid-window.
+                seen.insert(.interrupted)
+            case .success, .noAds:
+                continue
+            }
+        }
+        // `AdScanLimit.allCases` is declared in precedence order. Neither
+        // `.neverRan` nor the two residual causes below are ever INSERTED into
+        // `seen`, so the first match is always a genuine scan failure and wins.
+        for candidate in AdScanLimit.allCases where seen.contains(candidate) {
+            return candidate
+        }
+        // Nothing failed. Either the pass simply did not reach the rest of the
+        // audio, or it did and we cannot say so because the denominator is
+        // unusable.
+        return fractionIsMeasurable ? .stoppedShort : .unmeasurableDuration
     }
 
     /// playhead-gtt9.8: pure classifier that picks the appropriate
@@ -2445,22 +2757,42 @@ actor AnalysisCoordinator {
     ///   3. `transcriptFailed == true` → `.failedTranscript`
     ///   4. Feature-coverage short → `.failedFeature`
     ///   5. Transcript coverage analysis on top of adequate feature
-    ///      coverage: `.completeFull`, `.completeFeatureOnly`, or
-    ///      `.completeTranscriptPartial`.
+    ///      coverage: `.completeFull`, `.completeAdScanPartial`,
+    ///      `.completeFeatureOnly`, or `.completeTranscriptPartial`.
     ///   6. Unknown episode duration (<= 0) → `.failedTranscript` as a
     ///      fail-safe: we cannot prove coverage, so re-queue.
+    ///
+    /// playhead-gqx4: priority 5's clean arm now requires a THIRD term.
+    /// Transcript and feature coverage between them say nothing about whether
+    /// the audio was read for ads — feature extraction sweeps the episode
+    /// independently of the semantic scan — so the pre-gqx4 classifier stamped
+    /// `.completeFull` on assets whose scan had examined 2.6% of the audio and
+    /// wrote its own confession into `terminalReason` ("full coverage:
+    /// transcript 0.999, feature 1.000"). When measured ad-scan coverage is
+    /// short, or is not measurable at all, the verdict is the degraded
+    /// `.completeAdScanPartial` instead.
+    ///
+    /// It is still a TERMINAL in every branch. That is the whole point of
+    /// terminating into a degraded state rather than declining to terminate:
+    /// an asset the scan cannot advance must stop, or the fix is an infinite
+    /// retry loop — a worse bug than the one being fixed. Further scan
+    /// progress comes from the pre-analysis lane instead (playhead-i7qe).
     ///
     /// - Parameter featureCoverage: absolute seconds of feature coverage
     ///   (from `AnalysisAsset.featureCoverageEndTime`). `nil` or 0 is
     ///   treated as "feature coverage never advanced"; the classifier
     ///   maps that to `.failedFeature` unless duration is unknown.
+    /// - Parameter adScan: measured semantic ad-scan coverage for the asset.
+    ///   There is no default: every call site must state what it knows, so a
+    ///   new caller cannot acquire a clean `.completeFull` by omission.
     static func classifyBackfillTerminal(
         chunks: [TranscriptChunk],
         episodeDuration: Double,
         featureCoverage: Double?,
         budgetCancelled: Bool,
         transcriptFailed: Bool,
-        featureFailed: Bool
+        featureFailed: Bool,
+        adScan: AdScanCoverage
     ) -> BackfillTerminalVerdict {
         // Priority 1: budget cancellation short-circuits everything. It
         // is never a quality signal — it is an operator/battery/thermal
@@ -2522,13 +2854,25 @@ actor AnalysisCoordinator {
             )
         }
 
-        // Priority 5: completion shape depends on transcript coverage.
+        // Priority 5: completion shape depends on transcript coverage AND
+        // (playhead-gqx4) on measured semantic ad-scan coverage.
         if transcriptRatio + 1e-9 >= finalizeBackfillMinCoverageRatio {
+            guard adScan.clearsFinalizeFloor else {
+                // The transcript and the features are complete; the audio was
+                // still not read for ads. Terminate DEGRADED and name why.
+                return BackfillTerminalVerdict(
+                    state: .completeAdScanPartial,
+                    reason: String(
+                        format: "%@ (transcript %.3f, feature %.3f)",
+                        adScan.diagnostic, transcriptRatio, featureRatio
+                    )
+                )
+            }
             return BackfillTerminalVerdict(
                 state: .completeFull,
                 reason: String(
-                    format: "full coverage: transcript %.3f, feature %.3f",
-                    transcriptRatio, featureRatio
+                    format: "full coverage: transcript %.3f, feature %.3f, ad scan %.3f",
+                    transcriptRatio, featureRatio, adScan.fraction ?? 0
                 )
             )
         }
@@ -3242,14 +3586,29 @@ actor AnalysisCoordinator {
         guard let state = SessionState(rawValue: asset.analysisState) else {
             return .unchanged
         }
-        // Only the three new completion terminals make a "fully analyzed"
+        // Only the three gtt9.8 completion terminals make a "fully analyzed"
         // promise that the canonical coverage can contradict. Legacy
         // `.complete` is excluded because it carries no terminalReason
         // and pre-dates the gtt9.8 contract; those rows are intentionally
         // left for the next pipeline run to re-evaluate via the live
         // classifier rather than auto-repaired here.
+        //
+        // playhead-gqx4: `.completeAdScanPartial` IS included. It is degraded
+        // about the ad scan, but it still asserts the other two axes — it is
+        // only reachable when transcript AND feature both cleared the threshold
+        // — so a later-measured shortfall on either contradicts it exactly as it
+        // contradicts `.completeFull`, and `DogfoodDiagnosticsAnalysisHealth`
+        // raises `terminalStateContradictsCoverage` for it on that basis. Two
+        // surfaces disagreeing about whether a row is contradicted would leave a
+        // filed bug with no self-heal behind it.
+        //
+        // Repairing it is safe in one direction only, which is the direction we
+        // want: `repairVerdict` passes `AdScanCoverage.unmeasured`, so the
+        // outcome can be the same degraded terminal or a more honest one, never
+        // the clean `.completeFull`.
         switch state {
-        case .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+        case .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+             .completeAdScanPartial:
             break
         default:
             return .unchanged
@@ -3307,6 +3666,22 @@ actor AnalysisCoordinator {
         if state == .completeFeatureOnly {
             let featureShort = featureRatio + 1e-9 < finalizeBackfillMinCoverageRatio
             if featureShort || reasonClaimsImpossibleRatio {
+                return repairVerdict(
+                    asset: asset,
+                    transcriptCoverageEnd: transcriptCoverageEnd,
+                    featureSeconds: featureSeconds,
+                    duration: duration
+                )
+            }
+        }
+
+        // playhead-gqx4: `.completeAdScanPartial` carries `.completeFull`'s
+        // transcript AND feature contract (that is how priority 5 is reached),
+        // so it takes the same OR-axis check.
+        if state == .completeAdScanPartial {
+            let transcriptShort = transcriptRatio + 1e-9 < finalizeBackfillMinCoverageRatio
+            let featureShort = featureRatio + 1e-9 < finalizeBackfillMinCoverageRatio
+            if transcriptShort || featureShort || reasonClaimsImpossibleRatio {
                 return repairVerdict(
                     asset: asset,
                     transcriptCoverageEnd: transcriptCoverageEnd,
@@ -3387,7 +3762,16 @@ actor AnalysisCoordinator {
             featureCoverage: featureSeconds,
             budgetCancelled: false,
             transcriptFailed: false,
-            featureFailed: false
+            featureFailed: false,
+            // playhead-gqx4: this sweep reads `analysis_assets` +
+            // transcript maxima only — it has no ad-scan measurement in
+            // scope, and inventing one here would be the second,
+            // disagreeing coverage number this bead exists to avoid. So it
+            // under-claims: a row it repairs can reach the degraded
+            // `.completeAdScanPartial` but never the clean `.completeFull`.
+            // That closes the one path by which a repair could have minted
+            // a clean terminal for an asset whose audio was never screened.
+            adScan: .unmeasured
         )
         // R3: sanitize `]` out of the embedded original reason before
         // wrapping. The audit prefix uses the FIRST `]` to delimit the
@@ -3622,7 +4006,8 @@ actor AnalysisCoordinator {
                 lastSeenRowId = max(lastSeenRowId, rowId)
                 guard let state = SessionState(rawValue: asset.analysisState) else { continue }
                 switch state {
-                case .completeFull, .completeFeatureOnly, .completeTranscriptPartial:
+                case .completeFull, .completeFeatureOnly, .completeTranscriptPartial,
+                     .completeAdScanPartial:
                     candidateAssets.append(asset)
                 default:
                     continue

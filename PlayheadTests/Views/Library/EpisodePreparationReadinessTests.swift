@@ -721,7 +721,13 @@ struct EpisodePreparationReadinessTests {
                 "\(state) at full ad-scan coverage should be ready"
             )
         }
-        for state in [SessionState.completeFeatureOnly, .completeTranscriptPartial] {
+        // playhead-gqx4 adds `.completeAdScanPartial` to the degraded set: the
+        // transcript and features are complete but the audio was not read for
+        // ads, which is the commonest real-hardware shape and used to be
+        // indistinguishable from a full analysis.
+        for state in [
+            SessionState.completeFeatureOnly, .completeTranscriptPartial, .completeAdScanPartial
+        ] {
             #expect(
                 derive(sessionState: state, adScanFraction: 1.0).state == .partiallyAnalyzed,
                 "\(state) must never render the same calm ✓ as .complete"
@@ -729,7 +735,9 @@ struct EpisodePreparationReadinessTests {
         }
         // And the classifier itself agrees, exhaustively over every case.
         for state in SessionState.allCases {
-            let expected = state == .completeFeatureOnly || state == .completeTranscriptPartial
+            let expected = state == .completeFeatureOnly
+                || state == .completeTranscriptPartial
+                || state == .completeAdScanPartial
             #expect(
                 state.isDegradedTerminalCompletion == expected,
                 "\(state).isDegradedTerminalCompletion should be \(expected)"

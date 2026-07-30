@@ -275,6 +275,63 @@ struct FinalizeBackfillDenominatorFixTests {
         )
     }
 
+    /// playhead-gqx4: seed a coverage-lane semantic-scan row spanning
+    /// `[0, seconds]`, so `AnalysisCoverageSummary.adScanFraction` reports the
+    /// episode as genuinely read for ads and the terminal classifier's third
+    /// term is satisfied.
+    ///
+    /// These two tests are about the DENOMINATOR, not about ad-scan coverage —
+    /// but `.completeFull` now requires all three terms, so the fixture has to
+    /// state the third one rather than leave it absent. Seeding it (instead of
+    /// weakening the assertion to the degraded terminal) also means the
+    /// assertion still exercises the real store read that `finalizeBackfill`
+    /// performs, end to end.
+    private func seedFullAdScanCoverage(
+        store: AnalysisStore,
+        assetId: String,
+        seconds: Double
+    ) async throws {
+        // `insertSemanticScanResult` rejects a `scanCohortJSON` that is not a
+        // decodable `ScanCohort`, so the fixture must carry a real one.
+        let cohort = ScanCohort(
+            promptLabel: "gqx4-test",
+            promptHash: "prompt-v1",
+            schemaHash: "schema-v1",
+            scanPlanHash: "plan-v1",
+            normalizationHash: "norm-v1",
+            osBuild: "26A123",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let cohortJSON = String(decoding: try encoder.encode(cohort), as: UTF8.self)
+        try await store.insertSemanticScanResult(
+            SemanticScanResult(
+                id: "\(assetId)-scan-0",
+                analysisAssetId: assetId,
+                windowFirstAtomOrdinal: 0,
+                windowLastAtomOrdinal: 9,
+                windowStartTime: 0,
+                windowEndTime: seconds,
+                scanPass: SemanticScanCoverage.coverageScanPass,
+                transcriptQuality: .good,
+                disposition: .noAds,
+                spansJSON: "[]",
+                status: .success,
+                attemptCount: 1,
+                errorContext: nil,
+                inputTokenCount: nil,
+                outputTokenCount: nil,
+                latencyMs: nil,
+                prewarmHit: false,
+                scanCohortJSON: cohortJSON,
+                transcriptVersion: "tx-v1",
+                reuseScope: "\(assetId)-scan-0"
+            )
+        )
+    }
+
     // MARK: - Healthy regression: shard sum matches persisted
 
     /// When the shard sum and the persisted duration agree (the common
@@ -300,6 +357,8 @@ struct FinalizeBackfillDenominatorFixTests {
         try await store.insertTranscriptChunks([
             makeChunk(assetId: assetId, chunkIndex: 0, startTime: 0, endTime: duration)
         ])
+
+        try await seedFullAdScanCoverage(store: store, assetId: assetId, seconds: duration)
 
         let healthyShards = makeShards(episodeId: "ep-\(assetId)", totalSeconds: duration)
 
@@ -357,6 +416,11 @@ struct FinalizeBackfillDenominatorFixTests {
             makeChunk(assetId: assetId, chunkIndex: 0, startTime: 0, endTime: liveDuration)
         ])
 
+        // playhead-gqx4: the chosen denominator is max(3600, 1000) = 3600, so a
+        // fully-read episode means a scan covering the LIVE span, not the
+        // persisted one.
+        try await seedFullAdScanCoverage(store: store, assetId: assetId, seconds: liveDuration)
+
         let liveShards = makeShards(episodeId: "ep-\(assetId)", totalSeconds: liveDuration)
 
         try await coordinator.finalizeBackfillForTesting(
@@ -367,12 +431,41 @@ struct FinalizeBackfillDenominatorFixTests {
         )
 
         let sessionAfter = try await store.fetchSession(id: sessionId)
-        // Coverage matches the live shard sum (3600s) which is the
-        // chosen denominator (max(3600, 1000)) — so .completeFull.
+        let assetAfter = try await store.fetchAsset(id: assetId)
+        let reason = assetAfter?.terminalReason ?? ""
+
+        // THE DENOMINATOR IS THE ASSERTION. Coverage matches the live shard sum
+        // (3600s), which is the chosen denominator (max(3600, 1000)) — so the
+        // persisted ratios read 1.000. Had `max()` regressed to preferring the
+        // persisted 1000s value, the same terminal would be reached but the
+        // ratios would read 3.600, so the ratio text is what actually pins the
+        // behaviour under test.
         #expect(
-            sessionAfter?.state == SessionState.completeFull.rawValue,
-            "When live shard sum exceeds persisted, max() must still resolve to live. Got: \(sessionAfter?.state ?? "nil")"
+            reason.contains("transcript 1.000"),
+            "live shard sum must win the max(): expected ratios against 3600s. Got: \(reason)"
         )
+        #expect(
+            !reason.contains("3.600"),
+            "a ratio of 3.6 means the stale persisted 1000s was used. Got: \(reason)"
+        )
+
+        // playhead-gqx4: the terminal is the ad-scan-degraded one, NOT
+        // `.completeFull`, and that is correct rather than incidental. This
+        // fixture deliberately makes `analysis_assets.episodeDurationSec`
+        // (1000s) disagree with the real audio (3600s), and
+        // `AnalysisCoverageSummary.adScanFraction` refuses to divide by a
+        // denominator the transcript's own reach has disproved — it returns
+        // `nil`, which cannot satisfy the clean terminal. So an asset carrying a
+        // stale-small duration under-claims until the duration-backfill sweep
+        // repairs the row; a later run can then reach `.completeFull`. Either
+        // way the session TERMINATES.
+        let state = sessionAfter.flatMap { SessionState(rawValue: $0.state) }
+        #expect(
+            state == .completeAdScanPartial,
+            "Expected the ad-scan-degraded terminal on a contradicted duration. Got: \(sessionAfter?.state ?? "nil")"
+        )
+        #expect(state?.isTerminalCompletion == true)
+        #expect(reason.contains("unmeasured"))
     }
 
     // MARK: - episodeDurationsDiverge predicate (review/v0.5-head-polish C2 MT-1)

@@ -448,7 +448,12 @@ struct CrashRecoveryAtEachStateTests {
             // got stuck in.
             let validTerminals: Set<SessionState> = [
                 .complete, .completeFull, .completeFeatureOnly,
-                .completeTranscriptPartial, .failed, .failedTranscript,
+                // playhead-gqx4: the resume finalizes against persisted data
+                // with no semantic-scan rows seeded, so the honest terminal is
+                // the ad-scan-degraded one. Still a terminal — which is all
+                // this test asserts.
+                .completeTranscriptPartial, .completeAdScanPartial,
+                .failed, .failedTranscript,
                 .failedFeature, .cancelledBudget
             ]
             #expect(validTerminals.contains(state),
