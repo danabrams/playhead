@@ -4,7 +4,7 @@ Scope: playhead-fsy3 Scope 2 — verification artifact tying each item of
 the four-part legal checklist (a)-(d) to the test that proves it.
 Later sections extend it: (e) stability diagnostics (playhead-jw63.4),
 (f) delivery surfaces (playhead-jw63.5), (g) banner tallies
-(playhead-bfq7).
+(playhead-bfq7), (h) analysis-store health (playhead-wvdz).
 
 The diagnostics bundle is the only user-driven path that exfiltrates
 state off the device. Two-tier shape:
@@ -414,3 +414,98 @@ bundle, more in the log", and that is the split taken here.
 **Egress.** None added. The tally rides the bundle the listener already
 chooses to send through (f)'s feedback channel or the diagnostics
 export; nothing is uploaded.
+
+## (h) Analysis-store health: whether the database opened, no episode reference at all
+
+Added by playhead-wvdz. `DefaultBundle.analysis_store_health` carries
+the durable record of whether `AnalysisStore.migrate()` succeeded, across
+launches: a status, a consecutive-failure counter, three timestamps, a
+bounded list of failure records, a bounded list of quarantines, and the
+names of any diagnostics reads that threw while the bundle was being
+assembled.
+
+**Why it exists.** Before playhead-wvdz a failed migration answered
+itself by deleting the entire analysis database and retrying on the empty
+directory — which succeeded. Nothing durable recorded it, so from the
+next launch the app was indistinguishable from a fresh install, and every
+other field in this bundle would have described an app in perfect health
+with no data in it. A fleet-wide wipe caused by one bad migration rung
+would have presented as an unexplained drop in analysis coverage with no
+error signal anywhere. This field is that signal.
+
+**Why it is safe** — this is the first bundle field with no episode
+reference of any kind, not even a salted hash, and that is not an
+accident of the shape but a property of the subject: a database that will
+not open has no episode to name. Three facts:
+
+1. **No identifier crosses the boundary.** There is no episodeId, no
+   analysisAssetId, no show identifier, and no hash of any of them. The
+   sweep in `noEpisodeReference` asserts the substring `episode` does not
+   occur anywhere in the encoded subtree, which is stricter than the
+   `episode_id_hash` allowance the rest of the default bundle relies on
+   (item a).
+
+2. **The one free-text field is allowlisted, and rejection means
+   dropped.** Each failure record's `detail` is a SQLite error message.
+   `AnalysisStoreHealthDetail.sanitize` first strips the ` (SQL: …)`
+   suffix that `AnalysisStore.exec` appends — that SQL is Playhead's own
+   DDL, not user data, but it carries punctuation — then admits the
+   remainder only if it passes `DiagnosticTextSanitizer.isAllowed`, the
+   same character allowlist item (e) uses. A rejected message yields
+   `nil` and the key is omitted; it is never truncated and kept, because
+   a truncated leak is still a leak. Nothing is lost by being strict:
+   `failure_class` is a closed vocabulary and is what actually carries
+   the diagnosis. Re-sanitised on decode, for the same reason a stability
+   record is — the document outlives app versions.
+
+3. **Quarantine entries carry a directory NAME, never a path.** On a real
+   device the absolute path embeds the install UUID and the user's home
+   directory. The name is what a support engineer needs to talk an owner
+   through retrieving the data, and it is all that ships.
+
+Everything else in the shape is a counter, a date, or a rawValue of an
+enum this repo defines (`AnalysisStoreHealthStatus`,
+`AnalysisStoreFailurePhase`, `AnalysisStoreFailureClass`,
+`AnalysisStoreHealthState.ExportRead`).
+
+**Verified by** `PlayheadTests/Support/Diagnostics/AnalysisStoreHealthDiagnosticsPrivacyTests.swift`:
+
+- `sentinelContentNeverReachesTheBundle` — a failure whose SQLite message
+  is stuffed with an episode title and a feed URL, and a quarantine
+  record built from a full container path, produce a bundle whose encoded
+  bytes contain none of them. Non-vacuous: it also asserts the incident
+  is still reported (status, counter, and `failure_class` all survive).
+- `noEpisodeReference` — the substring `episode` appears nowhere in the
+  subtree.
+- `encodedKeySetIsClosed` — the encoded key set is a subset of a FROZEN
+  literal list (not `CodingKeys.allCases`, which would be circular), and
+  a superset of the required keys.
+- `frozenListsMatchDeclaredCodingKeys` — the frozen lists are complete,
+  so adding a field turns this red and forces an edit against this
+  checklist.
+- `journalReachesTheBundle` / `healthyDeviceStillEmitsTheKey` — the value
+  survives journal → fetch → coordinator → encoded bytes, and the key is
+  emitted on a healthy device so "the store is fine" is distinguishable
+  from "this bundle predates the signal".
+- `exportSurvivesADeadStore` — the export no longer dies with the store it
+  is describing (see below), and the failed read is NAMED in
+  `export_read_failures` rather than rendering as an empty table.
+- `exportReadFailuresAreNotPersisted` — an export-time observation is not
+  written back into the persisted document.
+
+**A behaviour change worth recording here.** `buildAndEncode` previously
+called `journalFetch`, `chapterPhaseEventsFetch` and
+`learnedDeviceProfilesFetch` with an unguarded `try`. The first of those
+reads the work journal out of `AnalysisStore`, so an unopenable store
+threw out of the whole export — and every UI caller wraps the export in
+`try?`, so the "Send diagnostics" button silently did nothing. The
+artifact that would have explained the failure could not be built
+*because* of the failure. All three are now guarded, and each failure is
+named by a closed vocabulary rather than swallowed, on the same reasoning
+that produced `rediff_diagnostics.read_failures`: an unreadable table and
+an empty table must not be the same bundle.
+
+**Egress.** None added. The document is a local JSON file under
+`Application Support/Diagnostics/`, a sibling of the stability ring
+buffer (e); it rides the bundle the listener already chooses to send and
+nothing is uploaded.

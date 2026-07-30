@@ -197,7 +197,8 @@ enum DiagnosticsBundleBuilder {
         learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
         stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
         bannerTallies: [BannerTallySession] = [],
-        rediff: DiagnosticsRediffSnapshot = .empty
+        rediff: DiagnosticsRediffSnapshot = .empty,
+        analysisStoreHealth: AnalysisStoreHealthState = .healthy
     ) -> DefaultBundle {
 
         // Canonicalise: timestamp ASCENDING (oldest first). Taking the
@@ -303,7 +304,14 @@ enum DiagnosticsBundleBuilder {
             // would only create a second place for them to disagree.
             stabilityDiagnostics: stabilityDiagnostics,
             bannerTallies: bannerTallySummaries,
-            rediffDiagnostics: rediffDiagnostics
+            rediffDiagnostics: rediffDiagnostics,
+            // playhead-wvdz: passed through unchanged. The journal has
+            // already applied its record caps and its detail allowlist,
+            // so re-deriving either here would only create a second
+            // place for them to disagree — the same reasoning as
+            // `stabilityDiagnostics` above. There is nothing to hash:
+            // the shape carries no episode, asset, or show reference.
+            analysisStoreHealth: analysisStoreHealth
         )
     }
 

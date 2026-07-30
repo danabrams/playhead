@@ -369,7 +369,23 @@ struct DiagnosticsBundleShapeTests {
         // ledger's free-form `deferReason` is PARSED into two integers
         // rather than forwarded. The proof lives in
         // `DiagnosticsBundleRediffTests`.
-        "rediff_diagnostics"
+        "rediff_diagnostics",
+        // playhead-wvdz: whether the analysis database opened, across
+        // launches. Always encoded so a support engineer can tell "the
+        // store is fine" from "this bundle predates the signal" — the
+        // absence of exactly that distinction is why a silent wipe was
+        // invisible. Privacy review: `AnalysisStoreHealthState` is a
+        // closed shape of counters, dates and enum rawValues this repo
+        // defines. It carries NO episode, asset, or show reference of
+        // any kind — a database that will not open has no episode to
+        // name. Its two free-text-shaped fields are both narrowed: each
+        // failure's `detail` must pass `DiagnosticTextSanitizer`'s
+        // character allowlist or be dropped, and quarantine entries
+        // carry a directory NAME, never a container path (which would
+        // embed the install UUID and the user's home directory). The
+        // proof lives in `AnalysisStoreHealthDiagnosticsPrivacyTests`
+        // (legal item h).
+        "analysis_store_health"
     ]
 
     /// Substrings that — if present anywhere in the encoded JSON's

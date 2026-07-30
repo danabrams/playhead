@@ -46,6 +46,7 @@ final class DiagnosticsExportCoordinator {
     private let stabilityFetch: DiagnosticsStabilityFetch
     private let bannerTalliesFetch: DiagnosticsBannerTalliesFetch
     private let rediffFetch: DiagnosticsRediffFetch
+    private let analysisStoreHealthFetch: DiagnosticsAnalysisStoreHealthFetch
     private let optInSink: DiagnosticsOptInSink
     private let optInEpisodes: [DiagnosticsEpisodeInput]
 
@@ -95,6 +96,13 @@ final class DiagnosticsExportCoordinator {
     ///     `AnalysisStore`. The `rediff_diagnostics` key is always
     ///     emitted, so an empty snapshot still distinguishes "the lane
     ///     has done nothing" from "this bundle predates the lane".
+    ///   - analysisStoreHealthFetch: playhead-wvdz — async read of the
+    ///     durable record of whether the analysis database opened.
+    ///     Defaults to `.healthy`; production wires it to
+    ///     `AnalysisStoreHealthJournal.shared.load()`. The
+    ///     `analysis_store_health` key is always emitted, so a healthy
+    ///     device is distinguishable from a bundle that predates the
+    ///     signal.
     ///   - optInSink: adapter that mutates `Episode.diagnosticsOptIn`.
     ///   - optInEpisodes: per-episode inputs for the OptIn bundle. Only
     ///     entries with `diagnosticsOptIn == true` ship; the builder
@@ -110,6 +118,7 @@ final class DiagnosticsExportCoordinator {
         stabilityFetch: @escaping DiagnosticsStabilityFetch = { [] },
         bannerTalliesFetch: @escaping DiagnosticsBannerTalliesFetch = { [] },
         rediffFetch: @escaping DiagnosticsRediffFetch = { .empty },
+        analysisStoreHealthFetch: @escaping DiagnosticsAnalysisStoreHealthFetch = { .healthy },
         optInSink: DiagnosticsOptInSink,
         optInEpisodes: [DiagnosticsEpisodeInput] = []
     ) {
@@ -122,6 +131,7 @@ final class DiagnosticsExportCoordinator {
         self.stabilityFetch = stabilityFetch
         self.bannerTalliesFetch = bannerTalliesFetch
         self.rediffFetch = rediffFetch
+        self.analysisStoreHealthFetch = analysisStoreHealthFetch
         self.optInSink = optInSink
         self.optInEpisodes = optInEpisodes
     }
@@ -154,13 +164,58 @@ final class DiagnosticsExportCoordinator {
     /// Fetch + build + encode the bundle. Surfaced for tests that need
     /// to assert encoded JSON shape without driving the presenter.
     func buildAndEncode() async throws -> (data: Data, filename: String, subject: String) {
-        let journal = try await journalFetch()
-        let chapterPhaseEvents = try await chapterPhaseEventsFetch()
+        // playhead-wvdz: the three throwing fetches are guarded rather
+        // than propagated, and each failure is NAMED.
+        //
+        // WHY. `journalFetch` reads the work journal out of
+        // `AnalysisStore`, so `try await journalFetch()` sent the whole
+        // export down whenever that store could not be opened — and
+        // every UI caller wraps the export in `try?`, so the button
+        // simply did nothing. The artifact that would explain why the
+        // analysis database is broken could not be produced BECAUSE the
+        // analysis database was broken. That is the exact hole
+        // playhead-wvdz exists to close, so guarding these reads is part
+        // of the observability fix rather than incidental hardening.
+        //
+        // Naming the failed read is what keeps the fix honest. A bare
+        // `try?` would make an unreadable journal indistinguishable from
+        // an empty one — "a quantity that names an absence" — which is
+        // the same conflation `rediff_diagnostics.read_failures` was
+        // added to remove. An empty `work_journal_tail` beside
+        // `export_read_failures: ["work_journal"]` says something very
+        // different from an empty one on its own.
+        var exportReadFailures: [AnalysisStoreHealthState.ExportRead] = []
+
+        let journal: [WorkJournalEntry]
+        do {
+            journal = try await journalFetch()
+        } catch {
+            journal = []
+            exportReadFailures.append(.workJournal)
+        }
+
+        let chapterPhaseEvents: [ChapterPhaseEvent]
+        do {
+            chapterPhaseEvents = try await chapterPhaseEventsFetch()
+        } catch {
+            chapterPhaseEvents = []
+            exportReadFailures.append(.chapterPhaseEvents)
+        }
+
+        let learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord]
+        do {
+            learnedDeviceProfiles = try await learnedDeviceProfilesFetch()
+        } catch {
+            learnedDeviceProfiles = []
+            exportReadFailures.append(.learnedDeviceProfiles)
+        }
+
         let musicBedProfileSnapshots = await musicBedProfilesFetch()
-        let learnedDeviceProfiles = try await learnedDeviceProfilesFetch()
         let stabilityDiagnostics = await stabilityFetch()
         let bannerTallies = await bannerTalliesFetch()
         let rediff = await rediffFetch()
+        let analysisStoreHealth = await analysisStoreHealthFetch()
+            .withExportReadFailures(exportReadFailures)
 
         let defaultBundle = DiagnosticsBundleBuilder.buildDefault(
             appVersion: environment.appVersion,
@@ -175,7 +230,8 @@ final class DiagnosticsExportCoordinator {
             learnedDeviceProfiles: learnedDeviceProfiles,
             stabilityDiagnostics: stabilityDiagnostics,
             bannerTallies: bannerTallies,
-            rediff: rediff
+            rediff: rediff,
+            analysisStoreHealth: analysisStoreHealth
         )
         let optInBundle = DiagnosticsBundleBuilder.buildOptIn(episodes: optInEpisodes)
 

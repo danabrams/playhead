@@ -1,5 +1,18 @@
 {
   "default" : {
+    "analysis_store_health" : {
+      "consecutive_failure_count" : 0,
+      "export_read_failures" : [
+
+      ],
+      "quarantines" : [
+
+      ],
+      "recent_failures" : [
+
+      ],
+      "status" : "healthy"
+    },
     "app_version" : "1.0.0",
     "banner_tallies" : [
       {

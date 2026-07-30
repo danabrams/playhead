@@ -213,6 +213,33 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// sanitized + truncated by the builder.
     let rediffDiagnostics: RediffDiagnostics
 
+    /// playhead-wvdz: whether the analysis database opened, across
+    /// launches.
+    ///
+    /// WHY IT IS HERE: a failed `AnalysisStore.migrate()` used to be
+    /// invisible. The app logged to Console, deleted the store
+    /// directory, retried on the now-empty directory, and launched
+    /// looking exactly like a fresh install. Every other field in this
+    /// bundle would have reported an app in perfect health with no data
+    /// in it, and a fleet-wide wipe caused by one bad migration rung
+    /// would have presented as an unexplained drop in analysis coverage
+    /// with no error signal at all. This field is the signal.
+    ///
+    /// ALWAYS encoded, including on a healthy device — a
+    /// `consecutive_failure_count` of 0 beside a `last_success_at` is
+    /// what distinguishes "the store is fine" from "this bundle predates
+    /// the signal", which was the whole failure of the previous
+    /// arrangement.
+    ///
+    /// Privacy: counters, dates, and enum rawValues this repo defines,
+    /// plus one optional `detail` string per failure that must pass
+    /// `DiagnosticTextSanitizer`'s character allowlist or be dropped.
+    /// Quarantine entries carry a directory NAME, never a container
+    /// path. No episode reference of any kind — a database that will not
+    /// open has no episode to name. Proof lives in
+    /// `AnalysisStoreHealthDiagnosticsPrivacyTests`.
+    let analysisStoreHealth: AnalysisStoreHealthState
+
     enum CodingKeys: String, CodingKey {
         case appVersion = "app_version"
         case osVersion = "os_version"
@@ -228,6 +255,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         case stabilityDiagnostics = "stability_diagnostics"
         case bannerTallies = "banner_tallies"
         case rediffDiagnostics = "rediff_diagnostics"
+        case analysisStoreHealth = "analysis_store_health"
     }
 
     init(
@@ -244,9 +272,11 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         learnedDeviceProfiles: [LearnedDeviceProfileDiagnosticRecord] = [],
         stabilityDiagnostics: [StabilityDiagnosticRecord] = [],
         bannerTallies: [BannerTallySummary] = [],
-        rediffDiagnostics: RediffDiagnostics = .empty
+        rediffDiagnostics: RediffDiagnostics = .empty,
+        analysisStoreHealth: AnalysisStoreHealthState = .healthy
     ) {
         self.rediffDiagnostics = rediffDiagnostics
+        self.analysisStoreHealth = analysisStoreHealth
         self.appVersion = appVersion
         self.osVersion = osVersion
         self.deviceClass = deviceClass
@@ -304,6 +334,14 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         self.rediffDiagnostics = try container.decodeIfPresent(
             RediffDiagnostics.self, forKey: .rediffDiagnostics
         ) ?? .empty
+        // Absent in bundles minted before playhead-wvdz. Decoding those
+        // as `.healthy` is the only available answer and is the honest
+        // one: an old bundle carries no evidence either way, and
+        // `last_success_at == nil` on a `.healthy` state is what tells a
+        // reader the field was never populated rather than measured.
+        self.analysisStoreHealth = try container.decodeIfPresent(
+            AnalysisStoreHealthState.self, forKey: .analysisStoreHealth
+        ) ?? .healthy
     }
 
     // MARK: - playhead-p70f: rediff lane telemetry

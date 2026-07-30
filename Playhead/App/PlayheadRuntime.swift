@@ -2101,15 +2101,34 @@ final class PlayheadRuntime {
             // the bead. A persistent open failure now disables the
             // pre-analysis pipeline for this launch and surfaces a
             // fault to Console; the next launch retries.
+            // playhead-wvdz (observability half): every outcome of this
+            // open is now recorded to `AnalysisStoreHealthJournal`, a
+            // JSON document under Application Support that does NOT live
+            // in the database being opened. Before this, a failure here
+            // was Console-only: nothing survived to the next launch, and
+            // the diagnostics bundle — which reads the work journal out
+            // of this very store — could not even be built. A wipe
+            // caused by one bad migration rung was indistinguishable
+            // from a fresh install.
+            //
+            // Recording only. The delete below is unchanged by this
+            // commit and is removed in the next one; the point of
+            // landing the signal first is that it is independently
+            // shippable and would have made the incident legible even
+            // without the behaviour change.
             do {
                 try await analysisStore.migrate()
+                await AnalysisStoreHealthJournal.shared.recordSuccess()
             } catch {
+                await AnalysisStoreHealthJournal.shared.recordFailure(error: error)
                 Logger(subsystem: "com.playhead", category: "Runtime")
                     .warning("Analysis store first-open failed; attempting delete-corrupted-dir recovery: \(error.localizedDescription, privacy: .public)")
                 try? FileManager.default.removeItem(at: AnalysisStore.defaultDirectory())
                 do {
                     try await analysisStore.migrate()
+                    await AnalysisStoreHealthJournal.shared.recordSuccess()
                 } catch {
+                    await AnalysisStoreHealthJournal.shared.recordFailure(error: error)
                     Logger(subsystem: "com.playhead", category: "Runtime")
                         .fault("Analysis store migration failed after delete-corrupted-dir retry — pre-analysis pipeline disabled: \(error)")
                     return  // Don't start the pipeline if tables don't exist

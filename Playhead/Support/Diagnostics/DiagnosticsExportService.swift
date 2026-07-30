@@ -286,6 +286,35 @@ typealias DiagnosticsBannerTalliesFetch = @Sendable () async -> [BannerTallySess
 /// `RediffDiagnosticsFetchAdapter`.
 typealias DiagnosticsRediffFetch = @Sendable () async -> DiagnosticsRediffSnapshot
 
+/// playhead-wvdz — async read of the durable record of whether the
+/// analysis database opened, across launches.
+///
+/// Non-throwing, and for this one the reason is stronger than it is for
+/// its siblings. This field exists precisely to describe a broken
+/// analysis database; a fetch that could throw would be able to take the
+/// export down at exactly the moment its own value is the reason the
+/// export was requested. `AnalysisStoreHealthJournal` reads a plain JSON
+/// file, swallows its own I/O errors, and returns
+/// `AnalysisStoreHealthState.healthy` when there is nothing to report.
+///
+/// Defaults to `.healthy`; production wires it to
+/// `AnalysisStoreHealthJournal.shared.load()`.
+typealias DiagnosticsAnalysisStoreHealthFetch = @Sendable () async -> AnalysisStoreHealthState
+
+/// The ONE production implementation behind
+/// `DiagnosticsAnalysisStoreHealthFetch` (playhead-wvdz).
+///
+/// Declared here — unconditionally compiled — rather than as two copies
+/// on the DEBUG and Release hatches, for the reason `RediffDiagnosticsFetchAdapter`
+/// documents: the test target builds DEBUG, so a Release-only copy is
+/// compiled by nothing any test can run, and a divergence there would
+/// ship with the suite green.
+enum AnalysisStoreHealthDiagnosticsFetchAdapter {
+    static let shared: DiagnosticsAnalysisStoreHealthFetch = {
+        await AnalysisStoreHealthJournal.shared.load()
+    }
+}
+
 /// The ONE production implementation behind `DiagnosticsRediffFetch`
 /// (playhead-p70f, review round 2).
 ///
