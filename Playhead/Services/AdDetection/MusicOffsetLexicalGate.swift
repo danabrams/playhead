@@ -121,17 +121,25 @@ enum MusicOffsetLexicalGate {
     /// `.acoustic` proposal in `build`'s merge its `endTime` can sit ~1 atom past
     /// the music edge, nudging the cutoff slightly later; the 2s lead plus the
     /// multi-chunk width of a real ad-read absorb that.) Chunks are ordered by
-    /// `startTime` with a `chunkIndex` tiebreaker so equal-timestamp chunks keep
-    /// transcript order and the 600-char truncation boundary is stable.
+    /// `TranscriptChunkCanonicalizer.canonicalTimeOrder` so equal-timestamp
+    /// chunks keep transcript order and the 600-char truncation boundary is
+    /// stable.
+    ///
+    /// playhead-r5um: this used to tiebreak equal start times on `chunkIndex`
+    /// directly. That was only correct because the canonicalizer REASSIGNED
+    /// `chunkIndex` to the time-sorted position on the mixed path. r5um
+    /// removed that rewrite, so `chunkIndex` here is the persisted value —
+    /// where every final row is strictly greater than every fast row
+    /// (`FinalPassRetranscriptionRunner.nextFinalChunkIndex`) — and the
+    /// tiebreak would have silently inverted at an equal-start fast/final
+    /// pair, moving the truncation boundary and with it whether `hasAdCue`
+    /// fires. Sharing the one comparator is what keeps this agreeing with the
+    /// atom sequence instead of drifting from it.
     static func onsetWindowText(trailingEdge: Double, chunks: [TranscriptChunk]) -> String {
         let cutoff = trailingEdge - onsetWindowLeadSeconds
         let joined = chunks
             .filter { $0.startTime >= cutoff }
-            .sorted { lhs, rhs in
-                lhs.startTime == rhs.startTime
-                    ? lhs.chunkIndex < rhs.chunkIndex
-                    : lhs.startTime < rhs.startTime
-            }
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
             .map(\.text)
             .joined(separator: " ")
         return String(joined.prefix(onsetWindowCharacterCap))

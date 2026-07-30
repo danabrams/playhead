@@ -3948,8 +3948,26 @@ actor AdDetectionService {
         // `canonicalChunks`. Single-pass transcripts (all-fast or all-final)
         // pass through byte-identically, so this is a no-op for every asset
         // that has never had a final-pass run.
+        // playhead-r5um: TIME-order the canonical array before anything reads
+        // it. `canonicalize` time-sorts the MIXED path but returns single-pass
+        // input byte-identically — that passthrough is a deliberate contract
+        // (hc7e's no-regression pin, and the transcript-peek display identity
+        // pinned by playhead-kcz.1), so the array it hands back is still in
+        // `chunkIndex` order for every single-pass asset. 7 of the 10
+        // single-pass assets on the 2026-07-30 device pull step BACKWARD in
+        // that order, worst −1470.8 s.
+        //
+        // `atomize` sorts for itself, so the atom lane was already safe. These
+        // are the consumers below that read `canonicalChunks` RAW and never
+        // atomize: `LexicalAnchorRefiner.buildWordStream`, whose contract is a
+        // flat time-ordered word stream and which matches n-grams ACROSS
+        // adjacent array positions (so two chunks 1,470 s apart could form a
+        // phrase), and the `RegionShadowPhase` input that reaches
+        // `MusicOffsetLexicalGate.onsetWindowText`. Sorting once here is
+        // idempotent on the mixed path and costs one O(n log n) pass.
         let canonicalization = TranscriptChunkCanonicalizer.canonicalize(chunks)
         let canonicalChunks = canonicalization.chunks
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
         let canonicalDiagnostics = canonicalization.diagnostics
         logger.info(
             "Backfill canonical transcript: asset=\(analysisAssetId, privacy: .public) input=\(canonicalDiagnostics.inputCount, privacy: .public) final=\(canonicalDiagnostics.finalCount, privacy: .public) fast=\(canonicalDiagnostics.fastCount, privacy: .public) droppedFast=\(canonicalDiagnostics.droppedFastCount, privacy: .public) retainedFast=\(canonicalDiagnostics.retainedFastCount, privacy: .public) residualFastFinalOverlap=\(canonicalDiagnostics.residualFastFinalOverlapCount, privacy: .public) coverageRetained=\(canonicalDiagnostics.coverageRetained, privacy: .public) passthrough=\(canonicalDiagnostics.isPassthrough, privacy: .public)"

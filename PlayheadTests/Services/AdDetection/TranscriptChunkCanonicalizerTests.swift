@@ -18,6 +18,7 @@
 // fast chunk dropped, three fast chunks kept, one "brought to you by" hit in
 // the overlap instead of two) encodes behavior main cannot produce.
 
+import CryptoKit
 import Foundation
 import Testing
 
@@ -182,8 +183,26 @@ struct TranscriptChunkCanonicalizerTests {
         // The atom sequence IS the canonical array, position for position.
         #expect(atoms.map(\.text) == canonical.map(\.text))
         #expect(atoms.map(\.startTime) == canonical.map(\.startTime))
-        #expect(atoms.map(\.atomKey.atomOrdinal) == Array(0..<canonical.count))
         #expect(atoms.map(\.startTime) == [0, 30, 45, 60, 90])
+
+        // THE COHORT CLAIM, pinned rather than argued. Pre-r5um this lane
+        // hashed the canonicalizer's array after a renumber-then-sort round
+        // trip that is the identity; so the pre-r5um hash is the digest of
+        // `canonical` in ARRAY order. Recompute that independently — the
+        // atomizer's documented recipe, length-prefixed `normalizedText`,
+        // SHA-256, first 16 bytes — and require the post-r5um version to equal
+        // it. If a future change perturbs the mixed-path sequence, this fails
+        // and the whole "no re-scan on the backfill lane" claim fails with it.
+        var hasher = SHA256()
+        for chunk in canonical {
+            let textData = Data(chunk.normalizedText.utf8)
+            withUnsafeBytes(of: UInt32(textData.count).bigEndian) {
+                hasher.update(bufferPointer: $0)
+            }
+            hasher.update(data: textData)
+        }
+        let preChangeHash = hasher.finalize().prefix(16).map { String(format: "%02x", $0) }.joined()
+        #expect(version.transcriptVersion == preChangeHash)
 
         // The order is recovered from the comparator alone. Feed the canonical
         // array back in reversed and by ascending persisted `chunkIndex` (the

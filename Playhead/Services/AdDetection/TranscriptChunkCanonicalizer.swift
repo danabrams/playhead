@@ -34,6 +34,20 @@
 // no-op for every asset that has not had a final-pass run. That is the
 // no-regression contract the mixed/all-fast/all-final acceptance tests pin.
 //
+// ⚠️ READ THIS BEFORE CONSUMING `Result.chunks` (playhead-r5um). Because that
+// passthrough is byte-identical, the array it returns is NOT time-ordered for
+// a single-pass asset — it is whatever `fetchTranscriptChunks` returned, which
+// is `ORDER BY chunkIndex`, and 7 of the 10 single-pass assets on the
+// 2026-07-30 device pull step backward in that order (worst −1470.8 s). The
+// passthrough is kept byte-identical on purpose: hc7e pins it, and
+// playhead-kcz.1 pins the transcript-peek display identity that rides on it.
+// So every DETECTION consumer must order the array itself with
+// `canonicalTimeOrder`. `TranscriptAtomizer.atomize` does. So does
+// `AdDetectionService.runBackfill`, for the consumers that read the chunks raw
+// rather than atomizing (`LexicalAnchorRefiner.buildWordStream`, the
+// `RegionShadowPhase` input). Sorting is idempotent, so doing it is always
+// safe; assuming it has been done is not.
+//
 // ORDERING (playhead-r5um). `canonicalTimeOrder` below is the ONE ordering
 // authority for transcript chunks in this app; `TranscriptAtomizer.atomize`
 // and the transcript-peek display path both sort with it. It is a total
@@ -205,8 +219,12 @@ enum TranscriptChunkCanonicalizer {
     /// and therefore `transcriptVersion` — undefined for those assets. The
     /// trailing `id` tiebreak is what makes the hash mean something.
     static func canonicalTimeOrder(_ lhs: TranscriptChunk, _ rhs: TranscriptChunk) -> Bool {
-        if lhs.startTime != rhs.startTime { return lhs.startTime < rhs.startTime }
-        if lhs.endTime != rhs.endTime { return lhs.endTime < rhs.endTime }
+        let lhsStart = orderKey(lhs.startTime)
+        let rhsStart = orderKey(rhs.startTime)
+        if lhsStart != rhsStart { return lhsStart < rhsStart }
+        let lhsEnd = orderKey(lhs.endTime)
+        let rhsEnd = orderKey(rhs.endTime)
+        if lhsEnd != rhsEnd { return lhsEnd < rhsEnd }
         let lr = passRank(lhs.pass)
         let rr = passRank(rhs.pass)
         if lr != rr { return lr < rr }
@@ -216,6 +234,27 @@ enum TranscriptChunkCanonicalizer {
 
     private static func passRank(_ pass: String) -> Int {
         pass == finalPass ? 0 : 1
+    }
+
+    /// Collapse non-finite times to a single sentinel so `canonicalTimeOrder`
+    /// stays a strict weak ordering.
+    ///
+    /// Chunk times are ASR-derived doubles with no non-finite guard on the way
+    /// into SQLite. A raw `NaN` would compare unequal to everything and less
+    /// than nothing, so `a < b` and `b < a` would both be false while `a` and
+    /// `b` are each "equivalent" to values that are not equivalent to each
+    /// other — an intransitive comparator, which is undefined behaviour in
+    /// `sorted(by:)` and trips its strict-weak-ordering precondition. The old
+    /// `chunkIndex` comparator was `Int` and could not reach this; ordering by
+    /// time can, on all six atomize lanes.
+    ///
+    /// Mapping every non-finite value to `+infinity` sorts the garbage last,
+    /// deterministically, and leaves the tie to be broken by `pass`,
+    /// `chunkIndex` and finally `id`. Finite values — every row on the
+    /// 2026-07-30 device pull — pass through untouched, so this is
+    /// byte-identical for all real data.
+    private static func orderKey(_ value: Double) -> Double {
+        value.isFinite ? value : .infinity
     }
 
     // MARK: - Interval helpers

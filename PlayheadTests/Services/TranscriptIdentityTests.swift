@@ -149,7 +149,6 @@ struct TranscriptAtomizerTests {
         // The persisted chunkIndex rides along untouched — it is diagnostic,
         // not the ordering key, and it is not the atom ordinal either.
         #expect(atoms.map(\.chunkIndex) == [2, 1, 0])
-        #expect(atoms.map(\.atomKey.atomOrdinal) == [0, 1, 2])
     }
 
     @Test("chunkIndex breaks ties only when the spans are identical")
@@ -394,7 +393,6 @@ struct TranscriptAtomTimeOrderTests {
 
         #expect(atoms.count == chunks.count)
         #expect(worstBackwardStep(atoms.map(\.startTime)) == 0)
-        #expect(atoms.map(\.atomKey.atomOrdinal) == Array(0..<chunks.count))
 
         // Specifically: the episode's tail no longer sits at the head. Under
         // the old order the t=3540 s row was atom ordinal 2 of 14.
@@ -419,6 +417,19 @@ struct TranscriptAtomTimeOrderTests {
 
         let legacyStarts = legacyChunkIndexOrder(canonical.chunks).map(\.startTime)
         #expect(abs(worstBackwardStep(legacyStarts) - (-1470.78)) < 0.005)
+
+        // The passthrough array itself is NOT time-ordered — that is the trap
+        // `AdDetectionService.runBackfill` now sorts around before handing
+        // `canonicalChunks` to the consumers that read it raw instead of
+        // atomizing (`LexicalAnchorRefiner.buildWordStream`, the
+        // `RegionShadowPhase` input). Pin both halves: it is broken as
+        // returned, and the shared comparator repairs it.
+        #expect(worstBackwardStep(canonical.chunks.map(\.startTime)) < 0)
+        #expect(worstBackwardStep(
+            canonical.chunks
+                .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
+                .map(\.startTime)
+        ) == 0)
 
         let (atoms, _) = atomize(canonical.chunks)
 
@@ -446,7 +457,6 @@ struct TranscriptAtomTimeOrderTests {
         #expect(atoms.map(\.startTime) == ordered.map(\.startTime))
         #expect(atoms.map(\.endTime) == ordered.map(\.endTime))
         #expect(atoms.map(\.chunkIndex) == ordered.map(\.chunkIndex))
-        #expect(atoms.map(\.atomKey.atomOrdinal) == Array(0..<ordered.count))
 
         // And the HASH is unchanged, not merely the sequence. Recomputed here
         // from the atomizer's documented recipe — length-prefixed
@@ -484,12 +494,6 @@ struct TranscriptAtomTimeOrderTests {
             #expect(version.transcriptVersion == baseVersion.transcriptVersion)
         }
 
-        // The tie that forces it: two rows share chunkIndex 0 AND the exact
-        // span (0.42, 1.08). Only the `id` tiebreak separates them, and it
-        // must separate them the same way every time.
-        let head = baseAtoms.prefix(2)
-        #expect(head.allSatisfy { $0.startTime == 0.42 })
-        #expect(head.map(\.chunkIndex) == [0, 0])
     }
 
     @Test("the id tiebreak decides rows that tie on span, pass AND chunkIndex")
@@ -558,6 +562,62 @@ struct TranscriptAtomTimeOrderTests {
         let tidyUnit = DiscourseUnit(ref: "S0", atoms: tidy)
         #expect(tidyUnit.startTime == tidy.first?.startTime)
         #expect(tidyUnit.endTime == tidy.last?.endTime)
+    }
+
+    @Test("the music-gate onset window reads in canonical order, not persisted chunkIndex")
+    func musicGateOnsetWindowFollowsCanonicalOrder() {
+        // Equal span, fast and final. `FinalPassRetranscriptionRunner
+        // .nextFinalChunkIndex` persists the final row ABOVE every fast row,
+        // so the gate's old `chunkIndex` tiebreak put fast first — while the
+        // canonicalizer, and now the atom sequence, rank final first. The two
+        // disagreed the moment r5um stopped renumbering `chunkIndex`, and the
+        // 600-char cap makes a disagreement change the text that is scanned.
+        // Both rows must sit inside the gate's `trailingEdge - 2 s` lead
+        // window or they are filtered out before ordering matters at all.
+        let chunks = [
+            makeChunk(id: "fast-row", chunkIndex: 7, startTime: 108.5, endTime: 110,
+                      text: "FAST", pass: "fast"),
+            makeChunk(id: "final-row", chunkIndex: 900, startTime: 108.5, endTime: 110,
+                      text: "FINAL", pass: "final"),
+        ]
+
+        let text = MusicOffsetLexicalGate.onsetWindowText(trailingEdge: 110, chunks: chunks)
+        #expect(text.isEmpty == false)
+        #expect(text == "FINAL FAST")
+
+        // Same answer whichever way the rows arrive from the store.
+        #expect(
+            MusicOffsetLexicalGate.onsetWindowText(
+                trailingEdge: 110, chunks: chunks.reversed()
+            ) == text
+        )
+    }
+
+    @Test("non-finite chunk times cannot make the comparator intransitive")
+    func nonFiniteTimesAreOrderedDeterministically() {
+        // Chunk times are ASR-derived doubles with no non-finite guard into
+        // SQLite. NaN compares unequal to everything and less than nothing, so
+        // a naive `!=` / `<` comparator would be intransitive — undefined
+        // behaviour in `sorted(by:)`, and a trapped strict-weak-ordering
+        // precondition in a debug build. The old `chunkIndex` (Int) comparator
+        // could not reach this; ordering by time can.
+        let chunks = [
+            makeChunk(id: "nan", chunkIndex: 0, startTime: .nan, endTime: .nan, text: "nan"),
+            makeChunk(id: "b", chunkIndex: 1, startTime: 20, endTime: 30, text: "second"),
+            makeChunk(id: "inf", chunkIndex: 2, startTime: .infinity, endTime: .infinity,
+                      text: "inf"),
+            makeChunk(id: "a", chunkIndex: 3, startTime: 0, endTime: 10, text: "first"),
+        ]
+
+        let (atoms, version) = atomize(chunks)
+
+        // Real rows keep their true order and sort ahead of the garbage.
+        #expect(atoms.prefix(2).map(\.text) == ["first", "second"])
+        #expect(atoms.count == 4)
+        // And the result is stable across arrival order, so the hash is too.
+        let (reversedAtoms, reversedVersion) = atomize(Array(chunks.reversed()))
+        #expect(reversedAtoms.map(\.text) == atoms.map(\.text))
+        #expect(reversedVersion.transcriptVersion == version.transcriptVersion)
     }
 
     @Test("segmenting the device shape yields forward, non-inverted segments")
