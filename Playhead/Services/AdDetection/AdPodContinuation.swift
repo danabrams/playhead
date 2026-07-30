@@ -136,10 +136,15 @@ enum AdPodContinuation {
         /// the seed itself is already most of the pod.
         var maxExtensionSecondsPerSide: Double
 
-        /// Drop a continuation mark already covered this fraction or more by
-        /// existing VISIBLE windows — the hole there is not a hole. Mirrors
-        /// `SpecialistMarkComposer.dedupeCoverageThreshold`.
-        var dedupeCoverageThreshold: Double
+        /// Shortest continuation mark worth emitting, in seconds.
+        ///
+        /// The recovered span is reduced to the material NOTHING already covers
+        /// (see ``compose(existingWindows:adCopyLinks:contentBarriers:protectedRegions:episodeDuration:analysisAssetId:config:)``),
+        /// and that subtraction can leave sub-second slivers at the edges of an
+        /// already-detected creative. A sliver is not an ad the listener hears; it
+        /// is arithmetic. 3 s is below any real creative and above the
+        /// transcript-interpolation slop that produces the slivers.
+        var minMarkDurationSeconds: Double
 
         /// Ceiling for the confidence stamped on a continuation mark.
         ///
@@ -156,19 +161,19 @@ enum AdPodContinuation {
         static let `default` = Configuration(
             maxLinkGapSeconds: 30.0,
             maxExtensionSecondsPerSide: 180.0,
-            dedupeCoverageThreshold: 0.70,
+            minMarkDurationSeconds: 3.0,
             markConfidenceCeiling: 0.70
         )
 
         init(
             maxLinkGapSeconds: Double = 30.0,
             maxExtensionSecondsPerSide: Double = 180.0,
-            dedupeCoverageThreshold: Double = 0.70,
+            minMarkDurationSeconds: Double = 3.0,
             markConfidenceCeiling: Double = 0.70
         ) {
             self.maxLinkGapSeconds = maxLinkGapSeconds
             self.maxExtensionSecondsPerSide = maxExtensionSecondsPerSide
-            self.dedupeCoverageThreshold = dedupeCoverageThreshold
+            self.minMarkDurationSeconds = minMarkDurationSeconds
             self.markConfidenceCeiling = markConfidenceCeiling
         }
     }
@@ -433,9 +438,19 @@ enum AdPodContinuation {
         let seeds = existingWindows.filter(isSeed)
         guard !seeds.isEmpty else { return [] }
 
+        // Material the listener can ALREADY see, which the recovered span is
+        // reduced against so this pass only ever adds genuinely-uncovered audio.
+        //
+        // Our OWN prior rows are excluded deliberately (mirroring
+        // `SpecialistMarkComposer`'s dedupe): including them would make a re-run
+        // find zero residue, emit nothing, and therefore RETIRE the rows it wrote
+        // last time — a row that flickers in and out on every backfill.
+        // Idempotency rides on content-addressed ids over identical residues, not
+        // on self-suppression.
         let visible: [(start: Double, end: Double)] = existingWindows
             .filter {
                 visibleDecisionStates.contains($0.decisionState)
+                    && $0.detectorVersion != detectorVersion
                     && $0.startTime.isFinite
                     && $0.endTime.isFinite
                     && $0.endTime > $0.startTime
@@ -455,43 +470,52 @@ enum AdPodContinuation {
         }
         guard !spans.isEmpty else { return [] }
 
-        // Clamp to real audio, then drop anything the listener can already see.
+        // Clamp to real audio, UNION the recovered spans, then reduce each to the
+        // material NOTHING already covers.
+        //
+        // The union comes first because several seeds in one pod propose
+        // overlapping spans — a seed either side of a hole both reach across it —
+        // and subtracting per-span would emit two nearly-identical rows over the
+        // same audio, i.e. two banners for one ad. Unioning makes the output
+        // DISJOINT by construction.
+        //
+        // Emitting the residue, rather than dropping a mostly-covered span,
+        // is what makes this pass move the quantity the bead measures: the
+        // UNCOVERED runs inside a pod. It also means the pass can never
+        // double-count — a hole between two already-detected creatives yields a
+        // mark for the hole, not a second row over the creatives.
         let upperBound = episodeDuration.isFinite && episodeDuration > 0
             ? episodeDuration
             : Double.greatestFiniteMagnitude
-        let clamped = spans.compactMap { span -> (start: Double, end: Double, confidence: Double)? in
+        let clamped = spans.compactMap { span -> (start: Double, end: Double)? in
             let start = max(span.start, 0)
             let end = min(span.end, upperBound)
-            guard end > start else { return nil }
-            return (start: start, end: end, confidence: span.confidence)
+            return end > start ? (start: start, end: end) : nil
         }
 
-        // Deterministic output order and stable dedupe of identical geometry:
-        // two seeds meeting in the middle of one pod can propose the same span.
-        var bestByGeometry: [AdCopyLink: Double] = [:]
-        for span in clamped {
-            let key = AdCopyLink(start: span.start, end: span.end)
-            bestByGeometry[key] = max(bestByGeometry[key] ?? 0, span.confidence)
-        }
-
-        let survivors = bestByGeometry
-            .filter { key, _ in
-                coveredFraction(start: key.start, end: key.end, by: visible)
-                    < config.dedupeCoverageThreshold
+        var marks: [AdWindow] = []
+        for recovered in unionIntervals(clamped) {
+            // Presence confidence for this stretch: the strongest seed that
+            // reached it. Never averaged down, never raised above the ceiling.
+            let confidence = spans
+                .filter { $0.start < recovered.end && $0.end > recovered.start }
+                .map(\.confidence)
+                .max() ?? 0
+            for residue in subtract(covered: visible, from: recovered) {
+                guard residue.end - residue.start >= config.minMarkDurationSeconds else {
+                    continue
+                }
+                marks.append(
+                    makeMark(
+                        start: residue.start,
+                        end: residue.end,
+                        confidence: min(confidence, config.markConfidenceCeiling),
+                        analysisAssetId: analysisAssetId
+                    )
+                )
             }
-            .sorted { lhs, rhs in
-                if lhs.key.start != rhs.key.start { return lhs.key.start < rhs.key.start }
-                return lhs.key.end < rhs.key.end
-            }
-
-        return survivors.map { key, confidence in
-            makeMark(
-                start: key.start,
-                end: key.end,
-                confidence: min(confidence, config.markConfidenceCeiling),
-                analysisAssetId: analysisAssetId
-            )
         }
+        return marks
     }
 
     // MARK: - Seed selection
@@ -594,23 +618,27 @@ enum AdPodContinuation {
 
     // MARK: - Interval helpers
 
-    /// Fraction of `[start, end)` covered by `intervals`, overlaps counted once.
-    /// Asymmetric (coverage OF the span, not IoU), matching
-    /// `SpecialistMarkComposer.coveredFraction`.
-    static func coveredFraction(
-        start: Double,
-        end: Double,
-        by intervals: [(start: Double, end: Double)]
-    ) -> Double {
-        let duration = end - start
-        guard duration > 0 else { return 0 }
-        let clipped = intervals.compactMap { iv -> (start: Double, end: Double)? in
-            let s = max(start, iv.start)
-            let e = min(end, iv.end)
-            return e > s ? (start: s, end: e) : nil
+    /// `span` minus the union of `covered`, as an ascending list of gaps. The
+    /// residue is what nothing already claims — the "uncovered run" this bead
+    /// measures, computed the same way the offline measurement does.
+    static func subtract(
+        covered: [(start: Double, end: Double)],
+        from span: (start: Double, end: Double)
+    ) -> [(start: Double, end: Double)] {
+        guard span.end > span.start else { return [] }
+        let clipped = covered.compactMap { iv -> (start: Double, end: Double)? in
+            let start = max(span.start, iv.start)
+            let end = min(span.end, iv.end)
+            return end > start ? (start: start, end: end) : nil
         }
-        let covered = unionIntervals(clipped).reduce(0.0) { $0 + ($1.end - $1.start) }
-        return covered / duration
+        var result: [(start: Double, end: Double)] = []
+        var cursor = span.start
+        for block in unionIntervals(clipped) {
+            if block.start > cursor { result.append((start: cursor, end: block.start)) }
+            cursor = max(cursor, block.end)
+        }
+        if cursor < span.end { result.append((start: cursor, end: span.end)) }
+        return result
     }
 
     /// Sort and union `[start, end)` intervals into a disjoint, ascending set.

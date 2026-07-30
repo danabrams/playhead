@@ -29,7 +29,7 @@ struct AdPodContinuationWireInTests {
 
     private static let podcastId = "podcast-pod-continuation"
     private static let assetId = "asset-pod-continuation"
-    private static let episodeDuration = 200.0
+    private static let episodeDuration = 140.0
 
     private func makeAsset(id: String) -> AnalysisAsset {
         AnalysisAsset(
@@ -47,18 +47,22 @@ struct AdPodContinuationWireInTests {
         )
     }
 
-    /// A three-creative DAI-shaped pod between two stretches of show content.
-    /// Each creative carries a sponsor disclosure plus a promo code or URL, which
-    /// is what the vetted lexical auto-ad rule requires — so the pod reads as a
-    /// chain of ad-copy links rather than one blob.
+    /// A three-creative DAI pod, shaped like the real failure. Creatives A and C
+    /// carry a sponsor disclosure plus a promo code and a spoken URL, so the
+    /// vetted lexical auto-ad rule fires on each. Creative B — between them —
+    /// carries NO ad cue at all: it is a dialogue-format spot, which is precisely
+    /// the ad the pipeline misses and the listener then hears play. Show narration
+    /// brackets the pod on both sides.
+    ///
+    /// The pod's ad copy runs 30–80 s. Anything outside that is show.
     private func makePodChunks(assetId: String) -> [TranscriptChunk] {
         let spans: [(start: Double, end: Double, text: String)] = [
-            (0.0, 40.0, "Welcome back to the show. We were talking about the history of the neighborhood and how the old market building changed hands three times."),
-            (40.0, 70.0, "This episode is brought to you by Squarespace. Use code SHOW for ten percent off your first purchase at squarespace dot com slash show."),
-            (70.0, 100.0, "Support for this show comes from Rocket Money. Go to rocketmoney dot com slash deal today and start cancelling the subscriptions you forgot about."),
-            (100.0, 130.0, "This break is sponsored by Athletic Greens. Visit drinkag one dot com slash show and use code GREENS to get your first order shipped free."),
-            (130.0, 170.0, "So where were we. You were telling me about the market building and the family that ran the produce stall on the corner for forty years."),
-            (170.0, 200.0, "That is a wonderful story and I think it says something about how these places hold a neighborhood together over time.")
+            (0.0, 30.0, "We were talking about the history of the neighborhood and how the old market building changed hands three times before the war."),
+            (30.0, 45.0, "This episode is brought to you by Squarespace. Use code SHOW and head to squarespace com slash show."),
+            (45.0, 65.0, "Buyers remorse. You bought a new car and now I am moving in with you. Sorry, I think there has been some mistake here. Terms and exclusions may apply."),
+            (65.0, 80.0, "This break is sponsored by Rocket Money. Use code DEAL and visit rocketmoney com slash deal."),
+            (80.0, 110.0, "You were telling me about the market building and the family that ran the produce stall on the corner for forty years."),
+            (110.0, 140.0, "That says something about how these places hold a neighborhood together, and about who gets to decide what a street looks like.")
         ]
         return spans.enumerated().map { idx, span in
             TranscriptChunk(
@@ -76,6 +80,46 @@ struct AdPodContinuationWireInTests {
                 atomOrdinal: nil
             )
         }
+    }
+
+    /// Bounds of the cue-free middle creative — the ad the listener currently
+    /// hears play after the banner fires on a neighbour.
+    private static let missedCreative = (start: 45.0, end: 65.0)
+
+    /// Bounds of the pod's ad copy. A recovered second outside this is show.
+    private static let podBounds = (start: 30.0, end: 80.0)
+
+    /// The seed the pass chains off: a CONFIRMED detector window on the pod's LAST
+    /// creative only — the exact production failure this bead exists for ("we
+    /// caught ad #3 and missed #2"). Pre-inserted rather than harvested from
+    /// fusion so this wiring test does not silently become a test of fusion's
+    /// confidence tuning: its `detectorVersion` differs from the service's, so the
+    /// backfill reconcile leaves it alone, and `AdPodContinuation.isSeed` accepts
+    /// it exactly as it accepts a real fused row.
+    private static let seedWindowId = "pod-seed-window"
+
+    private func makeSeedWindow() -> AdWindow {
+        AdWindow(
+            id: Self.seedWindowId,
+            analysisAssetId: Self.assetId,
+            startTime: 72.0,
+            endTime: 80.0,
+            confidence: 0.91,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "seed-detector-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: 72.0,
+            metadataSource: "fusion-v1",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue
+        )
     }
 
     private func makeService(
@@ -99,9 +143,13 @@ struct AdPodContinuationWireInTests {
         )
     }
 
-    private func runArm(podContinuationEnabled: Bool) async throws -> [AdWindow] {
+    private func runArm(
+        podContinuationEnabled: Bool,
+        extraWindows: [AdWindow] = []
+    ) async throws -> [AdWindow] {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: Self.assetId))
+        try await store.insertAdWindows([makeSeedWindow()] + extraWindows)
         let service = makeService(
             store: store,
             podContinuationEnabled: podContinuationEnabled
@@ -157,12 +205,28 @@ struct AdPodContinuationWireInTests {
             !rows.isEmpty,
             "Step 18b must recover pod material on a three-creative pod fixture"
         )
-        // Every recovered second must sit inside the pod, not in the show
-        // stretches on either side. The pod's ad copy runs 40–130 s; a mark that
-        // reached into the 0–40 or 130–200 narration would be eating show.
+        // The recovered material must land on the CUE-FREE middle creative — the
+        // ad the listener currently hears play after the banner fires on its
+        // neighbour. Reaching it is the felt-experience claim of this bead.
+        let missed = Self.missedCreative
+        let recoveredInsideMissed = rows.reduce(0.0) { total, row in
+            total + max(0, min(row.endTime, missed.end) - max(row.startTime, missed.start))
+        }
+        #expect(
+            recoveredInsideMissed > 10.0,
+            "recovery must cover most of the missed creative (got \(recoveredInsideMissed)s of \(missed.end - missed.start)s)"
+        )
+        // ZERO NEW SHOW SECONDS: every recovered second must sit inside the pod's
+        // ad copy, never in the narration either side of it.
         for row in rows {
-            #expect(row.startTime >= 40.0, "mark \(row.startTime)–\(row.endTime) reached into the opening narration")
-            #expect(row.endTime <= 130.0, "mark \(row.startTime)–\(row.endTime) reached into the closing narration")
+            #expect(
+                row.startTime >= Self.podBounds.start,
+                "mark \(row.startTime)-\(row.endTime) reached into the opening narration"
+            )
+            #expect(
+                row.endTime <= Self.podBounds.end,
+                "mark \(row.startTime)-\(row.endTime) reached into the closing narration"
+            )
         }
     }
 
@@ -202,13 +266,11 @@ struct AdPodContinuationWireInTests {
     /// engulfing it — the persisted continuation rows must not span it.
     @Test("a persisted user mark is never engulfed by a continuation row")
     func userMarkIsNeverEngulfed() async throws {
-        let store = try await makeTestStore()
-        try await store.insertAsset(makeAsset(id: Self.assetId))
         let mark = AdWindow(
             id: "user-mark-1",
             analysisAssetId: Self.assetId,
-            startTime: 72.0,
-            endTime: 98.0,
+            startTime: 50.0,
+            endTime: 56.0,
             confidence: 1.0,
             boundaryState: "userMarked",
             decisionState: AdDecisionState.confirmed.rawValue,
@@ -225,27 +287,19 @@ struct AdPodContinuationWireInTests {
             userDismissedBanner: false,
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
-        try await store.insertAdWindows([mark])
-
-        let service = makeService(store: store, podContinuationEnabled: true)
-        try await service.runBackfill(
-            chunks: makePodChunks(assetId: Self.assetId),
-            analysisAssetId: Self.assetId,
-            podcastId: Self.podcastId,
-            episodeDuration: Self.episodeDuration
+        let windows = try await runArm(
+            podContinuationEnabled: true,
+            extraWindows: [mark]
         )
-
-        let rows = continuationRows(try await store.fetchAdWindows(assetId: Self.assetId))
-        for row in rows {
+        for row in continuationRows(windows) {
             #expect(
                 !(row.startTime < mark.endTime && row.endTime > mark.startTime),
-                "continuation row \(row.startTime)–\(row.endTime) overlaps the listener's mark"
+                "continuation row \(row.startTime)-\(row.endTime) overlaps the listener's mark"
             )
         }
-        let persistedMark = try #require(
-            try await store.fetchAdWindows(assetId: Self.assetId).first { $0.id == mark.id }
-        )
+        let persistedMark = try #require(windows.first { $0.id == mark.id })
         #expect(persistedMark.startTime == mark.startTime)
         #expect(persistedMark.endTime == mark.endTime)
+        #expect(persistedMark.boundaryState == "userMarked")
     }
 }

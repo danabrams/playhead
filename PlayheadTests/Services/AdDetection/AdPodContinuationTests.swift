@@ -367,7 +367,7 @@ struct AdPodContinuationTests {
         #expect(mark.metadataConfidence == nil)
         #expect(mark.wasSkipped == false)
         #expect(
-            mark?.confidence == AdPodContinuation.Configuration.default.markConfidenceCeiling,
+            mark.confidence == AdPodContinuation.Configuration.default.markConfidenceCeiling,
             "a 0.98 seed's continuation is capped at the mark-tier ceiling"
         )
     }
@@ -515,7 +515,7 @@ struct AdPodContinuationTests {
     }
 
     @Test("a hole already covered by an existing visible window yields no mark")
-    func dedupesAgainstExistingCoverage() {
+    func fullyCoveredHoleYieldsNoMark() {
         let seed = window(start: 800.0, end: 815.0)
         let neighbour = window(start: 770.0, end: 800.0)
         let marks = AdPodContinuation.compose(
@@ -527,6 +527,72 @@ struct AdPodContinuationTests {
             analysisAssetId: Self.assetId
         )
         #expect(marks.isEmpty, "the neighbour already covers that material")
+    }
+
+    /// The residue rule, which is the whole point: a corridor with an
+    /// already-detected creative in the middle yields marks for the HOLES either
+    /// side of it, and nothing over the creative itself. Emitting the residue
+    /// rather than dropping the span is what makes this pass move the metric the
+    /// bead measures (uncovered runs), and it is why the pass can never
+    /// double-count material the listener already sees.
+    @Test("a partially covered corridor yields marks only for the uncovered holes")
+    func partiallyCoveredCorridorYieldsResidue() {
+        let seed = window(start: 900.0, end: 920.0)
+        let alreadyDetected = window(start: 850.0, end: 870.0)
+        let marks = AdPodContinuation.compose(
+            existingWindows: [seed, alreadyDetected],
+            adCopyLinks: [link(820.0, 845.0), link(848.0, 872.0), link(875.0, 898.0)],
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 2000.0,
+            analysisAssetId: Self.assetId
+        )
+        #expect(marks.map(\.startTime) == [820.0, 870.0])
+        #expect(marks.map(\.endTime) == [850.0, 900.0])
+    }
+
+    @Test("a sub-minimum sliver left by the subtraction is not emitted")
+    func sliversAreNotEmitted() {
+        let minimum = AdPodContinuation.Configuration.default.minMarkDurationSeconds
+        let seed = window(start: 900.0, end: 920.0)
+        // Existing coverage leaves only a (minimum - 1) s sliver before the seed.
+        let alreadyDetected = window(start: 820.0, end: 900.0 - (minimum - 1.0))
+        let marks = AdPodContinuation.compose(
+            existingWindows: [seed, alreadyDetected],
+            adCopyLinks: [link(825.0, 898.0)],
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 2000.0,
+            analysisAssetId: Self.assetId
+        )
+        #expect(marks.isEmpty)
+    }
+
+    /// A previously-persisted continuation row must NOT suppress its own re-
+    /// emission: if it did, a re-run would find no residue, emit nothing, and the
+    /// version-scoped reconcile would retire the row it wrote last time — a mark
+    /// that flickers on every backfill.
+    @Test("a prior continuation row does not suppress its own re-emission")
+    func priorContinuationRowsDoNotSelfSuppress() {
+        let seed = window(start: 800.0, end: 815.0)
+        let firstPass = AdPodContinuation.compose(
+            existingWindows: [seed],
+            adCopyLinks: [link(770.0, 795.0)],
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 1470.0,
+            analysisAssetId: Self.assetId
+        )
+        #expect(firstPass.count == 1)
+        let secondPass = AdPodContinuation.compose(
+            existingWindows: [seed] + firstPass,
+            adCopyLinks: [link(770.0, 795.0)],
+            contentBarriers: [],
+            protectedRegions: [],
+            episodeDuration: 1470.0,
+            analysisAssetId: Self.assetId
+        )
+        #expect(secondPass.map(\.id) == firstPass.map(\.id))
     }
 
     // MARK: - Determinism
