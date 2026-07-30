@@ -119,7 +119,7 @@ final class AdPodContinuationDeviceLaneTests: XCTestCase {
 
         for asset in lane.assets where !asset.chunks.isEmpty && !asset.windows.isEmpty {
             assetsEvaluated += 1
-            let chunks = asset.chunks.enumerated().map { index, chunk in
+            let rawChunks = asset.chunks.enumerated().map { index, chunk in
                 TranscriptChunk(
                     id: "\(asset.assetId)-\(index)",
                     analysisAssetId: asset.assetId,
@@ -166,6 +166,13 @@ final class AdPodContinuationDeviceLaneTests: XCTestCase {
                 .map { (start: $0.startTime, end: $0.endTime) }
             totalProtectedRegions += protectedRegions.count
 
+            // Production canonicalizes the mixed fast/final chunk array BEFORE any
+            // consumer reads it (playhead-hc7e), and a real device transcript
+            // genuinely carries both passes over the same seconds — the raw export
+            // shows every overlapped segment twice. Reading the raw array here
+            // would double-count the text and make this lane measure something
+            // `runBackfill` never sees.
+            let chunks = TranscriptChunkCanonicalizer.canonicalize(rawChunks).chunks
             let hits = scanner.collectHits(chunks: chunks)
             let lexicalLinks = AdPodContinuation.adCopyLinks(chunks: chunks, hits: hits)
             let rhetorical = AdPodContinuation.rhetoricalLinks(chunks: chunks)
