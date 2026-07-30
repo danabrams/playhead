@@ -1,12 +1,13 @@
-# Dogfood build installed 2026-07-30 — main @ 271815c9
+# Dogfood build STAGED 2026-07-30 ~12:15 ET — main @ 20c821d7 — NOT YET INSTALLED
 
-**Already installed on the iPhone** (ED78151E…) — `devicectl` reported
-`App installed: bundleID com.playhead.app`. Nothing to run unless you want to reinstall.
+⚠️ **The install did not complete.** The build succeeded and is verified, but the transfer failed
+with `CoreDeviceError 3002 "Connection interrupted"` mid-flight as the phone left, and the retry hit
+`4016` (device unavailable). Run the command below when the phone is back, unlocked and connected.
 
-Built from **main @ 271815c9**, Release, signed (team 36Z6VYTT9X, `com.playhead.app`),
-389 MB including the 336 MB `qwen3_0_6b_4bit_dynamic_ft_v2` specialist model and `StingerBank.json`.
+**Because 3002 interrupted mid-transfer, the app on the phone may be partially written.** If Playhead
+behaves oddly on next launch, re-run the install — that is the fix, not a symptom of a bad build.
 
-## Reinstall (phone unlocked + connected)
+## Install
 
 ```bash
 cd /Users/dabrams/playhead
@@ -15,55 +16,45 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
   .derivedDataDevice/Build/Products/Release-iphoneos/Playhead.app
 ```
 
-If it prints `CoreDeviceError 4016` ("not able to fulfill the requested usage assertion
-requirements"), the phone is locked or not actively paired — unlock it, confirm
-`xcrun devicectl list devices` shows the iPhone as `connected` rather than `unavailable`,
-then re-run.
+`4016` means locked or not actively paired — unlock, confirm `xcrun devicectl list devices` shows
+`connected`, re-run.
 
-## Verified beyond "BUILD SUCCEEDED"
+## Verified in the artifact, not just "BUILD SUCCEEDED"
 
-The binary contains `completeAdScanPartial` (×3) and all three residual `AdScanLimit` cause
-tokens (`neverRan`, `stoppedShort`, `unmeasurableDuration`), which proves **#297 is genuinely in
-this artifact**, plus `partiallyAnalyzed` (×2) for pz32's ◐ state.
+| symbol | hits | proves |
+|---|---|---|
+| `adScanRedrive` | 2 | onn6 (#298) bounded re-drive |
+| `AnalysisStoreRecovery` / `analysis_store_health` | 5 | wvdz (#299) no silent DB deletion |
+| `completeAdScanPartial` | 3 | gqx4 (#297) degraded terminal |
 
-⚠️ **Do not verify by grepping the binary for `"Partly analyzed"` — it will return zero and that
-is not a defect.** The literal is exactly 15 UTF-8 bytes, which is Swift's small-string limit, so
-it is stored INLINE in the String struct rather than emitted into `__cstring`; `strings` can never
-see it. Grep for the enum case name (`partiallyAnalyzed`), which comes from reflection metadata.
-The previous staging note's claim that the literal was greppable was wrong.
+Do NOT verify by grepping for `"Partly analyzed"` — that literal is 15 UTF-8 bytes, Swift's
+small-string limit, so it is stored inline and `strings` can never see it. Grep the enum case names.
 
-## What is new since the last staged build (main @ 149721c4)
+## What is new since the build now on the phone (main @ 271815c9)
 
-**#297 — playhead-gqx4 + playhead-i7qe: the ad scan now actually reaches the audio.**
+- **#298 onn6** — under-scanned episodes get a bounded re-drive. **6 episodes** that had no
+  dispatchable job at all and would never have been scanned again now get one:
+  `E71CF852`, `1E32428C`, `B5786B41`, `1A9616D1`, `8FECFDDE`, `06E94E9D`.
+  Two more are *deliberately* declined (superseded orphans — a pass would read no audio) and three
+  are out of reach (the 7-day GC deleted their job rows).
+- **#299 wvdz** — **a failed migration can no longer silently delete the analysis database.**
+  It used to `removeItem` the whole store directory and retry, and the retry succeeded *because the
+  directory was empty*. Now: retry first, then surface in Settings → Diagnostics after three
+  failures, and the only path that touches the directory *moves* it to quarantine.
 
-The last build made the checkmark honest (pz32). This one goes after the thing the honest
-checkmark exposed — that most episodes were barely scanned at all.
+## Worth checking
 
-- **gqx4** — `completeFull` used to be declared from transcript + feature coverage only. Neither is
-  the ad scan, so episodes were stamped "fully analysed" with ~3% of their audio ever examined, and
-  because that state is terminal nothing ever went back. It now requires measured ad-scan coverage
-  (the same number the ✓ uses), and a short scan lands in a new degraded terminal
-  `completeAdScanPartial` that records WHY (refusal, guardrail, decode failure, interrupted,
-  stopped short, unmeasurable duration).
-- **i7qe** — the pre-analysis runner skipped the semantic scan whenever the transcript had not grown
-  and no candidate windows were outstanding. But candidate windows are *produced by* the scan, so
-  their absence in unscanned audio meant nothing was ever proposed there — the skip was reading an
-  absence as completion. Seven assets on the last device pull sat in exactly that shape and could
-  never make progress no matter how often the job re-ran.
+- **Do any percentages climb?** That is the observable test of onn6 + i7qe.
+- ◐ will **not** become ✓ from onn6 alone — a degraded terminal is a hard veto and only the session
+  lane reclassifies. The percentage moves; playing the episode re-finalizes it.
+- The ◐ glyph itself is still **never verified on a real screen**.
 
-## Worth checking on this build
+## NOT in this build
 
-**Expect ◐ to persist on old episodes at first, and expect percentages to start climbing.**
-
-- Of the 34 episodes over 15 minutes on the last pull, **14 still have a dispatchable job** and
-  should now actually get scanned — including 2 that were stamped `completeFull` (820134BF at 39%,
-  70EC53D7 at 90%) and 3 stuck in `backfill`. Watch whether their percentages move.
-- The other 20 will NOT improve on their own — see the known limit below. That is expected.
-- Episodes analysed on the previous build read ◐ **"Amount scanned unknown"** on first launch: this
-  build is a cohort rev, so prior scan rows are pruned until re-scanned. Honest but inert.
-- **Still unverified visually** (carried over from the last build): nobody has looked at the ◐ glyph
-  on a real screen. Worth a glance, and worth trying VoiceOver on a library row — it should say
-  "Partly analyzed" and "N% scanned for ads".
+**playhead-se2h** (swallowed model-load failure). Its adversarial review found three HIGH issues,
+one of which recreated the exact permanent-silent-failure shape the bead exists to fix — a load with
+no timeout anywhere in its chain, leaving a sticky in-flight latch set forever. Fixes were still
+uncommitted and unverified at build time, so it was held rather than shipped unverified.
 
 ## Known limit, deliberate and filed
 
