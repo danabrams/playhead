@@ -99,6 +99,15 @@ struct SettingsView: View {
     @State private var dogfoodDiagnosticsExportResult: DogfoodDiagnosticsExportResult?
     @State private var dogfoodDiagnosticsExportError: String?
 
+    /// playhead-wvdz: the analysis-history recovery choice. Rendered
+    /// ONLY when the store has failed to open enough times that the app
+    /// has stopped deciding on its own, or when data has been set aside
+    /// and is still on the device. A healthy install never sees it.
+    @State private var analysisStoreHealth: AnalysisStoreHealthState?
+    @State private var analysisStoreRecoveryInProgress = false
+    @State private var analysisStoreRecoveryNotice: String?
+    @State private var showStartFreshConfirmation = false
+
     /// playhead-jw63.5: in-app feedback channel. `feedbackAttachDiagnostics`
     /// is the per-send opt-in for the diagnostics bundle — default OFF, so a
     /// "this felt wrong" note stays a note unless the listener says otherwise.
@@ -1889,6 +1898,8 @@ private extension SettingsView {
                     .foregroundStyle(.red)
                     .listRowBackground(AppColors.surface)
             }
+
+            analysisHistoryRecoveryRows
         } header: {
             sectionHeader(SettingsL274Copy.diagnosticsHeader)
         } footer: {
@@ -1896,6 +1907,159 @@ private extension SettingsView {
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
         }
+        .task { await refreshAnalysisStoreHealth() }
+    }
+
+    // MARK: - Analysis-history recovery (playhead-wvdz)
+
+    /// The listener's side of "retry, then surface and let them decide".
+    ///
+    /// WHY IT LIVES IN SETTINGS → DIAGNOSTICS RATHER THAN IN AN ALERT.
+    /// Launch must not be blocked behind a modal — someone opening the
+    /// app to play a podcast has to be able to play a podcast — and the
+    /// whole `Views/` tree contains only five `.alert(` call sites, none
+    /// of them diagnostics-related, so a sixth would be against the
+    /// grain. This sits beside "Send diagnostics", which is where a
+    /// listener already goes when something seems wrong, and reuses the
+    /// section's existing caption/error idiom rather than inventing a
+    /// component.
+    ///
+    /// HONEST LIMITATION: discovery here is PASSIVE. A listener has to
+    /// come to Settings to find it. The proactive nudge belongs on
+    /// playhead-jw63.4's surface, and is deliberately not invented here.
+    ///
+    /// Two independent reasons to render. Only the first offers actions:
+    ///   * `awaitingUserDecision` — retries are exhausted and the app has
+    ///     stopped deciding.
+    ///   * a non-empty quarantine list — data was set aside and is still
+    ///     occupying the device. That row outlives the recovery on
+    ///     purpose: it is the only pointer the listener has to it.
+    @ViewBuilder
+    private var analysisHistoryRecoveryRows: some View {
+        if let health = analysisStoreHealth {
+            if health.status == .awaitingUserDecision {
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(SettingsL274Copy.analysisHistoryRecoveryTitle)
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.textPrimary)
+                    Text(SettingsL274Copy.analysisHistoryRecoveryBody)
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.textTertiary)
+                }
+                .listRowBackground(AppColors.surface)
+
+                Button {
+                    Task { await retryAnalysisHistory() }
+                } label: {
+                    HStack {
+                        Label(
+                            SettingsL274Copy.analysisHistoryRetryButtonLabel,
+                            systemImage: "arrow.clockwise"
+                        )
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.accent)
+                        Spacer()
+                        if analysisStoreRecoveryInProgress {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(analysisStoreRecoveryInProgress)
+                .listRowBackground(AppColors.surface)
+
+                Button(role: .destructive) {
+                    showStartFreshConfirmation = true
+                } label: {
+                    HStack {
+                        Label(
+                            SettingsL274Copy.analysisHistoryStartFreshButtonLabel,
+                            systemImage: "tray.and.arrow.down"
+                        )
+                        .font(AppTypography.body)
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(analysisStoreRecoveryInProgress)
+                .listRowBackground(AppColors.surface)
+                // A confirmation, not a modal on launch. The listener
+                // asked for this screen; nothing here interrupts them.
+                .confirmationDialog(
+                    SettingsL274Copy.analysisHistoryStartFreshConfirmTitle,
+                    isPresented: $showStartFreshConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button(
+                        SettingsL274Copy.analysisHistoryStartFreshConfirmAction,
+                        role: .destructive
+                    ) {
+                        Task { await startFreshAnalysisHistory() }
+                    }
+                    Button(
+                        SettingsL274Copy.analysisHistoryStartFreshCancelAction,
+                        role: .cancel
+                    ) {}
+                } message: {
+                    Text(SettingsL274Copy.analysisHistoryStartFreshConfirmBody)
+                }
+            }
+
+            ForEach(health.quarantines, id: \.directoryName) { quarantine in
+                Text(
+                    SettingsL274Copy.analysisHistorySetAsideLabel
+                        + SettingsL274Copy.analysisHistorySetAsideSeparator
+                        + quarantine.quarantinedAt.formatted(date: .abbreviated, time: .shortened)
+                        + SettingsL274Copy.analysisHistorySetAsideSeparator
+                        + SettingsViewModel.formattedSize(quarantine.byteCount)
+                )
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+                .listRowBackground(AppColors.surface)
+            }
+
+            if let notice = analysisStoreRecoveryNotice {
+                Text(notice)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.textTertiary)
+                    .listRowBackground(AppColors.surface)
+            }
+        }
+    }
+
+    @MainActor
+    private func refreshAnalysisStoreHealth() async {
+        analysisStoreHealth = await loadAnalysisStoreHealth(runtime: runtime)
+    }
+
+    @MainActor
+    private func retryAnalysisHistory() async {
+        analysisStoreRecoveryInProgress = true
+        defer { analysisStoreRecoveryInProgress = false }
+        let outcome = await retryAnalysisStoreOpen(runtime: runtime)
+        analysisStoreRecoveryNotice = outcome.isOpen
+            ? SettingsL274Copy.analysisHistoryRecoveredCaption
+            : SettingsL274Copy.analysisHistoryStillFailingCaption
+        await refreshAnalysisStoreHealth()
+    }
+
+    @MainActor
+    private func startFreshAnalysisHistory() async {
+        analysisStoreRecoveryInProgress = true
+        defer { analysisStoreRecoveryInProgress = false }
+        do {
+            let outcome = try await startFreshAnalysisStore(runtime: runtime)
+            analysisStoreRecoveryNotice = outcome.isOpen
+                ? SettingsL274Copy.analysisHistoryRecoveredCaption
+                : SettingsL274Copy.analysisHistoryStillFailingCaption
+        } catch {
+            // Surfaced rather than swallowed. Silently doing nothing
+            // after the listener chose something is precisely how the
+            // original bug felt from the outside.
+            analysisStoreRecoveryNotice =
+                SettingsL274Copy.analysisHistorySetAsideFailedCaption
+        }
+        await refreshAnalysisStoreHealth()
     }
 
     @MainActor

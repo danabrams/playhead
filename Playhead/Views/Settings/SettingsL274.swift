@@ -53,6 +53,44 @@ enum SettingsL274Copy {
     /// Read-only line describing the auto-evict policy. Verbatim per spec.
     static let autoEvictPolicyLine: String = "Oldest played episodes are removed first."
 
+    // MARK: Analysis-history recovery (playhead-wvdz)
+
+    // The only place in the app where the listener is asked about their
+    // own analysis data. Copy rules that apply here specifically:
+    //
+    //   * SAY WHAT IS AND IS NOT GONE, FIRST. The failure this replaces
+    //     destroyed everything and said nothing, so the most important
+    //     sentence is that nothing has been deleted.
+    //   * SAY THAT PLAYBACK STILL WORKS. Otherwise "couldn't open" reads
+    //     as "the app is broken" and the listener's next action is to
+    //     delete the app, which really would destroy the data.
+    //   * "START FRESH" MUST NOT SOUND FREE, AND MUST NOT SOUND FATAL.
+    //     It is reversible — the old data is moved aside, not deleted —
+    //     and saying so is what makes the choice a real one.
+    //   * No jargon: not "migration", not "database", not "schema". The
+    //     listener did not ask for a storage layer.
+
+    static let analysisHistoryRecoveryTitle: String = "Analysis history"
+    static let analysisHistoryRecoveryBody: String =
+        "Playhead couldn't open your analysis history. Nothing has been deleted, and playback isn't affected — only what Playhead has learned about your episodes is unavailable."
+    static let analysisHistoryRetryButtonLabel: String = "Try again"
+    static let analysisHistoryStartFreshButtonLabel: String = "Start fresh"
+    static let analysisHistoryStartFreshConfirmTitle: String = "Start fresh?"
+    static let analysisHistoryStartFreshConfirmBody: String =
+        "Your existing analysis history — including everything you've marked by hand — is set aside on this device rather than deleted, and Playhead starts over with an empty one. You can ask for it back."
+    static let analysisHistoryStartFreshConfirmAction: String = "Set aside and start fresh"
+    static let analysisHistoryStartFreshCancelAction: String = "Cancel"
+    static let analysisHistoryRecoveredCaption: String = "Analysis history opened."
+    static let analysisHistoryStillFailingCaption: String =
+        "Still couldn't open it. Playhead will try again next time you open the app."
+    static let analysisHistorySetAsideFailedCaption: String =
+        "Couldn't set the old history aside, so nothing was changed."
+    /// Prefix for the row listing data the listener has set aside. Left
+    /// visible after recovery on purpose: it is the only pointer to
+    /// megabytes of their data that are still on the device.
+    static let analysisHistorySetAsideLabel: String = "Set aside"
+    static let analysisHistorySetAsideSeparator: String = " · "
+
     // MARK: Diagnostics group — control labels
     static let pipelineVersionLabel: String = "Pipeline version"
     static let modelVersionsLabel: String = "Model versions"
