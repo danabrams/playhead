@@ -873,11 +873,21 @@ actor AnalysisJobRunner {
         }
 
         // Backfill detection.
+        //
+        // playhead-i7qe: the skip decision now also consults MEASURED ad-scan
+        // coverage. See `shouldSkipSemanticBackfill` for why the two original
+        // terms were not enough.
         let finalWindows: [AdWindow]
-        let skippedBackfill = skippedHotPath && existingCandidateWindows.isEmpty
+        let adScanFraction = await measuredAdScanFraction(assetId: assetId)
+        let skippedBackfill = Self.shouldSkipSemanticBackfill(
+            wroteNewChunks: wroteNewChunks,
+            hasExistingWindows: !existingWindowsBeforeDetection.isEmpty,
+            hasCandidateWindows: !existingCandidateWindows.isEmpty,
+            adScanFraction: adScanFraction
+        )
         if skippedBackfill {
             logger.info(
-                "Skipping backfill for asset \(assetId): transcription produced no new chunks and there are no candidate windows to resolve"
+                "Skipping backfill for asset \(assetId): transcription produced no new chunks, there are no candidate windows to resolve, and the semantic ad scan already covers the episode"
             )
             finalWindows = existingWindowsBeforeDetection
         } else {
@@ -1058,6 +1068,91 @@ actor AnalysisJobRunner {
             logger.info("Published shared analysis for asset \(assetId): windows=\(snapshot.windows.count), coverage=\(snapshot.analysisCoverageEndSec)")
         } catch {
             logger.warning("Shared analysis publish failed for asset \(assetId): \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Semantic-backfill admission (playhead-i7qe)
+
+    /// playhead-i7qe: may this run skip the semantic ad-scan backfill?
+    ///
+    /// THE BUG THIS FIXES. The predicate used to be
+    /// `!wroteNewChunks && hasExistingWindows && !hasCandidateWindows` — read
+    /// aloud, "the transcript did not grow and there are no candidate windows
+    /// to resolve, so there is nothing for backfill to do". Both terms are
+    /// about work that ALREADY EXISTS, and neither is about the audio that was
+    /// never read:
+    ///
+    ///   * `!wroteNewChunks` is a transcript-coverage term. It is permanently
+    ///     true the moment the transcript completes — which is exactly the
+    ///     state of every asset this bead is about.
+    ///   * `!hasCandidateWindows` is a QUANTITY THAT NAMES AN ABSENCE. Candidate
+    ///     windows are PRODUCED BY the semantic scan. In the part of the
+    ///     episode the scan never reached, there are no candidates precisely
+    ///     because nothing ever looked. Reading that as "nothing left to do"
+    ///     inverts its meaning.
+    ///
+    /// Together they made the semantic scan unreachable for the exact shape
+    /// playhead-i7qe describes: transcript complete, scan truncated, no
+    /// candidates outstanding. Re-running the job could not help, however many
+    /// times it ran. Measured on the 2026-07-29 device pull, seven assets sat
+    /// in that shape, including the audited episode 820134BF (transcript
+    /// 2113/2113 s, ad scan 0.388, zero candidate windows).
+    ///
+    /// The fix adds the term that was missing: measured ad-scan coverage. Skip
+    /// only when the audio has demonstrably been read. `nil` (coverage not
+    /// honestly measurable) does NOT permit a skip — under-claim, and let the
+    /// scan run.
+    ///
+    /// Bounded, not a hot loop: not skipping means one call into
+    /// `AdDetectionService.runBackfill` per job run. That path is itself
+    /// idempotent and budgeted — `BackfillJobRunner.runPendingBackfill` skips
+    /// `complete` jobs outright and refuses to re-enqueue a job whose persisted
+    /// `retryCount` has reached `AdmissionController.maxRetries` — so an asset
+    /// whose scan genuinely cannot advance costs a no-op pass, not a spin.
+    ///
+    /// - Parameter adScanFraction: ``AnalysisCoverageSummary/adScanFraction``
+    ///   for the asset (playhead-pz32), or `nil` when unmeasurable.
+    static func shouldSkipSemanticBackfill(
+        wroteNewChunks: Bool,
+        hasExistingWindows: Bool,
+        hasCandidateWindows: Bool,
+        adScanFraction: Double?
+    ) -> Bool {
+        guard !wroteNewChunks, hasExistingWindows, !hasCandidateWindows else {
+            return false
+        }
+        guard let adScanFraction, adScanFraction.isFinite else { return false }
+        return adScanFraction >= semanticBackfillSufficientAdScanFraction
+    }
+
+    /// playhead-i7qe: measured ad-scan coverage at or above which the semantic
+    /// backfill may be skipped for an otherwise-idle run.
+    ///
+    /// Deliberately the SAME number the library ✓ uses
+    /// (``episodePreparationCompleteThreshold``), so the pipeline stops
+    /// scanning at exactly the point the surface is willing to call the episode
+    /// read. A lower floor here would produce episodes the pipeline considers
+    /// done and the UI still marks ◐, with nothing able to close the gap.
+    static var semanticBackfillSufficientAdScanFraction: Double {
+        episodePreparationCompleteThreshold
+    }
+
+    /// playhead-i7qe: read the asset's measured ad-scan coverage fraction.
+    /// Sourced from ``AnalysisCoverageSummary/adScanFraction`` — never
+    /// recomputed here, so the runner, the terminal classifier and the library
+    /// ✓ all divide the same numerator by the same denominator.
+    ///
+    /// A store failure returns `nil`, which forbids the skip. Erring towards
+    /// running the scan costs one pass; erring the other way is the bug.
+    private func measuredAdScanFraction(assetId: String) async -> Double? {
+        do {
+            return try await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction
+        } catch {
+            logger.warning(
+                "Ad-scan coverage fetch failed for asset \(assetId): \(error.localizedDescription); running semantic backfill"
+            )
+            return nil
         }
     }
 
