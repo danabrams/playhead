@@ -2653,7 +2653,13 @@ actor BackfillJobRunner {
              .encodingFailure:
             return true
         case .insertFailed(let message):
+            // playhead-csbq: an impossible scan window (`windowEndTime <
+            // windowStartTime`, or a non-finite bound) is rejected by
+            // `AnalysisStore.validateSemanticScanWindowGeometry`. Retrying
+            // reproduces the same bounds byte for byte, so the retry budget
+            // would be spent proving that — permanent, like `payloadTooLarge`.
             return message.hasPrefix("payloadTooLarge:")
+                || message.hasPrefix(AnalysisStore.impossibleWindowGeometryPrefix)
         case .openFailed, .migrationFailed, .queryFailed,
              .notFound, .duplicateJobId, .invalidStateTransition,
              .staleAdWindowRevision:
