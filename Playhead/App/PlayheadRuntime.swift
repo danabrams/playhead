@@ -2887,7 +2887,7 @@ final class PlayheadRuntime {
         }
     }
 
-    private static var isRunningUnderXCTest: Bool {
+    nonisolated private static var isRunningUnderXCTest: Bool {
         let env = ProcessInfo.processInfo.environment
         return env["XCTestConfigurationFilePath"] != nil ||
             env["XCTestSessionIdentifier"] != nil ||
@@ -2908,7 +2908,7 @@ final class PlayheadRuntime {
     /// `Application Support/Diagnostics/` container, which is shared by
     /// every test in a run. Tests that exercise the journal construct
     /// their own instance against a temp directory.
-    static func speechModelLoadJournal(
+    nonisolated static func speechModelLoadJournal(
         underTest: Bool = isRunningUnderXCTest
     ) -> SpeechModelLoadJournal? {
         underTest ? nil : .shared

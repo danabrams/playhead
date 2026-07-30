@@ -87,6 +87,13 @@
         "timestamp" : 1700000000
       }
     ],
+    "speech_model_load" : {
+      "consecutive_failure_count" : 0,
+      "recent_failures" : [
+
+      ],
+      "status" : "unknown"
+    },
     "stability_diagnostics" : [
 
     ],

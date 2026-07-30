@@ -510,8 +510,17 @@ struct SpeechModelLoadRecoveryTests {
         try await store.insertAsset(retryAsset(id: "asset-recover-1"))
         try await store.insertAsset(retryAsset(id: "asset-recover-2"))
 
-        // Fails once — the launch attempt — then succeeds.
-        let recognizer = TransientlyFailingRecognizer(failuresBeforeSuccess: 1)
+        // TWO failures: the launch attempt and run 1. Run 2 is the first
+        // attempt that finds the assets available.
+        //
+        // Not one: with a single scheduled failure the LAUNCH attempt
+        // consumes it and run 1 already recovers, which is a weaker test —
+        // it never exercises a transcription run that both fails by name
+        // AND leaves a usable retry budget behind, and that pair is the
+        // whole mechanism. Three attempts total is also exactly the epoch
+        // budget, so this doubles as proof the bound is wide enough to
+        // reach the recovery it exists to allow.
+        let recognizer = TransientlyFailingRecognizer(failuresBeforeSuccess: 2)
         let speech = SpeechService(
             recognizer: recognizer,
             serializesRecognizerRequests: false,
@@ -556,6 +565,10 @@ struct SpeechModelLoadRecoveryTests {
             """
         )
         #expect(recognizer.transcribeCalls > 0, "recovery means audio was actually transcribed")
+        #expect(
+            recognizer.loadAttempts == 3,
+            "expected the launch attempt plus one per run; got \(recognizer.loadAttempts)"
+        )
 
         // And the journal tells the story a support engineer needs: it
         // failed, then it recovered.
@@ -563,6 +576,10 @@ struct SpeechModelLoadRecoveryTests {
         #expect(state.status == .loaded)
         #expect(state.lastSuccessfulRole == .asrFast)
         #expect(state.recentFailures.count == 2, "one launch failure plus one run-1 failure")
+        #expect(
+            state.consecutiveFailureCount == 0,
+            "the counter must clear on recovery, or a recovered device reads as still broken"
+        )
     }
 }
 
