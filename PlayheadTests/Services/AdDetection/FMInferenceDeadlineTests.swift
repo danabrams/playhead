@@ -328,9 +328,11 @@ struct FMInferenceDeadlineCoarsePassTests {
     private static func runtime(
         hangOn: Set<Int>,
         slowButSuccessfulOn: Set<Int> = [],
-        slowSeconds: Double = 0
+        slowSeconds: Double = 0,
+        coarseFailures: [TestFMRuntimeFailure?] = []
     ) -> TestFMRuntime {
         TestFMRuntime(
+            coarseFailures: coarseFailures,
             contextSize: contextSize,
             coarseSchemaTokenCount: coarseSchemaTokenCount,
             tokenCountRule: tokenRule(),
@@ -418,6 +420,42 @@ struct FMInferenceDeadlineCoarsePassTests {
         #expect(output.status == .success)
         #expect(output.windows.count == 3)
         #expect(output.failedWindows.count == 2)
+    }
+
+    /// The guard asks "is the model still ANSWERING", not "is it succeeding".
+    /// A refusal is an answer: the model ran, reached a verdict and returned
+    /// it. Treating a refusal as no-progress would let an episode with ordinary
+    /// safety blocks scattered between two slow windows lose its whole tail —
+    /// and safety blocks are common enough on this corpus (playhead-qbib) that
+    /// this is not a hypothetical.
+    ///
+    /// Found by mutation: deleting the reset in the FAILURE arm (leaving only
+    /// the one in the success arm) survived the whole suite until this test.
+    @available(iOS 26.0, *)
+    @Test("a non-timeout failure between two timeouts also resets the no-progress counter")
+    func nonTimeoutFailureResetsTheGuard() async throws {
+        // Call 2 hangs, call 3 is REFUSED (an answer), call 4 hangs. Two
+        // timeouts, never consecutive, so the pass must run to the end.
+        let runtime = Self.runtime(
+            hangOn: [2, 4],
+            coarseFailures: [nil, nil, .refusal, nil, nil]
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: runtime.runtime,
+            config: Self.config(deadline: .milliseconds(150))
+        )
+
+        let output = try await classifier.coarsePassA(segments: Self.segments(count: 5))
+
+        #expect(
+            await runtime.coarseCallCount == 5,
+            "a refusal is the model answering — it must clear the no-progress evidence"
+        )
+        #expect(output.status == .success)
+        #expect(output.windows.count == 2, "windows 1 and 5 answered")
+        #expect(output.failedWindows.count == 3)
+        #expect(output.failedWindows.filter { $0.status == .inferenceTimeout }.count == 2)
+        #expect(output.failedWindows.filter { $0.status == .refusal }.count == 1)
     }
 
     /// The measurement fix. A failure row used to inherit the WHOLE PASS's
