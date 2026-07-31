@@ -935,10 +935,12 @@ actor AnalysisJobReconciler {
 
         let now = clock().timeIntervalSince1970
         // The fingerprint is the CALLER's — the one the cached audio actually
-        // hashes to — not `tail.sourceFingerprint`. They are equal by
-        // construction here (the base key is built from the caller's
-        // fingerprint and the tail is the row occupying it), and taking the
-        // caller's keeps that true if the key format ever changes.
+        // hashes to — not `tail.sourceFingerprint`. Both tail branches above
+        // already guarantee the two agree (one tests it, the other selects the
+        // row by a key built from it), so this is not a behaviour change; it
+        // states which of the two is the source of truth, so a future edit to
+        // the tail selection cannot silently stamp the row with a fingerprint
+        // describing different bytes than the file on disk.
         let retry = AnalysisJob(
             jobId: UUID().uuidString,
             jobType: "preAnalysis",
