@@ -2132,7 +2132,12 @@ struct FoundationModelClassifierTests {
         #expect(hole.endTime == 200)
         #expect(!hole.coversWholePlan)
         #expect(!hole.status.didExamineWindow)
-        #expect(hole.persistenceWindowKey != "window=0", "sub-plan holes need a distinct row key")
+        // playhead-bkhc: the persisted row key is now derived from the
+        // failure's OWN atom range rather than a plan-position suffix, so a
+        // sub-plan hole is addressable simply by carrying line refs that
+        // differ from the recovered half's — asserted above and here.
+        #expect(Set(hole.lineRefs).isDisjoint(with: Set(recovered.lineRefs)),
+                "sub-plan holes need coordinates distinct from the recovered half")
     }
 
     /// RETRY POLICY, the cap: a window the permissive path can never screen

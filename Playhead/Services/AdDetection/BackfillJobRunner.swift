@@ -856,23 +856,74 @@ actor BackfillJobRunner {
                     // cursor. Checkpoint-then-defer keeps the write ordering
                     // identical to that branch (progressCursor written while
                     // still `.running`, then status flips).
-                    if let honest = honestCursorBox.lastCoveredUpperBoundSec {
-                        let honestCursor = BackfillProgressCursor(
-                            processedPhaseCount: 0,
-                            lastProcessedUpperBoundSec: honest
-                        )
-                        let mergedCursor = job.progressCursor.map { honestCursor.monotonic(from: $0) } ?? honestCursor
+                    let salvagedCursor: BackfillProgressCursor? = honestCursorBox
+                        .lastCoveredUpperBoundSec
+                        .map { honest in
+                            let honestCursor = BackfillProgressCursor(
+                                processedPhaseCount: 0,
+                                lastProcessedUpperBoundSec: honest
+                            )
+                            return job.progressCursor.map { honestCursor.monotonic(from: $0) } ?? honestCursor
+                        }
+
+                    // playhead-bkhc: BOUND the treadmill. Resuming is only
+                    // worth doing while it converges; a job whose granted
+                    // windows keep ending with the covered prefix exactly
+                    // where it started would otherwise re-enter the queue
+                    // forever, burning FM budget and never finishing.
+                    //
+                    // The budget counts CONSECUTIVE barren windows, not
+                    // barren windows ever. An expiry that ADVANCED the
+                    // covered audio RESETS it: the job demonstrably converges
+                    // and must not be starved out by unlucky short windows
+                    // scattered through its history. Charging a lifetime
+                    // counter would kill a job at ~60% coverage just because
+                    // three of its many windows happened to be too short to
+                    // retire a single coarse window — a different, and wrong,
+                    // predicate from the one this branch exists to enforce.
+                    //
+                    // Forgiving the shared attempt budget cannot buy an
+                    // unbounded loop: a reset is only ever issued together
+                    // with a STRICTLY GREATER cursor, `monotonic` keeps the
+                    // cursor non-decreasing, and the cursor is bounded above
+                    // by the episode end. So resets are bounded by the number
+                    // of coarse windows in the episode, and each one is paid
+                    // for with audio that is now durable.
+                    if Self.cursorAdvanced(from: job.progressCursor, to: salvagedCursor) {
                         try await store.checkpointBackfillJobProgress(
                             jobId: job.jobId,
-                            progressCursor: mergedCursor
+                            progressCursor: salvagedCursor,
+                            retryCount: 0
                         )
+                        // H-R3-1: include the phase so operators can tell which
+                        // pass was interrupted without cross-referencing logs.
+                        try await store.markBackfillJobDeferred(
+                            jobId: job.jobId,
+                            reason: "cancelled-during-\(job.phase.rawValue)"
+                        )
+                    } else {
+                        let attempts = job.retryCount + 1
+                        if attempts >= AdmissionController.maxRetries {
+                            try await store.markBackfillJobFailed(
+                                jobId: job.jobId,
+                                reason: Self.noProgressExpiryReason(phase: job.phase),
+                                retryCount: attempts
+                            )
+                            logger.error(
+                                "FM backfill job \(job.jobId, privacy: .public) terminated: \(AdmissionController.maxRetries, privacy: .public) background windows expired without covering new audio"
+                            )
+                        } else {
+                            try await store.checkpointBackfillJobProgress(
+                                jobId: job.jobId,
+                                progressCursor: salvagedCursor ?? job.progressCursor,
+                                retryCount: attempts
+                            )
+                            try await store.markBackfillJobDeferred(
+                                jobId: job.jobId,
+                                reason: "cancelled-during-\(job.phase.rawValue)"
+                            )
+                        }
                     }
-                    // H-R3-1: include the phase so operators can tell which
-                    // pass was interrupted without cross-referencing logs.
-                    try await store.markBackfillJobDeferred(
-                        jobId: job.jobId,
-                        reason: "cancelled-during-\(job.phase.rawValue)"
-                    )
                 } catch {
                     logger.error("Failed to mark cancelled job deferred: \(error.localizedDescription, privacy: .public)")
                 }
@@ -1360,6 +1411,32 @@ actor BackfillJobRunner {
         let lastCoveredUpperBoundSec: Double?
     }
 
+    /// playhead-bkhc: did this run cover audio the job had not already covered?
+    ///
+    /// Progress is measured in SECONDS OF AUDIO (`lastProcessedUpperBoundSec`),
+    /// not in row states or phase counters — a run that flipped a status but
+    /// screened nothing new has made no progress, and treating it as progress
+    /// is what would let a non-converging job resume forever.
+    ///
+    /// A `nil` prior cursor means "nothing covered yet", so any strictly
+    /// positive upper bound is progress; a cursor of 0 is not.
+    nonisolated static func cursorAdvanced(
+        from prior: BackfillProgressCursor?,
+        to next: BackfillProgressCursor?
+    ) -> Bool {
+        guard let nextUpper = next?.lastProcessedUpperBoundSec else { return false }
+        return nextUpper > (prior?.lastProcessedUpperBoundSec ?? 0)
+    }
+
+    /// playhead-bkhc: the NAMED terminal cause for a job whose background
+    /// windows kept expiring without covering new audio. Distinct from
+    /// `cancelled-during-<phase>` (which is the resumable, still-converging
+    /// case) so an operator reading `backfill_jobs.deferReason` can tell a job
+    /// that ran out of time from a job that was never going to finish.
+    nonisolated static func noProgressExpiryReason(phase: BackfillJobPhase) -> String {
+        "expiredWithoutProgress-\(phase.rawValue)"
+    }
+
     /// playhead-pmp9: narrow `inputs` to the un-scanned remainder for an
     /// intra-episode RESUME. A job that previously deferred on a rate-limited
     /// coarse window persisted an honest cursor (end of the contiguous scanned
@@ -1539,8 +1616,28 @@ actor BackfillJobRunner {
         // before qbib nothing downstream could tell the two apart.
         var passARows: [SemanticScanResult] = []
 
+        // playhead-bkhc: NO cancellation check in this loop, deliberately.
+        //
+        // This is the digest of a coarse pass that has ALREADY RETURNED. Every
+        // window here was paid for with FM wall-clock (12–45 min per episode on
+        // device); the loop itself does no FM work — it writes one small row per
+        // window. `coarsePassA` converts a cancellation into a partial return
+        // (`status == .cancelled` plus the windows it finished) rather than a
+        // throw, precisely so the caller can bank that work.
+        //
+        // The previous `try Task.checkCancellation()` here threw on the FIRST
+        // iteration whenever the BG window expired during the coarse pass —
+        // which is where essentially all of the wall-clock is — so none of the
+        // completed windows were persisted AND the coverage block below (the
+        // only thing that fills `honestCursorBox`) was never reached. The t1kq
+        // expiry checkpoint then found an empty box and wrote nothing. That is
+        // the treadmill measured on device: 37 `complete` rows carried a
+        // progressCursor and all 47 non-complete rows carried none.
+        //
+        // Cancellation is honoured at the next EXPENSIVE boundary instead —
+        // immediately before the refinement pass — so an expiry still buys no
+        // new FM work, it just stops discarding the FM work already done.
         for window in coarse.windows {
-            try Task.checkCancellation()
             if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
                 try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
                 lastHeartbeatTick = ContinuousClock.now
@@ -1580,7 +1677,16 @@ actor BackfillJobRunner {
         counters.persistedEvidenceEventCount += randomAudit.persistedEventIds.count
 
         if !coarse.failedWindows.isEmpty || !coarse.windows.isEmpty {
-            let coarsePlans = try await classifier.planPassA(segments: inputs.segments)
+            // playhead-bkhc: the plan list the pass ACTUALLY windowed against,
+            // returned by `coarsePassA`. This used to be a second
+            // `planPassA(segments:)` call, which (a) paid a whole extra
+            // tokenizer pass over the episode on every job and (b) put an
+            // `async throws` hop on the coverage-cursor path — a path that must
+            // stay computable when the Task is already cancelled, because that
+            // is exactly when the checkpoint matters most. Reading the real
+            // plans also removes the drift hazard the comment below guards
+            // against: there is now only ONE plan list.
+            let coarsePlans = coarse.plans
             let succeededPlanIndices = Set(
                 coarse.windows.compactMap { window in
                     coarsePlans.first(where: { plan in
@@ -1616,7 +1722,16 @@ actor BackfillJobRunner {
             // skips unscanned audio even if a later window succeeded past an
             // earlier hole. (Pure arithmetic, no FM work, no persistence — the
             // no-rate-limit path stays byte-identical.)
-            coverageFullyCovered = fullyCoveredPlanIndices.count == coarsePlans.count
+            // playhead-bkhc: an EMPTY plan list must never read as "fully
+            // covered". `count == count` is vacuously true at zero, so a
+            // missing denominator would silently certify complete coverage of
+            // audio nobody screened — the precise failure this whole block
+            // exists to prevent. We are inside `!failedWindows.isEmpty ||
+            // !windows.isEmpty`, so zero plans is a contradiction (outcomes
+            // without a plan to attribute them to); treat it as incomplete and
+            // let the cursor stay where it was.
+            coverageFullyCovered = !coarsePlans.isEmpty
+                && fullyCoveredPlanIndices.count == coarsePlans.count
             var walkedUpperBound: Double? = nil
             for plan in coarsePlans.sorted(by: { $0.startTime < $1.startTime }) {
                 guard fullyCoveredPlanIndices.contains(plan.windowIndex) else { break }
@@ -1694,6 +1809,15 @@ actor BackfillJobRunner {
         }
 
         logCoarseCoverage(passARows: passARows, inputs: inputs, jobId: job.jobId)
+
+        // playhead-bkhc: the cancellation check the passA digest loop used to
+        // make, moved here — after every coarse window this run paid for is
+        // durable and after `honestCursorBox` holds the honest contiguous
+        // prefix, but BEFORE the next FM spend (zoom planning + refinement).
+        // A BG-window expiry therefore buys no new model work while keeping
+        // everything the granted window achieved; the drain loop's
+        // CancellationError branch turns the box into a persisted checkpoint.
+        try Task.checkCancellation()
 
         if coarse.status == .success && !coarse.windows.isEmpty {
             let zoomPlans = try await classifier.planAdaptiveZoom(
@@ -2657,15 +2781,49 @@ actor BackfillJobRunner {
     /// R7-Fix11: stable id for pass-A / pass-B scan rows. Exposed as
     /// `internal static` so tests can assert determinism and
     /// collision-immunity without reaching into the private helpers.
+    ///
+    /// playhead-bkhc: `windowKey` identifies the AUDIO WINDOW, not the
+    /// window's position in this run's plan list. It used to be
+    /// `windowIndex: Int` — the ordinal within whatever segment slice the run
+    /// happened to scan. That is not a row identity: a job that RESUMES from a
+    /// checkpoint re-plans over the un-scanned remainder, so its window 0 is a
+    /// different piece of audio than the previous run's window 0, and the two
+    /// collided on this primary key. `INSERT OR REPLACE` then DELETED the
+    /// earlier run's row — resume silently destroyed the very coverage it had
+    /// just banked. (The pmp9 rate-limit resume path had the same latent
+    /// defect; its tests only asserted call counts and the job row.)
+    ///
+    /// Keying on the atom range makes the primary key AGREE WITH the window
+    /// coordinate in `semantic_scan_results`' `UNIQUE(reuseKeyHash)`: same
+    /// window ⇒ same id ⇒ a genuine replace; different window ⇒ different id ⇒
+    /// no collateral delete.
+    ///
+    /// The two keys are not identical and are not meant to be. `reuseKeyHash`
+    /// additionally includes `scanCohortJSON`, so a re-scan under a new cohort
+    /// lands on the same id but a different reuse key; `INSERT OR REPLACE`
+    /// resolves that on the UNIQUE index and the newer cohort's row wins. What
+    /// matters — and what was broken — is that neither key may ever identify
+    /// the WINDOW by its position in a run.
     nonisolated static func makeScanResultIdForTesting(
         assetId: String,
         transcriptVersion: String,
         pass: String,
-        windowIndex: Int,
+        windowKey: String,
         jobKey: String? = nil
     ) -> String {
-        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|window=\(windowIndex)|job=\(jobKey ?? "default")"
+        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|window=\(windowKey)|job=\(jobKey ?? "default")"
         return hashedId(prefix: "scan", canonical: canonical)
+    }
+
+    /// playhead-bkhc: the position-independent window key — the atom range the
+    /// row covers. This is the same coordinate `reuseKeyHash` is built from,
+    /// so a row's primary key and its uniqueness key can never disagree about
+    /// which window they mean.
+    nonisolated static func atomWindowKey(
+        firstAtomOrdinal: Int,
+        lastAtomOrdinal: Int
+    ) -> String {
+        "atoms=\(firstAtomOrdinal)-\(lastAtomOrdinal)"
     }
 
     /// R7-Fix11: stable id for the "no windows, record the failure"
@@ -3153,7 +3311,10 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: scanPass,
-                windowIndex: windowOutput.windowIndex,
+                windowKey: Self.atomWindowKey(
+                    firstAtomOrdinal: firstAtom,
+                    lastAtomOrdinal: lastAtom
+                ),
                 jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
@@ -3240,7 +3401,10 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: "passB",
-                windowIndex: windowOutput.windowIndex,
+                windowKey: Self.atomWindowKey(
+                    firstAtomOrdinal: firstAtom,
+                    lastAtomOrdinal: lastAtom
+                ),
                 jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
@@ -3291,7 +3455,15 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: scanPass,
-                windowKey: windowKey,
+                // playhead-bkhc: default to the ATOM RANGE, never the plan's
+                // position in this run's window list — see
+                // `makeScanResultIdForTesting`. Callers only pass an explicit
+                // key for rows whose identity is not their geometry (the
+                // "no work" sentinels, which share the whole-episode range).
+                windowKey: windowKey ?? Self.atomWindowKey(
+                    firstAtomOrdinal: range.firstAtomOrdinal,
+                    lastAtomOrdinal: range.lastAtomOrdinal
+                ),
                 jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
@@ -3336,8 +3508,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
-            runMode: runMode,
-            windowKey: "window=\(plan.windowIndex)"
+            runMode: runMode
         )
     }
 
@@ -3359,8 +3530,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
-            runMode: runMode,
-            windowKey: "window=\(plan.windowIndex)"
+            runMode: runMode
         )
     }
 
@@ -3385,8 +3555,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: failure.status,
             latencyMs: latencyMs,
-            runMode: runMode,
-            windowKey: failure.persistenceWindowKey
+            runMode: runMode
         )
     }
 
