@@ -5114,8 +5114,39 @@ actor AdDetectionService {
             // playhead-fqc8: preserve `promotionTrack` from the raw mapper
             // output; the FM-suppression cap only changes the eligibility
             // gate, not the threshold-selection track.
+            //
+            // playhead-qs0d: byte-exact rediff certainty is EXEMPT from the CAP,
+            // the third member of the pzy2 exemption family (creator-chapter and
+            // self-promo are below). `.cappedByFMSuppression` is by its own
+            // definition "FM noAds consensus suppression" — a NON-deterministic
+            // model's opinion that there is no ad here. A span whose width the
+            // rediff differ owns (`.rediffSlot`) is a byte-verified DAI
+            // divergence: the origin served different bytes over exactly this
+            // region. Letting an FM noAds consensus force that to mark-only is
+            // the FM-coin-flip blocker this bead names, and it is precisely
+            // backwards — the deterministic observation outranks the model.
+            //
+            // Deliberately NARROW, and note what it does NOT do:
+            //   • It only declines to APPLY a demotion; it never promotes. The
+            //     span keeps whatever gate `DecisionMapper` gave it, so a
+            //     genuinely weak rediff-owned span can still land
+            //     `.blockedByEvidenceQuorum`.
+            //   • It does not touch `effectiveLedger`. FM suppression still
+            //     downweights the ledger, so `skipConfidence` stays exactly as
+            //     honest (and as suppressed) as before — only ACTIONABILITY
+            //     moves, the same presence/extent separation playhead-2350
+            //     enforces.
+            //   • Splice-AGNOSTIC: `.spliceSlot` is acoustic width, not
+            //     byte-exact, and is NOT exempt. FM/lexical-only spans stay
+            //     fully cappable, so the exemption cannot leak.
             var decision: DecisionResult
-            if suppressionResult.cappedToMarkOnly {
+            if suppressionResult.cappedToMarkOnly,
+               refinedSpan.carriesRediffByteExactWidth {
+                logger.info(
+                    "[qs0d] FM-suppression cap DECLINED for byte-exact rediff span=\(refinedSpan.id, privacy: .public) — deterministic divergence outranks an FM noAds consensus"
+                )
+                decision = rawDecision
+            } else if suppressionResult.cappedToMarkOnly {
                 decision = DecisionResult(
                     proposalConfidence: rawDecision.proposalConfidence,
                     skipConfidence: rawDecision.skipConfidence,
@@ -11261,8 +11292,13 @@ actor AdDetectionService {
     ///     Enabled`, default OFF) — a non-monotonic multi-break fetch is
     ///     segment-recovered (each guard re-applied over the segmented coverage)
     ///     rather than discarded; the lagged path keeps the strict reject.
-    ///   • MARK-ONLY — `eligibilityGate = .markOnly`, edges left `.unanchored`;
-    ///     a rare FP is only a wrong banner, never eaten content. Auto-skip held.
+    ///   • TIERED BY ACCEPTANCE ARM (playhead-qs0d, was blanket MARK-ONLY).
+    ///     A STRICT monotonic-clean slot records `.rediffByteExact` on both
+    ///     edges and — under `RediffActivation.dayZeroByteExactAutoSkipEnabled`
+    ///     — `eligibilityGate = .eligible`, so the orchestrator auto-skips it at
+    ///     98co-padded late-safe bounds. A 9s6q SEGMENT-RECOVERED
+    ///     (non-monotonic) slot keeps `.unanchored` + `.markOnly` — banner only
+    ///     — until playhead-pyq7 validates those boundaries separately.
     /// It does NOT change presence-gating for the lagged path, the chroma differ,
     /// or any non-day-0 flow.
     ///
@@ -11306,6 +11342,14 @@ actor AdDetectionService {
         // as `bSidesGateRejected == bSideCount`, unmistakably different from
         // "diffs accepted, copies simply agreed".
         var perBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
+        // playhead-qs0d: the STRICT (monotonic-clean) subset of the same
+        // per-persona lists. `gateAndDiffBytes` takes the 9s6q segment-recovery
+        // arm if and ONLY if `!alignment.monotonicClean`, so this partition is
+        // an exact classification of which acceptance arm produced each list —
+        // not a heuristic. It exists because the two arms earn different
+        // certainty: a monotonic-clean chain proves its A-timeline mapping at
+        // every edge, a segment-recovered one dropped runs to get there.
+        var strictPerBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
         var unreadable = 0
         var gateRejected = 0
         for bSideURL in bSideURLs {
@@ -11334,6 +11378,9 @@ actor AdDetectionService {
                 continue
             }
             perBSideSlots.append(acceptance.playedSlots)
+            if alignment.monotonicClean {
+                strictPerBSideSlots.append(acceptance.playedSlots)
+            }
         }
 
         /// Every counted outcome from here on carries the same per-B census.
@@ -11378,11 +11425,40 @@ actor AdDetectionService {
         // day-0 fire — or a day-0 run after some analysis already marked — never
         // double-banners or resurfaces a veto (mirrors correction-replay).
         let existing = (try? await store.fetchAdWindows(assetId: analysisAssetId)) ?? []
+        // playhead-qs0d: classify each unioned slot by the acceptance arm that
+        // produced it — STRICT monotonic-clean, or 9s6q segment-recovered. The
+        // rule (and why it is an EXACT geometry match against the strict-only
+        // union) lives in `strictByteExactMask`.
+        let strictMask = RediffSlotOwnership.strictByteExactMask(
+            unioned: unioned,
+            strictPerBSideSlots: strictPerBSideSlots
+        )
         var windows: [AdWindow] = []
-        for slot in unioned {
+        var strictMarkCount = 0
+        for (slotIndex, slot) in unioned.enumerated() {
             let overlapsExisting = existing.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
             let overlapsEmitted = windows.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
             if overlapsExisting || overlapsEmitted { continue }
+            // THE BLOCKER this bead exists to clear (measured 2026-07-31): both
+            // day-0 windows persisted with `startEdgeAnchor == endEdgeAnchor ==
+            // unanchored` — the SAME pair the 0.40-confidence aggregator windows
+            // carry — so the playhead-2350 gate held a 1.00-confidence,
+            // sample-accurate boundary at mark-only, correctly, given what it
+            // could see. `unanchored` meant "no anchor was recorded", never "the
+            // boundary is unknown". The byte differ set BOTH edges of a strict
+            // slot; record that.
+            //
+            // The anchor stamp is UNCONDITIONAL for strict slots — it is a
+            // provenance fact, and it is what `AutoSkipEdgePadding` needs to
+            // compute a late-safe window at all. Only the eligibility promotion
+            // reads `dayZeroByteExactAutoSkipEnabled`.
+            let strict = strictMask[slotIndex]
+            if strict { strictMarkCount += 1 }
+            let anchor: AutoSkipEdgeAnchor = strict ? .rediffByteExact : .unanchored
+            let gate: SkipEligibilityGate =
+                (strict && RediffActivation.dayZeroByteExactAutoSkipEnabled)
+                    ? .eligible
+                    : .markOnly
             windows.append(AdWindow(
                 id: UUID().uuidString,
                 analysisAssetId: analysisAssetId,
@@ -11403,10 +11479,17 @@ actor AdDetectionService {
                 wasSkipped: false,
                 userDismissedBanner: false,
                 evidenceSources: nil,
-                eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
-                catalogStoreMatchSimilarity: nil
-                // startEdgeAnchor / endEdgeAnchor default to `.unanchored`:
-                // mark-only, NOT auto-skip-eligible (a separate gated step).
+                eligibilityGate: gate.rawValue,
+                catalogStoreMatchSimilarity: nil,
+                // playhead-qs0d: a STRICT monotonic-clean byte-exact slot
+                // records `.rediffByteExact` on BOTH edges — the byte differ
+                // set both, and refiners never touch a day-0 mark. A 9s6q
+                // SEGMENT-RECOVERED slot keeps the conservative `.unanchored`
+                // pair (and `.markOnly`): playhead-pyq7 owns validating those
+                // boundaries, and until it does, a dropped-run chain has not
+                // earned an anchor claim.
+                startEdgeAnchor: anchor.rawValue,
+                endEdgeAnchor: anchor.rawValue
             ))
         }
         guard !windows.isEmpty else {
@@ -11421,7 +11504,7 @@ actor AdDetectionService {
             failed.detail = String(describing: error)
             return failed
         }
-        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) mark-only banner(s) asset=\(analysisAssetId, privacy: .public)")
+        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) banner(s) asset=\(analysisAssetId, privacy: .public) — \(strictMarkCount) STRICT byte-exact (anchored\(RediffActivation.dayZeroByteExactAutoSkipEnabled ? ", auto-skip eligible" : ", mark-only")), \(windows.count - strictMarkCount) segment-recovered (unanchored, mark-only)")
         return outcome(.marked, markCount: windows.count, divergentSlotCount: unioned.count)
     }
 
