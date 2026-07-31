@@ -77,9 +77,19 @@ struct CapOutRetryTests {
     /// Deterministic clock. Both the reconciler (cooldown) and the scheduler
     /// (backoff) read it, so one instance drives the whole loop and the
     /// hour-long cooldown is stepped over rather than slept through.
+    ///
+    /// It STARTS AT THE WALL CLOCK and only ever moves forward, which is
+    /// load-bearing rather than incidental: `garbageCollectOldJobs` (step 5)
+    /// deletes `complete`/`superseded` rows whose `updatedAt` predates
+    /// `Date() - 7 days` and reads the REAL clock, not this one. A fixture
+    /// anchored at a fixed historical epoch — the pattern the pure scheduler
+    /// suites use, because they never run a reconciler — has every seeded
+    /// terminal garbage-collected out from under it before step 7 runs, and
+    /// then reports a cap-out retry that "did not mint" for a row that no
+    /// longer exists.
     private final class RetryClock: @unchecked Sendable {
         private let lock: OSAllocatedUnfairLock<Date>
-        init(start: Date) { lock = OSAllocatedUnfairLock(initialState: start) }
+        init() { lock = OSAllocatedUnfairLock(initialState: Date()) }
         var value: Date { lock.withLock { $0 } }
         func advance(by seconds: TimeInterval) {
             lock.withLock { $0 = $0.addingTimeInterval(seconds) }
@@ -305,7 +315,7 @@ struct CapOutRetryTests {
     func cappedOutAssetTranscribesMoreAudio() async throws {
         let store = try await makeTestStore()
         let downloads = makeDownloads()
-        let clock = RetryClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let clock = RetryClock()
         // 300 s of 1,212.5 s == 25% transcribed, and the terminal is a day old.
         try await seedCappedOutEpisode(
             store,
@@ -380,7 +390,7 @@ struct CapOutRetryTests {
     func poisonedAssetTerminatesWithNamedCause() async throws {
         let store = try await makeTestStore()
         let downloads = makeDownloads()
-        let clock = RetryClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let clock = RetryClock()
         try await seedCappedOutEpisode(
             store,
             priorTranscriptCoverageSec: 0,
@@ -445,7 +455,7 @@ struct CapOutRetryTests {
     func progressDoesNotSpendBudget() async throws {
         let store = try await makeTestStore()
         let downloads = makeDownloads()
-        let clock = RetryClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let clock = RetryClock()
         try await seedCappedOutEpisode(
             store,
             priorTranscriptCoverageSec: 0,
@@ -489,7 +499,7 @@ struct CapOutRetryTests {
         for cause in [nil, "staleFingerprint:cachedAudioMismatch"] {
             let store = try await makeTestStore()
             let downloads = makeDownloads()
-            let clock = RetryClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+            let clock = RetryClock()
             try await seedCappedOutEpisode(
                 store,
                 priorTranscriptCoverageSec: 0,
@@ -522,7 +532,7 @@ struct CapOutRetryTests {
     func degradedCompleteTerminalIsNotReRequested() async throws {
         let store = try await makeTestStore()
         let downloads = makeDownloads()
-        let clock = RetryClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let clock = RetryClock()
         try await seedCappedOutEpisode(
             store,
             priorTranscriptCoverageSec: 90,
@@ -549,7 +559,7 @@ struct CapOutRetryTests {
     func coolingWindowIsHonoured() async throws {
         let store = try await makeTestStore()
         let downloads = makeDownloads()
-        let clock = RetryClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let clock = RetryClock()
         try await seedCappedOutEpisode(
             store,
             priorTranscriptCoverageSec: 0,
@@ -574,7 +584,7 @@ struct CapOutRetryTests {
     func repeatedSweepsAreIdempotent() async throws {
         let store = try await makeTestStore()
         let downloads = makeDownloads()
-        let clock = RetryClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let clock = RetryClock()
         try await seedCappedOutEpisode(
             store,
             priorTranscriptCoverageSec: 0,
