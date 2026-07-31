@@ -12965,6 +12965,29 @@ actor AnalysisStore {
         return readJob(stmt)
     }
 
+    /// playhead-y8f3: the row occupying a given `workKey`, or `nil` when the key
+    /// is free.
+    ///
+    /// `workKey` is `TEXT NOT NULL UNIQUE` with an index (`idx_jobs_workkey`),
+    /// so this is a single indexed read and returns at most one row. It exists
+    /// because `insertJob` is `INSERT OR IGNORE`: a caller that gets `false`
+    /// back knows only that SOMETHING already owns the key, and the whole
+    /// question — was the re-request swallowed by a live job, by a clean
+    /// terminal, or by an attempt-cap dead end that should be re-requested at a
+    /// fresh ordinal — needs the row itself. Looking up by key rather than by
+    /// episode also keeps the answer pinned to the audio the caller actually has
+    /// on disk: an episode can carry rows for several fingerprints, and
+    /// `fetchLatestJobForEpisode` would happily return one describing different
+    /// bytes.
+    func fetchJob(byWorkKey workKey: String) throws -> AnalysisJob? {
+        let sql = "SELECT * FROM analysis_jobs WHERE workKey = ?"
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, workKey)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readJob(stmt)
+    }
+
     /// Returns the most-recently-updated `analysis_jobs` row for an
     /// episode. Primarily used by the playhead-44h1 foreground-assist
     /// hand-off so the BG task expiration / completion paths can

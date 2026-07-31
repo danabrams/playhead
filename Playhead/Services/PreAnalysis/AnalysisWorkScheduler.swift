@@ -575,6 +575,27 @@ actor AnalysisWorkScheduler {
     private var workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder()
     private static let maxAttemptCount = 5
 
+    /// playhead-y8f3: the `lastErrorCode` prefix every attempt-cap terminal
+    /// carries, and the ONLY thing that tells a cap-out apart from a genuine
+    /// supersession.
+    ///
+    /// `state = 'superseded'` means two different things in this table, which is
+    /// why the one attempt-reset path (`AnalysisStore.requeueOrphanedLease`)
+    /// deliberately preserves it. Genuine supersession — a stale
+    /// `analysisVersion` (`AnalysisJobReconciler.supersedeStaleVersions`), a
+    /// deleted episode, cached audio that no longer matches
+    /// (`staleFingerprint:cachedAudioMismatch`) — retires a row whose
+    /// replacement either already exists or must never exist. A cap-out is the
+    /// opposite: the work is still wanted and nothing replaced it.
+    ///
+    /// Reader and writers share this constant so the discriminator cannot drift
+    /// away from the strings the four supersede arms actually write. Note the
+    /// FIFTH writer, `coverageInsufficient.maxAttempts`, terminates
+    /// `state = 'complete'` (playhead-gqx4's degraded terminal) and so is
+    /// excluded by the state check in ``isAttemptCapTerminal(_:)`` rather than
+    /// by the prefix.
+    static let maxAttemptsReachedPrefix = "maxAttemptsReached:"
+
     /// Per-lane running-job counter. Enforces the Now/Soon/Background
     /// concurrency caps spelled out in playhead-r835. Today the scheduler
     /// runs at most one job at a time via `currentRunningTask`, so the
@@ -824,7 +845,28 @@ actor AnalysisWorkScheduler {
             schedulerEpoch: currentEpoch
         )
         do {
-            _ = try await store.insertJob(job)
+            let inserted = try await store.insertJob(job)
+            if !inserted {
+                // playhead-y8f3: `insertJob` is `INSERT OR IGNORE`, so this
+                // return value is the ONLY evidence that a re-request did
+                // nothing. Discarding it here is how the most visible enqueue
+                // path in the app — download completion, and the user tapping
+                // Download & Analyze — became silent when an episode's base
+                // `workKey` was already held by an attempt-cap terminal.
+                //
+                // The row is NOT minted here. Re-requesting a swallowed key is
+                // `AnalysisJobReconciler`'s step 7, which owns the retry budget
+                // and the cooldown, and duplicating the mint at a second site
+                // would let a launch-then-tap sequence spend the budget twice.
+                // What belongs here is the fact that it happened.
+                logger.info(
+                    """
+                    enqueue_swallowed episode=\(episodeId, privacy: .public) \
+                    workKey_collision=true userInitiated=\(userInitiated) \
+                    (see playhead-y8f3; a bounded retry is minted by the next reconcile)
+                    """
+                )
+            }
             guard downloadRetirementGenerationByEpisode[
                 episodeId,
                 default: 0
@@ -3450,7 +3492,7 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(
                             state: "superseded",
                             nextEligibleAt: nil,
-                            lastErrorCode: "maxAttemptsReached:assetResolution: \(error)"
+                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)assetResolution: \(error)"
                         )
                     )
                 )
@@ -3632,7 +3674,7 @@ actor AnalysisWorkScheduler {
                             stateUpdate: .init(
                                 state: "superseded",
                                 nextEligibleAt: nil,
-                                lastErrorCode: "maxAttemptsReached:cancelMidRun"
+                                lastErrorCode: "\(Self.maxAttemptsReachedPrefix)cancelMidRun"
                             )
                         )
                     )
@@ -3948,7 +3990,7 @@ actor AnalysisWorkScheduler {
                                 stateUpdate: .init(
                                     state: "complete",
                                     nextEligibleAt: nil,
-                                    lastErrorCode: "maxAttemptsReached:coverageInsufficient"
+                                    lastErrorCode: "\(Self.maxAttemptsReachedPrefix)coverageInsufficient"
                                 )
                             )
                         )
@@ -4188,7 +4230,7 @@ actor AnalysisWorkScheduler {
                             stateUpdate: .init(
                                 state: "superseded",
                                 nextEligibleAt: nil,
-                                lastErrorCode: "maxAttemptsReached:\(reason)"
+                                lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(reason)"
                             )
                         )
                     )
@@ -4390,7 +4432,7 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(
                             state: "superseded",
                             nextEligibleAt: nil,
-                            lastErrorCode: "maxAttemptsReached:\(error.localizedDescription)"
+                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(error.localizedDescription)"
                         )
                     )
                 )
@@ -5654,6 +5696,234 @@ actor AnalysisWorkScheduler {
         // backfill. If this were lower, the scheduler would mint passes the
         // runner then declines to run.
         return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+    }
+
+    // MARK: - Cap-out retry (playhead-y8f3)
+
+    /// playhead-y8f3: `workKey` discriminator marking a job as a bounded retry
+    /// of an episode whose predecessor exhausted ``maxAttemptCount``.
+    ///
+    /// **Why the workKey, again.** This is playhead-onn6's mechanism applied to
+    /// a second instance of the same defect shape, deliberately rather than
+    /// inventing a parallel one. `analysis_jobs.workKey` is `TEXT NOT NULL
+    /// UNIQUE` and `insertJob` is `INSERT OR IGNORE` over a key that is stable
+    /// across launches, so a re-request for an episode whose row is already on
+    /// disk is a silent no-op. An ordinal in the key is simultaneously the way
+    /// past the collision AND the budget ledger, needs no migration and no new
+    /// column, and cannot be exceeded even if every other guard is wrong.
+    ///
+    /// Distinct from ``adScanRedriveWorkKeyMarker`` because the budgets are
+    /// independent: one buys another semantic ad scan over audio already read,
+    /// this one buys another attempt at reading the audio at all. A row can
+    /// legitimately need both, and the ordinal parsers key on their own marker
+    /// so neither chain launders the other's ledger.
+    static let capOutRetryWorkKeyMarker = "capRetry"
+
+    /// playhead-y8f3: how many times one episode's analysis may be re-requested
+    /// after exhausting its attempt budget, per `(sourceFingerprint,
+    /// analysisVersion)`.
+    ///
+    /// **The cap is the point.** `maxAttemptCount` exists so a poisoned asset
+    /// eventually stops consuming budget; a reset path without a ceiling
+    /// recreates exactly the bug the cap was defending against.
+    ///
+    /// **What is actually bounded is ROWS, not dispatches**, and the distinction
+    /// is worth stating because the obvious arithmetic is wrong. This admits at
+    /// most `1 + maxCapOutRetries` = 3 `analysis_jobs` rows per
+    /// `(sourceFingerprint, analysisVersion)` per 7-day GC window, enforced by
+    /// the UNIQUE index on `workKey`. It does NOT bound dispatches at
+    /// `5 * 3 = 15`: `fetchNextEligibleJob` has no `attemptCount` predicate, and
+    /// `AnalysisStore.requeueOrphanedLease` resets `attemptCount` to 0 whenever
+    /// a lease is recovered — which is why two rows on the 2026-07-31 device
+    /// pull carry `attemptCount` 8 and 10 against a cap of 5. Rows are the
+    /// ledger this bead can hold; dispatch counting was never the cap's job.
+    /// Each cycle is additionally paced by the existing exponential backoff
+    /// between attempts and by ``capOutRetryCooldownSeconds`` between cycles.
+    ///
+    /// **Why this reads as a CONSECUTIVE failure count, not a lifetime one**
+    /// (the lesson from playhead-bkhc and playhead-8d5r, where a lifetime
+    /// counter killed a job that had a few unlucky windows early and then
+    /// started converging). The ordinal only ever advances when a cycle
+    /// TERMINATES AT THE CAP. A cycle that reaches its tier terminates
+    /// `complete`, mints a deeper rung, and leaves the episode with an active
+    /// job — which excludes it from `discoverUnEnqueuedDownloads` entirely, so
+    /// nothing charges the ledger. Progress does not spend budget; only five
+    /// more consecutive failures do.
+    ///
+    /// Two, matching ``maxAdScanRedrives``: one cycle covers a transient the
+    /// first five attempts happened to straddle (a wedged engine, a model that
+    /// was unavailable all evening, a decode that failed against a file still
+    /// being written), the second covers a second such window. Past that the
+    /// cause is structural and more cycles buy dispatches, not coverage.
+    static let maxCapOutRetries = 2
+
+    /// playhead-y8f3: how long after an attempt-cap terminal before the episode
+    /// may be re-requested.
+    ///
+    /// One hour, which is ``exponentialBackoffSeconds(attempt:)``'s own ceiling.
+    /// The job that just capped out had already earned that gap between its last
+    /// two attempts, so re-requesting sooner would pace the retry FASTER than
+    /// the attempts inside the cycle it just failed. It also stops a burst of
+    /// launches or `BGProcessingTask` wakes from converting the whole budget
+    /// into a queue of doomed work ahead of episodes that have never been tried
+    /// at all.
+    ///
+    /// Not load-bearing for termination — the budget ordinal is — so a device
+    /// whose clock jumps cannot manufacture extra passes, only earlier ones.
+    static let capOutRetryCooldownSeconds: TimeInterval = 3600
+
+    /// playhead-y8f3: is this row an attempt-cap terminal, as opposed to a
+    /// genuine supersession? See ``maxAttemptsReachedPrefix``.
+    static func isAttemptCapTerminal(_ job: AnalysisJob) -> Bool {
+        job.state == "superseded"
+            && job.lastErrorCode?.hasPrefix(maxAttemptsReachedPrefix) == true
+    }
+
+    /// playhead-y8f3: the `workKey` for cap-out retry `ordinal` off `baseWorkKey`.
+    ///
+    /// There is deliberately NO matching `capOutRetryOrdinal(workKey:)` parser
+    /// to mirror ``adScanRedriveOrdinal(workKey:)``. onn6 needs one because it
+    /// reads its budget off the TERMINATING ROW's own key; this ledger is read
+    /// off the keys PRESENT IN THE TABLE, by construction and lookup, so a
+    /// parser would be production-dead code whose existence implied a guard
+    /// nothing performs. What does matter is the converse — that
+    /// `adScanRedriveOrdinal` does not match a `capRetry` key, or a cap-out
+    /// retry could never walk the tier ladder — and that is pinned by test.
+    static func capOutRetryWorkKey(baseWorkKey: String, ordinal: Int) -> String {
+        "\(baseWorkKey):\(capOutRetryWorkKeyMarker):\(ordinal)"
+    }
+
+    /// playhead-y8f3: why a cap-out retry was NOT minted. Every refusal is
+    /// named, because "the retry chain stopped" and "the retry chain stopped for
+    /// a reason we can state" are different claims and only the second one is
+    /// evidence that the bound holds.
+    enum CapOutRetryDeclineReason: String, Sendable, Equatable {
+        /// The row that swallowed the re-enqueue is not an attempt-cap terminal
+        /// — a live job, a clean `complete`, or a genuine supersession.
+        case notACapOutTerminal
+        /// Every ordinal up to ``maxCapOutRetries`` is already on disk. This is
+        /// the terminating case: it is what stops an asset that never progresses.
+        case budgetSpent
+        /// The terminal is younger than ``capOutRetryCooldownSeconds``.
+        case cooling
+        /// The transcript already reaches the top of the coverage ladder, so a
+        /// retry would read no audio it has not already read. Refusing here is
+        /// what keeps this from being "a job that runs and achieves nothing".
+        case noOutstandingTranscript
+    }
+
+    /// playhead-y8f3: mint a bounded retry, or decline with a named reason.
+    ///
+    /// Pure, so the whole decision matrix — including the termination bound — is
+    /// unit-testable without a store or a scheduler, the same reason
+    /// ``shouldMintAdScanRedrive(adScanFraction:resumableCoverageJobCount:)``
+    /// and `classifyBackfillTerminal` are static.
+    ///
+    /// - Parameter chainTail: the newest row already on disk in this episode's
+    ///   `base → capRetry:1 → capRetry:2` chain. The caller walks the chain
+    ///   because only the caller can read the store; this function owns the
+    ///   policy.
+    /// - Parameter nextOrdinal: the lowest unused ordinal, or `nil` when the
+    ///   budget is spent. Deriving it from the KEYS ON DISK rather than from a
+    ///   counter is what makes a duplicated or racing sweep idempotent — a
+    ///   second mint at the same ordinal collides on the UNIQUE index and does
+    ///   nothing.
+    /// - Parameter transcriptCoverageSec: the ASSET's transcript watermark
+    ///   (`analysis_assets.fastTranscriptCoverageEndTime`), never the job row's
+    ///   `transcriptCoverageSec`. `updateJobProgress` overwrites the job column
+    ///   with the LAST RUN's output rather than a high-water mark, so on all
+    ///   eight superseded rows of the 2026-07-31 device pull it reads 0.0 while
+    ///   the assets behind them are 69–100% transcribed. Reading the job column
+    ///   here would conclude "no progress ever" for an episode that is nearly
+    ///   done.
+    static func capOutRetryDecision(
+        baseWorkKey: String,
+        chainTail: AnalysisJob,
+        nextOrdinal: Int?,
+        transcriptCoverageSec: Double,
+        episodeDurationSec: Double?,
+        tiers: [Double],
+        now: Double
+    ) -> CapOutRetryDecision {
+        guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
+        guard let nextOrdinal else { return .declined(.budgetSpent) }
+        guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
+            return .declined(.cooling)
+        }
+        guard let target = outstandingTranscriptTarget(
+            transcriptCoverageSec: transcriptCoverageSec,
+            tiers: tiers,
+            episodeDurationSec: episodeDurationSec
+        ) else {
+            return .declined(.noOutstandingTranscript)
+        }
+        return .mint(CapOutRetryPlan(
+            workKey: capOutRetryWorkKey(baseWorkKey: baseWorkKey, ordinal: nextOrdinal),
+            ordinal: nextOrdinal,
+            desiredCoverageSec: target
+        ))
+    }
+
+    /// playhead-y8f3: the outcome of ``capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:tiers:now:)``.
+    enum CapOutRetryDecision: Sendable, Equatable {
+        case mint(CapOutRetryPlan)
+        case declined(CapOutRetryDeclineReason)
+    }
+
+    /// playhead-y8f3: what a minted cap-out retry should ask for.
+    struct CapOutRetryPlan: Sendable, Equatable {
+        let workKey: String
+        let ordinal: Int
+        let desiredCoverageSec: Double
+    }
+
+    /// playhead-y8f3: the coverage target a retry should carry — the next rung
+    /// of the EXISTING ladder above what the transcript already covers — or
+    /// `nil` when the transcript has already reached the top and there is
+    /// nothing outstanding.
+    ///
+    /// This is the "still has work outstanding" predicate, and it is structural
+    /// rather than historical for the same reason onn6's `resumableCoverageJobCount`
+    /// is: it asks whether a fresh pass WOULD read audio, not whether past
+    /// passes did.
+    ///
+    /// **Why the ladder and not the terminated job's own target.** Two of the
+    /// six re-requestable rows on the 2026-07-31 device pull had already been
+    /// transcribed PAST the target their job carried (`D2B8579A`: 2,670 s
+    /// covered against a 2,649 s target; `1B0C0D33`: 3,840 against 3,832), so
+    /// re-minting at the terminated job's own target would ask for audio the
+    /// asset already holds. The ladder rung is by construction strictly deeper
+    /// than the watermark, so the retry always has something left to read.
+    ///
+    /// A CLAIM DELIBERATELY NOT MADE HERE, because it does not survive reading
+    /// the runner: that re-using the old target would fail the same way, via
+    /// `transcription:zeroCoverage`. It would not. The runner's reported
+    /// coverage comes from `persistedCoverage()`, which reads the ASSET
+    /// watermark (``AnalysisJobRunner`` `observeTranscriptEvents`), not the
+    /// pass's own delta — so a pass over already-covered audio reports the full
+    /// watermark and terminates `complete` through `tierAdvance`. Zero coverage
+    /// arises from an engine failure or the runner's silent-engine timeout.
+    /// Asking for a target the asset already covers wastes a pass; it does not
+    /// reproduce the observed terminal. The ladder rung is the right choice for
+    /// the first reason alone.
+    ///
+    /// **The slack, and why the comparison needs it.** The last rung is the
+    /// asset's `episodeDurationSec`, which comes off the AVURLAsset CONTAINER
+    /// while the watermark advances on DECODED SHARD ends; the two disagree by
+    /// whatever the header and the decoder disagree by. Without slack, an
+    /// episode read end to end (`7A481794`: 3,210 s of 3,213 s) would look like
+    /// 3 s of outstanding work forever, and would burn its whole retry budget
+    /// re-reading a finished episode. ``tierCoverageSlack(target:)`` is the same
+    /// quantity ``tierTargetSatisfied(job:outcome:)`` already uses to reconcile
+    /// those two clocks.
+    static func outstandingTranscriptTarget(
+        transcriptCoverageSec: Double,
+        tiers: [Double],
+        episodeDurationSec: Double?
+    ) -> Double? {
+        let covered = transcriptCoverageSec.isFinite ? max(0, transcriptCoverageSec) : 0
+        return coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
+            .first { $0 > covered + tierCoverageSlack(target: $0) }
     }
 }
 

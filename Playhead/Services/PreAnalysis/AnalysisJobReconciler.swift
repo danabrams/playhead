@@ -63,6 +63,26 @@ struct ReconciliationReport: Sendable {
     /// spent its re-drive budget (`AnalysisWorkScheduler.maxAdScanRedrives`),
     /// which is what makes repeated launches safe.
     let adScanRedrivesMinted: Int
+    /// playhead-y8f3: bounded retries minted for episodes whose only
+    /// `analysis_jobs` row is an ATTEMPT-CAP terminal (`state = 'superseded'`
+    /// with a `maxAttemptsReached:*` cause). Those rows own a UNIQUE `workKey`
+    /// forever, so every re-enqueue for the episode was swallowed and the
+    /// episode was un-analysable until the 7-day GC removed the row. Zero once
+    /// each episode has spent ``AnalysisWorkScheduler/maxCapOutRetries``, which
+    /// is what makes repeated launches safe.
+    let capOutRetriesMinted: Int
+    /// playhead-y8f3: re-enqueues that `INSERT OR IGNORE` swallowed and that
+    /// this pass did NOT convert into a retry — the episode has cached audio and
+    /// no active job, but the row holding its `workKey` is not re-requestable
+    /// (still cooling, budget spent, fully transcribed, or a genuine
+    /// supersession rather than a cap-out).
+    ///
+    /// A DIAGNOSIS, not a repair, so it is deliberately absent from
+    /// ``recoveredWorkCount`` — same reasoning as `missingFilesStillBlocked`.
+    /// It is here because "`INSERT OR IGNORE` reported success while doing
+    /// nothing" is a defect shape this project keeps hitting, and a count that
+    /// only ever appears in a log line is one nobody can assert on.
+    let reEnqueuesSwallowed: Int
 
     /// playhead-onn6: how many rows this pass actually RECOVERED — the number the
     /// background-task ledger reports as `jobsCompleted` and uses to decide
@@ -83,6 +103,10 @@ struct ReconciliationReport: Sendable {
     /// `failedJobsBackedOff` remove or delay work rather than recovering it; and
     /// `queuedJobEpochsRestamped` / `scarcityReprioritizedJobs` act on rows that
     /// were already queued and dispatchable — only their metadata moved.
+    /// playhead-y8f3 adds `capOutRetriesMinted` (a queued, dispatchable row that
+    /// did not exist before) and keeps `reEnqueuesSwallowed` out, for the same
+    /// reason `missingFilesStillBlocked` is out: it reports work that did NOT
+    /// happen.
     var recoveredWorkCount: Int {
         expiredLeasesRecovered
             + recoveredStrandedSessionJobs
@@ -93,6 +117,7 @@ struct ReconciliationReport: Sendable {
             + strandedBackfillJobsReset
             + strandedFinalPassJobsReset
             + adScanRedrivesMinted
+            + capOutRetriesMinted
     }
 }
 
@@ -143,18 +168,33 @@ actor AnalysisJobReconciler {
     /// bound keeps the sweep's cost fixed without letting skips starve it.
     static let maxAdScanRedriveCandidatesPerReconcile = 64
 
+    /// playhead-y8f3: time source for the cap-out retry cooldown and the
+    /// timestamps on the rows step 7 mints. Injected because
+    /// ``AnalysisWorkScheduler/capOutRetryCooldownSeconds`` is an hour, and a
+    /// test that proves the retry chain TERMINATES has to cross several of them
+    /// — sleeping through that, or asserting only the first cycle, would be a
+    /// weaker claim than the one this bead needs to make.
+    ///
+    /// Deliberately narrow: the other steps still read the wall clock directly.
+    /// Converting all eleven `Date()` reads in this file would be churn in code
+    /// this bead does not otherwise touch, and every one of them is already
+    /// covered by tests that seed timestamps relative to `Date()`.
+    private let clock: @Sendable () -> Date
+
     init(
         store: AnalysisStore,
         downloadManager: any DownloadProviding,
         capabilitiesService: any CapabilitiesProviding,
         config: PreAnalysisConfig = .load(),
-        backlogScarcityRanking: (any BacklogScarcityRanking)? = nil
+        backlogScarcityRanking: (any BacklogScarcityRanking)? = nil,
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
         self.downloadManager = downloadManager
         self.capabilitiesService = capabilitiesService
         self.config = config
         self.backlogScarcityRanking = backlogScarcityRanking
+        self.clock = clock
     }
 
     /// playhead-dqfm: install the scarcity-ranking provider once the SwiftData
@@ -182,7 +222,9 @@ actor AnalysisJobReconciler {
                 strandedFinalPassJobsReset: 0,
                 queuedJobEpochsRestamped: 0,
                 scarcityReprioritizedJobs: 0,
-                adScanRedrivesMinted: 0
+                adScanRedrivesMinted: 0,
+                capOutRetriesMinted: 0,
+                reEnqueuesSwallowed: 0
             )
         }
         isReconciling = true
@@ -233,12 +275,14 @@ actor AnalysisJobReconciler {
             staleVersionsReenqueued: step4.reenqueued,
             completedJobsGarbageCollected: step5,
             failedJobsBackedOff: step6,
-            unEnqueuedDownloadsCreated: step7,
+            unEnqueuedDownloadsCreated: step7.created,
             strandedBackfillJobsReset: stepBackfillReaper,
             strandedFinalPassJobsReset: stepFinalPassReaper,
             queuedJobEpochsRestamped: stepRestamped,
             scarcityReprioritizedJobs: stepScarcity,
-            adScanRedrivesMinted: stepAdScanRedrive
+            adScanRedrivesMinted: stepAdScanRedrive,
+            capOutRetriesMinted: step7.capOutRetriesMinted,
+            reEnqueuesSwallowed: step7.swallowed
         )
 
         logger.info("""
@@ -257,7 +301,9 @@ actor AnalysisJobReconciler {
         strandedFinalPassJobs=\(report.strandedFinalPassJobsReset), \
         queuedEpochsRestamped=\(report.queuedJobEpochsRestamped), \
         scarcityReprioritized=\(report.scarcityReprioritizedJobs), \
-        adScanRedrivesMinted=\(report.adScanRedrivesMinted)
+        adScanRedrivesMinted=\(report.adScanRedrivesMinted), \
+        capOutRetriesMinted=\(report.capOutRetriesMinted), \
+        reEnqueuesSwallowed=\(report.reEnqueuesSwallowed)
         """)
 
         return report
@@ -630,18 +676,19 @@ actor AnalysisJobReconciler {
     /// visible was the thing reporting it healthy, which is a large part of why
     /// this read as platform starvation for as long as it did.
     ///
-    /// Reporting the true count does not by itself un-stick those episodes —
-    /// re-requesting a swallowed `workKey` is playhead-y8f3's forward-looking
-    /// half and is deliberately not duplicated here. It stops the swallow from
-    /// being invisible, and it stops a sweep whose only "yield" is a swallowed
-    /// insert from logging as `.recoveredWork`.
-    private func discoverUnEnqueuedDownloads() async throws -> Int {
+    /// playhead-y8f3 is what now un-sticks the subset of those episodes whose
+    /// terminal is an ATTEMPT-CAP dead end: on a swallow, this method asks
+    /// ``capOutRetry(episodeId:baseWorkKey:fingerprint:)`` for a bounded retry at
+    /// a fresh `workKey` ordinal. The swallowed row itself is never touched —
+    /// no state reset, no attempt reset, no migration.
+    private func discoverUnEnqueuedDownloads() async throws -> DiscoveryOutcome {
         let cachedIds = await downloadManager.allCachedEpisodeIds()
         let activeJobIds = try await store.fetchActiveJobEpisodeIds()
 
         let unEnqueued = cachedIds.subtracting(activeJobIds)
         var created = 0
         var attempted = 0
+        var capOutRetriesMinted = 0
         for episodeId in unEnqueued {
             // No fingerprint = no workKey = no insert was ever attempted. These
             // must not be counted as swallowed below: a swallow is specifically
@@ -650,8 +697,9 @@ actor AnalysisJobReconciler {
             // the wrong bug.
             guard let fp = await downloadManager.fingerprint(for: episodeId) else { continue }
             attempted += 1
+            let fingerprint = fp.strong ?? fp.weak
             let workKey = AnalysisJob.computeWorkKey(
-                fingerprint: fp.strong ?? fp.weak,
+                fingerprint: fingerprint,
                 analysisVersion: Self.currentAnalysisVersion,
                 jobType: "preAnalysis"
             )
@@ -662,7 +710,7 @@ actor AnalysisJobReconciler {
                 podcastId: nil,
                 analysisAssetId: nil,
                 workKey: workKey,
-                sourceFingerprint: fp.strong ?? fp.weak,
+                sourceFingerprint: fingerprint,
                 downloadId: episodeId,
                 priority: 0,
                 desiredCoverageSec: config.defaultT0DepthSeconds,
@@ -680,18 +728,251 @@ actor AnalysisJobReconciler {
             )
             if try await store.insertJob(job) {
                 created += 1
+            } else if await capOutRetry(
+                episodeId: episodeId,
+                baseWorkKey: workKey,
+                fingerprint: fingerprint
+            ) {
+                capOutRetriesMinted += 1
             }
         }
         if created > 0 {
             logger.info("Created \(created) job(s) for un-enqueued downloads")
         }
+        // A swallow that this pass converted into a cap-out retry is still a
+        // swallow — the re-enqueue at the base key did nothing — so it is
+        // counted here as well as in `capOutRetriesMinted`. The two answer
+        // different questions: "did INSERT OR IGNORE silently do nothing" and
+        // "did the episode get a dispatchable row anyway".
         let swallowed = attempted - created
         if swallowed > 0 {
             logger.info(
-                "\(swallowed) cached episode(s) had no active job but an existing workKey swallowed the re-enqueue (see playhead-y8f3)"
+                """
+                \(swallowed) cached episode(s) had no active job but an existing \
+                workKey swallowed the re-enqueue; \(capOutRetriesMinted) converted \
+                into a bounded cap-out retry (playhead-y8f3)
+                """
             )
         }
-        return created
+        return DiscoveryOutcome(
+            created: created,
+            capOutRetriesMinted: capOutRetriesMinted,
+            swallowed: swallowed
+        )
+    }
+
+    /// playhead-8bp2 / playhead-y8f3: what one step-7 sweep did. `created` and
+    /// `capOutRetriesMinted` are disjoint (a base-key insert either took or it
+    /// did not); `swallowed` counts every insert that did not take, including
+    /// the ones a retry rescued.
+    private struct DiscoveryOutcome {
+        let created: Int
+        let capOutRetriesMinted: Int
+        let swallowed: Int
+    }
+
+    // MARK: - Step 7b: bounded cap-out retry (playhead-y8f3)
+
+    /// Mint one bounded retry for an episode whose base `workKey` is held by an
+    /// ATTEMPT-CAP terminal. Returns `true` when a dispatchable row was
+    /// inserted.
+    ///
+    /// **The trap this opens.** A job that exhausts ``AnalysisWorkScheduler``'s
+    /// five attempts is written `state = 'superseded'` with `nextEligibleAt =
+    /// nil`. `analysis_jobs.workKey` is UNIQUE, `insertJob` is `INSERT OR
+    /// IGNORE`, and `AnalysisJob.computeWorkKey` is stable across launches, so
+    /// from that moment every enqueue for the episode is a silent no-op. The one
+    /// attempt-reset in the codebase, `AnalysisStore.requeueOrphanedLease`,
+    /// rewrites `state = CASE WHEN state = 'running' THEN 'queued' ELSE state
+    /// END` — it preserves a superseded row on purpose, because `superseded` is
+    /// also how a GENUINE supersession is recorded and those must stay retired.
+    /// The episode is therefore un-analysable until step 5's 7-day GC deletes
+    /// the row, after which the ladder restarts from scratch at
+    /// `defaultT0DepthSeconds`.
+    ///
+    /// Measured on the 2026-07-31 device pull: 8 rows at this terminal, 6 of
+    /// them on episodes still under 95% transcribed, against a queue holding
+    /// exactly one dispatchable job.
+    ///
+    /// **What this does NOT do.** It never touches the swallowed row: no state
+    /// change, no `attemptCount` reset, no `workKey` rewrite, no migration. The
+    /// terminal stays exactly as it was, and stays the ledger. Everything this
+    /// method can do is insert ONE new row at a key nothing owns.
+    ///
+    /// **Why the bound holds**, in three independent layers:
+    ///  1. The ordinal lives in the UNIQUE `workKey`
+    ///     (``AnalysisWorkScheduler/maxCapOutRetries``), so the chain cannot
+    ///     exceed its cap even if every other guard is wrong, and a duplicated
+    ///     or racing sweep is idempotent — the second insert collides and
+    ///     returns `false`.
+    ///  2. The retry is only minted while the episode has NO active job (this is
+    ///     inside the `cachedIds.subtracting(activeJobIds)` loop), so a live or
+    ///     queued row can never be double-dispatched, and the budget cannot be
+    ///     spent faster than jobs actually reach the cap.
+    ///  3. ``AnalysisWorkScheduler/capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:tiers:now:)``
+    ///     declines with a NAMED reason on a cooling terminal, on a fully
+    ///     transcribed episode, and on a genuine supersession.
+    ///
+    /// **Best-effort by contract**, like `mintAdScanRedrives`: a store failure
+    /// here is logged and swallowed rather than failing `reconcile()`, whose
+    /// critical steps (lease recovery) must not be masked by a hiccup in an
+    /// opportunistic top-up. Minting nothing is always safe; the next sweep
+    /// retries.
+    private func capOutRetry(
+        episodeId: String,
+        baseWorkKey: String,
+        fingerprint: String
+    ) async -> Bool {
+        do {
+            return try await capOutRetryThrowing(
+                episodeId: episodeId,
+                baseWorkKey: baseWorkKey,
+                fingerprint: fingerprint
+            )
+        } catch {
+            logger.warning("cap_out_retry skipped for episode \(episodeId, privacy: .public): \(error)")
+            return false
+        }
+    }
+
+    private func capOutRetryThrowing(
+        episodeId: String,
+        baseWorkKey: String,
+        fingerprint: String
+    ) async throws -> Bool {
+        // THE TERMINAL THIS DECISION IS ABOUT is the episode's most recent row,
+        // not the row that happens to hold the base key. The base key is what
+        // was swallowed, but the cap-out can be on a TIER SUCCESSOR: the
+        // tier-advance arm mints `<base>:<depth>` keys, so an episode that
+        // cleared 90 s and then exhausted its attempts at 300 s leaves the base
+        // row `complete` and the real terminal one row further along. Anchoring
+        // on the base row alone would read that as "not a cap-out" and strand it
+        // exactly as before.
+        //
+        // The fingerprint guard is playhead-onn6's asset-identity trap: an
+        // episode can carry rows for several fingerprints (a re-download mints a
+        // new asset), and `fetchLatestJobForEpisode` would happily return one
+        // describing different bytes than the audio on disk. When it does, fall
+        // back to the row occupying the base key, which by construction hashes
+        // to the cached audio.
+        let latest = try await store.fetchLatestJobForEpisode(episodeId)
+        let tail: AnalysisJob
+        if let latest, latest.sourceFingerprint == fingerprint {
+            tail = latest
+        } else if let base = try await store.fetchJob(byWorkKey: baseWorkKey) {
+            tail = base
+        } else {
+            return false
+        }
+
+        // Cheapest guard first, and deliberately BEFORE the ordinal walk and the
+        // asset read. Every clean `complete` terminal reaches this method on
+        // every sweep — 17 of them on the 2026-07-31 device pull — and paying
+        // three store round-trips and an `info` line apiece, forever, to
+        // re-derive "not ours" would make an opportunistic top-up the most
+        // expensive step in the sweep.
+        guard AnalysisWorkScheduler.isAttemptCapTerminal(tail) else {
+            logger.debug(
+                """
+                cap_out_retry_declined episode=\(episodeId, privacy: .public) \
+                reason=\(AnalysisWorkScheduler.CapOutRetryDeclineReason.notACapOutTerminal.rawValue, privacy: .public) \
+                tailState=\(tail.state, privacy: .public)
+                """
+            )
+            return false
+        }
+
+        // The budget ledger: the lowest `capRetry:<n>` key not already on disk,
+        // or none when the budget is spent. Derived from the KEYS rather than
+        // from a counter, so it survives a process death mid-chain and a
+        // duplicated sweep is idempotent. `stride` rather than `1...max` so a
+        // cap of 0 disables the feature instead of trapping on an invalid range.
+        var nextOrdinal: Int?
+        for ordinal in stride(from: 1, through: AnalysisWorkScheduler.maxCapOutRetries, by: 1) {
+            let key = AnalysisWorkScheduler.capOutRetryWorkKey(
+                baseWorkKey: baseWorkKey,
+                ordinal: ordinal
+            )
+            if try await store.fetchJob(byWorkKey: key) == nil {
+                nextOrdinal = ordinal
+                break
+            }
+        }
+
+        // The asset behind the tail supplies the two coverage inputs. A tail
+        // with no asset row (the job never got far enough to resolve one) reads
+        // as "nothing transcribed, duration unknown", which lands the retry on
+        // the ladder's first rung — the same cheapest-probe default the base
+        // insert above would have used.
+        var asset: AnalysisAsset?
+        if let assetId = tail.analysisAssetId {
+            asset = try await store.fetchAsset(id: assetId)
+        }
+        let decision = AnalysisWorkScheduler.capOutRetryDecision(
+            baseWorkKey: baseWorkKey,
+            chainTail: tail,
+            nextOrdinal: nextOrdinal,
+            transcriptCoverageSec: asset?.fastTranscriptCoverageEndTime ?? 0,
+            episodeDurationSec: asset?.episodeDurationSec,
+            tiers: [config.defaultT0DepthSeconds, config.t1DepthSeconds, config.t2DepthSeconds],
+            now: clock().timeIntervalSince1970
+        )
+
+        let plan: AnalysisWorkScheduler.CapOutRetryPlan
+        switch decision {
+        case .mint(let minted):
+            plan = minted
+        case .declined(let reason):
+            logger.info(
+                """
+                cap_out_retry_declined episode=\(episodeId, privacy: .public) \
+                reason=\(reason.rawValue, privacy: .public) \
+                tailState=\(tail.state, privacy: .public)
+                """
+            )
+            return false
+        }
+
+        let now = clock().timeIntervalSince1970
+        // The fingerprint is the CALLER's — the one the cached audio actually
+        // hashes to — not `tail.sourceFingerprint`. Both tail branches above
+        // already guarantee the two agree (one tests it, the other selects the
+        // row by a key built from it), so this is not a behaviour change; it
+        // states which of the two is the source of truth, so a future edit to
+        // the tail selection cannot silently stamp the row with a fingerprint
+        // describing different bytes than the file on disk.
+        let retry = AnalysisJob(
+            jobId: UUID().uuidString,
+            jobType: "preAnalysis",
+            episodeId: episodeId,
+            podcastId: tail.podcastId,
+            analysisAssetId: tail.analysisAssetId,
+            workKey: plan.workKey,
+            sourceFingerprint: fingerprint,
+            downloadId: tail.downloadId,
+            priority: 0,
+            desiredCoverageSec: plan.desiredCoverageSec,
+            featureCoverageSec: 0,
+            transcriptCoverageSec: 0,
+            cueCoverageSec: 0,
+            state: "queued",
+            attemptCount: 0,
+            nextEligibleAt: nil,
+            leaseOwner: nil,
+            leaseExpiresAt: nil,
+            lastErrorCode: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        guard try await store.insertJob(retry) else { return false }
+        logger.info(
+            """
+            cap_out_retry_minted episode=\(episodeId, privacy: .public) \
+            ordinal=\(plan.ordinal) target=\(plan.desiredCoverageSec) \
+            tailCause=\(tail.lastErrorCode ?? "-", privacy: .public)
+            """
+        )
+        return true
     }
 
     // MARK: - Step 8: Reap stranded backfill jobs (stranded-backfill-reaper)

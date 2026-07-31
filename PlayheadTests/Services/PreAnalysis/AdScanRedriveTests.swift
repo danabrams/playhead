@@ -852,7 +852,11 @@ struct AdScanRedriveReconcilerTests {
             strandedFinalPassJobsReset: 0,
             queuedJobEpochsRestamped: 4,
             scarcityReprioritizedJobs: 5,
-            adScanRedrivesMinted: 0
+            adScanRedrivesMinted: 0,
+            capOutRetriesMinted: 0,
+            // playhead-y8f3: also an excluded counter — a swallowed re-enqueue
+            // is work that did NOT happen.
+            reEnqueuesSwallowed: 9
         )
         // The excluded counters are loaded above and must still sum to nothing:
         // they diagnose, retire, delay or re-rank, they do not recover.
@@ -873,7 +877,9 @@ struct AdScanRedriveReconcilerTests {
             strandedFinalPassJobsReset: 0,
             queuedJobEpochsRestamped: 0,
             scarcityReprioritizedJobs: 0,
-            adScanRedrivesMinted: 6
+            adScanRedrivesMinted: 6,
+            capOutRetriesMinted: 0,
+            reEnqueuesSwallowed: 0
         )
         #expect(withRedrives.recoveredWorkCount == 6)
     }
