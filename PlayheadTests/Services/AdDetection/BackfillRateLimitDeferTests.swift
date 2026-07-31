@@ -93,6 +93,52 @@ struct BackfillRateLimitDeferTests {
         )
     }
 
+    /// playhead-8d5r: a FOUR-window episode. The three-window fixture cannot
+    /// express "the pass stopped before reaching a plan" — with one success and
+    /// two timeouts every plan is accounted for, so the runner's
+    /// unattempted-plan row is never built and the branch that stamps its
+    /// status goes untested. (A mutation reverting that branch survived the
+    /// whole suite until this fixture existed.)
+    private func makeFourWindowInputs(
+        assetId: String = "asset-pmp9",
+        podcastId: String = "podcast-pmp9",
+        transcriptVersion: String = "tx-pmp9-v1"
+    ) -> BackfillJobRunner.AssetInputs {
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            lines: [
+                (0, 10, "Window zero editorial content about the topic."),
+                (10, 20, "Window one sponsor break maybe present here."),
+                (20, 30, "Window two back to the show conversation."),
+                (30, 40, "Window three closing remarks and outro material.")
+            ]
+        )
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion
+        )
+        let plannerContext = CoveragePlannerContext(
+            observedEpisodeCount: 0,
+            stableRecall: false,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        return BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: transcriptVersion,
+            plannerContext: plannerContext
+        )
+    }
+
     private func makeRunner(
         store: AnalysisStore,
         runtime: FoundationModelClassifier.Runtime
@@ -534,6 +580,159 @@ struct BackfillRateLimitDeferTests {
         let completedRow = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(completedRow.status == .complete)
         #expect(completedRow.progressCursor?.lastProcessedUpperBoundSec == 30)
+    }
+
+    // MARK: - playhead-8d5r x playhead-bkhc: a per-call deadline must bank too
+
+    /// The composition risk this test exists for: playhead-8d5r added a hard
+    /// per-call deadline INSIDE the coarse pass, and playhead-bkhc's entire
+    /// contribution is that the pass banks what it finished rather than
+    /// discarding it. If a timeout ever escaped as a throw — the way the
+    /// cancellation check used to, before bkhc moved it past the digest loop —
+    /// the FM time already paid for would be discarded again.
+    ///
+    /// So: windows 1 and 2 hang after window 0 has been screened, which trips
+    /// the two-consecutive no-progress guard and ends the pass early. The
+    /// assertion is in SECONDS OF AUDIO, the same currency the bkhc tests
+    /// above use, because that is the quantity a discard actually destroys.
+    @available(iOS 26.0, *)
+    @Test("playhead-8d5r: a coarse pass ended by the timeout guard still banks the audio it screened")
+    func inferenceTimeoutAbortBanksScreenedAudio() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        // Calls 2 and 3 (windows 1 and 2) report a deadline; call 3 spends a
+        // deliberate 50ms first so the two attempts have plainly different
+        // costs — see the latency assertion below. Injected rather than hung:
+        // racing a real deadline against ~8,300 concurrent tests measures the
+        // suite's load, not this code (playhead-zx0l).
+        let runtime = TestFMRuntime(
+            coarseFailures: [nil, .inferenceTimeout, .inferenceTimeout],
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in
+                if ordinal == 3 {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+            }
+        )
+
+        // A run that ends on the guard must RETURN, not throw: a throw would
+        // unwind past the persistence the pass already earned.
+        _ = try await makeRunner(
+            store: store,
+            runtime: runtime.runtime
+        ).runPendingBackfill(for: inputs)
+
+        #expect(
+            await runtime.coarseCallCount == 3,
+            "the guard must stop the pass after two consecutive timeouts, not attempt more"
+        )
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
+        #expect(
+            examinedAudioSeconds(rows) == 10,
+            "the 10s of audio the pass paid FM for before the guard tripped must be durable"
+        )
+
+        // The holes are named, not guessed at.
+        let timeouts = rows.filter { $0.status == .inferenceTimeout }
+        #expect(timeouts.count == 2)
+        #expect(timeouts.allSatisfy { !$0.status.didExamineWindow })
+
+        // And each names its OWN cost. Before playhead-8d5r every failure row
+        // inherited the whole pass's wall-clock, so two rows from one pass
+        // reported the same number and summing the column double-counted it.
+        let passATimeouts = timeouts.filter { $0.scanPass == "passA" }
+        #expect(passATimeouts.count == 2)
+        #expect(passATimeouts.allSatisfy { ($0.latencyMs ?? 0) > 0 })
+        // THE JOB MUST DEFER, NOT COMPLETE. This is the assertion the first
+        // version of this test was missing, and its absence hid a P0: an
+        // `.inferenceTimeout` pass fell through to `markBackfillJobComplete`
+        // with an EPISODE-END cursor, so the M-5 idempotency gate would skip
+        // the row forever and the unscanned 20s would be stranded permanently.
+        // That is verbatim the bug playhead-pmp9 fixed for rate limits; the
+        // defer predicate keyed on rate-limiting alone and a Bool cannot carry
+        // a second cause.
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let jobRow = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(jobRow.status == .deferred, "a timeout-aborted pass must stay resumable")
+        #expect(
+            jobRow.progressCursor?.lastProcessedUpperBoundSec == 10,
+            "the cursor must be the honest 10s prefix, never the 30s episode end"
+        )
+        #expect(jobRow.deferReason == "inferenceTimeout-noProgress",
+                "the cause is named, not folded into the rate-limit reason")
+
+        // AND NO ROW MAY CLAIM A TIMEOUT FOR A WINDOW NOBODY CALLED. The
+        // pass-abort writes one row for the first unattempted plan; stamping it
+        // `.inferenceTimeout` would invent a timeout that never happened and
+        // inflate the very SUM(latencyMs) this bead exists to make trustworthy.
+        #expect(timeouts.count == 2, "exactly the two windows that really timed out")
+
+        // THE PRECISE SIGNATURE OF THE OLD DEFECT. When every failure row
+        // inherited the pass total, N rows from one pass carried the BIT-
+        // IDENTICAL number — which is why summing the column on the device pull
+        // reported 213.8 minutes of a quantity that was really 115.9. Two
+        // independently-measured attempts cannot collide on a Double.
+        #expect(
+            Set(passATimeouts.compactMap(\.latencyMs)).count == 2,
+            """
+            both timeout rows reported the same latency \
+            (\(passATimeouts.compactMap(\.latencyMs))) — that is the pass-total \
+            stamp, not each attempt's own cost.
+            """
+        )
+    }
+
+    /// playhead-8d5r: the pass-abort writes ONE row standing for the first plan
+    /// the pass never reached. That row must not claim the pass's terminal
+    /// status.
+    ///
+    /// Window 0 answers; windows 1 and 2 time out and trip the guard; window 3
+    /// is never attempted. If the unattempted row inherited
+    /// `.inferenceTimeout`, the episode would report THREE timeouts where two
+    /// happened — and the third would carry the whole pass's latency, which is
+    /// precisely the double-count that made 48 failure rows read as 213.8
+    /// minutes of a quantity that was really 115.9.
+    @available(iOS 26.0, *)
+    @Test("playhead-8d5r: the unattempted-plan row does not claim a timeout that never happened")
+    func unattemptedPlanRowDoesNotClaimATimeout() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeFourWindowInputs()
+
+        let runtime = TestFMRuntime(
+            coarseFailures: [nil, .inferenceTimeout, .inferenceTimeout, nil],
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule()
+        )
+        _ = try await makeRunner(store: store, runtime: runtime.runtime)
+            .runPendingBackfill(for: inputs)
+
+        #expect(await runtime.coarseCallCount == 3, "window 3 must never be attempted")
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
+        let passA = rows.filter { $0.scanPass == "passA" }
+        #expect(
+            passA.filter { $0.status == .inferenceTimeout }.count == 2,
+            """
+            \(passA.filter { $0.status == .inferenceTimeout }.count) timeout rows for 2 real \
+            timeouts — the unattempted plan is claiming one it never earned.
+            """
+        )
+        // It is still recorded, so the denominator shows where the pass stopped.
+        let unattempted = try #require(passA.first { $0.status == .failedTransient })
+        #expect(unattempted.latencyMs == 0, "a window nobody called cost nothing")
+        #expect(examinedAudioSeconds(rows) == 10)
     }
 
     @available(iOS 26.0, *)

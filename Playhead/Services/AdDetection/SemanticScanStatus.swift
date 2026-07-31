@@ -34,6 +34,15 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
     // H1-FM: eu1 permissive retry succeeded but returned no ad spans.
     // Recorded so callers can account for every window in the plan.
     case noAds = "no_ads"
+    // playhead-8d5r: the inference call outlived its per-call deadline
+    // (`FMInferenceDeadline.standard`) and was abandoned. NAMED rather than
+    // folded into `.failedTransient` because the two need to stay
+    // distinguishable in the persisted row: `.failedTransient` is "the model
+    // returned an error we do not recognise", this is "the model returned
+    // nothing at all within the budget". Collapsing them would make the very
+    // measurement this bead exists to enable impossible — you could not tell a
+    // bounded 180 s abandonment from the unbounded 1,664.9 s call it replaced.
+    case inferenceTimeout = "inference_timeout"
 
     /// Documents the recovery path for each status so backfill and future
     /// persistence code can make the same retry decision everywhere.
@@ -66,6 +75,15 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
             .persistFailure
         case .noAds:
             .none
+        // playhead-8d5r: a timeout must NOT retry in the same pass. The call
+        // already proved it cannot answer inside the budget, so an immediate
+        // retry spends a SECOND full deadline to learn the same thing — and the
+        // whole point of the deadline is to stop paying for calls that return
+        // nothing. `.persistFailure` records the honest hole and lets the
+        // existing shadow retry observer re-attempt on the next capability
+        // transition, exactly as `.refusal` does.
+        case .inferenceTimeout:
+            .persistFailure
         }
     }
 
@@ -93,7 +111,7 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
              .guardrailViolation, .assetsUnavailable, .rateLimited,
              .thermalDeferred, .cancelled, .failedTransient,
              .permissiveRefusal, .permissiveDecodingFailure,
-             .permissiveContextOverflow:
+             .permissiveContextOverflow, .inferenceTimeout:
             false
         }
     }
@@ -117,9 +135,17 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
     /// if one ever reached that switch.
     var failureScope: SemanticScanFailureScope {
         switch self {
+        // playhead-8d5r: `.window`, deliberately. One slow window is not
+        // evidence the device or model is unusable, and treating it as
+        // `.pass` would throw away every window the pass had already banked —
+        // the exact discarding playhead-bkhc fixed. A run of consecutive
+        // timeouts IS device-level evidence, and `coarsePassA` escalates on
+        // that separately (`consecutiveInferenceTimeoutAbortThreshold`)
+        // rather than by mis-scoping a single one.
         case .exceededContextWindow, .decodingFailure, .refusal,
              .guardrailViolation, .rateLimited, .permissiveRefusal,
-             .permissiveDecodingFailure, .permissiveContextOverflow:
+             .permissiveDecodingFailure, .permissiveContextOverflow,
+             .inferenceTimeout:
             .window
         case .unavailable, .unsupportedLocale, .assetsUnavailable,
              .thermalDeferred, .cancelled, .failedTransient:
@@ -139,6 +165,14 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
     }
 
     static func from(error: Error) -> SemanticScanStatus {
+        // playhead-8d5r: check the deadline error FIRST. It is a distinct type
+        // from `CancellationError`, so ordering is not a correctness
+        // requirement — but the two are adjacent in meaning and the order
+        // documents that a per-call deadline is NOT a cancellation. See
+        // `FMInferenceTimeoutError`.
+        if error is FMInferenceTimeoutError {
+            return .inferenceTimeout
+        }
         if error is CancellationError {
             return .cancelled
         }

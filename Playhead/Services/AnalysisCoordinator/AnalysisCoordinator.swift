@@ -2587,6 +2587,20 @@ actor AnalysisCoordinator {
         /// permanent for the window (`decodingFailure` /
         /// `permissive_decoding_failure` / context overflow).
         case decodeFailure = "decodeFailure"
+        /// playhead-8d5r: at least one window's inference call outlived its
+        /// per-call deadline and was abandoned (`inference_timeout`).
+        ///
+        /// Named separately rather than folded into `transient` or
+        /// `interrupted`, both of which it superficially resembles and neither
+        /// of which it is. `interrupted` means something OUTSIDE the model
+        /// stopped the pass (BG-window expiry, thermal, rate limit) —
+        /// nothing outside stopped this. `transient` means the model returned
+        /// an error we could not classify — this model returned nothing at all.
+        /// The distinction is the whole point of measuring: a run of these says
+        /// the deadline is doing its job, and a rise in them says either the
+        /// device is degraded or the budget is now too tight, which is exactly
+        /// the signal that would be invisible if it were spelled `transient`.
+        case timedOut = "timedOut"
         /// The pass was stopped from outside — cancellation, thermal defer,
         /// or rate limiting.
         case interrupted = "interrupted"
@@ -2724,6 +2738,8 @@ actor AnalysisCoordinator {
             case .decodingFailure, .permissiveDecodingFailure,
                  .exceededContextWindow, .permissiveContextOverflow:
                 seen.insert(.decodeFailure)
+            case .inferenceTimeout:
+                seen.insert(.timedOut)
             case .cancelled, .thermalDeferred, .rateLimited:
                 seen.insert(.interrupted)
             case .failedTransient:

@@ -3955,6 +3955,140 @@ struct FoundationModelClassifierTests {
         }
     }
 
+    /// playhead-8d5r: the refinement zoom loop is the third place that issues
+    /// many inference calls in sequence, and `.inferenceTimeout` is
+    /// `.window`-scoped so nothing stopped it spending one full deadline per
+    /// remaining zoom window against a model that had stopped answering.
+    ///
+    /// Four zoom windows, all timing out. The loop must stop after two, and
+    /// must return partial results rather than throwing.
+    @Test("playhead-8d5r: the refinement pass stops after two consecutive window timeouts")
+    func refinementPassStopsOnConsecutiveTimeouts() async throws {
+        let segments = (1...8).map { index in
+            makeSegment(
+                index: index,
+                startTime: Double(index) * 5,
+                endTime: Double(index) * 5 + 5,
+                text: "Refinement window content line \(index)."
+            )
+        }
+        let zoomPlans = (0..<4).map { windowIndex in
+            RefinementWindowPlan(
+                windowIndex: windowIndex,
+                sourceWindowIndex: windowIndex,
+                lineRefs: [windowIndex * 2 + 1, windowIndex * 2 + 2],
+                focusLineRefs: [windowIndex * 2 + 1],
+                focusClusters: [[windowIndex * 2 + 1, windowIndex * 2 + 2]],
+                prompt: "Refine ad spans.",
+                promptTokenCount: 8,
+                startTime: Double(windowIndex) * 10,
+                endTime: Double(windowIndex) * 10 + 10,
+                stopReason: .minimumSpan,
+                promptEvidence: []
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 4_096,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: Array(repeating: .inferenceTimeout, count: 4)
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: zoomPlans,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(
+            snapshot.respondRefinementCalls.count == 2,
+            """
+            refinement issued \(snapshot.respondRefinementCalls.count) calls against a wedged \
+            model; the guard must stop it at 2. Four means one pass can cost \
+            zoomPlans x the deadline.
+            """
+        )
+        #expect(output.status == .inferenceTimeout)
+        #expect(output.failedWindowStatuses.count == 2)
+        #expect(output.failedWindowStatuses.allSatisfy { $0 == .inferenceTimeout })
+    }
+
+    /// playhead-8d5r: subdivision is the ONE path that issues many inference
+    /// calls for a single plan — one per atom chunk — and it is reached from
+    /// the `promptTokenCount > budget` branch, which `continue`s before the
+    /// pass-level no-progress guard ever sees a status. Without a guard of its
+    /// own, a wedged model costs `chunks.count x inferenceDeadline` inside one
+    /// window while the pass-level bound looks on.
+    ///
+    /// Four chunks, all timing out. The loop must stop after two.
+    @Test("playhead-8d5r: subdivision stops after two consecutive chunk timeouts")
+    func coarsePassSubdivisionStopsOnConsecutiveTimeouts() async throws {
+        let markers = ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc", "deltaTOKENddd"]
+        // Any two atoms together exceed the 456-token budget, so each atom
+        // becomes its own chunk; the whole 4-atom segment is oversized, which
+        // is what routes the plan into subdivision at all.
+        let tokenRule: @Sendable (String) -> Int = { prompt in
+            let markerCount = markers.count { prompt.contains($0) }
+            switch markerCount {
+            case 0: return 50
+            case 1: return 200
+            default: return 500
+            }
+        }
+        let fixture = subdivisionBudgetFixture
+        let segments = [
+            makeMultiAtomSegment(index: 91, atomTexts: markers, startTime: 100, endTime: 140)
+        ]
+        let recorder = RuntimeRecorder(
+            contextSize: fixture.contextSize,
+            coarseSchemaTokens: fixture.coarseSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: tokenRule,
+            coarseFailures: Array(repeating: .inferenceTimeout, count: 4)
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(safetyMarginTokens: fixture.safetyMargin, maximumResponseTokens: fixture.maxResponse)
+        )
+
+        let plans = try await classifier.planPassA(segments: segments)
+        #expect(plans.count == 1)
+        #expect(plans[0].promptTokenCount == 500, "the segment must be oversized so subdivision runs")
+
+        let output = try await classifier.coarsePassA(segments: segments)
+        let snapshot = await recorder.snapshot()
+
+        #expect(
+            snapshot.respondCalls.count == 2,
+            """
+            subdivision issued \(snapshot.respondCalls.count) calls against a wedged model; \
+            the guard must stop it at 2. Four means the chunk loop has no bound and one \
+            window can cost chunks x the deadline.
+            """
+        )
+        // Nothing was examined, so the window is conceded as an honest hole
+        // rather than aggregating a verdict over audio nobody screened
+        // (playhead-9q10's false-clean gate).
+        #expect(output.windows.isEmpty)
+        #expect(output.failedWindows.count == 1)
+        // NAMED, not collapsed. Every pre-8d5r subdivision failure persists as
+        // `.exceededContextWindow` (9q10's contract, deliberately left intact);
+        // a timeout must not join them, or the one outcome this bead adds is
+        // the one outcome nobody can see — and the row would blame prompt size
+        // for a model that never answered.
+        #expect(output.failedWindows.first?.status == .inferenceTimeout)
+        #expect(output.failedWindows.first?.status != .exceededContextWindow)
+        // And it reports what the chunk calls actually cost, not the pass total.
+        #expect((output.failedWindows.first?.latencyMillis ?? -1) >= 0)
+    }
+
     @Test("coarse pass subdivides a single oversized multi-atom segment and aggregates noAds")
     func coarsePassSubdividesOversizedSegmentAllNoAds() async throws {
         let fixture = subdivisionBudgetFixture
@@ -6471,6 +6605,11 @@ private enum RuntimeFailure: Sendable {
     // pass-scoped status used to exercise the abort path now that refusal
     // and guardrail violations are per-window outcomes.
     case unknownTransient
+    // playhead-8d5r: the per-call deadline elapsed. Injected as the error the
+    // real deadline throws, which is faithful — `FMInferenceDeadline.run`
+    // propagates a thrown `FMInferenceTimeoutError` unchanged, so downstream
+    // handling is identical whether the deadline fired or the session threw it.
+    case inferenceTimeout
 
     private var defaultDebugDescription: String {
         switch self {
@@ -6490,10 +6629,16 @@ private enum RuntimeFailure: Sendable {
             return "runtime-failure-rateLimited"
         case .unknownTransient:
             return "runtime-failure-unknownTransient"
+        case .inferenceTimeout:
+            return "runtime-failure-inferenceTimeout"
         }
     }
 
     var error: Error {
+        // playhead-8d5r: the deadline's own error type, thrown verbatim.
+        if case .inferenceTimeout = self {
+            return FMInferenceTimeoutError(deadline: .seconds(300))
+        }
         // playhead-qbib: deliberately NOT a FoundationModels error — this is
         // the "we have no idea what happened" shape that maps to
         // `.failedTransient`.
@@ -6533,9 +6678,9 @@ private enum RuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
             case .rateLimited:
                 return LanguageModelSession.GenerationError.rateLimited(context)
-            case .unknownTransient:
-                // Unreachable — handled by the early return above. Kept so the
-                // switch stays exhaustive.
+            case .unknownTransient, .inferenceTimeout:
+                // Unreachable — both are handled by the early returns above.
+                // Kept so the switch stays exhaustive.
                 break
             }
         }

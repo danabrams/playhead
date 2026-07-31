@@ -771,7 +771,7 @@ actor BackfillJobRunner {
                 // touching status), then the row flips to `.deferred` — mirroring
                 // the device-state defer branch above but for a rate-limit that
                 // survived the capped-exponential backoff.
-                if coverage.coarseRateLimitedIncomplete {
+                if let coarseDeferReason = coverage.coarseIncompleteDeferReason {
                     let honest = BackfillProgressCursor(
                         processedPhaseCount: 0,
                         lastProcessedUpperBoundSec: coverage.lastCoveredUpperBoundSec
@@ -786,7 +786,7 @@ actor BackfillJobRunner {
                     )
                     try await store.markBackfillJobDeferred(
                         jobId: job.jobId,
-                        reason: "rateLimited-backoff"
+                        reason: coarseDeferReason
                     )
                     deferred.append(job.jobId)
                     let deferCounters = operationalCounters(
@@ -1402,9 +1402,21 @@ actor BackfillJobRunner {
     /// covered, the job DEFERS (non-terminal, resumable) with an honest cursor
     /// instead of completing with permanent holes.
     struct CoverageOutcome: Sendable, Equatable {
-        /// A coarse window hit FM rate-limiting AND the episode is not fully
-        /// covered — the job must defer (resumable), not complete-with-holes.
-        let coarseRateLimitedIncomplete: Bool
+        /// Non-nil when the coarse pass stopped short for a reason that is
+        /// RESUMABLE and the episode is not fully covered — the job must defer
+        /// (non-terminal), not complete-with-holes. The value is the token
+        /// persisted to `backfill_jobs.deferReason`, so an operator can tell
+        /// the causes apart without a device attached.
+        ///
+        /// playhead-8d5r: this used to be a bare `coarseRateLimitedIncomplete`
+        /// Bool. Rate-limiting was the only resumable stop-short cause until
+        /// the per-call inference deadline added a second one, and a Bool
+        /// cannot carry two causes — an `.inferenceTimeout` pass fell through
+        /// to `markBackfillJobComplete` with an EPISODE-END cursor, which is
+        /// verbatim the permanent-stranding bug pmp9 fixed for rate limits
+        /// (complete + M-5 idempotency = the unscanned audio is skipped
+        /// forever).
+        let coarseIncompleteDeferReason: String?
         /// Honest upper bound (seconds, absolute timeline) of the CONTIGUOUS
         /// successfully-scanned coarse prefix for this run. `nil` ⇒ nothing was
         /// successfully scanned this run.
@@ -1552,7 +1564,7 @@ actor BackfillJobRunner {
                 detectedAdLineRefs,
                 fmRefinementWindows,
                 counters,
-                CoverageOutcome(coarseRateLimitedIncomplete: false, lastCoveredUpperBoundSec: nil)
+                CoverageOutcome(coarseIncompleteDeferReason: nil, lastCoveredUpperBoundSec: nil)
             )
         }
 
@@ -1759,7 +1771,20 @@ actor BackfillJobRunner {
                     inputs: inputs,
                     jobId: job.jobId,
                     jobPhase: job.phase,
-                    latencyMs: coarse.latencyMillis,
+                    // playhead-8d5r: prefer the attempt's OWN elapsed time.
+                    //
+                    // SCOPE, stated honestly: the failure sites that measure
+                    // themselves today are the timeout sites, the permissive
+                    // routing/recovery sites, the subdivision aggregate, and
+                    // the whole-window coarse attempt. Pre-existing failure
+                    // classes constructed elsewhere still pass nil and fall
+                    // back to the pass total, so the double-count described in
+                    // `CoarseWindowFailure.latencyMillis` is REDUCED here, not
+                    // yet eliminated everywhere. Reading `SUM(latencyMs)` over
+                    // failure rows is trustworthy for `inference_timeout` and
+                    // for the sites listed above; treat other failure classes
+                    // as upper bounds until they are threaded too.
+                    latencyMs: failure.latencyMillis ?? coarse.latencyMillis,
                     runMode: runMode
                 ) {
                     try await store.insertSemanticScanResult(failureResult)
@@ -1775,6 +1800,21 @@ actor BackfillJobRunner {
             let unattemptedPlans = coarsePlans.filter {
                 !succeededPlanIndices.contains($0.windowIndex) && !failedPlanIndices.contains($0.windowIndex)
             }
+            // playhead-8d5r: this row stands for a plan that was NEVER
+            // ATTEMPTED, so it must not claim the pass's terminal status when
+            // that status names something that happened to a DIFFERENT window.
+            // An `.inferenceTimeout` pass would otherwise mint an extra
+            // `inference_timeout` row for a window no inference call ever
+            // touched — inflating both the timeout count and the exact
+            // `SUM(latencyMs)` this bead exists to make trustworthy. The
+            // windows that really did time out are already in
+            // `coarse.failedWindows` above, each with its own measured cost.
+            //
+            // `.failedTransient` is the honest label for "we stopped before
+            // reaching this window": it is the pass-scoped, retry-transiently
+            // status, and it does not assert a cause this row cannot know.
+            let blockingStatus: SemanticScanStatus =
+                coarse.status == .inferenceTimeout ? .failedTransient : coarse.status
             if coarse.status != .success,
                let blockingPlan = unattemptedPlans.first,
                        let failureResult = makeCoarseFailureScanResult(
@@ -1782,8 +1822,11 @@ actor BackfillJobRunner {
                             inputs: inputs,
                             jobId: job.jobId,
                             jobPhase: job.phase,
-                            status: coarse.status,
-                            latencyMs: coarse.latencyMillis,
+                            status: blockingStatus,
+                            // Never attempted ⇒ it cost nothing. Stamping the
+                            // pass total here is how the 213.8-vs-115.9-minute
+                            // double count arose in the first place.
+                            latencyMs: 0,
                             runMode: runMode
                        ) {
                 try await store.insertSemanticScanResult(failureResult)
@@ -2029,8 +2072,23 @@ actor BackfillJobRunner {
             )
         }
 
+        // playhead-8d5r: both causes are "the pass stopped short and the rest
+        // of the episode is still scannable later", so both must DEFER. They
+        // keep distinct reasons because the operator response differs: a rate
+        // limit resolves on its own, a run of inference timeouts means the
+        // model is not answering on this device.
+        let coarseIncompleteDeferReason: String?
+        if coverageFullyCovered {
+            coarseIncompleteDeferReason = nil
+        } else if coarseHitRateLimit {
+            coarseIncompleteDeferReason = "rateLimited-backoff"
+        } else if coarse.status == .inferenceTimeout {
+            coarseIncompleteDeferReason = "inferenceTimeout-noProgress"
+        } else {
+            coarseIncompleteDeferReason = nil
+        }
         let coverageOutcome = CoverageOutcome(
-            coarseRateLimitedIncomplete: coarseHitRateLimit && !coverageFullyCovered,
+            coarseIncompleteDeferReason: coarseIncompleteDeferReason,
             lastCoveredUpperBoundSec: coverageContiguousUpperBound
         )
         return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows, counters, coverageOutcome)

@@ -607,6 +607,30 @@ struct CoarseWindowFailure: Sendable, Equatable {
     /// failures get a distinct persistence key so two halves of one plan
     /// cannot collide on the same deterministic row id.
     let coversWholePlan: Bool
+    /// playhead-8d5r: wall-clock THIS attempt spent, in milliseconds, or nil
+    /// when the attempt never reached the model (e.g. a plan rejected
+    /// pre-flight for exceeding the token budget).
+    ///
+    /// WHY THIS EXISTS. The runner used to stamp every failure row with
+    /// `FMCoarseScanOutput.latencyMillis` — the WHOLE PASS's wall-clock —
+    /// while success rows carried a single window's. Two consequences, both
+    /// measured on the 2026-07-30 device pull:
+    ///
+    /// 1. N failure rows from one pass each carried the same pass total, so
+    ///    summing the column counted that wall-clock N times. 48 failure rows
+    ///    came from 26 distinct passes and summed to 213.8 minutes of a
+    ///    quantity that was really 115.9.
+    /// 2. That pass total INCLUDES the successful windows of the same pass, so
+    ///    "time spent failing" double-counted "time spent succeeding" — one
+    ///    asset shows a 749 s failure row over a pass containing 582 s of
+    ///    successful window time.
+    ///
+    /// Together those two effects are why the failure classes appeared to cost
+    /// 35x a success. Carrying the attempt's own elapsed time is what makes
+    /// `.inferenceTimeout` measurable at all: without it a bounded 180 s
+    /// abandonment would persist stamped with its pass's total and read
+    /// exactly like the unbounded call it replaced.
+    let latencyMillis: Double?
 
     init(
         planWindowIndex: Int,
@@ -614,7 +638,8 @@ struct CoarseWindowFailure: Sendable, Equatable {
         startTime: Double,
         endTime: Double,
         status: SemanticScanStatus,
-        coversWholePlan: Bool = true
+        coversWholePlan: Bool = true,
+        latencyMillis: Double? = nil
     ) {
         self.planWindowIndex = planWindowIndex
         self.lineRefs = lineRefs
@@ -622,18 +647,24 @@ struct CoarseWindowFailure: Sendable, Equatable {
         self.endTime = endTime
         self.status = status
         self.coversWholePlan = coversWholePlan
+        self.latencyMillis = latencyMillis
     }
 
     /// Whole-plan failure: the plan was attempted as planned and produced
     /// nothing usable.
-    init(plan: CoarsePassWindowPlan, status: SemanticScanStatus) {
+    init(
+        plan: CoarsePassWindowPlan,
+        status: SemanticScanStatus,
+        latencyMillis: Double? = nil
+    ) {
         self.init(
             planWindowIndex: plan.windowIndex,
             lineRefs: plan.lineRefs,
             startTime: plan.startTime,
             endTime: plan.endTime,
             status: status,
-            coversWholePlan: true
+            coversWholePlan: true,
+            latencyMillis: latencyMillis
         )
     }
 
@@ -960,6 +991,11 @@ struct FoundationModelClassifier: Sendable {
         /// give it `.persistFailure` recovery instead of
         /// `.resumeFromCheckpoint`.
         case cancelled
+        /// playhead-8d5r: the attempt outlived `Config.inferenceDeadline`.
+        /// Distinct from `.blocked` for the same reason `.cancelled` is: the
+        /// safety layer never got to say anything, so attributing this to the
+        /// guardrails would send the next reader to the wrong mitigation.
+        case timedOut
     }
 
     /// playhead-qbib: everything one window's bounded recovery produced.
@@ -987,6 +1023,20 @@ struct FoundationModelClassifier: Sendable {
         var permissiveCounts = PermissiveFailureCounts.zero
         /// Permissive FM calls actually issued, charged against the pass budget.
         var attemptsSpent = 0
+        /// playhead-8d5r: why the chunks failed, when `output` is nil.
+        ///
+        /// The aggregate of the unexamined chunk statuses was already computed
+        /// — and then thrown away into a log line, while the caller persisted a
+        /// flat `.exceededContextWindow`. That was survivable when overflow was
+        /// the only way to get here; it is not once a chunk can TIME OUT,
+        /// because the row would claim a size problem (`.decodeFailure` in
+        /// gqx4's vocabulary, `shrinkWindowAndRetryOnce` recovery) for a model
+        /// that simply never answered. `nil` ⇒ subdivision failed for a
+        /// structural reason (single atom, atom over budget) with no chunk
+        /// statuses to aggregate.
+        var unexaminedStatus: SemanticScanStatus?
+        /// Wall-clock the chunk calls actually cost, in milliseconds.
+        var latencyMillis: Double?
     }
 
     /// playhead-9q10: what one atom chunk of a subdivided window produced.
@@ -1043,6 +1093,23 @@ struct FoundationModelClassifier: Sendable {
         // makes rarer. Dormant until a driver opts in.
         let interWindowPacingNanos: UInt64
 
+        // playhead-8d5r: hard wall-clock bound on ONE inference call. See
+        // `FMInferenceDeadline.standard` for how the value was derived from the
+        // measured success tail, and `FMInferenceDeadline` for why the bound is
+        // enforced with an abandonable unstructured task rather than a
+        // structured task-group race.
+        //
+        // Set to `.zero` to disable the bound (the pre-8d5r behavior) — no call
+        // site does, and none should; it exists so the seam has an explicit off
+        // position rather than an implicit one. SCOPE: this governs only the
+        // sessions THIS classifier mints. `PermissiveAdClassifier` builds its
+        // own `LanguageModelSession` (it has to — permissive guardrails only
+        // apply to a String-output session) and carries its own
+        // `inferenceDeadline`, defaulted independently. The two knobs are not
+        // linked in either direction; changing one here does not change the
+        // permissive path.
+        let inferenceDeadline: Duration
+
         // bd-3h2 (2026-04-06): On-device run on iOS 26.4 produced a
         // refinement decode failure with the FM emitting valid JSON
         // truncated mid-string (the second span's `"certainty"` field
@@ -1075,7 +1142,8 @@ struct FoundationModelClassifier: Sendable {
             minimumZoomSpanLines: Int = 2,
             maximumRefinementSpansPerWindow: Int = 2,
             fmGreedyDecoding: Bool = true,
-            interWindowPacingNanos: UInt64 = 0
+            interWindowPacingNanos: UInt64 = 0,
+            inferenceDeadline: Duration = FMInferenceDeadline.standard
         ) {
             self.safetyMarginTokens = safetyMarginTokens
             self.coarseMaximumResponseTokens = coarseMaximumResponseTokens
@@ -1085,6 +1153,7 @@ struct FoundationModelClassifier: Sendable {
             self.maximumRefinementSpansPerWindow = max(1, maximumRefinementSpansPerWindow)
             self.fmGreedyDecoding = fmGreedyDecoding
             self.interWindowPacingNanos = interWindowPacingNanos
+            self.inferenceDeadline = inferenceDeadline
         }
 
         /// playhead-xsdz.60: return a copy of `self` with `fmGreedyDecoding`
@@ -1101,7 +1170,8 @@ struct FoundationModelClassifier: Sendable {
                 minimumZoomSpanLines: minimumZoomSpanLines,
                 maximumRefinementSpansPerWindow: maximumRefinementSpansPerWindow,
                 fmGreedyDecoding: value,
-                interWindowPacingNanos: interWindowPacingNanos
+                interWindowPacingNanos: interWindowPacingNanos,
+                inferenceDeadline: inferenceDeadline
             )
         }
 
@@ -1213,6 +1283,56 @@ struct FoundationModelClassifier: Sendable {
     static func coarseSafetyRecoveryPassBudget(planCount: Int) -> Int {
         max(coarseSafetyRecoveryMinimumPassAttempts, planCount)
     }
+
+    /// playhead-8d5r: how many BACK-TO-BACK `.inferenceTimeout` outcomes end
+    /// the enclosing loop.
+    ///
+    /// Applied at all three places that issue MORE THAN ONE inference call in
+    /// sequence — the coarse window loop, the refinement zoom loop, and the
+    /// subdivision chunk loop. Guarding only one of them would leave the other
+    /// two able to spend a deadline per iteration against a model that has
+    /// stopped answering, which is the same unbounded cost in a different loop.
+    ///
+    /// Two, not one and not a cumulative total. One timeout is a window fact
+    /// and must not cost the episode its remaining coverage — the measured
+    /// success tail contains legitimately slow calls, and a device under
+    /// thermal load produces the occasional one. Two in a row, with no window
+    /// answering in between, is a device fact: continuing would spend one full
+    /// deadline per remaining window to learn the same thing.
+    ///
+    /// This is what keeps a per-CALL deadline from adding up to an unbounded
+    /// PASS: every loop that can issue a deadline per iteration stops once the
+    /// model has demonstrably stopped answering, and the pass DEFERS with an
+    /// honest cursor so the remaining audio is scanned on a later grant rather
+    /// than stranded.
+    ///
+    /// WHAT THE BOUND ACTUALLY IS, stated precisely because the first version
+    /// of this comment claimed a flat `2 x deadline` and that was false. A
+    /// window can reach the model by more than one route, and the routes
+    /// compose:
+    ///
+    /// - Straight-through coarse window: 1 deadline, then the counter decides.
+    /// - Rate-limit backoff (`coarseResponses`): the loop exits on the FIRST
+    ///   non-`.rateLimited` status, and a timeout is one, so a window adds at
+    ///   most one more deadline here.
+    /// - Smart-shrink: same — the loop `return`s on any non-overflow status.
+    /// - qbib permissive recovery: up to `coarseSafetyRecoveryMaxAttempts` +
+    ///   `PerWindow` calls, but the recovery result now feeds this counter, so
+    ///   a wedged model ends the pass after two such windows.
+    /// - Subdivision: internally guarded at this same threshold, and its
+    ///   aggregate status now feeds this counter too.
+    ///
+    /// So the honest statement is: a wedged model ends the pass after two
+    /// consecutive non-answering WINDOWS, and a single window can spend a small
+    /// constant number of deadlines (bounded by its retry allowances, ≤4)
+    /// before the counter sees it. That is a bound; it is not `2 x deadline`.
+    ///
+    /// Two is not aggressive at a 300 s deadline: a SINGLE timeout is already a
+    /// 3.4x-beyond-the-measured-tail event, so two consecutive ones is not a
+    /// plausible way to lose legitimate coverage. The counter is reset by any
+    /// answering window, so this can only fire on a model that has stopped
+    /// answering entirely.
+    static let consecutiveInferenceTimeoutAbortThreshold = 2
 
     /// playhead-pmp9: apply ±20% jitter to a base backoff delay so a fleet of
     /// devices throttled at the same instant don't retry in lockstep and
@@ -1638,6 +1758,10 @@ struct FoundationModelClassifier: Sendable {
         // See `coarseSafetyRecoveryPassBudget` for why it scales with the
         // plan count.
         var recoveryAttemptsRemaining = Self.coarseSafetyRecoveryPassBudget(planCount: plans.count)
+        // playhead-8d5r: consecutive `.inferenceTimeout` windows with no
+        // answering window in between. See the no-progress guard in the failure
+        // arm below for why the signal is CONSECUTIVE rather than cumulative.
+        var consecutiveInferenceTimeouts = 0
 
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
@@ -1659,6 +1783,8 @@ struct FoundationModelClassifier: Sendable {
                 // into a window-level screening for the original segment.
                 // Aggregation precedence: containsAd > uncertain > abstain
                 // > noAds — "more permissive" matches coarse's recall role.
+                var subdivisionStatus: SemanticScanStatus?
+                var subdivisionLatencyMillis: Double?
                 if plan.lineRefs.count == 1,
                    let segment = segmentByIndex[plan.lineRefs[0]] {
                     let subdivision = await subdividedCoarseOutput(
@@ -1695,8 +1821,40 @@ struct FoundationModelClassifier: Sendable {
                         )
                         continue
                     }
+                    // playhead-8d5r: subdivision ran and produced no usable
+                    // verdict. Carry the CHUNK-level truth up, but ONLY for the
+                    // timeout case.
+                    //
+                    // A plan reaching here really was oversized, and every
+                    // pre-8d5r reason it then failed (refusal, decode failure,
+                    // rate limit) has been persisted as `.exceededContextWindow`
+                    // since playhead-9q10, with tests asserting exactly that.
+                    // Whether that collapse is right is a real question — a
+                    // window whose every chunk REFUSED is not a size problem
+                    // either — but it is qbib/9q10's contract, not this bead's,
+                    // and re-specifying it here would change recovery policy
+                    // (`shrinkWindowAndRetryOnce` -> `persistFailure`) for
+                    // classes this bead never measured. Left alone deliberately;
+                    // filed rather than smuggled in.
+                    //
+                    // `.inferenceTimeout` is different because it did not exist
+                    // before: collapsing it would mean the one outcome this bead
+                    // adds is the one outcome you cannot see, and a row claiming
+                    // a size problem would send the reader to shrink a prompt
+                    // when the model simply never answered.
+                    if subdivision.unexaminedStatus == .inferenceTimeout {
+                        subdivisionStatus = .inferenceTimeout
+                        subdivisionLatencyMillis = subdivision.latencyMillis
+                    }
                 }
-                failedWindows.append(CoarseWindowFailure(plan: plan, status: .exceededContextWindow))
+                let abandonedStatus = subdivisionStatus ?? .exceededContextWindow
+                failedWindows.append(
+                    CoarseWindowFailure(
+                        plan: plan,
+                        status: abandonedStatus,
+                        latencyMillis: subdivisionLatencyMillis
+                    )
+                )
                 logger.error(
                     """
                     fm.classifier.coarse_pass_window_abandoned \
@@ -1705,11 +1863,27 @@ struct FoundationModelClassifier: Sendable {
                     firstSegmentIndex=\(plan.lineRefs.first ?? -1, privacy: .public) \
                     lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
                     segmentCount=\(plan.lineRefs.count, privacy: .public) \
-                    status=\(SemanticScanStatus.exceededContextWindow.rawValue, privacy: .public) \
+                    status=\(abandonedStatus.rawValue, privacy: .public) \
                     tokenCount=\(plan.promptTokenCount, privacy: .public) \
                     budget=\(budget, privacy: .public)
                     """
                 )
+                // A subdivision that failed only to timeouts is the same
+                // no-progress evidence a window-level timeout is.
+                if abandonedStatus == .inferenceTimeout {
+                    consecutiveInferenceTimeouts += 1
+                    if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
+                        return FMCoarseScanOutput(
+                            status: .inferenceTimeout,
+                            windows: windows,
+                            latencyMillis: Self.latencyMillis(since: start, clock: clock),
+                            prewarmHit: prewarmHit,
+                            failedWindows: failedWindows,
+                            permissiveFailureCounts: permissiveCounts,
+                            plans: plans
+                        )
+                    }
+                }
                 continue
             }
 
@@ -1781,7 +1955,13 @@ struct FoundationModelClassifier: Sendable {
                         // shadow retry observer (Agent C) will pick the
                         // window up next capability transition.
                         let status = Self.permissiveStatus(for: error.reason)
-                        failedWindows.append(CoarseWindowFailure(plan: plan, status: status))
+                        failedWindows.append(
+                            CoarseWindowFailure(
+                                plan: plan,
+                                status: status,
+                                latencyMillis: Self.latencyMillis(since: permissiveStart, clock: clock)
+                            )
+                        )
                         permissiveCounts.increment(reason: error.reason)
                         logger.error(
                             """
@@ -1791,6 +1971,34 @@ struct FoundationModelClassifier: Sendable {
                             reason=\(error.reason.rawValue, privacy: .public) \
                             status=\(status.rawValue, privacy: .public)
                             """
+                        )
+                    } catch is FMInferenceTimeoutError {
+                        // playhead-8d5r: `PermissiveAdClassifier` rethrows the
+                        // deadline error untouched precisely so it is not
+                        // mislabelled here. The catch-all below would record
+                        // `.permissiveRefusal` — "Apple's safety layer said
+                        // no" — for a call the safety layer never saw.
+                        failedWindows.append(
+                            CoarseWindowFailure(
+                                plan: plan,
+                                status: .inferenceTimeout,
+                                latencyMillis: Self.latencyMillis(since: permissiveStart, clock: clock)
+                            )
+                        )
+                        consecutiveInferenceTimeouts += 1
+                        if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
+                            return FMCoarseScanOutput(
+                                status: .inferenceTimeout,
+                                windows: windows,
+                                latencyMillis: Self.latencyMillis(since: start, clock: clock),
+                                prewarmHit: prewarmHit,
+                                failedWindows: failedWindows,
+                                permissiveFailureCounts: permissiveCounts,
+                                plans: plans
+                            )
+                        }
+                        logger.error(
+                            "fm.classifier.coarse_pass_window_permissive_timeout window=\(planIndex + 1, privacy: .public)"
                         )
                     } catch {
                         // Should not happen — PermissiveAdClassifier
@@ -1804,7 +2012,11 @@ struct FoundationModelClassifier: Sendable {
                         // counter, leaving the two sources of telemetry
                         // in disagreement.
                         failedWindows.append(
-                            CoarseWindowFailure(plan: plan, status: .permissiveRefusal)
+                            CoarseWindowFailure(
+                                plan: plan,
+                                status: .permissiveRefusal,
+                                latencyMillis: Self.latencyMillis(since: permissiveStart, clock: clock)
+                            )
                         )
                         permissiveCounts.increment(reason: .permissiveRefusal)
                         logger.error(
@@ -1820,6 +2032,13 @@ struct FoundationModelClassifier: Sendable {
             // comment block above the loop for the on-device evidence
             // that motivated removing the shared-session branch.
             let perWindowBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
+            // playhead-8d5r: measure THIS window's attempt so a failure row can
+            // carry its own cost instead of inheriting the whole pass's. See
+            // `CoarseWindowFailure.latencyMillis`. The span deliberately covers
+            // the in-window retries (`coarseResponses` owns smart-shrink and
+            // rate-limit backoff), because those are part of what the window
+            // actually cost.
+            let windowAttemptStart = clock.now
             switch await coarseResponses(
                 for: plan,
                 sessionBox: perWindowBox,
@@ -1829,6 +2048,9 @@ struct FoundationModelClassifier: Sendable {
                 totalWindows: totalWindows
             ) {
             case let .success(outputs):
+                // A window that answered clears the no-progress evidence: the
+                // model is demonstrably alive.
+                consecutiveInferenceTimeouts = 0
                 for output in outputs {
                     windows.append(
                         FMCoarseWindowOutput(
@@ -1843,6 +2065,30 @@ struct FoundationModelClassifier: Sendable {
                     )
                 }
             case let .failure(status):
+                let windowAttemptLatency = Self.latencyMillis(
+                    since: windowAttemptStart,
+                    clock: clock
+                )
+                // playhead-8d5r: NO-PROGRESS GUARD.
+                //
+                // `.inferenceTimeout` is `.window`-scoped so one slow window
+                // never discards what the pass has banked (playhead-bkhc). But
+                // "window-scoped" applied blindly to a wedged model gives back
+                // an unbounded pass: N windows x the deadline, with the whole
+                // pass producing nothing. The bounded-retry rule this repo has
+                // landed on eight beads running is that a retry needs evidence
+                // it is making progress; the same rule applies to CONTINUING.
+                //
+                // One timeout is a window fact. `consecutiveInferenceTimeoutAbortThreshold` of them back-to-back, with no window
+                // answering in between, is a device fact — and a device fact
+                // ends the pass and resumes from a checkpoint. The counter
+                // resets on any answering window, so an episode with an
+                // occasional slow window still scans to the end.
+                if status == .inferenceTimeout {
+                    consecutiveInferenceTimeouts += 1
+                } else {
+                    consecutiveInferenceTimeouts = 0
+                }
                 // R6-Fix1 / bd-ih3 / playhead-qbib: coarse per-window failures
                 // that can be safely tolerated without losing the entire scan.
                 // A single schema-conformance failure, refusal, guardrail
@@ -1890,9 +2136,72 @@ struct FoundationModelClassifier: Sendable {
                             )
                         }
                         failedWindows.append(contentsOf: recovery.failures)
+                        // playhead-8d5r: the recovery path `continue`s, so
+                        // without this it never reaches the no-progress guard
+                        // below — and the guard had ALREADY been reset above,
+                        // because the status that sent us here was a safety
+                        // block rather than a timeout. Every safety-blocked
+                        // window could therefore spend its recovery attempts on
+                        // deadlines with nothing counting them.
+                        if recovery.recovered.isEmpty,
+                           recovery.failures.contains(where: { $0.status == .inferenceTimeout }) {
+                            consecutiveInferenceTimeouts += 1
+                            if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
+                                logger.error(
+                                    """
+                                    fm.classifier.coarse_pass_inference_timeout_abort \
+                                    window=\(planIndex + 1, privacy: .public) \
+                                    source=permissiveRecovery \
+                                    bankedWindows=\(windows.count, privacy: .public)
+                                    """
+                                )
+                                return FMCoarseScanOutput(
+                                    status: .inferenceTimeout,
+                                    windows: windows,
+                                    latencyMillis: Self.latencyMillis(since: start, clock: clock),
+                                    prewarmHit: prewarmHit,
+                                    failedWindows: failedWindows,
+                                    permissiveFailureCounts: permissiveCounts,
+                                    plans: plans
+                                )
+                            }
+                        } else if !recovery.recovered.isEmpty {
+                            // Recovery got a verdict: the model is answering.
+                            consecutiveInferenceTimeouts = 0
+                        }
                         continue
                     }
-                    failedWindows.append(CoarseWindowFailure(plan: plan, status: status))
+                    failedWindows.append(
+                        CoarseWindowFailure(
+                            plan: plan,
+                            status: status,
+                            latencyMillis: windowAttemptLatency
+                        )
+                    )
+                    if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
+                        logger.error(
+                            """
+                            fm.classifier.coarse_pass_inference_timeout_abort \
+                            window=\(planIndex + 1, privacy: .public) \
+                            totalWindows=\(totalWindows, privacy: .public) \
+                            consecutiveTimeouts=\(consecutiveInferenceTimeouts, privacy: .public) \
+                            bankedWindows=\(windows.count, privacy: .public)
+                            """
+                        )
+                        // Partial results, exactly as the `.pass`-scoped abort
+                        // below returns them: every window banked so far is
+                        // carried out and persisted by the runner before it
+                        // reads this status.
+                        return FMCoarseScanOutput(
+                            status: .inferenceTimeout,
+                            windows: windows,
+                            latencyMillis: Self.latencyMillis(since: start, clock: clock),
+                            prewarmHit: prewarmHit,
+                            failedWindows: failedWindows,
+                            permissiveFailureCounts: permissiveCounts,
+                            plans: plans
+                        )
+                    }
                     logger.error(
                         """
                         fm.classifier.coarse_pass_window_abandoned \
@@ -2094,6 +2403,24 @@ struct FoundationModelClassifier: Sendable {
                 )
             )
             return recovery
+        case .timedOut:
+            // playhead-8d5r: the model did not answer inside the deadline.
+            // Record the honest status and STOP — the remaining recovery
+            // attempts (the two halves) would each spend another full deadline
+            // against a model that has just demonstrated it is not answering,
+            // which is precisely the unbounded spend this bead removes.
+            recovery.failures.append(
+                CoarseWindowFailure(
+                    planWindowIndex: plan.windowIndex,
+                    lineRefs: resolvedLineRefs,
+                    startTime: resolvedStartTime,
+                    endTime: resolvedEndTime,
+                    status: .inferenceTimeout,
+                    coversWholePlan: resolvedCoversWholePlan,
+                    latencyMillis: Self.latencyMillis(since: wholeStart, clock: clock)
+                )
+            )
+            return recovery
         case let .blocked(reason):
             recovery.permissiveCounts.increment(reason: reason)
             let fallbackStatus = Self.permissiveStatus(for: reason)
@@ -2105,7 +2432,8 @@ struct FoundationModelClassifier: Sendable {
                         startTime: resolvedStartTime,
                         endTime: resolvedEndTime,
                         status: fallbackStatus,
-                        coversWholePlan: resolvedCoversWholePlan
+                        coversWholePlan: resolvedCoversWholePlan,
+                        latencyMillis: Self.latencyMillis(since: wholeStart, clock: clock)
                     )
                 )
                 logger.error(
@@ -2148,22 +2476,29 @@ struct FoundationModelClassifier: Sendable {
     ) async {
         let midpoint = planSegments.count / 2
         let halves = [Array(planSegments[..<midpoint]), Array(planSegments[midpoint...])]
-        var cancelled = false
+        // playhead-8d5r: WHY the split stopped early, or nil if it did not.
+        // This used to be a bare `cancelled` Bool, and the timeout arm below
+        // reused it for its STOP semantics — which meant a half that was never
+        // attempted after a TIMEOUT was persisted as `.cancelled`: a
+        // `.pass`-scoped, `.resumeFromCheckpoint` status asserting that
+        // something outside the model interrupted us, when nothing did.
+        var stopStatus: SemanticScanStatus?
         for half in halves where !half.isEmpty {
             let lineRefs = half.map(\.segmentIndex)
             let startTime = half.map(\.startTime).min() ?? plan.startTime
             let endTime = half.map(\.endTime).max() ?? plan.endTime
-            guard !cancelled, recovery.attemptsSpent < attemptBudget else {
-                // Never attempted — either the budget ran out mid-split or the
-                // task was cancelled. Either way it is a hole, carrying the
-                // status that explains WHY we could not look.
+            guard stopStatus == nil, recovery.attemptsSpent < attemptBudget else {
+                // Never attempted — the budget ran out mid-split, the task was
+                // cancelled, or the model stopped answering. Either way it is a
+                // hole, carrying the status that explains WHY we could not
+                // look.
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
                         lineRefs: lineRefs,
                         startTime: startTime,
                         endTime: endTime,
-                        status: cancelled ? .cancelled : fallbackStatus,
+                        status: stopStatus ?? fallbackStatus,
                         coversWholePlan: false
                     )
                 )
@@ -2195,7 +2530,7 @@ struct FoundationModelClassifier: Sendable {
                     """
                 )
             case .cancelled:
-                cancelled = true
+                stopStatus = .cancelled
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
@@ -2204,6 +2539,24 @@ struct FoundationModelClassifier: Sendable {
                         endTime: endTime,
                         status: .cancelled,
                         coversWholePlan: false
+                    )
+                )
+            case .timedOut:
+                // playhead-8d5r: a non-answering model is as good a reason to
+                // stop spending deadlines on the remaining halves as an expired
+                // grant window is. Recording the REASON (rather than flipping a
+                // shared `cancelled` flag) is what keeps the skipped half from
+                // claiming it was interrupted.
+                stopStatus = .inferenceTimeout
+                recovery.failures.append(
+                    CoarseWindowFailure(
+                        planWindowIndex: plan.windowIndex,
+                        lineRefs: lineRefs,
+                        startTime: startTime,
+                        endTime: endTime,
+                        status: .inferenceTimeout,
+                        coversWholePlan: false,
+                        latencyMillis: Self.latencyMillis(since: halfStart, clock: clock)
                     )
                 )
             case let .blocked(reason):
@@ -2215,7 +2568,8 @@ struct FoundationModelClassifier: Sendable {
                         startTime: startTime,
                         endTime: endTime,
                         status: Self.permissiveStatus(for: reason),
-                        coversWholePlan: false
+                        coversWholePlan: false,
+                        latencyMillis: Self.latencyMillis(since: halfStart, clock: clock)
                     )
                 )
                 logger.error(
@@ -2248,6 +2602,12 @@ struct FoundationModelClassifier: Sendable {
     ) async -> CoarsePermissiveAttempt {
         do {
             return .screened(try await permissive.classify(window: segments))
+        } catch is FMInferenceTimeoutError {
+            // playhead-8d5r: the recovery attempt outlived its own deadline.
+            // Report it as a timeout rather than a safety block — spending
+            // further recovery attempts on a model that is not answering is
+            // exactly the unbounded cost this bead removes.
+            return .timedOut
         } catch is CancellationError {
             return .cancelled
         } catch let error as PermissiveClassificationError {
@@ -2926,6 +3286,14 @@ struct FoundationModelClassifier: Sendable {
         var permissiveCounts = PermissiveFailureCounts.zero
         // Cycle 2 Rev2-M5/Rev3-M1: asymmetric-routing detection counter.
         var asymmetricWindowCount = 0
+        // playhead-8d5r: the coarse pass's no-progress guard, applied to the
+        // refinement loop for the same reason. `.inferenceTimeout` is
+        // `.window`-scoped so one slow zoom window does not cost the pass its
+        // siblings — but window-scoped applied blindly to a wedged model means
+        // one full deadline per remaining zoom window, and this loop can have
+        // many. Two back-to-back timeouts end the pass with partial results,
+        // reset by any window that answers.
+        var consecutiveInferenceTimeouts = 0
 
         let permissiveDispatchEnabled =
             sensitiveRouter?.hasRules == true && permissiveClassifier != nil
@@ -3097,6 +3465,9 @@ struct FoundationModelClassifier: Sendable {
             let response: RefinementWindowSchema
             switch outcome {
             case let .success(plan, schema):
+                // playhead-8d5r: a window that answered clears the no-progress
+                // evidence — the model is demonstrably alive.
+                consecutiveInferenceTimeouts = 0
                 effectivePlan = plan
                 response = schema
             case let .failure(status, refusalExplanation):
@@ -3182,6 +3553,15 @@ struct FoundationModelClassifier: Sendable {
                             status=\(permStatus.rawValue, privacy: .public)
                             """
                         )
+                    } catch is FMInferenceTimeoutError {
+                        // playhead-8d5r: same reasoning as the coarse permissive
+                        // dispatch — the deadline is not a guardrail decision,
+                        // and the catch-all below would file it as one.
+                        failedWindowStatuses.append(.inferenceTimeout)
+                        consecutiveInferenceTimeouts += 1
+                        logger.error(
+                            "fm.classifier.refinement_pass_eu1_fallback_timeout window=\(plan.windowIndex, privacy: .public)"
+                        )
                     } catch {
                         failedWindowStatuses.append(.permissiveRefusal)
                         permissiveCounts.increment(reason: .permissiveRefusal)
@@ -3206,6 +3586,30 @@ struct FoundationModelClassifier: Sendable {
                 // it must not end the pass.
                 if status.failureScope == .window {
                     failedWindowStatuses.append(status)
+                    if status == .inferenceTimeout {
+                        consecutiveInferenceTimeouts += 1
+                    } else {
+                        consecutiveInferenceTimeouts = 0
+                    }
+                    if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
+                        logger.error(
+                            """
+                            fm.classifier.refinement_pass_inference_timeout_abort \
+                            window=\(plan.windowIndex, privacy: .public) \
+                            consecutiveTimeouts=\(consecutiveInferenceTimeouts, privacy: .public) \
+                            bankedWindows=\(windows.count, privacy: .public)
+                            """
+                        )
+                        return FMRefinementScanOutput(
+                            status: .inferenceTimeout,
+                            windows: windows,
+                            latencyMillis: Self.latencyMillis(since: start, clock: clock),
+                            prewarmHit: prewarmHit,
+                            failedWindowStatuses: failedWindowStatuses,
+                            permissiveFailureCounts: permissiveCounts,
+                            asymmetricWindowCount: asymmetricWindowCount
+                        )
+                    }
                     logger.error(
                         """
                         fm.classifier.refinement_pass_window_abandoned \
@@ -3273,7 +3677,14 @@ struct FoundationModelClassifier: Sendable {
     }
 
     private func makePrewarmedSessionBox(promptPrefix: String) async -> SessionBox {
-        let sessionBox = SessionBox(session: await runtime.makeSession())
+        let sessionBox = SessionBox(
+            session: await runtime.makeSession(),
+            // playhead-8d5r: every session this classifier mints carries the
+            // configured per-call deadline. Threaded through `Config` rather
+            // than read from a global so a test can shrink it to milliseconds
+            // and the whole deadline path stays exercised at gate speed.
+            inferenceDeadline: config.inferenceDeadline
+        )
         await sessionBox.prewarm(promptPrefix)
         return sessionBox
     }
@@ -4532,6 +4943,14 @@ struct FoundationModelClassifier: Sendable {
         // violation, rate limit, cancellation) and was discarded before the
         // aggregate disposition was built.
         var unexaminedStatuses: [SemanticScanStatus] = []
+        // playhead-8d5r: the same no-progress guard the pass loop applies to
+        // windows, one level down. Subdivision is the one path that can issue
+        // MANY inference calls for a single plan — one per atom chunk — and it
+        // is reached from the `promptTokenCount > budget` branch, which
+        // `continue`s before the pass-level guard ever sees a status. Without
+        // this, a wedged model costs `chunks.count x Config.inferenceDeadline`
+        // inside one window and the pass-level bound never fires.
+        var consecutiveChunkTimeouts = 0
         chunkLoop: for atoms in chunks {
             switch await classifySubdividedChunk(
                 subSegment: subSegment(from: atoms),
@@ -4542,6 +4961,7 @@ struct FoundationModelClassifier: Sendable {
             ) {
             case let .examined(chunkDisposition):
                 succeededCount += 1
+                consecutiveChunkTimeouts = 0
                 switch chunkDisposition {
                 case .containsAd: anyContainsAd = true
                 case .uncertain: anyUncertain = true
@@ -4551,6 +4971,22 @@ struct FoundationModelClassifier: Sendable {
                 if anyContainsAd { break chunkLoop }
             case let .unexamined(status):
                 unexaminedStatuses.append(status)
+                // playhead-8d5r: a run of chunks that never answered is the
+                // same "every remaining chunk would fail identically" argument
+                // the `.pass`-scope check below makes, reached by evidence
+                // rather than by classification. Conceding here is safe: the
+                // false-clean gate further down already refuses to let a
+                // partially-examined subdivision claim anything but
+                // `.containsAd`, so an early stop yields an honest hole rather
+                // than a confident verdict over audio nobody screened.
+                if status == .inferenceTimeout {
+                    consecutiveChunkTimeouts += 1
+                    if consecutiveChunkTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
+                        break chunkLoop
+                    }
+                } else {
+                    consecutiveChunkTimeouts = 0
+                }
                 // A `.pass`-scoped failure is a property of the device, model
                 // or session, not of this chunk's content — cancellation (a
                 // BG-window expiry), assets evicted, thermal deferral — so
@@ -4565,7 +5001,14 @@ struct FoundationModelClassifier: Sendable {
             }
         }
 
-        guard succeededCount > 0 else { return outcome }
+        guard succeededCount > 0 else {
+            // playhead-8d5r: hand the caller the honest reason and the real
+            // cost instead of letting it guess `.exceededContextWindow` and
+            // stamp the whole pass's latency.
+            outcome.unexaminedStatus = Self.aggregateGracefulFailureStatus(unexaminedStatuses)
+            outcome.latencyMillis = Self.latencyMillis(since: windowStart, clock: clock)
+            return outcome
+        }
 
         let disposition: CoarseDisposition
         if anyContainsAd { disposition = .containsAd }
@@ -4579,6 +5022,8 @@ struct FoundationModelClassifier: Sendable {
         // concedes the whole window rather than persisting the examined
         // sub-ranges.
         if disposition != .containsAd, !unexaminedStatuses.isEmpty {
+            outcome.unexaminedStatus = Self.aggregateGracefulFailureStatus(unexaminedStatuses)
+            outcome.latencyMillis = Self.latencyMillis(since: windowStart, clock: clock)
             logger.error(
                 """
                 fm.classifier.coarse_pass_window_subdivided_unexamined \
@@ -4668,6 +5113,11 @@ struct FoundationModelClassifier: Sendable {
                 return .unexamined(Self.permissiveStatus(for: reason))
             case .cancelled:
                 return .unexamined(.cancelled)
+            case .timedOut:
+                // playhead-8d5r: an unexamined chunk, named honestly. qbib's
+                // `didExamineWindow` accounting already refuses to let an
+                // unexamined chunk aggregate into a confident `.noAds`.
+                return .unexamined(.inferenceTimeout)
             }
         }
     }
@@ -5927,13 +6377,41 @@ struct FoundationModelClassifier: Sendable {
 // H8: `LanguageModelSession` does not document `Sendable` conformance. We
 // previously captured the session inside `@Sendable` closures, which crosses
 // concurrency boundaries with no guarantee of thread safety. The session is
-// now confined to a small actor and all `respond` / `prewarm` calls are
-// dispatched through actor isolation.
+// confined to this actor and every `respond` / `prewarm` call is issued from
+// here.
+//
+// playhead-8d5r NARROWED THIS GUARANTEE, deliberately. `FMInferenceDeadline
+// .run` is a nonisolated async function that issues the call from an
+// unstructured `Task`, so a bounded respond no longer executes ON the
+// SessionBox executor — this actor now serialises the SPAWN, not the call. The
+// underlying serialisation that actually matters is unchanged: on the live path
+// `LiveSessionActor` still confines the real `LanguageModelSession`, so two
+// requests cannot touch it concurrently. What IS newly possible is an abandoned
+// respond still in flight while the same session is used again (e.g. the
+// `logFeedback` capture on a refusal); `LiveSessionActor` serialises those too,
+// so it is a wait rather than a race. Do not read this comment as a promise
+// that `SessionBox` isolation orders FM calls — it does not any more.
 final actor SessionBox {
     private let session: FoundationModelClassifier.Runtime.Session
+    /// playhead-8d5r: per-call inference deadline applied to EVERY respond
+    /// path.
+    ///
+    /// This is the chokepoint on purpose. `coarseResponses`,
+    /// `runCoarseRetry`, `runCoarseSmartShrinkLoop`, `subdividedCoarseOutput`,
+    /// the rate-limit backoff loop, the refinement pass and the boundary
+    /// extractor all reach the model through this actor and nothing else, so
+    /// bounding it here bounds all of them — including future call sites that
+    /// would otherwise have to remember to opt in. `prewarm` is deliberately
+    /// NOT bounded: it is fire-and-forget and returns without waiting on the
+    /// model.
+    private let inferenceDeadline: Duration
 
-    init(session: FoundationModelClassifier.Runtime.Session) {
+    init(
+        session: FoundationModelClassifier.Runtime.Session,
+        inferenceDeadline: Duration = FMInferenceDeadline.standard
+    ) {
         self.session = session
+        self.inferenceDeadline = inferenceDeadline
     }
 
     func prewarm(_ promptPrefix: String) async {
@@ -5941,16 +6419,25 @@ final actor SessionBox {
     }
 
     func respondCoarse(_ prompt: String) async throws -> CoarseScreeningSchema {
-        try await session.respondCoarse(prompt)
+        let session = self.session
+        return try await FMInferenceDeadline.run(inferenceDeadline) {
+            try await session.respondCoarse(prompt)
+        }
     }
 
     func respondRefinement(_ prompt: String) async throws -> RefinementWindowSchema {
-        try await session.respondRefinement(prompt)
+        let session = self.session
+        return try await FMInferenceDeadline.run(inferenceDeadline) {
+            try await session.respondRefinement(prompt)
+        }
     }
 
     /// B9: boundary extraction response.
     func respondBoundaryExtraction(_ prompt: String) async throws -> FMBoundarySchema {
-        try await session.respondBoundaryExtraction(prompt)
+        let session = self.session
+        return try await FMInferenceDeadline.run(inferenceDeadline) {
+            try await session.respondBoundaryExtraction(prompt)
+        }
     }
 
     /// bd-fmfb: invoke the underlying session's `logFeedbackAttachment` and

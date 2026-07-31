@@ -276,6 +276,11 @@ actor LiveShadowFMDispatcher: ShadowFMDispatcher {
              .permissiveRefusal, .permissiveDecodingFailure,
              .permissiveContextOverflow:
             return nil
+        // playhead-8d5r: a per-call deadline is not one of Apple's error
+        // shapes, so it gets its own tag rather than falling through to the
+        // substring classifier, which would label it "other".
+        case .inferenceTimeout:
+            return "inferenceTimeout"
         }
     }
 

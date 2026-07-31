@@ -31,6 +31,12 @@ DERIVED="${PLAYHEAD_DERIVED:-.derivedData-perf}"
 # The measurement tests. Add new load-sensitive tests here AND gate them with
 # PerfGate in the source so they skip in the parallel suite.
 MEASUREMENT_TESTS=(
+  # playhead-8d5r: proves the per-call FM inference deadline bounds WALL-CLOCK
+  # even when the call ignores cooperative cancellation. Every behavioural
+  # consequence of the deadline is asserted deterministically in the parallel
+  # suite; only this elapsed-time measurement needs a quiet CPU (it read 54.4s
+  # for a 200ms budget under the full fast gate).
+  "PlayheadTests/FMInferenceDeadlineTimingTests"
   "PlayheadTests/PlayheadRuntimeMainActorFreedomTests"
   "PlayheadTests/PlayheadRuntimeLaunchPerfTests"
   "PlayheadTests/LibraryViewUnplayedCountPerfTests"
