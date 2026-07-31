@@ -12465,10 +12465,11 @@ actor AnalysisStore {
     ///
     /// **Bookkeeping rules** (per the bd-m8k design field):
     /// - `observedEpisodeCount` is incremented by 1 on every call.
-    /// - `wasFullRescan == true`: `episodesSinceLastFullRescan` resets to 0,
-    ///   `lastFullRescanAt` is updated, and (when `fullRescanPrecisionSample`
-    ///   is non-nil) the sample is appended to the recall ring with the
-    ///   oldest entry dropped if the ring is already full.
+    /// - `wasFullRescan == true`: (when `fullRescanPrecisionSample` is non-nil)
+    ///   the sample is appended to the recall ring with the oldest entry dropped
+    ///   if the ring is already full; and — unless playhead-hvk0's
+    ///   `fullRescanReadEpisode` is `false` — `episodesSinceLastFullRescan`
+    ///   resets to 0 and `lastFullRescanAt` is updated.
     /// - `wasFullRescan == false`: `episodesSinceLastFullRescan` is
     ///   incremented; the recall ring is left untouched. A recall
     ///   sample passed alongside a non-full-rescan call is ignored (the
@@ -12498,7 +12499,11 @@ actor AnalysisStore {
     ///   deliberately NOT persisted as its own column: the value is re-supplied
     ///   by every subsequent full-coverage observation, and a demoted show is
     ///   planned `fullCoverage`, so there is no observation path that could read
-    ///   a stale value.
+    ///   a stale value. `false` ALSO suppresses the `episodesSinceLastFullRescan`
+    ///   / `lastFullRescanAt` reset — a rescan that did not read the episode
+    ///   re-validated nothing, so the periodic re-validation clock keeps running.
+    ///   That suppression is what lets an already-promoted show recover; see the
+    ///   `rescanRevalidated` block below.
     @discardableResult
     func recordPodcastEpisodeObservation(
         podcastId: String,
@@ -12526,9 +12531,34 @@ actor AnalysisStore {
             let newLastFullRescanAt: Double?
             var newSamples = priorSamples
 
+            // playhead-hvk0: a rescan RE-VALIDATES the show — and so restarts the
+            // periodic re-validation clock — only when it can be shown to have
+            // read its episode. `nil` read evidence (gate off, or a non-rescan
+            // observation) preserves the pre-hvk0 meaning exactly.
+            //
+            // This is the term that lets an ALREADY-promoted show recover. The
+            // recall-sample gate above stops a NEW show being promoted on a
+            // self-measurement, but it cannot demote one that already was: a
+            // promoted show plans `targetedWithAudit`, whose observations carry
+            // no rescan and therefore no read evidence, so the flag would derive
+            // from the untouched ring forever. Measured on the 2026-07-29 device
+            // pull, `feeds.simplecast.com/dHoohVNH` sits at
+            // `episodesSinceLastFullRescan = 4` precisely BECAUSE rescans that
+            // examined 82–167 s of a 1,503–4,379 s episode kept resetting this
+            // counter. Without those resets the counter reaches the periodic
+            // interval, `shouldUsePeriodicFullRescan` fires ahead of the targeted
+            // branch, and the show is back on a full-coverage plan.
+            //
+            // The steady state for a show whose scans never complete is
+            // "periodic full rescan on every episode". That is the `reset(context:)`
+            // doc's "deadlocked policy loop" reached deliberately, and it is the
+            // correct state: a show whose full scans cannot finish has never
+            // earned narrowing. It costs no extra passes — a full-coverage plan
+            // is ONE `fullEpisodeScan` job, and M-5 skips it when complete — and
+            // the counter's growth past the interval has no further effect, so
+            // there is nothing here to run away.
+            let rescanRevalidated = wasFullRescan && fullRescanReadEpisode != false
             if wasFullRescan {
-                newEpisodesSince = 0
-                newLastFullRescanAt = now
                 // Cycle 2 C4: parameter is named `fullRescanPrecisionSample`
                 // for legacy compatibility but the value semantically is a
                 // recall sample. Ad-free episodes pass nil and the ring is
@@ -12539,6 +12569,10 @@ actor AnalysisStore {
                         newSamples.removeFirst()
                     }
                 }
+            }
+            if rescanRevalidated {
+                newEpisodesSince = 0
+                newLastFullRescanAt = now
             } else {
                 newEpisodesSince = (prior?.episodesSinceLastFullRescan ?? 0) + 1
                 newLastFullRescanAt = prior?.lastFullRescanAt

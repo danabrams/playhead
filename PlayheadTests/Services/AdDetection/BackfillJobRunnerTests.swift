@@ -748,8 +748,13 @@ struct BackfillJobRunnerTests {
         var scanRowsAfterFirst: Int?
         for cycle in 1...cycles {
             let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
-            let policy = CoveragePlanner().plan(for: liveContext(state)).policy
-            #expect(policy == .fullCoverage, "cycle \(cycle) must stay on fullCoverage")
+            // Asserted on the phases, not the policy name: `fullCoverage` and
+            // `periodicFullRescan` are both full-episode plans and which fires
+            // depends on the re-validation clock. What must never happen is a
+            // narrowed plan.
+            let plan = CoveragePlanner().plan(for: liveContext(state))
+            #expect(plan.policy != .targetedWithAudit, "cycle \(cycle) must not narrow")
+            #expect(plan.phases == [.fullEpisodeScan], "cycle \(cycle)")
             _ = try await runner.runPendingBackfill(
                 for: makeTargetedInputs(
                     assetId: assetId,
