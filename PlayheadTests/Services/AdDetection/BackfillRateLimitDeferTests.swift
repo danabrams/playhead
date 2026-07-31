@@ -93,6 +93,52 @@ struct BackfillRateLimitDeferTests {
         )
     }
 
+    /// playhead-8d5r: a FOUR-window episode. The three-window fixture cannot
+    /// express "the pass stopped before reaching a plan" — with one success and
+    /// two timeouts every plan is accounted for, so the runner's
+    /// unattempted-plan row is never built and the branch that stamps its
+    /// status goes untested. (A mutation reverting that branch survived the
+    /// whole suite until this fixture existed.)
+    private func makeFourWindowInputs(
+        assetId: String = "asset-pmp9",
+        podcastId: String = "podcast-pmp9",
+        transcriptVersion: String = "tx-pmp9-v1"
+    ) -> BackfillJobRunner.AssetInputs {
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            lines: [
+                (0, 10, "Window zero editorial content about the topic."),
+                (10, 20, "Window one sponsor break maybe present here."),
+                (20, 30, "Window two back to the show conversation."),
+                (30, 40, "Window three closing remarks and outro material.")
+            ]
+        )
+        let evidenceCatalog = EvidenceCatalogBuilder.build(
+            atoms: segments.flatMap(\.atoms),
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion
+        )
+        let plannerContext = CoveragePlannerContext(
+            observedEpisodeCount: 0,
+            stableRecall: false,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        return BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            segments: segments,
+            evidenceCatalog: evidenceCatalog,
+            transcriptVersion: transcriptVersion,
+            plannerContext: plannerContext
+        )
+    }
+
     private func makeRunner(
         store: AnalysisStore,
         runtime: FoundationModelClassifier.Runtime
@@ -644,6 +690,49 @@ struct BackfillRateLimitDeferTests {
             stamp, not each attempt's own cost.
             """
         )
+    }
+
+    /// playhead-8d5r: the pass-abort writes ONE row standing for the first plan
+    /// the pass never reached. That row must not claim the pass's terminal
+    /// status.
+    ///
+    /// Window 0 answers; windows 1 and 2 time out and trip the guard; window 3
+    /// is never attempted. If the unattempted row inherited
+    /// `.inferenceTimeout`, the episode would report THREE timeouts where two
+    /// happened — and the third would carry the whole pass's latency, which is
+    /// precisely the double-count that made 48 failure rows read as 213.8
+    /// minutes of a quantity that was really 115.9.
+    @available(iOS 26.0, *)
+    @Test("playhead-8d5r: the unattempted-plan row does not claim a timeout that never happened")
+    func unattemptedPlanRowDoesNotClaimATimeout() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeFourWindowInputs()
+
+        let runtime = TestFMRuntime(
+            coarseFailures: [nil, .inferenceTimeout, .inferenceTimeout, nil],
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule()
+        )
+        _ = try await makeRunner(store: store, runtime: runtime.runtime)
+            .runPendingBackfill(for: inputs)
+
+        #expect(await runtime.coarseCallCount == 3, "window 3 must never be attempted")
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
+        let passA = rows.filter { $0.scanPass == "passA" }
+        #expect(
+            passA.filter { $0.status == .inferenceTimeout }.count == 2,
+            """
+            \(passA.filter { $0.status == .inferenceTimeout }.count) timeout rows for 2 real \
+            timeouts — the unattempted plan is claiming one it never earned.
+            """
+        )
+        // It is still recorded, so the denominator shows where the pass stopped.
+        let unattempted = try #require(passA.first { $0.status == .failedTransient })
+        #expect(unattempted.latencyMs == 0, "a window nobody called cost nothing")
+        #expect(examinedAudioSeconds(rows) == 10)
     }
 
     @available(iOS 26.0, *)
