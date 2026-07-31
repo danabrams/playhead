@@ -1042,4 +1042,73 @@ struct AnalysisJobReconcilerTests {
         #expect(postSecond?.status == .running,
                 "freshness floor must leave the live runner's row at .running")
     }
+
+    // MARK: - Step 7: un-enqueued downloads report actual inserts (playhead-8bp2)
+
+    /// `fetchActiveJobEpisodeIds` excludes `complete` and `superseded`, so an
+    /// episode whose only job reached either terminal is reported as
+    /// "un-enqueued" on every pass — while its `workKey` row still exists and
+    /// `insertJob` is `INSERT OR IGNORE`, so the insert is swallowed. Step 7
+    /// counted the CANDIDATES and called them `unEnqueuedDownloadsCreated`,
+    /// which `recoveredWorkCount` sums and `BackgroundProcessingService`
+    /// reports as `jobsCompleted` / `.recoveredWork`. On the 2026-07-30 device
+    /// pull that produced a steady `jobsCompleted: 1` across ~28 consecutive
+    /// overnight sweeps with nothing enqueued.
+    @Test("a swallowed re-enqueue is not counted as work recovered")
+    func testSwallowedReEnqueueIsNotCountedAsRecovery() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-swallowed"] = URL(fileURLWithPath: "/tmp/ep-swallowed.mp3")
+        downloads.fingerprints["ep-swallowed"] = AudioFingerprint(weak: "fp-swallowed", strong: nil)
+
+        // The terminal predecessor. `complete` keeps it out of the active set
+        // (so step 7 treats the episode as un-enqueued) while its workKey stays
+        // on disk (so the insert collides). `updatedAt` is fresh so step 5's
+        // 7-day GC does not delete it out from under the test.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "swallowed-predecessor",
+            jobType: "preAnalysis",
+            episodeId: "ep-swallowed",
+            workKey: AnalysisJob.computeWorkKey(
+                fingerprint: "fp-swallowed",
+                analysisVersion: PreAnalysisConfig.analysisVersion,
+                jobType: "preAnalysis"
+            ),
+            sourceFingerprint: "fp-swallowed",
+            state: "complete"
+        ))
+
+        let reconciler = makeReconciler(store: store, downloads: downloads)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.unEnqueuedDownloadsCreated == 0,
+                "the insert collided on workKey and did nothing; reporting 1 makes the ledger claim a recovery that never happened")
+        #expect(report.recoveredWorkCount == 0,
+                "a pass whose only yield was a swallowed insert must not read as recoveredWork")
+
+        // And the store agrees: no second row was created for the episode.
+        var rowsForEpisode = 0
+        for state in ["queued", "paused", "running", "complete", "failed", "superseded"] {
+            rowsForEpisode += try await store.fetchJobsByState(state)
+                .filter { $0.episodeId == "ep-swallowed" }.count
+        }
+        #expect(rowsForEpisode == 1)
+    }
+
+    /// The control: a genuinely new download still counts, so the honest count
+    /// is not simply "always zero".
+    @Test("a genuinely new download still counts as created")
+    func testNewDownloadStillCountsAsCreated() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-fresh"] = URL(fileURLWithPath: "/tmp/ep-fresh.mp3")
+        downloads.fingerprints["ep-fresh"] = AudioFingerprint(weak: "fp-fresh", strong: nil)
+
+        let reconciler = makeReconciler(store: store, downloads: downloads)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.unEnqueuedDownloadsCreated == 1)
+        let queued = try await store.fetchJobsByState("queued")
+        #expect(queued.contains { $0.episodeId == "ep-fresh" })
+    }
 }
