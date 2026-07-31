@@ -656,7 +656,8 @@ struct BackfillRateLimitDeferTests {
 
         // Window 1: three coarse windows screened, then expiry.
         let calls1 = await runExpiringWindow(store: store, inputs: inputs, expireAfterCoarseCalls: 2)
-        #expect(try await coveredSeconds() == 30)
+        let covered1 = try await coveredSeconds()
+        #expect(covered1 == 30)
         var row = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(row.status == .deferred)
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30)
@@ -664,7 +665,8 @@ struct BackfillRateLimitDeferTests {
 
         // Window 2: resumes at 30s, screens two more, expires again.
         let calls2 = await runExpiringWindow(store: store, inputs: inputs, expireAfterCoarseCalls: 1)
-        #expect(try await coveredSeconds() == 50, "audio processed must GROW across background windows")
+        let covered2 = try await coveredSeconds()
+        #expect(covered2 == 50, "audio processed must GROW across background windows")
         row = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(row.status == .deferred)
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == 50)
@@ -677,7 +679,8 @@ struct BackfillRateLimitDeferTests {
         )
         _ = try await makeRunner(store: store, runtime: rt3.runtime).runPendingBackfill(for: inputs)
         let calls3 = await rt3.coarseCallCount
-        #expect(try await coveredSeconds() == 60, "three background windows cover the whole episode")
+        let covered3 = try await coveredSeconds()
+        #expect(covered3 == 60, "three background windows cover the whole episode")
         let final = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(final.status == .complete)
 
