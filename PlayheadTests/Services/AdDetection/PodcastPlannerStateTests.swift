@@ -307,4 +307,345 @@ struct PodcastPlannerStateTests {
         let plan = planner.plan(for: contextFromState(state))
         #expect(plan.policy == .fullCoverage)
     }
+
+    // MARK: - playhead-hvk0: a rescan must have READ the episode to certify
+
+    /// The shipped default is load-bearing in BOTH directions, so it is pinned.
+    ///
+    /// It ships `false`. The mechanism is correct, but the floor it uses is the
+    /// shared 0.98 constant and no episode on the 2026-07-29 device pull reaches
+    /// it (max measured `adScanFraction` 0.943), so flipping it retires
+    /// `targetedWithAudit` outright and buys a full-episode plan on every episode
+    /// at 12–45 min of measured FM wall-clock each. That is a product decision,
+    /// not an implementation detail — this rail makes the flip a deliberate,
+    /// reviewed act in either direction.
+    @Test("playhead-hvk0: the promotion gate ships OFF pending a product decision")
+    func promotionGateShipsOff() {
+        #expect(AdDetectionConfig.default.plannerPromotionRequiresMeasuredCoverage == false)
+    }
+
+    /// The pure helper's contract, stated as a truth table so a future change
+    /// to either argument's meaning fails here rather than in a live-store test
+    /// where the ring bookkeeping could mask it.
+    ///
+    /// `nil` is the pre-hvk0 shape and MUST delegate to the two-argument helper
+    /// verbatim — every caller that does not opt into the gate keeps its
+    /// behaviour byte-for-byte.
+    @Test("playhead-hvk0: read evidence gates the stable flag, nil delegates unchanged")
+    func readEvidenceGatesStableFlag() {
+        let passing = [0.90, 0.91, 0.92]
+        let failing = [0.90, 0.10, 0.92]
+
+        // nil ⇒ identical to the two-argument helper in BOTH directions.
+        for samples in [passing, failing] {
+            for count in [4, 5, 9] {
+                #expect(
+                    AnalysisStore.computePlannerStableFlag(
+                        observedEpisodeCount: count,
+                        samples: samples,
+                        fullRescanReadEpisode: nil
+                    ) == AnalysisStore.computePlannerStableFlag(
+                        observedEpisodeCount: count,
+                        samples: samples
+                    )
+                )
+            }
+        }
+
+        // true ⇒ also identical: read evidence is NECESSARY, never sufficient.
+        // A show whose ring holds a failing sample must stay false even when the
+        // rescan read every second of its episode.
+        #expect(
+            AnalysisStore.computePlannerStableFlag(
+                observedEpisodeCount: 5, samples: failing, fullRescanReadEpisode: true
+            ) == false
+        )
+        #expect(
+            AnalysisStore.computePlannerStableFlag(
+                observedEpisodeCount: 5, samples: passing, fullRescanReadEpisode: true
+            ) == true
+        )
+        // And it cannot manufacture a promotion from an unfilled ring.
+        #expect(
+            AnalysisStore.computePlannerStableFlag(
+                observedEpisodeCount: 5, samples: [0.99], fullRescanReadEpisode: true
+            ) == false
+        )
+
+        // false ⇒ forces false even when every other condition passes. This is
+        // the whole bead: three 1.0 samples from rescans that read 2–5% of their
+        // episodes must not promote a show.
+        #expect(
+            AnalysisStore.computePlannerStableFlag(
+                observedEpisodeCount: 14, samples: [1.0, 1.0, 1.0], fullRescanReadEpisode: false
+            ) == false
+        )
+    }
+
+    /// The live-store path: the shape measured on the 2026-07-29 device pull.
+    /// `feeds.simplecast.com/dHoohVNH` reached three 1.0 recall samples from
+    /// `fullEpisodeScan` runs that each examined 82–167 s of a 1,503–4,379 s
+    /// episode, and that promoted every subsequent episode of the show into
+    /// `targetedWithAudit`.
+    @Test("playhead-hvk0: short rescans cannot promote a show, and the ring is not poisoned")
+    func shortRescansDoNotPromote() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-short-rescans"
+        let planner = CoveragePlanner()
+
+        // Five full rescans that each DID produce a perfect recall sample under
+        // the pre-hvk0 rules — the exact circular 1.0s the device pull shows —
+        // but none of which read its episode. The sample is passed in, non-nil,
+        // precisely so the STORE has to be the thing that refuses it: if the
+        // test withheld the sample itself, the assertion below would be a
+        // tautology and an implementation that banks circular samples (and then
+        // promotes off them on the next `true` observation) would pass.
+        for tick in 1...5 {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                fullRescanPrecisionSample: 1.0,
+                fullRescanReadEpisode: false,
+                now: Double(tick)
+            )
+        }
+
+        let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(state.observedEpisodeCount == 5)
+        // Refused, not zeroed: a 0.0 would be an equally false claim and would
+        // block the show for three further rescans after the scans got healthy.
+        #expect(state.recallSamples.isEmpty)
+        #expect(state.stableRecallFlag == false)
+        #expect(planner.plan(for: contextFromState(state)).policy == .fullCoverage)
+
+        // Now the scans get healthy. Three rescans that DID read their episodes
+        // fill the ring honestly and the show is promoted — the gate withholds
+        // certification, it does not withdraw the policy.
+        for (idx, sample) in [0.90, 0.91, 0.92].enumerated() {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                fullRescanPrecisionSample: sample,
+                fullRescanReadEpisode: true,
+                now: Double(6 + idx)
+            )
+        }
+        let promoted = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(promoted.recallSamples == [0.90, 0.91, 0.92])
+        #expect(promoted.stableRecallFlag == true)
+        #expect(planner.plan(for: contextFromState(promoted)).policy == .targetedWithAudit)
+
+        // And a single subsequent short rescan demotes it again, so the show's
+        // next episode is planned `fullCoverage` rather than narrowed — even
+        // when that rescan reports a perfect sample.
+        _ = try await store.recordPodcastEpisodeObservation(
+            podcastId: podcastId,
+            wasFullRescan: true,
+            fullRescanPrecisionSample: 1.0,
+            fullRescanReadEpisode: false,
+            now: 9
+        )
+        let demoted = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        // The ring is preserved across the demotion — the earned samples are
+        // still true, they are simply no longer sufficient on their own.
+        #expect(demoted.recallSamples == [0.90, 0.91, 0.92])
+        #expect(demoted.stableRecallFlag == false)
+        #expect(planner.plan(for: contextFromState(demoted)).policy == .fullCoverage)
+    }
+
+    /// A targeted observation carries no rescan, so it must pass `nil` through
+    /// and leave the flag deriving from the ring. Without this, a show that
+    /// earned the policy would be demoted by its own first targeted run — the
+    /// flap the non-sticky design depends on being impossible.
+    @Test("playhead-hvk0: a targeted observation never demotes an earned show")
+    func targetedObservationDoesNotDemote() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-earned"
+        let planner = CoveragePlanner()
+
+        for (idx, sample) in [0.90, 0.91, 0.92, 0.93, 0.94].enumerated() {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                fullRescanPrecisionSample: sample,
+                fullRescanReadEpisode: true,
+                now: Double(idx + 1)
+            )
+        }
+        let earned = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(earned.stableRecallFlag == true)
+
+        // The targeted runs that follow. The runner passes `nil` on this path
+        // (there is no rescan to certify), and a hostile caller passing `false`
+        // must ALSO be ignored — `recordPodcastEpisodeObservation` drops the
+        // argument on non-rescan observations rather than trusting it.
+        for tick in 6...10 {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: false,
+                fullRescanReadEpisode: tick.isMultiple(of: 2) ? false : nil,
+                now: Double(tick)
+            )
+            let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+            #expect(state.stableRecallFlag == true, "targeted observation must not demote (tick \(tick))")
+            #expect(planner.plan(for: contextFromState(state)).policy == .targetedWithAudit)
+        }
+    }
+
+    /// The mandatory bounded / no-progress rail: many cycles against a show
+    /// whose rescans never manage to read an episode.
+    ///
+    /// What a broken implementation would do here: flip the flag on some cycle
+    /// (an off-by-one in the ring, a sticky "demoted" bit that decays, a
+    /// `false` that is only consulted on the first observation), or poison the
+    /// ring with synthetic 0.0 samples so the show could never recover.
+    @Test("playhead-hvk0: 200 no-progress cycles never promote and never poison the ring")
+    func noProgressCyclesNeverPromote() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-no-progress"
+        let planner = CoveragePlanner()
+
+        for tick in 1...200 {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                // Non-nil on every cycle: the ring must be refused 200 times, not
+                // merely left alone 200 times.
+                fullRescanPrecisionSample: 1.0,
+                fullRescanReadEpisode: false,
+                now: Double(tick)
+            )
+            let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+            #expect(state.stableRecallFlag == false, "no-progress cycle \(tick) must not promote")
+            #expect(state.recallSamples.isEmpty, "no-progress cycle \(tick) must not enter the ring")
+            // Every cycle plans a FULL-EPISODE scan — the safe, more-audio-read
+            // direction — and never narrows. Asserted on the phases rather than
+            // the policy name because both `fullCoverage` and
+            // `periodicFullRescan` are full-episode plans, and which of the two
+            // fires depends on the re-validation clock.
+            let plan = planner.plan(for: contextFromState(state))
+            #expect(plan.policy != .targetedWithAudit, "no-progress cycle \(tick) must not narrow")
+            #expect(plan.phases == [.fullEpisodeScan], "no-progress cycle \(tick)")
+        }
+
+        let final = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(final.observedEpisodeCount == 200)
+        // Bounded state: the ring is a fixed-size window and 200 withheld
+        // samples leave it exactly as empty as one did.
+        #expect(final.recallSamples.isEmpty)
+        // A rescan that read nothing re-validated nothing, so the periodic clock
+        // keeps running rather than being reset by it.
+        #expect(final.episodesSinceLastFullRescan == 200)
+        #expect(final.lastFullRescanAt == nil, "no rescan ever re-validated this show")
+
+        // …and the counter's growth past the interval has NO further effect, so
+        // there is nothing here to run away: the plan at 200 is the plan at 10.
+        let atInterval = CoveragePlannerContext(
+            observedEpisodeCount: final.observedEpisodeCount,
+            stableRecall: final.stableRecallFlag,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 10,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        #expect(
+            planner.plan(for: atInterval).policy
+                == planner.plan(for: contextFromState(final)).policy
+        )
+    }
+
+    /// The recovery path for a show that was ALREADY promoted on circular
+    /// evidence — the `feeds.simplecast.com/dHoohVNH` shape on the 2026-07-29
+    /// device pull (`stablePrecisionFlag = 1`, ring `[1.0, 1.0, 1.0]`,
+    /// `episodesSinceLastFullRescan = 4`, every `fullEpisodeScan` having
+    /// examined 2–5% of its episode).
+    ///
+    /// The recall-sample gate alone cannot rescue it: a promoted show plans
+    /// `targetedWithAudit`, those observations carry no rescan, and the flag
+    /// derives from the untouched ring forever. The re-validation clock is what
+    /// breaks the loop.
+    @Test("playhead-hvk0: a show promoted on circular evidence recovers via the periodic clock")
+    func alreadyPromotedShowRecovers() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-already-promoted"
+        let planner = CoveragePlanner(periodicFullRescanIntervalEpisodes: 10)
+
+        // Reproduce the promotion under the PRE-hvk0 rules: three short rescans
+        // whose recall samples read 1.0 because the rescan found the only ads it
+        // could see, plus enough observations to clear the episode floor.
+        for (idx, sample) in [1.0, 1.0, 1.0, nil, nil].enumerated() {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: sample != nil,
+                fullRescanPrecisionSample: sample,
+                now: Double(idx + 1)
+            )
+        }
+        let promoted = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(promoted.stableRecallFlag == true)
+        #expect(planner.plan(for: contextFromState(promoted)).policy == .targetedWithAudit)
+
+        // Now the gate is live. The show keeps planning targeted (its flag is
+        // still true), so every observation is a non-rescan one and the clock
+        // climbs — this is the loop the clock exists to break.
+        var episodesSince = promoted.episodesSinceLastFullRescan
+        var tick = 6
+        var sawPeriodic = false
+        while tick < 40 {
+            let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+            let policy = planner.plan(for: contextFromState(state)).policy
+            if policy == .periodicFullRescan {
+                sawPeriodic = true
+                break
+            }
+            #expect(policy == .targetedWithAudit)
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: false,
+                fullRescanReadEpisode: nil,
+                now: Double(tick)
+            )
+            episodesSince += 1
+            tick += 1
+        }
+        #expect(sawPeriodic, "the periodic clock must eventually pull the show back to a full rescan")
+        #expect(episodesSince == 10)
+
+        // The periodic rescan runs — and is short, like every rescan this show
+        // has ever managed. It neither certifies nor re-validates, so the clock
+        // does NOT reset and the show stays on full-coverage plans from here.
+        for extra in 0..<5 {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                fullRescanPrecisionSample: 1.0,
+                fullRescanReadEpisode: false,
+                now: Double(tick + extra)
+            )
+            let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+            #expect(state.stableRecallFlag == false, "a short rescan must not re-certify")
+            #expect(
+                planner.plan(for: contextFromState(state)).policy != .targetedWithAudit,
+                "the show must not narrow again until a rescan actually reads an episode"
+            )
+        }
+
+        // And the moment the pipeline can read a whole episode, the show
+        // re-validates and the targeted policy's savings come back.
+        for (idx, sample) in [0.90, 0.91, 0.92].enumerated() {
+            _ = try await store.recordPodcastEpisodeObservation(
+                podcastId: podcastId,
+                wasFullRescan: true,
+                fullRescanPrecisionSample: sample,
+                fullRescanReadEpisode: true,
+                now: Double(tick + 5 + idx)
+            )
+        }
+        let recovered = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(recovered.episodesSinceLastFullRescan == 0)
+        #expect(recovered.stableRecallFlag == true)
+        #expect(planner.plan(for: contextFromState(recovered)).policy == .targetedWithAudit)
+    }
 }

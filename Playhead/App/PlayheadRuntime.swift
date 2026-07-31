@@ -997,7 +997,12 @@ final class PlayheadRuntime {
                 // playhead-b6jq PR 5: the mark-compose flag rides the SAME hoisted
                 // `adDetectionConfig` (PR4 config-source discipline) so the runner-
                 // tail compose site and the service's Step 18 read one value.
-                specialistMarkComposeEnabled: adDetectionConfig.specialistMarkComposeEnabled
+                specialistMarkComposeEnabled: adDetectionConfig.specialistMarkComposeEnabled,
+                // playhead-hvk0: the promotion gate rides the SAME hoisted
+                // `adDetectionConfig` as the two specialist keys above, so the
+                // runner's planner-state observation and the service read one value.
+                plannerPromotionRequiresMeasuredCoverage:
+                    adDetectionConfig.plannerPromotionRequiresMeasuredCoverage
             )
         }
         // bd-3bz (Phase 4) / H7 (cycle 2): when the shadow phase bails on

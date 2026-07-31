@@ -153,6 +153,21 @@ actor BackfillJobRunner {
     /// `beginEpisode` preload.
     private let specialistMarkComposeEnabled: Bool
 
+    /// playhead-hvk0: master flag for the promotion gate that requires a full
+    /// rescan to have MEASURABLY read its episode before its recall sample may
+    /// certify the `targetedWithAudit` policy (mirrors
+    /// `AdDetectionConfig.plannerPromotionRequiresMeasuredCoverage`).
+    ///
+    /// `false` is byte-identical to pre-hvk0: the recall ring is advanced by
+    /// every ad-bearing full rescan regardless of how little audio it read, and
+    /// `fullRescanReadEpisode: nil` is passed to the store so the stable-recall
+    /// flag derives from the ring alone.
+    ///
+    /// The default here is `false` so every existing test/caller that constructs
+    /// a runner directly keeps its current behaviour; production opts in through
+    /// `AdDetectionConfig.default`, which ships this ON.
+    private let plannerPromotionRequiresMeasuredCoverage: Bool
+
     /// Cycle 2 C2: per-reason telemetry counters for permissive
     /// failures. Incremented inside the runner whenever the persisted
     /// failed-window status came from a permissive bypass call. Logged
@@ -323,7 +338,8 @@ actor BackfillJobRunner {
         narrowingConfig: NarrowingConfig = .default,
         specialistRuntime: SpecialistAdClassifier.Runtime? = nil,
         specialistScanEnabled: Bool = false,
-        specialistMarkComposeEnabled: Bool = false
+        specialistMarkComposeEnabled: Bool = false,
+        plannerPromotionRequiresMeasuredCoverage: Bool = false
     ) {
         self.store = store
         self.admissionController = admissionController
@@ -340,6 +356,7 @@ actor BackfillJobRunner {
         self.specialistRuntime = specialistRuntime
         self.specialistScanEnabled = specialistScanEnabled
         self.specialistMarkComposeEnabled = specialistMarkComposeEnabled
+        self.plannerPromotionRequiresMeasuredCoverage = plannerPromotionRequiresMeasuredCoverage
     }
 
     // MARK: - Entry Point
@@ -1007,6 +1024,15 @@ actor BackfillJobRunner {
         //
         if !admitted.isEmpty {
             let wasFullRescan = (plan.policy == .fullCoverage || plan.policy == .periodicFullRescan)
+            // playhead-hvk0: did this full rescan MEASURABLY read the episode?
+            // `nil` when the gate is off or the run was not a full rescan, which
+            // makes both the ring advance and the store call byte-identical to
+            // pre-hvk0. See `fullRescanReadEpisode(assetId:)` for why the answer
+            // has to come from measured coverage rather than the planned policy.
+            let fullRescanReadEpisode: Bool? =
+                (plannerPromotionRequiresMeasuredCoverage && wasFullRescan)
+                    ? await self.fullRescanReadEpisode(assetId: inputs.analysisAssetId)
+                    : nil
             // Cycle 2 C4: this sample is **recall**, not precision —
             // the metric was historically misnamed. Formula:
             //   covered = |predictedTargetedLineRefs ∩ actualAdLineRefs|
@@ -1031,6 +1057,15 @@ actor BackfillJobRunner {
             // to give.
             var incrementEpisodesObservedWithoutSample = false
             var incrementNarrowingAllPhasesEmpty = false
+            // playhead-hvk0: the sample is still COMPUTED here exactly as before
+            // and the read-evidence gate is applied once, in the store. An
+            // earlier revision short-circuited this branch to skip the narrowing
+            // work when the read evidence was `false`, which silently stopped
+            // `episodesObservedWithoutSample` / `narrowingAllPhasesEmpty` from
+            // incrementing on short rescans — a telemetry change nobody asked
+            // for. The narrowing is pure in-memory CPU that this path already
+            // paid on every full rescan; one place to apply the gate is worth
+            // more than saving it.
             if wasFullRescan {
                 if fullRescanDetectedAdLineRefs.isEmpty {
                     // Cycle 2 C4: ad-free episode. Nil sample (do NOT
@@ -1102,6 +1137,9 @@ actor BackfillJobRunner {
                     fullRescanPrecisionSample: recallSample,
                     incrementEpisodesObservedWithoutSample: incrementEpisodesObservedWithoutSample,
                     incrementNarrowingAllPhasesEmpty: incrementNarrowingAllPhasesEmpty,
+                    // playhead-hvk0: `nil` unless the gate is on AND this was a
+                    // full rescan, so the flag derivation is untouched otherwise.
+                    fullRescanReadEpisode: fullRescanReadEpisode,
                     now: clock().timeIntervalSince1970
                 )
             } catch {
@@ -1123,6 +1161,60 @@ actor BackfillJobRunner {
             deferredJobIds: deferred,
             fmRefinementWindows: fmRefinementWindows
         )
+    }
+
+    /// playhead-hvk0: did the full rescan that just finished MEASURABLY read
+    /// this episode, and therefore earn the right to certify the
+    /// `targetedWithAudit` policy for its show?
+    ///
+    /// **Why the planned policy is not the answer.** `wasFullRescan` above is
+    /// derived from `plan.policy`, and the comment on it says so plainly: it
+    /// "reflects the planned policy, NOT the per-job outcome". That was the same
+    /// mistake playhead-gqx4 fixed one layer down for the terminal state and
+    /// playhead-pz32 fixed for the library ✓ — an INTENT was being read as an
+    /// OUTCOME. Measured on the 2026-07-29 device pull, every `fullEpisodeScan`
+    /// on `feeds.simplecast.com/dHoohVNH` examined 82–167 s of episodes 1,503–4,379 s
+    /// long, and those runs are what put three 1.0 recall samples in the ring and
+    /// promoted the whole show into `targetedWithAudit`.
+    ///
+    /// Reads ``AnalysisCoverageSummary/adScanFraction`` — never recomputed here,
+    /// so this gate, the runner's skip predicate (playhead-i7qe), the re-drive
+    /// mint (playhead-onn6) and the library ✓ all divide the same numerator by
+    /// the same denominator (playhead-csbq pinned that ruler). The floor is the
+    /// SAME constant, deliberately: a lower one here would certify targeting from
+    /// a scan the rest of the pipeline still considers incomplete.
+    ///
+    /// Returns `false` for BOTH "measurably short" and "not measurable" (a legacy
+    /// row with no duration, a coverage/duration disagreement, or a store
+    /// failure). Under-claiming can only route the show's next episode to a
+    /// full-episode plan, and it never causes a pass.
+    ///
+    /// **A full-episode plan is not a guarantee of more audio read**, and no
+    /// claim here should be read that way. `fullCoverage` is ONE job walking
+    /// windows sequentially, so a `.pass`-scoped failure (`failedTransient`,
+    /// `cancelled`, `thermalDeferred`, `assetsUnavailable`) ends it where it
+    /// stands, while `targetedWithAudit` is THREE independent jobs one abort
+    /// cannot kill. Measured on the 2026-07-29 device pull, `fullEpisodeScan`
+    /// spent 13,407 s of Foundation Models wall-clock across 120 calls and only
+    /// 1,100 s of that on calls that produced a verdict — asset 8FECFDDE has a
+    /// complete transcript (3,576 s of 3,578 s) and an `adScanFraction` of 0.187.
+    /// The demotion buys the INTENT to read the whole episode; whether the pass
+    /// survives to do it is playhead-qbib / playhead-i7qe territory, not this
+    /// gate's.
+    private func fullRescanReadEpisode(assetId: String) async -> Bool {
+        let fraction: Double?
+        do {
+            fraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction
+        } catch {
+            logger.warning(
+                "playhead-hvk0: ad-scan coverage read failed for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public); full rescan does not certify the targeted policy"
+            )
+            return false
+        }
+        guard let fraction, fraction.isFinite else { return false }
+        return fraction >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
     }
 
     private func operationalCounters(

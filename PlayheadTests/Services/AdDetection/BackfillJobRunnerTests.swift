@@ -14,7 +14,11 @@ struct BackfillJobRunnerTests {
 
     // MARK: - Fixtures
 
-    private func makeAsset(id: String = "asset-runner") -> AnalysisAsset {
+    private func makeAsset(
+        id: String = "asset-runner",
+        episodeDurationSec: Double? = nil,
+        fastTranscriptCoverageEndTime: Double? = nil
+    ) -> AnalysisAsset {
         AnalysisAsset(
             id: id,
             episodeId: "ep-\(id)",
@@ -22,11 +26,12 @@ struct BackfillJobRunnerTests {
             weakFingerprint: nil,
             sourceURL: "file:///tmp/\(id).m4a",
             featureCoverageEndTime: nil,
-            fastTranscriptCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: fastTranscriptCoverageEndTime,
             confirmedAdCoverageEndTime: nil,
             analysisState: "new",
             analysisVersion: 1,
-            capabilitySnapshot: nil
+            capabilitySnapshot: nil,
+            episodeDurationSec: episodeDurationSec
         )
     }
 
@@ -122,7 +127,10 @@ struct BackfillJobRunnerTests {
         runtime: FoundationModelClassifier.Runtime,
         snapshot: CapabilitySnapshot = makePermissiveCapabilitySnapshot(),
         mode: FMBackfillMode = .shadow,
-        classifierConfig: FoundationModelClassifier.Config = .default
+        classifierConfig: FoundationModelClassifier.Config = .default,
+        // playhead-hvk0: defaults to the PRE-hvk0 behaviour so every existing
+        // test in this suite keeps its meaning; the gate's own tests opt in.
+        plannerPromotionRequiresMeasuredCoverage: Bool = false
     ) -> BackfillJobRunner {
         BackfillJobRunner(
             store: store,
@@ -132,7 +140,8 @@ struct BackfillJobRunnerTests {
             mode: mode,
             capabilitySnapshotProvider: { snapshot },
             batteryLevelProvider: { 1.0 },
-            scanCohortJSON: makeTestScanCohortJSON()
+            scanCohortJSON: makeTestScanCohortJSON(),
+            plannerPromotionRequiresMeasuredCoverage: plannerPromotionRequiresMeasuredCoverage
         )
     }
 
@@ -482,6 +491,356 @@ struct BackfillJobRunnerTests {
         )
         let plan = CoveragePlanner().plan(for: plannerContext)
         #expect(plan.policy == .targetedWithAudit)
+    }
+
+    // MARK: - playhead-hvk0: the promotion gate, driven through the live runner
+
+    /// playhead-hvk0: builds the `CoveragePlannerContext` the production shadow
+    /// phase would build from persisted planner state, so these tests exercise
+    /// the real translation rather than a parallel one.
+    private func liveContext(_ state: PodcastPlannerState?) -> CoveragePlannerContext {
+        CoveragePlannerContext(
+            observedEpisodeCount: state?.observedEpisodeCount ?? 0,
+            stableRecall: state?.stableRecallFlag ?? false,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: state?.episodesSinceLastFullRescan ?? 0,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+    }
+
+    /// playhead-hvk0: a coverage-lane row asserting that some earlier pass
+    /// already read `[start, end]` of the asset. Written under a DIFFERENT
+    /// `transcriptVersion` than the run under test so it can never be picked up
+    /// as a reusable result — it exists only to move the measured
+    /// `adScanFraction` the gate reads.
+    private func makeReadEvidenceScanRow(
+        assetId: String,
+        start: Double,
+        end: Double
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: "\(assetId)-prior-read",
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 999,
+            windowStartTime: start,
+            windowEndTime: end,
+            scanPass: SemanticScanCoverage.coverageScanPass,
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: makeTestScanCohortJSON(),
+            transcriptVersion: "tx-prior-read-only",
+            reuseScope: "\(assetId)-prior-read"
+        )
+    }
+
+    /// The device shape this bead exists for. `fullRescanPersistsPrecisionSamples…`
+    /// above is the same five-episode drive with the gate OFF and is the
+    /// pre-hvk0 parity rail; this is the same drive with the gate ON, over
+    /// episodes whose full rescans do not read them.
+    ///
+    /// Measured on the 2026-07-29 device pull: every `fullEpisodeScan` on
+    /// `feeds.simplecast.com/dHoohVNH` examined 82–167 s of episodes 1,503–4,379 s
+    /// long, and three 1.0 recall samples from those runs promoted the show.
+    @Test("playhead-hvk0: full rescans that do not read the episode never promote the show")
+    func shortFullRescansDoNotPromoteShow() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-hvk0-short"
+        let coarseResponses = (0..<40).map { _ in
+            CoarseScreeningSchema(
+                disposition: .containsAd,
+                support: CoarseSupportSchema(supportLineRefs: [12], certainty: .strong)
+            )
+        }
+        let runtime = TestFMRuntime(coarseResponses: coarseResponses)
+        let runner = makeRunner(
+            store: store,
+            runtime: runtime.runtime,
+            plannerPromotionRequiresMeasuredCoverage: true
+        )
+
+        for episode in 1...5 {
+            let assetId = "asset-hvk0-short-\(episode)"
+            // The fixture transcribes 0–300 s; the episode is 3,000 s long. The
+            // rescan can read at most ~10% of it, which is the device ratio.
+            try await store.insertAsset(
+                makeAsset(id: assetId, episodeDurationSec: 3000, fastTranscriptCoverageEndTime: 3000)
+            )
+            let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
+            _ = try await runner.runPendingBackfill(
+                for: makeTargetedInputs(
+                    assetId: assetId,
+                    podcastId: podcastId,
+                    transcriptVersion: "tx-hvk0-short-v\(episode)",
+                    plannerContext: liveContext(state)
+                )
+            )
+            // Prove the premise rather than assuming it: the run really was a
+            // full rescan that really did fall short.
+            let fraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?.adScanFraction
+            let measured = try #require(fraction, "episode \(episode) must have a MEASURED fraction")
+            #expect(
+                measured < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction,
+                "episode \(episode) measured \(measured) — fixture no longer models a short rescan"
+            )
+        }
+
+        let finalState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(finalState.observedEpisodeCount == 5)
+        #expect(
+            finalState.recallSamples.isEmpty,
+            "a rescan that did not read its episode must not enter the recall ring"
+        )
+        #expect(finalState.stableRecallFlag == false)
+        #expect(CoveragePlanner().plan(for: liveContext(finalState)).policy == .fullCoverage)
+    }
+
+    /// UNMEASURABLE is not the same as sufficient. An asset with no declared
+    /// duration (legacy rows, placeholder rows pre-decode) yields a `nil`
+    /// `adScanFraction`, and a rescan whose read cannot be measured has not
+    /// demonstrated anything. Under-claiming routes the next episode to
+    /// `fullCoverage` — more audio read, never less.
+    ///
+    /// This is the exact fixture `fullRescanPersistsPrecisionSamples…` uses
+    /// (assets with no duration), so the two tests differ ONLY in the gate.
+    @Test("playhead-hvk0: an unmeasurable rescan does not certify the targeted policy")
+    func unmeasurableRescanDoesNotPromoteShow() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-hvk0-unmeasurable"
+        let coarseResponses = (0..<40).map { _ in
+            CoarseScreeningSchema(
+                disposition: .containsAd,
+                support: CoarseSupportSchema(supportLineRefs: [12], certainty: .strong)
+            )
+        }
+        let runtime = TestFMRuntime(coarseResponses: coarseResponses)
+        let runner = makeRunner(
+            store: store,
+            runtime: runtime.runtime,
+            plannerPromotionRequiresMeasuredCoverage: true
+        )
+
+        for episode in 1...5 {
+            let assetId = "asset-hvk0-unmeasurable-\(episode)"
+            try await store.insertAsset(makeAsset(id: assetId))
+            let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
+            _ = try await runner.runPendingBackfill(
+                for: makeTargetedInputs(
+                    assetId: assetId,
+                    podcastId: podcastId,
+                    transcriptVersion: "tx-hvk0-unmeasurable-v\(episode)",
+                    plannerContext: liveContext(state)
+                )
+            )
+            // Prove the premise: the fraction really is unmeasurable here.
+            let fraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?.adScanFraction
+            #expect(fraction == nil, "episode \(episode) is supposed to be UNMEASURABLE")
+        }
+
+        let finalState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(finalState.observedEpisodeCount == 5)
+        #expect(finalState.recallSamples.isEmpty)
+        #expect(finalState.stableRecallFlag == false)
+        #expect(CoveragePlanner().plan(for: liveContext(finalState)).policy == .fullCoverage)
+    }
+
+    /// The floor itself, pinned just below. Without this the whole gate is
+    /// satisfied by any threshold in `(0.10, 1.00]` — the other fixtures sit at
+    /// ~0.10 and 1.00, so an implementation with the floor at 0.50, or 0.11,
+    /// passes every other test here.
+    ///
+    /// It matters more than a normal boundary test: 0.95 is ABOVE every value
+    /// this pipeline achieves in the field (max measured `adScanFraction` on the
+    /// 2026-07-29 device pull is 0.943 across all 19 assets with a coverage-lane
+    /// row), so this test is also the executable statement of why the gate ships
+    /// OFF. If a future change makes 0.95 certify, that is a threshold decision
+    /// and it has to break this test to happen.
+    @Test("playhead-hvk0: a 0.95-coverage rescan is still short of the 0.98 floor")
+    func nearMissRescanDoesNotCertify() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-hvk0-nearmiss"
+        // 950 s of a 1,000 s episode read: better than anything the device has
+        // ever achieved, and still not certification.
+        try await store.insertAsset(
+            makeAsset(id: assetId, episodeDurationSec: 1000, fastTranscriptCoverageEndTime: 1000)
+        )
+        try await store.insertSemanticScanResult(
+            makeReadEvidenceScanRow(assetId: assetId, start: 0, end: 950)
+        )
+        let fraction = try #require(
+            await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]?.adScanFraction
+        )
+        #expect(abs(fraction - 0.95) < 0.001, "fixture drifted: measured \(fraction)")
+        #expect(fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+
+        // And one second under the floor is the same answer as ninety-five
+        // percent under it — the gate is a floor, not a gradient.
+        let atFloorId = "asset-hvk0-atfloor"
+        try await store.insertAsset(
+            makeAsset(id: atFloorId, episodeDurationSec: 1000, fastTranscriptCoverageEndTime: 1000)
+        )
+        try await store.insertSemanticScanResult(
+            makeReadEvidenceScanRow(assetId: atFloorId, start: 0, end: 980)
+        )
+        let atFloor = try #require(
+            await store.fetchCoverageSummariesByAssetIds([atFloorId])[atFloorId]?.adScanFraction
+        )
+        #expect(atFloor >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+    }
+
+    /// The other side of the same gate: read evidence is NECESSARY, not
+    /// punitive. A show whose rescans do read their episodes is promoted
+    /// exactly as it was pre-hvk0, so the targeted policy's savings survive.
+    @Test("playhead-hvk0: full rescans that DO read the episode still promote the show")
+    func completeFullRescansStillPromoteShow() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-hvk0-complete"
+        let coarseResponses = (0..<40).map { _ in
+            CoarseScreeningSchema(
+                disposition: .containsAd,
+                support: CoarseSupportSchema(supportLineRefs: [12], certainty: .strong)
+            )
+        }
+        let runtime = TestFMRuntime(coarseResponses: coarseResponses)
+        let runner = makeRunner(
+            store: store,
+            runtime: runtime.runtime,
+            plannerPromotionRequiresMeasuredCoverage: true
+        )
+
+        for episode in 1...5 {
+            let assetId = "asset-hvk0-complete-\(episode)"
+            try await store.insertAsset(
+                makeAsset(id: assetId, episodeDurationSec: 300, fastTranscriptCoverageEndTime: 300)
+            )
+            // An earlier pass read the whole episode. Deterministic, so the
+            // assertion does not depend on the FM window geometry.
+            try await store.insertSemanticScanResult(
+                makeReadEvidenceScanRow(assetId: assetId, start: 0, end: 300)
+            )
+            let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
+            _ = try await runner.runPendingBackfill(
+                for: makeTargetedInputs(
+                    assetId: assetId,
+                    podcastId: podcastId,
+                    transcriptVersion: "tx-hvk0-complete-v\(episode)",
+                    plannerContext: liveContext(state)
+                )
+            )
+            let fraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?.adScanFraction
+            let measured = try #require(fraction, "episode \(episode) must have a MEASURED fraction")
+            #expect(
+                measured >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction,
+                "episode \(episode) measured \(measured) — fixture no longer models a complete rescan"
+            )
+        }
+
+        let finalState = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(finalState.observedEpisodeCount == 5)
+        #expect(!finalState.recallSamples.isEmpty, "a rescan that read its episode must certify")
+        #expect(finalState.stableRecallFlag == true)
+        #expect(CoveragePlanner().plan(for: liveContext(finalState)).policy == .targetedWithAudit)
+    }
+
+    /// The bounded / no-progress rail at the RUNNER level.
+    ///
+    /// Every cycle re-transcribes (a fresh `transcriptVersion`), which is the
+    /// real producer of repeat coverage-lane batches — measured on the
+    /// 2026-07-29 device pull, six assets carried 2–3 distinct transcript
+    /// versions each. So every cycle here mints a genuinely new job batch, runs
+    /// it, and records a real observation; none of them gains coverage.
+    ///
+    /// What a broken implementation would do: promote on some later cycle, let
+    /// per-cycle job or scan-row counts grow super-linearly, or let the recall
+    /// ring fill from runs that read nothing.
+    @Test("playhead-hvk0: 30 no-progress runner cycles never promote and never run away")
+    func noProgressRunnerCyclesStayBounded() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-hvk0-spin"
+        let assetId = "asset-hvk0-spin"
+        let coarseResponses = (0..<400).map { _ in
+            CoarseScreeningSchema(
+                disposition: .containsAd,
+                support: CoarseSupportSchema(supportLineRefs: [12], certainty: .strong)
+            )
+        }
+        let runtime = TestFMRuntime(coarseResponses: coarseResponses)
+        let runner = makeRunner(
+            store: store,
+            runtime: runtime.runtime,
+            plannerPromotionRequiresMeasuredCoverage: true
+        )
+        try await store.insertAsset(
+            makeAsset(id: assetId, episodeDurationSec: 3000, fastTranscriptCoverageEndTime: 3000)
+        )
+
+        let cycles = 30
+        var scanRowsAfterFirst: Int?
+        for cycle in 1...cycles {
+            let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
+            // Asserted on the phases, not the policy name: `fullCoverage` and
+            // `periodicFullRescan` are both full-episode plans and which fires
+            // depends on the re-validation clock. What must never happen is a
+            // narrowed plan.
+            let plan = CoveragePlanner().plan(for: liveContext(state))
+            #expect(plan.policy != .targetedWithAudit, "cycle \(cycle) must not narrow")
+            #expect(plan.phases == [.fullEpisodeScan], "cycle \(cycle)")
+            _ = try await runner.runPendingBackfill(
+                for: makeTargetedInputs(
+                    assetId: assetId,
+                    podcastId: podcastId,
+                    transcriptVersion: "tx-hvk0-spin-v\(cycle)",
+                    plannerContext: liveContext(state)
+                )
+            )
+            let after = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+            #expect(after.stableRecallFlag == false, "cycle \(cycle) must not promote")
+            #expect(after.recallSamples.isEmpty, "cycle \(cycle) must not enter the ring")
+
+            // Runaway check: FM work per cycle must stay CONSTANT. One batch per
+            // transcript version and no more — growth linear in re-transcriptions
+            // is pre-existing M-5 behaviour, and the gate adds nothing to it. A
+            // gate that re-drove, re-widened or re-planned would show up here as
+            // super-linear growth long before the 30th cycle.
+            let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+            if cycle == 1 {
+                // Guard the rail against going vacuous: `n == 0 * cycle` holds
+                // for every cycle if the fixture ever stops producing rows.
+                #expect(scans.count > 0, "cycle 1 wrote no scan rows — the rail would be vacuous")
+                scanRowsAfterFirst = scans.count
+            } else if let first = scanRowsAfterFirst {
+                #expect(
+                    scans.count == first * cycle,
+                    "cycle \(cycle) wrote \(scans.count) scan rows, expected \(first * cycle)"
+                )
+            }
+        }
+
+        let final = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
+        #expect(final.observedEpisodeCount == cycles)
+        #expect(final.stableRecallFlag == false)
+        #expect(final.recallSamples.isEmpty)
+        let fraction = try await store
+            .fetchCoverageSummariesByAssetIds([assetId])[assetId]?.adScanFraction
+        let measured = try #require(fraction)
+        #expect(
+            measured < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction,
+            "the episode never gained coverage — that is the premise of this rail"
+        )
     }
 
     @available(iOS 26.0, *)
