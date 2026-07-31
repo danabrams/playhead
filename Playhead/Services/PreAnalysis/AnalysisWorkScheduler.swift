@@ -186,6 +186,22 @@ actor AnalysisWorkScheduler {
         case background
     }
 
+    /// playhead-ewag: lowest `AnalysisJob.priority` that maps to `.now`.
+    ///
+    /// Extracted from the literal that used to live only inside
+    /// ``AnalysisJob/schedulerLane`` because the store's eligibility SELECT now
+    /// needs the SAME number: `fetchNextEligibleJob` carves Now-lane rows out
+    /// of the `deferredWorkAllowed` gate by comparing `priority` against this
+    /// floor in SQL. Two copies of "20" — one in Swift, one in a query string —
+    /// is precisely the drift that lets a lane silently stop existing. Keep
+    /// this the ONLY definition.
+    static let nowLanePriorityFloor = 20
+
+    /// playhead-ewag: lowest `AnalysisJob.priority` that maps to `.soon`.
+    /// Anything below is `.background`. Same single-definition rule as
+    /// ``nowLanePriorityFloor``.
+    static let soonLanePriorityFloor = 1
+
     /// Per-lane concurrency caps. Bead spec:
     /// - Now:        <= 2 concurrent non-playback jobs
     /// - Soon:       <= 1 concurrent
@@ -247,31 +263,58 @@ actor AnalysisWorkScheduler {
         let qualityProfile: QualityProfile
         let policy: QualityProfile.SchedulerPolicy
 
+        /// playhead-ewag: WHY this profile is throttled, in the taxonomy the
+        /// user-facing surface already speaks.
+        ///
+        /// `QualityProfile` is a severity, not a cause: `.fair` is reached
+        /// either by a warm SoC or by Low Power Mode or by a low battery off
+        /// the cord, and those produce three different honest sentences
+        /// ("phone is too hot" vs "low battery"). Telling a user their phone
+        /// is hot when the truth is Low Power Mode is the same defect this
+        /// bead is about — a value read as something it does not measure — so
+        /// the cause is carried alongside the severity rather than guessed at
+        /// the surface.
+        ///
+        /// Defaulted to `.thermal` so every existing construction site (tests
+        /// that build a profile/policy pair directly) is unchanged; the live
+        /// value is computed in ``currentLaneAdmission()``, which is the only
+        /// place that has the battery and low-power reads in hand.
+        let throttleCause: InternalMissCause
+
+        init(
+            qualityProfile: QualityProfile,
+            policy: QualityProfile.SchedulerPolicy,
+            throttleCause: InternalMissCause = .thermal
+        ) {
+            self.qualityProfile = qualityProfile
+            self.policy = policy
+            self.throttleCause = throttleCause
+        }
+
         /// Whether any work at all may run. Mirrors `policy.pauseAllWork` for
         /// readability at call sites.
         var pauseAllWork: Bool { policy.pauseAllWork }
 
-        /// Whether a deferred job of the given coverage depth is allowed
-        /// under the current QualityProfile. T0 (playback) jobs are never
-        /// gated here — the store selects them on the hot-path criteria;
-        /// only `pauseAllWork` can stop them.
-        ///
-        /// A job is classified as Background when its desired coverage is at
-        /// or above `t2Threshold`. Anything below that is Soon lane.
-        func allowsDeferredJob(desiredCoverageSec: Double, t2Threshold: Double) -> Bool {
-            if pauseAllWork { return false }
-            let isBackgroundLane = desiredCoverageSec >= t2Threshold
-            if isBackgroundLane {
-                return policy.allowBackgroundLane
-            } else {
-                return policy.allowSoonLane
-            }
-        }
-
         /// Whether a job in the given `SchedulerLane` is admitted under the
-        /// current QualityProfile. This is the priority-derived dual of
-        /// `allowsDeferredJob(desiredCoverageSec:t2Threshold:)` — the latter
-        /// gates by coverage depth, this one gates by lane.
+        /// current QualityProfile. T0 (playback) jobs are never gated here —
+        /// the store selects them on the hot-path criteria; only
+        /// `pauseAllWork` can stop them.
+        ///
+        /// **playhead-ewag.** This replaced a coverage-DEPTH dual
+        /// (`desiredCoverageSec >= t2DepthSeconds ⇒ Background`) that was the
+        /// scheduler's only lane classifier for months while this method sat
+        /// unused. The depth test was written when every enqueue carried
+        /// `desiredCoverageSec = 90` and the tier ladder escalated later, so
+        /// depth was a fair proxy for the cost of the NEXT dispatch. Once
+        /// playhead-3xtw made the explicit-download path stamp the FULL
+        /// episode duration at enqueue, that proxy inverted: a user's very
+        /// first download pass was classified deep-Background before one
+        /// second of audio had been read, and `allowBackgroundLane` is true
+        /// only at `.nominal`. Five user downloads sat `queued` with
+        /// `attemptCount = 0` on a foregrounded charging device, forever.
+        /// `desiredCoverageSec` names the eventual coverage TARGET; it never
+        /// named the cost of a dispatch. Gate on the lane, which is derived
+        /// from priority — i.e. from who asked for the work.
         ///
         /// Semantics:
         /// - Any lane is blocked when `pauseAllWork` is true (critical).
@@ -290,6 +333,143 @@ actor AnalysisWorkScheduler {
             case .background: return policy.allowBackgroundLane
             }
         }
+    }
+
+    // MARK: - Lane gate (playhead-ewag)
+
+    /// What the post-selection lane gate decided about one candidate job.
+    ///
+    /// Three outcomes rather than a `Bool` because "held" and "admitted at a
+    /// reduced depth" are genuinely different states that must be observable
+    /// apart: the first is a wait the user needs to be told about, the second
+    /// is the bounded escape hatch that stops a wait from being unbounded.
+    enum LaneGateOutcome: Sendable, Equatable {
+        /// The job's lane is open under the current QualityProfile. Dispatch
+        /// the job exactly as enqueued.
+        case admit
+
+        /// The job's lane is CLOSED, but the job has been queued past
+        /// ``LaneGatePolicy/progressFloorAfterSec`` without ever being
+        /// attempted. Dispatch ONE Soon-depth slice — `coverageCapSec` is the
+        /// coverage target for this pass only and is deliberately NOT
+        /// persisted, so the job's real target survives.
+        case admitProgressFloor(coverageCapSec: Double)
+
+        /// The job's lane is closed. `reason` is written durably to the job
+        /// row (`lastRejectReason`) so the hold is queryable rather than
+        /// silent, and is stable enough to group on.
+        case hold(reason: String)
+    }
+
+    /// playhead-ewag: tunables for the lane gate's progress floor.
+    ///
+    /// The floor exists because Option A fixes the lane a user download lands
+    /// in but does not, on its own, make "queued forever" impossible for every
+    /// other lane. A `.background` row on a device that never returns to
+    /// `.nominal` would still wait indefinitely, and indefinitely is not a
+    /// state this pipeline is allowed to have.
+    enum LaneGatePolicy {
+        /// How long a job may sit queued, never once attempted, before the
+        /// gate admits one bounded slice despite its lane being closed.
+        ///
+        /// 10 minutes: long enough that a transient thermal excursion (which
+        /// clears in seconds-to-minutes) resolves on its own and the floor
+        /// never fires, short enough that a user who downloaded an episode and
+        /// left the app open sees progress inside one sitting. The field
+        /// incident's five jobs sat untouched for 20+ minutes.
+        static let progressFloorAfterSec: TimeInterval = 600
+    }
+
+    /// playhead-ewag: the post-selection admission decision for one candidate
+    /// job, as a pure function of (lane, profile, how long it has waited).
+    ///
+    /// Pure and `static` on purpose: this is the predicate that was wrong for
+    /// months, and the only way to keep it honest is to be able to assert on
+    /// the whole truth table without standing up a scheduler, a store, and a
+    /// simulated thermal ramp.
+    ///
+    /// Ordering of the three rules is load-bearing:
+    ///   1. `pauseAllWork` (thermal `.critical`) dominates everything,
+    ///      including the progress floor. A hot enough device does no work,
+    ///      full stop — the floor is a liveness bound, not a licence to cook
+    ///      the phone.
+    ///   2. An open lane admits at full depth.
+    ///   3. Only then may the floor admit a closed lane, and only for a job
+    ///      that has NEVER been attempted (`attemptCount == 0`). That
+    ///      condition is what makes the floor one-shot without any extra
+    ///      bookkeeping: every dispatch outcome arm moves `attemptCount` off
+    ///      zero, so a job gets at most one floor slice and then waits for its
+    ///      lane to open like everything else.
+    ///
+    /// - Parameters:
+    ///   - queuedForSec: wall-clock seconds since the row was created. Clamped
+    ///     at zero by the caller's `max` so a clock skew cannot fabricate an
+    ///     ancient job.
+    ///   - desiredCoverageSec: the job's real target, used only to cap the
+    ///     floor slice — a floor pass never asks for MORE than the job wants.
+    ///   - t1DepthSeconds: the Soon-lane depth. The floor slice is capped here
+    ///     so a floor dispatch costs a Soon-lane pass, never a Background one.
+    static func evaluateLaneGate(
+        lane: SchedulerLane,
+        admission: LaneAdmission,
+        queuedForSec: TimeInterval,
+        attemptCount: Int,
+        desiredCoverageSec: Double,
+        t1DepthSeconds: Double,
+        progressFloorAfterSec: TimeInterval = LaneGatePolicy.progressFloorAfterSec
+    ) -> LaneGateOutcome {
+        let reason = laneGateRejectReason(profile: admission.qualityProfile)
+        if admission.pauseAllWork {
+            return .hold(reason: reason)
+        }
+        if admission.allows(lane: lane) {
+            return .admit
+        }
+        if attemptCount == 0, queuedForSec >= progressFloorAfterSec {
+            return .admitProgressFloor(
+                coverageCapSec: min(desiredCoverageSec, t1DepthSeconds)
+            )
+        }
+        return .hold(reason: reason)
+    }
+
+    /// playhead-ewag: the durable advisory written to
+    /// `analysis_jobs.lastRejectReason` when the lane gate holds a job.
+    ///
+    /// Shaped `laneGate:<profile>` — the gate that fired, then the condition
+    /// that closed it. Named `laneGate` and not `depthGate` because after this
+    /// bead the gate really does read the lane; a reason string that named the
+    /// old depth test would be one more value describing something it does not
+    /// measure, which is the defect class this bead exists to close.
+    static func laneGateRejectReason(profile: QualityProfile) -> String {
+        "laneGate:\(profile.rawValue)"
+    }
+
+    /// playhead-ewag: a job the lane gate is currently holding, with the
+    /// CONSECUTIVE skip count.
+    ///
+    /// Consecutive, not lifetime. A lifetime counter cannot distinguish "this
+    /// job has been stuck since the app launched" from "this job has been
+    /// dispatched forty times and was skipped once each time it came back
+    /// around" — and only the first is a stall. The record is dropped the
+    /// moment the job dispatches, so a non-nil record always means "held right
+    /// now, and has been for `consecutiveSkips` passes".
+    struct LaneHoldRecord: Sendable, Equatable {
+        let jobId: String
+        let episodeId: String
+        let lane: SchedulerLane
+        let qualityProfile: QualityProfile
+        /// Why the profile is throttled, in the taxonomy the Activity surface
+        /// renders. Carried from ``LaneAdmission/throttleCause`` so the copy
+        /// the user reads names the real constraint.
+        let cause: InternalMissCause
+        /// Number of back-to-back gate passes that have held this job with no
+        /// intervening dispatch. Starts at 1.
+        let consecutiveSkips: Int
+        /// Wall-clock of the FIRST hold in the current consecutive run.
+        let firstHeldAt: TimeInterval
+        /// Wall-clock of the most recent hold.
+        let lastHeldAt: TimeInterval
     }
 
     // MARK: - PlayheadCatchupPolicy (playhead-yqax)
@@ -611,6 +791,20 @@ actor AnalysisWorkScheduler {
         .soon: 0,
         .background: 0,
     ]
+
+    /// playhead-ewag: jobs the lane gate is currently holding, keyed by jobId.
+    ///
+    /// In-memory rather than persisted because the quantity is CONSECUTIVE
+    /// skips, and "consecutive" is only meaningful within one scheduler
+    /// lifetime — a count that survived a relaunch would claim continuity
+    /// across a gap in which nothing was even asked. The durable half of the
+    /// record (that a hold happened, and why) goes to
+    /// `analysis_jobs.lastRejectReason` / `lastRejectAt` on every hold.
+    ///
+    /// An entry is removed the instant its job dispatches (see
+    /// ``clearLaneHold(jobId:)``), so a present entry always means "held right
+    /// now".
+    private var laneHolds: [String: LaneHoldRecord] = [:]
 
     /// Hook installed by downstream beads (playhead-01t8) to implement
     /// preemption of active Soon / Background jobs when a Now-lane job is
@@ -1279,6 +1473,7 @@ actor AnalysisWorkScheduler {
 
         guard let selected = await selectNextDispatchableJob(
             deferredWorkAllowed: deferredWorkAllowed,
+            nowLaneAllowed: admission.allows(lane: .now),
             now: now
         ) else { return nil }
 
@@ -1301,8 +1496,16 @@ actor AnalysisWorkScheduler {
     /// either unwired or has no seeded episodes. Only when the
     /// cascade is wired AND has seeds do we pay for the
     /// `fetchJobsByState` scan + Swift-side eligibility filter.
+    ///
+    /// - Parameter nowLaneAllowed: playhead-ewag. When true, rows at or above
+    ///   ``AnalysisWorkScheduler/nowLanePriorityFloor`` are selectable even
+    ///   when `deferredWorkAllowed` is false. Without it, an unrelaxed
+    ///   `.serious` profile binds `deferredWorkAllowed = 0` and the SELECT
+    ///   hides every non-playback row, so a user's explicit download is
+    ///   invisible to the dispatcher before any lane logic gets to see it.
     private func selectNextDispatchableJob(
         deferredWorkAllowed: Bool,
+        nowLaneAllowed: Bool,
         now: TimeInterval
     ) async -> (job: AnalysisJob, cascadeWindow: CandidateWindow?)? {
         // 1. FIFO winner. This is the legacy contract — preserved as
@@ -1310,6 +1513,7 @@ actor AnalysisWorkScheduler {
         // nothing to say.
         guard let fifoJob = try? await store.fetchNextEligibleJob(
             deferredWorkAllowed: deferredWorkAllowed,
+            nowLanePriorityFloor: nowLaneAllowed ? Self.nowLanePriorityFloor : nil,
             t0ThresholdSec: config.defaultT0DepthSeconds,
             now: now
         ) else { return nil }
@@ -1335,6 +1539,7 @@ actor AnalysisWorkScheduler {
         // eligible. Apply the same eligibility predicate in Swift.
         let candidates = await gatherCascadeRescanCandidates(
             deferredWorkAllowed: deferredWorkAllowed,
+            nowLaneAllowed: nowLaneAllowed,
             now: now
         )
 
@@ -1415,6 +1620,7 @@ actor AnalysisWorkScheduler {
     /// set the store's FIFO query would have considered.
     private func gatherCascadeRescanCandidates(
         deferredWorkAllowed: Bool,
+        nowLaneAllowed: Bool,
         now: TimeInterval
     ) async -> [AnalysisJob] {
         var collected: [AnalysisJob] = []
@@ -1425,6 +1631,7 @@ actor AnalysisWorkScheduler {
                 guard isEligibleForDispatch(
                     job: job,
                     deferredWorkAllowed: deferredWorkAllowed,
+                    nowLaneAllowed: nowLaneAllowed,
                     now: now
                 ) else { continue }
                 collected.append(job)
@@ -1443,6 +1650,7 @@ actor AnalysisWorkScheduler {
     private func isEligibleForDispatch(
         job: AnalysisJob,
         deferredWorkAllowed: Bool,
+        nowLaneAllowed: Bool,
         now: TimeInterval
     ) -> Bool {
         // State / lease / nextEligibleAt: queued|paused are eligible
@@ -1471,9 +1679,15 @@ actor AnalysisWorkScheduler {
         guard stateEligible else { return false }
 
         // T0 / deferred split — same as the SQL.
+        // playhead-ewag: the Now-lane carve-out mirrors the SQL's
+        // `priority >= nowLanePriorityFloor` disjunct. Keep the two in lock
+        // step; a Swift mirror that quietly disagrees with the query is how
+        // the cascade path and the FIFO path start selecting different sets.
         let isT0Playback = job.jobType == "playback"
             && job.featureCoverageSec < config.defaultT0DepthSeconds
-        let isDeferredAllowed = deferredWorkAllowed && nextEligibleDue
+        let isNowLane = nowLaneAllowed
+            && job.priority >= Self.nowLanePriorityFloor
+        let isDeferredAllowed = (deferredWorkAllowed || isNowLane) && nextEligibleDue
         return isT0Playback || isDeferredAllowed
     }
 
@@ -1846,8 +2060,12 @@ actor AnalysisWorkScheduler {
         // block in `(foreground, playing)`, and the lane-cap +
         // QualityProfile checks happen later in the run loop using
         // the same gates regular admissions use.
-        guard isEligibleForDispatch(job: job, deferredWorkAllowed: true, now: now)
-        else { return nil }
+        guard isEligibleForDispatch(
+            job: job,
+            deferredWorkAllowed: true,
+            nowLaneAllowed: true,
+            now: now
+        ) else { return nil }
 
         // Read transcript coverage from the asset row. If no asset row
         // exists yet (first run, asset not materialized), the runner
@@ -2022,6 +2240,7 @@ actor AnalysisWorkScheduler {
         // dispatch next under the current admission.
         guard let selected = await selectNextDispatchableJob(
             deferredWorkAllowed: deferredWorkAllowed,
+            nowLaneAllowed: admission.allows(lane: .now),
             now: now
         ) else { return nil }
         let job = selected.job
@@ -2429,18 +2648,27 @@ actor AnalysisWorkScheduler {
 
         guard let selected = await selectNextDispatchableJob(
             deferredWorkAllowed: deferredWorkAllowed,
+            nowLaneAllowed: admission.allows(lane: .now),
             now: now
         ) else {
             return false
         }
 
         let job = selected.job
-        if job.jobType != "playback",
-           !admission.allowsDeferredJob(
-                desiredCoverageSec: job.desiredCoverageSec,
-                t2Threshold: config.t2DepthSeconds
-           ) {
-            return false
+        // playhead-ewag: same lane gate the run loop applies. This path serves
+        // `drainEligible`, i.e. the BGTask overnight drain — pre-fix it carried
+        // an identical copy of the depth misclassification, so the overnight
+        // recovery path was frozen in exactly the same way.
+        var coverageOverride: Double?
+        if job.jobType != "playback" {
+            switch await applyLaneGate(to: job, admission: admission, now: now) {
+            case .hold:
+                return false
+            case .admitProgressFloor(let cap):
+                coverageOverride = cap
+            case .admit:
+                break
+            }
         }
 
         guard canAdmit(job: job) else { return false }
@@ -2462,6 +2690,7 @@ actor AnalysisWorkScheduler {
         await processJob(
             job,
             cascadeWindow: selected.cascadeWindow,
+            desiredCoverageOverride: coverageOverride,
             testCancelAfterRunnerStart: cause
         )
         return true
@@ -2555,12 +2784,20 @@ actor AnalysisWorkScheduler {
             }
 
             // `deferredWorkAllowed` gates the store's deferred (T1+) selection.
-            // Critical cases where T2 is paused but Soon is allowed are handled
-            // after fetch via `admission.allowsDeferredJob`, because the store
-            // predicate only distinguishes T0 vs. deferred, not Soon vs.
-            // Background.
+            // Cases where Background is paused but Soon is allowed are handled
+            // after fetch via the lane gate, because the store predicate only
+            // distinguishes T0 vs. deferred, not Soon vs. Background.
+            //
+            // playhead-ewag: `nowLaneAllowed` is the store-side half of the
+            // lane fix and is NOT optional. Under an unrelaxed `.serious` both
+            // policy flags are false, so `deferredWorkAllowed` binds 0 and the
+            // SELECT itself hides every non-playback row — honouring the Now
+            // lane only after selection would leave the fix inert on exactly
+            // the path (BGTask drain, backgrounded device) where it matters
+            // most.
             let deferredWorkAllowed = admission.policy.allowSoonLane
                 || admission.policy.allowBackgroundLane
+            let nowLaneAllowed = admission.allows(lane: .now)
 
             // playhead-gtt9.24: acoustic-triggered transcription
             // scheduling. Inspect persisted feature_windows for the
@@ -2607,6 +2844,7 @@ actor AnalysisWorkScheduler {
             // re-order.
             guard let selected = await selectNextDispatchableJob(
                 deferredWorkAllowed: deferredWorkAllowed,
+                nowLaneAllowed: nowLaneAllowed,
                 now: now
             ) else {
                 // playhead-narl.2: no dispatchable job → the scheduler is
@@ -2637,14 +2875,23 @@ actor AnalysisWorkScheduler {
             // job will come back to the top of the queue on every re-fetch —
             // a short sleep would produce a hot log/poll loop. A capability
             // change or an explicit wake() will preempt the sleep.
-            if job.jobType != "playback",
-               !admission.allowsDeferredJob(
-                    desiredCoverageSec: job.desiredCoverageSec,
-                    t2Threshold: config.t2DepthSeconds
-               ) {
-                logger.info("Skipping job \(job.jobId) (depth=\(job.desiredCoverageSec)s) under QualityProfile \(admission.qualityProfile.rawValue, privacy: .public)")
-                await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
-                continue
+            //
+            // playhead-ewag: the filter now reads the job's LANE, not its
+            // coverage depth, and every hold leaves a durable advisory on the
+            // row plus a bounded progress floor. The 30 s re-select loop is
+            // unchanged — what changed is that it is no longer silent and no
+            // longer unbounded.
+            var coverageOverride: Double?
+            if job.jobType != "playback" {
+                switch await applyLaneGate(to: job, admission: admission, now: now) {
+                case .hold:
+                    await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
+                    continue
+                case .admitProgressFloor(let cap):
+                    coverageOverride = cap
+                case .admit:
+                    break
+                }
             }
 
             // Per-lane concurrency cap (playhead-r835). T0 playback jobs are
@@ -2701,7 +2948,11 @@ actor AnalysisWorkScheduler {
             // structural insurance against future refactors.
             didStart(job: job)
             defer { didFinish(job: job) }
-            await processJob(job, cascadeWindow: dispatchedCascadeWindow)
+            await processJob(
+                job,
+                cascadeWindow: dispatchedCascadeWindow,
+                desiredCoverageOverride: coverageOverride
+            )
         }
     }
 
@@ -2991,6 +3242,123 @@ actor AnalysisWorkScheduler {
         Self.postActivityRefreshNotification()
     }
 
+    // MARK: - Lane gate application (playhead-ewag)
+
+    /// Apply the post-selection lane gate to `job` and record the outcome.
+    ///
+    /// This is the ONLY place the lane gate is evaluated. Both dispatch paths
+    /// — the run loop and `runSingleDispatchPass` (which serves `drainEligible`
+    /// and therefore the BGTask overnight drain) — route through it, because
+    /// the field bug was present at BOTH sites and a fix applied to one would
+    /// have left the overnight path frozen.
+    ///
+    /// Side effects on a hold, all three mandated by the bead:
+    ///   * bumps the CONSECUTIVE skip count for this job,
+    ///   * writes the durable `lastRejectReason` advisory so the hold is
+    ///     visible in a pulled database instead of being pure silence, and
+    ///   * posts the Activity refresh so the surface can say why.
+    /// On either admit arm the hold record is dropped, so the count means what
+    /// it says.
+    private func applyLaneGate(
+        to job: AnalysisJob,
+        admission: LaneAdmission,
+        now: TimeInterval
+    ) async -> LaneGateOutcome {
+        let lane = job.schedulerLane
+        let queuedForSec = max(0, now - job.createdAt)
+        let outcome = Self.evaluateLaneGate(
+            lane: lane,
+            admission: admission,
+            queuedForSec: queuedForSec,
+            attemptCount: job.attemptCount,
+            desiredCoverageSec: job.desiredCoverageSec,
+            t1DepthSeconds: config.t1DepthSeconds
+        )
+
+        switch outcome {
+        case .admit:
+            clearLaneHold(jobId: job.jobId)
+        case .admitProgressFloor(let cap):
+            clearLaneHold(jobId: job.jobId)
+            logger.info(
+                "Progress floor admitting job \(job.jobId) episode=\(job.episodeId) lane=\(String(describing: lane), privacy: .public) queuedForSec=\(Int(queuedForSec)) cappedCoverageSec=\(Int(cap)) profile=\(admission.qualityProfile.rawValue, privacy: .public)"
+            )
+        case .hold(let reason):
+            let prior = laneHolds[job.jobId]
+            let record = LaneHoldRecord(
+                jobId: job.jobId,
+                episodeId: job.episodeId,
+                lane: lane,
+                qualityProfile: admission.qualityProfile,
+                cause: admission.throttleCause,
+                consecutiveSkips: (prior?.consecutiveSkips ?? 0) + 1,
+                firstHeldAt: prior?.firstHeldAt ?? now,
+                lastHeldAt: now
+            )
+            laneHolds[job.jobId] = record
+            // Durable, UPDATE-in-place advisory. Best-effort in exactly the
+            // same sense as the multi-resource gate's reject write: a store
+            // hiccup must never change the admission verdict.
+            do {
+                try await store.recordJobAdmissionReject(
+                    jobId: job.jobId,
+                    reason: reason,
+                    at: now
+                )
+            } catch {
+                logger.warning("Failed to record lane-hold advisory for job \(job.jobId): \(error)")
+            }
+            logger.info(
+                "Holding job \(job.jobId) episode=\(job.episodeId) lane=\(String(describing: lane), privacy: .public) reason=\(reason, privacy: .public) cause=\(record.cause.rawValue, privacy: .public) consecutiveSkips=\(record.consecutiveSkips)"
+            )
+            Self.postActivityRefreshNotification()
+        }
+        return outcome
+    }
+
+    /// Drop the hold record for `jobId`, if any. Called on every admit so the
+    /// consecutive count never carries across a dispatch.
+    private func clearLaneHold(jobId: String) {
+        guard laneHolds.removeValue(forKey: jobId) != nil else { return }
+        Self.postActivityRefreshNotification()
+    }
+
+    /// playhead-ewag: every job the lane gate is currently holding, with its
+    /// consecutive skip count. Read by diagnostics so a stall is countable.
+    func currentLaneHolds() -> [LaneHoldRecord] {
+        laneHolds.values.sorted { lhs, rhs in
+            if lhs.firstHeldAt != rhs.firstHeldAt { return lhs.firstHeldAt < rhs.firstHeldAt }
+            return lhs.jobId < rhs.jobId
+        }
+    }
+
+    /// playhead-ewag: the lane-gate hold currently recorded for `jobId`, or
+    /// `nil` when the job is not being held.
+    func laneHold(forJobId jobId: String) -> LaneHoldRecord? {
+        laneHolds[jobId]
+    }
+
+    /// playhead-ewag: episodeId → why its analysis is being held, for the
+    /// Activity surface.
+    ///
+    /// This is the "surface it" half of the bead's bound. Before it, a job the
+    /// scheduler had decided not to run contributed NOTHING to the UI — the
+    /// Activity screen's `cause` input was a hardcoded `nil`, so a thermally
+    /// held episode was indistinguishable from one merely waiting its turn,
+    /// and the whole queue read as the silent "Nothing running" that let this
+    /// bug live for weeks. Feeding the cause in turns that into the Paused row
+    /// the copy table already has words for.
+    ///
+    /// Last hold wins when two jobs of the same episode are held; they share a
+    /// profile, so the cause is identical either way.
+    func heldEpisodeCauses() -> [String: InternalMissCause] {
+        var causes: [String: InternalMissCause] = [:]
+        for record in laneHolds.values {
+            causes[record.episodeId] = record.cause
+        }
+        return causes
+    }
+
     /// playhead-quh7: notify the Activity screen to re-aggregate its
     /// snapshot. Posted from the two scheduler-state edges that flip
     /// the section bucketing (a job moving from queued → running, and
@@ -3209,7 +3577,43 @@ actor AnalysisWorkScheduler {
             profile: profile,
             foregroundAggressive: isForegroundAggressiveMode()
         )
-        return LaneAdmission(qualityProfile: profile, policy: effectivePolicy)
+        return LaneAdmission(
+            qualityProfile: profile,
+            policy: effectivePolicy,
+            throttleCause: Self.throttleCause(
+                isLowPowerMode: snapshot.isLowPowerMode,
+                batteryLevel: batteryState.level,
+                isCharging: batteryState.isCharging
+            )
+        )
+    }
+
+    /// playhead-ewag: which of the three demotion inputs `QualityProfile`
+    /// consumed is the one to name to the user.
+    ///
+    /// Mirrors the precedence in ``QualityProfile/derive(thermalState:batteryLevel:batteryState:isLowPowerMode:)``
+    /// — Low Power Mode is tested first there, and a charging device is never
+    /// demoted for its battery level. Thermal is the residual: if neither
+    /// power condition holds, the profile can only have come from the SoC.
+    ///
+    /// This is deliberately a NAMING decision, not a second derivation: it
+    /// never decides whether to throttle, only which sentence describes a
+    /// throttle that `QualityProfile` already chose. If the two ever disagree
+    /// the worst outcome is imprecise copy, never a wrong admission.
+    static func throttleCause(
+        isLowPowerMode: Bool,
+        batteryLevel: Float,
+        isCharging: Bool
+    ) -> InternalMissCause {
+        if isLowPowerMode { return .lowPowerMode }
+        // A negative level is UIDevice's "monitoring off" sentinel and never
+        // demotes, so it must not be named as the cause either.
+        if batteryLevel >= 0,
+           batteryLevel < QualityProfile.lowBatteryThreshold,
+           !isCharging {
+            return .batteryLowUnplugged
+        }
+        return .thermal
     }
 
     /// playhead-gtt9.14: derive the effective `SchedulerPolicy` from the
@@ -3265,9 +3669,17 @@ actor AnalysisWorkScheduler {
 
     // MARK: - Job Processing
 
+    /// - Parameter desiredCoverageOverride: playhead-ewag. Coverage target for
+    ///   THIS dispatch only, used by the lane gate's progress floor to admit a
+    ///   bounded slice of a job whose lane is closed. Deliberately NOT
+    ///   persisted: `updateJobDesiredCoverage` would permanently shrink the
+    ///   job's real target, so a thermal hold would silently downgrade how much
+    ///   of the episode ever gets analysed. `nil` (every other caller) reads
+    ///   the row's own target, exactly as before.
     private func processJob(
         _ job: AnalysisJob,
         cascadeWindow: CandidateWindow? = nil,
+        desiredCoverageOverride: Double? = nil,
         testCancelAfterRunnerStart: InternalMissCause? = nil
     ) async {
         // Resolve audio URL from download cache.
@@ -3540,7 +3952,7 @@ actor AnalysisWorkScheduler {
             podcastId: job.podcastId ?? "",
             analysisAssetId: assetId,
             audioURL: localAudioURL,
-            desiredCoverageSec: job.desiredCoverageSec,
+            desiredCoverageSec: desiredCoverageOverride ?? job.desiredCoverageSec,
             mode: .preRollWarmup,
             outputPolicy: .writeWindowsAndCues,
             priority: .medium,
@@ -5941,10 +6353,8 @@ extension AnalysisJob {
     /// spec. Keep the ranges contiguous and non-overlapping — every integer
     /// priority must map to exactly one lane.
     var schedulerLane: AnalysisWorkScheduler.SchedulerLane {
-        switch priority {
-        case 20...:    return .now
-        case 1..<20:   return .soon
-        default:       return .background
-        }
+        if priority >= AnalysisWorkScheduler.nowLanePriorityFloor { return .now }
+        if priority >= AnalysisWorkScheduler.soonLanePriorityFloor { return .soon }
+        return .background
     }
 }

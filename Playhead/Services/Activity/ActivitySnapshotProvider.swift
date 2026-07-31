@@ -95,6 +95,19 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     /// DownloadManager directory scan over the eligible episode IDs; tests
     /// inject a small set.
     private let downloadedEpisodeIdsProvider: @Sendable (Set<String>) async -> Set<String>
+    /// playhead-ewag: `episodeId → why the scheduler is holding its analysis`.
+    ///
+    /// The provider's `cause:` input was a hardcoded `nil` until this bead,
+    /// with the comment that a live cause stream was "a follow-up bead's
+    /// scope". That silence is what a thermally-held queue looked like from
+    /// the UI: identical to an empty one. This closure is the narrowest
+    /// possible live cause stream — only scheduler lane holds, only for
+    /// episodes that have one — and every other episode still reduces with
+    /// `cause: nil` exactly as before.
+    ///
+    /// Production wires `AnalysisWorkScheduler.heldEpisodeCauses()`; the
+    /// default keeps every existing construction site (and Previews) unchanged.
+    private let heldEpisodeCausesProvider: @Sendable () async -> [String: InternalMissCause]
     private let modelContainer: ModelContainer
 
     init(
@@ -103,6 +116,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         runningEpisodeIdProvider: @escaping @Sendable () async -> String?,
         downloadProgressProvider: @escaping @Sendable () async -> [String: Double],
         downloadedEpisodeIdsProvider: @escaping @Sendable (Set<String>) async -> Set<String> = { _ in [] },
+        heldEpisodeCausesProvider: @escaping @Sendable () async -> [String: InternalMissCause] = { [:] },
         modelContainer: ModelContainer
     ) {
         self.store = store
@@ -110,6 +124,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         self.runningEpisodeIdProvider = runningEpisodeIdProvider
         self.downloadProgressProvider = downloadProgressProvider
         self.downloadedEpisodeIdsProvider = downloadedEpisodeIdsProvider
+        self.heldEpisodeCausesProvider = heldEpisodeCausesProvider
         self.modelContainer = modelContainer
     }
 
@@ -119,6 +134,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         let snapshot = await capabilitySnapshotProvider()
         let eligibility = EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
         let runningEpisodeId = await runningEpisodeIdProvider()
+        let heldEpisodeCauses = await heldEpisodeCausesProvider()
 
         // playhead-6boz: AnalysisStore is now lazily-opened — the
         // first call to a public method blocks while open + DDL
@@ -260,14 +276,14 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             guard let asset = allAssets[episodeId] else { continue }
 
             let analysisState = EpisodeSurfaceStatusObserver.analysisState(from: asset)
+            // playhead-ewag: the only live cause wired into the Activity
+            // provider is a scheduler lane hold. Everything else still
+            // reduces with `nil` — the dfem mapping remains keyed off the
+            // reducer's eligibility branch + persisted status, and a fuller
+            // cause stream is still a follow-up bead's scope.
             let status = episodeSurfaceStatus(
                 state: analysisState,
-                cause: nil, // v1: no cause attribution wired into the
-                            // Activity provider; the dfem mapping is the
-                            // Paused row's home and is keyed off the
-                            // reducer's eligibility branch + persisted
-                            // status. Plumbing a live cause stream is a
-                            // follow-up bead's scope.
+                cause: heldEpisodeCauses[episodeId],
                 eligibility: eligibility,
                 coverage: episode.coverageSummary,
                 readinessAnchor: episode.playbackAnchor
@@ -382,6 +398,10 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         let snapshot = await capabilitySnapshotProvider()
         let eligibility = EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
         let runningEpisodeId = await runningEpisodeIdProvider()
+        // playhead-ewag: the dogfood snapshot is the surface Dan actually
+        // pulls off a stalled device, so it carries the same lane-hold cause
+        // the UI does. A held row must not read as an idle one here either.
+        let heldEpisodeCauses = await heldEpisodeCausesProvider()
 
         let storeIsOpen = await store.isOpen
         guard storeIsOpen else {
@@ -464,7 +484,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             let analysisState = EpisodeSurfaceStatusObserver.analysisState(from: asset)
             let status = episodeSurfaceStatus(
                 state: analysisState,
-                cause: nil,
+                cause: heldEpisodeCauses[episodeId],
                 eligibility: eligibility,
                 coverage: episode.coverageSummary,
                 readinessAnchor: episode.playbackAnchor

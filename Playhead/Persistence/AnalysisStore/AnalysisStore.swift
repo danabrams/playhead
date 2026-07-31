@@ -13045,15 +13045,33 @@ actor AnalysisStore {
         return results
     }
 
+    /// - Parameter nowLanePriorityFloor: playhead-ewag. Lowest `priority` that
+    ///   counts as Now-lane work and is therefore selectable even when
+    ///   `deferredWorkAllowed` is false; `nil` disables the carve-out entirely
+    ///   (pre-ewag behaviour).
+    ///
+    ///   This exists because `deferredWorkAllowed` is a single bit derived from
+    ///   `allowSoonLane || allowBackgroundLane`, and BOTH are false at
+    ///   `QualityProfile.serious`. Without the carve-out the query hides every
+    ///   non-playback row on a warm device — including the explicit downloads
+    ///   the user is waiting on — so the scheduler cannot even see the work it
+    ///   is supposed to admit, and no amount of post-selection lane logic can
+    ///   recover a row that was never selected.
+    ///
+    ///   The floor is passed in rather than hardcoded so the number lives in
+    ///   exactly one place (`AnalysisWorkScheduler.nowLanePriorityFloor`,
+    ///   which also defines `AnalysisJob.schedulerLane`). A second literal in a
+    ///   query string is how the SQL and the Swift lane derivation drift apart.
     func fetchNextEligibleJob(
         deferredWorkAllowed: Bool,
+        nowLanePriorityFloor: Int? = nil,
         t0ThresholdSec: Double,
         now: TimeInterval
     ) throws -> AnalysisJob? {
         // T0 jobs: playback jobs that have zero coverage — always eligible.
-        // Deferred jobs: backfill/preAnalysis require the caller's shared
-        // admission-policy gate to allow deferred work and nextEligibleAt <=
-        // now (or NULL).
+        // Deferred jobs: backfill/preAnalysis require EITHER the caller's
+        // shared admission-policy gate to allow deferred work OR the row to be
+        // Now-lane, and nextEligibleAt <= now (or NULL).
         let sql = """
             SELECT * FROM analysis_jobs
             WHERE (
@@ -13065,7 +13083,7 @@ actor AnalysisStore {
               AND (
                 (jobType = 'playback' AND featureCoverageSec < ?)
                 OR (
-                  ? = 1
+                  (? = 1 OR (? = 1 AND priority >= ?))
                   AND (nextEligibleAt IS NULL OR nextEligibleAt <= ?)
                 )
               )
@@ -13079,7 +13097,12 @@ actor AnalysisStore {
         bind(stmt, 3, now)
         bind(stmt, 4, t0ThresholdSec)
         bind(stmt, 5, deferredWorkAllowed ? 1 : 0)
-        bind(stmt, 6, now)
+        // A separate enable bit rather than an unreachable sentinel floor:
+        // `bind(_:_:Int)` narrows to `Int32`, so an `Int.max` sentinel would
+        // trap at runtime the moment the carve-out was disabled.
+        bind(stmt, 6, nowLanePriorityFloor == nil ? 0 : 1)
+        bind(stmt, 7, nowLanePriorityFloor ?? 0)
+        bind(stmt, 8, now)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return readJob(stmt)
     }

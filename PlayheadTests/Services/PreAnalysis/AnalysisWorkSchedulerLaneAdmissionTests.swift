@@ -179,48 +179,57 @@ struct AnalysisWorkSchedulerLaneAdmissionTests {
 
     // MARK: - LaneAdmission policy checks
 
-    @Test("LaneAdmission.allowsDeferredJob: nominal allows Soon + Background")
+    // playhead-ewag: these four used to assert the coverage-DEPTH dual
+    // (`allowsDeferredJob(desiredCoverageSec:t2Threshold:)`). That predicate
+    // was the bug — it read a job's eventual coverage TARGET as the cost of
+    // its next dispatch — and it is gone. The lane matrix they were really
+    // pinning is unchanged, so they are restated against
+    // `allows(lane:)`, the priority-derived gate that replaced it.
+
+    @Test("LaneAdmission.allows(lane:): nominal allows every lane")
     func testLaneAdmissionNominalAllowsAll() {
         let admission = AnalysisWorkScheduler.LaneAdmission(
             qualityProfile: .nominal,
             policy: QualityProfile.nominal.schedulerPolicy
         )
-        #expect(admission.allowsDeferredJob(desiredCoverageSec: 300, t2Threshold: 900))
-        #expect(admission.allowsDeferredJob(desiredCoverageSec: 900, t2Threshold: 900))
-        #expect(admission.allowsDeferredJob(desiredCoverageSec: 1800, t2Threshold: 900))
+        #expect(admission.allows(lane: .now))
+        #expect(admission.allows(lane: .soon))
+        #expect(admission.allows(lane: .background))
     }
 
-    @Test("LaneAdmission.allowsDeferredJob: fair allows Soon but blocks Background")
+    @Test("LaneAdmission.allows(lane:): fair allows Now + Soon but blocks Background")
     func testLaneAdmissionFairBlocksBackground() {
         let admission = AnalysisWorkScheduler.LaneAdmission(
             qualityProfile: .fair,
             policy: QualityProfile.fair.schedulerPolicy
         )
-        // Soon lane (coverage < t2Threshold)
-        #expect(admission.allowsDeferredJob(desiredCoverageSec: 300, t2Threshold: 900))
-        // Background lane (coverage >= t2Threshold)
-        #expect(!admission.allowsDeferredJob(desiredCoverageSec: 900, t2Threshold: 900))
-        #expect(!admission.allowsDeferredJob(desiredCoverageSec: 1800, t2Threshold: 900))
+        #expect(admission.allows(lane: .now))
+        #expect(admission.allows(lane: .soon))
+        #expect(!admission.allows(lane: .background))
     }
 
-    @Test("LaneAdmission.allowsDeferredJob: serious blocks Soon and Background")
+    @Test("LaneAdmission.allows(lane:): serious blocks Soon + Background but NOT Now")
     func testLaneAdmissionSeriousBlocksDeferred() {
         let admission = AnalysisWorkScheduler.LaneAdmission(
             qualityProfile: .serious,
             policy: QualityProfile.serious.schedulerPolicy
         )
-        #expect(!admission.allowsDeferredJob(desiredCoverageSec: 300, t2Threshold: 900))
-        #expect(!admission.allowsDeferredJob(desiredCoverageSec: 900, t2Threshold: 900))
+        // The whole of playhead-ewag in one line: user-initiated work drains
+        // at .serious. Only `.critical` stops it.
+        #expect(admission.allows(lane: .now))
+        #expect(!admission.allows(lane: .soon))
+        #expect(!admission.allows(lane: .background))
     }
 
-    @Test("LaneAdmission.allowsDeferredJob: critical blocks all deferred")
+    @Test("LaneAdmission.allows(lane:): critical blocks every lane including Now")
     func testLaneAdmissionCriticalBlocksDeferred() {
         let admission = AnalysisWorkScheduler.LaneAdmission(
             qualityProfile: .critical,
             policy: QualityProfile.critical.schedulerPolicy
         )
-        #expect(!admission.allowsDeferredJob(desiredCoverageSec: 300, t2Threshold: 900))
-        #expect(!admission.allowsDeferredJob(desiredCoverageSec: 900, t2Threshold: 900))
+        #expect(!admission.allows(lane: .now))
+        #expect(!admission.allows(lane: .soon))
+        #expect(!admission.allows(lane: .background))
     }
 
     // MARK: - AdmissionGate integration (playhead-bnrs)

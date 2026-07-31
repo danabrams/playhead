@@ -5009,6 +5009,14 @@ final class PlayheadRuntime {
             downloadedEpisodeIdsProvider: { [downloadManager] episodeIds in
                 await downloadManager.cachedEpisodeIds(matching: episodeIds)
             },
+            // playhead-ewag: the live lane-hold cause stream. Without this the
+            // Activity screen cannot distinguish an episode the scheduler has
+            // decided not to run yet (device warm / in Low Power Mode) from
+            // one merely waiting its turn — the silence that let five starved
+            // downloads look like an idle queue for 20+ minutes.
+            heldEpisodeCausesProvider: { [analysisWorkScheduler] in
+                await analysisWorkScheduler.heldEpisodeCauses()
+            },
             modelContainer: modelContainer
         )
     }
