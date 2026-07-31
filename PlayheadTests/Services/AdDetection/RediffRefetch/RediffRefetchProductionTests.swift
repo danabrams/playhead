@@ -310,6 +310,121 @@ struct RediffRefetchEnumeratorTests {
         #expect(await enumerator.candidates().isEmpty)
     }
 
+    /// A throwaway audio-cache root standing in for one app Data container.
+    /// `holding: nil` builds the directory tree WITHOUT the artifact — the
+    /// post-eviction shape.
+    private func makeContainer(prefix: String, holding name: String?) throws -> (root: URL, audio: URL?) {
+        let root = try makeTempDir(prefix: prefix)
+        let complete = root.appendingPathComponent("complete", isDirectory: true)
+        try FileManager.default.createDirectory(at: complete, withIntermediateDirectories: true)
+        guard let name else { return (root, nil) }
+        let audio = complete.appendingPathComponent(name)
+        try Data(repeating: 7, count: 256).write(to: audio)
+        return (root, audio)
+    }
+
+    /// playhead-b8hj: the sweep's ONLY gate on the played copy is this
+    /// resolution, and before b8hj it was `URL(string:)` on a string that bakes
+    /// in the app Data-container UUID. iOS re-creates that container on
+    /// reinstall/restore — 12 distinct UUIDs across 36 rows on the owner's
+    /// device — so every seed dropped and the sweep reported a healthy no-op.
+    ///
+    /// The audio here is written into a SECOND container and the first is
+    /// deleted before enumeration, so a candidate can only appear if the seed
+    /// was re-rooted. `localAudioURL` is checked against the new file rather
+    /// than merely being non-nil: it is handed to the local sampler and to the
+    /// byte differ as the A-side, so a wrong path would spend a ~54 MB fetch.
+    @Test("playhead-b8hj: a persisted seed survives the container UUID changing under it")
+    func seedSurvivesContainerChange() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-container-move"
+        let name = "\(DownloadManager.safeFilename(for: episodeId)).mp3"
+
+        let old = try makeContainer(prefix: "RediffEnumOldContainer", holding: name)
+        let oldAudio = try #require(old.audio)
+        // The row is persisted while the FIRST container is live.
+        try await store.insertAsset(makeAsset(
+            id: "a-moved",
+            episodeId: episodeId,
+            sourceURL: AudioCacheLocation.portableString(for: oldAudio, cacheRoot: old.root)
+        ))
+        try await store.upsertEpisodeFingerprints(makeFingerprintRecord(assetId: "a-moved", capturedAt: 42))
+
+        // Reinstall: same artifact, brand-new container; the old tree is gone.
+        let new = try makeContainer(prefix: "RediffEnumNewContainer", holding: name)
+        defer { try? FileManager.default.removeItem(at: new.root) }
+        let newAudio = try #require(new.audio)
+        try FileManager.default.removeItem(at: old.root)
+
+        let box = RediffEnclosureResolverBox()
+        box.resolver = { @Sendable _ in URL(string: "https://cdn.example.com/current.mp3") }
+        let enumerator = AnalysisStoreRediffRefetchEnumerator(
+            store: store, enclosureResolver: box, cacheRoot: new.root
+        )
+
+        let candidates = await enumerator.candidates()
+        #expect(candidates.count == 1, "the sweep must still see work after a container move")
+        let candidate = try #require(candidates.first)
+        #expect(candidate.localAudioURL.standardizedFileURL == newAudio.standardizedFileURL)
+    }
+
+    @Test("playhead-b8hj: a LEGACY absolute seed from a dead container also survives")
+    func legacyAbsoluteSeedSurvivesContainerChange() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-legacy-container"
+        let name = "\(DownloadManager.safeFilename(for: episodeId)).mp3"
+
+        let old = try makeContainer(prefix: "RediffEnumLegacyOld", holding: name)
+        // Exactly the shape of the 36 rows already on the owner's device.
+        let legacyAbsolute = try #require(old.audio).absoluteString
+        try await store.insertAsset(makeAsset(
+            id: "a-legacy", episodeId: episodeId, sourceURL: legacyAbsolute
+        ))
+        try await store.upsertEpisodeFingerprints(makeFingerprintRecord(assetId: "a-legacy", capturedAt: 42))
+
+        let new = try makeContainer(prefix: "RediffEnumLegacyNew", holding: name)
+        defer { try? FileManager.default.removeItem(at: new.root) }
+        try FileManager.default.removeItem(at: old.root)
+
+        let box = RediffEnclosureResolverBox()
+        box.resolver = { @Sendable _ in URL(string: "https://cdn.example.com/current.mp3") }
+        let enumerator = AnalysisStoreRediffRefetchEnumerator(
+            store: store, enclosureResolver: box, cacheRoot: new.root
+        )
+        let newAudio = try #require(new.audio)
+        let candidate = try #require(await enumerator.candidates().first)
+        #expect(candidate.localAudioURL.standardizedFileURL == newAudio.standardizedFileURL)
+    }
+
+    @Test("playhead-b8hj: an evicted artifact yields no candidate rather than a doomed fetch")
+    func evictedArtifactYieldsNoCandidate() async throws {
+        let store = try await makeTestStore()
+        let episodeId = "ep-evicted-container"
+        let name = "\(DownloadManager.safeFilename(for: episodeId)).mp3"
+
+        let old = try makeContainer(prefix: "RediffEnumEvictOld", holding: name)
+        let oldAudio = try #require(old.audio)
+        try await store.insertAsset(makeAsset(
+            id: "a-evicted",
+            episodeId: episodeId,
+            sourceURL: AudioCacheLocation.portableString(for: oldAudio, cacheRoot: old.root)
+        ))
+        try await store.upsertEpisodeFingerprints(makeFingerprintRecord(assetId: "a-evicted", capturedAt: 42))
+
+        // New container, but `Library/Caches` was evicted so the audio is NOT
+        // there. Re-rooting must not manufacture a candidate.
+        let new = try makeContainer(prefix: "RediffEnumEvictNew", holding: nil)
+        defer { try? FileManager.default.removeItem(at: new.root) }
+        try FileManager.default.removeItem(at: old.root)
+
+        let box = RediffEnclosureResolverBox()
+        box.resolver = { @Sendable _ in URL(string: "https://cdn.example.com/current.mp3") }
+        let enumerator = AnalysisStoreRediffRefetchEnumerator(
+            store: store, enclosureResolver: box, cacheRoot: new.root
+        )
+        #expect(await enumerator.candidates().isEmpty)
+    }
+
     @Test("nil resolver (pre-attach window) yields zero candidates — a benign no-op sweep")
     func nilResolverYieldsNothing() async throws {
         let store = try await makeTestStore()

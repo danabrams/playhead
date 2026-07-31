@@ -1493,7 +1493,7 @@ struct DuplicateAssetMergeSummary: Sendable, Equatable {
 ///
 /// playhead-0hi9: 13 of the 14 duplicated episodes on the owner's device hold
 /// two rows naming the SAME file. The 14th holds two DIFFERENT `sourceURL`s.
-/// That one is filed separately (playhead-9x4c tracks `sourceURL` storing
+/// That one is filed separately (playhead-b8hj tracks `sourceURL` storing
 /// absolute container paths) and is explicitly out of scope here — but it is
 /// in the same table, and this sweep will meet it.
 ///
@@ -1506,10 +1506,13 @@ struct DuplicateAssetMergeSummary: Sendable, Equatable {
 /// reason otherwise.
 ///
 /// The comparison is on the last path component, not the whole URL, precisely
-/// because playhead-9x4c makes the leading container path unstable across
+/// because playhead-b8hj makes the leading container path unstable across
 /// reinstalls: `DownloadManager.safeFilename(for:)` derives the basename from
 /// the episode id, so it survives a container move that rewrites everything to
-/// its left.
+/// its left. b8hj has since stopped WRITING the volatile prefix (see
+/// ``AudioCacheLocation``), which makes this reduction agree with the new
+/// `complete/<name>` form as well — but it stays, because the legacy absolute
+/// rows it was written for are still in the table and are not being repaired.
 enum AssetMergeGuard: Sendable, Equatable {
     /// Both rows name the same on-disk artifact.
     case merge

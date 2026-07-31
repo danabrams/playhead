@@ -1793,7 +1793,11 @@ actor AnalysisCoordinator {
             episodeId: episodeId,
             assetFingerprint: assetId, // Placeholder until content hashing
             weakFingerprint: weakFingerprint,
-            sourceURL: audioURL.url.absoluteString,
+            // playhead-b8hj: container-PORTABLE, never `absoluteString` — see
+            // ``AudioCacheLocation``. The column is write-once, so a path that
+            // bakes in the Data-container UUID is permanently dead once iOS
+            // re-creates the container on reinstall or restore.
+            sourceURL: AudioCacheLocation.portableString(for: audioURL.url),
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
             confirmedAdCoverageEndTime: nil,

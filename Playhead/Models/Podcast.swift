@@ -99,6 +99,21 @@ final class Episode {
     var podcast: Podcast?
     var title: String
     var audioURL: URL
+    /// The second durable store of a local audio path, after
+    /// `analysis_assets.sourceURL` — and the ONE the playhead-b8hj audit left
+    /// as-is, deliberately. It is a MIRROR, never a resolver: nothing in the
+    /// tree opens it. `PlayheadRuntime` overwrites it from
+    /// `DownloadManager.cachedFileURL(for:)` whenever that resolves, and the
+    /// only other reader (`PodcastDiscoveryService`) tests it for NIL-NESS as a
+    /// "don't overwrite a pinned episode's duration" flag. A stale container
+    /// path is therefore inert as a path.
+    ///
+    /// It is NOT inert as a flag: it is never written back to nil, so an
+    /// evicted episode reads as pinned until it is played again. That is
+    /// pre-existing behaviour, out of b8hj's scope, and noted so the next
+    /// reader does not mistake the value for a live location. Do NOT start
+    /// dereferencing it — route through `DownloadManager`, the resolver of
+    /// record, or ``AudioCacheLocation`` for a persisted string.
     var cachedAudioURL: URL?
     var downloadState: DownloadState
     var lastPlayedAnalysisAssetId: UUID?

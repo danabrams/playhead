@@ -1250,6 +1250,44 @@ struct DuplicateAssetReconcileTests {
     /// two such rows compare equal. Nothing covered it — the existing unknown
     /// -source test uses `""`, which the `isEmpty` check rejects on its own.
     /// The `"/"` rejection is pinned for the same reason.
+    /// playhead-b8hj: `sourceURL` now holds `complete/<name>` for rows written
+    /// after the fix, while every pre-existing row keeps its absolute path —
+    /// deliberately, since there is no repair sweep. `artifactBasename` is the
+    /// ONLY reader that sees both forms, and it feeds an IRREVERSIBLE merge, so
+    /// the two forms must reduce identically. A mixed pair is not hypothetical:
+    /// it is the shape every dogfood device will carry after the next launch.
+    @Test("playhead-b8hj: the relative and absolute forms of one artifact merge")
+    func relativeAndAbsoluteFormsOfOneArtifactMerge() {
+        func row(_ id: String, _ sourceURL: String) -> AssetMergeRow {
+            AssetMergeRow(
+                rowId: 1, id: id, assetFingerprint: id, createdAt: 1,
+                analysisState: "queued", terminalReason: nil, sourceURL: sourceURL
+            )
+        }
+        let name = "\(DownloadManager.safeFilename(for: "https://feed.example/rss::guid-x")).mp3"
+        let absolute = "file:///var/mobile/Containers/Data/Application/"
+            + "BCC522DD-B26A-430D-B0F1-CCDE0D4235F9/Library/Caches/Playhead/AudioCache/complete/\(name)"
+        let relative = "complete/\(name)"
+
+        #expect(row("a", relative).artifactBasename == name.lowercased())
+        #expect(row("a", absolute).artifactBasename == name.lowercased())
+        #expect(
+            AnalysisStore.mergeGuard(victim: row("ph", absolute), survivor: row("sha", relative)) == .merge,
+            "a legacy absolute row and a post-b8hj relative row naming the SAME artifact must still merge"
+        )
+        #expect(
+            AnalysisStore.mergeGuard(victim: row("ph", relative), survivor: row("sha", absolute)) == .merge,
+            "and symmetrically"
+        )
+        // The guard must still refuse two genuinely different artifacts, even
+        // when one side is relative — otherwise the reduction has gone too far.
+        let other = "complete/\(DownloadManager.safeFilename(for: "https://feed.example/rss::guid-y")).mp3"
+        #expect(
+            AnalysisStore.mergeGuard(victim: row("ph", absolute), survivor: row("sha", other))
+                != .merge
+        )
+    }
+
     @Test("a blank-but-not-empty sourceURL is unknown, never a basename")
     func blankSourceURLIsUnknownRatherThanMerged() {
         func row(_ id: String, _ sourceURL: String) -> AssetMergeRow {

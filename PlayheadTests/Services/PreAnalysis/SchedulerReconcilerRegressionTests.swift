@@ -750,7 +750,54 @@ struct SchedulerBugFixRegressionTests {
         let asset = try #require(await store.fetchAsset(id: analysisAssetId))
         #expect(asset.episodeId == "ep-fk-regression")
         #expect(asset.assetFingerprint == "fp-fk-regression")
-        #expect(asset.sourceURL == localURL.absoluteString)
+        #expect(asset.sourceURL == localURL.absoluteString,
+                "a path outside the audio cache has no portable form and is stored verbatim")
+    }
+
+    /// playhead-b8hj: `analysis_assets.sourceURL` is write-once — no
+    /// `UPDATE ... SET sourceURL` exists — so an absolute path baked in here is
+    /// permanent. The audio cache is addressed through the app Data container,
+    /// whose UUID iOS rewrites on reinstall and restore, which is how 36 rows
+    /// on the owner's device came to name 12 different, mostly-dead containers.
+    ///
+    /// The URL is deliberately NOT created on disk: what is under test is what
+    /// gets written to the column, and the writer must not depend on the file
+    /// still being there. The stem is the real one, `SHA-256(episodeId)`.
+    @Test("playhead-b8hj: a cached audio path is persisted container-portable, never absolute")
+    func testSchedulerPersistsContainerPortableSourceURL() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let episodeId = "ep-b8hj-portable"
+        let name = "\(DownloadManager.safeFilename(for: episodeId)).mp3"
+        // Inside the LIVE audio cache — the production shape.
+        let localURL = DownloadManager.defaultCacheDirectory()
+            .appendingPathComponent("complete", isDirectory: true)
+            .appendingPathComponent(name)
+        downloads.cachedURLs[episodeId] = localURL
+
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "b8hj-portable-job",
+            jobType: "preAnalysis",
+            episodeId: episodeId,
+            analysisAssetId: nil,
+            workKey: "fp-b8hj-portable:1:preAnalysis",
+            sourceFingerprint: "fp-b8hj-portable",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        #expect(await scheduler.processNextDispatchableJobForTesting())
+        let updatedJob = try #require(await store.fetchJob(byId: "b8hj-portable-job"))
+        let resolvedAssetId = try #require(updatedJob.analysisAssetId)
+        let asset = try #require(await store.fetchAsset(id: resolvedAssetId))
+
+        #expect(asset.sourceURL == "complete/\(name)")
+        #expect(!asset.sourceURL.contains("Containers"),
+                "a container segment in a write-once column is a permanent dead reference")
+        #expect(URL(string: asset.sourceURL)?.isFileURL != true,
+                "an untaught reader must resolve nothing rather than open a wrong path")
     }
 
     @Test("scheduler upgrades reused placeholder asset to canonical full-file SHA when current fingerprint proves identity")
