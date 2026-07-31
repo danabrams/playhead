@@ -142,4 +142,33 @@ enum RediffActivation {
     /// wholesale-reject behavior — this activation does NOT touch the lagged
     /// width oracle, so there is no lagged false-widening exposure.
     static let nonMonotonicSegmentRecoveryEnabled = true
+
+    // MARK: - playhead-qs0d (day-0 byte-exact AUTO-SKIP promotion)
+
+    /// THE day-0 auto-skip switch. `true` = a day-0 mark minted from a
+    /// STRICT monotonic-clean byte-exact diff is persisted
+    /// `eligibilityGate = .eligible` instead of `.markOnly`, so the
+    /// orchestrator may auto-skip it. `false` = the xsdz.36.4 mark-only
+    /// behavior, byte-for-byte.
+    ///
+    /// ACTIVATED `true` (playhead-qs0d, 2026-07-31, Dan: "let's turn on rediff
+    /// for the next build"). The evidence is one episode on the owner's clean
+    /// install, same afternoon: the two `dayZeroRediffByteExact` windows
+    /// (confidence 1.00, OUTER edges) were 2-for-2 CORRECT and skipped
+    /// NOTHING, while three `segmentAggregated` windows (confidence 0.40–0.42,
+    /// INNER edges) were 0-for-3 and skipped 210 s of show. The pipeline was
+    /// skipping exactly the wrong population.
+    ///
+    /// SCOPE — three things this flag does NOT do:
+    ///   • It does not touch the per-edge ANCHOR stamp. Strict byte-exact
+    ///     slots record `.rediffByteExact` on both edges regardless of this
+    ///     flag: that is a correctness fix (the edges really were set by the
+    ///     byte differ), not a permission grant, and `unanchored` there meant
+    ///     "nobody wrote an anchor", never "the boundary is unknown".
+    ///   • It does not promote playhead-9s6q SEGMENT-RECOVERED
+    ///     (non-monotonic) slots. Those stay `.markOnly` AND `.unanchored`
+    ///     pending playhead-pyq7's separate validation — a chain that dropped
+    ///     runs has not proven its A-timeline mapping at the edge.
+    ///   • It does not enable auto-skip for any other producer.
+    static let dayZeroByteExactAutoSkipEnabled = true
 }

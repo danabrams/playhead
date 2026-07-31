@@ -117,6 +117,43 @@ enum AutoSkipEdgePadding {
     /// (wraj surfacing + veto masks + 3-run reproducibility) green.
     static let isEnabledByDefault = false
 
+    /// playhead-qs0d: the TARGETED activation predicate — is this policy live
+    /// for a span carrying THESE anchors?
+    ///
+    /// Read the master switch's polarity carefully before touching this. With
+    /// `isEnabledByDefault == false` the orchestrator does not "skip nothing" —
+    /// it skips every eligible span at its RAW, unpadded bounds, because
+    /// `paddedCueSpan` short-circuits to the snapped span. The master switch ON
+    /// is therefore strictly MORE conservative than OFF: padding only ever
+    /// shrinks a window or suppresses it (`startMargin` returns nil for an
+    /// unanchored start), never widens one and never admits a span that was
+    /// previously blocked.
+    ///
+    /// That polarity is what makes a targeted activation safe. A span whose
+    /// BOTH edges are `.rediffByteExact` is one the byte differ proved
+    /// sample-accurately, and turning the policy on for exactly those spans
+    /// gives them the derived late-safe margins (0.50 s in / 0.75 s off)
+    /// WITHOUT changing a single other span's behavior — every other anchor
+    /// combination still takes the master switch's answer. Dan asked for
+    /// *rediff* to skip; this is that, and nothing else.
+    ///
+    /// Both edges are required, not just the start: an `.unanchored` end on a
+    /// byte-exact start would pull in `endMarginUnanchoredSeconds` (10.25 s),
+    /// a margin derived for a population this lane is not.
+    ///
+    /// `masterEnabled` is the caller's RUNTIME flag (the orchestrator's
+    /// `edgePaddingEnabled`, seeded from `isEnabledByDefault` but overridable),
+    /// taken as an input rather than read from the static so this stays pure
+    /// and a runtime disable really disables the master lane.
+    static func isActive(
+        masterEnabled: Bool,
+        startAnchor: AutoSkipEdgeAnchor,
+        endAnchor: AutoSkipEdgeAnchor
+    ) -> Bool {
+        if masterEnabled { return true }
+        return startAnchor == .rediffByteExact && endAnchor == .rediffByteExact
+    }
+
     // MARK: Derived margins (seconds) — derivation doc §5
 
     /// Start margin, rediff byte-exact tier: 0 early events across the

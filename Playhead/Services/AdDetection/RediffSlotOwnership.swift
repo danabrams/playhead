@@ -279,6 +279,46 @@ enum RediffSlotOwnership {
         return mergedAndCapped(perBSideSlots.flatMap { $0 }, config: config)
     }
 
+    // MARK: - Strict (monotonic-clean) classification (playhead-qs0d)
+
+    /// Which slots of a k-way `unioned` set are STRICT byte-exact — i.e. their
+    /// geometry is reproduced EXACTLY by the union of the monotonic-clean
+    /// personas alone. Returns a mask index-aligned with `unioned`.
+    ///
+    /// Why this exists. The day-0 mint unions per-persona slot lists that come
+    /// from two different acceptance arms: the strict byte gate (a chain that
+    /// dropped nothing, so every edge is a proven A-timeline byte divergence)
+    /// and the playhead-9s6q segment-recovery arm (a chain that DID drop runs
+    /// and was rescued by the monotonic-segment partition). Only the first has
+    /// earned an auto-skip anchor. Because `unionedPlayedSlots` MERGES across
+    /// personas, "which arm produced this slot" is not a per-list property —
+    /// a recovered persona can widen, or bridge, a slot a strict persona found.
+    /// Recomputing the union over the strict subset and demanding an EXACT
+    /// geometry match is the conservative answer to that: any contribution from
+    /// a recovered persona moves an edge (or merges two slots) and the match
+    /// fails, so the slot falls back to mark-only.
+    ///
+    /// Exact equality is deliberate, not sloppy. Both sides are the identical
+    /// `mergedAndCapped` arithmetic (`max`, comparison, and verbatim
+    /// pass-through — no accumulation) over overlapping inputs, so an
+    /// untouched slot agrees bit-for-bit. A tolerance would only ever admit a
+    /// slot a recovered persona DID move.
+    ///
+    /// Pure and total. An empty `strictPerBSideSlots` yields an all-false mask
+    /// — the correct answer when every persona needed recovery.
+    static func strictByteExactMask(
+        unioned: [PlayedSlot],
+        strictPerBSideSlots: [[PlayedSlot]],
+        config: Configuration = .default
+    ) -> [Bool] {
+        let strictUnioned = unionedPlayedSlots(strictPerBSideSlots, config: config)
+        return unioned.map { slot in
+            strictUnioned.contains {
+                $0.startSeconds == slot.startSeconds && $0.endSeconds == slot.endSeconds
+            }
+        }
+    }
+
     // MARK: - Day-0 k-way minimum (playhead-xsdz.36.4 / playhead-wybg)
 
     /// Minimum number of DISTINCT-persona B-copies a day-0 byte-exact probe must

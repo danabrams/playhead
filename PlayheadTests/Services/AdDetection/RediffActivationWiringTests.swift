@@ -271,13 +271,26 @@ struct RediffActivationWiringTests {
         #expect(cost.precheckBytes == 0, "day-0 spends no pre-check bytes")
         #expect(newState.resolved)
 
-        // The product outcome: a byte-exact MARK-ONLY AdWindow banner — WITHOUT
-        // any persisted transcript/analysis (the byte-exact slot is its OWN
-        // presence core). NOT a decoded span, NOT auto-skip.
+        // The product outcome: a byte-exact AdWindow — WITHOUT any persisted
+        // transcript/analysis (the byte-exact slot is its OWN presence core).
+        // NOT a decoded span.
+        //
+        // playhead-qs0d RETARGETED the gate assertion here from `.markOnly` to
+        // `.eligible`, deliberately. This B-pair takes the STRICT
+        // (monotonic-clean) byte gate, and a strict day-0 slot is now
+        // auto-skip eligible with `rediffByteExact` on both edges — the whole
+        // point of that bead. The mark-only contract this test was written for
+        // still holds for the 9s6q segment-recovered lane, which is asserted in
+        // `RediffDayZeroMintAutoSkipPersistenceTests`.
         let windows = try await store.fetchAdWindows(assetId: assetId)
         #expect(windows.count == 1, "exactly the byte-exact ad slot is marked, got \(windows.map { ($0.startTime, $0.endTime) })")
         if let w = windows.first {
-            #expect(w.eligibilityGate == SkipEligibilityGate.markOnly.rawValue, "mark-only banner, never auto-skip")
+            #expect(w.eligibilityGate == SkipEligibilityGate.eligible.rawValue,
+                    "playhead-qs0d: a STRICT byte-exact day-0 slot is auto-skip eligible")
+            #expect(w.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+                    "the byte differ set this edge")
+            #expect(w.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+                    "the byte differ set this edge")
             #expect(w.confidence == 1.0, "deterministic byte-exact certainty")
             #expect(w.startTime >= 94.5 && w.startTime <= 95.5, "byte-exact start ≈ 95, got \(w.startTime)")
             #expect(w.endTime >= 164.5 && w.endTime <= 165.5, "byte-exact end ≈ 165, got \(w.endTime)")
@@ -520,7 +533,11 @@ struct RediffActivationWiringTests {
         #expect(summary.rotatedCount == 1, "the Download & Analyze tap fires day-0 unplugged on WiFi")
         let windows = try await store.fetchAdWindows(assetId: assetId)
         #expect(windows.count == 1, "byte-exact first-listen mark from the Download & Analyze trigger")
-        #expect(windows.first?.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+        // playhead-qs0d: the same STRICT byte gate as the sibling test above,
+        // so the same promotion applies — `.eligible` with byte-exact anchors.
+        #expect(windows.first?.eligibilityGate == SkipEligibilityGate.eligible.rawValue)
+        #expect(windows.first?.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue)
+        #expect(windows.first?.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue)
     }
 
     @Test("a consume failure records .failed (no resolve, R2 state advanced), deletes the B-copy, and leaves no marks")

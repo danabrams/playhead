@@ -5462,9 +5462,6 @@ actor SkipOrchestrator {
     /// BEFORE the `.applied` promotion — no `auto_skip_fired` audit event
     /// and no `inAdState` flip for a skip that will never fire.
     private func paddedCueSpan(for managed: ManagedWindow) -> (start: Double, end: Double)? {
-        guard edgePaddingEnabled, !isUserInitiatedSkip(managed) else {
-            return (start: managed.snappedStart, end: managed.snappedEnd)
-        }
         // playhead-hdgk: per-edge anchor provenance is derived at fusion time
         // (rediff `.rediffSlot` width ownership + `StingerRefiner` snap trace),
         // persisted on the `AdWindow` row, and stamped into
@@ -5472,8 +5469,23 @@ actor SkipOrchestrator {
         // promotion. An absent entry (a span that never flowed through ingest,
         // or a non-fusion producer) defaults both edges to `.unanchored`, under
         // which flag-ON auto-skips nothing — the intended conservative posture.
+        //
+        // playhead-qs0d: the anchors are resolved BEFORE the enable check
+        // because the enable is now per-span. `AutoSkipEdgePadding.isActive`
+        // answers the master switch verbatim for every anchor combination but
+        // one: a span the byte differ owns on BOTH edges is padded even while
+        // the Gate-2 master switch is off. Padding is shrink-or-suppress only,
+        // so this can never admit a skip that would not otherwise fire.
         let anchors = edgeAnchorsByWindowId[managed.adWindow.id]
-            ?? (start: .unanchored, end: .unanchored)
+            ?? (start: AutoSkipEdgeAnchor.unanchored, end: AutoSkipEdgeAnchor.unanchored)
+        guard AutoSkipEdgePadding.isActive(
+                masterEnabled: edgePaddingEnabled,
+                startAnchor: anchors.start,
+                endAnchor: anchors.end
+              ),
+              !isUserInitiatedSkip(managed) else {
+            return (start: managed.snappedStart, end: managed.snappedEnd)
+        }
         return AutoSkipEdgePadding.skipWindow(
             spanStart: managed.snappedStart,
             spanEnd: managed.snappedEnd,
