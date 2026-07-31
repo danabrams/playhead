@@ -5198,7 +5198,12 @@ actor AnalysisWorkScheduler {
             episodeId: job.episodeId,
             assetFingerprint: job.sourceFingerprint,
             weakFingerprint: insertWeakFingerprint,
-            sourceURL: localAudioURL.absoluteString,
+            // playhead-b8hj: container-PORTABLE, never `absoluteString`. The
+            // audio-cache path carries the Data-container UUID, which iOS
+            // rewrites on reinstall and restore, so an absolute string is a
+            // dead reference the moment the container moves — and this column
+            // is write-once, with no repair path.
+            sourceURL: AudioCacheLocation.portableString(for: localAudioURL),
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
             confirmedAdCoverageEndTime: nil,
