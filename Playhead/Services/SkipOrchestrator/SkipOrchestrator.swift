@@ -459,11 +459,15 @@ actor SkipOrchestrator {
 
     /// Windows whose skip was explicitly user-initiated (manual "Skip Ad"
     /// tap). User-initiated skips are exempt from edge padding: the user
-    /// chose the span deliberately. User-marked and accepted-suggestion
-    /// windows are exempted via their `boundaryState` stamps
-    /// ("userMarked" / "userConfirmedSuggested") in
-    /// `isUserInitiatedSkip(_:)`; this set covers the manual-tap path whose
-    /// window is an ordinary detection row.
+    /// chose the span deliberately. User-MARKED windows are exempted via
+    /// their `boundaryState` stamp in `isUserInitiatedSkip(_:)`; this set
+    /// covers the manual-tap path whose window is an ordinary detection row.
+    ///
+    /// playhead-ynmk: ACCEPTED SUGGESTIONS are no longer in either category.
+    /// A banner Yes asserts presence over a span the detector drew, so its
+    /// extent is governed by `AutoSkipEdgePadding` — `acceptSuggestedSkip`
+    /// no longer inserts here, and `isUserInitiatedSkip` consults
+    /// `UserSpanAssertion` before this set so it cannot be re-exempted.
     ///
     /// SCOPE CAVEAT: this set is in-memory and per-session — a manual
     /// skip's exemption does NOT survive relaunch. A previously
@@ -1687,8 +1691,19 @@ actor SkipOrchestrator {
             guard episodeLifecycleGeneration == lifecycleGeneration else {
                 return
             }
+            // playhead-ynmk: the 0.7 floor is a DETECTOR-confidence filter, and
+            // a user-asserted row is not a detector claim. Before this bead both
+            // user gestures wrote `confidence = 1.0`, so the floor never
+            // excluded them; now that a banner confirmation carries the
+            // MEASURED value (0.40 in the field case), a row the user answered
+            // Yes to would silently drop out of cross-launch continuity because
+            // the detector was unsure — losing exactly the anchored population
+            // qs0d wants to keep skipping. Admitting the row is not admitting
+            // the skip: `paddedCueSpan` re-derives the extent on every push, so
+            // an unanchored asserted row still cues nothing.
             let eligible = preWindows.filter {
-                $0.confidence >= Self.preloadConfidenceThreshold
+                ($0.confidence >= Self.preloadConfidenceThreshold
+                    || $0.userAssertion != nil)
                     && $0.endTime > $0.startTime
                     && Self.preloadEligibleDecisionStates.contains($0.decisionState)
             }
@@ -4771,8 +4786,34 @@ actor SkipOrchestrator {
         // check in `receiveAdWindows`.
         rememberAcceptedSuggestId(windowId)
 
-        // Build a fresh durable applied AdWindow with the suggest window's span
-        // and confidence pinned to 1.0. The in-memory wrapper starts confirmed
+        // playhead-ynmk: resolve the extent BEFORE building the row.
+        //
+        // The user answered "is this an ad?" — a PRESENCE claim over a span
+        // whose edges the DETECTOR drew. Extent was never asked about, so it is
+        // still owned by the evidence, and the evidence is the per-edge anchor
+        // tier. `AutoSkipEdgePadding` returns the late-safe window, or nil when
+        // no anchored start proves late-safety (derivation §5's verdict:
+        // "spans without a hard start anchor stay markOnly"). nil means the
+        // confirmation is recorded as a MARK and no skip fires — which is what
+        // the field case needed: three both-edges-unanchored spans, 0 of 3
+        // correct, 210 s of show cut by three taps.
+        //
+        // Anchors come from the persisted row: a suggest-tier window returns
+        // out of `receiveAdWindows` before the ingest stamp site, so
+        // `edgeAnchorsByWindowId` has no entry for it.
+        let suggestedAnchors = resolvedEdgeAnchors(for: suggested)
+        let extentIsSkippable = AutoSkipEdgePadding.skipWindow(
+            spanStart: suggested.startTime,
+            spanEnd: suggested.endTime,
+            startAnchor: suggestedAnchors.start,
+            endAnchor: suggestedAnchors.end,
+            showKey: sourcePodcastId
+        ) != nil
+
+        // Build a fresh durable AdWindow with the suggest window's span, its
+        // MEASURED confidence carried through unchanged, and the tap recorded
+        // in `boundaryState` (`UserSpanAssertion.userConfirmedSuggested`) where
+        // nothing reads it as certainty. The in-memory wrapper starts confirmed
         // so the explicit user-skip path owns the applied transition and cue.
         // We deliberately do not reuse the original markOnly window's id — its
         // eligibilityGate would block it again.
@@ -4788,9 +4829,13 @@ actor SkipOrchestrator {
             analysisAssetId: assetId,
             startTime: suggested.startTime,
             endTime: suggested.endTime,
-            confidence: 1.0,
-            boundaryState: "userConfirmedSuggested",
-            decisionState: AdDecisionState.applied.rawValue,
+            // playhead-ynmk: NEVER 1.0. A tap does not measure anything — a
+            // pure-show span confirmed by mistake would read 1.00 too.
+            confidence: suggested.confidence,
+            boundaryState: UserSpanAssertion.userConfirmedSuggested.rawValue,
+            decisionState: extentIsSkippable
+                ? AdDecisionState.applied.rawValue
+                : AdDecisionState.confirmed.rawValue,
             detectorVersion: suggested.detectorVersion,
             advertiser: suggested.advertiser,
             product: suggested.product,
@@ -4800,7 +4845,8 @@ actor SkipOrchestrator {
             metadataSource: suggested.metadataSource,
             metadataConfidence: suggested.metadataConfidence,
             metadataPromptVersion: suggested.metadataPromptVersion,
-            wasSkipped: true,
+            // playhead-ynmk: only true when a cue will actually be pushed.
+            wasSkipped: extentIsSkippable,
             userDismissedBanner: false,
             evidenceSources: suggested.evidenceSources,
             catalogStoreMatchSimilarity:
@@ -4940,6 +4986,11 @@ actor SkipOrchestrator {
         }
 
         windows[promotedId] = managed
+        // playhead-ynmk: the promotion runs under a FRESH uuid, so the ingest
+        // stamp in `receiveAdWindows` never sees it and `paddedCueSpan` would
+        // read the `.unanchored` default — refusing even a byte-exact
+        // confirmation. Carry the suggestion's real per-edge provenance across.
+        edgeAnchorsByWindowId[promotedId] = suggestedAnchors
         // The suggest card already presented this span and collected the
         // explicit Yes. Applying its promoted UUID must not immediately emit
         // a second feedback card for the same user decision.
@@ -4947,10 +4998,23 @@ actor SkipOrchestrator {
         // presentation already collected the response.
         banneredWindowIds.insert(promotedId)
 
-        applyManualSkip(
-            windowId: promotedId,
-            isExplicitBannerFeedback: true
-        )
+        if extentIsSkippable {
+            applyManualSkip(
+                windowId: promotedId,
+                isExplicitBannerFeedback: true
+            )
+        } else {
+            // The tap is honoured as FEEDBACK — the correction receipt, the
+            // recurrence learning and the MISS calibration above all landed —
+            // but nothing is skipped. Presence was asserted; extent was not,
+            // and no anchored edge exists to supply it.
+            logDecision(
+                managed: managed,
+                decision: .confirmed,
+                reason: "Banner confirmation over an unanchored extent -- presence recorded, markOnly"
+            )
+            evaluateAndPush()
+        }
 
         return true
     }
@@ -5224,10 +5288,25 @@ actor SkipOrchestrator {
         guard var managed = windows[windowId] else { return }
         guard managed.decisionState == .confirmed else { return }
 
-        // playhead-98co: a manual "Skip Ad" tap is user-initiated — the
-        // window (an ordinary detection row) is exempt from edge padding
-        // so the user's chosen span skips exactly.
-        userInitiatedSkipWindowIds.insert(windowId)
+        // playhead-ynmk: a banner confirmation asserts PRESENCE, not EXTENT.
+        // When the derived per-edge policy yields no late-safe window there is
+        // nothing safe to skip, so refuse — rather than flip to `.applied` and
+        // persist `wasSkipped` for a cue that `paddedCueSpan` will drop.
+        // `acceptSuggestedSkip` already declines to call us in that case; this
+        // is the second door (a manual tap on the promoted row) closed too.
+        if managed.adWindow.userAssertion == .userConfirmedSuggested,
+           paddedCueSpan(for: managed) == nil {
+            return
+        }
+
+        // playhead-98co: a manual "Skip Ad" tap on an ordinary detection row is
+        // user-initiated — that row is exempt from edge padding so the span the
+        // user acted on skips exactly. playhead-ynmk: NOT for a banner
+        // confirmation, whose edges are the detector's; see
+        // `isUserInitiatedSkip`, which ignores this set for asserted spans.
+        if !isExplicitBannerFeedback {
+            userInitiatedSkipWindowIds.insert(windowId)
+        }
 
         managed.decisionState = .applied
         managed.cueActive = true
@@ -5476,14 +5555,29 @@ actor SkipOrchestrator {
         // one: a span the byte differ owns on BOTH edges is padded even while
         // the Gate-2 master switch is off. Padding is shrink-or-suppress only,
         // so this can never admit a skip that would not otherwise fire.
+        //
+        // playhead-ynmk: a THIRD activation, on the same shrink-or-suppress
+        // safety argument. A span whose PRESENCE the user asserted but whose
+        // EDGES the detector drew (`UserSpanAssertion.assertsExtent == false`,
+        // i.e. an accepted suggestion) is governed by this policy regardless of
+        // the master switch and regardless of anchor tier. Before this bead it
+        // was EXEMPT — and that exemption is how one tap skipped 150 s of show
+        // over a 0.40-confidence span with neither edge anchored.
         let anchors = edgeAnchorsByWindowId[managed.adWindow.id]
             ?? (start: AutoSkipEdgeAnchor.unanchored, end: AutoSkipEdgeAnchor.unanchored)
-        guard AutoSkipEdgePadding.isActive(
-                masterEnabled: edgePaddingEnabled,
-                startAnchor: anchors.start,
-                endAnchor: anchors.end
-              ),
-              !isUserInitiatedSkip(managed) else {
+        let extentIsDetectorOwned = managed.adWindow.userAssertion
+            .map { !$0.assertsExtent } ?? false
+        let policyGovernsThisSpan =
+            extentIsDetectorOwned
+            || (
+                AutoSkipEdgePadding.isActive(
+                    masterEnabled: edgePaddingEnabled,
+                    startAnchor: anchors.start,
+                    endAnchor: anchors.end
+                )
+                && !isUserInitiatedSkip(managed)
+            )
+        guard policyGovernsThisSpan else {
             return (start: managed.snappedStart, end: managed.snappedEnd)
         }
         return AutoSkipEdgePadding.skipWindow(
@@ -5495,18 +5589,40 @@ actor SkipOrchestrator {
         )
     }
 
-    /// Whether this window's skip was explicitly user-initiated — exempt
-    /// from edge padding (the user chose the span deliberately).
+    /// Whether this window's skip EXTENT was chosen by the user — exempt from
+    /// edge padding, because those edges are the user's own.
+    ///
+    /// playhead-ynmk narrowed this. It used to answer `true` for
+    /// `userConfirmedSuggested` as well, on the premise that a banner Yes chose
+    /// the edges. It did not: the banner asks "is this an ad?" about a span the
+    /// DETECTOR drew. `UserSpanAssertion.assertsExtent` is the split, and it is
+    /// consulted BEFORE `userInitiatedSkipWindowIds` so a confirmation can
+    /// never be re-exempted through the id set by a later manual-tap path.
     private func isUserInitiatedSkip(_ managed: ManagedWindow) -> Bool {
-        if userInitiatedSkipWindowIds.contains(managed.adWindow.id) {
-            return true
+        if let assertion = managed.adWindow.userAssertion {
+            return assertion.assertsExtent
         }
-        switch managed.adWindow.boundaryState {
-        case "userMarked", "userConfirmedSuggested":
-            return true
-        default:
-            return false
+        return userInitiatedSkipWindowIds.contains(managed.adWindow.id)
+    }
+
+    /// The per-edge anchor tier for a window: the runtime stamp when ingest
+    /// recorded one, else the row's own persisted provenance.
+    ///
+    /// playhead-ynmk: `acceptSuggestedSkip` needs this because a suggest-tier
+    /// window never reaches the `receiveAdWindows` stamp site (the markOnly
+    /// branch returns first), so `edgeAnchorsByWindowId` has no entry for it.
+    private func resolvedEdgeAnchors(
+        for window: AdWindow
+    ) -> (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor) {
+        if let stamped = edgeAnchorsByWindowId[window.id] {
+            return stamped
         }
+        return (
+            start: AutoSkipEdgeAnchor(rawValue: window.startEdgeAnchor)
+                ?? .unanchored,
+            end: AutoSkipEdgeAnchor(rawValue: window.endEdgeAnchor)
+                ?? .unanchored
+        )
     }
 
     /// Evaluate a single window against skip policy. Returns the decision.

@@ -75,6 +75,15 @@ struct BannerConfirmationExtentGateTests {
         CMTimeGetSeconds(cue.start + cue.duration)
     }
 
+    /// `pushMergedCues` builds its `CMTime`s at `preferredTimescale: 600`, so a
+    /// bound that is not a multiple of 1/600 s is quantised. The field spans in
+    /// this suite (5462.6 / 5522.7) are not, so an exact `==` — or a tolerance
+    /// tighter than one tick — fails on arithmetic, not on policy. One tick is
+    /// the honest tolerance: every error this suite is looking for (a missing
+    /// 0.50/0.75/10.25 margin, a missing 1.0 s cushion, a raw unpadded span) is
+    /// three orders of magnitude larger.
+    private static let cueTickTolerance = 1.0 / 600.0 + 1e-9
+
     /// A suggest-tier (`markOnly`) window with explicit per-edge anchors and an
     /// explicit measured confidence — the two inputs this bead is about.
     private static func makeSuggestion(
@@ -244,6 +253,17 @@ struct BannerConfirmationExtentGateTests {
                     == AutoSkipEdgeAnchor.unanchored.rawValue,
             "the promoted row must carry the suggestion's real edge provenance"
         )
+        // The decision log is the audit trail for "the tap was honoured as
+        // feedback, and deliberately not as a skip". Without an explicit
+        // record, a refused confirmation is indistinguishable from a
+        // confirmation that never arrived.
+        #expect(
+            await orchestrator.getDecisionLog().contains {
+                $0.adWindowId == promoted.id
+                    && $0.reason.contains("unanchored extent")
+            },
+            "the refusal must be recorded, not silent"
+        )
     }
 
     /// The tap is still worth something: it is a MISS calibration signal and a
@@ -326,8 +346,8 @@ struct BannerConfirmationExtentGateTests {
         )
         let cue = try #require(pushedCues.first)
         // 5462.6 + 0.50 start margin; 5522.7 − 0.75 end margin − 1.0 pod cushion.
-        #expect(abs(Self.cueStart(cue) - 5463.1) < 0.0001)
-        #expect(abs(Self.cueEnd(cue) - 5520.95) < 0.0001)
+        #expect(abs(Self.cueStart(cue) - 5463.1) < Self.cueTickTolerance)
+        #expect(abs(Self.cueEnd(cue) - 5520.95) < Self.cueTickTolerance)
 
         let promoted = try #require(
             await Self.promotedRow(in: store, originalId: "ynmk-byte-exact")
@@ -377,10 +397,105 @@ struct BannerConfirmationExtentGateTests {
         // 100 + 0.75 stinger start margin; 190 − 10.25 unanchored end margin
         // − 1.0 pod cushion.
         #expect(Self.cueStart(cue) == 100.75)
-        #expect(abs(Self.cueEnd(cue) - 178.75) < 0.0001)
+        #expect(abs(Self.cueEnd(cue) - 178.75) < Self.cueTickTolerance)
+    }
+
+    /// The extent resolution is SHOW-SCOPED, like the auto path's. On a show in
+    /// `stingerStartDemotedShowKeys` a stinger-snapped start is not trusted, so
+    /// a confirmation over one has no late-safe window either.
+    ///
+    /// Asserts on the persisted row as well as the cue, deliberately: dropping
+    /// the show key from the resolution would flip `wasSkipped` to true while
+    /// `paddedCueSpan` (which keeps its own show key) still suppressed the cue —
+    /// a row claiming a skip that never happened, invisible to a cue-only test.
+    ///
+    /// No `assertAutoMode` here: this show has no seeded trust profile, so the
+    /// mode is `.shadow`. That is fine and is the point — a banner Yes skips
+    /// even in shadow mode (`applyManualSkip` does not consult the mode), so the
+    /// cue assertion is not vacuous.
+    @Test("Show-scoped start demotion reaches the confirmation path too")
+    func demotedShowStartAnchorBlocksConfirmationSkip() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: Self.assetId,
+            episodeId: Self.episodeId,
+            podcastId: "the-nikki-glaser-podcast"
+        )
+
+        let suggested = Self.makeSuggestion(
+            id: "ynmk-demoted-show",
+            start: 100,
+            end: 190,
+            confidence: 0.9,
+            startAnchor: .stingerSnapped,
+            endAnchor: .stingerSnapped
+        )
+        try await store.insertAdWindow(suggested)
+        await orchestrator.receiveAdWindows([suggested])
+        await orchestrator.acceptSuggestedSkip(windowId: "ynmk-demoted-show")
+
+        #expect(
+            pushedCues.isEmpty,
+            "a demoted stinger start is not an anchor — nothing late-safe to skip"
+        )
+        let promoted = try #require(
+            await Self.promotedRow(in: store, originalId: "ynmk-demoted-show")
+        )
+        #expect(promoted.wasSkipped == false)
+        #expect(promoted.decisionState == AdDecisionState.confirmed.rawValue)
     }
 
     // MARK: - 3. Overshoot guards — the fidelity ladder
+
+    /// The second door. `acceptSuggestedSkip` declines to apply an unanchored
+    /// confirmation, but the promoted row is still a `.confirmed` managed window
+    /// — so a manual "Skip Ad" tap aimed at it must be refused too, or the row
+    /// flips to `applied`/`wasSkipped` for a cue `paddedCueSpan` will drop.
+    @Test("Second door: a manual tap cannot apply an unanchored confirmation")
+    func manualTapCannotApplyAnUnanchoredConfirmation() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: Self.assetId,
+            episodeId: Self.episodeId,
+            podcastId: Self.podcastId
+        )
+        await Self.assertAutoMode(orchestrator)
+
+        // Confidence above `stayThreshold` so the promoted window settles at
+        // `.confirmed` rather than being suppressed on confidence — otherwise
+        // `applyManualSkip`'s own `.confirmed` guard would refuse it for an
+        // unrelated reason and this test would prove nothing.
+        let suggested = Self.makeSuggestion(
+            id: "ynmk-second-door",
+            confidence: 0.9
+        )
+        try await store.insertAdWindow(suggested)
+        await orchestrator.receiveAdWindows([suggested])
+        await orchestrator.acceptSuggestedSkip(windowId: "ynmk-second-door")
+
+        let promotedId = try #require(
+            (await orchestrator.activeWindowIDs()).first,
+            "the confirmation must still register a managed window to mark it"
+        )
+        #expect(
+            await orchestrator.confirmedWindows()
+                .contains { $0.id == promotedId },
+            "precondition: the promoted window is manually skippable-looking"
+        )
+
+        await orchestrator.applyManualSkip(windowId: promotedId)
+
+        #expect(pushedCues.isEmpty, "still nothing late-safe to skip")
+        #expect(
+            await orchestrator.confirmedWindows()
+                .contains { $0.id == promotedId },
+            "the manual tap must not promote it to applied"
+        )
+    }
 
     /// playhead-527u / feedback_manual_marks_override: a span the user DREW in
     /// the transcript asserts presence AND extent, and keeps its exact bounds.
@@ -526,7 +641,7 @@ struct BannerConfirmationExtentGateTests {
             "the anchored confirmation must survive relaunch at its MEASURED confidence"
         )
         let cue = try #require(pushedCues.first)
-        #expect(abs(Self.cueStart(cue) - 5463.1) < 0.0001)
-        #expect(abs(Self.cueEnd(cue) - 5520.95) < 0.0001)
+        #expect(abs(Self.cueStart(cue) - 5463.1) < Self.cueTickTolerance)
+        #expect(abs(Self.cueEnd(cue) - 5520.95) < Self.cueTickTolerance)
     }
 }
