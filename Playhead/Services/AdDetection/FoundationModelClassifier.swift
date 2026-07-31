@@ -607,6 +607,30 @@ struct CoarseWindowFailure: Sendable, Equatable {
     /// failures get a distinct persistence key so two halves of one plan
     /// cannot collide on the same deterministic row id.
     let coversWholePlan: Bool
+    /// playhead-8d5r: wall-clock THIS attempt spent, in milliseconds, or nil
+    /// when the attempt never reached the model (e.g. a plan rejected
+    /// pre-flight for exceeding the token budget).
+    ///
+    /// WHY THIS EXISTS. The runner used to stamp every failure row with
+    /// `FMCoarseScanOutput.latencyMillis` — the WHOLE PASS's wall-clock —
+    /// while success rows carried a single window's. Two consequences, both
+    /// measured on the 2026-07-30 device pull:
+    ///
+    /// 1. N failure rows from one pass each carried the same pass total, so
+    ///    summing the column counted that wall-clock N times. 48 failure rows
+    ///    came from 26 distinct passes and summed to 213.8 minutes of a
+    ///    quantity that was really 115.9.
+    /// 2. That pass total INCLUDES the successful windows of the same pass, so
+    ///    "time spent failing" double-counted "time spent succeeding" — one
+    ///    asset shows a 749 s failure row over a pass containing 582 s of
+    ///    successful window time.
+    ///
+    /// Together those two effects are why the failure classes appeared to cost
+    /// 35x a success. Carrying the attempt's own elapsed time is what makes
+    /// `.inferenceTimeout` measurable at all: without it a bounded 180 s
+    /// abandonment would persist stamped with its pass's total and read
+    /// exactly like the unbounded call it replaced.
+    let latencyMillis: Double?
 
     init(
         planWindowIndex: Int,
@@ -614,7 +638,8 @@ struct CoarseWindowFailure: Sendable, Equatable {
         startTime: Double,
         endTime: Double,
         status: SemanticScanStatus,
-        coversWholePlan: Bool = true
+        coversWholePlan: Bool = true,
+        latencyMillis: Double? = nil
     ) {
         self.planWindowIndex = planWindowIndex
         self.lineRefs = lineRefs
@@ -622,18 +647,24 @@ struct CoarseWindowFailure: Sendable, Equatable {
         self.endTime = endTime
         self.status = status
         self.coversWholePlan = coversWholePlan
+        self.latencyMillis = latencyMillis
     }
 
     /// Whole-plan failure: the plan was attempted as planned and produced
     /// nothing usable.
-    init(plan: CoarsePassWindowPlan, status: SemanticScanStatus) {
+    init(
+        plan: CoarsePassWindowPlan,
+        status: SemanticScanStatus,
+        latencyMillis: Double? = nil
+    ) {
         self.init(
             planWindowIndex: plan.windowIndex,
             lineRefs: plan.lineRefs,
             startTime: plan.startTime,
             endTime: plan.endTime,
             status: status,
-            coversWholePlan: true
+            coversWholePlan: true,
+            latencyMillis: latencyMillis
         )
     }
 
@@ -960,6 +991,11 @@ struct FoundationModelClassifier: Sendable {
         /// give it `.persistFailure` recovery instead of
         /// `.resumeFromCheckpoint`.
         case cancelled
+        /// playhead-8d5r: the attempt outlived `Config.inferenceDeadline`.
+        /// Distinct from `.blocked` for the same reason `.cancelled` is: the
+        /// safety layer never got to say anything, so attributing this to the
+        /// guardrails would send the next reader to the wrong mitigation.
+        case timedOut
     }
 
     /// playhead-qbib: everything one window's bounded recovery produced.
@@ -1043,6 +1079,16 @@ struct FoundationModelClassifier: Sendable {
         // makes rarer. Dormant until a driver opts in.
         let interWindowPacingNanos: UInt64
 
+        // playhead-8d5r: hard wall-clock bound on ONE inference call. See
+        // `FMInferenceDeadline.standard` for how the value was derived from the
+        // measured success tail, and `FMInferenceDeadline` for why the bound is
+        // enforced with an abandonable unstructured task rather than a
+        // structured task-group race. Set to `.zero` to disable the bound
+        // entirely (the pre-8d5r behavior) — no call site does, and none
+        // should; it exists so the seam has an explicit off position rather
+        // than an implicit one.
+        let inferenceDeadline: Duration
+
         // bd-3h2 (2026-04-06): On-device run on iOS 26.4 produced a
         // refinement decode failure with the FM emitting valid JSON
         // truncated mid-string (the second span's `"certainty"` field
@@ -1075,7 +1121,8 @@ struct FoundationModelClassifier: Sendable {
             minimumZoomSpanLines: Int = 2,
             maximumRefinementSpansPerWindow: Int = 2,
             fmGreedyDecoding: Bool = true,
-            interWindowPacingNanos: UInt64 = 0
+            interWindowPacingNanos: UInt64 = 0,
+            inferenceDeadline: Duration = FMInferenceDeadline.standard
         ) {
             self.safetyMarginTokens = safetyMarginTokens
             self.coarseMaximumResponseTokens = coarseMaximumResponseTokens
@@ -1085,6 +1132,7 @@ struct FoundationModelClassifier: Sendable {
             self.maximumRefinementSpansPerWindow = max(1, maximumRefinementSpansPerWindow)
             self.fmGreedyDecoding = fmGreedyDecoding
             self.interWindowPacingNanos = interWindowPacingNanos
+            self.inferenceDeadline = inferenceDeadline
         }
 
         /// playhead-xsdz.60: return a copy of `self` with `fmGreedyDecoding`
@@ -1101,7 +1149,8 @@ struct FoundationModelClassifier: Sendable {
                 minimumZoomSpanLines: minimumZoomSpanLines,
                 maximumRefinementSpansPerWindow: maximumRefinementSpansPerWindow,
                 fmGreedyDecoding: value,
-                interWindowPacingNanos: interWindowPacingNanos
+                interWindowPacingNanos: interWindowPacingNanos,
+                inferenceDeadline: inferenceDeadline
             )
         }
 
@@ -1213,6 +1262,29 @@ struct FoundationModelClassifier: Sendable {
     static func coarseSafetyRecoveryPassBudget(planCount: Int) -> Int {
         max(coarseSafetyRecoveryMinimumPassAttempts, planCount)
     }
+
+    /// playhead-8d5r: how many BACK-TO-BACK `.inferenceTimeout` windows end the
+    /// coarse pass.
+    ///
+    /// Two, not one and not a cumulative total. One timeout is a window fact
+    /// and must not cost the episode its remaining coverage — the measured
+    /// success tail contains legitimately slow calls, and a device under
+    /// thermal load produces the occasional one. Two in a row, with no window
+    /// answering in between, is a device fact: continuing would spend one full
+    /// deadline per remaining window to learn the same thing.
+    ///
+    /// This is the bound that keeps a per-CALL deadline from adding up to an
+    /// unbounded PASS. Worst case a wedged model now costs
+    /// `2 x Config.inferenceDeadline` (10 minutes at the shipped 300 s) instead
+    /// of one deadline per window, and the pass resumes from its checkpoint on
+    /// the next grant rather than losing what it banked.
+    ///
+    /// Two is not aggressive at a 300 s deadline: a SINGLE timeout is already a
+    /// 3.4x-beyond-the-measured-tail event, so two consecutive ones is not a
+    /// plausible way to lose legitimate coverage. The counter is reset by any
+    /// answering window, so this can only fire on a model that has stopped
+    /// answering entirely.
+    static let coarseConsecutiveInferenceTimeoutAbortThreshold = 2
 
     /// playhead-pmp9: apply ±20% jitter to a base backoff delay so a fleet of
     /// devices throttled at the same instant don't retry in lockstep and
@@ -1638,6 +1710,10 @@ struct FoundationModelClassifier: Sendable {
         // See `coarseSafetyRecoveryPassBudget` for why it scales with the
         // plan count.
         var recoveryAttemptsRemaining = Self.coarseSafetyRecoveryPassBudget(planCount: plans.count)
+        // playhead-8d5r: consecutive `.inferenceTimeout` windows with no
+        // answering window in between. See the no-progress guard in the failure
+        // arm below for why the signal is CONSECUTIVE rather than cumulative.
+        var consecutiveInferenceTimeouts = 0
 
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
@@ -1820,6 +1896,13 @@ struct FoundationModelClassifier: Sendable {
             // comment block above the loop for the on-device evidence
             // that motivated removing the shared-session branch.
             let perWindowBox = await makePrewarmedSessionBox(promptPrefix: Self.promptPrefix)
+            // playhead-8d5r: measure THIS window's attempt so a failure row can
+            // carry its own cost instead of inheriting the whole pass's. See
+            // `CoarseWindowFailure.latencyMillis`. The span deliberately covers
+            // the in-window retries (`coarseResponses` owns smart-shrink and
+            // rate-limit backoff), because those are part of what the window
+            // actually cost.
+            let windowAttemptStart = clock.now
             switch await coarseResponses(
                 for: plan,
                 sessionBox: perWindowBox,
@@ -1829,6 +1912,9 @@ struct FoundationModelClassifier: Sendable {
                 totalWindows: totalWindows
             ) {
             case let .success(outputs):
+                // A window that answered clears the no-progress evidence: the
+                // model is demonstrably alive.
+                consecutiveInferenceTimeouts = 0
                 for output in outputs {
                     windows.append(
                         FMCoarseWindowOutput(
@@ -1843,6 +1929,31 @@ struct FoundationModelClassifier: Sendable {
                     )
                 }
             case let .failure(status):
+                let windowAttemptLatency = Self.latencyMillis(
+                    since: windowAttemptStart,
+                    clock: clock
+                )
+                // playhead-8d5r: NO-PROGRESS GUARD.
+                //
+                // `.inferenceTimeout` is `.window`-scoped so one slow window
+                // never discards what the pass has banked (playhead-bkhc). But
+                // "window-scoped" applied blindly to a wedged model gives back
+                // an unbounded pass: N windows x the deadline, with the whole
+                // pass producing nothing. The bounded-retry rule this repo has
+                // landed on eight beads running is that a retry needs evidence
+                // it is making progress; the same rule applies to CONTINUING.
+                //
+                // One timeout is a window fact. `coarseConsecutiveInference` +
+                // `TimeoutAbortThreshold` of them back-to-back, with no window
+                // answering in between, is a device fact — and a device fact
+                // ends the pass and resumes from a checkpoint. The counter
+                // resets on any answering window, so an episode with an
+                // occasional slow window still scans to the end.
+                if status == .inferenceTimeout {
+                    consecutiveInferenceTimeouts += 1
+                } else {
+                    consecutiveInferenceTimeouts = 0
+                }
                 // R6-Fix1 / bd-ih3 / playhead-qbib: coarse per-window failures
                 // that can be safely tolerated without losing the entire scan.
                 // A single schema-conformance failure, refusal, guardrail
@@ -1892,7 +2003,37 @@ struct FoundationModelClassifier: Sendable {
                         failedWindows.append(contentsOf: recovery.failures)
                         continue
                     }
-                    failedWindows.append(CoarseWindowFailure(plan: plan, status: status))
+                    failedWindows.append(
+                        CoarseWindowFailure(
+                            plan: plan,
+                            status: status,
+                            latencyMillis: windowAttemptLatency
+                        )
+                    )
+                    if consecutiveInferenceTimeouts >= Self.coarseConsecutiveInferenceTimeoutAbortThreshold {
+                        logger.error(
+                            """
+                            fm.classifier.coarse_pass_inference_timeout_abort \
+                            window=\(planIndex + 1, privacy: .public) \
+                            totalWindows=\(totalWindows, privacy: .public) \
+                            consecutiveTimeouts=\(consecutiveInferenceTimeouts, privacy: .public) \
+                            bankedWindows=\(windows.count, privacy: .public)
+                            """
+                        )
+                        // Partial results, exactly as the `.pass`-scoped abort
+                        // below returns them: every window banked so far is
+                        // carried out and persisted by the runner before it
+                        // reads this status.
+                        return FMCoarseScanOutput(
+                            status: .inferenceTimeout,
+                            windows: windows,
+                            latencyMillis: Self.latencyMillis(since: start, clock: clock),
+                            prewarmHit: prewarmHit,
+                            failedWindows: failedWindows,
+                            permissiveFailureCounts: permissiveCounts,
+                            plans: plans
+                        )
+                    }
                     logger.error(
                         """
                         fm.classifier.coarse_pass_window_abandoned \
@@ -2094,6 +2235,24 @@ struct FoundationModelClassifier: Sendable {
                 )
             )
             return recovery
+        case .timedOut:
+            // playhead-8d5r: the model did not answer inside the deadline.
+            // Record the honest status and STOP — the remaining recovery
+            // attempts (the two halves) would each spend another full deadline
+            // against a model that has just demonstrated it is not answering,
+            // which is precisely the unbounded spend this bead removes.
+            recovery.failures.append(
+                CoarseWindowFailure(
+                    planWindowIndex: plan.windowIndex,
+                    lineRefs: resolvedLineRefs,
+                    startTime: resolvedStartTime,
+                    endTime: resolvedEndTime,
+                    status: .inferenceTimeout,
+                    coversWholePlan: resolvedCoversWholePlan,
+                    latencyMillis: Self.latencyMillis(since: wholeStart, clock: clock)
+                )
+            )
+            return recovery
         case let .blocked(reason):
             recovery.permissiveCounts.increment(reason: reason)
             let fallbackStatus = Self.permissiveStatus(for: reason)
@@ -2206,6 +2365,25 @@ struct FoundationModelClassifier: Sendable {
                         coversWholePlan: false
                     )
                 )
+            case .timedOut:
+                // playhead-8d5r: reuse the `cancelled` flag's STOP semantics —
+                // it is the existing "abandon the remaining halves" signal, and
+                // a non-answering model is as good a reason to stop spending
+                // deadlines as an expired grant window. The recorded STATUS
+                // stays `.inferenceTimeout`, so the two remain distinguishable
+                // in the persisted row even though they share the control flow.
+                cancelled = true
+                recovery.failures.append(
+                    CoarseWindowFailure(
+                        planWindowIndex: plan.windowIndex,
+                        lineRefs: lineRefs,
+                        startTime: startTime,
+                        endTime: endTime,
+                        status: .inferenceTimeout,
+                        coversWholePlan: false,
+                        latencyMillis: Self.latencyMillis(since: halfStart, clock: clock)
+                    )
+                )
             case let .blocked(reason):
                 recovery.permissiveCounts.increment(reason: reason)
                 recovery.failures.append(
@@ -2248,6 +2426,12 @@ struct FoundationModelClassifier: Sendable {
     ) async -> CoarsePermissiveAttempt {
         do {
             return .screened(try await permissive.classify(window: segments))
+        } catch is FMInferenceTimeoutError {
+            // playhead-8d5r: the recovery attempt outlived its own deadline.
+            // Report it as a timeout rather than a safety block — spending
+            // further recovery attempts on a model that is not answering is
+            // exactly the unbounded cost this bead removes.
+            return .timedOut
         } catch is CancellationError {
             return .cancelled
         } catch let error as PermissiveClassificationError {
@@ -3273,7 +3457,14 @@ struct FoundationModelClassifier: Sendable {
     }
 
     private func makePrewarmedSessionBox(promptPrefix: String) async -> SessionBox {
-        let sessionBox = SessionBox(session: await runtime.makeSession())
+        let sessionBox = SessionBox(
+            session: await runtime.makeSession(),
+            // playhead-8d5r: every session this classifier mints carries the
+            // configured per-call deadline. Threaded through `Config` rather
+            // than read from a global so a test can shrink it to milliseconds
+            // and the whole deadline path stays exercised at gate speed.
+            inferenceDeadline: config.inferenceDeadline
+        )
         await sessionBox.prewarm(promptPrefix)
         return sessionBox
     }
@@ -4668,6 +4859,11 @@ struct FoundationModelClassifier: Sendable {
                 return .unexamined(Self.permissiveStatus(for: reason))
             case .cancelled:
                 return .unexamined(.cancelled)
+            case .timedOut:
+                // playhead-8d5r: an unexamined chunk, named honestly. qbib's
+                // `didExamineWindow` accounting already refuses to let an
+                // unexamined chunk aggregate into a confident `.noAds`.
+                return .unexamined(.inferenceTimeout)
             }
         }
     }
@@ -5931,9 +6127,25 @@ struct FoundationModelClassifier: Sendable {
 // dispatched through actor isolation.
 final actor SessionBox {
     private let session: FoundationModelClassifier.Runtime.Session
+    /// playhead-8d5r: per-call inference deadline applied to EVERY respond
+    /// path.
+    ///
+    /// This is the chokepoint on purpose. `coarseResponses`,
+    /// `runCoarseRetry`, `runCoarseSmartShrinkLoop`, `subdividedCoarseOutput`,
+    /// the rate-limit backoff loop, the refinement pass and the boundary
+    /// extractor all reach the model through this actor and nothing else, so
+    /// bounding it here bounds all of them — including future call sites that
+    /// would otherwise have to remember to opt in. `prewarm` is deliberately
+    /// NOT bounded: it is fire-and-forget and returns without waiting on the
+    /// model.
+    private let inferenceDeadline: Duration
 
-    init(session: FoundationModelClassifier.Runtime.Session) {
+    init(
+        session: FoundationModelClassifier.Runtime.Session,
+        inferenceDeadline: Duration = FMInferenceDeadline.standard
+    ) {
         self.session = session
+        self.inferenceDeadline = inferenceDeadline
     }
 
     func prewarm(_ promptPrefix: String) async {
@@ -5941,16 +6153,25 @@ final actor SessionBox {
     }
 
     func respondCoarse(_ prompt: String) async throws -> CoarseScreeningSchema {
-        try await session.respondCoarse(prompt)
+        let session = self.session
+        return try await FMInferenceDeadline.run(inferenceDeadline) {
+            try await session.respondCoarse(prompt)
+        }
     }
 
     func respondRefinement(_ prompt: String) async throws -> RefinementWindowSchema {
-        try await session.respondRefinement(prompt)
+        let session = self.session
+        return try await FMInferenceDeadline.run(inferenceDeadline) {
+            try await session.respondRefinement(prompt)
+        }
     }
 
     /// B9: boundary extraction response.
     func respondBoundaryExtraction(_ prompt: String) async throws -> FMBoundarySchema {
-        try await session.respondBoundaryExtraction(prompt)
+        let session = self.session
+        return try await FMInferenceDeadline.run(inferenceDeadline) {
+            try await session.respondBoundaryExtraction(prompt)
+        }
     }
 
     /// bd-fmfb: invoke the underlying session's `logFeedbackAttachment` and

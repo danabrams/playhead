@@ -1759,7 +1759,12 @@ actor BackfillJobRunner {
                     inputs: inputs,
                     jobId: job.jobId,
                     jobPhase: job.phase,
-                    latencyMs: coarse.latencyMillis,
+                    // playhead-8d5r: prefer the attempt's OWN elapsed time. The
+                    // pass total is only a fallback for failures recorded
+                    // before the model was ever called. See
+                    // `CoarseWindowFailure.latencyMillis` for what stamping the
+                    // pass total on every failure row did to the numbers.
+                    latencyMs: failure.latencyMillis ?? coarse.latencyMillis,
                     runMode: runMode
                 ) {
                     try await store.insertSemanticScanResult(failureResult)

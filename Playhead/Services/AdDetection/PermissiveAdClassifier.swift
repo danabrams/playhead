@@ -696,8 +696,19 @@ actor PermissiveAdClassifier {
     var classifyOverrideForTesting: ((_ segments: [AdTranscriptSegment]) throws -> CoarseScreeningSchema?)?
     #endif
 
-    init(logger: Logger = Logger(subsystem: "com.playhead", category: "PermissiveAdClassifier")) {
+    /// playhead-8d5r: per-call deadline for this classifier's own inference
+    /// calls. The permissive path builds its OWN `LanguageModelSession` (it has
+    /// to — `.permissiveContentTransformations` guardrails only apply to a
+    /// String-output session), so it does not pass through `SessionBox` and
+    /// would otherwise have stayed unbounded after the standard path was fixed.
+    private let inferenceDeadline: Duration
+
+    init(
+        logger: Logger = Logger(subsystem: "com.playhead", category: "PermissiveAdClassifier"),
+        inferenceDeadline: Duration = FMInferenceDeadline.standard
+    ) {
         self.logger = logger
+        self.inferenceDeadline = inferenceDeadline
         #if canImport(FoundationModels)
         self.model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
         #endif
@@ -771,6 +782,13 @@ actor PermissiveAdClassifier {
             let prompt = PermissiveAdGrammar.buildPrompt(for: segments)
             let raw = try await respond(to: prompt)
             return try PermissiveAdGrammar.parseClassify(raw, validLineRefs: lineRefs)
+        } catch let error as FMInferenceTimeoutError {
+            // playhead-8d5r: rethrow untouched, for the same reason Cycle 4 M-1
+            // rethrows `CancellationError` — the catch-all below would relabel
+            // it `.permissiveDecodingFailure`, and a decode failure is a
+            // DIFFERENT thing with a different fix. Nothing was decoded here;
+            // the model never answered.
+            throw error
         } catch is CancellationError {
             // Cycle 4 M-1: cooperative cancellation must propagate
             // untouched. The prior catch-all below would have mapped
@@ -879,6 +897,9 @@ actor PermissiveAdClassifier {
                 focusLineRefs: focusLineRefs,
                 maximumSpans: maximumSpans
             )
+        } catch let error as FMInferenceTimeoutError {
+            // playhead-8d5r: see the matching arm in `classify`.
+            throw error
         } catch is CancellationError {
             // Cycle 4 M-1: propagate cooperative cancellation untouched.
             throw CancellationError()
@@ -934,12 +955,19 @@ actor PermissiveAdClassifier {
     /// and return the trimmed response content. Factored out so the
     /// classify and refine paths share the same session lifecycle.
     private func respond(to prompt: String) async throws -> String {
-        let session = LanguageModelSession(model: model)
-        let response = try await session.respond(
-            to: prompt,
-            options: GenerationOptions(samplingMode: .greedy)
-        )
-        return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = self.model
+        // playhead-8d5r: bounded exactly like the standard path. The session is
+        // constructed INSIDE the deadline because construction is part of the
+        // call's cost, and because a session abandoned by a timeout must not
+        // outlive the attempt that created it.
+        return try await FMInferenceDeadline.run(inferenceDeadline) {
+            let session = LanguageModelSession(model: model)
+            let response = try await session.respond(
+                to: prompt,
+                options: GenerationOptions(samplingMode: .greedy)
+            )
+            return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     /// Cycle 2 H6: shared smart-shrink retry helper for the permissive
