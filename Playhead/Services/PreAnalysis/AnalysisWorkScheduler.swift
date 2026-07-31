@@ -4827,9 +4827,23 @@ actor AnalysisWorkScheduler {
     /// a 900.4 s episode must not produce both a `:900` T2 rung and a `:900`
     /// duration rung.
     private static let tierLadderMinimumRungGapSeconds: Double = 1
+
+    /// playhead-8bp2: an upper sanity bound on a duration used as a tier rung.
+    ///
+    /// `analysis_assets.episodeDurationSec` is a `REAL` read off disk. A rung
+    /// becomes a `workKey` suffix via `Int(nextCoverage)`, and `Int(_: Double)`
+    /// TRAPS on a non-finite or out-of-range value — a corrupt row would crash
+    /// the scheduler rather than degrade. 24 hours is far past any podcast
+    /// episode and comfortably inside `Int`; anything non-finite or beyond it is
+    /// treated as unusable, which costs only the pre-8bp2 ceiling.
+    static let maximumTierLadderDurationSeconds: Double = 24 * 60 * 60
+
     static func coverageTierLadder(tiers: [Double], episodeDurationSec: Double?) -> [Double] {
         let ascending = tiers.sorted()
-        guard let duration = episodeDurationSec, duration > 0 else { return ascending }
+        guard let duration = episodeDurationSec,
+              duration.isFinite,
+              duration > 0,
+              duration <= maximumTierLadderDurationSeconds else { return ascending }
         return ascending.filter { $0 <= duration - tierLadderMinimumRungGapSeconds } + [duration]
     }
 
@@ -4856,11 +4870,11 @@ actor AnalysisWorkScheduler {
     /// ladder. `nil` — including on a read failure — means "use the configured
     /// tiers only", i.e. exactly the pre-8bp2 ladder. Failing CLOSED here would
     /// mean deepening on a guess; failing open costs at worst the old ceiling.
+    /// Range/finiteness sanity lives in ``coverageTierLadder(tiers:episodeDurationSec:)``
+    /// so the rule is testable without a store.
     private func tierLadderEpisodeDuration(assetId: String) async -> Double? {
         do {
-            guard let duration = try await store.fetchAsset(id: assetId)?.episodeDurationSec,
-                  duration > 0 else { return nil }
-            return duration
+            return try await store.fetchAsset(id: assetId)?.episodeDurationSec
         } catch {
             logger.warning(
                 "playhead-8bp2: episode duration read failed for asset \(assetId): \(error); tier ladder falls back to configured tiers"

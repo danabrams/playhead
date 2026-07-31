@@ -431,6 +431,38 @@ struct AnalysisWorkSchedulerTests {
         }
     }
 
+    /// `episodeDurationSec` is a `REAL` read off disk and the rung becomes a
+    /// `workKey` suffix via `Int(_:)`, which TRAPS on a non-finite or
+    /// out-of-range value. A corrupt row must degrade to the configured tiers,
+    /// not crash the scheduler.
+    @Test("a corrupt or absurd duration degrades to the configured tiers")
+    func ladderRejectsUnusableDurations() {
+        let unusable: [Double] = [
+            .nan,
+            .infinity,
+            -.infinity,
+            0,
+            -1,
+            AnalysisWorkScheduler.maximumTierLadderDurationSeconds + 1,
+            1e30,
+        ]
+        for duration in unusable {
+            let ladder = AnalysisWorkScheduler.coverageTierLadder(
+                tiers: Self.configuredTiers,
+                episodeDurationSec: duration
+            )
+            #expect(ladder == [90, 300, 900], "duration \(duration) must not become a rung")
+            #expect(ladder.allSatisfy { $0.isFinite })
+        }
+        // The bound itself is inclusive — a 24 h episode is still usable.
+        #expect(
+            AnalysisWorkScheduler.coverageTierLadder(
+                tiers: Self.configuredTiers,
+                episodeDurationSec: AnalysisWorkScheduler.maximumTierLadderDurationSeconds
+            ).last == AnalysisWorkScheduler.maximumTierLadderDurationSeconds
+        )
+    }
+
     /// Bounded by construction: walking the ladder from zero must strictly
     /// increase and halt. An unbounded retry is a worse bug than the one this
     /// bead fixes.
