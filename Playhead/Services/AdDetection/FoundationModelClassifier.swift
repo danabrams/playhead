@@ -686,13 +686,31 @@ struct FMCoarseScanOutput: Sendable, Equatable {
     /// N chunks folding into one row. Do not reintroduce a subset assertion.
     let permissiveFailureCounts: PermissiveFailureCounts
 
+    /// playhead-bkhc: the plan list this pass windowed against — the DENOMINATOR
+    /// for coverage. Empty only when the pass returned before planning (model
+    /// unavailable) or planned nothing.
+    ///
+    /// Two reasons it is returned rather than re-derived by the caller:
+    ///
+    /// 1. `BackfillJobRunner.runJob` used to call `planPassA` a SECOND time to
+    ///    rebuild this list, paying a whole extra tokenizer pass over the
+    ///    episode per job and re-deriving plan attribution structurally in the
+    ///    hope the two lists agreed (its own comment flagged that a drift would
+    ///    silently let the coverage cursor advance past a hole).
+    /// 2. That second call is an `async throws` hop into the tokenizer. The
+    ///    coverage cursor has to be computable when the enclosing Task is
+    ///    ALREADY CANCELLED (a BG-window expiry) — an await that may throw
+    ///    under cancellation is exactly what must not sit on the salvage path.
+    let plans: [CoarsePassWindowPlan]
+
     init(
         status: SemanticScanStatus,
         windows: [FMCoarseWindowOutput],
         latencyMillis: Double,
         prewarmHit: Bool,
         failedWindows: [CoarseWindowFailure] = [],
-        permissiveFailureCounts: PermissiveFailureCounts = .zero
+        permissiveFailureCounts: PermissiveFailureCounts = .zero,
+        plans: [CoarsePassWindowPlan] = []
     ) {
         self.status = status
         self.windows = windows
@@ -700,6 +718,7 @@ struct FMCoarseScanOutput: Sendable, Equatable {
         self.prewarmHit = prewarmHit
         self.failedWindows = failedWindows
         self.permissiveFailureCounts = permissiveFailureCounts
+        self.plans = plans
     }
 }
 
@@ -1710,7 +1729,8 @@ struct FoundationModelClassifier: Sendable {
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
                     prewarmHit: prewarmHit,
                     failedWindows: failedWindows,
-                    permissiveFailureCounts: permissiveCounts
+                    permissiveFailureCounts: permissiveCounts,
+                    plans: plans
                 )
             }
 
@@ -1902,7 +1922,8 @@ struct FoundationModelClassifier: Sendable {
                     latencyMillis: Self.latencyMillis(since: start, clock: clock),
                     prewarmHit: prewarmHit,
                     failedWindows: failedWindows,
-                    permissiveFailureCounts: permissiveCounts
+                    permissiveFailureCounts: permissiveCounts,
+                    plans: plans
                 )
             }
         }
@@ -1924,7 +1945,8 @@ struct FoundationModelClassifier: Sendable {
             latencyMillis: Self.latencyMillis(since: start, clock: clock),
             prewarmHit: prewarmHit,
             failedWindows: failedWindows,
-            permissiveFailureCounts: permissiveCounts
+            permissiveFailureCounts: permissiveCounts,
+            plans: plans
         )
     }
 

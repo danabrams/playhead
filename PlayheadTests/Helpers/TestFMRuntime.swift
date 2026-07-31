@@ -43,6 +43,14 @@ actor TestFMRuntime {
     /// EXPIRY produces (so the post-refinement `Task.checkCancellation()`
     /// throws, exercising the runner's cancellation-checkpoint branch).
     private let onRefinementRespond: @Sendable () async -> Void
+    /// playhead-bkhc: awaited at the START of each coarse respond, before the
+    /// response/failure is produced, with the 1-based call ordinal. Defaults to
+    /// a no-op. A test can gate on this to deterministically cancel the
+    /// enclosing Task *during the coarse pass* — the scenario a BG-window
+    /// EXPIRY actually produces on device (the coarse pass is where the
+    /// 12–45 min of FM wall-clock is spent), as distinct from the t1kq
+    /// during-refinement case.
+    private let onCoarseRespond: @Sendable (Int) async -> Void
     private(set) var coarseCallCount = 0
     private(set) var refinementCallCount = 0
     private(set) var boundaryExtractionCallCount = 0
@@ -68,9 +76,11 @@ actor TestFMRuntime {
         ),
         defaultRefinement: RefinementWindowSchema = RefinementWindowSchema(spans: []),
         defaultBoundaryExtraction: FMBoundarySchema = FMBoundarySchema(spans: [], abstain: false),
-        onRefinementRespond: @escaping @Sendable () async -> Void = { }
+        onRefinementRespond: @escaping @Sendable () async -> Void = { },
+        onCoarseRespond: @escaping @Sendable (Int) async -> Void = { _ in }
     ) {
         self.onRefinementRespond = onRefinementRespond
+        self.onCoarseRespond = onCoarseRespond
         self.coarseQueue = coarseResponses
         self.refinementQueue = refinementResponses
         self.boundaryExtractionQueue = boundaryExtractionResponses
@@ -117,7 +127,8 @@ actor TestFMRuntime {
         coarsePrompts.map(Self.submittedLineRefs(from:))
     }
 
-    private func nextCoarse(prompt: String) throws -> CoarseScreeningSchema {
+    private func nextCoarse(prompt: String) async throws -> CoarseScreeningSchema {
+        await onCoarseRespond(coarseCallCount + 1)
         coarsePrompts.append(prompt)
         coarseCallCount += 1
         if !coarseFailureQueue.isEmpty {

@@ -445,6 +445,192 @@ struct BackfillRateLimitDeferTests {
                 "a full-coverage cancellation must not checkpoint an episode-end cursor")
     }
 
+    // MARK: - playhead-bkhc: expiry DURING THE COARSE PASS must not discard the pass
+
+    /// Total seconds of audio a run's persisted passA rows actually examined,
+    /// measured as the length of the UNION of their `[windowStartTime,
+    /// windowEndTime)` intervals. Union, not sum, so a re-scan of already-
+    /// covered audio cannot inflate the number — which is the whole point: the
+    /// question "did the second window continue where the first stopped" is a
+    /// question about audio, not about row counts or status columns.
+    private func examinedAudioSeconds(_ rows: [SemanticScanResult]) -> Double {
+        let intervals = rows
+            .filter { $0.scanPass == "passA" && $0.status.didExamineWindow }
+            .map { ($0.windowStartTime, $0.windowEndTime) }
+            .sorted { $0.0 < $1.0 }
+        var total = 0.0
+        var cursor = -Double.infinity
+        for (start, end) in intervals where end > cursor {
+            total += end - max(start, cursor)
+            cursor = end
+        }
+        return total
+    }
+
+    @available(iOS 26.0, *)
+    @Test("a BG-window expiry DURING the coarse pass keeps the audio it already screened, and the next window resumes from there")
+    func expiryDuringCoarsePassCheckpointsAudioAndResumes() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        // BG window 1: windows 0 (0..10) and 1 (10..20) are screened, then the
+        // OS expires the task. `coarsePassA` returns its partial output; the
+        // runner must persist that work and checkpoint 20s of covered audio.
+        let gate = CoarseCallGate(triggerOnCall: 2)
+        let rt1 = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in await gate.arriveAndWait(ordinal: ordinal) }
+        )
+        let task = Task { try await makeRunner(store: store, runtime: rt1.runtime).runPendingBackfill(for: inputs) }
+        await gate.awaitReached()   // window 1's respond is about to produce
+        task.cancel()               // BG window expires
+        await gate.release()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        #expect(await rt1.coarseCallCount == 2, "two windows were screened before expiry")
+
+        // THE ASSERTION THAT MATTERS: seconds of audio, not a status column.
+        let afterRun1 = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
+        #expect(examinedAudioSeconds(afterRun1) == 20,
+                "the 20s of audio the expired window paid FM for must be durable")
+
+        let deferredRow = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(deferredRow.status == .deferred)
+        #expect(deferredRow.progressCursor?.lastProcessedUpperBoundSec == 20,
+                "checkpoint must be the honest contiguous prefix (20s), not nil and not episode-end")
+        #expect(deferredRow.retryCount == 0,
+                "a window that MADE progress must not consume the attempt budget")
+
+        // BG window 2: no expiry. The job must resume at 20s.
+        let rt2 = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule()
+        )
+        let run2 = try await makeRunner(store: store, runtime: rt2.runtime).runPendingBackfill(for: inputs)
+        #expect(run2.admittedJobIds.contains(jobId))
+        #expect(await rt2.coarseCallCount == 1,
+                "resume must screen ONLY the remaining 10s window, not re-screen the whole episode")
+
+        let afterRun2 = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
+        #expect(examinedAudioSeconds(afterRun2) == 30,
+                "two BG windows must together cover the whole 30s episode")
+        let completedRow = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(completedRow.status == .complete)
+        #expect(completedRow.progressCursor?.lastProcessedUpperBoundSec == 30)
+    }
+
+    @available(iOS 26.0, *)
+    @Test("resuming after a coarse-pass expiry duplicates no window: one row per window, no overlapping audio")
+    func resumeAfterCoarseExpiryIsIdempotent() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        let gate = CoarseCallGate(triggerOnCall: 2)
+        let rt1 = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in await gate.arriveAndWait(ordinal: ordinal) }
+        )
+        let task = Task { try await makeRunner(store: store, runtime: rt1.runtime).runPendingBackfill(for: inputs) }
+        await gate.awaitReached()
+        task.cancel()
+        await gate.release()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+
+        let rt2 = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule()
+        )
+        _ = try await makeRunner(store: store, runtime: rt2.runtime).runPendingBackfill(for: inputs)
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
+        let passA = rows.filter { $0.scanPass == "passA" }
+        // Exactly one row per planned window across BOTH passes. The window
+        // straddling the checkpoint is REPLACED (same reuseKeyHash), never
+        // duplicated, and the pre-checkpoint windows are not re-emitted.
+        #expect(passA.count == 3, "one passA row per window across the resumed pass, no duplicates")
+        let geometries = Set(passA.map { "\($0.windowFirstAtomOrdinal)-\($0.windowLastAtomOrdinal)" })
+        #expect(geometries.count == 3, "no two passA rows may cover the same window")
+        // Sum == union ⇒ no audio was examined twice across the resume.
+        let examined = passA.filter { $0.status.didExamineWindow }
+        let summed = examined.reduce(0.0) { $0 + ($1.windowEndTime - $1.windowStartTime) }
+        #expect(summed == examinedAudioSeconds(rows),
+                "summed window durations must equal the union — any excess is double-scanned audio")
+        // Evidence events are content-addressed; a resumed pass must not
+        // multiply them either.
+        let events = try await store.fetchEvidenceEvents(analysisAssetId: "asset-pmp9")
+        #expect(events.count == Set(events.map(\.id)).count, "no duplicated evidence events across the resume")
+    }
+
+    @available(iOS 26.0, *)
+    @Test("a job that makes NO progress across repeated expiries TERMINATES with a named cause instead of resuming forever")
+    func repeatedNoProgressExpiriesTerminateWithNamedCause() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+
+        // Every BG window: window 0 refuses, then the OS expires the task —
+        // so the contiguous covered prefix never leaves 0s. This is the
+        // treadmill shape; it must not run forever.
+        for attempt in 1...AdmissionController.maxRetries {
+            let gate = CoarseCallGate(triggerOnCall: 1)
+            let runtime = TestFMRuntime(
+                coarseFailures: [.refusal],
+                contextSize: Self.contextSize,
+                coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+                tokenCountRule: windowingTokenRule(),
+                onCoarseRespond: { ordinal in await gate.arriveAndWait(ordinal: ordinal) }
+            )
+            let task = Task { try await makeRunner(store: store, runtime: runtime.runtime).runPendingBackfill(for: inputs) }
+            await gate.awaitReached()
+            task.cancel()
+            await gate.release()
+            await #expect(throws: CancellationError.self) { _ = try await task.value }
+
+            let row = try #require(await store.fetchBackfillJob(byId: jobId))
+            #expect(row.progressCursor?.lastProcessedUpperBoundSec == nil, "no audio was ever covered")
+            #expect(row.retryCount == attempt, "a zero-progress expiry must consume one attempt")
+            if attempt < AdmissionController.maxRetries {
+                #expect(row.status == .deferred, "still within the attempt budget")
+            }
+        }
+
+        let terminal = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(terminal.status == .failed, "the treadmill must terminate, not resume forever")
+        #expect(terminal.deferReason == BackfillJobRunner.noProgressExpiryReason(phase: .fullEpisodeScan))
+        #expect(terminal.retryCount == AdmissionController.maxRetries)
+
+        // And it stays terminated: a further drain admits nothing and spends
+        // no FM calls on it.
+        let rt = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule()
+        )
+        let after = try await makeRunner(store: store, runtime: rt.runtime).runPendingBackfill(for: inputs)
+        #expect(!after.admittedJobIds.contains(jobId))
+        #expect(await rt.coarseCallCount == 0)
+    }
+
     // MARK: - Item 4: inter-window pacing invokes the injected sleep
 
     @available(iOS 26.0, *)
@@ -478,6 +664,44 @@ struct BackfillRateLimitDeferTests {
         // only (never before the first), each at the configured delay.
         let sleeps = await recorder.sleeps
         #expect(sleeps == [pacingNanos, pacingNanos])
+    }
+}
+
+/// playhead-bkhc: the coarse-pass analogue of `RefinementGate`. Blocks the Nth
+/// coarse respond so a test can cancel the runner's `Task` mid-coarse-pass —
+/// the real BG-window expiry shape, since the coarse pass is where the FM
+/// wall-clock is spent. Continuation-synchronized, never sleep-based.
+private actor CoarseCallGate {
+    private let triggerOnCall: Int
+    private var reached = false
+    private var released = false
+    private var reachedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(triggerOnCall: Int) {
+        self.triggerOnCall = triggerOnCall
+    }
+
+    /// Runner-side: on the trigger ordinal, signal arrival then block until the
+    /// test releases. Every other ordinal passes straight through.
+    func arriveAndWait(ordinal: Int) async {
+        guard ordinal == triggerOnCall else { return }
+        reached = true
+        reachedContinuation?.resume()
+        reachedContinuation = nil
+        if released { return }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func awaitReached() async {
+        if reached { return }
+        await withCheckedContinuation { reachedContinuation = $0 }
+    }
+
+    func release() {
+        released = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
     }
 }
 
