@@ -770,6 +770,41 @@ struct AdDetectionConfig: Sendable {
     /// byte-identical to pre-xsdz.65. Flip after a corpus A/B.
     let podContinuationEnabled: Bool
 
+    /// playhead-hvk0: require a full rescan to have MEASURABLY read its episode
+    /// before its recall sample may certify the `targetedWithAudit` policy for
+    /// the show.
+    ///
+    /// **The circularity this closes.** `CoveragePlanner` switches a show to
+    /// `targetedWithAudit` — which narrows scanning to anchor windows and never
+    /// re-reads an episode — as soon as `observedEpisodeCount >= 5 && stableRecall`.
+    /// `stableRecall` is three full-rescan recall samples at or above 0.85, and a
+    /// recall sample asks "of the ad lines THIS RESCAN found, what fraction would
+    /// the targeted phases also have scanned". Its denominator is produced by the
+    /// rescan itself, so a rescan that read almost none of the episode finds
+    /// almost no ad lines, the targeted phases trivially cover them, and the
+    /// sample reads 1.0. Measured on the 2026-07-29 device pull: every
+    /// `fullEpisodeScan` on `feeds.simplecast.com/dHoohVNH` examined 82–167 s of
+    /// episodes 1,503–4,379 s long (2–5%), and those runs are exactly what put
+    /// three 1.0 samples in the ring and promoted the show.
+    ///
+    /// When `true` (the shipped default), a full rescan whose measured
+    /// ``AnalysisCoverageSummary/adScanFraction`` is below
+    /// ``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction`` — or is not
+    /// measurable at all — contributes NO recall sample and forces the show's
+    /// stable-recall flag false, so its next episode is planned `fullCoverage`.
+    /// A rescan that does read its episode restores the flag from the untouched
+    /// ring, and the targeted policy's savings return the moment it is earned.
+    ///
+    /// When `false`, the recall ring advances and the flag derives exactly as it
+    /// did pre-hvk0 — the kill switch, if the extra full scans prove too
+    /// expensive in the field.
+    ///
+    /// **What it cannot do.** It is not a retry, not a widen and not a re-drive:
+    /// it only decides WHICH plan an already-caused pass produces. It cannot
+    /// cause a pass, so it adds no scanning to an episode nothing was going to
+    /// scan anyway, and it re-opens no terminal.
+    let plannerPromotionRequiresMeasuredCoverage: Bool
+
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
     /// the per-knob config fields. The effective-threshold clamp is fixed at the
     /// bead-mandated `[0.55, 0.95]` (the controller is two-sided but must never
@@ -872,7 +907,8 @@ struct AdDetectionConfig: Sendable {
         postRollGuardSeconds: Double = 90.0,
         unanchoredExtentBlocksAutoSkip: Bool = true,
         preRollStartClampSeconds: Double = 20.0,
-        podContinuationEnabled: Bool = false
+        podContinuationEnabled: Bool = false,
+        plannerPromotionRequiresMeasuredCoverage: Bool = true
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -949,6 +985,7 @@ struct AdDetectionConfig: Sendable {
         self.unanchoredExtentBlocksAutoSkip = unanchoredExtentBlocksAutoSkip
         self.preRollStartClampSeconds = preRollStartClampSeconds
         self.podContinuationEnabled = podContinuationEnabled
+        self.plannerPromotionRequiresMeasuredCoverage = plannerPromotionRequiresMeasuredCoverage
     }
 
     static let `default` = AdDetectionConfig(
@@ -1012,7 +1049,8 @@ struct AdDetectionConfig: Sendable {
         postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
         preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
-        podContinuationEnabled: false  // playhead-xsdz.65: ad-pod continuation ships OFF and fully inert (zero ad_windows writes, byte-identical backfill); flip after corpus A/B
+        podContinuationEnabled: false,  // playhead-xsdz.65: ad-pod continuation ships OFF and fully inert (zero ad_windows writes, byte-identical backfill); flip after corpus A/B
+        plannerPromotionRequiresMeasuredCoverage: true  // playhead-hvk0: ships ON — a full rescan must MEASURABLY read its episode before its recall sample may promote the show to targetedWithAudit. Measured device cost: the promoted show's episodes cost a full scan (~23 FM calls / ~5 min FM compute for a 28-min episode) instead of a targeted one (~7 calls / ~1.5 min) until the promotion is earned. Kill switch: set false to restore the pre-hvk0 ring derivation.
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip

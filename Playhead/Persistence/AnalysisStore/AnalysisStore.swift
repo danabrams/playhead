@@ -12489,6 +12489,16 @@ actor AnalysisStore {
     ///   empty targeted run passes `incrementNarrowingAllPhasesEmpty = true`.
     ///   A full rescan can pass both (ad-free episode where narrowing was
     ///   also empty).
+    /// - playhead-hvk0: `fullRescanReadEpisode` carries the full rescan's
+    ///   MEASURED read evidence. `nil` (the default, and the only value any
+    ///   pre-hvk0 caller passes) leaves the flag derivation byte-identical.
+    ///   `false` forces `stableRecallFlag` false for this observation — see
+    ///   ``computePlannerStableFlag(observedEpisodeCount:samples:fullRescanReadEpisode:)``
+    ///   for why the recall ring alone cannot certify the targeted policy. It is
+    ///   deliberately NOT persisted as its own column: the value is re-supplied
+    ///   by every subsequent full-coverage observation, and a demoted show is
+    ///   planned `fullCoverage`, so there is no observation path that could read
+    ///   a stale value.
     @discardableResult
     func recordPodcastEpisodeObservation(
         podcastId: String,
@@ -12496,6 +12506,7 @@ actor AnalysisStore {
         fullRescanPrecisionSample: Double? = nil,
         incrementEpisodesObservedWithoutSample: Bool = false,
         incrementNarrowingAllPhasesEmpty: Bool = false,
+        fullRescanReadEpisode: Bool? = nil,
         now: Double
     ) throws -> PodcastPlannerState {
         // Wrap the read-modify-write in a transaction so a concurrent
@@ -12535,9 +12546,13 @@ actor AnalysisStore {
                 // non-full-rescan observations — see doc comment above.
             }
 
+            // playhead-hvk0: the read-evidence term only ever applies to a full
+            // rescan. A targeted observation has no rescan to certify, so it
+            // passes `nil` through and the flag derives from the ring alone.
             let stableFlag = Self.computePlannerStableFlag(
                 observedEpisodeCount: newObservedCount,
-                samples: newSamples
+                samples: newSamples,
+                fullRescanReadEpisode: wasFullRescan ? fullRescanReadEpisode : nil
             )
 
             // Cycle 4 B4: per-podcast counters. Read prior value (0 for
@@ -12601,6 +12616,59 @@ actor AnalysisStore {
         guard observedEpisodeCount >= plannerStableObservedEpisodeFloor else { return false }
         guard samples.count >= plannerRecallRingSize else { return false }
         return samples.allSatisfy { $0 >= plannerRecallThreshold }
+    }
+
+    /// playhead-hvk0: the stable-recall flag, with the full-rescan READ
+    /// EVIDENCE applied on top of the ring.
+    ///
+    /// **Why the ring alone is not enough.** A recall sample answers "of the
+    /// ad lines the FULL RESCAN found, what fraction would the targeted phases
+    /// also have scanned". Its denominator is produced by the rescan itself, so
+    /// a rescan that read almost none of the episode finds almost no ad lines
+    /// and the targeted phases trivially cover them — the sample reads 1.0.
+    /// Measured on the 2026-07-29 device pull: every `fullEpisodeScan` on
+    /// `feeds.simplecast.com/dHoohVNH` examined 82–167 s of episodes 1,503–4,379 s
+    /// long (2–5%), and those runs are what put three 1.0 samples in the ring and
+    /// promoted the whole show to `targetedWithAudit`. Conditioning on a scan and
+    /// then concluding the scan's targeting works is circular — the same trap
+    /// playhead-4xqf's original N=12 pair-only conclusion fell into.
+    ///
+    /// So the ring is necessary and not sufficient: a rescan may only CERTIFY the
+    /// targeted policy if it measurably read the episode
+    /// (``AnalysisCoverageSummary/adScanFraction`` at or above
+    /// ``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction`` — the SAME
+    /// floor the runner's skip predicate, the re-drive mint and the library ✓ use;
+    /// playhead-csbq pinned that ruler and this deliberately introduces no second
+    /// coverage measure).
+    ///
+    /// - Parameter fullRescanReadEpisode: `nil` on any observation that is not a
+    ///   full rescan, or when the caller is not applying the gate — the flag then
+    ///   derives from the ring exactly as it did pre-hvk0. `false` means a full
+    ///   rescan ran and could NOT be shown to have read the episode (short scan,
+    ///   unmeasurable coverage, or a failed read): the flag is forced false.
+    ///   `true` means it did.
+    ///
+    /// **Direction of the error, on purpose.** Every uncertain input resolves to
+    /// "not certified", which can only ever route future episodes to
+    /// `fullCoverage` — more audio read, never less. This helper cannot cause a
+    /// pass, a retry or a widen; it only decides which plan an
+    /// already-caused pass produces.
+    ///
+    /// **Not sticky, and it does not need to be.** A demotion routes the show's
+    /// next episode to a full-coverage policy, which supplies this input again —
+    /// so the flag cannot flap back through a targeted run it has itself made
+    /// unreachable. A rescan that finally reads its episode restores the flag
+    /// from the untouched ring.
+    nonisolated static func computePlannerStableFlag(
+        observedEpisodeCount: Int,
+        samples: [Double],
+        fullRescanReadEpisode: Bool?
+    ) -> Bool {
+        if fullRescanReadEpisode == false { return false }
+        return computePlannerStableFlag(
+            observedEpisodeCount: observedEpisodeCount,
+            samples: samples
+        )
     }
 
     private func writePodcastPlannerStateRow(
