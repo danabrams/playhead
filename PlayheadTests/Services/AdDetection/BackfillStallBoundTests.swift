@@ -161,18 +161,14 @@ struct BackfillStallBoundTests {
     /// have separated them.
     @Test("the coarse pass reports one unit of work per resolved window")
     func coarsePassReportsProgressPerWindow() async throws {
-        let fmRuntime = TestFMRuntime()
-        let classifier = FoundationModelClassifier(
-            runtime: fmRuntime.runtime,
-            // A small context forces the planner to cut several windows, so
-            // this test is not vacuously about a single-window pass.
-            config: FoundationModelClassifier.Config(
-                safetyMarginTokens: 4,
-                coarseMaximumResponseTokens: 8,
-                refinementMaximumResponseTokens: 16
-            )
-        )
-        let inputs = makeInputs(lineCount: 12)
+        // Counting prompt CHARACTERS rather than words is what forces the
+        // planner to cut several windows out of this transcript. Without it the
+        // whole fixture fits one window, `max(1, plans.count)` collapses to 1,
+        // and the per-window half of the contract goes untested — a vacuous
+        // pass that survives deleting the per-window tick outright.
+        let fmRuntime = TestFMRuntime(tokenCountRule: { $0.count })
+        let classifier = FoundationModelClassifier(runtime: fmRuntime.runtime)
+        let inputs = makeInputs(lineCount: 40)
 
         let observed = FMProgressTicker()
         let output = try await classifier.coarsePassA(
@@ -180,7 +176,10 @@ struct BackfillStallBoundTests {
             onProgress: { _ in observed.note() }
         )
 
-        #expect(output.plans.count >= 1)
+        // The vacuity guard. A single-window pass cannot distinguish the
+        // prologue tick from the per-window ticks.
+        #expect(output.plans.count > 1)
+        // One for the planning prologue, then one per window after the first.
         #expect(observed.observed == max(1, output.plans.count))
     }
 

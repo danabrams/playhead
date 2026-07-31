@@ -25,9 +25,15 @@ private func neverReturns() async {
     await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
 }
 
-/// Counts how many times the watchdog sampled, and optionally records progress
-/// on the first `progressiveSamples` of them. Returning immediately keeps the
-/// test off the wall clock.
+/// Counts how many times the watchdog sampled and returns immediately, keeping
+/// the test off the wall clock.
+///
+/// Progress, when asked for, is recorded on every SECOND sample within the
+/// first `progressiveSamples`. Alternating matters: it is what makes each
+/// progress sample land on an already-accumulated strike, which is the only
+/// arrangement in which resetting the count and merely not incrementing it
+/// behave differently. A driver that ticked on a contiguous opening run would
+/// pass identically against both, and would be a test of nothing.
 private final class SampleDriver: Sendable {
     private let state = OSAllocatedUnfairLock(initialState: 0)
     private let ticker: FMProgressTicker
@@ -46,11 +52,19 @@ private final class SampleDriver: Sendable {
                 count += 1
                 return count
             }
-            if ordinal <= progressiveSamples {
+            if ordinal <= progressiveSamples, ordinal.isMultiple(of: 2) {
                 ticker.note()
             }
         }
     }
+}
+
+/// A sampling loop that never fires, so only the operation can settle the
+/// race. Used by every test whose subject is the OPERATION's outcome: a
+/// zero-cost sampler would otherwise be racing the operation for first-writer
+/// and the test would pass or fail on scheduler luck.
+private let neverSamples: @Sendable (Duration) async throws -> Void = { _ in
+    await neverReturns()
 }
 
 private struct WatchdogTestError: Error, Equatable {
@@ -69,10 +83,9 @@ struct FMNoProgressWatchdogTests {
             interval: .seconds(30),
             consecutiveIntervalLimit: 3,
             ticker: ticker,
-            sleep: SampleDriver(ticker: ticker).sleep
-        ) {
-            "answered"
-        }
+            sleep: neverSamples,
+            operation: { "answered" }
+        )
         #expect(value == "answered")
     }
 
@@ -102,8 +115,8 @@ struct FMNoProgressWatchdogTests {
     /// throughout. If the count were CUMULATIVE, such a pass would be killed
     /// after the third slow stretch no matter how much audio it had banked —
     /// the same wrong predicate `playhead-bkhc` had to fix for barren
-    /// background windows. Six interleaved progress ticks must therefore cost
-    /// exactly six extra samples and nothing else.
+    /// background windows. Progress interleaved through the first six samples
+    /// must therefore cost exactly six extra samples and nothing else.
     @Test("progress resets the count: consecutive silence, never cumulative")
     func progressResetsTheConsecutiveCount() async {
         let ticker = FMProgressTicker()
@@ -125,9 +138,11 @@ struct FMNoProgressWatchdogTests {
             }
         }
 
-        // A cumulative counter fires at sample 3 (three silent-or-not samples
-        // in); a consecutive counter cannot fire until the run of silence
-        // itself is `limit` long, which is sample 9.
+        // The driver ticks on samples 2, 4 and 6, so each of those lands on an
+        // already-accumulated strike. A count that is merely NOT INCREMENTED on
+        // progress reaches the limit at sample 5; a count that is RESET cannot
+        // reach it until an unbroken run of `limit` silent samples exists,
+        // which is sample 9.
         #expect(driver.samples == progressiveSamples + limit)
     }
 
@@ -139,10 +154,9 @@ struct FMNoProgressWatchdogTests {
                 interval: .seconds(180),
                 consecutiveIntervalLimit: 3,
                 ticker: ticker,
-                sleep: SampleDriver(ticker: ticker).sleep
-            ) {
-                throw WatchdogTestError(tag: "refusal")
-            }
+                sleep: neverSamples,
+                operation: { throw WatchdogTestError(tag: "refusal") }
+            )
         }
     }
 
@@ -162,7 +176,7 @@ struct FMNoProgressWatchdogTests {
                     consecutiveIntervalLimit: 3,
                     ticker: ticker,
                     // Never samples, so only the cancellation can decide this.
-                    sleep: { _ in await neverReturns() },
+                    sleep: neverSamples,
                     operation: {
                         await started.signal()
                         try await Task.sleep(for: .seconds(120))
