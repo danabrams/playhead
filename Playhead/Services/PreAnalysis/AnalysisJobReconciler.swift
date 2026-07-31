@@ -619,9 +619,11 @@ actor AnalysisJobReconciler {
     /// ``ReconciliationReport/recoveredWorkCount`` sums and
     /// `BackgroundProcessingService` reports to the background-task ledger as
     /// `jobsCompleted` / `.recoveredWork`. On the 2026-07-30 device pull that
-    /// produced a steady `jobsCompleted: 1` on ~28 consecutive overnight sweeps
-    /// while nothing was enqueued: the ledger built to make a stalled fleet
-    /// visible was the thing reporting it healthy.
+    /// produced a flat `jobsCompleted: 1` on 70 of the 287 `preanalysis_recovery`
+    /// runs — 25 of the 33 half-hourly sweeps on 2026-07-28 alone — while 19
+    /// assets sat un-progressing. The ledger built to make a stalled fleet
+    /// visible was the thing reporting it healthy, which is a large part of why
+    /// this read as platform starvation for as long as it did.
     ///
     /// Reporting the true count does not by itself un-stick those episodes —
     /// re-requesting a swallowed `workKey` is playhead-y8f3's forward-looking

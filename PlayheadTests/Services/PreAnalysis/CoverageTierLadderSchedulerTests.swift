@@ -3,9 +3,9 @@
 // its audio TRANSCRIBED, driven through the real scheduler + runner + transcript
 // engine rather than through the outcome-arm predicates in isolation.
 //
-// The defect these tests pin, measured on the 2026-07-30 device pull: 66.4% of
-// long-episode audio had never been transcribed, and 19 assets held 909 of the
-// 1,102 untranscribed minutes. Two independent causes, both here:
+// The defect these tests pin, measured on the 2026-07-30 device pull: of the 34
+// episodes over 15 minutes, 19 sat in `analysisState = 'queued'` holding 909 of
+// the 1,102 untranscribed minutes. Two independent causes, both here:
 //
 //   1. The tier-advance arm asked `outcome.cueCoverageSec >= desiredCoverageSec`.
 //      `cueCoverageSec` is the end time of the last confident AD WINDOW, so an

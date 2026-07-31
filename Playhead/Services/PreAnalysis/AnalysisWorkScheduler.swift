@@ -4794,30 +4794,7 @@ actor AnalysisWorkScheduler {
 
     // MARK: - Tier Definitions
 
-    /// playhead-8bp2: the coverage-depth ladder a background episode walks,
-    /// ASCENDING and terminated by the episode itself.
-    ///
-    /// **Why the episode duration is the last rung.** `desiredCoverageSec` is
-    /// the transcription budget, literally — `AnalysisJobRunner` keeps only
-    /// `allShards.filter { $0.startTime < request.desiredCoverageSec }`. The
-    /// configured tiers stop at `t2DepthSeconds` (900 s), so an episode nobody
-    /// plays could never be transcribed past fifteen minutes no matter how many
-    /// clean passes it got, and "all tiers done" terminated it `complete` with
-    /// `workKey` UNIQUE + `INSERT OR IGNORE` blocking any re-request. Measured
-    /// on the 2026-07-30 device pull, 66.4% of long-episode audio had never been
-    /// transcribed; the only assets at high coverage were ones playback had
-    /// escalated past the ladder via `dispatchForegroundCatchup`. The rungs a
-    /// listener's playhead already reaches must not be the only ones that exist.
-    ///
-    /// **Bounded, and by construction.** The ladder is at most four rungs:
-    /// three configured tiers plus the duration. Rungs at or past the duration
-    /// are dropped rather than kept, so we never set a target the audio cannot
-    /// satisfy (which would burn a pass reaching for seconds that do not exist),
-    /// and the list is strictly ascending, so ``nextTierCoverage(current:tiers:episodeDurationSec:)``
-    /// strictly increases and terminates. With no duration known we return
-    /// exactly the configured tiers — the pre-8bp2 ladder — so a missing
-    /// `episodeDurationSec` degrades to the old behaviour rather than guessing.
-    /// Minimum gap between two rungs of the ladder.
+    /// playhead-8bp2: minimum gap between two rungs of the ladder.
     ///
     /// The tier-advance arm derives a rung's `workKey` suffix as
     /// `":\(Int(nextCoverage))"`, so two rungs less than a second apart would
@@ -4838,6 +4815,31 @@ actor AnalysisWorkScheduler {
     /// treated as unusable, which costs only the pre-8bp2 ceiling.
     static let maximumTierLadderDurationSeconds: Double = 24 * 60 * 60
 
+    /// playhead-8bp2: the coverage-depth ladder a background episode walks,
+    /// ASCENDING and terminated by the episode itself.
+    ///
+    /// **Why the episode duration is the last rung.** `desiredCoverageSec` is
+    /// the transcription budget, literally — `AnalysisJobRunner` keeps only
+    /// `allShards.filter { $0.startTime < request.desiredCoverageSec }`. The
+    /// configured tiers stop at `t2DepthSeconds` (900 s), so an episode nobody
+    /// plays could never be transcribed past fifteen minutes no matter how many
+    /// clean passes it got, and "all tiers done" terminated it `complete` with
+    /// `workKey` UNIQUE + `INSERT OR IGNORE` blocking any re-request. Measured
+    /// on the 2026-07-30 device pull, the 34 episodes over 15 minutes held
+    /// 1,900 minutes of audio and this ladder could reach at most 510 of them
+    /// (26.8%); the 797 minutes actually transcribed got past that ceiling only
+    /// where a listener's playhead had escalated the target through
+    /// `dispatchForegroundCatchup`. The rungs a playhead already reaches must
+    /// not be the only rungs that exist.
+    ///
+    /// **Bounded, and by construction.** The ladder is at most four rungs:
+    /// three configured tiers plus the duration. Rungs at or past the duration
+    /// are dropped rather than kept, so we never set a target the audio cannot
+    /// satisfy (which would burn a pass reaching for seconds that do not exist),
+    /// and the list is strictly ascending, so ``nextTierCoverage(current:tiers:episodeDurationSec:)``
+    /// strictly increases and terminates. With no usable duration we return
+    /// exactly the configured tiers — the pre-8bp2 ladder — so a missing or
+    /// corrupt `episodeDurationSec` degrades rather than guessing.
     static func coverageTierLadder(tiers: [Double], episodeDurationSec: Double?) -> [Double] {
         let ascending = tiers.sorted()
         guard let duration = episodeDurationSec,
