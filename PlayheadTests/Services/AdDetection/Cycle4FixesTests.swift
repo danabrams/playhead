@@ -366,6 +366,53 @@ struct Cycle4PermissiveEndToEndTests {
             "defensive catch-all must bump permissiveCounts.refusal; got snapshot=\(snapshot)"
         )
     }
+
+    /// playhead-8d5r: the SAME defensive catch-all must NOT swallow a per-call
+    /// deadline.
+    ///
+    /// `PermissiveAdClassifier.classify` rethrows `FMInferenceTimeoutError`
+    /// untouched — added precisely so the timeout is not relabelled — and the
+    /// arm above would then file it as `.permissiveRefusal`, i.e. "Apple's
+    /// safety layer declined this window", for a call the safety layer never
+    /// saw. The two have different causes, different `AdScanLimit` buckets and
+    /// different fixes, so the row must say which happened.
+    ///
+    /// Found by mutation: disabling the timeout arm in the coarse permissive
+    /// dispatch survived the whole suite, because nothing exercised the
+    /// permissive path's deadline at all.
+    @available(iOS 26.0, *)
+    @Test("playhead-8d5r: a permissive-path deadline persists as inference_timeout, not permissiveRefusal")
+    func permissiveDeadlineIsNotRelabelledAsRefusal() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-8d5r-permissive-timeout"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let permissive = PermissiveAdClassifier()
+        await permissive.installArbitraryFaultInjectionForTesting { _ in
+            FMInferenceTimeoutError(deadline: .seconds(300))
+        }
+        let runner = makeRunner(
+            store: store,
+            permissiveClassifier: permissive,
+            router: makeTriggerRouter()
+        )
+
+        _ = try await runner.runPendingBackfill(for: makeTriggeringInputs(assetId: assetId))
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(
+            scans.contains { $0.status == .inferenceTimeout },
+            "a permissive deadline must persist as inference_timeout; got statuses=\(scans.map(\.status.rawValue))"
+        )
+        #expect(
+            !scans.contains { $0.status == .permissiveRefusal },
+            "the deadline must not be filed as a guardrail decision"
+        )
+        // And it must not inflate the permissive guardrail telemetry either —
+        // that counter drives the "is the safety layer blocking us" question.
+        let snapshot = await runner.snapshotPermissiveTelemetry()
+        #expect(snapshot.refusal == 0, "got snapshot=\(snapshot)")
+    }
 }
 
 /// Cycle 6: an opaque `Error` used only to exercise the
