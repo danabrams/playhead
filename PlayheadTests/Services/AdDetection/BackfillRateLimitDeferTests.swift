@@ -443,6 +443,13 @@ struct BackfillRateLimitDeferTests {
         #expect(row.status == .deferred)
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == nil,
                 "a full-coverage cancellation must not checkpoint an episode-end cursor")
+        // playhead-bkhc: and because it checkpoints NOTHING, the next window
+        // must redo the whole coarse pass — so this window genuinely retained
+        // no progress and DOES spend one unit of the attempt budget. Pinned
+        // explicitly: it is the one case where a leg did real FM work and is
+        // still charged, and that is a deliberate consequence of t1kq's
+        // "never checkpoint an episode-end cursor" rule, not an oversight.
+        #expect(row.retryCount == 1)
     }
 
     // MARK: - playhead-bkhc: expiry DURING THE COARSE PASS must not discard the pass
@@ -690,6 +697,70 @@ struct BackfillRateLimitDeferTests {
         // while covered audio stayed at 0.
         #expect(calls1 + calls2 + calls3 == 6,
                 "no window may be re-screened across resumptions (got \(calls1)+\(calls2)+\(calls3))")
+    }
+
+    /// One background window that expires before its FIRST coarse window can
+    /// return — the short-grant case the device sees constantly (26–295 s
+    /// granted against minutes per window). It covers no new audio, so it is
+    /// barren by definition.
+    @available(iOS 26.0, *)
+    private func runBarrenWindow(
+        store: AnalysisStore,
+        inputs: BackfillJobRunner.AssetInputs
+    ) async {
+        let gate = CoarseCallGate(triggerOnCall: 1)
+        let runtime = TestFMRuntime(
+            coarseFailures: [.refusal],
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in await gate.arriveAndWait(ordinal: ordinal) }
+        )
+        let task = Task { try await makeRunner(store: store, runtime: runtime.runtime).runPendingBackfill(for: inputs) }
+        await gate.awaitReached()
+        task.cancel()
+        await gate.release()
+        _ = try? await task.value
+    }
+
+    @available(iOS 26.0, *)
+    @Test("the attempt budget counts CONSECUTIVE barren windows — a window that covers new audio RESETS it")
+    func productiveWindowResetsTheBarrenBudget() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeSixWindowInputs()
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+
+        // Two barren windows take the job to the edge of the budget…
+        await runBarrenWindow(store: store, inputs: inputs)
+        await runBarrenWindow(store: store, inputs: inputs)
+        var row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.retryCount == AdmissionController.maxRetries - 1)
+        #expect(row.status == .deferred)
+
+        // …then ONE window that actually covers audio. A converging job must
+        // not be killed by unlucky short windows earlier in its history, so
+        // the barren budget goes back to zero.
+        _ = await runExpiringWindow(store: store, inputs: inputs, expireAfterCoarseCalls: 2)
+        row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30, "the productive window banked 30s")
+        #expect(row.retryCount == 0, "covering new audio must RESET the consecutive-barren budget")
+        #expect(row.status == .deferred)
+
+        // And the full budget is available again: two more barren windows
+        // still leave the job resumable rather than failed.
+        await runBarrenWindow(store: store, inputs: inputs)
+        await runBarrenWindow(store: store, inputs: inputs)
+        row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .deferred, "a job that recently progressed is still resumable")
+        #expect(row.retryCount == AdmissionController.maxRetries - 1)
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30,
+                "barren windows must never regress the cursor")
     }
 
     @available(iOS 26.0, *)
