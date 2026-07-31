@@ -4723,6 +4723,14 @@ struct FoundationModelClassifier: Sendable {
         // violation, rate limit, cancellation) and was discarded before the
         // aggregate disposition was built.
         var unexaminedStatuses: [SemanticScanStatus] = []
+        // playhead-8d5r: the same no-progress guard the pass loop applies to
+        // windows, one level down. Subdivision is the one path that can issue
+        // MANY inference calls for a single plan — one per atom chunk — and it
+        // is reached from the `promptTokenCount > budget` branch, which
+        // `continue`s before the pass-level guard ever sees a status. Without
+        // this, a wedged model costs `chunks.count x Config.inferenceDeadline`
+        // inside one window and the pass-level bound never fires.
+        var consecutiveChunkTimeouts = 0
         chunkLoop: for atoms in chunks {
             switch await classifySubdividedChunk(
                 subSegment: subSegment(from: atoms),
@@ -4733,6 +4741,7 @@ struct FoundationModelClassifier: Sendable {
             ) {
             case let .examined(chunkDisposition):
                 succeededCount += 1
+                consecutiveChunkTimeouts = 0
                 switch chunkDisposition {
                 case .containsAd: anyContainsAd = true
                 case .uncertain: anyUncertain = true
@@ -4742,6 +4751,22 @@ struct FoundationModelClassifier: Sendable {
                 if anyContainsAd { break chunkLoop }
             case let .unexamined(status):
                 unexaminedStatuses.append(status)
+                // playhead-8d5r: a run of chunks that never answered is the
+                // same "every remaining chunk would fail identically" argument
+                // the `.pass`-scope check below makes, reached by evidence
+                // rather than by classification. Conceding here is safe: the
+                // false-clean gate further down already refuses to let a
+                // partially-examined subdivision claim anything but
+                // `.containsAd`, so an early stop yields an honest hole rather
+                // than a confident verdict over audio nobody screened.
+                if status == .inferenceTimeout {
+                    consecutiveChunkTimeouts += 1
+                    if consecutiveChunkTimeouts >= Self.coarseConsecutiveInferenceTimeoutAbortThreshold {
+                        break chunkLoop
+                    }
+                } else {
+                    consecutiveChunkTimeouts = 0
+                }
                 // A `.pass`-scoped failure is a property of the device, model
                 // or session, not of this chunk's content — cancellation (a
                 // BG-window expiry), assets evicted, thermal deferral — so
