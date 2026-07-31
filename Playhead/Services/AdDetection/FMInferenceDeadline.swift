@@ -202,6 +202,16 @@ enum FMInferenceDeadline {
             // cancellation-aware call throws `CancellationError` promptly, and
             // one that is not still finishes and is banked — now with the
             // deadline as its backstop instead of nothing.
+            //
+            // Nothing can hang here. `timer` is unstructured too, so it does
+            // NOT inherit the caller's cancellation; it keeps running and
+            // settles the race even if the operation never returns. The cost of
+            // that guarantee is worth stating plainly: after a BG-window expiry
+            // a cancellation-IGNORING call keeps this waiter parked for up to
+            // the remaining deadline, which can outlast the OS grace period.
+            // The alternative — resolving the race on the cancellation signal —
+            // is what abandoned a nearly-finished window and broke
+            // playhead-bkhc's banking, so this is the deliberate trade.
             work.cancel()
         }
 
@@ -234,6 +244,10 @@ enum FMInferenceDeadline {
             if let settled {
                 return settled
             }
+            // Enforced, not merely documented: a second caller would overwrite
+            // the first's continuation, which never resumes — a permanent hang
+            // that would be near-impossible to diagnose from a stuck backfill.
+            precondition(waiter == nil, "FMInferenceDeadline.Race supports a single waiter")
             return await withCheckedContinuation { continuation in
                 // No suspension point since the `settled` check above, so this
                 // cannot miss a settle that happened in between.

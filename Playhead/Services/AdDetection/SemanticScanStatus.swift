@@ -140,7 +140,7 @@ enum SemanticScanStatus: String, Codable, Sendable, Hashable, CaseIterable {
         // `.pass` would throw away every window the pass had already banked —
         // the exact discarding playhead-bkhc fixed. A run of consecutive
         // timeouts IS device-level evidence, and `coarsePassA` escalates on
-        // that separately (`coarseConsecutiveInferenceTimeoutAbortThreshold`)
+        // that separately (`consecutiveInferenceTimeoutAbortThreshold`)
         // rather than by mis-scoping a single one.
         case .exceededContextWindow, .decodingFailure, .refusal,
              .guardrailViolation, .rateLimited, .permissiveRefusal,

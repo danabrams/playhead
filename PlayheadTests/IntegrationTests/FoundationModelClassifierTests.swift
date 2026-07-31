@@ -4078,6 +4078,15 @@ struct FoundationModelClassifierTests {
         // (playhead-9q10's false-clean gate).
         #expect(output.windows.isEmpty)
         #expect(output.failedWindows.count == 1)
+        // NAMED, not collapsed. Every pre-8d5r subdivision failure persists as
+        // `.exceededContextWindow` (9q10's contract, deliberately left intact);
+        // a timeout must not join them, or the one outcome this bead adds is
+        // the one outcome nobody can see — and the row would blame prompt size
+        // for a model that never answered.
+        #expect(output.failedWindows.first?.status == .inferenceTimeout)
+        #expect(output.failedWindows.first?.status != .exceededContextWindow)
+        // And it reports what the chunk calls actually cost, not the pass total.
+        #expect((output.failedWindows.first?.latencyMillis ?? -1) >= 0)
     }
 
     @Test("coarse pass subdivides a single oversized multi-atom segment and aggregates noAds")

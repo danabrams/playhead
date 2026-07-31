@@ -602,6 +602,35 @@ struct BackfillRateLimitDeferTests {
         let passATimeouts = timeouts.filter { $0.scanPass == "passA" }
         #expect(passATimeouts.count == 2)
         #expect(passATimeouts.allSatisfy { ($0.latencyMs ?? 0) > 0 })
+        // THE JOB MUST DEFER, NOT COMPLETE. This is the assertion the first
+        // version of this test was missing, and its absence hid a P0: an
+        // `.inferenceTimeout` pass fell through to `markBackfillJobComplete`
+        // with an EPISODE-END cursor, so the M-5 idempotency gate would skip
+        // the row forever and the unscanned 20s would be stranded permanently.
+        // That is verbatim the bug playhead-pmp9 fixed for rate limits; the
+        // defer predicate keyed on rate-limiting alone and a Bool cannot carry
+        // a second cause.
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        let jobRow = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(jobRow.status == .deferred, "a timeout-aborted pass must stay resumable")
+        #expect(
+            jobRow.progressCursor?.lastProcessedUpperBoundSec == 10,
+            "the cursor must be the honest 10s prefix, never the 30s episode end"
+        )
+        #expect(jobRow.deferReason == "inferenceTimeout-noProgress",
+                "the cause is named, not folded into the rate-limit reason")
+
+        // AND NO ROW MAY CLAIM A TIMEOUT FOR A WINDOW NOBODY CALLED. The
+        // pass-abort writes one row for the first unattempted plan; stamping it
+        // `.inferenceTimeout` would invent a timeout that never happened and
+        // inflate the very SUM(latencyMs) this bead exists to make trustworthy.
+        #expect(timeouts.count == 2, "exactly the two windows that really timed out")
+
         // THE PRECISE SIGNATURE OF THE OLD DEFECT. When every failure row
         // inherited the pass total, N rows from one pass carried the BIT-
         // IDENTICAL number — which is why summing the column on the device pull
