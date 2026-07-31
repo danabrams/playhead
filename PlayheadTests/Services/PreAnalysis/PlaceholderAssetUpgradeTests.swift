@@ -283,6 +283,57 @@ struct PlaceholderAssetUpgradeTests {
                 "the placeholder is still keyed by its own id — no content hash exists yet")
         #expect(asset.weakFingerprint == weak,
                 "the placeholder must carry the weak identity so canUpgradeWeakAssetToCanonicalSHA can match it later")
+        #expect(asset.sourceURL == audioURL.absoluteString,
+                "a path outside the audio cache has no portable form and is stored verbatim")
+    }
+
+    /// playhead-b8hj: Pipeline A's placeholder is minted the moment playback
+    /// starts and its `sourceURL` is never rewritten (no `UPDATE ... SET
+    /// sourceURL` exists), so an absolute path baked in here outlives the
+    /// container it names. iOS re-creates the Data container under a new UUID
+    /// on reinstall and restore.
+    @Test("playhead-b8hj: resolveSession persists a container-portable path for cached audio")
+    func resolveSessionPersistsContainerPortableSourceURL() async throws {
+        let store = try await makeTestStore()
+        let dir = try makeTempDir(prefix: "Bdb8hjResolve")
+        Self.tempDirs.track(dir)
+
+        let coordinator = AnalysisCoordinator(
+            store: store,
+            audioService: AnalysisAudioService(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(
+                speechService: SpeechService(recognizer: StubSpeechRecognizer()),
+                store: store
+            ),
+            capabilitiesService: CapabilitiesService(),
+            adDetectionService: AdDetectionService(
+                store: store,
+                metadataExtractor: FallbackExtractor(),
+                backfillJobRunnerFactory: nil,
+                canUseFoundationModelsProvider: { false }
+            ),
+            skipOrchestrator: SkipOrchestrator(store: store),
+            downloadManager: DownloadManager(cacheDirectory: dir)
+        )
+
+        let episodeId = "ep-b8hj-portable"
+        let name = "\(DownloadManager.safeFilename(for: episodeId)).mp3"
+        // Inside the LIVE audio cache — the production shape. The file is
+        // deliberately not created: what is under test is the persisted string.
+        let audioURL = try #require(LocalAudioURL(
+            DownloadManager.defaultCacheDirectory()
+                .appendingPathComponent("complete", isDirectory: true)
+                .appendingPathComponent(name)
+        ))
+        let (_, assetId, _) = try await coordinator.resolveSessionForTesting(
+            episodeId: episodeId, audioURL: audioURL
+        )
+
+        let asset = try #require(try await store.fetchAsset(id: assetId))
+        #expect(asset.sourceURL == "complete/\(name)")
+        #expect(!asset.sourceURL.contains("Containers"),
+                "a container segment in a write-once column is a permanent dead reference")
     }
 
     // MARK: - The upgrade survives a relaunch

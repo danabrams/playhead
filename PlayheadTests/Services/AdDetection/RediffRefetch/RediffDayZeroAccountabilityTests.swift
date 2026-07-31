@@ -1488,6 +1488,57 @@ struct RediffDayZeroMintExitTests {
         #expect(outcome.bSideCount == 2)
     }
 
+    /// playhead-b8hj: `resolveDayZeroASide` is the shared A-side resolution for
+    /// BOTH the mint and its free pre-check, and it reads the asset row's
+    /// `sourceURL` — a string whose leading segment is the app Data-container
+    /// UUID, which iOS rewrites on reinstall and restore. A row minted under an
+    /// earlier container named a directory that no longer exists, so day-0
+    /// blocked on `.aSideNotAnchored` for audio sitting right there under the
+    /// current container.
+    ///
+    /// Exercised through `byteDifferASideURL`, the single choke point both the
+    /// day-0 mint and the xsdz.57 byte differ resolve through.
+    @Test("playhead-b8hj: the A-side resolves after the container UUID changes under it")
+    func aSideSurvivesContainerChange() throws {
+        let episodeId = "ep-a-side-container-move"
+        let name = "\(DownloadManager.safeFilename(for: episodeId)).mp3"
+
+        let oldRoot = try makeTempDir(prefix: "P70fASideOldContainer")
+        let oldComplete = oldRoot.appendingPathComponent("complete", isDirectory: true)
+        try FileManager.default.createDirectory(at: oldComplete, withIntermediateDirectories: true)
+        let oldAudio = oldComplete.appendingPathComponent(name)
+        try writeMP3(to: oldAudio)
+        let storedWhenOldContainerWasLive = AudioCacheLocation.portableString(
+            for: oldAudio, cacheRoot: oldRoot
+        )
+
+        let newRoot = try makeTempDir(prefix: "P70fASideNewContainer")
+        defer { try? FileManager.default.removeItem(at: newRoot) }
+        let newComplete = newRoot.appendingPathComponent("complete", isDirectory: true)
+        try FileManager.default.createDirectory(at: newComplete, withIntermediateDirectories: true)
+        let newAudio = newComplete.appendingPathComponent(name)
+        try writeMP3(to: newAudio)
+        try FileManager.default.removeItem(at: oldRoot)
+
+        let resolved = AdDetectionService.byteDifferASideURL(
+            sourceURL: storedWhenOldContainerWasLive, cacheRoot: newRoot
+        )
+        #expect(resolved?.standardizedFileURL == newAudio.standardizedFileURL)
+        // Legacy absolute rows — the 36 already on the owner's device — take
+        // the same route.
+        #expect(AdDetectionService.byteDifferASideURL(
+            sourceURL: oldAudio.absoluteString, cacheRoot: newRoot
+        )?.standardizedFileURL == newAudio.standardizedFileURL)
+
+        // ...and a genuinely evicted artifact is still "no A-side", not a
+        // fabricated path: day-0 must record `.aSideNotAnchored` and spend
+        // nothing, exactly as before.
+        try FileManager.default.removeItem(at: newAudio)
+        #expect(AdDetectionService.byteDifferASideURL(
+            sourceURL: storedWhenOldContainerWasLive, cacheRoot: newRoot
+        ) == nil)
+    }
+
     @Test("CHANGE 3: the pre-fetch blocker names the same exits the mint would, for FREE")
     func prefetchBlockerMatchesMintExits() async throws {
         let store = try await makeTestStore()
