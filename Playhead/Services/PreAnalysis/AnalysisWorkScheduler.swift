@@ -5203,7 +5203,7 @@ actor AnalysisWorkScheduler {
             // rewrites on reinstall and restore, so an absolute string is a
             // dead reference the moment the container moves — and this column
             // is write-once, with no repair path.
-            sourceURL: AudioCacheLocation.portableString(for: localAudioURL),
+            sourceURL: AudioCacheLocation.portableString(for: localAudioURL.url),
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
             confirmedAdCoverageEndTime: nil,

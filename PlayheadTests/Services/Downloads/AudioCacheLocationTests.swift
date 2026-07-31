@@ -53,7 +53,9 @@ struct AudioCacheLocationTests {
         }
     }
 
-    private static let anchored: (URL) -> Bool = { AdDetectionService.isAnchoredRegularFile($0) }
+    private static let anchored: @Sendable (URL) -> Bool = {
+        AdDetectionService.isAnchoredRegularFile($0)
+    }
 
     /// The real basename shape: SHA-256 of the episode id.
     private static func basename(for episodeId: String, ext: String = "mp3") -> String {
