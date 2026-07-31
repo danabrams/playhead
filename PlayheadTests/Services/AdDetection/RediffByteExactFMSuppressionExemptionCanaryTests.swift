@@ -72,8 +72,19 @@ final class RediffByteExactFMSuppressionExemptionCanaryTests: XCTestCase {
         let strippedRange = NSRange(stripped.startIndex..., in: stripped)
 
         // The cap site itself must not be guarded by the broad marker.
+        //
+        // MUTATION-DERIVED (M12, review round 1): the first version of this
+        // pattern was `cappedToMarkOnly[^\n]*isWidthOwnership`, and it SURVIVED
+        // the exact mutation it exists to kill — swapping
+        // `carriesRediffByteExactWidth` for
+        // `anchorProvenance.contains(where: { $0.isWidthOwnership })` puts a
+        // NEWLINE between the two tokens, which `[^\n]*` cannot cross. The
+        // window is now newline-tolerant and bounded to 200 characters, which is
+        // wide enough for any formatting of this one guard and far too narrow to
+        // reach the unrelated `!$0.isWidthOwnership` filter several hundred
+        // lines later in the same function.
         let broadRegex = try NSRegularExpression(
-            pattern: #"cappedToMarkOnly[^\n]*isWidthOwnership"#
+            pattern: #"cappedToMarkOnly[\s\S]{0,200}?isWidthOwnership"#
         )
         XCTAssertNil(
             broadRegex.firstMatch(in: stripped, range: strippedRange),
