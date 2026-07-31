@@ -265,4 +265,310 @@ struct AnalysisWorkSchedulerTests {
         let blockedJob = try await store.fetchJob(byId: "missing-audio-job")
         #expect(blockedJob?.state == "blocked:missingFile")
     }
+
+    // MARK: - Tier satisfaction (playhead-8bp2)
+
+    /// The exact shape of `analysis_jobs` row `07DBF13B` on the 2026-07-30
+    /// device pull: a 300 s tier on a 1,672 s episode, transcript watermark at
+    /// 300 s, last confident ad window ending at 120 s. It terminated
+    /// `state='complete', lastErrorCode='coverageInsufficient:noProgress'` and,
+    /// because `workKey` is UNIQUE and `insertJob` is `INSERT OR IGNORE`, that
+    /// episode can never be enqueued again at this `analysisVersion`. The tier's
+    /// work was finished; only the question was wrong.
+    @Test("a tier whose audio was transcribed is satisfied even with no ad past the target")
+    func tierSatisfiedByTranscriptWithoutLateCue() {
+        let job = makeAnalysisJob(desiredCoverageSec: 300, cueCoverageSec: 0)
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 300,
+            featureCoverageSec: 300,
+            transcriptCoverageSec: 300,
+            cueCoverageSec: 119.82,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(AnalysisWorkScheduler.tierTargetSatisfied(job: job, outcome: outcome))
+    }
+
+    /// The legacy sufficient condition, kept: a confident ad window that ends
+    /// past the target does imply the detector read that far.
+    @Test("a cue past the target still satisfies the tier")
+    func tierSatisfiedByCuePastTarget() {
+        let job = makeAnalysisJob(desiredCoverageSec: 300)
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 300,
+            featureCoverageSec: 100,
+            transcriptCoverageSec: 100,
+            cueCoverageSec: 400,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(AnalysisWorkScheduler.tierTargetSatisfied(job: job, outcome: outcome))
+    }
+
+    @Test("a tier whose audio was NOT read is not satisfied")
+    func tierNotSatisfiedWhenAudioUnread() {
+        let job = makeAnalysisJob(desiredCoverageSec: 300)
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 300,
+            featureCoverageSec: 100,
+            transcriptCoverageSec: 100,
+            cueCoverageSec: 0,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(!AnalysisWorkScheduler.tierTargetSatisfied(job: job, outcome: outcome))
+    }
+
+    /// Feature extraction sweeps the whole episode independently of
+    /// transcription — three `superseded` rows on the same device pull carried
+    /// `featureCoverageSec` at full duration against `transcriptCoverageSec == 0`.
+    /// An implementation that accepted feature coverage would deepen the target
+    /// of an episode that has no transcript at all, which is the opposite of
+    /// what this bead is for.
+    @Test("feature coverage alone does not satisfy a tier")
+    func tierNotSatisfiedByFeatureCoverageAlone() {
+        let job = makeAnalysisJob(desiredCoverageSec: 300)
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 300,
+            featureCoverageSec: 3_180,
+            transcriptCoverageSec: 0,
+            cueCoverageSec: 0,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(!AnalysisWorkScheduler.tierTargetSatisfied(job: job, outcome: outcome))
+    }
+
+    /// The target is a byte-exact tier value (for the last rung, the container
+    /// duration); the transcript watermark is the end of the last ASR SEGMENT.
+    /// An episode closing on music is fully READ with its watermark short, so a
+    /// tier boundary landing inside a silent shard must not read as unread —
+    /// otherwise the deepest rung stamps `coverageInsufficient:noProgress` on an
+    /// episode that was just transcribed end to end.
+    @Test("a target inside a silent closing shard still satisfies the tier")
+    func tierSatisfiedWithinOneShardOfTheTarget() {
+        let job = makeAnalysisJob(desiredCoverageSec: 1_200)
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 1_200,
+            featureCoverageSec: 1_200,
+            // 1,171.5 s: the closing shard was read and produced no speech.
+            transcriptCoverageSec: 1_171.5,
+            cueCoverageSec: 0,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(AnalysisWorkScheduler.tierTargetSatisfied(job: job, outcome: outcome))
+    }
+
+    /// The slack forgives a shard boundary, nothing wider. Two shards short is
+    /// audio that genuinely was not read.
+    @Test("more than one shard short does not satisfy the tier")
+    func tierNotSatisfiedBeyondOneShard() {
+        let job = makeAnalysisJob(desiredCoverageSec: 1_200)
+        let outcome = AnalysisOutcome(
+            assetId: "asset-1",
+            requestedCoverageSec: 1_200,
+            featureCoverageSec: 1_200,
+            transcriptCoverageSec: 1_130,
+            cueCoverageSec: 0,
+            newCueCount: 0,
+            stopReason: .reachedTarget
+        )
+
+        #expect(!AnalysisWorkScheduler.tierTargetSatisfied(job: job, outcome: outcome))
+    }
+
+    /// The slack must never let an episode with NO transcript deepen its target,
+    /// however small the tier — a shard of slack against a 30 s tier would
+    /// otherwise satisfy it from zero.
+    @Test("zero transcript never satisfies a tier, however small")
+    func tierNotSatisfiedByZeroTranscript() {
+        for target in [30.0, 60.0, 90.0, 1_200.0] {
+            let job = makeAnalysisJob(desiredCoverageSec: target)
+            let outcome = AnalysisOutcome(
+                assetId: "asset-1",
+                requestedCoverageSec: target,
+                featureCoverageSec: target,
+                transcriptCoverageSec: 0,
+                cueCoverageSec: 0,
+                newCueCount: 0,
+                stopReason: .reachedTarget
+            )
+            #expect(!AnalysisWorkScheduler.tierTargetSatisfied(job: job, outcome: outcome),
+                    "target \(target) satisfied from zero transcript")
+        }
+    }
+
+    @Test("the slack is one shard, capped at half the target")
+    func tierSlackIsOneShardCappedAtHalfTheTarget() {
+        #expect(AnalysisWorkScheduler.tierCoverageSlack(target: 1_200)
+                == AnalysisAudioService.defaultShardDuration)
+        #expect(AnalysisWorkScheduler.tierCoverageSlack(target: 40) == 20)
+        #expect(AnalysisWorkScheduler.tierCoverageSlack(target: 0) > 0,
+                "a zero target must still compare true on an exact hit, not divide the slack to nothing")
+    }
+
+    // MARK: - Coverage tier ladder (playhead-8bp2)
+
+    private static let configuredTiers: [Double] = [90, 300, 900]
+
+    /// Without a duration the ladder is exactly the pre-8bp2 one, so a missing
+    /// `episodeDurationSec` degrades to the old ceiling rather than guessing.
+    @Test("with no known duration the ladder is the configured tiers and stops at T2")
+    func ladderWithoutDurationMatchesConfiguredTiers() {
+        #expect(
+            AnalysisWorkScheduler.coverageTierLadder(
+                tiers: Self.configuredTiers,
+                episodeDurationSec: nil
+            ) == [90, 300, 900]
+        )
+        #expect(
+            AnalysisWorkScheduler.nextTierCoverage(
+                current: 900,
+                tiers: Self.configuredTiers,
+                episodeDurationSec: nil
+            ) == nil
+        )
+    }
+
+    /// The headline defect: `B7D5B117` is a 6,147 s episode whose only job
+    /// terminated at a 90 s target. Even a perfectly healthy ladder used to top
+    /// out at T2 = 900 s, i.e. 14.6% of it.
+    @Test("a long episode's ladder ends at the episode, not at T2")
+    func ladderEndsAtEpisodeDuration() {
+        let ladder = AnalysisWorkScheduler.coverageTierLadder(
+            tiers: Self.configuredTiers,
+            episodeDurationSec: 6_147
+        )
+        #expect(ladder == [90, 300, 900, 6_147])
+        #expect(
+            AnalysisWorkScheduler.nextTierCoverage(
+                current: 900,
+                tiers: Self.configuredTiers,
+                episodeDurationSec: 6_147
+            ) == 6_147
+        )
+        #expect(
+            AnalysisWorkScheduler.nextTierCoverage(
+                current: 6_147,
+                tiers: Self.configuredTiers,
+                episodeDurationSec: 6_147
+            ) == nil
+        )
+    }
+
+    /// No rung may ask for audio that does not exist — reaching for it costs a
+    /// pass that can never succeed.
+    @Test("no rung exceeds the episode duration")
+    func ladderNeverExceedsDuration() {
+        let ladder = AnalysisWorkScheduler.coverageTierLadder(
+            tiers: Self.configuredTiers,
+            episodeDurationSec: 500
+        )
+        #expect(ladder == [90, 300, 500])
+        #expect(
+            AnalysisWorkScheduler.nextTierCoverage(
+                current: 500,
+                tiers: Self.configuredTiers,
+                episodeDurationSec: 500
+            ) == nil
+        )
+    }
+
+    /// The tier `workKey` suffix is `":\(Int(nextCoverage))"`, so two rungs
+    /// under a second apart would truncate to the SAME key — and `insertJob` is
+    /// `INSERT OR IGNORE`, which would swallow the deeper rung without a word.
+    /// A 900.4 s episode is the concrete case.
+    @Test("rungs never collide once truncated into a workKey suffix")
+    func ladderRungsDoNotCollideAsWorkKeySuffixes() {
+        // 900.6 is the case that pins the SIZE of the gap, not just its
+        // existence: a half-second gap would admit both a `:900` T2 rung and a
+        // `:900` duration rung here.
+        for duration in [900.4, 900.6, 900.0, 899.6, 90.2, 301.0, 6_147.9] {
+            let ladder = AnalysisWorkScheduler.coverageTierLadder(
+                tiers: Self.configuredTiers,
+                episodeDurationSec: duration
+            )
+            let suffixes = ladder.map { Int($0) }
+            #expect(Set(suffixes).count == ladder.count,
+                    "duration \(duration) produced colliding workKey suffixes \(suffixes)")
+        }
+    }
+
+    /// `episodeDurationSec` is a `REAL` read off disk and the rung becomes a
+    /// `workKey` suffix via `Int(_:)`, which TRAPS on a non-finite or
+    /// out-of-range value. A corrupt row must degrade to the configured tiers,
+    /// not crash the scheduler.
+    /// Same screen on the configured tiers. `PreAnalysisConfig` is `Decodable`
+    /// and its validator only checks `t0 < t1 < t2`, which `90 < 300 < .infinity`
+    /// satisfies — and every rung ends up inside a trapping `Int(_:)`.
+    @Test("a non-finite configured tier is not a rung")
+    func ladderRejectsUnusableConfiguredTiers() {
+        let ladder = AnalysisWorkScheduler.coverageTierLadder(
+            tiers: [90, 300, .infinity, .nan, -5, 0],
+            episodeDurationSec: nil
+        )
+        #expect(ladder == [90, 300])
+        #expect(ladder.allSatisfy { $0.isFinite })
+    }
+
+    @Test("a corrupt or absurd duration degrades to the configured tiers")
+    func ladderRejectsUnusableDurations() {
+        let unusable: [Double] = [
+            .nan,
+            .infinity,
+            -.infinity,
+            0,
+            -1,
+            AnalysisWorkScheduler.maximumTierLadderDurationSeconds + 1,
+            1e30,
+        ]
+        for duration in unusable {
+            let ladder = AnalysisWorkScheduler.coverageTierLadder(
+                tiers: Self.configuredTiers,
+                episodeDurationSec: duration
+            )
+            #expect(ladder == [90, 300, 900], "duration \(duration) must not become a rung")
+            #expect(ladder.allSatisfy { $0.isFinite })
+        }
+        // The bound itself is inclusive — a 24 h episode is still usable.
+        #expect(
+            AnalysisWorkScheduler.coverageTierLadder(
+                tiers: Self.configuredTiers,
+                episodeDurationSec: AnalysisWorkScheduler.maximumTierLadderDurationSeconds
+            ).last == AnalysisWorkScheduler.maximumTierLadderDurationSeconds
+        )
+    }
+
+    /// Bounded by construction: walking the ladder from zero must strictly
+    /// increase and halt. An unbounded retry is a worse bug than the one this
+    /// bead fixes.
+    @Test("walking the ladder strictly increases and terminates")
+    func ladderWalkTerminates() {
+        for duration in [nil, 45.0, 500.0, 900.0, 6_147.0] as [Double?] {
+            var current = 0.0
+            var steps = 0
+            while let next = AnalysisWorkScheduler.nextTierCoverage(
+                current: current,
+                tiers: Self.configuredTiers,
+                episodeDurationSec: duration
+            ) {
+                #expect(next > current)
+                current = next
+                steps += 1
+                #expect(steps <= 4, "ladder did not terminate for duration \(String(describing: duration))")
+                if steps > 4 { break }
+            }
+        }
+    }
 }

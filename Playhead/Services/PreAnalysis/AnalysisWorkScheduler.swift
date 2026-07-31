@@ -3751,8 +3751,35 @@ actor AnalysisWorkScheduler {
 
             // Handle outcome.
             switch outcome.stopReason {
-            case .reachedTarget where outcome.cueCoverageSec >= job.desiredCoverageSec:
-                if let nextCoverage = nextTierCoverage(current: job.desiredCoverageSec) {
+            case .reachedTarget where Self.tierTargetSatisfied(job: job, outcome: outcome):
+                // playhead-8bp2: the rung we have actually cleared is the
+                // deeper of "what this tier asked for" and "what the transcript
+                // already covers". Reading it off the transcript matters when a
+                // playback session (or an earlier catch-up escalation) already
+                // transcribed far past this tier: without it the ladder would
+                // spend one full dispatch per rung re-confirming audio already
+                // on disk. Both terms are monotone, so `current` never moves
+                // backwards and the ladder still terminates.
+                let clearedCoverage = max(job.desiredCoverageSec, outcome.transcriptCoverageSec)
+                // playhead-8bp2 / playhead-onn6: an ad-scan re-drive NEVER walks
+                // the tier ladder. Its whole contract is "finish the scan at the
+                // depth the episode already reached" (see `adScanRedriveJob`), and
+                // its budget ledger is the `adScanRedrive:<n>` ordinal carried in
+                // its own `workKey`. The tier successor's key is rebuilt from the
+                // BASE key below, which would LAUNDER that ordinal away: the
+                // successor would terminate, `nextAdScanRedriveWorkKey` would parse
+                // no ordinal, re-mint `:1`, and collide with the row still on disk
+                // — silently collapsing onn6's budget from two passes to one.
+                // Re-drives fall through to the `allTiersDone` arm, which is where
+                // the ordinal is read and advanced correctly.
+                let isAdScanRedrive = Self.adScanRedriveOrdinal(workKey: job.workKey) != nil
+                let episodeDurationSec = isAdScanRedrive
+                    ? nil
+                    : await tierLadderEpisodeDuration(assetId: assetId)
+                if !isAdScanRedrive, let nextCoverage = nextTierCoverage(
+                    current: clearedCoverage,
+                    episodeDurationSec: episodeDurationSec
+                ) {
                     let tierWorkKey = AnalysisJob.computeWorkKey(
                         fingerprint: job.sourceFingerprint,
                         analysisVersion: PreAnalysisConfig.analysisVersion,
@@ -4781,15 +4808,106 @@ actor AnalysisWorkScheduler {
 
     // MARK: - Tier Definitions
 
-    /// Returns the next tier's coverage target, or nil if all tiers are complete.
-    private func nextTierCoverage(current: Double) -> Double? {
-        // Ensure tiers are ascending; skip any that aren't.
-        let tiers = [config.defaultT0DepthSeconds, config.t1DepthSeconds, config.t2DepthSeconds]
+    /// playhead-8bp2: minimum gap between two rungs of the ladder.
+    ///
+    /// The tier-advance arm derives a rung's `workKey` suffix as
+    /// `":\(Int(nextCoverage))"`, so two rungs less than a second apart would
+    /// TRUNCATE to the same key — and `insertJob` is `INSERT OR IGNORE`, which
+    /// would swallow the deeper rung silently. Keeping the rungs a whole second
+    /// apart is what makes the suffix a faithful name for the rung. Concretely:
+    /// a 900.4 s episode must not produce both a `:900` T2 rung and a `:900`
+    /// duration rung.
+    private static let tierLadderMinimumRungGapSeconds: Double = 1
+
+    /// playhead-8bp2: an upper sanity bound on a duration used as a tier rung.
+    ///
+    /// `analysis_assets.episodeDurationSec` is a `REAL` read off disk. A rung
+    /// becomes a `workKey` suffix via `Int(nextCoverage)`, and `Int(_: Double)`
+    /// TRAPS on a non-finite or out-of-range value — a corrupt row would crash
+    /// the scheduler rather than degrade. 24 hours is far past any podcast
+    /// episode and comfortably inside `Int`; anything non-finite or beyond it is
+    /// treated as unusable, which costs only the pre-8bp2 ceiling.
+    static let maximumTierLadderDurationSeconds: Double = 24 * 60 * 60
+
+    /// playhead-8bp2: the coverage-depth ladder a background episode walks,
+    /// ASCENDING and terminated by the episode itself.
+    ///
+    /// **Why the episode duration is the last rung.** `desiredCoverageSec` is
+    /// the transcription budget, literally — `AnalysisJobRunner` keeps only
+    /// `allShards.filter { $0.startTime < request.desiredCoverageSec }`. The
+    /// configured tiers stop at `t2DepthSeconds` (900 s), so an episode nobody
+    /// plays could never be transcribed past fifteen minutes no matter how many
+    /// clean passes it got, and "all tiers done" terminated it `complete` — after
+    /// which `workKey` UNIQUE + `INSERT OR IGNORE` swallow every re-enqueue until
+    /// ``AnalysisJobReconciler``'s 7-day GC deletes the terminal row and step 7
+    /// re-mints the episode back at `defaultT0DepthSeconds`. So the block is a
+    /// WEEKLY RESTART AT 90 SECONDS, not a permanent death — which is worse to
+    /// diagnose and no better to live with. Measured
+    /// on the 2026-07-30 device pull, the 34 episodes over 15 minutes held
+    /// 1,900 minutes of audio and this ladder could reach at most 510 of them
+    /// (26.8%); the 797 minutes actually transcribed got past that ceiling only
+    /// where a listener's playhead had escalated the target through
+    /// `dispatchForegroundCatchup`. The rungs a playhead already reaches must
+    /// not be the only rungs that exist.
+    ///
+    /// **Bounded, and by construction.** The ladder is at most four rungs: the
+    /// duration, plus each configured tier that sits at least
+    /// ``tierLadderMinimumRungGapSeconds`` below it. Configured tiers at or past
+    /// the duration are DROPPED, so we never set a target the audio cannot
+    /// satisfy (which would burn a pass reaching for seconds that do not exist),
+    /// and the list is strictly ascending, so ``nextTierCoverage(current:tiers:episodeDurationSec:)``
+    /// strictly increases and terminates. With no usable duration we return
+    /// exactly the configured tiers — the pre-8bp2 ladder — so a missing or
+    /// corrupt `episodeDurationSec` degrades rather than guessing.
+    static func coverageTierLadder(tiers: [Double], episodeDurationSec: Double?) -> [Double] {
+        // The configured tiers are `Decodable` (hot config / test harness), so
+        // they get the same finiteness and range screen as the duration —
+        // `PreAnalysisConfig`'s strictly-ascending validator accepts
+        // `90 < 300 < .infinity`, and every rung ends up in `Int(_:)`.
+        let ascending = tiers
+            .filter { $0.isFinite && $0 > 0 && $0 <= maximumTierLadderDurationSeconds }
             .sorted()
-        for tier in tiers where tier > current {
-            return tier
+        guard let duration = episodeDurationSec,
+              duration.isFinite,
+              duration > 0,
+              duration <= maximumTierLadderDurationSeconds else { return ascending }
+        return ascending.filter { $0 <= duration - tierLadderMinimumRungGapSeconds } + [duration]
+    }
+
+    /// Returns the next tier's coverage target, or nil if all tiers are complete.
+    static func nextTierCoverage(
+        current: Double,
+        tiers: [Double],
+        episodeDurationSec: Double?
+    ) -> Double? {
+        coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
+            .first { $0 > current }
+    }
+
+    /// Instance wrapper binding the configured tier depths.
+    private func nextTierCoverage(current: Double, episodeDurationSec: Double?) -> Double? {
+        Self.nextTierCoverage(
+            current: current,
+            tiers: [config.defaultT0DepthSeconds, config.t1DepthSeconds, config.t2DepthSeconds],
+            episodeDurationSec: episodeDurationSec
+        )
+    }
+
+    /// playhead-8bp2: the episode's own duration, for the last rung of the tier
+    /// ladder. `nil` — including on a read failure — means "use the configured
+    /// tiers only", i.e. exactly the pre-8bp2 ladder. Failing CLOSED here would
+    /// mean deepening on a guess; failing open costs at worst the old ceiling.
+    /// Range/finiteness sanity lives in ``coverageTierLadder(tiers:episodeDurationSec:)``
+    /// so the rule is testable without a store.
+    private func tierLadderEpisodeDuration(assetId: String) async -> Double? {
+        do {
+            return try await store.fetchAsset(id: assetId)?.episodeDurationSec
+        } catch {
+            logger.warning(
+                "playhead-8bp2: episode duration read failed for asset \(assetId): \(error); tier ladder falls back to configured tiers"
+            )
+            return nil
         }
-        return nil
     }
 
     // MARK: - Ad-scan re-drive minting (playhead-onn6)
@@ -5302,6 +5420,105 @@ actor AnalysisWorkScheduler {
             jobSourceFingerprint: sourceFingerprint,
             currentAudioFingerprint: currentAudioFingerprint
         )
+    }
+
+    /// playhead-8bp2: did this pass DO the tier's work?
+    ///
+    /// **What was wrong before.** The tier-advance arm asked
+    /// `outcome.cueCoverageSec >= job.desiredCoverageSec`. `cueCoverageSec` is
+    /// `finalWindows.filter(isCueWindow).map(\.endTime).max() ?? 0` — the end
+    /// time of the LAST ad window above the cue-confidence threshold. It
+    /// measures where the ads are, not how much audio the pass read. So the
+    /// ladder advanced or died on ad placement: an episode whose ads all sit in
+    /// the first two minutes reported "coverage insufficient" for a 300 s tier
+    /// it had fully transcribed, while an episode with one late ad advanced for
+    /// free. On the 2026-07-30 device pull ALL SEVEN jobs that terminated
+    /// `coverageInsufficient:*` had `transcriptCoverageSec >= desiredCoverageSec`
+    /// — the work was finished in every single case — and four of them stopped
+    /// at a 90 s / 300 s / 420 s depth on episodes of 26 to 102 minutes. The
+    /// three that DID pass the old gate were the three whose target had already
+    /// been escalated to 91–98% of the episode by playback catch-up, i.e. deep
+    /// enough that a last ad fell inside it: the gate was reading ad placement,
+    /// not work.
+    ///
+    /// Such a terminal is not permanent, and calling it permanent misdiagnoses
+    /// it: `analysis_jobs.workKey` is UNIQUE and `insertJob` is
+    /// `INSERT OR IGNORE`, so re-enqueues are swallowed only until
+    /// ``AnalysisJobReconciler``'s 7-day GC deletes the row, after which step 7
+    /// mints a fresh job at `defaultT0DepthSeconds` and this same predicate
+    /// strands it again. The steady state was an episode restarting at 90
+    /// seconds every week, forever.
+    ///
+    /// **The predicate now.** A tier is satisfied when the pass READ the audio
+    /// the tier asked for. `desiredCoverageSec` is the shard filter in
+    /// ``AnalysisJobRunner`` (`startTime < desiredCoverageSec`), so the
+    /// transcript watermark is the direct record of that depth being read;
+    /// coverage lands at the end of the last admitted shard, hence `>=`.
+    ///
+    /// The old cue condition is KEPT as a sufficient-but-not-necessary arm. It
+    /// is not load-bearing any more, but a confident ad window past the target
+    /// does imply the detector saw that far, and dropping it would silently
+    /// change which jobs advance for reasons unrelated to this fix.
+    ///
+    /// Feature coverage is deliberately NOT accepted: feature extraction sweeps
+    /// independently of transcription, and three superseded rows on the same
+    /// device pull carried `featureCoverageSec` at full duration against
+    /// `transcriptCoverageSec == 0`. Advancing those would deepen the target of
+    /// an episode with no transcript at all.
+    ///
+    /// **Why the comparison needs slack.** For the DURATION rung the two numbers
+    /// come off different clocks. `analysis_assets.episodeDurationSec` is written
+    /// on the playback path from the AVURLAsset CONTAINER duration
+    /// (``AnalysisCoordinator``), while the watermark is a high-water mark over
+    /// DECODED SHARD ends (`TranscriptEngineService.updateCoverage`, raised but
+    /// never lowered by the chunk-max reconcile). The two disagree by whatever
+    /// the container header and the decoder disagree by, and a shard that failed
+    /// mid-pass can leave the watermark at the chunk max instead. An exact
+    /// comparison would send the deepest and most expensive rung into the
+    /// coverage-insufficient arm to stamp `coverageInsufficient:noProgress` — the
+    /// exact forensic signature this bead calls the bug — on an episode that had
+    /// just been read end to end. ``tierCoverageSlack(target:)`` is that slack.
+    ///
+    /// A silent or musical closing shard, by contrast, is NOT a reason for slack:
+    /// the watermark advances on shard ends, so audio that was read but produced
+    /// no speech still counts. Measured, not assumed — see
+    /// `CoverageTierLadderSchedulerTests`, whose fixture goes silent for its last
+    /// shard and still lands the watermark on the shard sum.
+    static func tierTargetSatisfied(job: AnalysisJob, outcome: AnalysisOutcome) -> Bool {
+        let target = job.desiredCoverageSec
+        if outcome.cueCoverageSec >= target { return true }
+        // A pass that produced NO transcript never satisfies a tier, however
+        // small the tier: the slack exists to forgive a shard boundary, not to
+        // let an episode with no transcript at all deepen its target.
+        guard outcome.transcriptCoverageSec > 0 else { return false }
+        return outcome.transcriptCoverageSec + tierCoverageSlack(target: target) >= target
+    }
+
+    /// playhead-8bp2: how far short of a tier target the transcript watermark may
+    /// land and still count as having read the tier.
+    ///
+    /// ONE DECODE SHARD, because that is the granularity everything upstream
+    /// works at: the runner admits shards by
+    /// `allShards.filter { $0.startTime < request.desiredCoverageSec }` and the
+    /// watermark advances by shard ends. A rung that lands inside a shard, or a
+    /// container duration that overshoots the decoded audio, cannot put the
+    /// watermark more than one shard behind. More slack than that would forgive
+    /// audio that genuinely was not read. It is the same quantity
+    /// ``AnalysisCoverageSummary/adScanDurationToleranceSec(episodeDurationSec:)``
+    /// already uses to reconcile these two clocks elsewhere.
+    ///
+    /// Capped at half the target so a small tier cannot be satisfied by a
+    /// token amount of transcript, and floored at ``coverageProgressEpsilon`` so
+    /// the exact-hit case still compares true against float error.
+    ///
+    /// RESIDUAL, stated honestly: if the container duration overshoots the
+    /// decoded audio by MORE than one shard — a malformed feed, of which this
+    /// project has real examples — the last rung still fails, burns one further
+    /// pass, and terminates `coverageInsufficient:noProgress` with the audio
+    /// read. This bead does not introduce a second measure to try to tell those
+    /// apart.
+    static func tierCoverageSlack(target: Double) -> Double {
+        max(coverageProgressEpsilon, min(AnalysisAudioService.defaultShardDuration, target / 2))
     }
 
     static func shouldRetryCoverageInsufficient(job: AnalysisJob, outcome: AnalysisOutcome) -> Bool {

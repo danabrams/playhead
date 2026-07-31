@@ -607,13 +607,49 @@ actor AnalysisJobReconciler {
 
     // MARK: - Step 7: Discover un-enqueued downloads
 
+    /// playhead-8bp2: returns jobs that were ACTUALLY inserted, not candidates
+    /// considered.
+    ///
+    /// `fetchActiveJobEpisodeIds` excludes `complete` and `superseded`, so an
+    /// episode whose only job reached either terminal is reported here as
+    /// "un-enqueued" on every single pass — but its `workKey` row still exists,
+    /// `workKey` is UNIQUE, and `insertJob` is `INSERT OR IGNORE`, so the insert
+    /// is silently swallowed until step 5's 7-day GC deletes that terminal row
+    /// (`garbageCollectOldJobs`), at which point this method's insert finally
+    /// takes and the episode restarts the tier ladder from
+    /// `defaultT0DepthSeconds`. So the swallow is weekly, not forever — every
+    /// sweep in between reports a discovery it did not make. This method counted
+    /// the CANDIDATES and
+    /// called them `unEnqueuedDownloadsCreated`, which
+    /// ``ReconciliationReport/recoveredWorkCount`` sums and
+    /// `BackgroundProcessingService` reports to the background-task ledger as
+    /// `jobsCompleted` / `.recoveredWork`. On the 2026-07-30 device pull that
+    /// produced a flat `jobsCompleted: 1` on 70 of the 287 `preanalysis_recovery`
+    /// runs — 25 of the 33 half-hourly sweeps on 2026-07-28 alone — while 19
+    /// assets sat un-progressing. The ledger built to make a stalled fleet
+    /// visible was the thing reporting it healthy, which is a large part of why
+    /// this read as platform starvation for as long as it did.
+    ///
+    /// Reporting the true count does not by itself un-stick those episodes —
+    /// re-requesting a swallowed `workKey` is playhead-y8f3's forward-looking
+    /// half and is deliberately not duplicated here. It stops the swallow from
+    /// being invisible, and it stops a sweep whose only "yield" is a swallowed
+    /// insert from logging as `.recoveredWork`.
     private func discoverUnEnqueuedDownloads() async throws -> Int {
         let cachedIds = await downloadManager.allCachedEpisodeIds()
         let activeJobIds = try await store.fetchActiveJobEpisodeIds()
 
         let unEnqueued = cachedIds.subtracting(activeJobIds)
+        var created = 0
+        var attempted = 0
         for episodeId in unEnqueued {
+            // No fingerprint = no workKey = no insert was ever attempted. These
+            // must not be counted as swallowed below: a swallow is specifically
+            // an insert that collided with an existing `workKey`, and reporting
+            // an un-fingerprinted download as one would point the next reader at
+            // the wrong bug.
             guard let fp = await downloadManager.fingerprint(for: episodeId) else { continue }
+            attempted += 1
             let workKey = AnalysisJob.computeWorkKey(
                 fingerprint: fp.strong ?? fp.weak,
                 analysisVersion: Self.currentAnalysisVersion,
@@ -642,12 +678,20 @@ actor AnalysisJobReconciler {
                 createdAt: Date().timeIntervalSince1970,
                 updatedAt: Date().timeIntervalSince1970
             )
-            try await store.insertJob(job)
+            if try await store.insertJob(job) {
+                created += 1
+            }
         }
-        if !unEnqueued.isEmpty {
-            logger.info("Created \(unEnqueued.count) job(s) for un-enqueued downloads")
+        if created > 0 {
+            logger.info("Created \(created) job(s) for un-enqueued downloads")
         }
-        return unEnqueued.count
+        let swallowed = attempted - created
+        if swallowed > 0 {
+            logger.info(
+                "\(swallowed) cached episode(s) had no active job but an existing workKey swallowed the re-enqueue (see playhead-y8f3)"
+            )
+        }
+        return created
     }
 
     // MARK: - Step 8: Reap stranded backfill jobs (stranded-backfill-reaper)
