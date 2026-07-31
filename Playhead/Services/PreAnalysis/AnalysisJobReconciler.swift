@@ -168,18 +168,33 @@ actor AnalysisJobReconciler {
     /// bound keeps the sweep's cost fixed without letting skips starve it.
     static let maxAdScanRedriveCandidatesPerReconcile = 64
 
+    /// playhead-y8f3: time source for the cap-out retry cooldown and the
+    /// timestamps on the rows step 7 mints. Injected because
+    /// ``AnalysisWorkScheduler/capOutRetryCooldownSeconds`` is an hour, and a
+    /// test that proves the retry chain TERMINATES has to cross several of them
+    /// — sleeping through that, or asserting only the first cycle, would be a
+    /// weaker claim than the one this bead needs to make.
+    ///
+    /// Deliberately narrow: the other steps still read the wall clock directly.
+    /// Converting all eleven `Date()` reads in this file would be churn in code
+    /// this bead does not otherwise touch, and every one of them is already
+    /// covered by tests that seed timestamps relative to `Date()`.
+    private let clock: @Sendable () -> Date
+
     init(
         store: AnalysisStore,
         downloadManager: any DownloadProviding,
         capabilitiesService: any CapabilitiesProviding,
         config: PreAnalysisConfig = .load(),
-        backlogScarcityRanking: (any BacklogScarcityRanking)? = nil
+        backlogScarcityRanking: (any BacklogScarcityRanking)? = nil,
+        clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.store = store
         self.downloadManager = downloadManager
         self.capabilitiesService = capabilitiesService
         self.config = config
         self.backlogScarcityRanking = backlogScarcityRanking
+        self.clock = clock
     }
 
     /// playhead-dqfm: install the scarcity-ranking provider once the SwiftData
@@ -860,7 +875,7 @@ actor AnalysisJobReconciler {
             transcriptCoverageSec: asset?.fastTranscriptCoverageEndTime ?? 0,
             episodeDurationSec: asset?.episodeDurationSec,
             tiers: [config.defaultT0DepthSeconds, config.t1DepthSeconds, config.t2DepthSeconds],
-            now: Date().timeIntervalSince1970
+            now: clock().timeIntervalSince1970
         )
 
         let plan: AnalysisWorkScheduler.CapOutRetryPlan
@@ -878,7 +893,7 @@ actor AnalysisJobReconciler {
             return false
         }
 
-        let now = Date().timeIntervalSince1970
+        let now = clock().timeIntervalSince1970
         // The fingerprint is the CALLER's — the one the cached audio actually
         // hashes to — not `tail.sourceFingerprint`. They are equal by
         // construction here (the base key is built from the caller's
