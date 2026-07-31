@@ -7439,14 +7439,21 @@ actor AdDetectionService {
 
     /// The played-copy (A-side) file for the byte differ, derived from the
     /// asset row's `sourceURL` (the downloaded episode file in production; the
-    /// snapshotted corpus copy in the dump harness). `nil` unless it is a
-    /// file URL pointing at an anchored regular file.
-    static func byteDifferASideURL(sourceURL: String) -> URL? {
-        guard !sourceURL.isEmpty,
-              let url = URL(string: sourceURL),
-              url.isFileURL,
-              isAnchoredRegularFile(url) else { return nil }
-        return url
+    /// snapshotted corpus copy in the dump harness). `nil` unless it resolves
+    /// to an anchored regular file.
+    ///
+    /// playhead-b8hj: resolution goes through ``AudioCacheLocation`` rather
+    /// than trusting the stored string as a path. The audio cache is addressed
+    /// through the app Data container, whose UUID is rewritten on reinstall and
+    /// restore, so a row minted under an earlier container names a directory
+    /// that no longer exists even though the artifact itself is right there
+    /// under the current one. `nil` still means "no A-side" — a normal,
+    /// non-error outcome that falls back to chroma / blocks the day-0 mint.
+    static func byteDifferASideURL(
+        sourceURL: String,
+        cacheRoot: URL = DownloadManager.defaultCacheDirectory()
+    ) -> URL? {
+        AudioCacheLocation.resolve(sourceURL, cacheRoot: cacheRoot, isUsable: isAnchoredRegularFile)
     }
 
     /// The bf4a2383 filesystem anchor: the URL itself (no symlink traversal)

@@ -67,6 +67,11 @@ struct AnalysisStoreRediffRefetchEnumerator: RediffRefetchEnumerating {
     /// played copy whose garbage local sample reads as "rotated", spending a
     /// ~54 MB fetch on a candidate the byte differ is guaranteed to reject.
     var fileExists: @Sendable (URL) -> Bool = { AdDetectionService.isAnchoredRegularFile($0) }
+    /// playhead-b8hj: the CURRENT container's audio-cache root. A seed's
+    /// persisted `sourceURL` is resolved against this, not trusted as a path —
+    /// the container UUID baked into rows minted before a reinstall names a
+    /// directory that no longer exists.
+    var cacheRoot: URL = DownloadManager.defaultCacheDirectory()
 
     private static let logger = Logger(subsystem: "com.playhead", category: "RediffRefetch")
 
@@ -85,10 +90,24 @@ struct AnalysisStoreRediffRefetchEnumerator: RediffRefetchEnumerating {
 
         var out: [RediffRefetchCandidate] = []
         out.reserveCapacity(seeds.count)
+        // playhead-b8hj: a seed dropped for want of its played copy used to be
+        // a bare `continue` — so a library whose every row named a dead
+        // container was indistinguishable, in logs and in the ledger, from a
+        // library with no work in it. Counted and reported.
+        var skippedNoLocalCopy = 0
         for seed in seeds {
             // The played copy must still be an on-disk file — it is both the
             // local pre-check sample source and the byte differ's A input.
-            guard let local = URL(string: seed.sourceURL), local.isFileURL, fileExists(local) else { continue }
+            // Resolved against the CURRENT container, never trusted as a path.
+            guard let local = AudioCacheLocation.resolve(
+                seed.sourceURL, cacheRoot: cacheRoot, isUsable: fileExists
+            ) else {
+                skippedNoLocalCopy += 1
+                Self.logger.debug(
+                    "rediff-refetch skip asset=\(seed.analysisAssetId, privacy: .public) reason=played-copy-unresolvable"
+                )
+                continue
+            }
             // CURRENT enclosure URL (spike §7: never a stale one).
             guard let enclosure = await resolve(seed.episodeId) else { continue }
             out.append(RediffRefetchCandidate(
@@ -98,6 +117,11 @@ struct AnalysisStoreRediffRefetchEnumerator: RediffRefetchEnumerating {
                 localAudioURL: local,
                 attemptState: stateByAsset[seed.analysisAssetId]?.attemptState ?? .initial
             ))
+        }
+        if skippedNoLocalCopy > 0 {
+            Self.logger.info(
+                "rediff-refetch enumeration seeds=\(seeds.count, privacy: .public) candidates=\(out.count, privacy: .public) skippedNoLocalCopy=\(skippedNoLocalCopy, privacy: .public)"
+            )
         }
         return out
     }
