@@ -728,7 +728,7 @@ actor AnalysisJobReconciler {
             )
             if try await store.insertJob(job) {
                 created += 1
-            } else if try await capOutRetry(
+            } else if await capOutRetry(
                 episodeId: episodeId,
                 baseWorkKey: workKey,
                 fingerprint: fingerprint
@@ -822,7 +822,7 @@ actor AnalysisJobReconciler {
         episodeId: String,
         baseWorkKey: String,
         fingerprint: String
-    ) async throws -> Bool {
+    ) async -> Bool {
         do {
             return try await capOutRetryThrowing(
                 episodeId: episodeId,
@@ -840,23 +840,63 @@ actor AnalysisJobReconciler {
         baseWorkKey: String,
         fingerprint: String
     ) async throws -> Bool {
-        // Walk `base → capRetry:1 → … → capRetry:max` over the keys ON DISK.
-        // The tail is the newest row in the chain and carries the terminal this
-        // decision is about; the first gap is the ordinal to mint. Deriving both
-        // from the keys rather than from a counter is what makes the budget
-        // survive a process death mid-chain.
-        guard var tail = try await store.fetchJob(byWorkKey: baseWorkKey) else { return false }
+        // THE TERMINAL THIS DECISION IS ABOUT is the episode's most recent row,
+        // not the row that happens to hold the base key. The base key is what
+        // was swallowed, but the cap-out can be on a TIER SUCCESSOR: the
+        // tier-advance arm mints `<base>:<depth>` keys, so an episode that
+        // cleared 90 s and then exhausted its attempts at 300 s leaves the base
+        // row `complete` and the real terminal one row further along. Anchoring
+        // on the base row alone would read that as "not a cap-out" and strand it
+        // exactly as before.
+        //
+        // The fingerprint guard is playhead-onn6's asset-identity trap: an
+        // episode can carry rows for several fingerprints (a re-download mints a
+        // new asset), and `fetchLatestJobForEpisode` would happily return one
+        // describing different bytes than the audio on disk. When it does, fall
+        // back to the row occupying the base key, which by construction hashes
+        // to the cached audio.
+        let latest = try await store.fetchLatestJobForEpisode(episodeId)
+        let tail: AnalysisJob
+        if let latest, latest.sourceFingerprint == fingerprint {
+            tail = latest
+        } else if let base = try await store.fetchJob(byWorkKey: baseWorkKey) {
+            tail = base
+        } else {
+            return false
+        }
+
+        // Cheapest guard first, and deliberately BEFORE the ordinal walk and the
+        // asset read. Every clean `complete` terminal reaches this method on
+        // every sweep — 17 of them on the 2026-07-31 device pull — and paying
+        // three store round-trips and an `info` line apiece, forever, to
+        // re-derive "not ours" would make an opportunistic top-up the most
+        // expensive step in the sweep.
+        guard AnalysisWorkScheduler.isAttemptCapTerminal(tail) else {
+            logger.debug(
+                """
+                cap_out_retry_declined episode=\(episodeId, privacy: .public) \
+                reason=\(AnalysisWorkScheduler.CapOutRetryDeclineReason.notACapOutTerminal.rawValue, privacy: .public) \
+                tailState=\(tail.state, privacy: .public)
+                """
+            )
+            return false
+        }
+
+        // The budget ledger: the lowest `capRetry:<n>` key not already on disk,
+        // or none when the budget is spent. Derived from the KEYS rather than
+        // from a counter, so it survives a process death mid-chain and a
+        // duplicated sweep is idempotent. `stride` rather than `1...max` so a
+        // cap of 0 disables the feature instead of trapping on an invalid range.
         var nextOrdinal: Int?
-        for ordinal in 1...AnalysisWorkScheduler.maxCapOutRetries {
+        for ordinal in stride(from: 1, through: AnalysisWorkScheduler.maxCapOutRetries, by: 1) {
             let key = AnalysisWorkScheduler.capOutRetryWorkKey(
                 baseWorkKey: baseWorkKey,
                 ordinal: ordinal
             )
-            guard let existing = try await store.fetchJob(byWorkKey: key) else {
+            if try await store.fetchJob(byWorkKey: key) == nil {
                 nextOrdinal = ordinal
                 break
             }
-            tail = existing
         }
 
         // The asset behind the tail supplies the two coverage inputs. A tail

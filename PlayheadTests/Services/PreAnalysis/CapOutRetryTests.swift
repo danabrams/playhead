@@ -356,8 +356,11 @@ struct CapOutRetryTests {
         #expect(retry?.attemptCount == 0)
         #expect(retry?.analysisAssetId == Self.assetId)
         // The target is the next LADDER rung above the watermark, so the pass has
-        // audio it has not read. Re-minting the terminated job's own 90 s target
-        // against a 300 s watermark would read nothing and fail identically.
+        // audio it has not read. THIS is the assertion that kills a wrong-target
+        // implementation — re-using the terminated job's own 90 s target, or
+        // reading the job row's `transcriptCoverageSec` (0, because
+        // `updateJobProgress` stores the last run rather than a high-water mark)
+        // both land on 90 and are caught here.
         #expect(retry?.desiredCoverageSec == 900,
                 "expected the next rung above 300 s; got \(retry?.desiredCoverageSec ?? -1)")
 
@@ -369,6 +372,10 @@ struct CapOutRetryTests {
         }
         #expect(dispatches >= 1)
 
+        // Seconds of audio. This is what a row-state assertion cannot see: a
+        // minted row the scheduler declines to dispatch, a target the runner
+        // cannot act on, or a mint that lands after the lane is already closed
+        // all leave `fastTranscriptCoverageEndTime` exactly where it was.
         let after = try await transcriptCoverage(store)
         #expect(after > before,
                 "the retry must READ AUDIO, not merely move a row: \(before) -> \(after)")
@@ -484,6 +491,95 @@ struct CapOutRetryTests {
         #expect(try await transcriptCoverage(store) == Self.shardSpanSec)
     }
 
+    /// The cap-out is not always on the row holding the BASE key. The
+    /// tier-advance arm mints successors at `<base>:<depth>`, so an episode that
+    /// cleared its 90 s rung and then exhausted its attempts at 300 s leaves the
+    /// base row `complete` and the real terminal one row further along.
+    ///
+    /// Anchoring the decision on the base row alone reads that as "not a
+    /// cap-out" and strands the episode exactly as before — a gap that does not
+    /// appear on the 2026-07-31 device pull (no row there carries a `:NNN`
+    /// suffix; the deep targets came from in-place escalation) but is reachable
+    /// the moment a ladder walk gets one rung in before failing.
+    @Test("a cap-out on a tier successor is re-requested, not just one on the base key")
+    func capOutOnTierSuccessorIsReRequested() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        let terminalAt = clock.value.timeIntervalSince1970 - 86_400
+        // The base row cleared its rung cleanly.
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: 300,
+            supersededAt: terminalAt - 3_600,
+            lastErrorCode: "",
+            state: "complete"
+        )
+        // Its tier successor is where the attempts ran out. Newer than the base
+        // row, so it is the episode's chain tail.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-y8f3-tier300",
+            jobType: "preAnalysis",
+            episodeId: Self.episodeId,
+            analysisAssetId: Self.assetId,
+            workKey: "\(Self.baseWorkKey):300",
+            sourceFingerprint: Self.fingerprint,
+            desiredCoverageSec: 300,
+            state: "superseded",
+            attemptCount: 5,
+            lastErrorCode: "maxAttemptsReached:transcription:zeroCoverage",
+            createdAt: terminalAt,
+            updatedAt: terminalAt
+        ))
+
+        let report = try await makeReconciler(
+            store: store, downloads: downloads, clock: clock
+        ).reconcile()
+
+        #expect(report.capOutRetriesMinted == 1)
+        let retry = try await store.fetchJob(byWorkKey: Self.retryKey(1))
+        #expect(retry?.state == "queued")
+        // The ordinal still comes off the BASE key, so the budget is one ledger
+        // per episode however deep the ladder got before it failed.
+        #expect(retry?.desiredCoverageSec == 900)
+    }
+
+    /// The mirror image, and the reason the tail is the NEWEST row rather than
+    /// "any cap-out anywhere in the episode's history": an episode whose most
+    /// recent outcome was a clean `complete` is not this bead's to re-request,
+    /// even though an older row is a cap-out terminal.
+    @Test("an older cap-out under a newer clean terminal is not re-requested")
+    func staleCapOutUnderNewerCleanTerminalIsNotReRequested() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        let terminalAt = clock.value.timeIntervalSince1970 - 86_400
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: 300,
+            supersededAt: terminalAt - 3_600
+        )
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-y8f3-tier300",
+            jobType: "preAnalysis",
+            episodeId: Self.episodeId,
+            analysisAssetId: Self.assetId,
+            workKey: "\(Self.baseWorkKey):300",
+            sourceFingerprint: Self.fingerprint,
+            desiredCoverageSec: 300,
+            state: "complete",
+            createdAt: terminalAt,
+            updatedAt: terminalAt
+        ))
+
+        let report = try await makeReconciler(
+            store: store, downloads: downloads, clock: clock
+        ).reconcile()
+
+        #expect(report.capOutRetriesMinted == 0)
+        #expect(report.reEnqueuesSwallowed == 1)
+    }
+
     // MARK: - The other meaning of `superseded`
 
     /// `superseded` means two things. A GENUINE supersession — a stale
@@ -507,10 +603,18 @@ struct CapOutRetryTests {
                 lastErrorCode: cause ?? ""
             )
             // `makeAnalysisJob` cannot express a NULL lastErrorCode through the
-            // loop above, so clear it explicitly for the nil case.
+            // loop above, so clear it explicitly for the nil case. This is how
+            // `supersedeStaleVersions` and the episode-deleted path record a
+            // genuine supersession: `updateJobState`'s default NULLs the column.
             if cause == nil {
                 try await store.updateJobState(jobId: "job-y8f3-base", state: "superseded")
             }
+            // `updateJobState` stamps `updatedAt = Date()`, which resets the age
+            // this fixture seeded. Without stepping past the cooldown the nil
+            // arm would decline as `.cooling` and prove nothing about the
+            // discriminator — dropping the prefix check from
+            // `isAttemptCapTerminal` would still leave the test green.
+            clock.advance(by: AnalysisWorkScheduler.capOutRetryCooldownSeconds + 60)
 
             let report = try await makeReconciler(
                 store: store, downloads: downloads, clock: clock
@@ -603,28 +707,28 @@ struct CapOutRetryTests {
 
     // MARK: - Pure decision matrix
 
-    @Test("the cap-out retry ordinal round-trips and rejects every other key shape")
-    func ordinalParsing() {
+    @Test("the cap-out retry work key is built off the base, once, without nesting")
+    func retryKeyShape() {
         let base = Self.baseWorkKey
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: Self.retryKey(1)) == 1)
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: Self.retryKey(2)) == 2)
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: base) == nil)
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: "\(base):900") == nil)
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: "\(base):capRetry:0") == nil)
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: "\(base):capRetry:x") == nil)
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: "\(base):capRetry") == nil)
+        #expect(Self.retryKey(1) == "\(base):capRetry:1")
+        #expect(Self.retryKey(2) == "\(base):capRetry:2")
+        #expect(Self.retryKey(1) != Self.retryKey(2))
     }
 
-    /// The two budgets are independent ledgers. If either parser matched the
-    /// other's marker, a chain would launder the other's ordinal away — exactly
-    /// the collapse `CoverageTierLadderSchedulerTests` pins for onn6.
-    @Test("the cap-out and ad-scan-redrive ordinals do not read each other's keys")
-    func ordinalLedgersAreIndependent() {
-        let base = Self.baseWorkKey
-        let redrive = "\(base):\(AnalysisWorkScheduler.adScanRedriveWorkKeyMarker):1"
-        let capRetry = Self.retryKey(1)
-        #expect(AnalysisWorkScheduler.capOutRetryOrdinal(workKey: redrive) == nil)
-        #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: capRetry) == nil)
+    /// onn6's ordinal parser MUST NOT match a `capRetry` key, and this is live
+    /// rather than symmetric bookkeeping: the tier-advance arm keys on
+    /// `adScanRedriveOrdinal(workKey:) != nil` to decide a row may not walk the
+    /// ladder. If it matched, a cap-out retry that transcribed its rung would be
+    /// refused its successor and the episode would stall one rung in — the
+    /// opposite of what this bead is for.
+    @Test("onn6's ad-scan-redrive ordinal does not match a cap-out retry key")
+    func adScanRedriveOrdinalIgnoresCapRetryKeys() {
+        #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: Self.retryKey(1)) == nil)
+        #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: Self.retryKey(2)) == nil)
+        // The control: its own key still parses, so this is not vacuously true.
+        #expect(AnalysisWorkScheduler.adScanRedriveOrdinal(
+            workKey: "\(Self.baseWorkKey):\(AnalysisWorkScheduler.adScanRedriveWorkKeyMarker):1"
+        ) == 1)
     }
 
     @Test("only a superseded row with a maxAttemptsReached cause is an attempt-cap terminal")
