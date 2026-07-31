@@ -282,7 +282,15 @@ struct AutoSkipEdgePaddingWiringTests {
 
     // MARK: - playhead-hdgk: anchors sourced from the PERSISTED row (no manual setEdgeAnchors)
 
-    @Test("hdgk OFF: persisted anchors on the row are inert — cue is byte-identical to pre-hdgk")
+    /// playhead-qs0d NARROWED THIS TEST, deliberately. It used to assert that
+    /// with the master switch OFF a persisted `rediffByteExact` pair was inert.
+    /// That is no longer true and must not be: qs0d added a TARGETED activation
+    /// so a both-edges byte-exact span is padded even while the Gate-2 master
+    /// switch is off (see `AutoSkipEdgePaddingTargetedWiringTests`, which pins
+    /// the new bounds). The hdgk claim this test exists for — persisted anchors
+    /// do not by themselves change the cue — still holds for every OTHER tier,
+    /// so it is retargeted onto `stingerSnapped` rather than deleted.
+    @Test("hdgk OFF: persisted non-byte-exact anchors are inert — cue is byte-identical to pre-hdgk")
     func offPersistedAnchorsAreInert() async throws {
         let orchestrator = try await Self.makeAutoOrchestrator()
         nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
@@ -295,8 +303,8 @@ struct AutoSkipEdgePaddingWiringTests {
         let ad = makeSkipTestAdWindow(
             id: "ad-persisted-off", startTime: 60, endTime: 120,
             confidence: 0.9, decisionState: "confirmed",
-            startEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue,
-            endEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            startEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue
         )
         await orchestrator.receiveAdWindows([ad])
 
