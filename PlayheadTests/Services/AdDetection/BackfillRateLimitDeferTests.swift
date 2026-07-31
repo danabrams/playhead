@@ -699,6 +699,17 @@ struct BackfillRateLimitDeferTests {
                 "no window may be re-screened across resumptions (got \(calls1)+\(calls2)+\(calls3))")
     }
 
+    /// Full row state in one line. Every assertion about the attempt budget
+    /// carries it, because `retryCount` alone cannot say WHICH branch wrote the
+    /// row — `deferReason` is the discriminator between the cancellation
+    /// branch, the rate-limit defer, and a terminal transition.
+    private static func describe(_ row: BackfillJob) -> String {
+        let cursor: Double = row.progressCursor?.lastProcessedUpperBoundSec ?? -1
+        let reason: String = row.deferReason ?? "nil"
+        let status: String = row.status.rawValue
+        return "[status=\(status) retry=\(row.retryCount) cursor=\(cursor) reason=\(reason)]"
+    }
+
     /// One background window that expires before its FIRST coarse window can
     /// return — the short-grant case the device sees constantly (26–295 s
     /// granted against minutes per window). It covers no new audio, so it is
@@ -740,27 +751,30 @@ struct BackfillRateLimitDeferTests {
         await runBarrenWindow(store: store, inputs: inputs)
         await runBarrenWindow(store: store, inputs: inputs)
         var row = try #require(await store.fetchBackfillJob(byId: jobId))
-        #expect(row.retryCount == AdmissionController.maxRetries - 1)
-        #expect(row.status == .deferred)
+        #expect(row.retryCount == AdmissionController.maxRetries - 1, "\(Self.describe(row))")
+        #expect(row.status == .deferred, "\(Self.describe(row))")
 
         // …then ONE window that actually covers audio. A converging job must
         // not be killed by unlucky short windows earlier in its history, so
         // the barren budget goes back to zero.
-        _ = await runExpiringWindow(store: store, inputs: inputs, expireAfterCoarseCalls: 2)
+        let before = Self.describe(row)
+        let productiveCalls = await runExpiringWindow(store: store, inputs: inputs, expireAfterCoarseCalls: 2)
         row = try #require(await store.fetchBackfillJob(byId: jobId))
-        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30, "the productive window banked 30s")
-        #expect(row.retryCount == 0, "covering new audio must RESET the consecutive-barren budget")
-        #expect(row.status == .deferred)
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30,
+                "the productive window banked 30s — before=\(before) after=\(Self.describe(row)) calls=\(productiveCalls)")
+        #expect(row.retryCount == 0,
+                "covering new audio must RESET the consecutive-barren budget — before=\(before) after=\(Self.describe(row)) calls=\(productiveCalls)")
+        #expect(row.status == .deferred, "\(Self.describe(row))")
 
         // And the full budget is available again: two more barren windows
         // still leave the job resumable rather than failed.
         await runBarrenWindow(store: store, inputs: inputs)
         await runBarrenWindow(store: store, inputs: inputs)
         row = try #require(await store.fetchBackfillJob(byId: jobId))
-        #expect(row.status == .deferred, "a job that recently progressed is still resumable")
-        #expect(row.retryCount == AdmissionController.maxRetries - 1)
+        #expect(row.status == .deferred, "a job that recently progressed is still resumable — \(Self.describe(row))")
+        #expect(row.retryCount == AdmissionController.maxRetries - 1, "\(Self.describe(row))")
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30,
-                "barren windows must never regress the cursor")
+                "barren windows must never regress the cursor — \(Self.describe(row))")
     }
 
     @available(iOS 26.0, *)

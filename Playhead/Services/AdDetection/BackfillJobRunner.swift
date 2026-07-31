@@ -867,20 +867,33 @@ actor BackfillJobRunner {
                         }
 
                     // playhead-bkhc: BOUND the treadmill. Resuming is only
-                    // worth doing while it converges; a job whose every
-                    // granted window ends with the covered prefix exactly
+                    // worth doing while it converges; a job whose granted
+                    // windows keep ending with the covered prefix exactly
                     // where it started would otherwise re-enter the queue
-                    // forever, burning FM budget and never finishing. An
-                    // expiry that ADVANCED the covered audio costs nothing
-                    // (the job is making progress and must not be starved
-                    // out); an expiry that advanced NOTHING spends one unit
-                    // of the SHARED attempt budget the FM-failure path
-                    // already uses, and the last one terminates the row with
-                    // a named cause instead of deferring it again.
+                    // forever, burning FM budget and never finishing.
+                    //
+                    // The budget counts CONSECUTIVE barren windows, not
+                    // barren windows ever. An expiry that ADVANCED the
+                    // covered audio RESETS it: the job demonstrably converges
+                    // and must not be starved out by unlucky short windows
+                    // scattered through its history. Charging a lifetime
+                    // counter would kill a job at ~60% coverage just because
+                    // three of its many windows happened to be too short to
+                    // retire a single coarse window — a different, and wrong,
+                    // predicate from the one this branch exists to enforce.
+                    //
+                    // Forgiving the shared attempt budget cannot buy an
+                    // unbounded loop: a reset is only ever issued together
+                    // with a STRICTLY GREATER cursor, `monotonic` keeps the
+                    // cursor non-decreasing, and the cursor is bounded above
+                    // by the episode end. So resets are bounded by the number
+                    // of coarse windows in the episode, and each one is paid
+                    // for with audio that is now durable.
                     if Self.cursorAdvanced(from: job.progressCursor, to: salvagedCursor) {
                         try await store.checkpointBackfillJobProgress(
                             jobId: job.jobId,
-                            progressCursor: salvagedCursor
+                            progressCursor: salvagedCursor,
+                            retryCount: 0
                         )
                         // H-R3-1: include the phase so operators can tell which
                         // pass was interrupted without cross-referencing logs.
@@ -1709,7 +1722,16 @@ actor BackfillJobRunner {
             // skips unscanned audio even if a later window succeeded past an
             // earlier hole. (Pure arithmetic, no FM work, no persistence — the
             // no-rate-limit path stays byte-identical.)
-            coverageFullyCovered = fullyCoveredPlanIndices.count == coarsePlans.count
+            // playhead-bkhc: an EMPTY plan list must never read as "fully
+            // covered". `count == count` is vacuously true at zero, so a
+            // missing denominator would silently certify complete coverage of
+            // audio nobody screened — the precise failure this whole block
+            // exists to prevent. We are inside `!failedWindows.isEmpty ||
+            // !windows.isEmpty`, so zero plans is a contradiction (outcomes
+            // without a plan to attribute them to); treat it as incomplete and
+            // let the cursor stay where it was.
+            coverageFullyCovered = !coarsePlans.isEmpty
+                && fullyCoveredPlanIndices.count == coarsePlans.count
             var walkedUpperBound: Double? = nil
             for plan in coarsePlans.sorted(by: { $0.startTime < $1.startTime }) {
                 guard fullyCoveredPlanIndices.contains(plan.windowIndex) else { break }
@@ -2771,10 +2793,17 @@ actor BackfillJobRunner {
     /// just banked. (The pmp9 rate-limit resume path had the same latent
     /// defect; its tests only asserted call counts and the job row.)
     ///
-    /// Keying on the atom range makes the primary key agree with
-    /// `semantic_scan_results`' `UNIQUE(reuseKeyHash)`, which is the row's
-    /// real identity: same window ⇒ same id ⇒ a genuine replace; different
-    /// window ⇒ different id ⇒ no collateral delete.
+    /// Keying on the atom range makes the primary key AGREE WITH the window
+    /// coordinate in `semantic_scan_results`' `UNIQUE(reuseKeyHash)`: same
+    /// window ⇒ same id ⇒ a genuine replace; different window ⇒ different id ⇒
+    /// no collateral delete.
+    ///
+    /// The two keys are not identical and are not meant to be. `reuseKeyHash`
+    /// additionally includes `scanCohortJSON`, so a re-scan under a new cohort
+    /// lands on the same id but a different reuse key; `INSERT OR REPLACE`
+    /// resolves that on the UNIQUE index and the newer cohort's row wins. What
+    /// matters — and what was broken — is that neither key may ever identify
+    /// the WINDOW by its position in a run.
     nonisolated static func makeScanResultIdForTesting(
         assetId: String,
         transcriptVersion: String,
