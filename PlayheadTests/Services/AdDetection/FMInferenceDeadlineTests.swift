@@ -52,6 +52,9 @@ struct FMInferenceDeadlineTests {
         #expect(value == "answered")
     }
 
+    /// Safe in the parallel gate: it asserts only WHICH error is thrown, never
+    /// how fast. Starvation delays the timeout; it cannot turn it into success,
+    /// because the operation sleeps 600x the budget.
     @Test("a call that outlives the deadline throws FMInferenceTimeoutError")
     func slowCallTimesOut() async {
         await #expect(throws: FMInferenceTimeoutError(deadline: .milliseconds(50))) {
@@ -60,40 +63,6 @@ struct FMInferenceDeadlineTests {
                 return "never"
             }
         }
-    }
-
-    /// THE LOAD-BEARING TEST. Proves the deadline bounds WALL-CLOCK, not merely
-    /// the reported outcome.
-    ///
-    /// The operation ignores cancellation and runs for 10 s. A structured
-    /// task-group race would return in ~10 s (correct status, no bound). The
-    /// abandonable unstructured implementation returns in ~0.2 s. The assertion
-    /// sits at 5 s: 25x the deadline, so CPU starvation on the gate cannot
-    /// produce a false pass, and 2x under the operation, so a regression to the
-    /// structured shape cannot produce a false pass either.
-    @Test("the deadline returns promptly even when the call ignores cancellation")
-    func deadlineReturnsPromptlyEvenWhenTheOperationIgnoresCancellation() async {
-        var thrown: Error?
-        let seconds = await elapsedSeconds {
-            do {
-                _ = try await FMInferenceDeadline.run(.milliseconds(200)) {
-                    await uncancellableSleep(seconds: 10)
-                    return "the call eventually finished"
-                }
-            } catch {
-                thrown = error
-            }
-        }
-
-        #expect(thrown is FMInferenceTimeoutError)
-        #expect(
-            seconds < 5.0,
-            """
-            deadline took \(seconds)s to bound a 10s uncancellable call. \
-            A value near 10s means the implementation went back to awaiting the \
-            abandoned call — see the file header on FMInferenceDeadline.
-            """
-        )
     }
 
     @Test("a real model error propagates unchanged rather than becoming a timeout")
@@ -225,7 +194,12 @@ struct FMInferenceDeadlineTests {
     /// success has against the shipped 300s.
     @Test("a slow call that lands inside the deadline still succeeds")
     func slowButLegitimateCallStillSucceeds() async throws {
-        let value = try await FMInferenceDeadline.run(.milliseconds(500)) {
+        // 150x margin, deliberately. An earlier 500ms budget against a 200ms
+        // call was a race the parallel gate lost: under ~8,300 concurrent
+        // tests a 200ms sleep does not resume in 500ms. The point of this test
+        // is that a call finishing inside its budget SUCCEEDS, which does not
+        // require the budget to be tight.
+        let value = try await FMInferenceDeadline.run(.seconds(30)) {
             try await Task.sleep(for: .milliseconds(200))
             return "answered slowly"
         }
@@ -297,16 +271,29 @@ struct FMInferenceDeadlineCoarsePassTests {
 
     private static let contextSize = 431
     private static let coarseSchemaTokenCount = 4
-    /// Long enough that a hung call is unambiguous, short enough that a test
-    /// which somehow waits for it still finishes.
-    private static let hangSeconds = 30.0
 
-    private static func config(deadline: Duration) -> FoundationModelClassifier.Config {
+    /// DETERMINISTIC BY CONSTRUCTION. These tests inject the error the deadline
+    /// throws instead of hanging a stub past a short `inferenceDeadline`.
+    ///
+    /// The first version did hang, with a 150 ms deadline. It passed in
+    /// isolation and FAILED in the gate: Swift Testing runs ~8,300 tests
+    /// concurrently in-process, and under that starvation a stub that normally
+    /// returns in microseconds blows a 150 ms budget — a 200 ms timer was
+    /// measured taking 54 s to be noticed. Every window then "timed out" and
+    /// the assertions collapsed. Widening the budget would only move the
+    /// flake, because the quantity being raced is exactly the quantity the
+    /// load perturbs.
+    ///
+    /// `FMInferenceDeadline.run` propagates a thrown `FMInferenceTimeoutError`
+    /// unchanged, so injecting it exercises byte-identical downstream handling
+    /// with zero wall-clock dependence. The deadline's own TIMING behaviour is
+    /// a separate question, measured under `PerfGate` in
+    /// `FMInferenceDeadlineTimingTests`.
+    private static func config() -> FoundationModelClassifier.Config {
         FoundationModelClassifier.Config(
             safetyMarginTokens: 5,
             coarseMaximumResponseTokens: 6,
-            refinementMaximumResponseTokens: 12,
-            inferenceDeadline: deadline
+            refinementMaximumResponseTokens: 12
         )
     }
 
@@ -324,22 +311,28 @@ struct FMInferenceDeadlineCoarsePassTests {
         )
     }
 
-    /// `hangOn` is a set of 1-based coarse call ordinals that never answer.
+    /// `timeoutOn` is the set of 1-based coarse call ordinals whose call is
+    /// reported as having exceeded the deadline. `slowSuccessOn` ordinals
+    /// answer successfully after `slowSeconds` — used only where a test needs
+    /// one window to have measurably MORE cost than another, never as a race.
     private static func runtime(
-        hangOn: Set<Int>,
-        slowButSuccessfulOn: Set<Int> = [],
-        slowSeconds: Double = 0,
-        coarseFailures: [TestFMRuntimeFailure?] = []
+        timeoutOn: Set<Int>,
+        callCount: Int,
+        otherFailures: [Int: TestFMRuntimeFailure] = [:],
+        slowSuccessOn: Set<Int> = [],
+        slowSeconds: Double = 0
     ) -> TestFMRuntime {
-        TestFMRuntime(
-            coarseFailures: coarseFailures,
+        let failures: [TestFMRuntimeFailure?] = (1...max(1, callCount)).map { ordinal in
+            if timeoutOn.contains(ordinal) { return .inferenceTimeout }
+            return otherFailures[ordinal]
+        }
+        return TestFMRuntime(
+            coarseFailures: failures,
             contextSize: contextSize,
             coarseSchemaTokenCount: coarseSchemaTokenCount,
             tokenCountRule: tokenRule(),
             onCoarseRespond: { ordinal in
-                if hangOn.contains(ordinal) {
-                    try? await Task.sleep(for: .seconds(hangSeconds))
-                } else if slowButSuccessfulOn.contains(ordinal) {
+                if slowSuccessOn.contains(ordinal) {
                     try? await Task.sleep(for: .seconds(slowSeconds))
                 }
             }
@@ -353,10 +346,10 @@ struct FMInferenceDeadlineCoarsePassTests {
     @available(iOS 26.0, *)
     @Test("a single timed-out window keeps every window banked before and after it")
     func singleTimeoutKeepsSiblingWindows() async throws {
-        let runtime = Self.runtime(hangOn: [2])
+        let runtime = Self.runtime(timeoutOn: [2], callCount: 3)
         let classifier = FoundationModelClassifier(
             runtime: runtime.runtime,
-            config: Self.config(deadline: .milliseconds(150))
+            config: Self.config()
         )
 
         let output = try await classifier.coarsePassA(segments: Self.segments(count: 3))
@@ -377,10 +370,10 @@ struct FMInferenceDeadlineCoarsePassTests {
     @available(iOS 26.0, *)
     @Test("two consecutive timeouts end the pass and still return the banked windows")
     func twoConsecutiveTimeoutsEndThePassWithPartialResults() async throws {
-        let runtime = Self.runtime(hangOn: [2, 3])
+        let runtime = Self.runtime(timeoutOn: [2, 3], callCount: 4)
         let classifier = FoundationModelClassifier(
             runtime: runtime.runtime,
-            config: Self.config(deadline: .milliseconds(150))
+            config: Self.config()
         )
 
         let output = try await classifier.coarsePassA(segments: Self.segments(count: 4))
@@ -408,10 +401,10 @@ struct FMInferenceDeadlineCoarsePassTests {
     @Test("an answering window resets the no-progress counter")
     func answeringWindowResetsTheGuard() async throws {
         // Timeouts at windows 2 and 4, with a healthy window 3 between them.
-        let runtime = Self.runtime(hangOn: [2, 4])
+        let runtime = Self.runtime(timeoutOn: [2, 4], callCount: 5)
         let classifier = FoundationModelClassifier(
             runtime: runtime.runtime,
-            config: Self.config(deadline: .milliseconds(150))
+            config: Self.config()
         )
 
         let output = try await classifier.coarsePassA(segments: Self.segments(count: 5))
@@ -437,12 +430,13 @@ struct FMInferenceDeadlineCoarsePassTests {
         // Call 2 hangs, call 3 is REFUSED (an answer), call 4 hangs. Two
         // timeouts, never consecutive, so the pass must run to the end.
         let runtime = Self.runtime(
-            hangOn: [2, 4],
-            coarseFailures: [nil, nil, .refusal, nil, nil]
+            timeoutOn: [2, 4],
+            callCount: 5,
+            otherFailures: [3: .refusal]
         )
         let classifier = FoundationModelClassifier(
             runtime: runtime.runtime,
-            config: Self.config(deadline: .milliseconds(150))
+            config: Self.config()
         )
 
         let output = try await classifier.coarsePassA(segments: Self.segments(count: 5))
@@ -465,17 +459,20 @@ struct FMInferenceDeadlineCoarsePassTests {
     @available(iOS 26.0, *)
     @Test("a timed-out window reports its own elapsed time, not the whole pass's")
     func timeoutCarriesItsOwnLatency() async throws {
-        // Window 1 answers, slowly. Window 2 hangs. The pass therefore costs
-        // window 1's ~400ms PLUS the ~150ms deadline; the failure row must
-        // report only the latter.
+        // Window 1 answers successfully after a deliberate 300ms, so the PASS
+        // has a cost the timed-out window plainly does not share. Window 2
+        // reports a timeout immediately. The failure row must therefore carry a
+        // latency far below the pass total — and would carry the pass total
+        // exactly if the runner went back to stamping it.
         let runtime = Self.runtime(
-            hangOn: [2],
-            slowButSuccessfulOn: [1],
-            slowSeconds: 0.4
+            timeoutOn: [2],
+            callCount: 2,
+            slowSuccessOn: [1],
+            slowSeconds: 0.3
         )
         let classifier = FoundationModelClassifier(
             runtime: runtime.runtime,
-            config: Self.config(deadline: .milliseconds(150))
+            config: Self.config()
         )
 
         let output = try await classifier.coarsePassA(segments: Self.segments(count: 2))
@@ -483,11 +480,11 @@ struct FMInferenceDeadlineCoarsePassTests {
         let failure = try #require(output.failedWindows.first)
         #expect(failure.status == .inferenceTimeout)
         let failureLatency = try #require(failure.latencyMillis)
-        // Structural, not a timing race: the pass strictly contains the window,
-        // and the pass additionally contains a 400ms success the window does
-        // not. Both quantities are sleep-driven, so the ratio is stable under
-        // CPU load — but the bound is set at 0.75 against a real ratio near
-        // 0.27 so even a badly starved gate cannot flip it.
+        // Structural, not a timing race. The timed-out window reports an
+        // essentially instantaneous attempt; the pass additionally contains a
+        // deliberate 300ms successful window. Nothing here waits on a deadline,
+        // so CPU starvation inflates both quantities together and the ratio
+        // bound (0.75, against a real ratio near 0.0) cannot flip.
         #expect(failureLatency < output.latencyMillis)
         #expect(
             failureLatency < output.latencyMillis * 0.75,
@@ -503,10 +500,10 @@ struct FMInferenceDeadlineCoarsePassTests {
     @available(iOS 26.0, *)
     @Test("a healthy pass is unaffected by the deadline")
     func healthyPassIsUnchanged() async throws {
-        let runtime = Self.runtime(hangOn: [])
+        let runtime = Self.runtime(timeoutOn: [], callCount: 3)
         let classifier = FoundationModelClassifier(
             runtime: runtime.runtime,
-            config: Self.config(deadline: .milliseconds(150))
+            config: Self.config()
         )
 
         let output = try await classifier.coarsePassA(segments: Self.segments(count: 3))
@@ -514,6 +511,67 @@ struct FMInferenceDeadlineCoarsePassTests {
         #expect(output.status == .success)
         #expect(output.windows.count == 3)
         #expect(output.failedWindows.isEmpty)
+    }
+}
+
+// MARK: - The one genuinely load-sensitive assertion
+
+/// playhead-8d5r x playhead-zx0l. This suite measures WALL-CLOCK, so it runs
+/// only in the serial perf pass (`scripts/perf-tests.sh`) and skips in the
+/// parallel gate.
+///
+/// It was in the fast gate first and failed there, informatively: the deadline
+/// reported taking 54.4 s to bound a 10 s call, not because the implementation
+/// was wrong but because ~8,300 concurrently running tests starved the timer
+/// task for 54 s. Under that load NO wall-clock budget is meaningful, and
+/// widening the bound would only have hidden the measurement rather than fixed
+/// it. Every behavioural consequence of the deadline — the named status, the
+/// no-progress guards, banking, per-attempt latency — is asserted
+/// deterministically in the suites above; this is the only assertion that
+/// genuinely needs a quiet CPU.
+@Suite("playhead-8d5r: FM inference deadline timing")
+struct FMInferenceDeadlineTimingTests {
+
+    /// THE LOAD-BEARING TEST. Proves the deadline bounds WALL-CLOCK, not merely
+    /// the reported outcome.
+    ///
+    /// The operation ignores cooperative cancellation and runs for 10 s. A
+    /// `withThrowingTaskGroup` race — the shape used elsewhere in this repo —
+    /// cancels AND AWAITS its children, so it would return the right error
+    /// after ~10 s, which is no bound at all. The abandonable unstructured
+    /// implementation returns in ~0.2 s. The assertion sits at 5 s: 25x the
+    /// deadline, and 2x under the operation, so neither jitter nor a
+    /// regression to the structured shape can produce a false result.
+    ///
+    /// This is the test that justifies the whole design of
+    /// `FMInferenceDeadline`. If it is ever deleted, the file's central claim
+    /// becomes unverified.
+    @Test(
+        "the deadline returns promptly even when the call ignores cancellation",
+        .enabled(if: PerfGate.runsMeasurementTests, "perf pass only — see playhead-zx0l")
+    )
+    func deadlineReturnsPromptlyEvenWhenTheOperationIgnoresCancellation() async {
+        var thrown: Error?
+        let seconds = await elapsedSeconds {
+            do {
+                _ = try await FMInferenceDeadline.run(.milliseconds(200)) {
+                    await uncancellableSleep(seconds: 10)
+                    return "the call eventually finished"
+                }
+            } catch {
+                thrown = error
+            }
+        }
+
+        #expect(thrown is FMInferenceTimeoutError)
+        #expect(
+            seconds < 5.0,
+            """
+            deadline took \(seconds)s to bound a 10s uncancellable call. \
+            A value near 10s means the implementation went back to awaiting the \
+            abandoned call — see the file header on FMInferenceDeadline.
+            """
+        )
     }
 }
 

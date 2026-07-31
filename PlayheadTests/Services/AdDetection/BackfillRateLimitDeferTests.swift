@@ -29,16 +29,12 @@ struct BackfillRateLimitDeferTests {
         { prompt in prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8 }
     }
 
-    private func windowingConfig(
-        interWindowPacingNanos: UInt64 = 0,
-        inferenceDeadline: Duration = FMInferenceDeadline.standard
-    ) -> FoundationModelClassifier.Config {
+    private func windowingConfig(interWindowPacingNanos: UInt64 = 0) -> FoundationModelClassifier.Config {
         FoundationModelClassifier.Config(
             safetyMarginTokens: 5,
             coarseMaximumResponseTokens: 6,
             refinementMaximumResponseTokens: 12,
-            interWindowPacingNanos: interWindowPacingNanos,
-            inferenceDeadline: inferenceDeadline
+            interWindowPacingNanos: interWindowPacingNanos
         )
     }
 
@@ -99,13 +95,12 @@ struct BackfillRateLimitDeferTests {
 
     private func makeRunner(
         store: AnalysisStore,
-        runtime: FoundationModelClassifier.Runtime,
-        config: FoundationModelClassifier.Config? = nil
+        runtime: FoundationModelClassifier.Runtime
     ) -> BackfillJobRunner {
         BackfillJobRunner(
             store: store,
             admissionController: AdmissionController(),
-            classifier: FoundationModelClassifier(runtime: runtime, config: config ?? windowingConfig()),
+            classifier: FoundationModelClassifier(runtime: runtime, config: windowingConfig()),
             coveragePlanner: CoveragePlanner(),
             mode: .shadow,
             capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
@@ -561,14 +556,19 @@ struct BackfillRateLimitDeferTests {
         try await store.insertAsset(makeAsset())
         let inputs = makeThreeWindowInputs()
 
+        // Calls 2 and 3 (windows 1 and 2) report a deadline; call 3 spends a
+        // deliberate 50ms first so the two attempts have plainly different
+        // costs — see the latency assertion below. Injected rather than hung:
+        // racing a real deadline against ~8,300 concurrent tests measures the
+        // suite's load, not this code (playhead-zx0l).
         let runtime = TestFMRuntime(
+            coarseFailures: [nil, .inferenceTimeout, .inferenceTimeout],
             contextSize: Self.contextSize,
             coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
             tokenCountRule: windowingTokenRule(),
             onCoarseRespond: { ordinal in
-                // Calls 2 and 3 (windows 1 and 2) never answer.
-                if ordinal >= 2 {
-                    try? await Task.sleep(for: .seconds(30))
+                if ordinal == 3 {
+                    try? await Task.sleep(for: .milliseconds(50))
                 }
             }
         )
@@ -577,8 +577,7 @@ struct BackfillRateLimitDeferTests {
         // unwind past the persistence the pass already earned.
         _ = try await makeRunner(
             store: store,
-            runtime: runtime.runtime,
-            config: windowingConfig(inferenceDeadline: .milliseconds(150))
+            runtime: runtime.runtime
         ).runPendingBackfill(for: inputs)
 
         #expect(
@@ -603,10 +602,6 @@ struct BackfillRateLimitDeferTests {
         let passATimeouts = timeouts.filter { $0.scanPass == "passA" }
         #expect(passATimeouts.count == 2)
         #expect(passATimeouts.allSatisfy { ($0.latencyMs ?? 0) > 0 })
-        #expect(
-            passATimeouts.allSatisfy { ($0.latencyMs ?? .infinity) < 30_000 },
-            "a bounded 150ms deadline must not persist a row that reads like a 30s call"
-        )
         // THE PRECISE SIGNATURE OF THE OLD DEFECT. When every failure row
         // inherited the pass total, N rows from one pass carried the BIT-
         // IDENTICAL number — which is why summing the column on the device pull

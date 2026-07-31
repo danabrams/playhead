@@ -215,8 +215,25 @@ enum TestFMRuntimeFailure: Sendable {
     case refusal
     case guardrailViolation
     case rateLimited
+    // playhead-8d5r: the per-call deadline elapsed.
+    //
+    // Injected as the error the real deadline throws rather than by actually
+    // hanging a stub past a short `Config.inferenceDeadline`. That is both
+    // faithful and necessary: `FMInferenceDeadline.run` propagates a thrown
+    // `FMInferenceTimeoutError` unchanged, so every consumer behaves
+    // identically — and a test that HANGS to produce a timeout is measuring
+    // wall-clock, which does not survive the parallel suite. The gate runs
+    // ~8,300 tests concurrently; a 200ms timer was observed taking 54s to be
+    // noticed. Timeout HANDLING is deterministic and belongs in the fast gate;
+    // the timing behaviour of the deadline itself is measured separately under
+    // PerfGate.
+    case inferenceTimeout
 
     var error: Error {
+        // playhead-8d5r: not a FoundationModels error — the deadline is ours.
+        if case .inferenceTimeout = self {
+            return FMInferenceTimeoutError(deadline: .seconds(300))
+        }
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             let context = LanguageModelSession.GenerationError.Context(debugDescription: "test-fm-runtime")
@@ -230,6 +247,10 @@ enum TestFMRuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
             case .rateLimited:
                 return LanguageModelSession.GenerationError.rateLimited(context)
+            case .inferenceTimeout:
+                // Unreachable — handled by the early return above. Kept so the
+                // switch stays exhaustive.
+                break
             }
         }
         #endif
