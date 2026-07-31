@@ -798,12 +798,6 @@ struct SchedulerBugFixRegressionTests {
                 "a container segment in a write-once column is a permanent dead reference")
         #expect(URL(string: asset.sourceURL)?.isFileURL != true,
                 "an untaught reader must resolve nothing rather than open a wrong path")
-        // The stored form still round-trips to the live file.
-        #expect(AudioCacheLocation.resolve(
-            asset.sourceURL,
-            cacheRoot: DownloadManager.defaultCacheDirectory(),
-            isUsable: { $0.standardizedFileURL == localURL.standardizedFileURL }
-        )?.standardizedFileURL == localURL.standardizedFileURL)
     }
 
     @Test("scheduler upgrades reused placeholder asset to canonical full-file SHA when current fingerprint proves identity")

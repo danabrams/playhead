@@ -292,11 +292,16 @@ struct PlaceholderAssetUpgradeTests {
     /// sourceURL` exists), so an absolute path baked in here outlives the
     /// container it names. iOS re-creates the Data container under a new UUID
     /// on reinstall and restore.
+    ///
+    /// The manager is DEFAULT-rooted, matching production
+    /// (`PlayheadRuntime.init` constructs the only `DownloadManager()` and
+    /// passes no `cacheDirectory`). That pairing is deliberate: the encoder
+    /// relativizes against `DownloadManager.defaultCacheDirectory()`, so a
+    /// custom-rooted manager handing out a default-rooted URL would be an
+    /// incoherent fixture that passes for the wrong reason.
     @Test("playhead-b8hj: resolveSession persists a container-portable path for cached audio")
     func resolveSessionPersistsContainerPortableSourceURL() async throws {
         let store = try await makeTestStore()
-        let dir = try makeTempDir(prefix: "Bdb8hjResolve")
-        Self.tempDirs.track(dir)
 
         let coordinator = AnalysisCoordinator(
             store: store,
@@ -314,7 +319,7 @@ struct PlaceholderAssetUpgradeTests {
                 canUseFoundationModelsProvider: { false }
             ),
             skipOrchestrator: SkipOrchestrator(store: store),
-            downloadManager: DownloadManager(cacheDirectory: dir)
+            downloadManager: DownloadManager()
         )
 
         let episodeId = "ep-b8hj-portable"

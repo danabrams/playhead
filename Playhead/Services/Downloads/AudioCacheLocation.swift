@@ -44,6 +44,14 @@ enum AudioCacheLocation {
     /// The result is deliberately NOT a `file://` URL: a reader that has not
     /// been taught about this format gets `isFileURL == false` and resolves
     /// nothing, rather than confidently opening the wrong path.
+    ///
+    /// `cacheRoot` defaults to the global root rather than being threaded from
+    /// the `DownloadManager` that produced `url`, because production builds
+    /// exactly one manager and passes it no `cacheDirectory`
+    /// (`PlayheadRuntime.init`). Encode and decode therefore always agree. A
+    /// custom-rooted manager would simply fail the containment check and store
+    /// an absolute path — degraded, never wrong — but if one is ever
+    /// introduced in production, thread its `cacheDirectory` through here.
     static func portableString(
         for url: URL,
         cacheRoot: URL = DownloadManager.defaultCacheDirectory()
@@ -65,10 +73,19 @@ enum AudioCacheLocation {
     ///   2. Otherwise re-root the `<subdirectory>/<name>` tail — taken from the
     ///      stored relative form, or recovered from a stale absolute path — on
     ///      the current cache root.
-    ///   3. Otherwise look for the same basename under a different audio
-    ///      extension, because `DownloadManager.resolveExtension(for:)` falls
-    ///      back to `mp3` when nothing is on disk and a later re-download can
-    ///      legitimately land `.m4a`.
+    ///
+    /// There is deliberately no third step. An earlier draft also scanned for
+    /// the same stem under a different audio extension, to survive
+    /// `DownloadManager.resolveExtension(for:)`'s `mp3` fallback. That is a
+    /// resolution the resolver of record would REFUSE: `servingURLIfComplete`
+    /// checks the `.pin` sidecar's byte length and strong hash, and returns
+    /// `nil` outright when two audio siblings share a stem, "so an old
+    /// extension sibling can never bypass its pin/hash disambiguation"
+    /// (playhead-wrj8, `PlayheadRuntime`). A weaker second resolver handing the
+    /// byte differ a truncated or stale A-side is worse than not resolving:
+    /// the miss degrades to "not cached", the bad file mints a wrong mark.
+    /// Extension drift therefore reads as not-cached and re-downloads, which is
+    /// the same safe outcome as an eviction.
     ///
     /// - Parameter isUsable: the "this file is really here" predicate. Callers
     ///   pass the same anchor they would have applied to the raw URL, so
@@ -102,8 +119,7 @@ enum AudioCacheLocation {
         let candidate = cacheRoot
             .appendingPathComponent(tail[0], isDirectory: true)
             .appendingPathComponent(tail[1])
-        if isUsable(candidate) { return candidate }
-        return siblingWithDifferentAudioExtension(of: candidate, isUsable: isUsable)
+        return isUsable(candidate) ? candidate : nil
     }
 
     // MARK: - Tail extraction
@@ -135,6 +151,13 @@ enum AudioCacheLocation {
     /// Only the LAST artifact subdirectory counts, and only the final component
     /// is kept as the name — so a stale absolute path and the relative form
     /// written for the same file normalize to the identical two components.
+    ///
+    /// The scan is positional, not root-anchored, so a MISSING path stored
+    /// verbatim from outside the cache (a dump-harness snapshot at
+    /// `<corpus>/<show>/complete/<x>.mp3`) will also be probed under the cache
+    /// root. That is intentional — it is the same operation that rescues a
+    /// stale container path, and the names are SHA-256 of an episode id, so a
+    /// false hit would require a collision.
     private static func cacheRelativeTail(of components: [String]) -> [String]? {
         guard components.count >= 2 else { return nil }
         let name = components[components.count - 1]
@@ -145,37 +168,6 @@ enum AudioCacheLocation {
         for index in stride(from: components.count - 2, through: 0, by: -1)
         where knownSubdirectories.contains(components[index]) {
             return [components[index], name]
-        }
-        return nil
-    }
-
-    // MARK: - Extension drift
-
-    /// The same basename under a different audio extension. Guards against the
-    /// `mp3` fallback in `DownloadManager.resolveExtension(for:)` having been
-    /// baked into a row minted while nothing was on disk.
-    ///
-    /// Matching is on the FULL stem, not a prefix: background staging files are
-    /// `<hash>.<identityHash>.<ext>` and the completeness pin is `<hash>.pin`,
-    /// and neither is the played audio.
-    private static func siblingWithDifferentAudioExtension(
-        of candidate: URL,
-        isUsable: (URL) -> Bool
-    ) -> URL? {
-        let directory = candidate.deletingLastPathComponent()
-        let stem = candidate.deletingPathExtension().lastPathComponent
-        guard !stem.isEmpty else { return nil }
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
-            return nil
-        }
-        // Sorted so a directory holding two siblings resolves deterministically
-        // rather than following enumeration order.
-        for name in names.sorted() {
-            let sibling = directory.appendingPathComponent(name)
-            guard sibling.deletingPathExtension().lastPathComponent == stem,
-                  DownloadManager.isKnownAudioExtension(sibling.pathExtension)
-            else { continue }
-            if isUsable(sibling) { return sibling }
         }
         return nil
     }

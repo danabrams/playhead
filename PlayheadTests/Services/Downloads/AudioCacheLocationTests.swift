@@ -195,47 +195,55 @@ struct AudioCacheLocationTests {
         ) == nil)
     }
 
+    /// The escape target is planted OUTSIDE the cache root, where a `..` that
+    /// was honoured would actually land. A fixture inside the root would make
+    /// the naive `suffix(2)` implementation pass by accident.
     @Test("a traversal tail cannot escape the cache root")
     func traversalCannotEscape() throws {
         let container = try Container(uuid: "AEF96D16-F54D-4206-BF4E-564AEB3040A1")
         defer { container.remove() }
-        try Data(repeating: 0x42, count: 128).write(
-            to: container.cacheRoot.appendingPathComponent("secret.bin")
-        )
+        let outside = container.cacheRoot.deletingLastPathComponent()
+            .appendingPathComponent("secret.bin")
+        try Data(repeating: 0x42, count: 128).write(to: outside)
+        #expect(AdDetectionService.isAnchoredRegularFile(outside), "control: the target is reachable")
+
         // The last component is the artifact name and is never a directory
         // hop, so `..` cannot be used to climb out.
+        for stored in ["complete/../../secret.bin", "../secret.bin", "complete/../secret.bin"] {
+            #expect(AudioCacheLocation.resolve(
+                stored, cacheRoot: container.cacheRoot, isUsable: Self.anchored
+            ) == nil, "\(stored) must not resolve")
+        }
+    }
+
+    // MARK: - Extension drift is NOT rescued, on purpose
+
+    /// Deliberate: guessing a sibling extension is a resolution
+    /// `DownloadManager.servingURLIfComplete` would refuse — it checks the
+    /// `.pin` byte length and hash and returns nil outright when two audio
+    /// siblings share a stem. Handing the byte differ a truncated or stale
+    /// A-side mints a wrong mark; a miss merely re-downloads.
+    @Test("extension drift degrades to not-cached rather than guessing a sibling")
+    func extensionDriftIsNotCached() throws {
+        let container = try Container(uuid: "A0A98C22-9A20-4716-B47A-9C81738A3999")
+        defer { container.remove() }
+        let stem = DownloadManager.safeFilename(for: "https://feed.example/rss::guid-m4a")
+        let landed = try container.writeAudio(named: "\(stem).m4a")
+        #expect(AdDetectionService.isAnchoredRegularFile(landed), "control: the sibling IS on disk")
+
         #expect(AudioCacheLocation.resolve(
-            "complete/../secret.bin", cacheRoot: container.cacheRoot, isUsable: Self.anchored
+            "complete/\(stem).mp3", cacheRoot: container.cacheRoot, isUsable: Self.anchored
         ) == nil)
     }
 
-    // MARK: - Extension drift
-
-    @Test("a re-download under a different audio extension still resolves")
-    func resolvesAcrossExtensionDrift() throws {
-        let container = try Container(uuid: "A0A98C22-9A20-4716-B47A-9C81738A3999")
-        defer { container.remove() }
-        let episodeId = "https://feed.example/rss::guid-m4a"
-        let stem = DownloadManager.safeFilename(for: episodeId)
-
-        // The row was minted while nothing was on disk, so `resolveExtension`
-        // fell back to `mp3`; the artifact that actually landed is `.m4a`.
-        let actual = try container.writeAudio(named: "\(stem).m4a")
-
-        let resolved = AudioCacheLocation.resolve(
-            "complete/\(stem).mp3", cacheRoot: container.cacheRoot, isUsable: Self.anchored
-        )
-        #expect(resolved?.standardizedFileURL == actual.standardizedFileURL)
-    }
-
-    @Test("a non-audio sibling is never mistaken for the audio")
+    @Test("a pin sidecar or staging file is never mistaken for the audio")
     func ignoresNonAudioSiblings() throws {
         let container = try Container(uuid: "76435512-3E77-4BD9-A778-9B35626CAF69")
         defer { container.remove() }
         let stem = DownloadManager.safeFilename(for: "ep-pin-only")
         let complete = container.cacheRoot.appendingPathComponent("complete", isDirectory: true)
-        // The completeness pin sidecar and a background staging file share the
-        // stem's prefix. Neither is playable audio.
+        // Everything that legitimately shares this stem in `complete/` except
+        // the audio itself: the completeness pin and a background staging file.
         try Data(repeating: 0x01, count: 64)
             .write(to: complete.appendingPathComponent("\(stem).pin"))
         try Data(repeating: 0x02, count: 64)
@@ -244,6 +252,11 @@ struct AudioCacheLocationTests {
         #expect(AudioCacheLocation.resolve(
             "complete/\(stem).mp3", cacheRoot: container.cacheRoot, isUsable: Self.anchored
         ) == nil)
+        // ...and the stem itself is not a directory listing key: asking for the
+        // pin by name must not hand back the staging file either.
+        #expect(AudioCacheLocation.resolve(
+            "complete/\(stem).pin", cacheRoot: container.cacheRoot, isUsable: Self.anchored
+        )?.lastPathComponent == "\(stem).pin", "an exact name still resolves exactly")
     }
 
     // MARK: - The current container must not regress
@@ -287,16 +300,28 @@ struct AudioCacheLocationTests {
 
     // MARK: - Collision
 
+    /// The load-bearing half is the ABSENT episode: only B's artifact is on
+    /// disk, so an implementation that returned "whatever audio is in the
+    /// directory" — or that lost the basename while re-rooting — hands A back
+    /// B's file. That is the irreversible one: A's transcript fused onto B's
+    /// audio.
     @Test("two episodes never resolve to the same file")
     func distinctEpisodesDoNotCollide() throws {
         let container = try Container(uuid: "BCC522DD-B26A-430D-B0F1-CCDE0D4235F9")
         defer { container.remove() }
         let a = "https://feed.example/rss::guid-a"
         let b = "https://feed.example/rss::guid-b"
-        let urlA = try container.writeAudio(named: Self.basename(for: a))
         let urlB = try container.writeAudio(named: Self.basename(for: b))
-        #expect(urlA != urlB)
 
+        // A is not downloaded in this container. It must read as not-cached,
+        // NOT as B.
+        #expect(AudioCacheLocation.resolve(
+            "complete/\(Self.basename(for: a))", cacheRoot: container.cacheRoot,
+            isUsable: Self.anchored
+        ) == nil)
+
+        let urlA = try container.writeAudio(named: Self.basename(for: a))
+        #expect(urlA != urlB)
         let resolvedA = AudioCacheLocation.resolve(
             "complete/\(Self.basename(for: a))", cacheRoot: container.cacheRoot,
             isUsable: Self.anchored
@@ -332,6 +357,15 @@ struct AudioCacheLocationTests {
         #expect(AudioCacheLocation.resolve(
             "complete/\(stem).mp3", cacheRoot: container.cacheRoot, isUsable: Self.anchored
         )?.standardizedFileURL == complete.standardizedFileURL)
+
+        // The load-bearing case: with the partial GONE, a partials reference
+        // must read as not-cached rather than falling through to the complete
+        // artifact that shares its stem. A truncated-vs-complete mix-up is a
+        // silently wrong A-side.
+        try FileManager.default.removeItem(at: partial)
+        #expect(AudioCacheLocation.resolve(
+            "partials/\(stem).partial", cacheRoot: container.cacheRoot, isUsable: Self.anchored
+        ) == nil)
     }
 
     // MARK: - Round trip

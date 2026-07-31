@@ -2515,12 +2515,6 @@ actor DownloadManager {
         "mp3", "m4a", "aac", "wav", "caf", "aiff", "mp4", "ogg", "opus"
     ]
 
-    /// Whether an extension names audio this cache is willing to serve.
-    /// Case-insensitive: `bootstrap()` accepts on-disk spellings as written.
-    static func isKnownAudioExtension(_ pathExtension: String) -> Bool {
-        knownAudioExtensions.contains(pathExtension.lowercased())
-    }
-
     /// Keep every newly-written artifact inside the extension set used by
     /// sibling discovery, serving, cleanup, and eviction. Podcast enclosure
     /// URLs commonly end in routing suffixes such as `.php` or `.ashx`; those
@@ -2529,7 +2523,7 @@ actor DownloadManager {
     /// URLs without creating an artifact the cache can no longer find.
     static func cacheExtension(for url: URL) -> String {
         let candidate = url.pathExtension.lowercased()
-        return isKnownAudioExtension(candidate) ? candidate : "mp3"
+        return knownAudioExtensions.contains(candidate) ? candidate : "mp3"
     }
 
     // MARK: - Completeness pin (playhead-wrj8)
