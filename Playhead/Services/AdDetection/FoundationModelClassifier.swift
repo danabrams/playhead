@@ -1110,6 +1110,24 @@ struct FoundationModelClassifier: Sendable {
         // permissive path.
         let inferenceDeadline: Duration
 
+        // playhead-qk44: how long the coarse pass may complete NO windows
+        // before that counts as one strike, and how many consecutive strikes
+        // end the pass. See `FMNoProgressWatchdog` for why silence rather than
+        // duration is the thing being bounded, and why the count is
+        // consecutive.
+        //
+        // Set either to zero/non-positive to disable the bound. Tests shrink
+        // the interval so the whole watchdog path runs at gate speed, exactly
+        // as `inferenceDeadline` does.
+        //
+        // SCOPE: the COARSE pass only. `refinePassB` is deliberately not
+        // wrapped in this bead — it is reached only after a coarse pass has
+        // already returned windows, so a wedge there leaves durable evidence
+        // (rows, an advanced lease) that the silent-`running` state this bead
+        // was filed for does not. Filed rather than smuggled in.
+        let coarseNoProgressInterval: Duration
+        let coarseNoProgressIntervalLimit: Int
+
         // bd-3h2 (2026-04-06): On-device run on iOS 26.4 produced a
         // refinement decode failure with the FM emitting valid JSON
         // truncated mid-string (the second span's `"certainty"` field
@@ -1143,7 +1161,9 @@ struct FoundationModelClassifier: Sendable {
             maximumRefinementSpansPerWindow: Int = 2,
             fmGreedyDecoding: Bool = true,
             interWindowPacingNanos: UInt64 = 0,
-            inferenceDeadline: Duration = FMInferenceDeadline.standard
+            inferenceDeadline: Duration = FMInferenceDeadline.standard,
+            coarseNoProgressInterval: Duration = FMNoProgressWatchdog.standardInterval,
+            coarseNoProgressIntervalLimit: Int = FMNoProgressWatchdog.standardConsecutiveIntervalLimit
         ) {
             self.safetyMarginTokens = safetyMarginTokens
             self.coarseMaximumResponseTokens = coarseMaximumResponseTokens
@@ -1154,6 +1174,8 @@ struct FoundationModelClassifier: Sendable {
             self.fmGreedyDecoding = fmGreedyDecoding
             self.interWindowPacingNanos = interWindowPacingNanos
             self.inferenceDeadline = inferenceDeadline
+            self.coarseNoProgressInterval = coarseNoProgressInterval
+            self.coarseNoProgressIntervalLimit = coarseNoProgressIntervalLimit
         }
 
         /// playhead-xsdz.60: return a copy of `self` with `fmGreedyDecoding`
@@ -1171,7 +1193,9 @@ struct FoundationModelClassifier: Sendable {
                 maximumRefinementSpansPerWindow: maximumRefinementSpansPerWindow,
                 fmGreedyDecoding: value,
                 interWindowPacingNanos: interWindowPacingNanos,
-                inferenceDeadline: inferenceDeadline
+                inferenceDeadline: inferenceDeadline,
+                coarseNoProgressInterval: coarseNoProgressInterval,
+                coarseNoProgressIntervalLimit: coarseNoProgressIntervalLimit
             )
         }
 
@@ -1640,13 +1664,15 @@ struct FoundationModelClassifier: Sendable {
 
     func coarsePassA(
         segments: [AdTranscriptSegment],
-        locale: Locale = .current
+        locale: Locale = .current,
+        onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil
     ) async throws -> FMCoarseScanOutput {
         try await coarsePassA(
             segments: segments,
             locale: locale,
             sensitiveRouter: nil,
-            permissiveClassifier: nil
+            permissiveClassifier: nil,
+            onProgress: onProgress
         )
     }
 
@@ -1663,12 +1689,60 @@ struct FoundationModelClassifier: Sendable {
     /// short-circuit the FM call entirely (no wasted refusal). When
     /// either is nil or the router is the noop, behavior is byte-
     /// identical to the original `coarsePassA`.
+    ///
+    /// playhead-qk44: the whole pass runs under a NO-PROGRESS bound. Every
+    /// unit of work it finishes — the planning prologue, then each window —
+    /// notes a tick, and `FMNoProgressWatchdog` ends the pass with
+    /// ``FMNoProgressError`` if `config.coarseNoProgressIntervalLimit`
+    /// consecutive `config.coarseNoProgressInterval`s pass with no tick.
+    /// `onProgress` receives the same ticks so a caller can keep durable state
+    /// (the `backfill_jobs` lease) honest about work that is otherwise
+    /// invisible until this function returns.
     @available(iOS 26.0, *)
     func coarsePassA(
         segments: [AdTranscriptSegment],
         locale: Locale = .current,
         sensitiveRouter: SensitiveWindowRouter?,
-        permissiveClassifier: PermissiveAdClassifier?
+        permissiveClassifier: PermissiveAdClassifier?,
+        onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil
+    ) async throws -> FMCoarseScanOutput {
+        let ticker = FMProgressTicker()
+        // Both consumers of a completed unit of work, composed once so the
+        // pass body has a single, unconditional call site. The watchdog MUST
+        // see every tick (it is the bound); `onProgress` is optional and is
+        // awaited, so a slow observer delays the pass rather than the tick.
+        let progress: @Sendable (Int) async -> Void = { units in
+            ticker.note()
+            await onProgress?(units)
+        }
+        return try await FMNoProgressWatchdog.run(
+            interval: config.coarseNoProgressInterval,
+            consecutiveIntervalLimit: config.coarseNoProgressIntervalLimit,
+            ticker: ticker
+        ) { [self] in
+            try await coarsePassAUnbounded(
+                segments: segments,
+                locale: locale,
+                sensitiveRouter: sensitiveRouter,
+                permissiveClassifier: permissiveClassifier,
+                progress: progress
+            )
+        }
+    }
+
+    /// The coarse pass proper. Called only from `coarsePassA`, which supplies
+    /// the no-progress bound; split out so the bound wraps the ENTIRE body —
+    /// availability probe, prompt budget and `planPassA` included. Those run
+    /// before the first window and are precisely where the wedge that produced
+    /// playhead-qk44 could hide, because no per-call inference deadline
+    /// reaches them.
+    @available(iOS 26.0, *)
+    private func coarsePassAUnbounded(
+        segments: [AdTranscriptSegment],
+        locale: Locale,
+        sensitiveRouter: SensitiveWindowRouter?,
+        permissiveClassifier: PermissiveAdClassifier?,
+        progress: @escaping @Sendable (_ completedUnits: Int) async -> Void
     ) async throws -> FMCoarseScanOutput {
         let clock = ContinuousClock()
         let start = clock.now
@@ -1684,6 +1758,15 @@ struct FoundationModelClassifier: Sendable {
 
         let budget = try await promptBudget()
         let plans = try await planPassA(segments: segments, budget: budget)
+
+        // playhead-qk44: the planning prologue is a unit of work, and it is
+        // the one the no-progress bound most needs to see. Availability
+        // probing and `planPassA` between them issue every unbounded model
+        // call on this path (one `tokenCount` XPC round trip per candidate
+        // window); reaching here proves they returned. Without this tick the
+        // watchdog could not tell "still planning" from "wedged before the
+        // first window", which is the same conflation the whole bead is about.
+        await progress(0)
 
         // playhead-xx7m.2 (Phase B): once-per-classification-run breadcrumb
         // (NOT per window) so a real-device run can confirm the iOS 27 model's
@@ -1765,6 +1848,16 @@ struct FoundationModelClassifier: Sendable {
 
         let totalWindows = plans.count
         for (planIndex, plan) in plans.enumerated() {
+            // playhead-qk44: reaching the top of iteration N proves window
+            // N-1 resolved — banked, failed, or recovered, all of which are
+            // work. Reported here rather than at the end of the body because
+            // the body has a dozen `continue` exits and a tick that some of
+            // them skip would be a bound that some failure modes escape.
+            // Skipped for the first window because the prologue tick above
+            // already recorded the only work that precedes it.
+            if planIndex > 0 {
+                await progress(planIndex)
+            }
             // playhead-pmp9: optional inter-window pacing. Default 0 = no delay
             // = byte-identical to the pre-pmp9 loop. When a background driver
             // sets `interWindowPacingNanos > 0`, wait between per-window
@@ -6630,6 +6723,13 @@ private extension FoundationModelClassifier {
                 return fallbackFoundationModelContextSize
                 #endif
             },
+            // playhead-qk44: every `tokenCount` below is an XPC round trip to
+            // the same on-device model daemon that `respond` goes to, and
+            // every one of them was UNBOUNDED — `planPassA` makes one per
+            // candidate window, so a hang here stalls the coarse pass before
+            // it ever reaches a `FMInferenceDeadline`-guarded call. See
+            // `FMInferenceDeadline.metadata` for why the budget is 30 s rather
+            // than the 300 s inference budget.
             tokenCount: { prompt in
                 guard #available(iOS 26.0, *) else {
                     return fallbackTokenEstimate(for: prompt)
@@ -6637,7 +6737,9 @@ private extension FoundationModelClassifier {
                 #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
-                    return try await model.tokenCount(for: prompt)
+                    return try await FMInferenceDeadline.run(FMInferenceDeadline.metadata) {
+                        try await model.tokenCount(for: prompt)
+                    }
                 }
                 #endif
                 return fallbackTokenEstimate(for: prompt)
@@ -6649,7 +6751,9 @@ private extension FoundationModelClassifier {
                 #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
-                    return try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
+                    return try await FMInferenceDeadline.run(FMInferenceDeadline.metadata) {
+                        try await model.tokenCount(for: CoarseScreeningSchema.generationSchema)
+                    }
                 }
                 #endif
                 return fallbackCoarseSchemaTokenEstimate
@@ -6661,7 +6765,9 @@ private extension FoundationModelClassifier {
                 #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
-                    return try await model.tokenCount(for: RefinementWindowSchema.generationSchema)
+                    return try await FMInferenceDeadline.run(FMInferenceDeadline.metadata) {
+                        try await model.tokenCount(for: RefinementWindowSchema.generationSchema)
+                    }
                 }
                 #endif
                 return fallbackRefinementSchemaTokenEstimate
@@ -6673,7 +6779,9 @@ private extension FoundationModelClassifier {
                 #if compiler(>=6.3)
                 let model = SystemLanguageModel.default
                 if #available(iOS 26.4, *) {
-                    return try await model.tokenCount(for: FMBoundarySchema.generationSchema)
+                    return try await FMInferenceDeadline.run(FMInferenceDeadline.metadata) {
+                        try await model.tokenCount(for: FMBoundarySchema.generationSchema)
+                    }
                 }
                 #endif
                 return fallbackBoundarySchemaTokenEstimate

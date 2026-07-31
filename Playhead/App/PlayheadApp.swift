@@ -620,6 +620,17 @@ struct PlayheadApp: App {
                 Task {
                     await runtime.speechService.noteAppDidBecomeActive()
                 }
+                // playhead-qk44: sweep `backfill_jobs` rows stranded in
+                // `running` by a process that is no longer here. Before this
+                // bead the sweep ran only at launch and on a background-task
+                // wake, so a stranded row was invisible for the whole of a
+                // foregrounded session — the 2026-07-31 pull caught one 23
+                // minutes in, with the app active for 22 of them. One SQL
+                // UPDATE against a table with tens of rows, guarded by the
+                // reaper's own 10-minute freshness floor.
+                Task {
+                    await runtime.analysisJobReconciler.sweepStrandedBackfillJobsInSession()
+                }
             case .inactive:
                 break
             @unknown default:

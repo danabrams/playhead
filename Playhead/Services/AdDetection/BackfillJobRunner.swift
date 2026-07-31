@@ -1574,6 +1574,32 @@ actor BackfillJobRunner {
         // classifier are both opt-in — when either is nil we call the
         // legacy single-arg overload, which is byte-identical to the
         // pre-bd-1en path.
+        // playhead-qk44: make the lease an honest WORK clock across the coarse
+        // pass.
+        //
+        // `resetStrandedBackfillJobs` asks "is `updatedAt` fresh?" as a proxy
+        // for "is this job alive?", and every heartbeat site below is
+        // downstream of `coarsePassA` RETURNING. A coarse pass takes 12–45
+        // minutes on device, so throughout the single longest stretch of the
+        // job the lease was frozen — which is why the 2026-07-31 device pull
+        // shows `updatedAt` stuck at the instant the row flipped to `running`,
+        // 23 minutes stale, with zero scan rows.
+        //
+        // Note what that field evidence REFUTES: the heartbeat cannot have
+        // been refreshing the row out of the reaper's reach, because it never
+        // fired at all. The row was eligible for the reaper from 10 minutes
+        // in; nothing swept it. Both halves are fixed here — the lease now
+        // advances once per resolved coarse window, so a fresh `updatedAt`
+        // finally MEANS work advanced, and a stale one means it stopped.
+        //
+        // `try?` matches the other heartbeat sites: a lease touch that loses a
+        // race with a terminal transition must not fail the pass.
+        let leaseJobId = job.jobId
+        let leaseStore = store
+        let onCoarseProgress: @Sendable (Int) async -> Void = { _ in
+            try? await leaseStore.markBackfillJobRunning(jobId: leaseJobId)
+        }
+
         let coarse: FMCoarseScanOutput
         if #available(iOS 26.0, *),
            let router = sensitiveRouter,
@@ -1581,10 +1607,14 @@ actor BackfillJobRunner {
             coarse = try await classifier.coarsePassA(
                 segments: inputs.segments,
                 sensitiveRouter: router,
-                permissiveClassifier: classifierBox.classifier
+                permissiveClassifier: classifierBox.classifier,
+                onProgress: onCoarseProgress
             )
         } else {
-            coarse = try await classifier.coarsePassA(segments: inputs.segments)
+            coarse = try await classifier.coarsePassA(
+                segments: inputs.segments,
+                onProgress: onCoarseProgress
+            )
         }
 
         // Cycle 2 C2: roll up per-pass permissive failure tally into

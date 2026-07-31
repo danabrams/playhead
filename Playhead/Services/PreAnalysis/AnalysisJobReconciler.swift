@@ -1034,6 +1034,57 @@ actor AnalysisJobReconciler {
         return count
     }
 
+    /// playhead-qk44: run the stranded-backfill reaper DURING a foregrounded
+    /// session instead of only at launch and on a BGProcessingTask wake.
+    ///
+    /// **The gap this closes.** Before this bead `resetStrandedBackfillJobs`
+    /// was reachable from exactly two places — `reconcile()` at launch
+    /// (`PlayheadRuntime`) and the same `reconcile()` from
+    /// `BackgroundProcessingService`. Neither runs while the user is holding
+    /// the phone. The 2026-07-31 device pull shows what that costs: a
+    /// `fullEpisodeScan` sat at `running` for 23 minutes with zero scan rows
+    /// while `Documents/bg-task-log.jsonl` records the app continuously
+    /// `active` for 22 of them. The row cleared the reaper's 10-minute
+    /// freshness floor after 10 of those minutes and nothing asked.
+    ///
+    /// **Why it is only safe to call this now.** The reaper's predicate is
+    /// `updatedAt < now - strandedJobFreshnessSeconds`, and until playhead-qk44
+    /// `updatedAt` did not advance during a coarse pass at all — every
+    /// heartbeat site in `BackfillJobRunner.runJob` is downstream of
+    /// `coarsePassA` returning, and a coarse pass runs 12–45 minutes on device.
+    /// Adding a foreground sweep on top of THAT would have reaped healthy jobs
+    /// mid-pass, discarding the exact FM work the reaper exists to protect.
+    /// The per-window lease touch added in the same bead is what makes a fresh
+    /// `updatedAt` mean "work advanced", and therefore what makes this sweep
+    /// correct rather than destructive. Do not port this call anywhere without
+    /// that guarantee.
+    ///
+    /// **This is the belt, not the braces.** The primary bound on a wedged
+    /// pass is `FMNoProgressWatchdog`, which ends it in-process after
+    /// 3 x 180 s and writes a named terminal — deliberately sooner than the
+    /// 600 s floor here, so this sweep only ever sees rows whose owning runner
+    /// is genuinely gone. Scene activation, not a timer, is the trigger: a
+    /// periodic foreground timer would add a long-lived Task for a case the
+    /// watchdog already covers.
+    ///
+    /// Best-effort. A failure leaves the row for the next activation or the
+    /// next launch; it must never propagate into the scene-phase handler.
+    @discardableResult
+    func sweepStrandedBackfillJobsInSession() async -> Int {
+        do {
+            let count = try await store.resetStrandedBackfillJobs()
+            if count > 0 {
+                logger.info("stranded_backfill_reset_foreground count=\(count)")
+            }
+            return count
+        } catch {
+            logger.warning(
+                "Foreground stranded-backfill sweep failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return 0
+        }
+    }
+
     /// C1: sibling reaper for `final_pass_jobs.status='running'` rows
     /// stranded across a process death. Bug 9 introduced the `final_pass_jobs`
     /// table and the `resetStrandedFinalPassJobs` helper but never wired
