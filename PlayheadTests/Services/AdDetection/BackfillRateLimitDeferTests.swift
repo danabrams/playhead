@@ -601,10 +601,24 @@ struct BackfillRateLimitDeferTests {
         // inherited the whole pass's wall-clock, so two rows from one pass
         // reported the same number and summing the column double-counted it.
         let passATimeouts = timeouts.filter { $0.scanPass == "passA" }
+        #expect(passATimeouts.count == 2)
         #expect(passATimeouts.allSatisfy { ($0.latencyMs ?? 0) > 0 })
         #expect(
             passATimeouts.allSatisfy { ($0.latencyMs ?? .infinity) < 30_000 },
             "a bounded 150ms deadline must not persist a row that reads like a 30s call"
+        )
+        // THE PRECISE SIGNATURE OF THE OLD DEFECT. When every failure row
+        // inherited the pass total, N rows from one pass carried the BIT-
+        // IDENTICAL number — which is why summing the column on the device pull
+        // reported 213.8 minutes of a quantity that was really 115.9. Two
+        // independently-measured attempts cannot collide on a Double.
+        #expect(
+            Set(passATimeouts.compactMap(\.latencyMs)).count == 2,
+            """
+            both timeout rows reported the same latency \
+            (\(passATimeouts.compactMap(\.latencyMs))) — that is the pass-total \
+            stamp, not each attempt's own cost.
+            """
         )
     }
 
