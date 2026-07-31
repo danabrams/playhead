@@ -165,12 +165,31 @@ enum FoundationModelsUsabilityProbe {
             return false
         }
 
-        let session = LanguageModelSession(model: model)
         do {
-            _ = try await session.respond(
-                to: "Health check. Return ready=true if you can answer this request.",
-                generating: FoundationModelsReadinessProbe.self
-            )
+            // playhead-qk44: BOUND the probe. This was the last bare
+            // `LanguageModelSession.respond` on the ad-detection path after
+            // playhead-8d5r, and it sits on the coarse pass's critical path:
+            // `FoundationModelClassifier.liveRuntime`'s `availabilityStatus`
+            // awaits it before `coarsePassA` plans a single window. A hang
+            // here therefore stalls the whole backfill lane with the job row
+            // reading `running` and nothing else — the exact state
+            // playhead-qk44 was filed for. A probe that does not answer in
+            // `FMInferenceDeadline.standard` is not a usable model, so the
+            // timeout is caught below and cached as unusable exactly like any
+            // other probe failure.
+            //
+            // The session is minted INSIDE the closure so nothing
+            // non-`Sendable` crosses into the unstructured task the deadline
+            // spawns. `SystemLanguageModel.default` is the same shared
+            // singleton the `availability` guard above consulted, so this is
+            // the same session the pre-qk44 code built.
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard) {
+                let session = LanguageModelSession(model: SystemLanguageModel.default)
+                _ = try await session.respond(
+                    to: "Health check. Return ready=true if you can answer this request.",
+                    generating: FoundationModelsReadinessProbe.self
+                )
+            }
             cache(usable: true)
             return true
         } catch {

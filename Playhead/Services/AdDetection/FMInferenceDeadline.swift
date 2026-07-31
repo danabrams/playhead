@@ -57,6 +57,7 @@
 // `.rateLimited` → the existing capped-exponential backoff.
 
 import Foundation
+import os
 
 /// Thrown by ``FMInferenceDeadline/run(_:operation:)`` when one Foundation
 /// Models inference call outlived its deadline.
@@ -140,6 +141,33 @@ enum FMInferenceDeadline {
     /// need it least.
     static let standard: Duration = .seconds(300)
 
+    /// playhead-qk44: the bound for the NON-generative model calls on the same
+    /// path — `SystemLanguageModel.tokenCount(for:)` for a prompt and for each
+    /// `@Generable` schema.
+    ///
+    /// These were unbounded, and that is not a detail. `planPassA` issues one
+    /// `tokenCount` XPC round trip per candidate window, so a 92-minute episode
+    /// makes tens of them BEFORE the first `respond` — which means a wedge in
+    /// the framework at that point never reaches a deadline-guarded call at
+    /// all. That is the exact shape of the 23-minute silent `running` row this
+    /// bead was filed for: `status='running'`, `progressCursor` empty, zero
+    /// scan rows, `updatedAt` frozen at the instant the row flipped.
+    ///
+    /// 30 s rather than `standard`, because these calls are not inference.
+    /// There is no sampling and no generation — a tokenizer round trip is
+    /// linear in prompt length and the prompts here are bounded by the model's
+    /// own context window. Two orders of magnitude above any honest cost.
+    ///
+    /// The asymmetry that licenses the shorter value runs the OPPOSITE way to
+    /// `standard`'s. Killing a slow inference destroys coverage that would have
+    /// existed; killing a slow token count does not, because six of the eight
+    /// `runtime.tokenCount` call sites already wrap it in `try?` with a
+    /// documented character-based fallback estimate. A bound that fires there
+    /// costs planning PRECISION, not coverage. Where it does propagate
+    /// (`planPassA`), the outcome is a named `inference_timeout` row and a
+    /// terminal job — strictly better than a row that says `running` forever.
+    static let metadata: Duration = .seconds(30)
+
     /// Run `operation` under a hard wall-clock deadline.
     ///
     /// Returns whatever `operation` returns, rethrows whatever it throws, and
@@ -158,7 +186,7 @@ enum FMInferenceDeadline {
             return try await operation()
         }
 
-        let race = Race<T>()
+        let race = AbandonableRace<T>()
         let work = Task {
             do {
                 await race.settle(.success(try await operation()))
@@ -221,38 +249,229 @@ enum FMInferenceDeadline {
         work.cancel()
         return try outcome.get()
     }
+}
 
-    /// First-writer-wins handoff between the operation, the timer, and the
-    /// caller's cancellation handler. An actor rather than a lock because all
-    /// three writers are already in async context, and because `awaitOutcome`
-    /// needs to park a continuation under the same isolation that settles it.
-    private actor Race<T: Sendable> {
-        private var settled: Result<T, Error>?
-        private var waiter: CheckedContinuation<Result<T, Error>, Never>?
+/// First-writer-wins handoff between an operation, its bound, and the caller's
+/// cancellation handler. An actor rather than a lock because all three writers
+/// are already in async context, and because `awaitOutcome` needs to park a
+/// continuation under the same isolation that settles it.
+///
+/// playhead-qk44 lifted this out of `FMInferenceDeadline` so
+/// ``FMNoProgressWatchdog`` can share it. Both bounds have to ABANDON the
+/// operation rather than await it (see the file header), and one correct
+/// implementation of that handoff is worth more than two.
+private actor AbandonableRace<T: Sendable> {
+    private var settled: Result<T, Error>?
+    private var waiter: CheckedContinuation<Result<T, Error>, Never>?
 
-        func settle(_ result: Result<T, Error>) {
-            guard settled == nil else { return }
-            settled = result
-            if let waiter {
-                self.waiter = nil
-                waiter.resume(returning: result)
-            }
+    func settle(_ result: Result<T, Error>) {
+        guard settled == nil else { return }
+        settled = result
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(returning: result)
+        }
+    }
+
+    /// Call at most once. Suspends until the first `settle`.
+    func awaitOutcome() async -> Result<T, Error> {
+        if let settled {
+            return settled
+        }
+        // Enforced, not merely documented: a second caller would overwrite
+        // the first's continuation, which never resumes — a permanent hang
+        // that would be near-impossible to diagnose from a stuck backfill.
+        precondition(waiter == nil, "AbandonableRace supports a single waiter")
+        return await withCheckedContinuation { continuation in
+            // No suspension point since the `settled` check above, so this
+            // cannot miss a settle that happened in between.
+            waiter = continuation
+        }
+    }
+}
+
+// MARK: - playhead-qk44: the NO-PROGRESS bound
+
+/// A monotonic count of units of work an operation has finished, shared
+/// between that operation and the watchdog that is timing it.
+///
+/// The counter is deliberately opaque and monotonic: the watchdog compares
+/// successive readings and never interprets the value, so any definition of
+/// "a unit of work" the operation likes is admissible as long as it only ever
+/// goes up and only ever goes up because something real happened.
+final class FMProgressTicker: Sendable {
+    private let state = OSAllocatedUnfairLock(initialState: 0)
+
+    init() {}
+
+    /// Record that one unit of work completed.
+    func note() {
+        state.withLock { $0 += 1 }
+    }
+
+    /// The number of units recorded so far.
+    var observed: Int {
+        state.withLock { $0 }
+    }
+}
+
+/// Thrown by ``FMNoProgressWatchdog/run(interval:consecutiveIntervalLimit:ticker:sleep:operation:)``
+/// when an operation completed no units of work for `consecutiveIntervals`
+/// consecutive sampling intervals.
+///
+/// A DISTINCT type from ``FMInferenceTimeoutError`` because it answers a
+/// different question. `FMInferenceTimeoutError` means "this one call to the
+/// model did not answer in time" — the pass around it may be perfectly
+/// healthy, banking window after window. `FMNoProgressError` means "the pass
+/// as a whole stopped producing anything", which is the only signal that can
+/// catch a wedge in the parts of the path no per-call deadline covers:
+/// availability probing, tokenisation, window planning, or a hang inside the
+/// framework that never reaches a bounded `respond`.
+struct FMNoProgressError: Error, Sendable, Equatable {
+    /// The sampling interval that elapsed without work.
+    let interval: Duration
+    /// How many CONSECUTIVE intervals passed with no unit of work completed.
+    let consecutiveIntervals: Int
+}
+
+/// A wall-clock bound on SILENCE rather than on duration.
+///
+/// WHY THIS EXISTS (playhead-qk44). On 2026-07-31 a `fullEpisodeScan` sat at
+/// `status='running'` for 23 minutes with an empty `progressCursor`, zero
+/// `semantic_scan_results` rows, no error and no terminal — while the app was
+/// foregrounded and active the entire time. Nothing was wrong with the job
+/// row; nothing was watching the WORK.
+///
+/// Three facts make that state undiagnosable without this bound:
+///
+/// 1. `FMInferenceDeadline` bounds `respond` and nothing else. The coarse pass
+///    reaches the on-device model through several other awaits first —
+///    `FoundationModelsUsabilityProbe` issues a bare `respond`, and
+///    `SystemLanguageModel.tokenCount(for:)` is an XPC round trip called once
+///    per candidate window inside `planPassA`. A hang in any of those never
+///    reaches a deadline-guarded call at all.
+/// 2. `coarsePassA` persists NOTHING until it returns. Every scan row is
+///    written by `BackfillJobRunner.runJob` from the returned windows, so a
+///    pass in flight is invisible in the database by construction.
+/// 3. A healthy coarse pass takes 12–45 minutes per episode on device. So the
+///    observable state of a healthy pass and a wedged one were, before this
+///    bead, byte-identical: `running`, no cursor, no rows.
+///
+/// A DURATION bound cannot separate those two — any value long enough to
+/// spare a healthy 45-minute pass is too long to be a bound. A SILENCE bound
+/// separates them exactly: a healthy pass banks a window every few seconds to
+/// a few minutes, and a wedged one banks nothing, ever.
+///
+/// CONSECUTIVE, NEVER CUMULATIVE. The same discipline `playhead-bkhc` applies
+/// to barren background windows and `playhead-8d5r` applies to inference
+/// timeouts. A pass that answers slowly is still converging and must not be
+/// killed for the sum of its slow stretches; only an unbroken run of silence
+/// is evidence that nothing is coming. Any completed unit of work resets the
+/// count to zero.
+///
+/// ABANDONS, DOES NOT AWAIT. Same reasoning as `FMInferenceDeadline` — see
+/// this file's header. A structured race would report the stall only after
+/// the thing it was supposed to bound finished, which is no bound at all.
+enum FMNoProgressWatchdog {
+    /// How long a coarse pass may produce nothing before that counts as one
+    /// strike.
+    ///
+    /// 180 s is chosen against the ONE bound that already exists on this path:
+    /// `FMInferenceDeadline.standard` is 300 s, so a single legitimate window
+    /// can occupy at most 300 s before it either answers or is abandoned with
+    /// a recorded failure — and both of those are units of work that reset the
+    /// count. With a 180 s interval the slowest legitimate window scores at
+    /// most two strikes (at 180 s and 360 s, with the window resolving by
+    /// 300 s), which is why the limit below is three and not two.
+    static let standardInterval: Duration = .seconds(180)
+
+    /// How many consecutive silent intervals end the pass.
+    ///
+    /// Three, for the reason above: two is reachable by a single slow-but-
+    /// legitimate window, three is not. 3 x 180 s = 540 s, so the 23-minute
+    /// silence that produced this bead becomes a named failure in nine
+    /// minutes. That is deliberately BELOW `AnalysisStore
+    /// .strandedJobFreshnessSeconds` (600 s), so the in-process watchdog
+    /// always reaches a wedged job before the database reaper would — the
+    /// reaper is left to do the only job it can do correctly, which is
+    /// cleaning up after a process that died.
+    static let standardConsecutiveIntervalLimit = 3
+
+    /// Run `operation` under a no-progress bound.
+    ///
+    /// Returns whatever `operation` returns and rethrows whatever it throws.
+    /// Throws ``FMNoProgressError`` when `ticker` records no new work for
+    /// `consecutiveIntervalLimit` consecutive `interval`s.
+    ///
+    /// A non-positive `interval` or a non-positive `consecutiveIntervalLimit`
+    /// disables the bound entirely and calls `operation` inline, so a caller
+    /// can opt out without a second code path.
+    ///
+    /// `sleep` is injectable so a test can drive the sampling loop without
+    /// wall-clock. Production uses `Task.sleep`.
+    static func run<T: Sendable>(
+        interval: Duration,
+        consecutiveIntervalLimit: Int,
+        ticker: FMProgressTicker,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard interval > .zero, consecutiveIntervalLimit > 0 else {
+            return try await operation()
         }
 
-        /// Call at most once. Suspends until the first `settle`.
-        func awaitOutcome() async -> Result<T, Error> {
-            if let settled {
-                return settled
-            }
-            // Enforced, not merely documented: a second caller would overwrite
-            // the first's continuation, which never resumes — a permanent hang
-            // that would be near-impossible to diagnose from a stuck backfill.
-            precondition(waiter == nil, "FMInferenceDeadline.Race supports a single waiter")
-            return await withCheckedContinuation { continuation in
-                // No suspension point since the `settled` check above, so this
-                // cannot miss a settle that happened in between.
-                waiter = continuation
+        let race = AbandonableRace<T>()
+        let work = Task {
+            do {
+                await race.settle(.success(try await operation()))
+            } catch {
+                await race.settle(.failure(error))
             }
         }
+        let watchdog = Task {
+            var lastObserved = ticker.observed
+            var consecutiveSilentIntervals = 0
+            while consecutiveSilentIntervals < consecutiveIntervalLimit {
+                do {
+                    try await sleep(interval)
+                } catch {
+                    // The watchdog lost the race and was cancelled. Settling
+                    // here would be a spurious stall.
+                    return
+                }
+                let observed = ticker.observed
+                if observed == lastObserved {
+                    consecutiveSilentIntervals += 1
+                } else {
+                    lastObserved = observed
+                    consecutiveSilentIntervals = 0
+                }
+            }
+            await race.settle(
+                .failure(
+                    FMNoProgressError(
+                        interval: interval,
+                        consecutiveIntervals: consecutiveIntervalLimit
+                    )
+                )
+            )
+        }
+
+        let outcome = await withTaskCancellationHandler {
+            await race.awaitOutcome()
+        } onCancel: {
+            // FORWARD the cancellation exactly as `FMInferenceDeadline` does,
+            // and for the same reason: an unstructured `Task` does not inherit
+            // it, so without this a background-window expiry would never reach
+            // the in-flight pass. Do NOT decide the race here — an operation
+            // that is about to bank a finished window must be allowed to.
+            work.cancel()
+        }
+
+        watchdog.cancel()
+        // Best-effort stop for the losing operation. Deliberately NOT awaited
+        // — see the file header for why waiting would defeat the bound.
+        work.cancel()
+        return try outcome.get()
     }
 }

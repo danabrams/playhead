@@ -15056,6 +15056,23 @@ actor AnalysisStore {
     /// The freshness window must be larger than any legitimate single
     /// in-process work step (see `Self.strandedJobFreshnessSeconds`).
     ///
+    /// playhead-qk44: WHAT `updatedAt` MEASURES, and what it did not.
+    /// The predicate reads as "is this row's owner alive?", but the value it
+    /// reads only ever answered "did some code touch this row recently?" —
+    /// and across the single longest stretch of a backfill job, nothing did.
+    /// Every `markBackfillJobRunning` heartbeat in `BackfillJobRunner.runJob`
+    /// sits DOWNSTREAM of `coarsePassA` returning, and a coarse pass runs
+    /// 12–45 minutes on device, so a perfectly healthy job looked exactly like
+    /// a dead one for its whole first pass: `running`, empty `progressCursor`,
+    /// zero scan rows, frozen `updatedAt`. That is why this reaper could not
+    /// safely be run anywhere except across a process boundary, and why the
+    /// 2026-07-31 wedge survived 23 minutes in the foreground unnoticed.
+    /// The runner now touches the lease once per RESOLVED coarse window, so a
+    /// fresh `updatedAt` finally means work advanced and a stale one means it
+    /// stopped — which is what makes
+    /// `AnalysisJobReconciler.sweepStrandedBackfillJobsInSession()` (the
+    /// foreground sweep) correct rather than destructive.
+    ///
     /// Returns the number of rows reset. Callers (the reconciler) report
     /// the count in `ReconciliationReport` so a stranded-fleet event leaves
     /// a structured log trail.
