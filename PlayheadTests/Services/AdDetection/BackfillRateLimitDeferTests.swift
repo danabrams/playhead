@@ -29,12 +29,16 @@ struct BackfillRateLimitDeferTests {
         { prompt in prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8 }
     }
 
-    private func windowingConfig(interWindowPacingNanos: UInt64 = 0) -> FoundationModelClassifier.Config {
+    private func windowingConfig(
+        interWindowPacingNanos: UInt64 = 0,
+        inferenceDeadline: Duration = FMInferenceDeadline.standard
+    ) -> FoundationModelClassifier.Config {
         FoundationModelClassifier.Config(
             safetyMarginTokens: 5,
             coarseMaximumResponseTokens: 6,
             refinementMaximumResponseTokens: 12,
-            interWindowPacingNanos: interWindowPacingNanos
+            interWindowPacingNanos: interWindowPacingNanos,
+            inferenceDeadline: inferenceDeadline
         )
     }
 
@@ -95,12 +99,13 @@ struct BackfillRateLimitDeferTests {
 
     private func makeRunner(
         store: AnalysisStore,
-        runtime: FoundationModelClassifier.Runtime
+        runtime: FoundationModelClassifier.Runtime,
+        config: FoundationModelClassifier.Config? = nil
     ) -> BackfillJobRunner {
         BackfillJobRunner(
             store: store,
             admissionController: AdmissionController(),
-            classifier: FoundationModelClassifier(runtime: runtime, config: windowingConfig()),
+            classifier: FoundationModelClassifier(runtime: runtime, config: config ?? windowingConfig()),
             coveragePlanner: CoveragePlanner(),
             mode: .shadow,
             capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
@@ -534,6 +539,73 @@ struct BackfillRateLimitDeferTests {
         let completedRow = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(completedRow.status == .complete)
         #expect(completedRow.progressCursor?.lastProcessedUpperBoundSec == 30)
+    }
+
+    // MARK: - playhead-8d5r x playhead-bkhc: a per-call deadline must bank too
+
+    /// The composition risk this test exists for: playhead-8d5r added a hard
+    /// per-call deadline INSIDE the coarse pass, and playhead-bkhc's entire
+    /// contribution is that the pass banks what it finished rather than
+    /// discarding it. If a timeout ever escaped as a throw — the way the
+    /// cancellation check used to, before bkhc moved it past the digest loop —
+    /// the FM time already paid for would be discarded again.
+    ///
+    /// So: windows 1 and 2 hang after window 0 has been screened, which trips
+    /// the two-consecutive no-progress guard and ends the pass early. The
+    /// assertion is in SECONDS OF AUDIO, the same currency the bkhc tests
+    /// above use, because that is the quantity a discard actually destroys.
+    @available(iOS 26.0, *)
+    @Test("playhead-8d5r: a coarse pass ended by the timeout guard still banks the audio it screened")
+    func inferenceTimeoutAbortBanksScreenedAudio() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeThreeWindowInputs()
+
+        let runtime = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in
+                // Calls 2 and 3 (windows 1 and 2) never answer.
+                if ordinal >= 2 {
+                    try? await Task.sleep(for: .seconds(30))
+                }
+            }
+        )
+
+        // A run that ends on the guard must RETURN, not throw: a throw would
+        // unwind past the persistence the pass already earned.
+        _ = try await makeRunner(
+            store: store,
+            runtime: runtime.runtime,
+            config: windowingConfig(inferenceDeadline: .milliseconds(150))
+        ).runPendingBackfill(for: inputs)
+
+        #expect(
+            await runtime.coarseCallCount == 3,
+            "the guard must stop the pass after two consecutive timeouts, not attempt more"
+        )
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9")
+        #expect(
+            examinedAudioSeconds(rows) == 10,
+            "the 10s of audio the pass paid FM for before the guard tripped must be durable"
+        )
+
+        // The holes are named, not guessed at.
+        let timeouts = rows.filter { $0.status == .inferenceTimeout }
+        #expect(timeouts.count == 2)
+        #expect(timeouts.allSatisfy { !$0.status.didExamineWindow })
+
+        // And each names its OWN cost. Before playhead-8d5r every failure row
+        // inherited the whole pass's wall-clock, so two rows from one pass
+        // reported the same number and summing the column double-counted it.
+        let passATimeouts = timeouts.filter { $0.scanPass == "passA" }
+        #expect(passATimeouts.allSatisfy { ($0.latencyMs ?? 0) > 0 })
+        #expect(
+            passATimeouts.allSatisfy { ($0.latencyMs ?? .infinity) < 30_000 },
+            "a bounded 150ms deadline must not persist a row that reads like a 30s call"
+        )
     }
 
     @available(iOS 26.0, *)

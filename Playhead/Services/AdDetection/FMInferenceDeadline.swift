@@ -180,11 +180,29 @@ enum FMInferenceDeadline {
         let outcome = await withTaskCancellationHandler {
             await race.awaitOutcome()
         } onCancel: {
-            // A BG-window expiry. Ask the in-flight call to stop and settle the
-            // race as cancellation so the caller sees `CancellationError` and
-            // checkpoints, rather than blocking until the deadline elapses.
+            // FORWARD the cancellation; do NOT decide the race on it.
+            //
+            // `Task { }` inherits priority, actor context and task-locals from
+            // its creator but NOT cancellation, so without this a BG-window
+            // expiry would never reach the in-flight call at all. Before this
+            // file the operation ran inline in the caller's task and observed
+            // cancellation directly; this restores that exactly.
+            //
+            // What this deliberately does NOT do is settle the race as
+            // cancelled. That was the first version and it broke playhead-bkhc:
+            // an operation that does not observe cancellation used to RUN TO
+            // COMPLETION when the grant expired, and the coarse pass banked
+            // that window before returning partial results. Resolving the race
+            // on the cancellation signal instead abandoned a window that was
+            // about to finish — re-introducing the discard bkhc had just fixed
+            // (caught by `expiryDuringCoarsePassCheckpointsAudioAndResumes`,
+            // which measures banked audio in seconds and dropped 20s -> 10s).
+            //
+            // So cancellation is delivered and then the operation decides: a
+            // cancellation-aware call throws `CancellationError` promptly, and
+            // one that is not still finishes and is banked — now with the
+            // deadline as its backstop instead of nothing.
             work.cancel()
-            Task { await race.settle(.failure(CancellationError())) }
         }
 
         timer.cancel()

@@ -281,6 +281,204 @@ struct FMInferenceDeadlineTests {
     }
 }
 
+// MARK: - Composition with the coarse pass
+
+/// playhead-8d5r x playhead-bkhc. The deadline lives inside a pass whose whole
+/// point (bkhc, merged as #307) is that interrupted work is BANKED rather than
+/// discarded. These tests assert the two compose: a timeout must cost the
+/// window it hit and nothing else.
+///
+/// Windowing knobs: `contextSize` 431 with a `lines * 8` token rule yields a
+/// coarse budget of 52; a one-segment prompt is 48 and a two-segment prompt is
+/// 56, so every segment becomes its own window. Same arithmetic as
+/// `BackfillRateLimitDeferTests`.
+@Suite("playhead-8d5r: deadline inside the coarse pass")
+struct FMInferenceDeadlineCoarsePassTests {
+
+    private static let contextSize = 431
+    private static let coarseSchemaTokenCount = 4
+    /// Long enough that a hung call is unambiguous, short enough that a test
+    /// which somehow waits for it still finishes.
+    private static let hangSeconds = 30.0
+
+    private static func config(deadline: Duration) -> FoundationModelClassifier.Config {
+        FoundationModelClassifier.Config(
+            safetyMarginTokens: 5,
+            coarseMaximumResponseTokens: 6,
+            refinementMaximumResponseTokens: 12,
+            inferenceDeadline: deadline
+        )
+    }
+
+    private static func tokenRule() -> @Sendable (String) -> Int {
+        { prompt in prompt.split(separator: "\n", omittingEmptySubsequences: false).count * 8 }
+    }
+
+    private static func segments(count: Int) -> [AdTranscriptSegment] {
+        makeFMSegments(
+            analysisAssetId: "asset-8d5r",
+            transcriptVersion: "tx-8d5r-v1",
+            lines: (0..<count).map { index in
+                (Double(index) * 10, Double(index + 1) * 10, "Window \(index) of the episode under test.")
+            }
+        )
+    }
+
+    /// `hangOn` is a set of 1-based coarse call ordinals that never answer.
+    private static func runtime(
+        hangOn: Set<Int>,
+        slowButSuccessfulOn: Set<Int> = [],
+        slowSeconds: Double = 0
+    ) -> TestFMRuntime {
+        TestFMRuntime(
+            contextSize: contextSize,
+            coarseSchemaTokenCount: coarseSchemaTokenCount,
+            tokenCountRule: tokenRule(),
+            onCoarseRespond: { ordinal in
+                if hangOn.contains(ordinal) {
+                    try? await Task.sleep(for: .seconds(hangSeconds))
+                } else if slowButSuccessfulOn.contains(ordinal) {
+                    try? await Task.sleep(for: .seconds(slowSeconds))
+                }
+            }
+        )
+    }
+
+    /// THE bkhc COMPOSITION ASSERTION at classifier level: a timed-out window
+    /// must not cost the windows around it. If a timeout ever propagates as a
+    /// throw instead of a per-window failure, this test fails — and that would
+    /// be exactly the discard bug bkhc just removed.
+    @available(iOS 26.0, *)
+    @Test("a single timed-out window keeps every window banked before and after it")
+    func singleTimeoutKeepsSiblingWindows() async throws {
+        let runtime = Self.runtime(hangOn: [2])
+        let classifier = FoundationModelClassifier(
+            runtime: runtime.runtime,
+            config: Self.config(deadline: .milliseconds(150))
+        )
+
+        let output = try await classifier.coarsePassA(segments: Self.segments(count: 3))
+
+        #expect(await runtime.coarseCallCount == 3, "the pass must continue past the timed-out window")
+        #expect(output.status == .success, "one slow window does not fail a pass that produced output")
+        #expect(output.windows.count == 2, "windows 1 and 3 are banked")
+        #expect(output.failedWindows.count == 1)
+        #expect(output.failedWindows.first?.status == .inferenceTimeout)
+        // Named, not folded into a neighbouring class.
+        #expect(output.failedWindows.first?.status != .failedTransient)
+        #expect(output.failedWindows.first?.status != .cancelled)
+    }
+
+    /// The no-progress guard. Two consecutive timeouts end the pass — but with
+    /// PARTIAL results, so the window banked before them is still carried out
+    /// for the runner to persist.
+    @available(iOS 26.0, *)
+    @Test("two consecutive timeouts end the pass and still return the banked windows")
+    func twoConsecutiveTimeoutsEndThePassWithPartialResults() async throws {
+        let runtime = Self.runtime(hangOn: [2, 3])
+        let classifier = FoundationModelClassifier(
+            runtime: runtime.runtime,
+            config: Self.config(deadline: .milliseconds(150))
+        )
+
+        let output = try await classifier.coarsePassA(segments: Self.segments(count: 4))
+
+        #expect(
+            await runtime.coarseCallCount == 3,
+            "window 4 must never be attempted — that is the bound the guard buys"
+        )
+        #expect(output.status == .inferenceTimeout)
+        #expect(
+            output.windows.count == 1,
+            "the window banked before the guard tripped must survive the abort (playhead-bkhc)"
+        )
+        #expect(output.failedWindows.count == 2)
+        #expect(output.failedWindows.allSatisfy { $0.status == .inferenceTimeout })
+        // The plan list must come out too — the runner needs it to compute an
+        // honest coverage cursor on an aborted pass.
+        #expect(output.plans.count == 4)
+    }
+
+    /// The guard must be CONSECUTIVE, not cumulative. An episode with an
+    /// occasional slow window still scans to the end; otherwise the guard
+    /// itself would become a coverage bug on a merely-degraded device.
+    @available(iOS 26.0, *)
+    @Test("an answering window resets the no-progress counter")
+    func answeringWindowResetsTheGuard() async throws {
+        // Timeouts at windows 2 and 4, with a healthy window 3 between them.
+        let runtime = Self.runtime(hangOn: [2, 4])
+        let classifier = FoundationModelClassifier(
+            runtime: runtime.runtime,
+            config: Self.config(deadline: .milliseconds(150))
+        )
+
+        let output = try await classifier.coarsePassA(segments: Self.segments(count: 5))
+
+        #expect(await runtime.coarseCallCount == 5, "every window must still be attempted")
+        #expect(output.status == .success)
+        #expect(output.windows.count == 3)
+        #expect(output.failedWindows.count == 2)
+    }
+
+    /// The measurement fix. A failure row used to inherit the WHOLE PASS's
+    /// wall-clock, which is why the device pull appeared to show failures
+    /// costing 35x a success. A timeout that reported its pass's total would be
+    /// indistinguishable from the unbounded call it replaced.
+    @available(iOS 26.0, *)
+    @Test("a timed-out window reports its own elapsed time, not the whole pass's")
+    func timeoutCarriesItsOwnLatency() async throws {
+        // Window 1 answers, slowly. Window 2 hangs. The pass therefore costs
+        // window 1's ~400ms PLUS the ~150ms deadline; the failure row must
+        // report only the latter.
+        let runtime = Self.runtime(
+            hangOn: [2],
+            slowButSuccessfulOn: [1],
+            slowSeconds: 0.4
+        )
+        let classifier = FoundationModelClassifier(
+            runtime: runtime.runtime,
+            config: Self.config(deadline: .milliseconds(150))
+        )
+
+        let output = try await classifier.coarsePassA(segments: Self.segments(count: 2))
+
+        let failure = try #require(output.failedWindows.first)
+        #expect(failure.status == .inferenceTimeout)
+        let failureLatency = try #require(failure.latencyMillis)
+        // Structural, not a timing race: the pass strictly contains the window,
+        // and the pass additionally contains a 400ms success the window does
+        // not. Both quantities are sleep-driven, so the ratio is stable under
+        // CPU load — but the bound is set at 0.75 against a real ratio near
+        // 0.27 so even a badly starved gate cannot flip it.
+        #expect(failureLatency < output.latencyMillis)
+        #expect(
+            failureLatency < output.latencyMillis * 0.75,
+            """
+            failure latency \(failureLatency)ms vs pass latency \(output.latencyMillis)ms — \
+            a value at parity means the row went back to inheriting the pass total.
+            """
+        )
+    }
+
+    /// A pass in which nothing times out must be byte-identical in shape to the
+    /// pre-8d5r behavior. The deadline is dormant on the healthy path.
+    @available(iOS 26.0, *)
+    @Test("a healthy pass is unaffected by the deadline")
+    func healthyPassIsUnchanged() async throws {
+        let runtime = Self.runtime(hangOn: [])
+        let classifier = FoundationModelClassifier(
+            runtime: runtime.runtime,
+            config: Self.config(deadline: .milliseconds(150))
+        )
+
+        let output = try await classifier.coarsePassA(segments: Self.segments(count: 3))
+
+        #expect(output.status == .success)
+        #expect(output.windows.count == 3)
+        #expect(output.failedWindows.isEmpty)
+    }
+}
+
 /// One-shot async signal. Lets a test wait until the operation under test has
 /// actually started before cancelling it, instead of sleeping and hoping.
 private actor AsyncSignal {
