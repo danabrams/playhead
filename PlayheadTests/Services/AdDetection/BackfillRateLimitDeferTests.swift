@@ -575,6 +575,120 @@ struct BackfillRateLimitDeferTests {
         #expect(events.count == Set(events.map(\.id)).count, "no duplicated evidence events across the resume")
     }
 
+    /// Six 10s windows — an episode NO single background window can finish,
+    /// which is the device situation: 26–295 s granted against 12–45 min of
+    /// work. Before this bead the answer to "how much audio do N such windows
+    /// process" was 0 s for every N; the episode could never complete.
+    private func makeSixWindowInputs(
+        assetId: String = "asset-pmp9",
+        podcastId: String = "podcast-pmp9",
+        transcriptVersion: String = "tx-pmp9-v1"
+    ) -> BackfillJobRunner.AssetInputs {
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            lines: (0..<6).map { index in
+                (Double(index) * 10, Double(index + 1) * 10, "Window \(index) of the conversation, some words here.")
+            }
+        )
+        return BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalogBuilder.build(
+                atoms: segments.flatMap(\.atoms),
+                analysisAssetId: assetId,
+                transcriptVersion: transcriptVersion
+            ),
+            transcriptVersion: transcriptVersion,
+            plannerContext: CoveragePlannerContext(
+                observedEpisodeCount: 0,
+                stableRecall: false,
+                isFirstEpisodeAfterCohortInvalidation: false,
+                recallDegrading: false,
+                sponsorDriftDetected: false,
+                auditMissDetected: false,
+                episodesSinceLastFullRescan: 0,
+                periodicFullRescanIntervalEpisodes: 10
+            )
+        )
+    }
+
+    /// Runs one background window that expires after `expireAfterCoarseCalls`
+    /// coarse windows have been screened, and returns how many FM coarse calls
+    /// it spent.
+    @available(iOS 26.0, *)
+    private func runExpiringWindow(
+        store: AnalysisStore,
+        inputs: BackfillJobRunner.AssetInputs,
+        expireAfterCoarseCalls: Int
+    ) async -> Int {
+        let gate = CoarseCallGate(triggerOnCall: expireAfterCoarseCalls + 1)
+        let runtime = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule(),
+            onCoarseRespond: { ordinal in await gate.arriveAndWait(ordinal: ordinal) }
+        )
+        let task = Task { try await makeRunner(store: store, runtime: runtime.runtime).runPendingBackfill(for: inputs) }
+        await gate.awaitReached()
+        task.cancel()
+        await gate.release()
+        _ = try? await task.value
+        return await runtime.coarseCallCount
+    }
+
+    @available(iOS 26.0, *)
+    @Test("MEASURED: a fixed number of expiring background windows now processes a growing amount of audio, and finishes")
+    func expiringBackgroundWindowsAccumulateAudio() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let inputs = makeSixWindowInputs()
+        let jobId = BackfillJobRunner.makeJobIdForTesting(
+            analysisAssetId: inputs.analysisAssetId,
+            transcriptVersion: inputs.transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+        func coveredSeconds() async throws -> Double {
+            examinedAudioSeconds(try await store.fetchSemanticScanResults(analysisAssetId: "asset-pmp9"))
+        }
+
+        // Window 1: three coarse windows screened, then expiry.
+        let calls1 = await runExpiringWindow(store: store, inputs: inputs, expireAfterCoarseCalls: 2)
+        #expect(try await coveredSeconds() == 30)
+        var row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .deferred)
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30)
+        #expect(row.retryCount == 0, "a converging job must never consume the attempt budget")
+
+        // Window 2: resumes at 30s, screens two more, expires again.
+        let calls2 = await runExpiringWindow(store: store, inputs: inputs, expireAfterCoarseCalls: 1)
+        #expect(try await coveredSeconds() == 50, "audio processed must GROW across background windows")
+        row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .deferred)
+        #expect(row.progressCursor?.lastProcessedUpperBoundSec == 50)
+
+        // Window 3: one window left; the episode finishes.
+        let rt3 = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            tokenCountRule: windowingTokenRule()
+        )
+        _ = try await makeRunner(store: store, runtime: rt3.runtime).runPendingBackfill(for: inputs)
+        let calls3 = await rt3.coarseCallCount
+        #expect(try await coveredSeconds() == 60, "three background windows cover the whole episode")
+        let final = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(final.status == .complete)
+
+        // And the episode cost exactly six coarse windows in total: every
+        // expiry banked its work, so nothing was ever screened twice. Before
+        // this bead each window restarted from zero and the totals diverged
+        // while covered audio stayed at 0.
+        #expect(calls1 + calls2 + calls3 == 6,
+                "no window may be re-screened across resumptions (got \(calls1)+\(calls2)+\(calls3))")
+    }
+
     @available(iOS 26.0, *)
     @Test("a job that makes NO progress across repeated expiries TERMINATES with a named cause instead of resuming forever")
     func repeatedNoProgressExpiriesTerminateWithNamedCause() async throws {
