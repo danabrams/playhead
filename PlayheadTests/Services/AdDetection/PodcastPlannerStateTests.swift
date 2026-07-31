@@ -310,6 +310,15 @@ struct PodcastPlannerStateTests {
 
     // MARK: - playhead-hvk0: a rescan must have READ the episode to certify
 
+    /// The shipped default is load-bearing, not cosmetic: with the gate OFF the
+    /// whole bead is inert and a show can still be promoted by rescans that read
+    /// 2–5% of their episodes. Pinned so a default flip is a deliberate,
+    /// reviewed act rather than a silent regression.
+    @Test("playhead-hvk0: the promotion gate ships ON")
+    func promotionGateShipsOn() {
+        #expect(AdDetectionConfig.default.plannerPromotionRequiresMeasuredCoverage == true)
+    }
+
     /// The pure helper's contract, stated as a truth table so a future change
     /// to either argument's meaning fails here rather than in a live-store test
     /// where the ring bookkeeping could mask it.
