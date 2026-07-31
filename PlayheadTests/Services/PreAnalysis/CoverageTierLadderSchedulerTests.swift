@@ -37,17 +37,35 @@ struct CoverageTierLadderSchedulerTests {
     private static let fingerprint = "fp-8bp2"
     private static let shardSeconds: Double = 30
     private static let shardCount = 40
-    /// 1,200 s — comfortably past `t2DepthSeconds` (900 s), so the ladder's old
-    /// ceiling is visible and the duration rung is distinguishable from T2.
-    private static let durationSec = Double(shardCount) * shardSeconds
+    /// 1,200 s of DECODED audio — comfortably past `t2DepthSeconds` (900 s), so
+    /// the ladder's old ceiling is visible and the duration rung is
+    /// distinguishable from T2. This is what the transcript watermark can reach.
+    private static let shardSpanSec = Double(shardCount) * shardSeconds
+    /// The asset's `episodeDurationSec`, deliberately 12.5 s LONGER than the
+    /// decoded audio. That is the real shape: the column is written on the
+    /// playback path from the AVURLAsset container duration, while the watermark
+    /// advances on decoded shard ends, and the two disagree. A ladder whose last
+    /// rung is this number can only be satisfied through
+    /// `AnalysisWorkScheduler.tierCoverageSlack`.
+    private static let durationSec = shardSpanSec + 12.5
 
     /// A recognizer that returns one segment per shard, so the transcript engine
     /// persists chunks and `fastTranscriptCoverageEndTime` genuinely advances.
     /// `StubSpeechRecognizer` returns an empty transcript, which the runner
     /// classifies as `transcription:zeroCoverage` — it never reaches the tier
     /// arms at all.
+    ///
+    /// `silentFrom` models the thing that makes a real episode's transcript stop
+    /// short of its container duration: a closing shard of music or applause. The
+    /// shard IS read; it just yields no segment, so the watermark lands a shard
+    /// behind IN CHUNK TERMS. The watermark itself still advances (it tracks
+    /// shard ends), which is exactly the property this fixture is here to pin
+    /// rather than assume.
     private final class ShardTranscribingRecognizer: SpeechRecognizer, @unchecked Sendable {
         private let lock = OSAllocatedUnfairLock(initialState: false)
+        private let silentFrom: Double
+
+        init(silentFrom: Double = .infinity) { self.silentFrom = silentFrom }
 
         func loadModel() async throws { lock.withLock { $0 = true } }
         func unloadModel() async { lock.withLock { $0 = false } }
@@ -55,6 +73,7 @@ struct CoverageTierLadderSchedulerTests {
 
         func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
             guard lock.withLock({ $0 }) else { throw TranscriptEngineError.modelNotLoaded }
+            guard shard.startTime < silentFrom else { return [] }
             let text = "shard-\(Int(shard.startTime))"
             return [
                 TranscriptSegment(
@@ -98,7 +117,11 @@ struct CoverageTierLadderSchedulerTests {
         }
     }
 
-    private func seedEpisode(_ store: AnalysisStore, desiredCoverageSec: Double) async throws {
+    private func seedEpisode(
+        _ store: AnalysisStore,
+        desiredCoverageSec: Double,
+        priorTranscriptCoverageSec: Double? = nil
+    ) async throws {
         try await store.insertAsset(
             AnalysisAsset(
                 id: Self.assetId,
@@ -107,7 +130,7 @@ struct CoverageTierLadderSchedulerTests {
                 weakFingerprint: nil,
                 sourceURL: "file:///tmp/8bp2.m4a",
                 featureCoverageEndTime: nil,
-                fastTranscriptCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: priorTranscriptCoverageSec,
                 confirmedAdCoverageEndTime: nil,
                 analysisState: SessionState.queued.rawValue,
                 analysisVersion: PreAnalysisConfig.analysisVersion,
@@ -115,6 +138,27 @@ struct CoverageTierLadderSchedulerTests {
                 episodeDurationSec: Self.durationSec
             )
         )
+        if let priorTranscriptCoverageSec {
+            // Chunks as well as the watermark: the runner reconciles the
+            // watermark up from persisted chunks at job start, so a watermark
+            // with no chunks behind it would be reconciled away.
+            _ = try await store.insertTranscriptChunks([
+                TranscriptChunk(
+                    id: "\(Self.assetId)-prior",
+                    analysisAssetId: Self.assetId,
+                    segmentFingerprint: "\(Self.assetId)-prior-seg",
+                    chunkIndex: 0,
+                    startTime: 0,
+                    endTime: priorTranscriptCoverageSec,
+                    text: "prior playback transcript",
+                    normalizedText: "prior playback transcript",
+                    pass: "fast",
+                    modelVersion: "test-asr",
+                    transcriptVersion: "tx-v1",
+                    atomOrdinal: 0
+                ),
+            ])
+        }
         try await store.insertJob(
             makeAnalysisJob(
                 jobId: "job-8bp2-t0",
@@ -136,6 +180,7 @@ struct CoverageTierLadderSchedulerTests {
 
     private func makeScheduler(
         store: AnalysisStore,
+        silentFrom: Double = .infinity,
         clock: @escaping @Sendable () -> Date
     ) async throws -> AnalysisWorkScheduler {
         let downloads = StubDownloadProvider()
@@ -149,7 +194,9 @@ struct CoverageTierLadderSchedulerTests {
                 duration: Self.shardSeconds
             )
         }
-        let speechService = SpeechService(recognizer: ShardTranscribingRecognizer())
+        let speechService = SpeechService(
+            recognizer: ShardTranscribingRecognizer(silentFrom: silentFrom)
+        )
         try await speechService.loadFastModel()
         let runner = AnalysisJobRunner(
             store: store,
@@ -220,12 +267,22 @@ struct CoverageTierLadderSchedulerTests {
     /// nobody plays and that contains no ads ends up FULLY transcribed, and the
     /// ladder stops on its own. Pre-fix the ceiling was `t2DepthSeconds` = 900 s
     /// even in the best case, and in practice this episode stopped at 90 s.
+    ///
+    /// Two realities the fixture carries deliberately: the asset's
+    /// `episodeDurationSec` overshoots the decoded audio (container vs decoder),
+    /// and the closing shard is music. Between them, an exact
+    /// watermark-equals-target comparison would send the deepest rung into the
+    /// coverage-insufficient arm and stamp `coverageInsufficient:noProgress` on a
+    /// fully-read episode.
     @Test("an unplayed long episode is transcribed end to end, and the ladder stops")
     func ladderReachesEndOfEpisodeAndTerminates() async throws {
         let store = try await makeTestStore()
         try await seedEpisode(store, desiredCoverageSec: 90)
         let clock = TierLadderClock(start: Date(timeIntervalSince1970: 1_700_000_000))
-        let scheduler = try await makeScheduler(store: store) { clock.value }
+        let scheduler = try await makeScheduler(
+            store: store,
+            silentFrom: Self.shardSpanSec - Self.shardSeconds
+        ) { clock.value }
 
         let before = try await transcriptCoverage(store)
         #expect(before == 0)
@@ -241,9 +298,12 @@ struct CoverageTierLadderSchedulerTests {
             clock.advance(by: 7_200)
         }
 
+        // Every decoded second is read — including the silent closing shard,
+        // because the watermark advances on shard ends, not on the last ASR
+        // segment. It stops at the shard sum, short of the declared duration.
         let after = try await transcriptCoverage(store)
-        #expect(after >= Self.durationSec,
-                "the whole episode must be transcribed, got \(after) of \(Self.durationSec)")
+        #expect(after == Self.shardSpanSec,
+                "every decoded shard must be read, got \(after) of \(Self.shardSpanSec)")
         #expect(after > before)
 
         // The ladder is at most four rungs (T0, T1, T2, duration), so the whole
@@ -253,13 +313,145 @@ struct CoverageTierLadderSchedulerTests {
         let jobs = try await allJobs(store)
         #expect(jobs.allSatisfy { $0.state == "complete" },
                 "every rung must reach a terminal; a leftover queued/paused row means the walk did not stop")
-        #expect(jobs.contains { $0.desiredCoverageSec == Self.durationSec },
-                "the last rung must be the episode itself")
-        #expect(Set(jobs.map(\.workKey)).count == jobs.count,
-                "rungs must not collide on workKey — a collision is swallowed by INSERT OR IGNORE")
+        #expect(jobs.allSatisfy { $0.lastErrorCode == nil },
+                "no rung may terminate as coverage-insufficient — every one of them read its audio")
+        // The exact rung set, not a uniqueness check: `workKey` is UNIQUE, so a
+        // truncation collision cannot show up as a duplicate — it shows up as a
+        // MISSING row, which only an exact expectation can see.
+        let base = AnalysisJob.computeWorkKey(
+            fingerprint: Self.fingerprint,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            jobType: "preAnalysis"
+        )
+        #expect(
+            Set(jobs.map(\.workKey)) == [
+                base,
+                "\(base):300",
+                "\(base):900",
+                "\(base):\(Int(Self.durationSec))",
+            ]
+        )
+        #expect(jobs.count == 4)
 
         // And it is genuinely quiescent: another pass finds nothing to do.
         clock.advance(by: 7_200)
         #expect(await scheduler.processNextDispatchableJobForTesting() == false)
+    }
+
+    /// The rung a pass has CLEARED is the deeper of "what the tier asked for" and
+    /// "what the transcript already covers". An episode a listener played most of
+    /// the way through carries a watermark far past its background tier, and
+    /// re-confirming each intermediate rung costs a full decode pass apiece.
+    /// Pinning this: with `clearedCoverage = job.desiredCoverageSec` the
+    /// successor would be the 300 s rung.
+    @Test("a rung the transcript already covers is skipped, not re-walked")
+    func ladderSkipsRungsThePlaybackTranscriptAlreadyCovers() async throws {
+        let store = try await makeTestStore()
+        // 950 s: past T2 (900) but short of the episode, so exactly one rung is
+        // left and it is distinguishable from every configured tier.
+        try await seedEpisode(store, desiredCoverageSec: 90, priorTranscriptCoverageSec: 950)
+        let clock = TierLadderClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let scheduler = try await makeScheduler(store: store) { clock.value }
+
+        #expect(await scheduler.processNextDispatchableJobForTesting())
+
+        let successors = try await allJobs(store).filter { $0.jobId != "job-8bp2-t0" }
+        #expect(successors.count == 1)
+        #expect(successors.first?.desiredCoverageSec == Self.durationSec,
+                "expected a jump straight to the episode; got \(successors.first?.desiredCoverageSec ?? -1)")
+    }
+
+    /// playhead-onn6's budget ledger IS the `adScanRedrive:<n>` ordinal in the
+    /// row's own `workKey`, and the tier successor's key is rebuilt from the BASE
+    /// key. So a re-drive that walked the ladder would launder its ordinal away:
+    /// the successor terminates, `nextAdScanRedriveWorkKey` parses no ordinal,
+    /// re-mints `:1`, and collides with the row already on disk — collapsing a
+    /// two-pass budget to one, silently. Re-drives must not tier-advance at all.
+    @Test("an ad-scan re-drive never walks the tier ladder")
+    func adScanRedriveDoesNotWalkTheLadder() async throws {
+        let store = try await makeTestStore()
+        // Shallow target on a long episode: without the guard, `nextTierCoverage`
+        // would happily mint a deeper rung off the base key.
+        try await seedEpisode(store, desiredCoverageSec: 120)
+        let base = AnalysisJob.computeWorkKey(
+            fingerprint: Self.fingerprint,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            jobType: "preAnalysis"
+        )
+        let redriveKey = "\(base):\(AnalysisWorkScheduler.adScanRedriveWorkKeyMarker):1"
+        // Replace the seeded base job with a re-drive row at the same depth.
+        try await store.updateJobState(jobId: "job-8bp2-t0", state: "complete")
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-8bp2-redrive",
+                jobType: "preAnalysis",
+                episodeId: Self.episodeId,
+                analysisAssetId: Self.assetId,
+                workKey: redriveKey,
+                sourceFingerprint: Self.fingerprint,
+                priority: 10,
+                desiredCoverageSec: 120,
+                state: "queued"
+            )
+        )
+
+        let clock = TierLadderClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let scheduler = try await makeScheduler(store: store) { clock.value }
+        #expect(await scheduler.processNextDispatchableJobForTesting())
+
+        let keys = Set(try await allJobs(store).map(\.workKey))
+        #expect(keys.contains(redriveKey))
+        #expect(!keys.contains { AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: $0) == nil && $0 != base },
+                "a re-drive must not mint a base-keyed tier rung; got \(keys)")
+    }
+
+    /// The other half of the same `max`. When the CUE arm satisfies a tier the
+    /// transcript has not reached, the cleared rung must still be the tier — with
+    /// `clearedCoverage = outcome.transcriptCoverageSec` alone the successor could
+    /// be a rung at or below the one the job is already on, whose `workKey` either
+    /// already exists (swallowed by `INSERT OR IGNORE`, ladder silently dead) or
+    /// walks the episode backwards.
+    @Test("a cue-satisfied tier still advances forward, never sideways or back")
+    func ladderAdvancesForwardWhenCueSatisfiesAheadOfTranscript() async throws {
+        let store = try await makeTestStore()
+        try await seedEpisode(store, desiredCoverageSec: 900)
+        // A confident ad window ending past the 900 s target: the legacy
+        // sufficient condition, with the transcript far behind it.
+        var window = makeAdWindow(startTime: 940, endTime: 1_000, confidence: 0.9)
+        window = AdWindow(
+            id: window.id,
+            analysisAssetId: Self.assetId,
+            startTime: window.startTime,
+            endTime: window.endTime,
+            confidence: window.confidence,
+            boundaryState: window.boundaryState,
+            decisionState: window.decisionState,
+            detectorVersion: window.detectorVersion,
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: window.startTime,
+            metadataSource: "none",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+        try await store.insertAdWindow(window)
+
+        let clock = TierLadderClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        // Only the first 120 s carries speech, so the transcript stays far below
+        // the 900 s target and the cue arm is the only thing that can satisfy it.
+        let scheduler = try await makeScheduler(store: store, silentFrom: 120) { clock.value }
+
+        #expect(await scheduler.processNextDispatchableJobForTesting())
+
+        let successors = try await allJobs(store).filter { $0.jobId != "job-8bp2-t0" }
+        #expect(successors.count == 1)
+        let next = try #require(successors.first)
+        #expect(next.desiredCoverageSec > 900,
+                "successor must be strictly deeper than the rung just cleared, got \(next.desiredCoverageSec)")
+        #expect(next.desiredCoverageSec == Self.durationSec)
     }
 }

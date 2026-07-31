@@ -614,7 +614,12 @@ actor AnalysisJobReconciler {
     /// episode whose only job reached either terminal is reported here as
     /// "un-enqueued" on every single pass — but its `workKey` row still exists,
     /// `workKey` is UNIQUE, and `insertJob` is `INSERT OR IGNORE`, so the insert
-    /// is silently swallowed forever. This method counted the CANDIDATES and
+    /// is silently swallowed until step 5's 7-day GC deletes that terminal row
+    /// (`garbageCollectOldJobs`), at which point this method's insert finally
+    /// takes and the episode restarts the tier ladder from
+    /// `defaultT0DepthSeconds`. So the swallow is weekly, not forever — every
+    /// sweep in between reports a discovery it did not make. This method counted
+    /// the CANDIDATES and
     /// called them `unEnqueuedDownloadsCreated`, which
     /// ``ReconciliationReport/recoveredWorkCount`` sums and
     /// `BackgroundProcessingService` reports to the background-task ledger as
@@ -636,8 +641,15 @@ actor AnalysisJobReconciler {
 
         let unEnqueued = cachedIds.subtracting(activeJobIds)
         var created = 0
+        var attempted = 0
         for episodeId in unEnqueued {
+            // No fingerprint = no workKey = no insert was ever attempted. These
+            // must not be counted as swallowed below: a swallow is specifically
+            // an insert that collided with an existing `workKey`, and reporting
+            // an un-fingerprinted download as one would point the next reader at
+            // the wrong bug.
             guard let fp = await downloadManager.fingerprint(for: episodeId) else { continue }
+            attempted += 1
             let workKey = AnalysisJob.computeWorkKey(
                 fingerprint: fp.strong ?? fp.weak,
                 analysisVersion: Self.currentAnalysisVersion,
@@ -673,7 +685,7 @@ actor AnalysisJobReconciler {
         if created > 0 {
             logger.info("Created \(created) job(s) for un-enqueued downloads")
         }
-        let swallowed = unEnqueued.count - created
+        let swallowed = attempted - created
         if swallowed > 0 {
             logger.info(
                 "\(swallowed) cached episode(s) had no active job but an existing workKey swallowed the re-enqueue (see playhead-y8f3)"
