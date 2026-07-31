@@ -1263,8 +1263,14 @@ struct FoundationModelClassifier: Sendable {
         max(coarseSafetyRecoveryMinimumPassAttempts, planCount)
     }
 
-    /// playhead-8d5r: how many BACK-TO-BACK `.inferenceTimeout` windows end the
-    /// coarse pass.
+    /// playhead-8d5r: how many BACK-TO-BACK `.inferenceTimeout` outcomes end
+    /// the enclosing loop.
+    ///
+    /// Applied at all three places that issue MORE THAN ONE inference call in
+    /// sequence — the coarse window loop, the refinement zoom loop, and the
+    /// subdivision chunk loop. Guarding only one of them would leave the other
+    /// two able to spend a deadline per iteration against a model that has
+    /// stopped answering, which is the same unbounded cost in a different loop.
     ///
     /// Two, not one and not a cumulative total. One timeout is a window fact
     /// and must not cost the episode its remaining coverage — the measured
@@ -1284,7 +1290,7 @@ struct FoundationModelClassifier: Sendable {
     /// plausible way to lose legitimate coverage. The counter is reset by any
     /// answering window, so this can only fire on a model that has stopped
     /// answering entirely.
-    static let coarseConsecutiveInferenceTimeoutAbortThreshold = 2
+    static let consecutiveInferenceTimeoutAbortThreshold = 2
 
     /// playhead-pmp9: apply ±20% jitter to a base backoff delay so a fleet of
     /// devices throttled at the same instant don't retry in lockstep and
@@ -2010,7 +2016,7 @@ struct FoundationModelClassifier: Sendable {
                             latencyMillis: windowAttemptLatency
                         )
                     )
-                    if consecutiveInferenceTimeouts >= Self.coarseConsecutiveInferenceTimeoutAbortThreshold {
+                    if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
                         logger.error(
                             """
                             fm.classifier.coarse_pass_inference_timeout_abort \
@@ -3110,6 +3116,14 @@ struct FoundationModelClassifier: Sendable {
         var permissiveCounts = PermissiveFailureCounts.zero
         // Cycle 2 Rev2-M5/Rev3-M1: asymmetric-routing detection counter.
         var asymmetricWindowCount = 0
+        // playhead-8d5r: the coarse pass's no-progress guard, applied to the
+        // refinement loop for the same reason. `.inferenceTimeout` is
+        // `.window`-scoped so one slow zoom window does not cost the pass its
+        // siblings — but window-scoped applied blindly to a wedged model means
+        // one full deadline per remaining zoom window, and this loop can have
+        // many. Two back-to-back timeouts end the pass with partial results,
+        // reset by any window that answers.
+        var consecutiveInferenceTimeouts = 0
 
         let permissiveDispatchEnabled =
             sensitiveRouter?.hasRules == true && permissiveClassifier != nil
@@ -3281,6 +3295,9 @@ struct FoundationModelClassifier: Sendable {
             let response: RefinementWindowSchema
             switch outcome {
             case let .success(plan, schema):
+                // playhead-8d5r: a window that answered clears the no-progress
+                // evidence — the model is demonstrably alive.
+                consecutiveInferenceTimeouts = 0
                 effectivePlan = plan
                 response = schema
             case let .failure(status, refusalExplanation):
@@ -3390,6 +3407,30 @@ struct FoundationModelClassifier: Sendable {
                 // it must not end the pass.
                 if status.failureScope == .window {
                     failedWindowStatuses.append(status)
+                    if status == .inferenceTimeout {
+                        consecutiveInferenceTimeouts += 1
+                    } else {
+                        consecutiveInferenceTimeouts = 0
+                    }
+                    if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
+                        logger.error(
+                            """
+                            fm.classifier.refinement_pass_inference_timeout_abort \
+                            window=\(plan.windowIndex, privacy: .public) \
+                            consecutiveTimeouts=\(consecutiveInferenceTimeouts, privacy: .public) \
+                            bankedWindows=\(windows.count, privacy: .public)
+                            """
+                        )
+                        return FMRefinementScanOutput(
+                            status: .inferenceTimeout,
+                            windows: windows,
+                            latencyMillis: Self.latencyMillis(since: start, clock: clock),
+                            prewarmHit: prewarmHit,
+                            failedWindowStatuses: failedWindowStatuses,
+                            permissiveFailureCounts: permissiveCounts,
+                            asymmetricWindowCount: asymmetricWindowCount
+                        )
+                    }
                     logger.error(
                         """
                         fm.classifier.refinement_pass_window_abandoned \
@@ -4761,7 +4802,7 @@ struct FoundationModelClassifier: Sendable {
                 // than a confident verdict over audio nobody screened.
                 if status == .inferenceTimeout {
                     consecutiveChunkTimeouts += 1
-                    if consecutiveChunkTimeouts >= Self.coarseConsecutiveInferenceTimeoutAbortThreshold {
+                    if consecutiveChunkTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
                         break chunkLoop
                     }
                 } else {

@@ -3955,6 +3955,71 @@ struct FoundationModelClassifierTests {
         }
     }
 
+    /// playhead-8d5r: the refinement zoom loop is the third place that issues
+    /// many inference calls in sequence, and `.inferenceTimeout` is
+    /// `.window`-scoped so nothing stopped it spending one full deadline per
+    /// remaining zoom window against a model that had stopped answering.
+    ///
+    /// Four zoom windows, all timing out. The loop must stop after two, and
+    /// must return partial results rather than throwing.
+    @Test("playhead-8d5r: the refinement pass stops after two consecutive window timeouts")
+    func refinementPassStopsOnConsecutiveTimeouts() async throws {
+        let segments = (1...8).map { index in
+            makeSegment(
+                index: index,
+                startTime: Double(index) * 5,
+                endTime: Double(index) * 5 + 5,
+                text: "Refinement window content line \(index)."
+            )
+        }
+        let zoomPlans = (0..<4).map { windowIndex in
+            RefinementWindowPlan(
+                windowIndex: windowIndex,
+                sourceWindowIndex: windowIndex,
+                lineRefs: [windowIndex * 2 + 1, windowIndex * 2 + 2],
+                focusLineRefs: [windowIndex * 2 + 1],
+                focusClusters: [[windowIndex * 2 + 1, windowIndex * 2 + 2]],
+                prompt: "Refine ad spans.",
+                promptTokenCount: 8,
+                startTime: Double(windowIndex) * 10,
+                endTime: Double(windowIndex) * 10 + 10,
+                stopReason: .minimumSpan,
+                promptEvidence: []
+            )
+        }
+        let recorder = RuntimeRecorder(
+            contextSize: 4_096,
+            coarseSchemaTokens: 4,
+            refinementSchemaTokens: 8,
+            tokenCountRule: { _ in 1 },
+            refinementFailures: Array(repeating: .inferenceTimeout, count: 4)
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime)
+
+        let output = try await classifier.refinePassB(
+            zoomPlans: zoomPlans,
+            segments: segments,
+            evidenceCatalog: EvidenceCatalog(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "transcript-v1",
+                entries: []
+            )
+        )
+        let snapshot = await recorder.snapshot()
+
+        #expect(
+            snapshot.respondRefinementCalls.count == 2,
+            """
+            refinement issued \(snapshot.respondRefinementCalls.count) calls against a wedged \
+            model; the guard must stop it at 2. Four means one pass can cost \
+            zoomPlans x the deadline.
+            """
+        )
+        #expect(output.status == .inferenceTimeout)
+        #expect(output.failedWindowStatuses.count == 2)
+        #expect(output.failedWindowStatuses.allSatisfy { $0 == .inferenceTimeout })
+    }
+
     /// playhead-8d5r: subdivision is the ONE path that issues many inference
     /// calls for a single plan — one per atom chunk — and it is reached from
     /// the `promptTokenCount > budget` branch, which `continue`s before the
