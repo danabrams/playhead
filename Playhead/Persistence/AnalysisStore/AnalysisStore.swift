@@ -12465,11 +12465,11 @@ actor AnalysisStore {
     ///
     /// **Bookkeeping rules** (per the bd-m8k design field):
     /// - `observedEpisodeCount` is incremented by 1 on every call.
-    /// - `wasFullRescan == true`: (when `fullRescanPrecisionSample` is non-nil)
-    ///   the sample is appended to the recall ring with the oldest entry dropped
-    ///   if the ring is already full; and — unless playhead-hvk0's
-    ///   `fullRescanReadEpisode` is `false` — `episodesSinceLastFullRescan`
-    ///   resets to 0 and `lastFullRescanAt` is updated.
+    /// - `wasFullRescan == true` — and, per playhead-hvk0, `fullRescanReadEpisode`
+    ///   is not `false`: `episodesSinceLastFullRescan` resets to 0,
+    ///   `lastFullRescanAt` is updated, and (when `fullRescanPrecisionSample` is
+    ///   non-nil) the sample is appended to the recall ring with the oldest entry
+    ///   dropped if the ring is already full.
     /// - `wasFullRescan == false`: `episodesSinceLastFullRescan` is
     ///   incremented; the recall ring is left untouched. A recall
     ///   sample passed alongside a non-full-rescan call is ignored (the
@@ -12498,12 +12498,13 @@ actor AnalysisStore {
     ///   for why the recall ring alone cannot certify the targeted policy. It is
     ///   deliberately NOT persisted as its own column: the value is re-supplied
     ///   by every subsequent full-coverage observation, and a demoted show is
-    ///   planned `fullCoverage`, so there is no observation path that could read
-    ///   a stale value. `false` ALSO suppresses the `episodesSinceLastFullRescan`
-    ///   / `lastFullRescanAt` reset — a rescan that did not read the episode
-    ///   re-validated nothing, so the periodic re-validation clock keeps running.
-    ///   That suppression is what lets an already-promoted show recover; see the
-    ///   `rescanRevalidated` block below.
+    ///   planned with a full-episode phase, so there is no observation path that
+    ///   could read a stale value. `false` suppresses ALL THREE effects of a full
+    ///   rescan — the recall-ring append, the `episodesSinceLastFullRescan` /
+    ///   `lastFullRescanAt` reset, and the stable flag — because a rescan that
+    ///   did not read the episode certified nothing and re-validated nothing.
+    ///   Suppressing the clock reset is what lets an ALREADY-promoted show
+    ///   recover; see the `rescanRevalidated` block below.
     @discardableResult
     func recordPodcastEpisodeObservation(
         podcastId: String,
@@ -12558,7 +12559,15 @@ actor AnalysisStore {
             // the counter's growth past the interval has no further effect, so
             // there is nothing here to run away.
             let rescanRevalidated = wasFullRescan && fullRescanReadEpisode != false
-            if wasFullRescan {
+            // playhead-hvk0: the ring advances only on a rescan that re-validated.
+            // This is the SINGLE place the read-evidence gate touches the ring —
+            // the runner computes the sample unconditionally and hands it over,
+            // so a caller cannot get the gate half-right. Guarding only the flag
+            // and not the ring would be a latent bug rather than a nicety: a
+            // circular 1.0 would still be BANKED, and the next observation with
+            // `true` (or with the gate off) would promote the show off samples the
+            // store had already judged uncertifiable.
+            if rescanRevalidated {
                 // Cycle 2 C4: parameter is named `fullRescanPrecisionSample`
                 // for legacy compatibility but the value semantically is a
                 // recall sample. Ad-free episodes pass nil and the ring is
@@ -12569,8 +12578,6 @@ actor AnalysisStore {
                         newSamples.removeFirst()
                     }
                 }
-            }
-            if rescanRevalidated {
                 newEpisodesSince = 0
                 newLastFullRescanAt = now
             } else {
@@ -12683,9 +12690,12 @@ actor AnalysisStore {
     ///   `true` means it did.
     ///
     /// **Direction of the error, on purpose.** Every uncertain input resolves to
-    /// "not certified", which can only ever route future episodes to
-    /// `fullCoverage` — more audio read, never less. This helper cannot cause a
-    /// pass, a retry or a widen; it only decides which plan an
+    /// "not certified", which can only ever route future episodes to a
+    /// full-episode plan — the plan that INTENDS to read the whole episode. It is
+    /// not a guarantee that more audio is read: a single-job full scan dies on a
+    /// `.pass`-scoped failure where three targeted jobs would not (see
+    /// `BackfillJobRunner.fullRescanReadEpisode(assetId:)`). This helper cannot
+    /// cause a pass, a retry or a widen; it only decides which plan an
     /// already-caused pass produces.
     ///
     /// **Not sticky, and it does not need to be.** A demotion routes the show's

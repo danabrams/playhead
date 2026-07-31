@@ -310,13 +310,18 @@ struct PodcastPlannerStateTests {
 
     // MARK: - playhead-hvk0: a rescan must have READ the episode to certify
 
-    /// The shipped default is load-bearing, not cosmetic: with the gate OFF the
-    /// whole bead is inert and a show can still be promoted by rescans that read
-    /// 2–5% of their episodes. Pinned so a default flip is a deliberate,
-    /// reviewed act rather than a silent regression.
-    @Test("playhead-hvk0: the promotion gate ships ON")
-    func promotionGateShipsOn() {
-        #expect(AdDetectionConfig.default.plannerPromotionRequiresMeasuredCoverage == true)
+    /// The shipped default is load-bearing in BOTH directions, so it is pinned.
+    ///
+    /// It ships `false`. The mechanism is correct, but the floor it uses is the
+    /// shared 0.98 constant and no episode on the 2026-07-29 device pull reaches
+    /// it (max measured `adScanFraction` 0.943), so flipping it retires
+    /// `targetedWithAudit` outright and buys a full-episode plan on every episode
+    /// at 12–45 min of measured FM wall-clock each. That is a product decision,
+    /// not an implementation detail — this rail makes the flip a deliberate,
+    /// reviewed act in either direction.
+    @Test("playhead-hvk0: the promotion gate ships OFF pending a product decision")
+    func promotionGateShipsOff() {
+        #expect(AdDetectionConfig.default.plannerPromotionRequiresMeasuredCoverage == false)
     }
 
     /// The pure helper's contract, stated as a truth table so a future change
@@ -388,13 +393,18 @@ struct PodcastPlannerStateTests {
         let podcastId = "podcast-short-rescans"
         let planner = CoveragePlanner()
 
-        // Five full rescans that would each have produced a perfect recall
-        // sample under the pre-hvk0 rules, but none of which read its episode.
+        // Five full rescans that each DID produce a perfect recall sample under
+        // the pre-hvk0 rules — the exact circular 1.0s the device pull shows —
+        // but none of which read its episode. The sample is passed in, non-nil,
+        // precisely so the STORE has to be the thing that refuses it: if the
+        // test withheld the sample itself, the assertion below would be a
+        // tautology and an implementation that banks circular samples (and then
+        // promotes off them on the next `true` observation) would pass.
         for tick in 1...5 {
             _ = try await store.recordPodcastEpisodeObservation(
                 podcastId: podcastId,
                 wasFullRescan: true,
-                fullRescanPrecisionSample: nil,  // the runner withholds it
+                fullRescanPrecisionSample: 1.0,
                 fullRescanReadEpisode: false,
                 now: Double(tick)
             )
@@ -402,7 +412,7 @@ struct PodcastPlannerStateTests {
 
         let state = try #require(await store.fetchPodcastPlannerState(podcastId: podcastId))
         #expect(state.observedEpisodeCount == 5)
-        // Withheld, not zeroed: a 0.0 would be an equally false claim and would
+        // Refused, not zeroed: a 0.0 would be an equally false claim and would
         // block the show for three further rescans after the scans got healthy.
         #expect(state.recallSamples.isEmpty)
         #expect(state.stableRecallFlag == false)
@@ -426,11 +436,12 @@ struct PodcastPlannerStateTests {
         #expect(planner.plan(for: contextFromState(promoted)).policy == .targetedWithAudit)
 
         // And a single subsequent short rescan demotes it again, so the show's
-        // next episode is planned `fullCoverage` rather than narrowed.
+        // next episode is planned `fullCoverage` rather than narrowed — even
+        // when that rescan reports a perfect sample.
         _ = try await store.recordPodcastEpisodeObservation(
             podcastId: podcastId,
             wasFullRescan: true,
-            fullRescanPrecisionSample: nil,
+            fullRescanPrecisionSample: 1.0,
             fullRescanReadEpisode: false,
             now: 9
         )
@@ -498,7 +509,9 @@ struct PodcastPlannerStateTests {
             _ = try await store.recordPodcastEpisodeObservation(
                 podcastId: podcastId,
                 wasFullRescan: true,
-                fullRescanPrecisionSample: nil,
+                // Non-nil on every cycle: the ring must be refused 200 times, not
+                // merely left alone 200 times.
+                fullRescanPrecisionSample: 1.0,
                 fullRescanReadEpisode: false,
                 now: Double(tick)
             )
@@ -607,7 +620,7 @@ struct PodcastPlannerStateTests {
             _ = try await store.recordPodcastEpisodeObservation(
                 podcastId: podcastId,
                 wasFullRescan: true,
-                fullRescanPrecisionSample: nil,
+                fullRescanPrecisionSample: 1.0,
                 fullRescanReadEpisode: false,
                 now: Double(tick + extra)
             )

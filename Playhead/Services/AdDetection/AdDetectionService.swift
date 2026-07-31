@@ -787,22 +787,45 @@ struct AdDetectionConfig: Sendable {
     /// episodes 1,503–4,379 s long (2–5%), and those runs are exactly what put
     /// three 1.0 samples in the ring and promoted the show.
     ///
-    /// When `true` (the shipped default), a full rescan whose measured
+    /// When `true`, a full rescan whose measured
     /// ``AnalysisCoverageSummary/adScanFraction`` is below
     /// ``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction`` — or is not
-    /// measurable at all — contributes NO recall sample and forces the show's
-    /// stable-recall flag false, so its next episode is planned `fullCoverage`.
-    /// A rescan that does read its episode restores the flag from the untouched
-    /// ring, and the targeted policy's savings return the moment it is earned.
+    /// measurable at all — contributes no recall sample, does not restart the
+    /// periodic re-validation clock, and forces the show's stable-recall flag
+    /// false, so its next episode is planned with a full-episode phase. A rescan
+    /// that does read its episode re-validates the show and restores the flag
+    /// from the untouched ring.
     ///
-    /// When `false`, the recall ring advances and the flag derives exactly as it
-    /// did pre-hvk0 — the kill switch, if the extra full scans prove too
-    /// expensive in the field.
+    /// **SHIPS `false`, and that is a DECISION REQUEST, not caution.** The floor
+    /// is deliberately the shared 0.98 constant rather than a new tunable — but
+    /// on the 2026-07-29 device pull NO episode reaches it: the maximum measured
+    /// `adScanFraction` across all 19 assets with a coverage-lane row is 0.943,
+    /// and 0 of 34 episodes over 15 minutes clear 0.95. So with this `true`, no
+    /// show is ever certified, and the steady state is a full-episode plan on
+    /// every episode of every show — `targetedWithAudit`, the narrower, the audit
+    /// sampler and the au2v.1.14 chapter-informed selection all become
+    /// unreachable at runtime.
     ///
-    /// **What it cannot do.** It is not a retry, not a widen and not a re-drive:
-    /// it only decides WHICH plan an already-caused pass produces. It cannot
-    /// cause a pass, so it adds no scanning to an episode nothing was going to
-    /// scan anyway, and it re-opens no terminal.
+    /// That may well be the correct product answer — narrowing a scan on a show
+    /// whose full rescans examined 82–167 s of a 1,503–4,379 s episode is
+    /// indefensible at any threshold — but it retires a policy, and the measured
+    /// price is steep: on this device a `fullEpisodeScan` costs 12–45 minutes of
+    /// Foundation Models wall-clock per episode (120 calls, 13,407 s total) of
+    /// which **92% is spent on calls that fail and yield no coverage**, against
+    /// ~4 minutes for a targeted plan. Retiring a policy and paying that per
+    /// episode is Dan's call under CLAUDE.md's Decision Authority rule, so the
+    /// mechanism lands tested and inert and the flip is a separate, reviewed act.
+    ///
+    /// **What it cannot do, either way.** It is not a retry, not a widen and not
+    /// a re-drive: it only decides WHICH plan an already-caused pass produces. It
+    /// cannot cause a pass, so it adds no scanning to an episode nothing was
+    /// going to scan anyway, and it re-opens no terminal. One caveat worth naming
+    /// (it is not "only a plan choice" in one respect): flipping a show's plan
+    /// shape changes `BackfillJobRunner`'s deterministic jobId inputs, so the
+    /// first demoted pass mints a fresh `fullEpisodeScan` row with
+    /// `retryCount == 0` rather than resuming the targeted rows' accrued budget.
+    /// That is one extra attempt per asset per transcriptVersion, bounded by
+    /// ``AdmissionController/maxRetries`` thereafter.
     let plannerPromotionRequiresMeasuredCoverage: Bool
 
     /// playhead-xsdz.11: assemble the `PerShowThresholdControllerParameters` from
@@ -908,7 +931,7 @@ struct AdDetectionConfig: Sendable {
         unanchoredExtentBlocksAutoSkip: Bool = true,
         preRollStartClampSeconds: Double = 20.0,
         podContinuationEnabled: Bool = false,
-        plannerPromotionRequiresMeasuredCoverage: Bool = true
+        plannerPromotionRequiresMeasuredCoverage: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -1050,7 +1073,7 @@ struct AdDetectionConfig: Sendable {
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
         preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
         podContinuationEnabled: false,  // playhead-xsdz.65: ad-pod continuation ships OFF and fully inert (zero ad_windows writes, byte-identical backfill); flip after corpus A/B
-        plannerPromotionRequiresMeasuredCoverage: true  // playhead-hvk0: ships ON — a full rescan must MEASURABLY read its episode before its recall sample may promote the show to targetedWithAudit. Measured device cost: the promoted show's episodes cost a full scan (~23 FM calls / ~5 min FM compute for a 28-min episode) instead of a targeted one (~7 calls / ~1.5 min) until the promotion is earned. Kill switch: set false to restore the pre-hvk0 ring derivation.
+        plannerPromotionRequiresMeasuredCoverage: false  // playhead-hvk0: the read-evidence promotion gate ships OFF and fully inert. The mechanism is correct and mutation-tested, but at the shared 0.98 floor NO episode on the 2026-07-29 device pull qualifies (max measured adScanFraction 0.943), so flipping it retires `targetedWithAudit` entirely and buys a full-episode plan on every episode at a MEASURED 12-45 min of FM wall-clock each, 92% of it spent on calls that fail and yield no coverage. Retiring a policy at that price is Dan's decision under CLAUDE.md Decision Authority — see the field doc.
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip

@@ -1057,22 +1057,17 @@ actor BackfillJobRunner {
             // to give.
             var incrementEpisodesObservedWithoutSample = false
             var incrementNarrowingAllPhasesEmpty = false
+            // playhead-hvk0: the sample is still COMPUTED here exactly as before
+            // and the read-evidence gate is applied once, in the store. An
+            // earlier revision short-circuited this branch to skip the narrowing
+            // work when the read evidence was `false`, which silently stopped
+            // `episodesObservedWithoutSample` / `narrowingAllPhasesEmpty` from
+            // incrementing on short rescans — a telemetry change nobody asked
+            // for. The narrowing is pure in-memory CPU that this path already
+            // paid on every full rescan; one place to apply the gate is worth
+            // more than saving it.
             if wasFullRescan {
-                if fullRescanReadEpisode == false {
-                    // playhead-hvk0: this rescan did not read the episode, so it
-                    // has no standing to certify the targeted policy. Withhold
-                    // the sample rather than record it — the sample's DENOMINATOR
-                    // is the ad lines THIS rescan found, so a short rescan finds
-                    // few and the targeted phases trivially cover them (1.0). The
-                    // ring must not be advanced by a measurement of itself.
-                    //
-                    // Withheld, not zeroed: a 0.0 would be an equally false claim
-                    // (that the targeting missed real ads) and it would poison the
-                    // ring for three subsequent rescans. `nil` leaves the ring
-                    // untouched; the flag is forced false by the store from
-                    // `fullRescanReadEpisode` alone.
-                    recallSample = nil
-                } else if fullRescanDetectedAdLineRefs.isEmpty {
+                if fullRescanDetectedAdLineRefs.isEmpty {
                     // Cycle 2 C4: ad-free episode. Nil sample (do NOT
                     // fake 1.0). Bump the dedicated counter so we can
                     // distinguish "ad-free" from "ad-bearing but
@@ -1191,8 +1186,21 @@ actor BackfillJobRunner {
     ///
     /// Returns `false` for BOTH "measurably short" and "not measurable" (a legacy
     /// row with no duration, a coverage/duration disagreement, or a store
-    /// failure). Under-claiming can only route the show's next episode to
-    /// `fullCoverage` — more audio read, never less — and it never causes a pass.
+    /// failure). Under-claiming can only route the show's next episode to a
+    /// full-episode plan, and it never causes a pass.
+    ///
+    /// **A full-episode plan is not a guarantee of more audio read**, and no
+    /// claim here should be read that way. `fullCoverage` is ONE job walking
+    /// windows sequentially, so a `.pass`-scoped failure (`failedTransient`,
+    /// `cancelled`, `thermalDeferred`, `assetsUnavailable`) ends it where it
+    /// stands, while `targetedWithAudit` is THREE independent jobs one abort
+    /// cannot kill. Measured on the 2026-07-29 device pull, `fullEpisodeScan`
+    /// spent 13,407 s of Foundation Models wall-clock across 120 calls and only
+    /// 1,100 s of that on calls that produced a verdict — asset 8FECFDDE has a
+    /// complete transcript (3,576 s of 3,578 s) and an `adScanFraction` of 0.187.
+    /// The demotion buys the INTENT to read the whole episode; whether the pass
+    /// survives to do it is playhead-qbib / playhead-i7qe territory, not this
+    /// gate's.
     private func fullRescanReadEpisode(assetId: String) async -> Bool {
         let fraction: Double?
         do {

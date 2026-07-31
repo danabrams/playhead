@@ -657,6 +657,50 @@ struct BackfillJobRunnerTests {
         #expect(CoveragePlanner().plan(for: liveContext(finalState)).policy == .fullCoverage)
     }
 
+    /// The floor itself, pinned just below. Without this the whole gate is
+    /// satisfied by any threshold in `(0.10, 1.00]` — the other fixtures sit at
+    /// ~0.10 and 1.00, so an implementation with the floor at 0.50, or 0.11,
+    /// passes every other test here.
+    ///
+    /// It matters more than a normal boundary test: 0.95 is ABOVE every value
+    /// this pipeline achieves in the field (max measured `adScanFraction` on the
+    /// 2026-07-29 device pull is 0.943 across all 19 assets with a coverage-lane
+    /// row), so this test is also the executable statement of why the gate ships
+    /// OFF. If a future change makes 0.95 certify, that is a threshold decision
+    /// and it has to break this test to happen.
+    @Test("playhead-hvk0: a 0.95-coverage rescan is still short of the 0.98 floor")
+    func nearMissRescanDoesNotCertify() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-hvk0-nearmiss"
+        // 950 s of a 1,000 s episode read: better than anything the device has
+        // ever achieved, and still not certification.
+        try await store.insertAsset(
+            makeAsset(id: assetId, episodeDurationSec: 1000, fastTranscriptCoverageEndTime: 1000)
+        )
+        try await store.insertSemanticScanResult(
+            makeReadEvidenceScanRow(assetId: assetId, start: 0, end: 950)
+        )
+        let fraction = try #require(
+            await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]?.adScanFraction
+        )
+        #expect(abs(fraction - 0.95) < 0.001, "fixture drifted: measured \(fraction)")
+        #expect(fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+
+        // And one second under the floor is the same answer as ninety-five
+        // percent under it — the gate is a floor, not a gradient.
+        let atFloorId = "asset-hvk0-atfloor"
+        try await store.insertAsset(
+            makeAsset(id: atFloorId, episodeDurationSec: 1000, fastTranscriptCoverageEndTime: 1000)
+        )
+        try await store.insertSemanticScanResult(
+            makeReadEvidenceScanRow(assetId: atFloorId, start: 0, end: 980)
+        )
+        let atFloor = try #require(
+            await store.fetchCoverageSummariesByAssetIds([atFloorId])[atFloorId]?.adScanFraction
+        )
+        #expect(atFloor >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+    }
+
     /// The other side of the same gate: read evidence is NECESSARY, not
     /// punitive. A show whose rescans do read their episodes is promoted
     /// exactly as it was pre-hvk0, so the targeted policy's savings survive.
@@ -774,6 +818,9 @@ struct BackfillJobRunnerTests {
             // super-linear growth long before the 30th cycle.
             let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
             if cycle == 1 {
+                // Guard the rail against going vacuous: `n == 0 * cycle` holds
+                // for every cycle if the fixture ever stops producing rows.
+                #expect(scans.count > 0, "cycle 1 wrote no scan rows — the rail would be vacuous")
                 scanRowsAfterFirst = scans.count
             } else if let first = scanRowsAfterFirst {
                 #expect(
