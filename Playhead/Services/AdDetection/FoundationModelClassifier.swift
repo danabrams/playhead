@@ -637,12 +637,6 @@ struct CoarseWindowFailure: Sendable, Equatable {
         )
     }
 
-    /// Stable suffix for the persisted failure row id. Whole-plan failures
-    /// keep the pre-qbib key so existing rows stay addressable.
-    var persistenceWindowKey: String {
-        guard !coversWholePlan else { return "window=\(planWindowIndex)" }
-        return "window=\(planWindowIndex).\(lineRefs.first ?? -1)-\(lineRefs.last ?? -1)"
-    }
 }
 
 struct FMCoarseScanOutput: Sendable, Equatable {

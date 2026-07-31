@@ -2160,10 +2160,10 @@ struct BackfillJobRunnerTests {
         //   ("abc", "def-123") vs ("abc-def", "123")
         // both produce "scan-abc-def-123-passA-0" with the old format.
         let a = BackfillJobRunner.makeScanResultIdForTesting(
-            assetId: "abc", transcriptVersion: "def-123", pass: "passA", windowIndex: 0
+            assetId: "abc", transcriptVersion: "def-123", pass: "passA", windowKey: "atoms=0-0"
         )
         let b = BackfillJobRunner.makeScanResultIdForTesting(
-            assetId: "abc-def", transcriptVersion: "123", pass: "passA", windowIndex: 0
+            assetId: "abc-def", transcriptVersion: "123", pass: "passA", windowKey: "atoms=0-0"
         )
         #expect(a != b, "distinct tuples must produce distinct hashed ids")
     }
@@ -2171,10 +2171,10 @@ struct BackfillJobRunnerTests {
     @Test("R7-Fix11: scan ID is deterministic for same inputs")
     func scanIdsAreDeterministic() {
         let a = BackfillJobRunner.makeScanResultIdForTesting(
-            assetId: "asset-1", transcriptVersion: "v1", pass: "passA", windowIndex: 0
+            assetId: "asset-1", transcriptVersion: "v1", pass: "passA", windowKey: "atoms=0-0"
         )
         let b = BackfillJobRunner.makeScanResultIdForTesting(
-            assetId: "asset-1", transcriptVersion: "v1", pass: "passA", windowIndex: 0
+            assetId: "asset-1", transcriptVersion: "v1", pass: "passA", windowKey: "atoms=0-0"
         )
         #expect(a == b)
         #expect(a.hasPrefix("scan-"))

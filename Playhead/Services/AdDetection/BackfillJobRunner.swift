@@ -2759,15 +2759,42 @@ actor BackfillJobRunner {
     /// R7-Fix11: stable id for pass-A / pass-B scan rows. Exposed as
     /// `internal static` so tests can assert determinism and
     /// collision-immunity without reaching into the private helpers.
+    ///
+    /// playhead-bkhc: `windowKey` identifies the AUDIO WINDOW, not the
+    /// window's position in this run's plan list. It used to be
+    /// `windowIndex: Int` — the ordinal within whatever segment slice the run
+    /// happened to scan. That is not a row identity: a job that RESUMES from a
+    /// checkpoint re-plans over the un-scanned remainder, so its window 0 is a
+    /// different piece of audio than the previous run's window 0, and the two
+    /// collided on this primary key. `INSERT OR REPLACE` then DELETED the
+    /// earlier run's row — resume silently destroyed the very coverage it had
+    /// just banked. (The pmp9 rate-limit resume path had the same latent
+    /// defect; its tests only asserted call counts and the job row.)
+    ///
+    /// Keying on the atom range makes the primary key agree with
+    /// `semantic_scan_results`' `UNIQUE(reuseKeyHash)`, which is the row's
+    /// real identity: same window ⇒ same id ⇒ a genuine replace; different
+    /// window ⇒ different id ⇒ no collateral delete.
     nonisolated static func makeScanResultIdForTesting(
         assetId: String,
         transcriptVersion: String,
         pass: String,
-        windowIndex: Int,
+        windowKey: String,
         jobKey: String? = nil
     ) -> String {
-        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|window=\(windowIndex)|job=\(jobKey ?? "default")"
+        let canonical = "asset=\(assetId)|version=\(transcriptVersion)|pass=\(pass)|window=\(windowKey)|job=\(jobKey ?? "default")"
         return hashedId(prefix: "scan", canonical: canonical)
+    }
+
+    /// playhead-bkhc: the position-independent window key — the atom range the
+    /// row covers. This is the same coordinate `reuseKeyHash` is built from,
+    /// so a row's primary key and its uniqueness key can never disagree about
+    /// which window they mean.
+    nonisolated static func atomWindowKey(
+        firstAtomOrdinal: Int,
+        lastAtomOrdinal: Int
+    ) -> String {
+        "atoms=\(firstAtomOrdinal)-\(lastAtomOrdinal)"
     }
 
     /// R7-Fix11: stable id for the "no windows, record the failure"
@@ -3255,7 +3282,10 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: scanPass,
-                windowIndex: windowOutput.windowIndex,
+                windowKey: Self.atomWindowKey(
+                    firstAtomOrdinal: firstAtom,
+                    lastAtomOrdinal: lastAtom
+                ),
                 jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
@@ -3342,7 +3372,10 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: "passB",
-                windowIndex: windowOutput.windowIndex,
+                windowKey: Self.atomWindowKey(
+                    firstAtomOrdinal: firstAtom,
+                    lastAtomOrdinal: lastAtom
+                ),
                 jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
@@ -3393,7 +3426,15 @@ actor BackfillJobRunner {
                 assetId: inputs.analysisAssetId,
                 transcriptVersion: inputs.transcriptVersion,
                 pass: scanPass,
-                windowKey: windowKey,
+                // playhead-bkhc: default to the ATOM RANGE, never the plan's
+                // position in this run's window list — see
+                // `makeScanResultIdForTesting`. Callers only pass an explicit
+                // key for rows whose identity is not their geometry (the
+                // "no work" sentinels, which share the whole-episode range).
+                windowKey: windowKey ?? Self.atomWindowKey(
+                    firstAtomOrdinal: range.firstAtomOrdinal,
+                    lastAtomOrdinal: range.lastAtomOrdinal
+                ),
                 jobKey: jobId
             ),
             analysisAssetId: inputs.analysisAssetId,
@@ -3438,8 +3479,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
-            runMode: runMode,
-            windowKey: "window=\(plan.windowIndex)"
+            runMode: runMode
         )
     }
 
@@ -3461,8 +3501,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: status,
             latencyMs: latencyMs,
-            runMode: runMode,
-            windowKey: "window=\(plan.windowIndex)"
+            runMode: runMode
         )
     }
 
@@ -3487,8 +3526,7 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: failure.status,
             latencyMs: latencyMs,
-            runMode: runMode,
-            windowKey: failure.persistenceWindowKey
+            runMode: runMode
         )
     }
 
