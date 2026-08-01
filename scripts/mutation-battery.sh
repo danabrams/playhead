@@ -452,14 +452,16 @@ MUTATIONS=(
   # narrowing is checked against a distinct victim.
   "D01|20|ORCH|$T_D3G0_FIELD;$T_D3G0_ENTRY;$T_D3G0_BUDGET;$T_D3G0_PREROLL;$T_D3G0_ONCE;$T_D3G0_SEEK;$T_D3G0_CATALOG"
 
-  # D02 (inclusive→exclusive at the START edge) and D03 (exclusive→inclusive at
-  # the END edge) are the two halves of the half-open interval and have
-  # disjoint victims: D02 kills the entry/pre-roll tests, which enter exactly
-  # ON a boundary; D03 kills the already-passed test, which is the only one
-  # that observes a span from outside its end. Neither test is named twice, so
-  # they share a batch honestly.
+  # D02 (inclusive→exclusive at the START edge), D03 (exclusive→inclusive at
+  # the END edge) and D06 (a dwell) are the three ways to get the half-open
+  # interval wrong. Their VICTIMS are disjoint — D02 kills the tests that enter
+  # exactly on a boundary, D03 the only test that observes a span from outside
+  # its end, D06 the worst-case-alignment test — but all three rewrite the SAME
+  # `.filter` line, so whichever landed first would destroy the others'
+  # anchors. A batch each, for the M08/M13 reason rather than a crediting one.
+  # (Measured: sharing batch 21 made D03 ERROR "anchor did not apply".)
   "D02|21|ORCH|$T_D3G0_ENTRY;$T_D3G0_PREROLL"
-  "D03|21|ORCH|$T_D3G0_PAST"
+  "D03|28|ORCH|$T_D3G0_PAST"
 
   # D04 (never disarm) and D05 (drop the replay gate) both touch the
   # once/replay contracts, and D05's victim is the replay test which D04 does
