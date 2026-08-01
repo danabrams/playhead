@@ -3044,6 +3044,10 @@ rec_file()   {
     ACT)   printf '%s' "$ACT" ;;
     ADSVC) printf '%s' "$ADSVC" ;;
     PODC)  printf '%s' "$PODC" ;;
+    THROT) printf '%s' "$THROT" ;;
+    RUNNER) printf '%s' "$RUNNER" ;;
+    FMCLS) printf '%s' "$FMCLS" ;;
+    PROBE) printf '%s' "$PROBE" ;;
     *)     printf '%s' "" ;;
   esac
 }
