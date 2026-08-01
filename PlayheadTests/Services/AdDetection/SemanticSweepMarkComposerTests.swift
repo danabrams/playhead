@@ -591,6 +591,40 @@ struct SemanticSweepAdditiveOnlyTests {
         #expect(marks.first?.startTime == 1_604)
     }
 
+    /// `hasKnownExportDisposition` is an ALL-or-nothing gate: ONE unrecognized
+    /// `candidate` boundaryState aborts the whole asset's cross-user snapshot,
+    /// silently, with no log and no error. A sweep mark must therefore be a
+    /// RECOGNIZED (local-only) disposition even though it is never exported —
+    /// and unlike the two producers already listed there, this one ships ON, so
+    /// the omission would bite in the field rather than staying dormant.
+    @Test("a sweep mark does not abort the asset's cross-user snapshot")
+    func sweepMarksAreAKnownExportDisposition() {
+        let mark = SemanticSweepMarkComposer.makeMark(
+            SemanticSweepMarkComposer.Extent(start: 508, end: 599),
+            analysisAssetId: Fx.assetId
+        )
+
+        #expect(CrossUserAnalysisSnapshot.Window.hasKnownExportDisposition(mark))
+    }
+
+    /// A stale sweep row must be RETIRABLE, which requires its boundary state to
+    /// stay OUT of the protected set — the mirror image of the claim above, and
+    /// the two are one token apart in the same table.
+    @Test("a sweep mark is reconcilable under its own detector version")
+    func sweepMarksAreReconcilable() {
+        let mark = SemanticSweepMarkComposer.makeMark(
+            SemanticSweepMarkComposer.Extent(start: 508, end: 599),
+            analysisAssetId: Fx.assetId
+        )
+
+        #expect(AdDetectionService.isReconcilableBackfillWindow(
+            mark, detectorVersion: SemanticSweepMarkComposer.detectorVersion
+        ))
+        #expect(!AdDetectionService.isReconcilableBackfillWindow(
+            mark, detectorVersion: "detection-v1"
+        ), "and is invisible to the FM reconcile, so neither can clobber the other")
+    }
+
     /// A previously-composed sweep mark must not suppress its own recompose —
     /// idempotency rides on content-addressed ids and the version-scoped
     /// reconcile, not on self-dedupe. Without this carve-out the second run over
