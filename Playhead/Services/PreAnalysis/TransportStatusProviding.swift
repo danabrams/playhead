@@ -30,14 +30,26 @@ protocol TransportStatusProviding: Sendable {
     /// interactive jobs. Maintenance jobs ignore this value — they are
     /// Wi-Fi-only regardless.
     func userAllowsCellular() async -> Bool
+    /// playhead-4dqe: whether the active path is CONSTRAINED — i.e. iOS
+    /// Low Data Mode is on for it (`NWPath.isConstrained`).
+    ///
+    /// DELIBERATELY NOT GIVEN A PROTOCOL DEFAULT. A `{ false }` default
+    /// would mean "Low Data Mode is off" for any conformer that forgot
+    /// to implement it — the direction that SPENDS a user's data against
+    /// an explicit OS-level instruction, and it would do so invisibly.
+    /// There are three conformers; each states its answer.
+    func isLowDataMode() async -> Bool
 }
 
-/// Deterministic stub: assume Wi-Fi + user allows cellular. Retained
-/// post-ml96 for SwiftUI previews and as a unit-test fixture default.
-/// Production callers use `LiveTransportStatusProvider`.
+/// Deterministic stub: assume Wi-Fi + user allows cellular + no Low Data
+/// Mode. Retained post-ml96 for SwiftUI previews and as a unit-test
+/// fixture default. Production callers use `LiveTransportStatusProvider`.
 struct WifiTransportStatusProvider: TransportStatusProviding {
     func currentReachability() async -> TransportSnapshot.Reachability { .wifi }
     func userAllowsCellular() async -> Bool { true }
+    /// A preview/fixture device is not in Low Data Mode. Stated, not
+    /// inherited — see the protocol's note on why there is no default.
+    func isLowDataMode() async -> Bool { false }
 }
 
 // MARK: - LiveTransportStatusProvider
