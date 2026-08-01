@@ -1008,6 +1008,10 @@ final class PlayheadRuntime {
                 // `adDetectionConfig` (PR4 config-source discipline) so the runner-
                 // tail compose site and the service's Step 18 read one value.
                 specialistMarkComposeEnabled: adDetectionConfig.specialistMarkComposeEnabled,
+                // playhead-y3ya: same discipline for the semantic-sweep compose —
+                // the runner tail and the service's Step 18c read ONE value, so a
+                // rollback cannot leave one site composing and the other not.
+                semanticSweepMarkEnabled: adDetectionConfig.semanticSweepMarkEnabled,
                 // playhead-hvk0: the promotion gate rides the SAME hoisted
                 // `adDetectionConfig` as the two specialist keys above, so the
                 // runner's planner-state observation and the service read one value.

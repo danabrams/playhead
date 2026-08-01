@@ -153,6 +153,29 @@ actor BackfillJobRunner {
     /// `beginEpisode` preload.
     private let specialistMarkComposeEnabled: Bool
 
+    /// playhead-y3ya: master flag for the SEMANTIC-SWEEP mark compose at the tail
+    /// of `runJob` (mirrors `AdDetectionConfig.semanticSweepMarkEnabled`).
+    ///
+    /// This is the TIMELY half of the fix. The service-side Step 18c composes the
+    /// same marks from the same persisted rows, but it only runs when a backfill
+    /// runs — and on the field episode the FM sweep spent fifteen hours writing
+    /// rows in background jobs while nothing re-fused. Composing HERE means a
+    /// verdict becomes a durable mark within one job cycle of the model producing
+    /// it, so the next `beginEpisode` preload surfaces it. The runner has no
+    /// orchestrator reference and cannot push live; that is the service site's
+    /// job.
+    ///
+    /// Placed before `runJob` returns rather than on the caller's COMPLETE path,
+    /// deliberately: the field sweep ended `cancelled`, and a verdict already
+    /// written to disk must not be withheld because the job that wrote it was
+    /// later deferred or cancelled.
+    ///
+    /// Idempotent with the service site by construction — content-addressed ids
+    /// plus the version-scoped reconcile pinned to `"semantic-sweep-v1"`, so FM
+    /// (`detection-v1`), specialist, pod-continuation, shared and user-owned rows
+    /// are never clobbered.
+    private let semanticSweepMarkEnabled: Bool
+
     /// playhead-hvk0: master flag for the promotion gate that requires a full
     /// rescan to have MEASURABLY read its episode before its recall sample may
     /// certify the `targetedWithAudit` policy (mirrors
@@ -348,6 +371,7 @@ actor BackfillJobRunner {
         specialistRuntime: SpecialistAdClassifier.Runtime? = nil,
         specialistScanEnabled: Bool = false,
         specialistMarkComposeEnabled: Bool = false,
+        semanticSweepMarkEnabled: Bool = true,
         plannerPromotionRequiresMeasuredCoverage: Bool = false
     ) {
         self.store = store
@@ -365,6 +389,7 @@ actor BackfillJobRunner {
         self.specialistRuntime = specialistRuntime
         self.specialistScanEnabled = specialistScanEnabled
         self.specialistMarkComposeEnabled = specialistMarkComposeEnabled
+        self.semanticSweepMarkEnabled = semanticSweepMarkEnabled
         self.plannerPromotionRequiresMeasuredCoverage = plannerPromotionRequiresMeasuredCoverage
     }
 
@@ -2260,6 +2285,35 @@ actor BackfillJobRunner {
             coarseIncompleteDeferReason: coarseIncompleteDeferReason,
             lastCoveredUpperBoundSec: coverageContiguousUpperBound
         )
+        // playhead-y3ya: semantic-sweep mark compose. Turn the `containsAd`
+        // verdicts this job just persisted into user-visible MARK-ONLY
+        // `AdWindow`s while they are freshest.
+        //
+        // WHY HERE AND NOT ON THE CALLER'S COMPLETE PATH. The 2026-08-01 field
+        // sweep on DE0784D8 ended `2581-2676 | abstain | cancelled` after
+        // fifteen hours. Its earlier windows had already returned `containsAd`
+        // at 508-599 and 1604-1731, and those rows were on disk. A verdict that
+        // is already durable must not be withheld because the job that wrote it
+        // was later deferred, cancelled or failed — so the compose runs on every
+        // path that reaches this return.
+        //
+        // A COMPOSE FAILURE MUST NEVER COST THE SCAN. This is a recall lever
+        // running after all the FM work is persisted; a throwing store read is
+        // logged and swallowed, and the service-side Step 18c recomputes the
+        // same marks from the same rows (content-addressed ids, nothing churns).
+        // Hard-gated: OFF short-circuits before any read/compose/write.
+        if semanticSweepMarkEnabled {
+            do {
+                try await composeSemanticSweepMarks(
+                    analysisAssetId: inputs.analysisAssetId
+                )
+            } catch {
+                logger.warning(
+                    "y3ya sweep compose skipped for asset \(inputs.analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
         return (scanResultIds, evidenceEventIds, detectedAdLineRefs, fmRefinementWindows, counters, coverageOutcome)
     }
 
@@ -3283,6 +3337,35 @@ actor BackfillJobRunner {
     /// only persisted rows + existing windows (no model, no FM) and delegates the
     /// version-scoped set-difference to the shared reconcile invariant so the
     /// runner-tail site and the service's Step 18 stay in lockstep.
+    /// playhead-y3ya: compose + reconcile + persist the semantic-sweep
+    /// mark-only windows for one asset from its persisted
+    /// `semantic_scan_results`. Reads only persisted rows + existing windows
+    /// (no model, no re-scan) and delegates the version-scoped set-difference to
+    /// the SAME shared reconcile invariant the service site uses, so the
+    /// runner-tail site and Step 18c stay in lockstep.
+    private func composeSemanticSweepMarks(analysisAssetId: String) async throws {
+        let scanRows = try await store.fetchSemanticScanResults(
+            analysisAssetId: analysisAssetId
+        )
+        guard !scanRows.isEmpty else { return }
+        let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+        let marks = SemanticSweepMarkComposer.compose(
+            scanRows: scanRows,
+            existingWindows: existingWindows,
+            analysisAssetId: analysisAssetId
+        )
+        let reconciled = AdDetectionService.reconcileVersionScopedMarkSets(
+            newMarks: marks,
+            existingWindows: existingWindows,
+            detectorVersion: SemanticSweepMarkComposer.detectorVersion
+        )
+        guard !reconciled.windows.isEmpty || !reconciled.retiredIDs.isEmpty else { return }
+        try await store.reconcileBackfillAdWindows(
+            reconciled.windows,
+            retiredIDs: reconciled.retiredIDs
+        )
+    }
+
     private func composeSpecialistMarks(analysisAssetId: String) async throws {
         let scanRows = try await store.fetchSpecialistScanResults(analysisAssetId: analysisAssetId)
         guard !scanRows.isEmpty else { return }
