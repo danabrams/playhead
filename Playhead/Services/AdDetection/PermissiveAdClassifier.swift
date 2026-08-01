@@ -182,6 +182,20 @@ public enum PermissiveClassificationError: Error, Equatable, Sendable {
         case permissiveRefusal
         case permissiveDecodingFailure
         case permissiveContextOverflow
+        /// playhead-kvs8: the FoundationModels daemon THROTTLED this call. Not
+        /// a permissive failure at all — the model never saw the window — but
+        /// carried through this error type because that is the channel the
+        /// permissive dispatch sites already read.
+        ///
+        /// It exists as its own reason because the two alternatives were both
+        /// wrong and both permanent: the `default:` arm below filed a throttle
+        /// as `.permissiveDecodingFailure`, and on iOS 27 (where the daemon
+        /// throws `LanguageModelError`, not `GenerationError`) the catch-all
+        /// filed it the same way. Both map to statuses whose retry policy is
+        /// `.persistFailure`, so a momentary throttle became a permanent
+        /// coverage hole — and charged Apple's safety layer, or the schema
+        /// decoder, for a call neither one performed.
+        case rateLimited
     }
 
     case failed(reason: Reason, underlyingDescription: String)
@@ -795,6 +809,21 @@ actor PermissiveAdClassifier {
             // this to `.permissiveDecodingFailure`, which is incorrect
             // — a cancelled task is not a model failure.
             throw CancellationError()
+        } catch let error where FMDaemonThrottle.isThrottle(error) {
+            // playhead-kvs8: a daemon THROTTLE, caught before the two arms
+            // below can relabel it. The `default:` arm of the
+            // `GenerationError` switch filed it as `.permissiveDecodingFailure`
+            // on iOS 26, and on iOS 27 — where the daemon throws
+            // `LanguageModelError`, a type the switch does not match — the
+            // catch-all filed it identically. Both are `.persistFailure`
+            // statuses, so a throttle that lasts seconds became a coverage hole
+            // that lasts forever. Caught HERE, above both, so the OS-version
+            // fan-out cannot reintroduce the bug.
+            logger.debug("permissive_classifier_rate_limited window=\(lineRefs.count, privacy: .public) segments")
+            throw PermissiveClassificationError.failed(
+                reason: .rateLimited,
+                underlyingDescription: String(describing: error)
+            )
         } catch let error as LanguageModelSession.GenerationError {
             // Cycle 2 C2 + H6: route the documented failure cases
             // through `PermissiveClassificationError` so the runner can
@@ -903,6 +932,13 @@ actor PermissiveAdClassifier {
         } catch is CancellationError {
             // Cycle 4 M-1: propagate cooperative cancellation untouched.
             throw CancellationError()
+        } catch let error where FMDaemonThrottle.isThrottle(error) {
+            // playhead-kvs8: see the matching arm in `classify`.
+            logger.debug("permissive_refinement_rate_limited window=\(lineRefs.count, privacy: .public) segments")
+            throw PermissiveClassificationError.failed(
+                reason: .rateLimited,
+                underlyingDescription: String(describing: error)
+            )
         } catch let error as LanguageModelSession.GenerationError {
             switch error {
             case .refusal:

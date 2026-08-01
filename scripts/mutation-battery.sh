@@ -306,9 +306,18 @@ ACT="Playhead/Services/AdDetection/RediffRefetch/RediffActivation.swift"
 # carries the mark literals and the seed predicate.
 ADSVC="Playhead/Services/AdDetection/AdDetectionService.swift"
 PODC="Playhead/Services/AdDetection/AdPodContinuation.swift"
+# playhead-kvs8: the FM daemon throttle (Q01-Q08). THROT is the single
+# definition + the named causes; RUNNER carries the defer branch that replaced
+# the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
+# readiness cache guard.
+THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
+RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
+FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
+PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
+  "$THROT" "$RUNNER" "$FMCLS" "$PROBE"
 )
 
 FOCUSED_SUITES=(
@@ -384,6 +393,22 @@ FOCUSED_SUITES=(
   # `.candidate` admission is caught by the exclusion sweep here AND by the
   # negative-control arm of the eks2 field test.
   -only-testing:PlayheadTests/AdPodContinuationDayZeroSeedTests
+  # playhead-kvs8: the FM daemon throttle (Q01-Q08).
+  #
+  # NOT LISTED, and it is not an oversight: `FMDaemonThrottleCanaryTests` is
+  # XCTest, and `extract_ran`/`extract_failures` above parse only Swift
+  # Testing's `◇ Test "…" started` lines. An expectation naming an XCTest case
+  # can never be matched, so it would report ERROR rather than KILLED. The two
+  # source canaries (the streaming sweep and the probe cache guard) are verified
+  # by hand instead — see the kvs8 provenance note.
+  -only-testing:PlayheadTests/FMDaemonThrottleClassificationTests
+  -only-testing:PlayheadTests/FMThrottledPrologueRunnerTests
+  -only-testing:PlayheadTests/FMThrottlePermissiveLaneTests
+  -only-testing:PlayheadTests/FMThrottleUsabilityProbeTests
+  # pmp9's window-level rate-limit defer stays in scope: M02 renames the
+  # prologue cause to the WINDOW cause, and a mutation that quietly merged the
+  # two would otherwise be judged only by this bead's own suite.
+  -only-testing:PlayheadTests/BackfillRateLimitDeferTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -644,6 +669,20 @@ T_EVC1_CONFIRM_MARKS="ynmk: confirming a day-0 seeded banner marks, it does not 
 T_EVC1_ENTRY_ONCE="d3g0: a day-0 seeded continuation window arms on ingest, fires on entry, once"
 T_EVC1_SEED_UNTOUCHED="the day-0 seed row itself is never modified"
 T_EVC1_DELIVERY="the carve-out raises a continuation row across the delivery floor"
+# playhead-kvs8 — an FM daemon THROTTLE is not a model failure. The field row
+# (DE0784D8, status=failed / retryCount=1 / raw daemon prose in deferReason) is
+# three defects in three columns, and Q01-Q03 are one rail each.
+T_KVS8_DEFERS="a daemon throttle in the coarse-pass PROLOGUE defers the job — it must not mark it failed"
+T_KVS8_COVERAGE="a throttled prologue leaves coverage accounting untouched — no cursor, no scan rows"
+T_KVS8_RETRY="a throttle does not spend a lifetime retry — the field row's retryCount=1"
+T_KVS8_CAUSE="a throttled prologue records a NAMED cause, not the daemon's raw prose"
+T_KVS8_VACUITY="VACUITY CONTROL: a non-throttle prologue throw still marks the job failed and burns a retry"
+T_KVS8_BATCH="a throttled batch leaves no job stranded in queued and none marked failed"
+T_KVS8_PERM="a daemon throttle on the permissive path persists as rateLimited, never as a permissive refusal"
+T_KVS8_REASON="a throttle Reason maps to rateLimited and is charged to no permissive counter"
+T_KVS8_PROBE="a throttle is not a usability verdict, so it must not be cached"
+T_KVS8_NAMES="the pass-prologue defer cause is a NAMED token, distinct from pmp9's window token"
+T_KVS8_CONSEC="the drain stops CONSECUTIVELY, not on a lifetime tally"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1099,6 +1138,56 @@ MUTATIONS=(
   # become a side-effect of an auto-skip flag, and turning auto-skip off would
   # silently turn first-listen pod recovery off with it.
   "V06|67|PODC|$T_EVC1_GATE_BLIND"
+  "L09|61|PODC|$T_EKS2_ENTRY_ONCE"
+
+  # playhead-kvs8 — the FM daemon THROTTLE (Q01-Q08).
+  #
+  # Q01-Q03 are one rail per COLUMN of the field row, deliberately separated:
+  # `status=failed`, the burned `retryCount`, and the unattributable reason
+  # string are three independent defects that a single mutation would conflate.
+  # Each gets its own batch because all three redden the same test.
+
+  # Q01 makes the throttle arm unreachable (its guard can never hold), so a
+  # throttled prologue falls through to the generic catch-all and the job is
+  # marked terminally `failed` — the field row, restored.
+  "Q01|62|RUNNER|$T_KVS8_DEFERS;$T_KVS8_RETRY;$T_KVS8_CAUSE;$T_KVS8_BATCH"
+
+  # Q02 spends a lifetime retry on the throttle. Everything else about the
+  # defer is intact, so ONLY the retryCount assertion moves — which is the
+  # point: three unlucky throttles must not disqualify an episode that was
+  # never scanned once.
+  "Q02|63|RUNNER|$T_KVS8_RETRY"
+
+  # Q03 merges the prologue cause into pmp9's window cause. Both are honest
+  # tokens, so nothing crashes and coverage looks fine; what is lost is the
+  # operator's ability to tell "the daemon refused us outright, nothing was
+  # scanned" from "a window lost its retries and we banked the rest".
+  "Q03|64|RUNNER|$T_KVS8_CAUSE"
+
+  # Q04 restores `.permissiveRefusal` as the status a throttled permissive
+  # window persists — a `.persistFailure` status, so a momentary throttle
+  # becomes a permanent coverage hole attributed to Apple's safety layer.
+  "Q04|65|FMCLS|$T_KVS8_REASON;$T_KVS8_PERM"
+
+  # Q05 charges a throttle to the permissive REFUSAL counter. The persisted row
+  # is still honest, so only the telemetry lies — the model looks like it
+  # refuses more windows the busier the device gets.
+  "Q05|66|FMCLS|$T_KVS8_REASON"
+
+  # Q06 re-hard-codes `.permissiveRefusal` in the coarse defensive arm, which is
+  # the arm an iOS-27 `LanguageModelError` throttle actually reaches. Distinct
+  # seam from Q04: the mapping is correct and simply not consulted.
+  "Q06|67|FMCLS|$T_KVS8_PERM"
+
+  # Q07 caches a throttled readiness probe as an unusable model. `probeIfNeeded`
+  # gates the WHOLE lane, so this converts one momentary daemon refusal into 15
+  # minutes with no ad scanning at all on a perfectly healthy device.
+  "Q07|68|PROBE|$T_KVS8_PROBE"
+
+  # Q08 drops the consecutive stop threshold to one, so a single throttled job
+  # ends the whole drain. The counter still resets, so this is specifically the
+  # "one event is not a device fact" rail.
+  "Q08|69|THROT|$T_KVS8_CONSEC"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3005,6 +3094,96 @@ EOF
     static func isDayZeroByteExactSeed(_ window: AdWindow) -> Bool {
         window.eligibilityGate == SkipEligibilityGate.eligible.rawValue
             && window.boundaryState == AdDetectionService.dayZeroRediffByteExactBoundaryState
+  # --- playhead-kvs8: the FM daemon throttle ---------------------------------
+
+  Q01)
+    # The guard can never hold: `CancellationError` is caught by an earlier arm,
+    # so no error reaching here is both a throttle and a cancellation. The arm
+    # stays syntactically live (nothing is deleted) and every throttle falls
+    # through to the generic catch-all that produced the field row.
+    snippet OLD <<'EOF'
+            } catch let throttle where FMDaemonThrottle.isThrottle(throttle) {
+EOF
+    snippet NEW <<'EOF'
+            } catch let throttle where FMDaemonThrottle.isThrottle(throttle) && throttle is CancellationError {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Q02)
+    snippet OLD <<'EOF'
+                throttledThisJob = true
+                consecutiveThrottledJobs += 1
+                do {
+EOF
+    snippet NEW <<'EOF'
+                throttledThisJob = true
+                consecutiveThrottledJobs += 1
+                try? await store.checkpointBackfillJobProgress(
+                    jobId: job.jobId,
+                    progressCursor: job.progressCursor,
+                    retryCount: job.retryCount + 1
+                )
+                do {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Q03)
+    snippet OLD <<'EOF'
+                        reason: FMDaemonThrottle.DeferCause.passPrologue.rawValue
+EOF
+    snippet NEW <<'EOF'
+                        reason: FMDaemonThrottle.DeferCause.window.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Q04)
+    snippet OLD <<'EOF'
+            // `.persistFailure` status that would strand it.
+            return .rateLimited
+EOF
+    snippet NEW <<'EOF'
+            // `.persistFailure` status that would strand it.
+            return .permissiveRefusal
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Q05)
+    snippet OLD <<'EOF'
+            // carries it into `failedWindowStatuses` and onto the persisted row.
+            break
+EOF
+    snippet NEW <<'EOF'
+            // carries it into `failedWindowStatuses` and onto the persisted row.
+            refusal += 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Q06)
+    snippet OLD <<'EOF'
+                        let unexpectedReason = Self.permissiveUnexpectedReason(for: error)
+                        failedWindows.append(
+EOF
+    snippet NEW <<'EOF'
+                        let unexpectedReason = PermissiveClassificationError.Reason.permissiveRefusal
+                        failedWindows.append(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Q07)
+    snippet OLD <<'EOF'
+        !FMDaemonThrottle.isThrottle(error)
+EOF
+    snippet NEW <<'EOF'
+        true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Q08)
+    snippet OLD <<'EOF'
+    static let consecutiveDeferStopThreshold = 2
+EOF
+    snippet NEW <<'EOF'
+    static let consecutiveDeferStopThreshold = 1
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -3037,6 +3216,10 @@ rec_file()   {
     ACT)   printf '%s' "$ACT" ;;
     ADSVC) printf '%s' "$ADSVC" ;;
     PODC)  printf '%s' "$PODC" ;;
+    THROT) printf '%s' "$THROT" ;;
+    RUNNER) printf '%s' "$RUNNER" ;;
+    FMCLS) printf '%s' "$FMCLS" ;;
+    PROBE) printf '%s' "$PROBE" ;;
     *)     printf '%s' "" ;;
   esac
 }

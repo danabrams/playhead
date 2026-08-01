@@ -29,6 +29,17 @@ actor TestFMRuntime {
     private let defaultBoundaryExtraction: FMBoundarySchema
     private let contextSizeValue: Int
     private let coarseSchemaTokenCountValue: Int
+    /// playhead-kvs8: make the coarse pass's PROLOGUE fail.
+    ///
+    /// `coarseSchemaTokenCount` is the first FoundationModels round trip
+    /// `coarsePassAUnbounded` makes — `promptBudget()` awaits it before
+    /// `planPassA` plans a single window. It is an XPC call to the same daemon
+    /// `respond` goes to, so the daemon can throttle it, and unlike a window
+    /// failure there is no per-window catch to absorb it: it propagates out of
+    /// `coarsePassA` as a THROW. Nothing in the pre-kvs8 test surface could
+    /// express that, which is why the runner's terminal-`failed` handling of it
+    /// went unnoticed until the device pull.
+    private let coarseSchemaTokenCountFailureValue: TestFMRuntimeFailure?
     private let refinementSchemaTokenCountValue: Int
     private let boundarySchemaTokenCountValue: Int
     private let tokenCountRule: @Sendable (String) -> Int
@@ -64,6 +75,7 @@ actor TestFMRuntime {
         boundaryExtractionFailures: [TestFMRuntimeFailure?] = [],
         contextSize: Int = 4_096,
         coarseSchemaTokenCount: Int = 16,
+        coarseSchemaTokenCountFailure: TestFMRuntimeFailure? = nil,
         refinementSchemaTokenCount: Int = 32,
         boundarySchemaTokenCount: Int = 32,
         backoffSleep: @escaping @Sendable (UInt64) async -> Void = { _ in },
@@ -89,6 +101,7 @@ actor TestFMRuntime {
         self.boundaryExtractionFailureQueue = boundaryExtractionFailures
         self.contextSizeValue = contextSize
         self.coarseSchemaTokenCountValue = coarseSchemaTokenCount
+        self.coarseSchemaTokenCountFailureValue = coarseSchemaTokenCountFailure
         self.refinementSchemaTokenCountValue = refinementSchemaTokenCount
         self.boundarySchemaTokenCountValue = boundarySchemaTokenCount
         self.tokenCountRule = tokenCountRule
@@ -105,7 +118,12 @@ actor TestFMRuntime {
             tokenCount: { prompt in
                 self.tokenCountRule(prompt)
             },
-            coarseSchemaTokenCount: { self.coarseSchemaTokenCountValue },
+            coarseSchemaTokenCount: {
+                if let failure = self.coarseSchemaTokenCountFailureValue {
+                    throw failure.error
+                }
+                return self.coarseSchemaTokenCountValue
+            },
             refinementSchemaTokenCount: { self.refinementSchemaTokenCountValue },
             boundarySchemaTokenCount: { self.boundarySchemaTokenCountValue },
             makeSession: {
