@@ -82,6 +82,14 @@
 //     playhead-ye0n's rule (never demote a whole window for extending one edge)
 //     satisfied by construction rather than by argument: there is no edge
 //     rewrite and no gate arithmetic anywhere in this file.
+//   • A SEED IS A CONFIRMED VERDICT — plus exactly ONE `.candidate` provenance:
+//     the STRICT day-0 byte-exact rediff mark (playhead-evc1), which is
+//     byte-derived at confidence 1.00, is never promoted out of `.candidate` by
+//     anything, and is the only row that can find an ad in the first seconds of
+//     a FIRST listen. The aggregator's coarse 30 s candidate tiles stay refused,
+//     which is what the original exclusion was actually for. See
+//     `isDayZeroByteExactSeed`. The seed's certainty does NOT propagate: what
+//     the walk emits is mark-only/candidate/unanchored either way.
 //   • IT NEVER CROSSES A LISTENER'S MARK (playhead-lc4c). `protectedRegions`
 //     are supplied by the caller because persisted `userMarked` rows are not in
 //     the window list this pass receives. A protected region intersecting the
@@ -264,15 +272,94 @@ enum AdPodContinuation {
         AdDecisionState.applied.rawValue
     ]
 
-    /// Decision states that may SEED a continuation chain. Deliberately narrower
-    /// than `visibleDecisionStates`: a `.candidate` row is a coarse proposal (the
-    /// segment aggregator tiles fixed 30 s regions as candidates), and chaining
-    /// off an unconfirmed tile would build a pod claim on a guess. Only a
-    /// verdict the pipeline actually confirmed anchors a chain.
+    /// Decision states that may SEED a continuation chain ON DECISION STATE
+    /// ALONE. Deliberately narrower than `visibleDecisionStates`: a `.candidate`
+    /// row is a coarse proposal (the segment aggregator tiles fixed 30 s regions
+    /// as candidates), and chaining off an unconfirmed tile would build a pod
+    /// claim on a guess. Only a verdict the pipeline actually confirmed anchors a
+    /// chain.
+    ///
+    /// That rationale is about the AGGREGATOR and it still holds — the field
+    /// aggregator went 0-for-3 and cost 210 s of show, and admitting `.candidate`
+    /// wholesale would seed pod walks off 0.40-confidence tiles. It is NOT about
+    /// every row that happens to be `.candidate`; see
+    /// ``isDayZeroByteExactSeed(_:)`` for the one provenance that is admitted
+    /// despite this set, and why.
     static let seedDecisionStates: Set<String> = [
         AdDecisionState.confirmed.rawValue,
         AdDecisionState.applied.rawValue
     ]
+
+    /// playhead-evc1 — THE ONE PROVENANCE THAT SEEDS WHILE STILL `.candidate`.
+    ///
+    /// `AdDetectionService.mintByteExactDayZeroMarks` persists every day-0
+    /// byte-exact rediff slot as `.candidate`, and nothing in the pipeline ever
+    /// promotes it: a day-0 mark is deterministic ground truth the algorithmic
+    /// detector does not re-emit, so it is exempted from reconcile and from
+    /// hot-path retirement and simply stays `.candidate` for life. Under
+    /// `seedDecisionStates` alone it could therefore never seed a chain — and a
+    /// day-0 mark is the ONLY thing that can find an ad in the first seconds of
+    /// a FIRST listen, which makes it the only seed that can cover a whole break
+    /// before the listener presses play.
+    ///
+    /// MEASURED, not argued (playhead-eks2, field episode D9B513CD): day-0 found
+    /// `0.0 – 45.1` (ad 1) and missed `47.6 – 94.3` (ad 2), which was
+    /// byte-identical in both fetches. Composing over that exact state recovered
+    /// 0.0 s. The SAME row as `.confirmed` — same geometry, same 1.00
+    /// confidence, same provenance, same links, same barriers — recovered all of
+    /// ad 2 plus the 2.5 s stitch gap and terminated exactly at the show
+    /// boundary. The mechanism was correct and precise and could not see the one
+    /// row type that found the ad.
+    ///
+    /// THE CARVE IS ON PROVENANCE, NOT ON `decisionState`. Three conditions, and
+    /// each is load-bearing:
+    ///
+    ///  • `boundaryState == dayZeroRediffByteExact`. Written at exactly ONE site
+    ///    (`mintByteExactDayZeroMarks`) and by nothing else, so this is a
+    ///    single-writer provenance claim rather than a heuristic. The origin
+    ///    served DIFFERENT BYTES over the range; the row's confidence is 1.00 by
+    ///    construction. That is the opposite of a coarse proposal.
+    ///
+    ///  • BOTH edge anchors `.rediffByteExact` — the STRICT (monotonic-clean)
+    ///    acceptance arm. A playhead-9s6q SEGMENT-RECOVERED slot keeps
+    ///    `.unanchored` precisely because its chain dropped runs to reach an
+    ///    A-timeline mapping, and playhead-pyq7 owns validating those boundaries.
+    ///    A pod walk starts AT a seed edge and steps OUTWARD, so an unvalidated
+    ///    edge is the one thing that could put the walk's first step inside the
+    ///    show rather than at the pod's rim. One anchored edge is not two.
+    ///
+    ///    KNOWN AND ACCEPTED CONSEQUENCE: day-0 rows minted BEFORE playhead-qs0d
+    ///    (2026-07-31) carry `.unanchored` because no anchor was RECORDED, not
+    ///    because the slot was segment-recovered — and the two are
+    ///    indistinguishable from the persisted row. Those legacy rows stay out.
+    ///    The mint is idempotent (it skips any slot overlapping an existing
+    ///    window), so they are never re-minted either; the carve-out is
+    ///    forward-looking by construction.
+    ///
+    ///  • `visibleDecisionStates`, which is where `.reverted` and `.suppressed`
+    ///    are refused. An explicit user veto (`decisionState = .reverted`) is the
+    ///    ONLY way a day-0 mark is ever retired, which makes it the single
+    ///    durable "no" a listener can say about this row type. A vetoed row must
+    ///    not go on seeding marks in the neighbourhood it was vetoed out of.
+    ///
+    /// EVIDENCE THE ORIGINAL EXCLUSION WAS ACCIDENTAL RATHER THAN INTENDED:
+    /// ``userOwnedBoundaryStates`` below already carries a note recording that
+    /// the first implementation refused this same row through a DIFFERENT door
+    /// and calling it "the most obviously correct thing to chain a pod walk off".
+    /// That filter was fixed; this one still blocked it.
+    ///
+    /// The output is unchanged: a continuation mark is mark-only / candidate /
+    /// unanchored whatever seeded it, so the seed's certainty does NOT propagate
+    /// along the chain — playhead-2350 blocks auto-skip and playhead-ynmk makes a
+    /// banner confirmation MARK rather than cut. Both are asserted against
+    /// day-0-seeded rows `runBackfill` persisted, in
+    /// `AdPodContinuationDayZeroSeedTests`.
+    static func isDayZeroByteExactSeed(_ window: AdWindow) -> Bool {
+        window.boundaryState == AdDetectionService.dayZeroRediffByteExactBoundaryState
+            && window.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            && window.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            && visibleDecisionStates.contains(window.decisionState)
+    }
 
     // MARK: - Link derivation (the positive ad-evidence half)
 
@@ -869,7 +956,9 @@ enum AdPodContinuation {
     ]
 
     /// A window may seed a continuation chain iff it is a CONFIRMED detector
-    /// verdict with sane geometry and is not the listener's own row.
+    /// verdict — or a STRICT day-0 byte-exact rediff mark, the one provenance
+    /// admitted while still `.candidate` (see ``isDayZeroByteExactSeed(_:)``) —
+    /// with sane geometry, and is not the listener's own row.
     ///
     /// User-owned rows are excluded deliberately. A manual mark is the
     /// highest-fidelity statement about the span the listener drew — it says
@@ -877,7 +966,8 @@ enum AdPodContinuation {
     /// creative has already told us what they wanted marked. Deriving more marks
     /// off their boundary would put a guess in a place they curated.
     static func isSeed(_ window: AdWindow) -> Bool {
-        seedDecisionStates.contains(window.decisionState)
+        (seedDecisionStates.contains(window.decisionState)
+            || isDayZeroByteExactSeed(window))
             && !userOwnedBoundaryStates.contains(window.boundaryState)
             && !isOwnRow(window)
             && window.startTime.isFinite

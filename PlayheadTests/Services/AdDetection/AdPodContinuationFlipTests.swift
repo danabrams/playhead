@@ -34,18 +34,25 @@
 // (`time >= start && time < end`), not a transition, so a window armed while the
 // playhead is already inside must fire on the NEXT tick, exactly once.
 //
-// THE MEASURED BLOCKER THIS SUITE ALSO PINS
-// -----------------------------------------
-// See `dayZeroRediffMarkCannotSeedAContinuationChain`. Flipping the flag does
-// NOT recover Dan's ad 2 from the state his device was actually in, because the
-// only row that found ad 1 is a day-0 rediff mark and those are persisted
-// `decisionState == .candidate`, while `AdPodContinuation.seedDecisionStates`
-// admits only `.confirmed` / `.applied`. The exclusion is deliberate for the
-// aggregator's coarse 30 s candidate tiles and accidental for a byte-derived
-// slot — `userOwnedBoundaryStates`' own note calls a day-0 rediff row "the most
-// obviously correct thing to chain a pod walk off". The two arms of that test
-// isolate the predicate: same row, same links, same barriers, only the
-// `decisionState` differs.
+// THE MEASURED BLOCKER THIS SUITE FOUND, AND WHAT BECAME OF IT
+// ------------------------------------------------------------
+// Flipping the flag did NOT recover Dan's ad 2 from the state his device was
+// actually in: the only row that found ad 1 is a day-0 rediff mark, and those
+// are persisted `decisionState == .candidate` while
+// `AdPodContinuation.seedDecisionStates` admits only `.confirmed` / `.applied`.
+// The exclusion is deliberate for the aggregator's coarse 30 s candidate tiles
+// and was accidental for a byte-derived slot — `userOwnedBoundaryStates`' own
+// note calls a day-0 rediff row "the most obviously correct thing to chain a pod
+// walk off".
+//
+// playhead-evc1 carved that provenance out, and
+// `dayZeroRediffMarkSeedsWhileTheAggregatorsTilesDoNot` now pins BOTH halves of
+// the result on the field pod: the day-0 row seeds and recovers ad 2, and a
+// `.candidate` row identical but for its `boundaryState` and anchors still
+// recovers nothing. The full contract lives in
+// `AdPodContinuationDayZeroSeedTests`; what stays here is the two-armed
+// measurement on THIS suite's field fixture, so a regression in either direction
+// reddens the suite that owns the flip.
 
 import CoreMedia
 import Foundation
@@ -144,10 +151,17 @@ struct AdPodContinuationFlipTests {
     /// The day-0 rediff mark EXACTLY as `mintByteExactDayZeroMarks` persists a
     /// STRICT byte-exact slot: confidence 1.0, `.candidate`, mark-only, both
     /// edges `.rediffByteExact`. Not a paraphrase — every field here is read off
-    /// the production mint site, because this row's `decisionState` is the whole
-    /// point of `dayZeroRediffMarkCannotSeedAContinuationChain`.
+    /// the production mint site, because which of these fields the seed predicate
+    /// reads is the whole point of
+    /// `dayZeroRediffMarkSeedsWhileTheAggregatorsTilesDoNot`.
+    ///
+    /// `boundaryState` and `anchor` are parameterised so the same builder can
+    /// produce the NEGATIVE CONTROL: an otherwise byte-identical `.candidate`
+    /// row carrying the aggregator's provenance instead of day-0's.
     private static func dayZeroRediffMark(
-        decisionState: String = AdDecisionState.candidate.rawValue
+        decisionState: String = AdDecisionState.candidate.rawValue,
+        boundaryState: String = AdDetectionService.dayZeroRediffByteExactBoundaryState,
+        anchor: AutoSkipEdgeAnchor = .rediffByteExact
     ) -> AdWindow {
         AdWindow(
             id: "eks2-day0-ad1",
@@ -155,7 +169,7 @@ struct AdPodContinuationFlipTests {
             startTime: adOne.start,
             endTime: adOne.end,
             confidence: 1.0,
-            boundaryState: AdDetectionService.dayZeroRediffByteExactBoundaryState,
+            boundaryState: boundaryState,
             decisionState: decisionState,
             detectorVersion: "detection-v1",
             advertiser: nil,
@@ -171,8 +185,8 @@ struct AdPodContinuationFlipTests {
             evidenceSources: nil,
             eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
             catalogStoreMatchSimilarity: nil,
-            startEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue,
-            endEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            startEdgeAnchor: anchor.rawValue,
+            endEdgeAnchor: anchor.rawValue
         )
     }
 
@@ -247,73 +261,96 @@ struct AdPodContinuationFlipTests {
 
     // MARK: - 2. Dan's field pod, measured
 
-    /// THE MEASURED BLOCKER. Two arms over the field pod, differing ONLY in the
-    /// seed row's `decisionState`. Same window geometry, same confidence, same
-    /// provenance, same links, same barriers.
+    /// THE MEASUREMENT THIS SUITE FOUND THE BLOCKER WITH, kept as the pair of
+    /// claims the carve-out has to satisfy AT ONCE. Three arms over the field
+    /// pod, each differing from the day-0 row in exactly one respect.
     ///
     /// A day-0 byte-exact rediff mark is persisted `.candidate`
-    /// (`mintByteExactDayZeroMarks`), and `AdPodContinuation.seedDecisionStates`
-    /// is `{confirmed, applied}` — so on Dan's device, where the ONLY row that
-    /// found ad 1 was that mark, flipping the flag recovers nothing. The same
-    /// row as `.confirmed` recovers essentially all of ad 2.
+    /// (`mintByteExactDayZeroMarks`) and stays that way for life. Before
+    /// playhead-evc1, `AdPodContinuation.seedDecisionStates` being
+    /// `{confirmed, applied}` meant that on Dan's device — where the ONLY row
+    /// that found ad 1 was that mark — flipping the flag recovered 0.0 s. The
+    /// same row as `.confirmed` recovered essentially all of ad 2, which is what
+    /// proved the mechanism correct and the predicate blind.
     ///
-    /// This is a characterization test, not an endorsement: it names the
-    /// predicate that decides, so the follow-up carve-out is a deliberate edit
-    /// here rather than a silent behaviour change.
-    @Test("Field case: a day-0 rediff mark cannot seed, the same row confirmed can")
-    func dayZeroRediffMarkCannotSeedAContinuationChain() {
+    /// The carve-out is scoped on PROVENANCE, so the third arm is the one that
+    /// keeps it honest: the SAME `.candidate` row with the aggregator's
+    /// `boundaryState` and `.unanchored` edges must still recover nothing.
+    /// Without it, this test could not tell a provenance carve-out from
+    /// admitting `.candidate` wholesale.
+    @Test("Field case: a day-0 rediff mark seeds where an aggregator tile does not")
+    func dayZeroRediffMarkSeedsWhileTheAggregatorsTilesDoNot() {
         let chunks = Self.fieldChunks()
         let links = Self.productionLinks(chunks)
         let barriers = Self.productionBarriers(chunks)
         #expect(
             links.contains { $0.start < Self.adTwo.end && $0.end > Self.adTwo.start },
-            "fixture must carry ad-copy evidence inside ad 2, else both arms are vacuous"
+            "fixture must carry ad-copy evidence inside ad 2, else every arm is vacuous"
         )
+        func compose(_ seed: AdWindow) -> [AdWindow] {
+            AdPodContinuation.compose(
+                existingWindows: [seed],
+                adCopyLinks: links,
+                contentBarriers: barriers,
+                protectedRegions: [],
+                episodeDuration: Self.episodeDuration,
+                analysisAssetId: Self.assetId
+            )
+        }
+        let adTwoWidth = Self.adTwo.end - Self.adTwo.start
 
+        // ARM 1 — the row AS MINTED, `.candidate`. playhead-evc1's whole claim.
         let asMinted = Self.dayZeroRediffMark()
         #expect(
-            !AdPodContinuation.isSeed(asMinted),
-            "a day-0 rediff mark is .candidate, and seedDecisionStates is {confirmed, applied}"
+            AdPodContinuation.isSeed(asMinted),
+            "a strict day-0 byte-exact mark must seed while still .candidate"
         )
-        let mintedMarks = AdPodContinuation.compose(
-            existingWindows: [asMinted],
-            adCopyLinks: links,
-            contentBarriers: barriers,
-            protectedRegions: [],
-            episodeDuration: Self.episodeDuration,
-            analysisAssetId: Self.assetId
-        )
+        let mintedMarks = compose(asMinted)
+        let recovered = Self.overlap(mintedMarks, with: Self.adTwo)
         #expect(
-            mintedMarks.isEmpty,
-            """
-            Dan's device state recovered \(Self.overlap(mintedMarks, with: Self.adTwo)) s of ad 2. \
-            If this now passes material, the seed predicate changed — update the bead, \
-            do not weaken the assertion.
-            """
+            recovered >= adTwoWidth * 0.9,
+            "Dan's device state recovered \(recovered) s of \(adTwoWidth) s of ad 2"
         )
 
+        // ARM 2 — the REFERENCE the eks2 isolation established was reachable.
+        // The carve-out must reach the same span, not merely some span.
         let asConfirmed = Self.dayZeroRediffMark(
             decisionState: AdDecisionState.confirmed.rawValue
         )
         #expect(AdPodContinuation.isSeed(asConfirmed))
-        let confirmedMarks = AdPodContinuation.compose(
-            existingWindows: [asConfirmed],
-            adCopyLinks: links,
-            contentBarriers: barriers,
-            protectedRegions: [],
-            episodeDuration: Self.episodeDuration,
-            analysisAssetId: Self.assetId
-        )
-        let recovered = Self.overlap(confirmedMarks, with: Self.adTwo)
-        let adTwoWidth = Self.adTwo.end - Self.adTwo.start
+        let confirmedMarks = compose(asConfirmed)
         #expect(
-            recovered >= adTwoWidth * 0.9,
-            "a confirmed seed must recover ad 2; got \(recovered) s of \(adTwoWidth) s"
+            mintedMarks.map({ [$0.startTime, $0.endTime] })
+                == confirmedMarks.map({ [$0.startTime, $0.endTime] }),
+            "as-minted \(mintedMarks.map { ($0.startTime, $0.endTime) }) != confirmed \(confirmedMarks.map { ($0.startTime, $0.endTime) })"
         )
+
+        // ARM 3 — the NEGATIVE CONTROL. Same `.candidate` state, same geometry,
+        // same 1.00 confidence; aggregator provenance and unanchored edges.
+        let asTile = Self.dayZeroRediffMark(
+            boundaryState: AdBoundaryState.segmentAggregated.rawValue,
+            anchor: .unanchored
+        )
+        #expect(
+            !AdPodContinuation.isSeed(asTile),
+            "the carve-out admitted a coarse aggregator tile"
+        )
+        let tileMarks = compose(asTile)
+        #expect(
+            tileMarks.isEmpty,
+            """
+            An aggregator-provenance candidate recovered \
+            \(Self.overlap(tileMarks, with: Self.adTwo)) s. The carve-out is scoped \
+            on PROVENANCE; if this passes material it has become a blanket \
+            `.candidate` admission — the thing the field aggregator's 0-for-3 \
+            record says not to do.
+            """
+        )
+
         // ZERO SHOW SECONDS. The walk terminates at the last link's end, and the
         // show resumes at 94.3 — a mark reaching past it is the failure this
         // whole mechanism is built to avoid.
-        for mark in confirmedMarks {
+        for mark in mintedMarks + confirmedMarks {
             #expect(
                 mark.endTime <= Self.showResumes,
                 "mark \(mark.startTime)-\(mark.endTime) reached into the show"

@@ -120,6 +120,43 @@
 #   Batches 1-52 were NOT re-run and carry the verdicts above. Recount: the
 #   array now holds 105 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-01 (playhead-evc1). Batches 62-67 (V01-V06, 6 new
+#   entries) plus batches 56, 57, 58 and 61 — L04, L05, L06 and L09, whose
+#   expectations this bead changed. FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 11
+#   builds (batch 62 and batch 64 each ERRORed once on a disk-exhaustion sim
+#   crash — "Test crashed with signal kill while preparing to run tests" — and
+#   KILLED on re-run after `simctl erase`; that is an environment fault, not a
+#   mutation fault). Batches 1-55 and 59-60 were NOT re-run and carry the
+#   verdicts above. Recount: the array now holds 111 live entries.
+#
+#   L06 was RE-CUT rather than re-verified. Its edit (admit `.candidate`
+#   wholesale) used to be "the playhead-evc1 carve-out applied early"; since
+#   evc1 landed it is the WRONG carve — it admits the segment aggregator's
+#   coarse 30 s tiles, which is the population the original exclusion was for.
+#   Its expectation moved from the eks2 characterization test to evc1's
+#   exclusion sweep plus the negative-control arm of that same eks2 test.
+#
+#   THE TWO SAFETY RAILS WERE RE-APPLIED BY HAND AND THEIR ISSUE LISTS READ,
+#   for the reason the eks2 note below gives — a KILL only proves SOME
+#   expectation failed, and both of these mutations also trip a metadata
+#   assertion in the evc1 suite. Under L04 (gate markOnly -> eligible), `2350: a
+#   day-0 seeded continuation span never auto-skips` also failed
+#   `trespassing.isEmpty`: a real skip cue was pushed over the day-0-seeded
+#   span. Under L05 (anchors unanchored -> rediffByteExact), `ynmk: confirming a
+#   day-0 seeded banner marks` also failed `pushedCues.isEmpty`,
+#   `promoted.wasSkipped == false` and `promoted.decisionState == .confirmed` —
+#   a tap really cut audio and the row really recorded `.applied`. The claim
+#   that a byte-exact seed's certainty does not propagate along the chain is
+#   load-bearing, not a restatement of the emitted literal.
+#
+#   V01's expectation list is deliberately the WHOLE admission half of the evc1
+#   suite (11 names). That makes it the vacuity audit for the bead: with the
+#   carve-out reverted, every test that claims to measure the admission must go
+#   red, and the three exclusion tests must stay green. It came back KILLED with
+#   all 11 red, including both vacuity CONTROLS — the "the control must seed"
+#   arm of the exclusion sweep and the "a candidate day-0 row was refused" arm
+#   of the veto test.
+#
 #   One thing that run learned, and it is the reason two of these were then
 #   re-run BY HAND rather than trusted: a KILL only proves SOME expectation in
 #   the named test failed, and a suite that also asserts the mutated field
@@ -351,6 +388,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AdPodContinuationFlipTests
   -only-testing:PlayheadTests/AdPodContinuationWireInTests
   -only-testing:PlayheadTests/AdPodContinuationTests
+  # playhead-evc1: the day-0 seed carve-out (V01-V06). The eks2 suites above
+  # stay in scope: L06's re-cut expectation spans both, because the wholesale
+  # `.candidate` admission is caught by the exclusion sweep here AND by the
+  # negative-control arm of the eks2 field test.
+  -only-testing:PlayheadTests/AdPodContinuationDayZeroSeedTests
   # playhead-kvs8: the FM daemon throttle (Q01-Q08).
   #
   # NOT LISTED, and it is not an oversight: `FMDaemonThrottleCanaryTests` is
@@ -605,10 +647,28 @@ T_EKS2_RECOVERS="the shipped flag persists a continuation mark over the missed c
 T_EKS2_NO_AUTOSKIP="2350: a persisted continuation span never auto-skips, and still banners"
 T_EKS2_CONFIRM_MARKS="ynmk: confirming a continuation banner marks, it does not skip"
 T_EKS2_ENTRY_ONCE="d3g0: a continuation window ingested mid-listen arms, fires on entry, once"
-T_EKS2_DAY0_SEED="Field case: a day-0 rediff mark cannot seed, the same row confirmed can"
+T_EKS2_DAY0_SEED="Field case: a day-0 rediff mark seeds where an aggregator tile does not"
 T_EKS2_WIREIN_TIER="flag ON: every persisted continuation row is banner-tier"
 T_EKS2_WIREIN_COMPOSES="flag ON: runBackfill persists at least one continuation mark"
 
+# playhead-evc1 — a STRICT day-0 byte-exact rediff mark seeds a pod walk while
+# still `.candidate`, and NOTHING else `.candidate` does. The carve-out is
+# scoped on PROVENANCE, so every mutation below asks one of two questions: does
+# the admission still fire for the row that found the ad, and does the refusal
+# still hold for the coarse aggregator tile that cost 210 s of show?
+T_EVC1_SEEDS="a strict day-0 byte-exact mark seeds while still candidate"
+T_EVC1_FIELD="Field case: the day-0 mark that found ad 1 now marks ad 2"
+T_EVC1_SURVIVES="the production-faithful day-0 seed survives its own backfill"
+T_EVC1_OTHERS_REFUSED="every other candidate row is still refused as a seed"
+T_EVC1_TILE_SILENT="an aggregator candidate tile composes nothing while a day-0 row composes a mark"
+T_EVC1_SEGMENT_RECOVERED="a segment-recovered day-0 slot does not seed until its edges are validated"
+T_EVC1_VETOED="a vetoed or suppressed day-0 row never seeds"
+T_EVC1_GATE_BLIND="the day-0 carve-out does not read the eligibility gate"
+T_EVC1_NO_AUTOSKIP="2350: a day-0 seeded continuation span never auto-skips, and still banners"
+T_EVC1_CONFIRM_MARKS="ynmk: confirming a day-0 seeded banner marks, it does not skip"
+T_EVC1_ENTRY_ONCE="d3g0: a day-0 seeded continuation window arms on ingest, fires on entry, once"
+T_EVC1_SEED_UNTOUCHED="the day-0 seed row itself is never modified"
+T_EVC1_DELIVERY="the carve-out raises a continuation row across the delivery floor"
 # playhead-kvs8 — an FM daemon THROTTLE is not a model failure. The field row
 # (DE0784D8, status=failed / retryCount=1 / raw daemon prose in deferReason) is
 # three defects in three columns, and Q01-Q03 are one rail each.
@@ -1003,16 +1063,23 @@ MUTATIONS=(
   "L03|55|ADSVC|$T_EKS2_RECOVERS;$T_EKS2_WIREIN_COMPOSES"
 
   # L04 is the playhead-2350 rail: the emitted row claims auto-skip eligibility.
-  "L04|56|PODC|$T_EKS2_NO_AUTOSKIP;$T_EKS2_WIREIN_TIER"
+  # The evc1 name is here because a DAY-0 seed is the case where the mistake is
+  # most tempting — the seed really is byte-exact and 1.00-confident — so the
+  # "certainty does not propagate along the chain" claim needs its own witness.
+  "L04|56|PODC|$T_EKS2_NO_AUTOSKIP;$T_EKS2_WIREIN_TIER;$T_EVC1_NO_AUTOSKIP"
 
   # L05 is the playhead-ynmk rail: the row claims byte-exact edges, so a
   # confirmation acquires an extent it never measured and cuts.
-  "L05|57|PODC|$T_EKS2_CONFIRM_MARKS;$T_EKS2_NO_AUTOSKIP;$T_EKS2_WIREIN_TIER"
+  "L05|57|PODC|$T_EKS2_CONFIRM_MARKS;$T_EKS2_NO_AUTOSKIP;$T_EKS2_WIREIN_TIER;$T_EVC1_NO_AUTOSKIP;$T_EVC1_CONFIRM_MARKS"
 
-  # L06 silently widens the seed predicate to admit `.candidate`. This is the
-  # follow-up carve-out playhead-evc1 describes, applied WITHOUT its
-  # measurement — the characterization test is what makes that a deliberate act.
-  "L06|58|PODC|$T_EKS2_DAY0_SEED"
+  # L06 widens the seed predicate to admit `.candidate` WHOLESALE. Since
+  # playhead-evc1 this is no longer "the carve-out applied early" — it is the
+  # WRONG carve: it admits the segment aggregator's coarse 30 s tiles, the
+  # population the original exclusion was actually for and the one that went
+  # 0-for-3 in the field. The three named tests are the exclusion half of evc1;
+  # if this ever goes green again the carve-out has stopped being scoped on
+  # provenance.
+  "L06|58|PODC|$T_EVC1_OTHERS_REFUSED;$T_EVC1_TILE_SILENT;$T_EKS2_DAY0_SEED"
 
   # L07 turns d3g0's CONTAINMENT emit back into a start-edge TRANSITION. A
   # window armed while the playhead is already inside — which is every
@@ -1027,6 +1094,50 @@ MUTATIONS=(
   # `markConfidenceCeiling`'s doc asserts the two are the same number; without
   # that, 96ot's ingest filters every continuation row out and the banner the
   # whole bead exists for never reaches the session.
+  "L09|61|PODC|$T_EKS2_ENTRY_ONCE;$T_EVC1_ENTRY_ONCE;$T_EVC1_DELIVERY"
+
+  # playhead-evc1 — the DAY-0 SEED CARVE-OUT (V01-V06).
+  #
+  # ONE MUTATION PER BATCH again: they all edit the same six lines of
+  # `isSeed` / `isDayZeroByteExactSeed`, so any two applied together would be
+  # indistinguishable, and V03/V04 name the same test by construction.
+
+  # V01 reverts the carve-out itself — `isSeed` back to `seedDecisionStates`
+  # alone. Deliberately expects EVERY evc1 test that is about the ADMISSION,
+  # which makes it the vacuity audit for this suite: if any of these stays green
+  # with the carve-out gone, that test was never measuring it. The three
+  # exclusion tests (V02/V03/V05's subjects) correctly stay green here.
+  "V01|62|PODC|$T_EVC1_SEEDS;$T_EVC1_FIELD;$T_EVC1_SURVIVES;$T_EVC1_DELIVERY;$T_EVC1_TILE_SILENT;$T_EVC1_GATE_BLIND;$T_EVC1_SEED_UNTOUCHED;$T_EVC1_NO_AUTOSKIP;$T_EVC1_CONFIRM_MARKS;$T_EVC1_ENTRY_ONCE;$T_EKS2_DAY0_SEED"
+
+  # V02 drops the `boundaryState` leg, so the byte-exact ANCHORS alone admit a
+  # row. Anchors are a per-edge provenance tier that several producers can set;
+  # the day-0 `boundaryState` has exactly one writer. Carving on the wrong one
+  # would admit any refined row that happened to carry rediff edges.
+  "V02|63|PODC|$T_EVC1_OTHERS_REFUSED"
+
+  # V03 drops BOTH anchor legs, admitting a playhead-9s6q segment-recovered
+  # slot — whose boundaries playhead-pyq7 has not validated — as a seed. A pod
+  # walk starts AT the seed edge, so this is the mutation that can put the
+  # walk's first step inside the show.
+  "V03|64|PODC|$T_EVC1_SEGMENT_RECOVERED"
+
+  # V04 is the subtler half of V03: require only ONE anchored edge. A
+  # half-validated boundary is still unvalidated on the other side, and the walk
+  # uses both.
+  "V04|65|PODC|$T_EVC1_SEGMENT_RECOVERED"
+
+  # V05 drops the visible-state leg, so a row the listener VETOED
+  # (`decisionState = .reverted`) goes on seeding marks around the span it was
+  # vetoed out of. A veto is the only durable "no" that exists for this row
+  # type — every other retirement path exempts it.
+  "V05|66|PODC|$T_EVC1_VETOED"
+
+  # V06 keys the carve-out on the eligibility gate. It looks like hardening and
+  # is the opposite: the gate moves with
+  # `RediffActivation.dayZeroByteExactAutoSkipEnabled`, so pod recovery would
+  # become a side-effect of an auto-skip flag, and turning auto-skip off would
+  # silently turn first-listen pod recovery off with it.
+  "V06|67|PODC|$T_EVC1_GATE_BLIND"
   "L09|61|PODC|$T_EKS2_ENTRY_ONCE"
 
   # playhead-kvs8 — the FM daemon THROTTLE (Q01-Q08).
@@ -2924,6 +3035,65 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  V01)
+    snippet OLD <<'EOF'
+        (seedDecisionStates.contains(window.decisionState)
+            || isDayZeroByteExactSeed(window))
+EOF
+    snippet NEW <<'EOF'
+        (seedDecisionStates.contains(window.decisionState))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  V02)
+    snippet OLD <<'EOF'
+        window.boundaryState == AdDetectionService.dayZeroRediffByteExactBoundaryState
+            && window.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+EOF
+    snippet NEW <<'EOF'
+        window.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  V03)
+    snippet OLD <<'EOF'
+            && window.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            && window.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+EOF
+    snippet NEW <<'EOF'
+            && !window.boundaryState.isEmpty
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  V04)
+    snippet OLD <<'EOF'
+            && window.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            && window.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+EOF
+    snippet NEW <<'EOF'
+            && (window.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue
+                || window.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  V05)
+    snippet OLD <<'EOF'
+            && visibleDecisionStates.contains(window.decisionState)
+EOF
+    snippet NEW <<'EOF'
+            && !window.decisionState.isEmpty
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  V06)
+    snippet OLD <<'EOF'
+    static func isDayZeroByteExactSeed(_ window: AdWindow) -> Bool {
+        window.boundaryState == AdDetectionService.dayZeroRediffByteExactBoundaryState
+EOF
+    snippet NEW <<'EOF'
+    static func isDayZeroByteExactSeed(_ window: AdWindow) -> Bool {
+        window.eligibilityGate == SkipEligibilityGate.eligible.rawValue
+            && window.boundaryState == AdDetectionService.dayZeroRediffByteExactBoundaryState
   # --- playhead-kvs8: the FM daemon throttle ---------------------------------
 
   Q01)
