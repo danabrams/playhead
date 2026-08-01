@@ -5147,10 +5147,15 @@ struct SkipOrchestratorRevertTests {
             endTime: 120,
             confidence: 0.9
         )
+        // playhead-b6r2: the replacement was `[0, 60]`, which the corrected
+        // rule (b) ADMITS — it is a pre-roll, not an artifact. The claim here
+        // is about `hasPreviouslyValidatedGeometry`, not about which spans are
+        // invalid, so only the fixture moves: `[0, 2.0]` lies wholly inside
+        // the head margin and is still rejected as `.tooEarly`.
         let invalidReplacement = makeSkipTestAdWindow(
             id: admitted.id,
             startTime: 0,
-            endTime: 60,
+            endTime: 2.0,
             confidence: 0.99
         )
         await orchestrator.receiveAdWindows([admitted])
@@ -5196,10 +5201,14 @@ struct SkipOrchestratorRevertTests {
             confidence: 0.9,
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
+        // playhead-b6r2: re-cut from `[0, 60]`, a pre-roll, for the reason
+        // given on the AdWindow-path twin above. The `AdDecisionResult` door
+        // runs the SAME `hasPreviouslyValidatedGeometry` guard, and that
+        // symmetry is what this test exists to hold.
         let invalidReplacement = makeSkipTestAdWindow(
             id: admitted.id,
             startTime: 0,
-            endTime: 60,
+            endTime: 2.0,
             confidence: 0.99,
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
