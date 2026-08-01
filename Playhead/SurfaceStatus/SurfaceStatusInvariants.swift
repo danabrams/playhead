@@ -423,6 +423,17 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// different one. The specific cause is carried in the description.
         case skipModeTrustLookupFailed = "skip_mode_trust_lookup_failed"
 
+        /// playhead-usn1: the listener chose a per-show skip mode and the write
+        /// could NOT be performed, because the session has no canonical show to
+        /// attach the preference to. Its own code, separate from
+        /// ``skipModeShowIdentityUnresolved``: that one records a READ that
+        /// found nothing at episode start, this one records a WRITE the user
+        /// actually asked for and did not get. Before this bead
+        /// `PlayheadRuntime.setShowSkipMode` was `if let podcastId = …` with no
+        /// `else` — it returned as though the choice had been stored.
+        case skipModeWriteRefusedNoShowIdentity =
+            "skip_mode_write_refused_no_show_identity"
+
         /// playhead-cthe Invariant A (part 1): `PlaybackReadiness
         /// == .complete` but the coverage record is nil OR its
         /// `isComplete` flag is false. "complete" must be backed by a

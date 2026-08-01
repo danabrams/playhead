@@ -504,7 +504,14 @@ struct NowPlayingView: View {
                 into: bannerQueue,
                 hostGeneration: bannerHostGeneration
             )
-            Task { await viewModel.loadSkipMode(from: runtime.skipOrchestrator) }
+            // playhead-usn1: SUBSCRIBE, do not sample. The screen is presented
+            // in the same turn as the tap that starts playback, so a single
+            // read here lands before `beginEpisode` has resolved the show and
+            // never looks again — "Show Unknown", menu withheld, on a show the
+            // app knows perfectly well. The stream replays the current value on
+            // attach, so this still covers the "opened later" case the one-shot
+            // read got right.
+            viewModel.observeSkipMode(from: runtime.skipOrchestrator)
         }
         .onChange(of: bannerPlaybackContext) {
             previousContext,
@@ -547,6 +554,12 @@ struct NowPlayingView: View {
             } else {
                 viewModel.stopObservingAdSegments()
                 viewModel.stopObservingBanners()
+                // playhead-usn1: the skip-mode subscription is attached in the
+                // same `onAppear` as the other two and is torn down with them.
+                // Leaving it live on a shared view model would keep a
+                // continuation registered in the orchestrator for a screen that
+                // is gone.
+                viewModel.stopObservingSkipMode()
             }
         }
         .sheet(isPresented: $showQueueSheet) {

@@ -593,6 +593,14 @@ actor SkipOrchestrator {
     /// `SkipModeResolution.isLookupFailure`).
     private var skipModeResolutionFailureCounts: [SkipModeResolution: Int] = [:]
 
+    /// playhead-usn1: continuation-backed stream of `SkipModeSnapshot`.
+    ///
+    /// The mode and its cause are only correct AFTER `beginEpisode` has resolved
+    /// the show — which happens many suspensions into `PlayheadRuntime
+    /// .performPlayEpisode`, long after the Now Playing screen has appeared and
+    /// taken its one-shot reading. A pull could only ever be a race; this pushes.
+    private var skipModeContinuations: [UUID: AsyncStream<SkipModeSnapshot>.Continuation] = [:]
+
     /// Continuation-backed stream of applied ad segment time ranges (seconds).
     /// Consumers receive the full set of applied segments whenever the set changes.
     private var segmentContinuations: [UUID: AsyncStream<[(start: Double, end: Double)]>.Continuation] = [:]
@@ -988,6 +996,55 @@ actor SkipOrchestrator {
 
     private func removeSegmentContinuation(id: UUID) {
         segmentContinuations.removeValue(forKey: id)
+    }
+
+    // MARK: - Skip Mode Stream (playhead-usn1)
+
+    /// Returns an `AsyncStream` of the active `SkipModeSnapshot`.
+    ///
+    /// The CURRENT snapshot is delivered immediately on subscribe, so a
+    /// subscriber that attaches before, during or after `beginEpisode` all end
+    /// up with the same answer. That replay is what makes this a replacement for
+    /// the one-shot `currentSkipMode()` / `currentSkipModeResolution()` read at
+    /// screen-appear time rather than an addition to it: the screen appears
+    /// while `performPlayEpisode` is still awaiting the asset resolution that
+    /// precedes `beginEpisode`, so the one-shot read observed the value
+    /// `endEpisode` had just installed — `.shadow` / `.noActiveEpisode` — for a
+    /// show whose identity resolves perfectly, and never looked again.
+    func skipModeStream() -> AsyncStream<SkipModeSnapshot> {
+        let id = UUID()
+        return AsyncStream { [self] continuation in
+            self.skipModeContinuations[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task {
+                    await self?.removeSkipModeContinuation(id: id)
+                }
+            }
+            continuation.yield(self.currentSkipModeSnapshot())
+        }
+    }
+
+    private func removeSkipModeContinuation(id: UUID) {
+        skipModeContinuations.removeValue(forKey: id)
+    }
+
+    /// The pair as it stands right now.
+    func currentSkipModeSnapshot() -> SkipModeSnapshot {
+        SkipModeSnapshot(mode: activeSkipMode, resolution: activeSkipModeResolution)
+    }
+
+    /// Broadcast the current pair to every subscriber.
+    ///
+    /// Called at EVERY transition that writes `activeSkipMode` or
+    /// `activeSkipModeResolution` — `beginEpisode` (both the pre-suspension
+    /// clear and the post-lookup verdict), `endEpisode`, and
+    /// `setActiveSkipMode`. Missing one is how the surface goes stale again, so
+    /// the mutation battery re-injects each omission separately.
+    private func publishSkipMode() {
+        let snapshot = currentSkipModeSnapshot()
+        for (_, continuation) in skipModeContinuations {
+            continuation.yield(snapshot)
+        }
     }
 
     // MARK: - Banner Item Stream
@@ -1775,6 +1832,10 @@ actor SkipOrchestrator {
         // for the replacement episode is in flight.
         pushSkipCues()
         broadcastAppliedSegments()
+        // playhead-usn1: the cleared pair is published too. A subscriber that
+        // attached during the PREVIOUS episode must not keep rendering that
+        // show's mode across the suspensions the lookup below is about to take.
+        publishSkipMode()
 
         #if DEBUG
         await beginEpisodeHydrationBarrierForTesting?()
@@ -1828,6 +1889,9 @@ actor SkipOrchestrator {
             activeSkipMode = .shadow
             noteSkipModeResolution(.unresolvedShowIdentity, episodeId: episodeId)
         }
+        // playhead-usn1: the verdict reaches the surface HERE, not on the next
+        // pull. This is the emission the Now Playing pill was missing.
+        publishSkipMode()
 
         // playhead-xr3t: hydrate the inventory filter's episode duration
         // from the persisted asset row. Best-effort: an absent row /
@@ -2082,6 +2146,9 @@ actor SkipOrchestrator {
         // The per-cause failure COUNTS deliberately survive — they are a
         // process-lifetime tally, not per-episode state.
         activeSkipModeResolution = .noActiveEpisode
+        // playhead-usn1: publish the cleared pair so a mounted Now Playing
+        // screen stops describing a show that is no longer playing.
+        publishSkipMode()
         // playhead-xr3t: clear per-episode inventory-filter context so
         // the next episode doesn't inherit stale duration/chapters.
         activeEpisodeDuration = nil
@@ -5779,14 +5846,30 @@ actor SkipOrchestrator {
         // the listener their show was unrecognized after they had answered the
         // question themselves.
         activeSkipModeResolution = .sessionOverride
+        // playhead-usn1: an explicit choice is a transition like any other.
+        publishSkipMode()
         evaluateAndPush()
     }
 
-    #if DEBUG
-    /// Test hook: the show identity this session actually resolved, including
-    /// one recovered from the durable job row (playhead-djl0).
-    func activePodcastIdForTesting() -> String? {
+    /// The show identity this session actually resolved, including one
+    /// recovered from the durable job row (playhead-djl0).
+    ///
+    /// playhead-usn1 promoted this out of `#if DEBUG`. djl0's recovery gave the
+    /// ORCHESTRATOR an identity the runtime did not have, and nothing carried it
+    /// back — so a session could hold a valid trust profile (pill selectable,
+    /// because the resolution reports a resolved identity) while
+    /// `PlayheadRuntime.currentPodcastId` stayed nil and every write silently
+    /// went nowhere. That is precisely the "menu accepts a choice and forgets
+    /// it" defect djl0 withheld the control to avoid; closing the loop is
+    /// better than withholding.
+    func activeShowIdentity() -> String? {
         activePodcastId
+    }
+
+    #if DEBUG
+    /// Legacy spelling kept for the playhead-djl0 suites.
+    func activePodcastIdForTesting() -> String? {
+        activeShowIdentity()
     }
     #endif
 
