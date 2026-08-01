@@ -196,6 +196,10 @@ FOCUSED_SUITES=(
   # (D07-D09).
   -only-testing:PlayheadTests/SuggestBannerEntryGateTests
   -only-testing:PlayheadTests/SuggestBannerSkipAffordanceTests
+  # playhead-ynmk's extent gate. D07 is a direct revert of it, so leaving it out
+  # would have let a mutation that re-skips 150 s of show be judged solely on
+  # d3g0's own card-side assertion.
+  -only-testing:PlayheadTests/BannerConfirmationExtentGateTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -293,7 +297,12 @@ T_D3G0_CATALOG="Moving the emit later means the banner carries the RICHER catalo
 T_D3G0_NOSKIP="A both-edges-unanchored span does not offer a skip it cannot perform"
 T_D3G0_SKIP="A byte-exact span still offers a real skip"
 T_D3G0_MATCH="The card's claim matches what the tap actually does"
-T_D3G0_COPY="Mark-only copy drops the skip promise; skippable copy is untouched"
+# NOTE: no semicolon. `;` is the MUTATIONS record separator for expected test
+# names, so a display name containing one is silently split into two names that
+# match nothing — which is exactly how D09 first reported SURVIVED against a
+# test that had failed correctly. The test was renamed rather than the parser
+# taught to escape: one fewer thing to remember.
+T_D3G0_COPY="Mark-only copy drops the skip promise and skippable copy is untouched"
 T_D3G0_LATENCY="Entry latency budget is derived from the real transport tick, not chosen"
 
 # playhead-o4qr MERGE NOTE — READ BEFORE "FIXING" M01/M02/M03/M04/M06.
@@ -477,11 +486,24 @@ MUTATIONS=(
   # instinct produces, and the one Dan's decision rules out.
   "D06|24|ORCH|$T_D3G0_BUDGET"
 
-  # D07/D08 are the affordance. D07 makes the card always claim it will skip
-  # (the pre-fix state); D08 makes it never claim it (the overshoot). Distinct
-  # victims in both directions, so one batch.
-  "D07|25|ORCH|$T_D3G0_NOSKIP;$T_D3G0_MATCH"
-  "D08|25|ORCH|$T_D3G0_SKIP;$T_D3G0_MATCH"
+  # D07/D08 are the affordance, and they need a batch each — MEASURED, not
+  # assumed. Sharing batch 25 made D07 report SURVIVED: D08 replaces the card's
+  # `confirmationWouldSkip(_:)` call with a literal, so it deletes D07's only
+  # card-side reader and masks it entirely. Distinct victims were not enough;
+  # one mutation ate the other's seam.
+  #
+  # D07 (the card always claims it will skip — the pre-affordance state) names
+  # ONLY the absolute test. It cannot redden `affordanceMatchesWhatTheTapActuallyDoes`,
+  # and that is the point rather than a gap: D07 flips the card AND the
+  # transaction through the one shared helper, so the two agree and the anti-lie
+  # test passes. A consistent lie is invisible to a consistency check. That is
+  # why the suite carries both shapes.
+  "D07|25|ORCH|$T_D3G0_NOSKIP"
+
+  # D08 (the card never claims it will skip — the overshoot) leaves
+  # `acceptSuggestedSkip` honest, so the card and the transaction now DISAGREE
+  # on the byte-exact population and the anti-lie test does fire.
+  "D08|29|ORCH|$T_D3G0_SKIP;$T_D3G0_MATCH"
 
   # D09 is the copy seam and lives in a different file, so it cannot collide.
   "D09|26|VIEW|$T_D3G0_COPY"

@@ -727,7 +727,7 @@ struct SuggestBannerSkipAffordanceTests {
 
     /// The copy seam. Exactly one place produces the mark-only wording, so the
     /// copy pass (playhead-1mq1.1) has one file to edit.
-    @Test("Mark-only copy drops the skip promise; skippable copy is untouched")
+    @Test("Mark-only copy drops the skip promise and skippable copy is untouched")
     func markOnlyCopyDropsTheSkipPromise() {
         let skippable = AdBannerView.feedbackChoiceContent(
             for: .suggest, confirmationSkipsPlayback: true
