@@ -1594,13 +1594,13 @@ final class PlayheadRuntime {
                 // so iOS Low Data Mode is honored at the socket too.
                 fullFetcher: URLSessionFullEpisodeFetcher(
                     session: URLSessionRangedAudioSampler.makeWiFiOnlySession(),
+                    persona: .default,
                     cellularSession: URLSessionRangedAudioSampler.makeSession(
                         allowsCellular: true
                     ),
                     allowsCellular: {
                         UserPreferencesSnapshot.current.dayZeroAllowsCellular
-                    },
-                    persona: .default
+                    }
                 ),
                 bsideFingerprinter: EpisodeCaptureBSideFingerprinter(
                     decoder: AnalysisAudioBSideDecoder(audioService: audioService)

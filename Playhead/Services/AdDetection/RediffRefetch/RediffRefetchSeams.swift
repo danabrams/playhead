@@ -672,23 +672,12 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
         self.allowsCellular = allowsCellular
     }
 
-    /// playhead-4dqe: a k-way-friendly init that names the transport seams
-    /// first, matching how the day-0 wiring reads.
-    init(
-        session: URLSession,
-        cellularSession: URLSession?,
-        allowsCellular: @escaping @Sendable () -> Bool,
-        persona: RediffFetchPersona? = nil,
-        cacheBuster: @escaping @Sendable () -> String = { UUID().uuidString }
-    ) {
-        self.init(
-            session: session,
-            persona: persona,
-            cacheBuster: cacheBuster,
-            cellularSession: cellularSession,
-            allowsCellular: allowsCellular
-        )
-    }
+    // NOTE: there is deliberately only ONE init. A second overload that led
+    // with the transport seams read better at the day-0 call site but was
+    // AMBIGUOUS with this one for `(session:cellularSession:allowsCellular:)`,
+    // since every other parameter is defaulted. Swift already allows skipping
+    // defaults in declaration order, so that call spells fine against this init
+    // alone.
 
     /// Which session THIS fetch will use. Both conditions must hold: a
     /// cellular session must have been supplied AND the user must have opted
