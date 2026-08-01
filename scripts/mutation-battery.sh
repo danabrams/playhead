@@ -108,8 +108,28 @@
 #   0 ERROR. Batches 1-40 were NOT re-run and carry the 07-28 verdict above.
 #   Recount: the array now holds 74 live entries.
 #
-#   Three things that run learned, all of them authoring faults rather than
-#   coverage holes except the first:
+#   PARTIAL RE-RUN 2026-08-01 (playhead-4dqe). Batches 48-52 only, added by
+#   this bead: K01-K22, 22 entries, 5 batches. FINAL 22 KILLED / 0 SURVIVED /
+#   0 ERROR (7 builds: 5 batches, then K15 and K10 re-run alone after the two
+#   faults below were repaired). Batches 1-47 were NOT re-run and carry the
+#   verdicts above. Recount: the array now holds 96 live entries.
+#
+#   Two things that run learned:
+#     • K10 SURVIVED for real, and the survivor was a genuine coverage hole.
+#       `an UNKNOWN publish date sorts LAST` asserted the ORDER OF A
+#       TWO-ELEMENT SORT. Inverting `case (nil, .some)` makes the comparator
+#       claim BOTH "a precedes b" and "b precedes a" — an invalid predicate,
+#       whose `sorted(by:)` behaviour is undefined — and on two elements the
+#       sort happened to reach the expected order through the other arm. The
+#       test now asserts `isOrderedBefore` in BOTH directions. A list order is
+#       not evidence about a comparator.
+#     • K15 reported ERROR, not SURVIVED: one of its three named tests lives in
+#       `RediffDayZeroTriggerIdempotencyTests`, which was missing from
+#       FOCUSED_SUITES. That is the script's own documented failure mode and
+#       the fix was the list, not the expectation.
+#
+#   Three things the 07-28/djl0 runs learned, all of them authoring faults
+#   rather than coverage holes except the first:
 #     • J02 SURVIVED for real. `a show with no profile yet is a new-show
 #       default, not a failure` named the right resolution and then asserted a
 #       DIFFERENT cause's counter, so reclassifying `newShowDefault` as a
