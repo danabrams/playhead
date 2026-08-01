@@ -103,6 +103,29 @@
 #       as they stood — that was the point, it is what proved the two tests
 #       vacuous — and both KILLED once the fixtures were repaired.
 #
+#   PARTIAL RE-RUN 2026-08-01 (playhead-djl0). Batches 41-47 only, added by
+#   this bead: J01-J18, 18 entries, 8 builds. FINAL 18 KILLED / 0 SURVIVED /
+#   0 ERROR. Batches 1-40 were NOT re-run and carry the 07-28 verdict above.
+#   Recount: the array now holds 74 live entries.
+#
+#   Three things that run learned, all of them authoring faults rather than
+#   coverage holes except the first:
+#     • J02 SURVIVED for real. `a show with no profile yet is a new-show
+#       default, not a failure` named the right resolution and then asserted a
+#       DIFFERENT cause's counter, so reclassifying `newShowDefault` as a
+#       failure left it green — every first listen would have written a coded
+#       diagnostics incident. The test now asserts that cause's own counter and
+#       the absence of both diagnostics codes.
+#     • J08 and J14 each SURVIVED on ONE named test that the mutation provably
+#       cannot reach (an orchestrator edit against a view-model-local
+#       transition; a "route everything down the resolved branch" edit against
+#       the resolved branch's own labels). Both expectations were narrowed and
+#       the un-covered production values given their own entries, J17 and J18.
+#       Neither was fixed by relaxing an assertion.
+#     • J03's first EDIT was dry-run-clean and did not COMPILE (it left a
+#       non-exhaustive switch) — the file's own warning about `--dry-run`,
+#       collected again.
+#
 # THE ONE STANDING SURVIVOR — M17. Read this before "fixing" it.
 #   Production attribution is correct by construction: both seams pass the
 #   `sourceShowId` captured at gesture time into `makeManualCorrectionVetoEvent`
