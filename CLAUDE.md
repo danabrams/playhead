@@ -162,6 +162,20 @@ Two further traps this sequence exists to avoid (both hit on 2026-07-26):
 - Never pass `--force` to `git worktree remove` without explicit user approval — the refusal is the safety net.
 - Echo what was removed so the transcript audits the session.
 
+### A full gate run needs ~8 GB of headroom, and leaves ~100 MB behind (playhead-voez)
+
+Measured 2026-08-01 across three runs. Beyond the ~2.7 GB of `.derivedData` that CLAUDE.md already accounts for, one full-plan gate is a **transient** disk event: the destination simulator grows from ~3.7 GB to ~9 GB during the Swift Testing bulk and shrinks back afterwards. Starting a run with ~13 GB free finished; starting with ~10 GB free hit 100 % capacity and **wedged** — xcodebuild stayed alive with zero output for four minutes, having failed to write its result bundle. That presents as a hang, not as an error.
+
+Two consequences:
+
+- **Check free space before a gate.** Under ~8 GB, reclaim first. The remedy for a wedge is the documented one: kill the run, then `xcrun simctl shutdown <udid>` and `xcrun simctl erase <udid>` (needs `DEVELOPER_DIR`), which returns the sim to ~0. **Never `rm` a booted sim's directory.**
+- **`.derivedData/Logs/Test/*.xcresult` is the one part that does not shrink back** — ~100 MB per run, accumulating forever. It is safe to delete (the build cache is `.derivedData/Build`, untouched), and it is inside the `.worktrees/` prefix the `rm -rf` rail already permits:
+  ```bash
+  rm -rf .worktrees/<slug>/.derivedData/Logs/Test/*.xcresult
+  ```
+
+A wedged run is also the case the baseline check is built to survive: it printed `CANNOT EVALUATE — the log is incomplete` and passed xcodebuild's own exit through (143), rather than reading ~9,900 unfinished tests as a clean sweep.
+
 ### Orphan sweep script
 
 `scripts/disk-cleanup.sh` runs weekly via cron. Safe to run manually:
