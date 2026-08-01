@@ -427,6 +427,7 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/ShowSkipModeWriteTests
   -only-testing:PlayheadTests/RefusedSkipModeSelectionTests
   -only-testing:PlayheadTests/RecoveredShowIdentityAdoptionTests
+  -only-testing:PlayheadTests/RefusedShowSkipModeWriteDiagnosticsTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -724,6 +725,7 @@ T_USN1_ADOPT="the runtime adopts an identity only the orchestrator could recover
 T_USN1_NOOVERWRITE="adoption never overwrites an identity the runtime already has"
 T_USN1_STALE="a superseded play request does not adopt"
 T_USN1_VMREVERT="a refused write restores the pill to what it said before the tap"
+T_USN1_TRACE="a refused write is recorded under its own code"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1292,6 +1294,12 @@ MUTATIONS=(
   # that looks wired and is not.
   "U14|77|NPVM|$T_USN1_VMREVERT"
   "U15|77|NPVM|$T_USN1_VMLATE;$T_USN1_VMMENU"
+
+  # U17 files the refusal under playhead-djl0's READ-side code. Both tokens are
+  # honest and nothing crashes; what is lost is an operator's ability to tell
+  # "we never knew the show" from "the listener tried to set a preference and it
+  # went nowhere". The same collapse djl0 spent a bead undoing, one layer over.
+  "U17|78|RT|$T_USN1_TRACE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3472,6 +3480,15 @@ EOF
             let stream = await orchestrator.skipModeStream()
             for await snapshot in AsyncStream<SkipModeSnapshot>.makeStream().stream {
                 _ = stream
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U17)
+    snippet OLD <<'EOF'
+                code: .skipModeWriteRefusedNoShowIdentity,
+EOF
+    snippet NEW <<'EOF'
+                code: .skipModeShowIdentityUnresolved,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

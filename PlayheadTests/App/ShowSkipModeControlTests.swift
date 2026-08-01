@@ -364,6 +364,30 @@ struct NowPlayingSkipModeSubscriptionTests {
     private static let assetId = "asset-usn1-vm"
     private static let episodeId = "ep-usn1-vm"
 
+    /// Attach the view model's subscription and PROVE it is live before
+    /// returning.
+    ///
+    /// `observeSkipMode` registers its continuation inside an unstructured Task,
+    /// so a test that calls it and immediately begins an episode has no
+    /// guarantee about which happened first. If the episode wins, the
+    /// replay-on-attach hands over the already-resolved snapshot and the test
+    /// passes even with the verdict publish deleted — which is exactly what
+    /// mutation U01 demonstrated on the first run of this file. The sentinel is
+    /// a resolution neither the replay (`.noActiveEpisode`) nor the verdict
+    /// (`.showTrustProfile`) can produce, so watching it be overwritten is
+    /// positive proof the subscription is attached.
+    private static func attachAndAwaitSubscription(
+        _ viewModel: NowPlayingViewModel,
+        to orchestrator: SkipOrchestrator
+    ) async {
+        viewModel.skipModeResolution = .trustProfileUnreadable
+        viewModel.observeSkipMode(from: orchestrator)
+        for _ in 0..<400
+        where viewModel.skipModeResolution == .trustProfileUnreadable {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     /// THE FIELD DEFECT, at the surface. The screen appears, subscribes, and the
     /// episode begins AFTERWARDS — the real ordering. Before this bead the view
     /// model took one reading here and kept it, so the pill said "Show Unknown"
@@ -384,7 +408,10 @@ struct NowPlayingSkipModeSubscriptionTests {
             runtime: PlayheadRuntime(isPreviewRuntime: true)
         )
 
-        viewModel.observeSkipMode(from: orchestrator)
+        await Self.attachAndAwaitSubscription(viewModel, to: orchestrator)
+        #expect(viewModel.skipModeResolution == .noActiveEpisode,
+                "precondition: the screen must be subscribed BEFORE the episode begins")
+
         await orchestrator.beginEpisode(
             analysisAssetId: Self.assetId,
             episodeId: Self.episodeId,
@@ -419,7 +446,10 @@ struct NowPlayingSkipModeSubscriptionTests {
             runtime: PlayheadRuntime(isPreviewRuntime: true)
         )
 
-        viewModel.observeSkipMode(from: orchestrator)
+        await Self.attachAndAwaitSubscription(viewModel, to: orchestrator)
+        #expect(viewModel.skipModeResolution == .noActiveEpisode,
+                "precondition: the screen must be subscribed BEFORE the episode begins")
+
         await orchestrator.beginEpisode(
             analysisAssetId: Self.assetId,
             episodeId: Self.episodeId,
@@ -676,5 +706,53 @@ struct RecoveredShowIdentityAdoptionTests {
             generation: staleGeneration, episodeId: episodeId
         )
         #expect(runtime.currentPodcastId == nil)
+    }
+}
+    _ logger: SurfaceStatusInvariantLogger,
+    untilSentinel sentinel: String
+) -> [InvariantViolation.Code] {
+    logger.invariantViolated(code: .unknown, description: sentinel)
+    var entries: [SurfaceStateTransitionEntry] = []
+    for _ in 0..<10 {
+        logger.flushForTesting()
+        guard let sessionURL = logger.currentSessionFileURL,
+              let data = try? Data(contentsOf: sessionURL) else { continue }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        entries = String(decoding: data, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap {
+                try? decoder.decode(
+                    SurfaceStateTransitionEntry.self, from: Data($0.utf8)
+                )
+            }
+        if entries.contains(where: {
+            $0.invariantViolation?.description == sentinel
+        }) { break }
+    }
+    return entries
+        .filter { $0.invariantViolation?.description != sentinel }
+        .compactMap(\.invariantViolation?.code)
+}
+
+@Suite("A refused per-show write leaves a durable trace (playhead-usn1)",
+       .timeLimit(.minutes(1)))
+@MainActor
+struct RefusedShowSkipModeWriteDiagnosticsTests {
+
+    @Test("a refused write is recorded under its own code")
+    func aRefusedWriteIsRecorded() async {
+        let runtime = PlayheadRuntime(isPreviewRuntime: true)
+        runtime._setUserMarkPlaybackContextForTesting(
+            analysisAssetId: "a", episodeId: "ep-usn1-log", podcastId: nil
+        )
+        _ = await runtime.setShowSkipMode(
+            .auto, orchestrator: runtime.skipOrchestrator
+        )
+        let codes = drainRuntimeInvariantCodes(
+            runtime.surfaceStatusLogger,
+            untilSentinel: "usn1-sentinel-\(UUID().uuidString)"
+        )
+        #expect(codes.contains(.skipModeWriteRefusedNoShowIdentity))
     }
 }
