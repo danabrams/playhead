@@ -764,10 +764,42 @@ struct AdDetectionConfig: Sendable {
     /// positive content-resumed barrier, and emits the recovered material as NEW
     /// mark-only rows. It modifies no existing window.
     ///
-    /// Ships OFF (this repo's convention for anything that moves production
-    /// boundaries — xsdz.37, fl4j, b6jq PR5 all shipped flag-off): flag-off
-    /// short-circuits BEFORE any derivation or write, so a backfill is
-    /// byte-identical to pre-xsdz.65. Flip after a corpus A/B.
+    /// **SHIPS ON — flipped 2026-08-01 by playhead-eks2, on Dan's approval.**
+    ///
+    /// The evidence the xsdz.65 close gated on, in the order it matters:
+    ///
+    ///  • THE FIELD CASE. Episode D9B513CD (Conan, 65.5 min), ground truth =
+    ///    Dan's own manual marks. Day-0 rediff found `0.0 – 45.1` (ad 1) with
+    ///    its end edge 0.4 s from his mark, and MISSED `47.6 – 94.3` (ad 2)
+    ///    entirely — two creatives 2.5 s apart in one pre-roll pod. Rediff
+    ///    detects what CHANGED between two fetches and ad 2 was byte-identical
+    ///    in both, so no rediff improvement reaches it. Recovering a found ad's
+    ///    pod NEIGHBOURS is the only mechanism that can.
+    ///
+    ///  • THE CORPUS A/B (`AdPodContinuationCorpusEvalTests`, run against
+    ///    byte-derived rediff pod boundaries). At the SHIPPING arm the newly
+    ///    claimed seconds landing outside every rediff slot are 0.0, asserted as
+    ///    a frozen budget rather than printed; no detected slot loses coverage;
+    ///    uncovered ad seconds inside detected slots fall and the count of slots
+    ///    still carrying a >30 s hole falls.
+    ///
+    ///  • THE BOUNDED DOWNSIDE. Every emitted row is `markOnly` / `candidate`
+    ///    with both edge anchors `unanchored`, so playhead-2350 blocks auto-skip
+    ///    and playhead-ynmk makes a banner confirmation MARK rather than cut.
+    ///    A wrong continuation therefore costs a wrong BANNER, never lost show.
+    ///    Both gates are asserted against rows `runBackfill` actually persisted
+    ///    at this flag's shipped value in `AdPodContinuationFlipTests`.
+    ///
+    /// **KNOWN GAP, measured, not hypothesised.** `AdPodContinuation
+    /// .seedDecisionStates` is `{confirmed, applied}`, and
+    /// `mintByteExactDayZeroMarks` persists a day-0 byte-exact rediff mark as
+    /// `.candidate`. So the exact state Dan's device was in — ad 1 found ONLY by
+    /// day-0 rediff — seeds no chain and recovers nothing, even with this ON.
+    /// Pinned two-armed by
+    /// `AdPodContinuationFlipTests.dayZeroRediffMarkCannotSeedAContinuationChain`
+    /// (same row, same links, only `decisionState` differs: 0 s vs ~all of ad 2).
+    /// Admitting byte-derived candidates as seeds is a separate, measured
+    /// decision — see playhead-evc1.
     let podContinuationEnabled: Bool
 
     /// playhead-hvk0: require a full rescan to have MEASURABLY read its episode
@@ -930,7 +962,7 @@ struct AdDetectionConfig: Sendable {
         postRollGuardSeconds: Double = 90.0,
         unanchoredExtentBlocksAutoSkip: Bool = true,
         preRollStartClampSeconds: Double = 20.0,
-        podContinuationEnabled: Bool = false,
+        podContinuationEnabled: Bool = true,
         plannerPromotionRequiresMeasuredCoverage: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
@@ -1072,7 +1104,7 @@ struct AdDetectionConfig: Sendable {
         postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
         preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
-        podContinuationEnabled: false,  // playhead-xsdz.65: ad-pod continuation ships OFF and fully inert (zero ad_windows writes, byte-identical backfill); flip after corpus A/B
+        podContinuationEnabled: true,  // playhead-eks2: flipped ON 2026-08-01 (Dan) — the corpus A/B the xsdz.65 close gated on measures 0.0 newly-claimed seconds outside a byte-confirmed DAI slot at the shipping arm, and the output is mark-only/candidate/unanchored, so the worst case is a wrong BANNER (playhead-2350 + ynmk both hold, pinned by AdPodContinuationFlipTests)
         plannerPromotionRequiresMeasuredCoverage: false  // playhead-hvk0: the read-evidence promotion gate ships OFF and fully inert. The mechanism is correct and mutation-tested, but at the shared 0.98 floor NO episode on the 2026-07-29 device pull qualifies (max measured adScanFraction 0.943), so flipping it retires `targetedWithAudit` entirely and buys a full-episode plan on every episode at a MEASURED 12-45 min of FM wall-clock each, 92% of it spent on calls that fail and yield no coverage. Retiring a policy at that price is Dan's decision under CLAUDE.md Decision Authority — see the field doc.
     )
 
@@ -6393,9 +6425,16 @@ actor AdDetectionService {
         // every emitted row is `markOnly` with both edge anchors `.unanchored`,
         // which can never auto-skip.
         //
-        // Hard-gated on `podContinuationEnabled` (default OFF): flag-off
-        // short-circuits BEFORE any fetch/derivation/write, so this backfill is
-        // byte-identical to pre-xsdz.65.
+        // Hard-gated on `podContinuationEnabled`, which since playhead-eks2
+        // (2026-08-01) ships ON. The gate stays because it is the rollback: with
+        // it off this short-circuits BEFORE any fetch/derivation/write and the
+        // backfill is byte-identical to pre-xsdz.65.
+        //
+        // ONLY A `.confirmed` / `.applied` WINDOW SEEDS A CHAIN HERE. That
+        // excludes a day-0 byte-exact rediff mark, which is persisted
+        // `.candidate` — so a pod whose only detected ad came from day-0 rediff
+        // recovers nothing from this step. Measured, not assumed; see
+        // playhead-evc1 and `podContinuationEnabled`'s note.
         //
         // A FAILURE HERE MUST NEVER COST THE BACKFILL. This is the last
         // additive step before the priors update and the coverage watermark, so
