@@ -175,7 +175,11 @@ export DEVELOPER_DIR
 ORCH="Playhead/Services/SkipOrchestrator/SkipOrchestrator.swift"
 STORE="Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
 CTRL="Playhead/Services/AdDetection/PerShowThresholdControllerStore.swift"
-MUTABLE_FILES=("$ORCH" "$STORE" "$CTRL")
+# playhead-d3g0: the suggest card's copy seam. The mark-only wording is the
+# only thing standing between "confirming this MARKS" and a button that
+# promises a skip it cannot perform, so it is mutable here.
+VIEW="Playhead/Views/Components/AdBannerView.swift"
+MUTABLE_FILES=("$ORCH" "$STORE" "$CTRL" "$VIEW")
 
 FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
@@ -188,6 +192,10 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorSuggestTierTests
   # playhead-1mq1.2.1: the mixed-width attribution rails (P01/P02).
   -only-testing:PlayheadTests/RevertMixedWidthAttributionTests
+  # playhead-d3g0: the playhead-entry gate (D01-D06) and the skip affordance
+  # (D07-D09).
+  -only-testing:PlayheadTests/SuggestBannerEntryGateTests
+  -only-testing:PlayheadTests/SuggestBannerSkipAffordanceTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -271,6 +279,22 @@ T_DIRECT_REPLACEMENT_CLEARS_ACCEPTED="direct episode replacement clears accepted
 # wrong, reverted in one tap. Both learning surfaces it can poison are asserted
 # in this one test, which is why P01 and P02 need separate batches.
 T_MIXED_WIDTH="THEMOVE: reverting 3493.02-3536.90 lands no negative label on the true ad 3505.74-3536.10"
+
+# playhead-d3g0 — the suggest banner's playhead gate and skip affordance.
+T_D3G0_FIELD="Field case: one batch of three spans emits NOTHING until the playhead reaches each"
+T_D3G0_ENTRY="Fires on the first observation INSIDE the span, and not one tick earlier"
+T_D3G0_BUDGET="Worst-case tick alignment still banners inside the budget"
+T_D3G0_PREROLL="Pre-roll banners when the playhead is AT 0:00 — and not when the episode is resumed past it"
+T_D3G0_PAST="A span already behind the playhead never banners"
+T_D3G0_ONCE="Entry fires at most once per window, however many ticks land inside"
+T_D3G0_SEEK="Seeking backwards into an already-fired span does not re-ask"
+T_D3G0_REPLAY="A host that attaches late replays only spans the playhead has entered — exactly once"
+T_D3G0_CATALOG="Moving the emit later means the banner carries the RICHER catalog"
+T_D3G0_NOSKIP="A both-edges-unanchored span does not offer a skip it cannot perform"
+T_D3G0_SKIP="A byte-exact span still offers a real skip"
+T_D3G0_MATCH="The card's claim matches what the tap actually does"
+T_D3G0_COPY="Mark-only copy drops the skip promise; skippable copy is untouched"
+T_D3G0_LATENCY="Entry latency budget is derived from the real transport tick, not chosen"
 
 # playhead-o4qr MERGE NOTE — READ BEFORE "FIXING" M01/M02/M03/M04/M06.
 #
@@ -419,6 +443,50 @@ MUTATIONS=(
   # Distinct seams (`receiveAdWindows` vs `beginEpisode`), distinct victims.
   "S06|19|ORCH|$T_GATE_FLIP_CLEARS_SUGGEST"
   "S07|19|ORCH|$T_DIRECT_REPLACEMENT_CLEARS_ACCEPTED"
+
+  # playhead-d3g0 — the suggest banner fires on PLAYHEAD ENTRY, and never
+  # offers a Skip it cannot perform.
+  #
+  # D01 is the bead itself and reddens the whole entry suite, so it takes a
+  # batch alone. Everything after it is a NARROWING of that gate, and each
+  # narrowing is checked against a distinct victim.
+  "D01|20|ORCH|$T_D3G0_FIELD;$T_D3G0_ENTRY;$T_D3G0_BUDGET;$T_D3G0_PREROLL;$T_D3G0_ONCE;$T_D3G0_SEEK;$T_D3G0_CATALOG"
+
+  # D02 (inclusive→exclusive at the START edge) and D03 (exclusive→inclusive at
+  # the END edge) are the two halves of the half-open interval and have
+  # disjoint victims: D02 kills the entry/pre-roll tests, which enter exactly
+  # ON a boundary; D03 kills the already-passed test, which is the only one
+  # that observes a span from outside its end. Neither test is named twice, so
+  # they share a batch honestly.
+  "D02|21|ORCH|$T_D3G0_ENTRY;$T_D3G0_PREROLL"
+  "D03|21|ORCH|$T_D3G0_PAST"
+
+  # D04 (never disarm) and D05 (drop the replay gate) both touch the
+  # once/replay contracts, and D05's victim is the replay test which D04 does
+  # not reach — D04's window is disarmed-then-re-fired within one stream,
+  # D05's is never disarmed at all. Separate batches anyway: D04 leaves every
+  # armed window eligible forever, which is broad enough that crediting D05
+  # off its blast radius is a real risk.
+  "D04|22|ORCH|$T_D3G0_ONCE;$T_D3G0_SEEK"
+  "D05|23|ORCH|$T_D3G0_REPLAY"
+
+  # D06: require a DWELL before presenting. This is the latency budget as a
+  # behaviour rather than a constant — the shape every "just wait a beat"
+  # instinct produces, and the one Dan's decision rules out.
+  "D06|24|ORCH|$T_D3G0_BUDGET"
+
+  # D07/D08 are the affordance. D07 makes the card always claim it will skip
+  # (the pre-fix state); D08 makes it never claim it (the overshoot). Distinct
+  # victims in both directions, so one batch.
+  "D07|25|ORCH|$T_D3G0_NOSKIP;$T_D3G0_MATCH"
+  "D08|25|ORCH|$T_D3G0_SKIP;$T_D3G0_MATCH"
+
+  # D09 is the copy seam and lives in a different file, so it cannot collide.
+  "D09|26|VIEW|$T_D3G0_COPY"
+
+  # D10: widen the latency budget past the transport tick's meaning. The
+  # constant is only honest while it is derived from the observer cadence.
+  "D10|27|ORCH|$T_D3G0_LATENCY"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -482,6 +550,16 @@ describe_mutation() {
     O04) echo "revertWindow: attribute recurrence REVOCATION to activePodcastId when the correction has no usable show" ;;
     P01) echo "ingestNegativeFingerprint: drop the mixed-width guard (a whole-span hard negative over a window that is mostly a real ad)" ;;
     P02) echo "revokeRecurrenceEvidence: fingerprint the WHOLE reverted span again instead of the attributable subspans" ;;
+    D01) echo "registerSuggestedWindow: emit at DETECTION delivery again instead of arming (the bead)" ;;
+    D02) echo "playhead entry: exclude the START edge, so entering the span is not entry" ;;
+    D03) echo "playhead entry: include the END edge, so a span already behind the playhead still asks" ;;
+    D04) echo "playhead entry: never disarm, so every observation inside a span re-asks" ;;
+    D05) echo "replay: drop the armed filter, so a late host receives spans the playhead never reached" ;;
+    D06) echo "playhead entry: require a dwell before presenting, so the card arrives inside the ad" ;;
+    D07) echo "suggest card: always claim the confirmation will skip (the pre-affordance state)" ;;
+    D08) echo "suggest card: never claim the confirmation will skip (the overshoot)" ;;
+    D09) echo "banner copy: give the mark-only card the skipping card's confirm wording" ;;
+    D10) echo "latency budget: raise it past any meaning the transport tick gives it" ;;
     O05) echo "denyAutoSkippedBanner: restore the outright refusal, so a banner No naming another show loses its receipt" ;;
     *)   echo "(no description)" ;;
   esac
@@ -1289,6 +1367,161 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # --- playhead-d3g0 ------------------------------------------------------
+
+  D01)
+    snippet OLD <<'EOF'
+            suggestWindows[adWindow.id] = adWindow
+            armedSuggestWindowIds.insert(adWindow.id)
+            return
+EOF
+    snippet NEW <<'EOF'
+            suggestWindows[adWindow.id] = adWindow
+            emitSuggestBanner(for: adWindow)
+            return
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D02)
+    snippet OLD <<'EOF'
+            .filter { time >= $0.startTime && time < $0.endTime }
+EOF
+    snippet NEW <<'EOF'
+            .filter { time > $0.startTime && time < $0.endTime }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D03)
+    snippet OLD <<'EOF'
+            .filter { time >= $0.startTime && time < $0.endTime }
+EOF
+    snippet NEW <<'EOF'
+            .filter { time >= $0.startTime }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D04)
+    snippet OLD <<'EOF'
+        for window in entered {
+            armedSuggestWindowIds.remove(window.id)
+            emitSuggestBanner(for: window)
+        }
+EOF
+    snippet NEW <<'EOF'
+        for window in entered {
+            emitSuggestBanner(for: window)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D05)
+    snippet OLD <<'EOF'
+        let pending = suggestWindows.values
+            .filter {
+                guard !armedSuggestWindowIds.contains($0.id) else {
+                    return false
+                }
+                guard let revisionToken =
+                        suggestRevisionTokensByWindowId[$0.id]
+                else {
+                    return true
+                }
+                return !acknowledgedSuggestRevisionTokens
+                    .contains(revisionToken)
+                    && !banneredWindowIds.contains($0.id)
+            }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+
+        for window in pending {
+            switch continuation.yield(makeSuggestBannerItem(for: window)) {
+EOF
+    snippet NEW <<'EOF'
+        let pending = suggestWindows.values
+            .filter {
+                guard let revisionToken =
+                        suggestRevisionTokensByWindowId[$0.id]
+                else {
+                    return true
+                }
+                return !acknowledgedSuggestRevisionTokens
+                    .contains(revisionToken)
+                    && !banneredWindowIds.contains($0.id)
+            }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+
+        for window in pending {
+            switch continuation.yield(makeSuggestBannerItem(for: window)) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D06)
+    snippet OLD <<'EOF'
+            .filter { time >= $0.startTime && time < $0.endTime }
+EOF
+    snippet NEW <<'EOF'
+            .filter { time >= $0.startTime + 1.0 && time < $0.endTime }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D07)
+    snippet OLD <<'EOF'
+    private func confirmationWouldSkip(_ window: AdWindow) -> Bool {
+        let anchors = resolvedEdgeAnchors(for: window)
+        return AutoSkipEdgePadding.skipWindow(
+EOF
+    snippet NEW <<'EOF'
+    private func confirmationWouldSkip(_ window: AdWindow) -> Bool {
+        if true { return true }
+        let anchors = resolvedEdgeAnchors(for: window)
+        return AutoSkipEdgePadding.skipWindow(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D08)
+    snippet OLD <<'EOF'
+            confirmationSkipsPlayback: confirmationWouldSkip(adWindow)
+EOF
+    snippet NEW <<'EOF'
+            confirmationSkipsPlayback: false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D09)
+    snippet OLD <<'EOF'
+                    confirmLabel: markOnlyConfirmFeedbackLabel,
+                    denyLabel: denyFeedbackLabel,
+                    confirmAccessibilityLabel: "Yes, this is a sponsor break",
+                    confirmAccessibilityHint:
+                        "Marks this as an ad; playback continues",
+EOF
+    snippet NEW <<'EOF'
+                    confirmLabel: confirmFeedbackLabel,
+                    denyLabel: denyFeedbackLabel,
+                    confirmAccessibilityLabel: "Yes, skip this sponsor break",
+                    confirmAccessibilityHint:
+                        "Confirms this is an ad and skips it",
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D10)
+    snippet OLD <<'EOF'
+    static let suggestEntryLatencyBudgetSeconds: TimeInterval = 0.5
+EOF
+    snippet NEW <<'EOF'
+    static let suggestEntryLatencyBudgetSeconds: TimeInterval = 3.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -1305,6 +1538,7 @@ rec_file()   {
     ORCH)  printf '%s' "$ORCH" ;;
     STORE) printf '%s' "$STORE" ;;
     CTRL)  printf '%s' "$CTRL" ;;
+    VIEW)  printf '%s' "$VIEW" ;;
     *)     printf '%s' "" ;;
   esac
 }
