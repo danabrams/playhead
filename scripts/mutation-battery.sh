@@ -2007,10 +2007,13 @@ EOF
     snippet OLD <<'EOF'
         case .noActiveEpisode, .unresolvedShowIdentity:
             return false
+        case .showTrustProfile, .newShowDefault, .sessionOverride,
 EOF
     snippet NEW <<'EOF'
         case .noActiveEpisode:
             return false
+        case .unresolvedShowIdentity,
+             .showTrustProfile, .newShowDefault, .sessionOverride,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -303,10 +303,20 @@ struct SkipModeResolutionNamingTests {
     /// own doc calls it "Default for new shows". It gets a distinct name so it
     /// is not counted as a failure, and so it is not confused with an identity
     /// that could not be resolved at all.
+    /// "Not a failure" is a claim about the COUNTERS and the LOG, not only
+    /// about the name. Asserting the name alone let a mutation that reclassified
+    /// `newShowDefault` as a failure pass: every first listen would then emit a
+    /// coded diagnostics line and increment a failure counter, and the audit
+    /// bucket would read as "we lose the show constantly" while nothing was
+    /// wrong. Found by mutation J02.
     @Test("a show with no profile yet is a new-show default, not a failure")
     func anUnseededShowIsANewShowDefault() async throws {
+        let (logger, directory) = makeScopedInvariantLogger()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let store = try await makeTestStore()
-        let orchestrator = try await Fx.makeOrchestrator(store: store)
+        let orchestrator = try await Fx.makeOrchestrator(
+            store: store, invariantLogger: logger
+        )
         await orchestrator.beginEpisode(
             analysisAssetId: Fx.assetId,
             episodeId: Fx.episodeId,
@@ -314,10 +324,19 @@ struct SkipModeResolutionNamingTests {
         )
         #expect(await orchestrator.currentSkipMode() == .shadow)
         #expect(await orchestrator.currentSkipModeResolution() == .newShowDefault)
+        #expect(!SkipModeResolution.newShowDefault.isLookupFailure)
+        #expect(
+            await orchestrator.skipModeResolutionFailureCount(.newShowDefault) == 0,
+            "a first listen is not an incident — counting it makes the tally unreadable"
+        )
         #expect(
             await orchestrator.skipModeResolutionFailureCount(.unresolvedShowIdentity) == 0,
             "a brand-new show is not an identity failure"
         )
+        let codes = try drainInvariantCodes(logger, untilSentinel: "djl0-newshow")
+        #expect(!codes.contains(.skipModeShowIdentityUnresolved))
+        #expect(!codes.contains(.skipModeTrustLookupFailed),
+                "a first listen must not write a diagnostics incident")
     }
 
     /// A show identity WAS supplied; there was simply nothing to ask. Production
