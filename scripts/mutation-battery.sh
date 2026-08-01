@@ -120,6 +120,43 @@
 #   Batches 1-52 were NOT re-run and carry the verdicts above. Recount: the
 #   array now holds 105 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-01 (playhead-evc1). Batches 62-67 (V01-V06, 6 new
+#   entries) plus batches 56, 57, 58 and 61 — L04, L05, L06 and L09, whose
+#   expectations this bead changed. FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 11
+#   builds (batch 62 and batch 64 each ERRORed once on a disk-exhaustion sim
+#   crash — "Test crashed with signal kill while preparing to run tests" — and
+#   KILLED on re-run after `simctl erase`; that is an environment fault, not a
+#   mutation fault). Batches 1-55 and 59-60 were NOT re-run and carry the
+#   verdicts above. Recount: the array now holds 111 live entries.
+#
+#   L06 was RE-CUT rather than re-verified. Its edit (admit `.candidate`
+#   wholesale) used to be "the playhead-evc1 carve-out applied early"; since
+#   evc1 landed it is the WRONG carve — it admits the segment aggregator's
+#   coarse 30 s tiles, which is the population the original exclusion was for.
+#   Its expectation moved from the eks2 characterization test to evc1's
+#   exclusion sweep plus the negative-control arm of that same eks2 test.
+#
+#   THE TWO SAFETY RAILS WERE RE-APPLIED BY HAND AND THEIR ISSUE LISTS READ,
+#   for the reason the eks2 note below gives — a KILL only proves SOME
+#   expectation failed, and both of these mutations also trip a metadata
+#   assertion in the evc1 suite. Under L04 (gate markOnly -> eligible), `2350: a
+#   day-0 seeded continuation span never auto-skips` also failed
+#   `trespassing.isEmpty`: a real skip cue was pushed over the day-0-seeded
+#   span. Under L05 (anchors unanchored -> rediffByteExact), `ynmk: confirming a
+#   day-0 seeded banner marks` also failed `pushedCues.isEmpty`,
+#   `promoted.wasSkipped == false` and `promoted.decisionState == .confirmed` —
+#   a tap really cut audio and the row really recorded `.applied`. The claim
+#   that a byte-exact seed's certainty does not propagate along the chain is
+#   load-bearing, not a restatement of the emitted literal.
+#
+#   V01's expectation list is deliberately the WHOLE admission half of the evc1
+#   suite (11 names). That makes it the vacuity audit for the bead: with the
+#   carve-out reverted, every test that claims to measure the admission must go
+#   red, and the three exclusion tests must stay green. It came back KILLED with
+#   all 11 red, including both vacuity CONTROLS — the "the control must seed"
+#   arm of the exclusion sweep and the "a candidate day-0 row was refused" arm
+#   of the veto test.
+#
 #   One thing that run learned, and it is the reason two of these were then
 #   re-run BY HAND rather than trusted: a KILL only proves SOME expectation in
 #   the named test failed, and a suite that also asserts the mutated field
