@@ -246,9 +246,14 @@ KICK="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroKickoff.swift"
 KCOORD="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroKickoffCoordinator.swift"
 SEAMS="Playhead/Services/AdDetection/RediffRefetch/RediffRefetchSeams.swift"
 ACT="Playhead/Services/AdDetection/RediffRefetch/RediffActivation.swift"
+# playhead-eks2: the ad-pod continuation flip (L01-L09). ADSVC carries BOTH the
+# shipped flag (`AdDetectionConfig.default`) and the Step 18b wire-in; PODC
+# carries the mark literals and the seed predicate.
+ADSVC="Playhead/Services/AdDetection/AdDetectionService.swift"
+PODC="Playhead/Services/AdDetection/AdPodContinuation.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
-  "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT"
+  "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
 )
 
 FOCUSED_SUITES=(
@@ -312,6 +317,13 @@ FOCUSED_SUITES=(
   # K15 reported ERROR ("expected test never ran") rather than KILLED — the
   # script's own named failure mode for a suite missing from this list.
   -only-testing:PlayheadTests/RediffDayZeroTriggerIdempotencyTests
+  # playhead-eks2: the pod-continuation flip (L01-L09). The d3g0/96ot suites
+  # above stay in scope deliberately — a continuation window is delivered by
+  # `ingestPersistedAdWindows` and presented by the entry gate, so a mutation
+  # that broke either while satisfying this bead's own suite would go unseen.
+  -only-testing:PlayheadTests/AdPodContinuationFlipTests
+  -only-testing:PlayheadTests/AdPodContinuationWireInTests
+  -only-testing:PlayheadTests/AdPodContinuationTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -541,6 +553,18 @@ T_4DQE_CELLULAR_NO_READ="the suppression check runs AFTER the WiFi gate — a ce
 T_4DQE_REQUEST_CELLULAR="a day-0 request under the opted-in setting ACTUALLY permits cellular — a gate alone would just fail the fetch"
 T_4DQE_SOCKET_LDM="the cellular-capable session opens cellular and expensive paths — but NEVER the constrained one"
 T_4DQE_FETCHER_FOLLOWS_SETTING="a fetcher with a cellular session follows the SETTING, both ways"
+
+# playhead-eks2 — ad-pod continuation is ON in production, and the two gates
+# that bound its downside still hold with the flag at its shipped value.
+T_EKS2_SHIPPED_ON="the production config ships pod continuation ON"
+T_EKS2_INIT_DEFAULT="a config built without the argument matches the shipped value"
+T_EKS2_RECOVERS="the shipped flag persists a continuation mark over the missed creative"
+T_EKS2_NO_AUTOSKIP="2350: a persisted continuation span never auto-skips, and still banners"
+T_EKS2_CONFIRM_MARKS="ynmk: confirming a continuation banner marks, it does not skip"
+T_EKS2_ENTRY_ONCE="d3g0: a continuation window ingested mid-listen arms, fires on entry, once"
+T_EKS2_DAY0_SEED="Field case: a day-0 rediff mark cannot seed, the same row confirmed can"
+T_EKS2_WIREIN_TIER="flag ON: every persisted continuation row is banner-tier"
+T_EKS2_WIREIN_COMPOSES="flag ON: runBackfill persists at least one continuation mark"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -900,6 +924,52 @@ MUTATIONS=(
   # K17: the ledger records the pre-flight ESTIMATE instead of what was
   # actually spent, so the budget bounds a number nobody measured.
   "K17|52|TRIG|$T_4DQE_REAL_COST"
+
+  # playhead-eks2 — the pod-continuation FLIP (L01-L09).
+  #
+  # ONE MUTATION PER BATCH, deliberately. Six of the nine redden a test in the
+  # same small suite, and the two that do not (L01, L03) have a blast radius
+  # that covers the other six — a shared batch could not tell them apart.
+
+  # L01 reverts the flip itself. It reddens the whole eks2 suite bar the
+  # pure-compose day-0 test, which is why it is alone.
+  "L01|53|ADSVC|$T_EKS2_SHIPPED_ON"
+
+  # L02 desynchronises the init default from `.default`. The eks2 e2e tests
+  # read `AdDetectionConfig.default.podContinuationEnabled` explicitly, so this
+  # is invisible to them — which is exactly what the rail is for.
+  "L02|54|ADSVC|$T_EKS2_INIT_DEFAULT"
+
+  # L03 keeps the flag ON and kills the Step 18b call site. Distinct seam from
+  # L01: a config that says yes and a pipeline that never asks.
+  "L03|55|ADSVC|$T_EKS2_RECOVERS;$T_EKS2_WIREIN_COMPOSES"
+
+  # L04 is the playhead-2350 rail: the emitted row claims auto-skip eligibility.
+  "L04|56|PODC|$T_EKS2_NO_AUTOSKIP;$T_EKS2_WIREIN_TIER"
+
+  # L05 is the playhead-ynmk rail: the row claims byte-exact edges, so a
+  # confirmation acquires an extent it never measured and cuts.
+  "L05|57|PODC|$T_EKS2_CONFIRM_MARKS;$T_EKS2_NO_AUTOSKIP;$T_EKS2_WIREIN_TIER"
+
+  # L06 silently widens the seed predicate to admit `.candidate`. This is the
+  # follow-up carve-out playhead-evc1 describes, applied WITHOUT its
+  # measurement — the characterization test is what makes that a deliberate act.
+  "L06|58|PODC|$T_EKS2_DAY0_SEED"
+
+  # L07 turns d3g0's CONTAINMENT emit back into a start-edge TRANSITION. A
+  # window armed while the playhead is already inside — which is every
+  # continuation window, since the pass runs after the pod's first ad is found
+  # — would then never banner at all.
+  "L07|59|ORCH|$T_EKS2_ENTRY_ONCE;$T_D3G0_FIELD"
+
+  # L08 stops disarming on emit, so a span asks again on every 0.25 s tick.
+  "L08|60|ORCH|$T_EKS2_ENTRY_ONCE;$T_D3G0_ONCE"
+
+  # L09 drops the mark confidence ceiling below `preloadConfidenceThreshold`.
+  # `markConfidenceCeiling`'s doc asserts the two are the same number; without
+  # that, 96ot's ingest filters every continuation row out and the banner the
+  # whole bead exists for never reaches the session.
+  "L09|61|PODC|$T_EKS2_ENTRY_ONCE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2634,6 +2704,119 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-eks2: the ad-pod continuation flip -----------------------
+
+  L01)
+    snippet OLD <<'EOF'
+        podContinuationEnabled: true,  // playhead-eks2: flipped ON 2026-08-01 (Dan) — the corpus A/B the xsdz.65 close gated on measures 0.0 newly-claimed seconds outside a byte-confirmed DAI slot at the shipping arm, and the output is mark-only/candidate/unanchored, so the worst case is a wrong BANNER (playhead-2350 + ynmk both hold, pinned by AdPodContinuationFlipTests)
+EOF
+    snippet NEW <<'EOF'
+        podContinuationEnabled: false,  // playhead-eks2: flipped ON 2026-08-01 (Dan) — the corpus A/B the xsdz.65 close gated on measures 0.0 newly-claimed seconds outside a byte-confirmed DAI slot at the shipping arm, and the output is mark-only/candidate/unanchored, so the worst case is a wrong BANNER (playhead-2350 + ynmk both hold, pinned by AdPodContinuationFlipTests)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L02)
+    snippet OLD <<'EOF'
+        podContinuationEnabled: Bool = true,
+EOF
+    snippet NEW <<'EOF'
+        podContinuationEnabled: Bool = false,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L03)
+    snippet OLD <<'EOF'
+        if config.podContinuationEnabled {
+            do {
+                let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+EOF
+    snippet NEW <<'EOF'
+        if config.podContinuationEnabled && analysisAssetId.isEmpty {
+            do {
+                let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L04)
+    snippet OLD <<'EOF'
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            catalogStoreMatchSimilarity: nil,
+EOF
+    snippet NEW <<'EOF'
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+            catalogStoreMatchSimilarity: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L05)
+    snippet OLD <<'EOF'
+            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+EOF
+    snippet NEW <<'EOF'
+            startEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L06)
+    snippet OLD <<'EOF'
+    static let seedDecisionStates: Set<String> = [
+        AdDecisionState.confirmed.rawValue,
+        AdDecisionState.applied.rawValue
+    ]
+EOF
+    snippet NEW <<'EOF'
+    static let seedDecisionStates: Set<String> = [
+        AdDecisionState.confirmed.rawValue,
+        AdDecisionState.applied.rawValue,
+        AdDecisionState.candidate.rawValue
+    ]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L07)
+    snippet OLD <<'EOF'
+            .filter { time >= $0.startTime && time < $0.endTime }
+EOF
+    snippet NEW <<'EOF'
+            .filter {
+                time >= $0.startTime
+                    && time < $0.startTime
+                        + PlaybackService.periodicTimeObserverIntervalSeconds
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L08)
+    snippet OLD <<'EOF'
+        for window in entered {
+            armedSuggestWindowIds.remove(window.id)
+            emitSuggestBanner(for: window)
+        }
+EOF
+    snippet NEW <<'EOF'
+        for window in entered {
+            emitSuggestBanner(for: window)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  L09)
+    snippet OLD <<'EOF'
+            markConfidenceCeiling: 0.70
+        )
+
+        init(
+EOF
+    snippet NEW <<'EOF'
+            markConfidenceCeiling: 0.60
+        )
+
+        init(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -2661,6 +2844,8 @@ rec_file()   {
     KCOORD) printf '%s' "$KCOORD" ;;
     SEAMS) printf '%s' "$SEAMS" ;;
     ACT)   printf '%s' "$ACT" ;;
+    ADSVC) printf '%s' "$ADSVC" ;;
+    PODC)  printf '%s' "$PODC" ;;
     *)     printf '%s' "" ;;
   esac
 }
