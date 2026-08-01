@@ -5250,10 +5250,20 @@ actor SkipOrchestrator {
             // recurrence learning and the MISS calibration above all landed —
             // but nothing is skipped. Presence was asserted; extent was not,
             // and no anchored edge exists to supply it.
-            logDecision(
-                managed: managed,
-                decision: .confirmed,
-                reason: "Banner confirmation over an unanchored extent -- presence recorded, markOnly"
+            //
+            // playhead-v7q6: the AUDIT TRAIL for this refusal is the durable
+            // row, not the decision log. The promoted `AdWindow` records it
+            // unambiguously — `decisionState == .confirmed` with
+            // `wasSkipped == false` is a refused confirmation and can be
+            // nothing else. `logDecision(managed:)` would additionally write
+            // the window's EXACT SPAN into the diagnostic logger, and
+            // `testExplicitBannerFeedbackRoutesDoNotWriteDetailedLogs` forbids
+            // every explicit-feedback route from doing that: exact feedback
+            // receipts belong only in the durable correction store. So the
+            // observability ynmk wanted is kept as an id-only os_log line —
+            // enough to find the event, carrying no receipt.
+            logger.info(
+                "acceptSuggestedSkip: unanchored extent — presence recorded, markOnly (window \(promotedId, privacy: .public))"
             )
             evaluateAndPush()
         }
