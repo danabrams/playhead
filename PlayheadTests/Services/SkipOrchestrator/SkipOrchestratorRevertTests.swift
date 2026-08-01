@@ -1193,7 +1193,14 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
         )
 
-        let suggestion = makeSkipTestMarkOnlyWindow(id: "sug-accept-race")
+        // playhead-ynmk: byte-exact edges. The positive control below reads the
+        // durable applied+skipped row to prove the gesture really committed, so
+        // the confirmation needs a late-safe extent to skip.
+        let suggestion = makeSkipTestMarkOnlyWindow(
+            id: "sug-accept-race",
+            startEdgeAnchor: .rediffByteExact,
+            endEdgeAnchor: .rediffByteExact
+        )
         try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
         #expect(

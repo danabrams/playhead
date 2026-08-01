@@ -785,7 +785,14 @@ func makeSkipTestMarkOnlyWindow(
     id: String,
     assetId: String = "asset-1",
     startTime: Double = 60,
-    endTime: Double = 120
+    endTime: Double = 120,
+    // playhead-ynmk: a banner confirmation only skips when the derived per-edge
+    // extent policy has a late-safe window, so callers that observe the
+    // acceptance through `applied` / `wasSkipped` / a pushed cue must state the
+    // extent they depend on. Default `.unanchored` — the field-case shape —
+    // so anchoring is always an explicit, visible choice.
+    startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
+    endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored
 ) -> AdWindow {
     AdWindow(
         id: id,
@@ -804,7 +811,9 @@ func makeSkipTestMarkOnlyWindow(
         wasSkipped: false,
         userDismissedBanner: false,
         evidenceSources: nil,
-        eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+        eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+        startEdgeAnchor: startEdgeAnchor.rawValue,
+        endEdgeAnchor: endEdgeAnchor.rawValue
     )
 }
 
