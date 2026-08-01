@@ -215,8 +215,20 @@ RSVC="Playhead/Services/AdDetection/RediffRefetch/RediffRefetchService.swift"
 TRUST="Playhead/Services/TrustScoring/TrustScoringService.swift"
 NPV="Playhead/Views/NowPlaying/NowPlayingView.swift"
 NPVM="Playhead/Views/NowPlaying/NowPlayingViewModel.swift"
+# playhead-4dqe: day-0 at DOWNLOAD time. Four more places the download-time
+# path can silently stop working — the transport/budget policy that decides
+# whether it may spend, the readiness wait + ordering that decide whether it
+# ever reaches the trigger, the coordinator that counts and surfaces a give-up,
+# and the fetch seams where the user's transport setting has to reach the
+# SOCKET rather than only the gate.
+BWPOL="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroBandwidthPolicy.swift"
+KICK="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroKickoff.swift"
+KCOORD="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroKickoffCoordinator.swift"
+SEAMS="Playhead/Services/AdDetection/RediffRefetch/RediffRefetchSeams.swift"
+ACT="Playhead/Services/AdDetection/RediffRefetch/RediffActivation.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
+  "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT"
 )
 
 FOCUSED_SUITES=(
@@ -260,6 +272,20 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SuggestTierIsNotGatedByTrustModeTests
   -only-testing:PlayheadTests/SkipModePillPresentationTests
   -only-testing:PlayheadTests/NowPlayingViewModelSkipModeResolutionTests
+  # playhead-4dqe: day-0 at DOWNLOAD time (K01-K22). The 96ot delivery suites
+  # above stay in scope deliberately — the download-time path ends in the same
+  # `triggerIfEligible`, so a mutation that broke the mint delivery while
+  # satisfying this bead's own suites would otherwise go unnoticed.
+  -only-testing:PlayheadTests/DayZeroTransportPolicyTests
+  -only-testing:PlayheadTests/RediffDayZeroDailyBudgetTests
+  -only-testing:PlayheadTests/RediffDayZeroKickoffOutcomeTests
+  -only-testing:PlayheadTests/DayZeroReadinessWaitTests
+  -only-testing:PlayheadTests/RediffDayZeroKickoffOrderingTests
+  -only-testing:PlayheadTests/RediffDayZeroKickoffCoordinatorTests
+  -only-testing:PlayheadTests/DayZeroTransportSettingTests
+  -only-testing:PlayheadTests/DayZeroFetchTransportTests
+  -only-testing:PlayheadTests/DayZeroDownloadTimeStoreTests
+  -only-testing:PlayheadTests/DayZeroTriggerTransportBudgetTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -455,6 +481,40 @@ T_DJL0_PILL_VISIBLE="the pill is shown for an unresolved identity even with no p
 T_DJL0_PILL_HIDDEN="the pill stays hidden when there is simply nothing playing"
 T_DJL0_VM_LOAD="loadSkipMode carries the CAUSE across, not just the mode"
 T_DJL0_VM_OVERRIDE="setting a mode marks the resolution as a session override"
+
+# playhead-4dqe — day-0 at DOWNLOAD time. Display names, verbatim; the
+# separator in a MUTATIONS record is `;`, so none of these may contain one.
+T_4DQE_LDM_CELLULAR="LOW DATA MODE WINS ON CELLULAR too — it is an OS-level instruction, not a transport rule"
+T_4DQE_LDM_OUTRANKS="Low Data Mode outranks the user setting: flipping the toggle cannot change the verdict"
+T_4DQE_CELLULAR_ALLOWED="cellular WITH the setting is ALLOWED — this is what Dan moved out of code"
+T_4DQE_DEFAULT_WIFI="THE DEFAULT IS WIFI ONLY — a metered user must never lose ~130 MB/episode before finding the toggle"
+T_4DQE_UNTOUCHED_INSTALL="an untouched install reads WiFi only"
+T_4DQE_WINDOW_ROLLS="the window ROLLS after 24 h from FIRST SPEND (not calendar midnight — a timezone crossing must not gain or lose a day)"
+T_4DQE_SPEND_RESTARTS="a spend after the window elapsed RESTARTS it rather than accumulating forever"
+T_4DQE_FULL_ESTIMATE="an attempt is admitted on the FULL estimate — never a partial fetch, which cannot mint at the k-way floor"
+T_4DQE_ZERO_SPEND="a zero-byte spend does not start a window — an attempt that spent nothing has not opened a day"
+T_4DQE_FURTHEST_PROGRESS="the wait reports the FURTHEST progress it ever saw, not the last (an LRU eviction must not rewrite history)"
+T_4DQE_CANCELLED_OWN_OUTCOME="a cancelled wait is .cancelled — teardown is not a defect and must not be reported as one"
+T_4DQE_DISTINCT_CODES="THE PRE-EWAG SIGNATURE and a download failure map to DIFFERENT invariant codes — the remedies differ"
+T_4DQE_MISSING_FILE_CAUSE="a download whose bytes never land is a DIFFERENT counted cause with a DIFFERENT code"
+T_4DQE_UNDATED_LAST="an UNKNOWN publish date sorts LAST — a missing date is not evidence of newness"
+T_4DQE_TOTAL_ORDER="equal publish dates fall back to FIFO, then to episode id — the order is TOTAL"
+T_4DQE_NEWEST_FIRST="A CONTENDED BATCH DRAINS NEWEST FIRST — Dan's ordering sub-decision, end to end"
+T_4DQE_DEDUPE="a SECOND kickoff for an episode already in flight does not double-spend the wait"
+T_4DQE_PRE_EWAG_SURFACED="PRE-EWAG REPRODUCTION: the file lands, the asset never does → counted, recorded, and SURFACED"
+T_4DQE_ORPHAN_ROW="A KICKOFF FOR AN EPISODE WITH NO ASSET ROW IS RECORDABLE — the whole reason this table is episode-keyed"
+T_4DQE_COUNTS_ACCUMULATE="counts ACCUMULATE per episode so \`kickoffCount\` large + \`firedCount\` zero reads as the pre-ewag failure"
+T_4DQE_MIXED_HISTORY="a mixed history keeps BOTH numbers — a device that recovered is distinguishable from one that never worked"
+T_4DQE_STORE_ROLLS="a spend more than 24 h after the window started ROLLS it — yesterday's bytes do not bind today"
+T_4DQE_CELLULAR_RECORDED="A CELLULAR REFUSAL IS RECORDED — before playhead-4dqe the gate returned an empty summary and wrote NOTHING"
+T_4DQE_LDM_RECORDED="LOW DATA MODE ON WIFI is recorded under its OWN exit — not folded into the cellular refusal"
+T_4DQE_CELLULAR_FETCHES="CELLULAR WITH THE SETTING ON ACTUALLY FETCHES — the setting is not decorative"
+T_4DQE_BUDGET_REFUSES="AN EXHAUSTED DAILY BUDGET REFUSES AND IS RECORDED — on WiFi, where nothing else would have stopped it"
+T_4DQE_REAL_COST="an attempt that RAN folds the bytes it ACTUALLY spent into the window — not the pre-flight estimate"
+T_4DQE_CELLULAR_NO_READ="the suppression check runs AFTER the WiFi gate — a cellular play never reads the store"
+T_4DQE_REQUEST_CELLULAR="a day-0 request under the opted-in setting ACTUALLY permits cellular — a gate alone would just fail the fetch"
+T_4DQE_SOCKET_LDM="the cellular-capable session opens cellular and expensive paths — but NEVER the constrained one"
+T_4DQE_FETCHER_FOLLOWS_SETTING="a fetcher with a cellular session follows the SETTING, both ways"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -733,6 +793,87 @@ MUTATIONS=(
   # edit `NowPlayingViewModel`'s skip-mode block, so they would eat each
   # other's anchors.
   "J17|47|NPVM|$T_DJL0_VM_OVERRIDE"
+
+  # -------------------------------------------------------------------------
+  # playhead-4dqe — day-0 rediff at DOWNLOAD time (K01-K22)
+  #
+  # Three claims, and one mutation family per claim: the download-time trigger
+  # reaches the trigger and NAMES it when it does not (K07-K09, K13, K15);
+  # background/auto downloads get the same entry point, drained serially and
+  # newest-first (K10-K12, K14); and the transport is a USER SETTING that is
+  # not the byte budget, that Low Data Mode outranks, and that has to reach the
+  # SOCKET (K01-K06, K16-K22).
+  # -------------------------------------------------------------------------
+
+  # K01: Low Data Mode applies ONLY on WiFi. Dan's sub-decision is that it wins
+  # on BOTH transports — it is the user's OS-level instruction, and an in-app
+  # toggle is not consent to override it.
+  "K01|48|BWPOL|$T_4DQE_LDM_CELLULAR;$T_4DQE_LDM_OUTRANKS"
+  # K04: the rolling window never elapses, so yesterday's bytes bind forever.
+  "K04|48|BWPOL|$T_4DQE_WINDOW_ROLLS;$T_4DQE_SPEND_RESTARTS"
+  # K10: an unknown publish date sorts FIRST, so a date-less feed jumps ahead
+  # of a genuine new drop when the budget is contended.
+  "K10|48|KICK|$T_4DQE_UNDATED_LAST"
+  # K18: a give-up is counted as a fired kickoff, which is precisely the
+  # "kickoffCount large, firedCount zero" signature this ledger exists to make
+  # readable.
+  "K18|48|STORE|$T_4DQE_ORPHAN_ROW;$T_4DQE_COUNTS_ACCUMULATE;$T_4DQE_MIXED_HISTORY"
+  # K20: the request's transport flag is hardcoded off, so an opted-in user's
+  # day-0 fetch is refused by the REQUEST even though the gate allowed it.
+  "K20|48|SEAMS|$T_4DQE_REQUEST_CELLULAR"
+
+  # K02: the cellular leg ignores the setting — a hardcoded WiFi-only gate,
+  # i.e. exactly what Dan moved out of code.
+  "K02|49|BWPOL|$T_4DQE_CELLULAR_ALLOWED;$T_4DQE_CELLULAR_FETCHES"
+  # K07: the wait blames the LAST probe rather than the furthest observed, so
+  # an LRU eviction rewrites the diagnosis of a kickoff that got further.
+  "K07|49|KICK|$T_4DQE_FURTHEST_PROGRESS"
+  # K12: the drain is FIFO, losing Dan's newest-episode-first ordering.
+  "K12|49|KCOORD|$T_4DQE_NEWEST_FIRST"
+  # K21: Low Data Mode is not honored at the SOCKET, only at the gate — one
+  # dropped `if` away from spending a metered user's data against an explicit
+  # OS-level instruction.
+  "K21|49|SEAMS|$T_4DQE_SOCKET_LDM"
+
+  # K03: the shipping default flips to cellular-allowed, so a metered user
+  # silently loses ~130 MB per episode before ever finding the toggle.
+  "K03|50|ACT|$T_4DQE_DEFAULT_WIFI;$T_4DQE_UNTOUCHED_INSTALL"
+  # K08: cancellation is reported as a give-up, so app teardown is
+  # indistinguishable from a download that never landed.
+  "K08|50|KICK|$T_4DQE_CANCELLED_OWN_OUTCOME"
+  # K14: the in-flight dedupe is gone, so two play paths plus the tap each
+  # spend a full k-way fetch for one episode.
+  "K14|50|KCOORD|$T_4DQE_DEDUPE"
+  # K16: the budget is admitted against a zero cost, so the ceiling never binds.
+  "K16|50|TRIG|$T_4DQE_BUDGET_REFUSES"
+  # K22: the fetcher ignores the setting and always reaches for cellular.
+  "K22|50|SEAMS|$T_4DQE_FETCHER_FOLLOWS_SETTING"
+
+  # K05: a PARTIAL attempt is admitted. Below the >=2 B-copy floor the mint
+  # cannot diff at all, so this spends the last of the budget for nothing.
+  "K05|51|BWPOL|$T_4DQE_FULL_ESTIMATE"
+  # K09: the two give-up causes collapse onto one invariant code, which is the
+  # same unattributable state the bare `return` left behind.
+  "K09|51|KICK|$T_4DQE_DISTINCT_CODES;$T_4DQE_MISSING_FILE_CAUSE"
+  # K15: THE BEAD'S CORE DEFECT, re-injected — the transport refusal writes
+  # nothing, so "why has day-0 never fired on this phone?" is unanswerable.
+  "K15|51|TRIG|$T_4DQE_CELLULAR_RECORDED;$T_4DQE_LDM_RECORDED;$T_4DQE_CELLULAR_NO_READ"
+  # K19: the store's roll never fires, so the SQL and the pure policy disagree
+  # about when a day ends.
+  "K19|51|STORE|$T_4DQE_STORE_ROLLS"
+
+  # K06: a zero-byte spend starts a window, so a device that only ever fails
+  # silently shrinks its own daily allowance.
+  "K06|52|BWPOL|$T_4DQE_ZERO_SPEND"
+  # K11: the ordering loses its FIFO tiebreak and is no longer total, so the
+  # drain order depends on sort stability.
+  "K11|52|KICK|$T_4DQE_TOTAL_ORDER"
+  # K13: the per-cause give-up counters stop counting — one indistinguishable
+  # total is what playhead-djl0 established is not enough.
+  "K13|52|KCOORD|$T_4DQE_PRE_EWAG_SURFACED"
+  # K17: the ledger records the pre-flight ESTIMATE instead of what was
+  # actually spent, so the budget bounds a number nobody measured.
+  "K17|52|TRIG|$T_4DQE_REAL_COST"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -830,6 +971,28 @@ describe_mutation() {
     E08) echo "runDayZeroRefetch: accumulate the ROTATED flag into the MARK count (the neighbouring number)" ;;
     E09) echo "fetchMintAndRecord: report 0 marks on the marked branch, so nothing propagates" ;;
     O05) echo "denyAutoSkippedBanner: restore the outright refusal, so a banner No naming another show loses its receipt" ;;
+    K01) echo "DayZeroTransportPolicy: Low Data Mode applies only on WiFi" ;;
+    K02) echo "DayZeroTransportPolicy: cellular refused regardless of the user setting" ;;
+    K03) echo "RediffActivation: the shipping transport default flips to cellular-allowed" ;;
+    K04) echo "RediffDayZeroDailyBudget: the rolling window never elapses" ;;
+    K05) echo "RediffDayZeroDailyBudget: admit an attempt that fits only ONE B-copy" ;;
+    K06) echo "RediffDayZeroDailyBudget: a zero-byte spend starts a window" ;;
+    K07) echo "DayZeroReadinessWait: blame the LAST probe instead of the furthest observed" ;;
+    K08) echo "DayZeroReadinessWait: report cancellation as a missing-file give-up" ;;
+    K09) echo "RediffDayZeroKickoffOutcome: both give-ups share one invariant code" ;;
+    K10) echo "RediffDayZeroKickoffOrdering: an unknown publish date sorts FIRST" ;;
+    K11) echo "RediffDayZeroKickoffOrdering: drop the FIFO tiebreak (the order is no longer total)" ;;
+    K12) echo "RediffDayZeroKickoffCoordinator: drain FIFO instead of newest-episode-first" ;;
+    K13) echo "RediffDayZeroKickoffCoordinator: count every give-up as .fired" ;;
+    K14) echo "RediffDayZeroKickoffCoordinator: drop the in-flight dedupe" ;;
+    K15) echo "DayZeroRediffTrigger: the transport refusal writes nothing (the playhead-4dqe defect)" ;;
+    K16) echo "DayZeroRediffTrigger: admit the budget against a zero estimate" ;;
+    K17) echo "DayZeroRediffTrigger: charge the window the ESTIMATE, not the real cost" ;;
+    K18) echo "AnalysisStore: count a day-0 give-up as a fired kickoff" ;;
+    K19) echo "AnalysisStore: the day-0 budget window never rolls in SQL" ;;
+    K20) echo "RediffFetchRequest: the request refuses cellular whatever the setting says" ;;
+    K21) echo "URLSessionRangedAudioSampler: the cellular session admits Low Data Mode" ;;
+    K22) echo "URLSessionFullEpisodeFetcher: use the cellular session regardless of the setting" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -2236,6 +2399,215 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+
+  # ------------------------------------------------------------------
+  # playhead-4dqe — day-0 rediff at DOWNLOAD time
+  # ------------------------------------------------------------------
+
+  K01)
+    snippet OLD <<'EOF'
+        guard !transport.isLowDataMode else { return .denyLowDataMode }
+EOF
+    snippet NEW <<'EOF'
+        guard !(transport.isLowDataMode && transport.reachability == .wifi) else {
+            return .denyLowDataMode
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K02)
+    snippet OLD <<'EOF'
+        if transport.reachability == .cellular, !transport.allowsCellular {
+EOF
+    snippet NEW <<'EOF'
+        if transport.reachability == .cellular {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K03)
+    snippet OLD <<'EOF'
+    static let dayZeroAllowsCellularByDefault = false
+EOF
+    snippet NEW <<'EOF'
+    static let dayZeroAllowsCellularByDefault = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K04)
+    snippet OLD <<'EOF'
+        return now >= startedAt + windowSeconds
+EOF
+    snippet NEW <<'EOF'
+        _ = startedAt
+        return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K05)
+    snippet OLD <<'EOF'
+        estimatedCost <= remainingBytes(window, now: now)
+EOF
+    snippet NEW <<'EOF'
+        _ = estimatedCost
+        return estimatedBytesPerBCopy <= remainingBytes(window, now: now)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K06)
+    snippet OLD <<'EOF'
+        guard bytes > 0 else { return window }
+EOF
+    snippet NEW <<'EOF'
+        guard bytes >= 0 else { return window }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K07)
+    snippet OLD <<'EOF'
+            if reached.readinessProgressRank > furthest.readinessProgressRank {
+                furthest = reached
+            }
+EOF
+    snippet NEW <<'EOF'
+            furthest = reached
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K08)
+    snippet OLD <<'EOF'
+                    ready: nil, outcome: .cancelled, pollCount: polls
+EOF
+    snippet NEW <<'EOF'
+                    ready: nil, outcome: .noPinnedFile, pollCount: polls
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K09)
+    snippet OLD <<'EOF'
+        case .noPinnedFile: return .rediffDayZeroKickoffNoPinnedFile
+EOF
+    snippet NEW <<'EOF'
+        case .noPinnedFile: return .rediffDayZeroKickoffNoAnalysisAsset
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K10)
+    snippet OLD <<'EOF'
+        case (nil, .some):
+            return false
+EOF
+    snippet NEW <<'EOF'
+        case (nil, .some):
+            return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K11)
+    snippet OLD <<'EOF'
+        if lhs.enqueuedAt != rhs.enqueuedAt { return lhs.enqueuedAt < rhs.enqueuedAt }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K12)
+    snippet OLD <<'EOF'
+        pending = RediffDayZeroKickoffOrdering.drainOrder(pending)
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K13)
+    snippet OLD <<'EOF'
+            giveUps[outcome.outcome, default: 0] += 1
+EOF
+    snippet NEW <<'EOF'
+            giveUps[.fired, default: 0] += 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K14)
+    snippet OLD <<'EOF'
+        guard !inFlight.contains(request.episodeId) else { return }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K15)
+    snippet OLD <<'EOF'
+            if let exit = transportDecision.deniedExit {
+                await suppressionRecorder(analysisAssetId, exit, now)
+            }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K16)
+    snippet OLD <<'EOF'
+        guard RediffDayZeroDailyBudget.allows(window, estimatedCost: estimate, now: now) else {
+EOF
+    snippet NEW <<'EOF'
+        guard RediffDayZeroDailyBudget.allows(window, estimatedCost: 0, now: now) else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K17)
+    snippet OLD <<'EOF'
+            await budgetSpendRecorder(summary.fullFetchBytes, now)
+EOF
+    snippet NEW <<'EOF'
+            await budgetSpendRecorder(estimate, now)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K18)
+    snippet OLD <<'EOF'
+        let fired = outcome.isGiveUp ? 0 : 1
+EOF
+    snippet NEW <<'EOF'
+        let fired = 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K19)
+    snippet OLD <<'EOF'
+        let window = RediffDayZeroDailyBudget.windowSeconds
+EOF
+    snippet NEW <<'EOF'
+        let window = RediffDayZeroDailyBudget.windowSeconds * 1_000_000
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K20)
+    snippet OLD <<'EOF'
+        request.allowsCellularAccess = allowsCellular
+EOF
+    snippet NEW <<'EOF'
+        request.allowsCellularAccess = false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K21)
+    snippet OLD <<'EOF'
+        config.allowsConstrainedNetworkAccess = false
+EOF
+    snippet NEW <<'EOF'
+        config.allowsConstrainedNetworkAccess = allowsCellular
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  K22)
+    snippet OLD <<'EOF'
+        cellularSession != nil && allowsCellular()
+EOF
+    snippet NEW <<'EOF'
+        cellularSession != nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -2258,6 +2630,11 @@ rec_file()   {
     TRUST) printf '%s' "$TRUST" ;;
     NPV)   printf '%s' "$NPV" ;;
     NPVM)  printf '%s' "$NPVM" ;;
+    BWPOL) printf '%s' "$BWPOL" ;;
+    KICK)  printf '%s' "$KICK" ;;
+    KCOORD) printf '%s' "$KCOORD" ;;
+    SEAMS) printf '%s' "$SEAMS" ;;
+    ACT)   printf '%s' "$ACT" ;;
     *)     printf '%s' "" ;;
   esac
 }
