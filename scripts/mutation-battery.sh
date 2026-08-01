@@ -184,7 +184,17 @@ VIEW="Playhead/Views/Components/AdBannerView.swift"
 # decision is what was missing for the whole life of the day-0 path.
 TRIG="Playhead/Services/AdDetection/RediffRefetch/DayZeroRediffTrigger.swift"
 RSVC="Playhead/Services/AdDetection/RediffRefetch/RediffRefetchService.swift"
-MUTABLE_FILES=("$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC")
+# playhead-djl0: the three layers that carry the CAUSE behind the active skip
+# mode. `.shadow` used to name both "deliberately observing this show" and "I
+# could not look the show up", and every one of these files is a place the two
+# can be collapsed back together — the trust lookup that decides the cause, and
+# the pill/view-model hop that shows it.
+TRUST="Playhead/Services/TrustScoring/TrustScoringService.swift"
+NPV="Playhead/Views/NowPlaying/NowPlayingView.swift"
+NPVM="Playhead/Views/NowPlaying/NowPlayingViewModel.swift"
+MUTABLE_FILES=(
+  "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
+)
 
 FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
@@ -214,6 +224,19 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/MidSessionIngestSuggestArmingTests
   -only-testing:PlayheadTests/DayZeroTriggerMarkDeliveryTests
   -only-testing:PlayheadTests/DayZeroFirstListenInSessionSkipTests
+  # playhead-djl0: the named/counted/surfaced cause behind the skip mode
+  # (J01-J16). The two d3g0/96ot families above stay in scope: the field
+  # regression asserts a mark-only day-0 window still banners in a session
+  # with no show, which is a claim about the SUGGEST tier, not this bead's
+  # own machinery.
+  -only-testing:PlayheadTests/SkipModeResolutionNamingTests
+  -only-testing:PlayheadTests/SkipModeResolutionCountingTests
+  -only-testing:PlayheadTests/SkipModeResolutionDiagnosticsTests
+  -only-testing:PlayheadTests/ShowIdentityRecoveryTests
+  -only-testing:PlayheadTests/UnresolvedShowFieldRegressionTests
+  -only-testing:PlayheadTests/SuggestTierIsNotGatedByTrustModeTests
+  -only-testing:PlayheadTests/SkipModePillPresentationTests
+  -only-testing:PlayheadTests/NowPlayingViewModelSkipModeResolutionTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -373,6 +396,42 @@ T_96OT_COVERED="a run whose slots were already covered delivers nothing"
 T_96OT_ONCE="a marked day-0 run delivers its asset id EXACTLY once"
 T_96OT_MARKCOUNT="a marked day-0 run reports its MARK count, distinct from rotatedCount"
 T_96OT_FIRSTLISTEN="a first-listen day-0 mint produces a skip cue WITHOUT relaunching the episode"
+
+# playhead-djl0 — the CAUSE behind the active skip mode. Every one of these
+# names a way to collapse `.shadow` back into a single silent value.
+T_DJL0_DISTINGUISH="a deliberate shadow and an unresolved identity are DISTINGUISHABLE"
+T_DJL0_NEWSHOW="a show with no profile yet is a new-show default, not a failure"
+T_DJL0_NOTRUST="a missing trust service is its own cause, not an unresolved identity"
+T_DJL0_NONCANON="a non-canonical show id is an identity failure, not a new show"
+T_DJL0_BADMODE="a profile whose stored mode does not decode is its own cause"
+T_DJL0_STALE="a beginEpisode superseded mid-hydration leaves no stale cause"
+T_DJL0_OVERRIDE="an explicit session override is its own cause"
+T_DJL0_NOEPISODE="no episode is running before beginEpisode and after endEpisode"
+T_DJL0_FAILURESET="exactly the lookup failures are classified as failures"
+T_DJL0_SHOWLESS="only an unresolved identity leaves the session without a show"
+T_DJL0_COUNTED="each episode begun without a resolvable identity increments its counter"
+T_DJL0_UNAFFECTED="a resolvable show never increments any failure counter"
+T_DJL0_NOBLEED="counters are per cause — a missing trust service does not inflate the identity count"
+T_DJL0_LOGGED="an unresolved identity writes a coded entry to the session log"
+T_DJL0_QUIET="a resolvable show writes no skip-mode failure entry"
+T_DJL0_TRUSTCODE="a missing trust service records the trust-lookup code, not the identity code"
+T_DJL0_RECOVER="a nil caller identity is recovered from the durable job row"
+T_DJL0_RECOVER_ACTIVE="the recovered identity becomes the session's active show"
+T_DJL0_CALLER_WINS="a supplied identity is never overridden by the job row"
+T_DJL0_NULL_ROW="a job row with a NULL podcastId falls through to the named failure"
+T_DJL0_STORED_NONCANON="a non-canonical stored identity is not recovered"
+T_DJL0_NULL_MASK="a NULL newest row does not mask an older row that knows the show"
+T_DJL0_NEWEST="the newest job row wins when an episode has several"
+T_DJL0_NOT_BORROWED="another episode's job row is not borrowed"
+T_DJL0_FIELD="day-0 marks delivered to a session with no show still banner, and leave a trace"
+T_DJL0_PILL_DISTINCT="a deliberate shadow and an unresolved identity do not render the same pill"
+T_DJL0_PILL_LABELS="a resolved show keeps its existing pill text exactly"
+T_DJL0_PILL_LOCKED="an unresolved identity withholds the per-show control"
+T_DJL0_PILL_LIVE="a trust-lookup failure keeps the control — the show is still known"
+T_DJL0_PILL_VISIBLE="the pill is shown for an unresolved identity even with no podcast title"
+T_DJL0_PILL_HIDDEN="the pill stays hidden when there is simply nothing playing"
+T_DJL0_VM_LOAD="loadSkipMode carries the CAUSE across, not just the mode"
+T_DJL0_VM_OVERRIDE="setting a mode marks the resolution as a session override"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -583,6 +642,55 @@ MUTATIONS=(
   # share a batch.
   "E08|39|RSVC|$T_96OT_MARKCOUNT"
   "E09|40|RSVC|$T_96OT_MARKCOUNT;$T_96OT_ONCE;$T_96OT_FIRSTLISTEN"
+
+  # playhead-djl0 — `.shadow` must never be a silent fallback for "I could not
+  # look something up." Four layers, and the mutation set is organised by which
+  # layer re-merges the causes: the CLASSIFIER (J02/J03), the ORCHESTRATOR's
+  # branch and its bookkeeping (J01, J04-J09), the RECOVERY query (J10-J12) and
+  # the SURFACE (J13-J16).
+  #
+  # Batch 41 is the broad one: J01 reddens most of this bead's suites at once,
+  # so nothing that could be credited off its blast radius shares it. The two
+  # classifier mutations join it because they live in a different file and name
+  # victims J01 cannot reach — J02 flips a NON-failure into a failure (which
+  # J01, being a failure-side edit, never touches) and J03 the reverse.
+  "J01|41|ORCH|$T_DJL0_DISTINGUISH;$T_DJL0_COUNTED;$T_DJL0_LOGGED;$T_DJL0_FIELD"
+  "J02|41|TRUST|$T_DJL0_FAILURESET;$T_DJL0_NEWSHOW"
+  "J03|41|TRUST|$T_DJL0_SHOWLESS;$T_DJL0_PILL_LOCKED"
+
+  # The remaining classifier seam: `resolveMode`'s two failure exits. Both are
+  # `.shadow`, and before djl0 both were `.showTrustProfile`'s equal. Separate
+  # batch from J02/J03 because all three edit the same enum/function region.
+  "J04|42|TRUST|$T_DJL0_BADMODE"
+  # J05-J07 are the orchestrator's bookkeeping. Victims are disjoint: the
+  # counter (J05), the diagnostics record (J06), the code CHOICE (J07).
+  "J05|42|ORCH|$T_DJL0_COUNTED;$T_DJL0_NOBLEED"
+  "J06|42|ORCH|$T_DJL0_LOGGED;$T_DJL0_TRUSTCODE"
+
+  # J07 rewrites the same ternary J06 deletes, so it cannot share J06's batch.
+  "J07|43|ORCH|$T_DJL0_TRUSTCODE"
+  # J08/J09 are the two lifecycle resets. `setActiveSkipMode` and `endEpisode`
+  # are distinct functions with distinct victims.
+  "J08|43|ORCH|$T_DJL0_OVERRIDE;$T_DJL0_VM_OVERRIDE"
+  "J09|43|ORCH|$T_DJL0_NOEPISODE"
+
+  # J10-J12: half one, the recovery. J10 and J11 both edit `recoverShowIdentity`
+  # / the `beginEpisode` call around it, so they are split; J12 is the SQL and
+  # cannot collide with either.
+  "J10|44|ORCH|$T_DJL0_STORED_NONCANON"
+  "J12|44|STORE|$T_DJL0_NULL_MASK"
+
+  "J11|45|ORCH|$T_DJL0_CALLER_WINS"
+  # J13 drops the recovery entirely — the "half one was never wired" mutant.
+  # Its victims are the recovery suite's, which J11's caller-precedence victim
+  # is not among.
+  "J13|45|ORCH|$T_DJL0_RECOVER;$T_DJL0_RECOVER_ACTIVE;$T_DJL0_NEWEST"
+
+  # J14-J16: the surface. Three files, three disjoint victims, no anchor
+  # overlap — the cheapest honest batch in the bead.
+  "J14|46|NPV|$T_DJL0_PILL_DISTINCT;$T_DJL0_PILL_LABELS"
+  "J15|46|NPV|$T_DJL0_PILL_VISIBLE"
+  "J16|46|NPVM|$T_DJL0_VM_LOAD"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -1859,6 +1967,206 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-djl0 ------------------------------------------------------
+
+  # J01: the pre-djl0 shape. One silent `.shadow` for every reason.
+  J01)
+    snippet OLD <<'EOF'
+        } else {
+            activeSkipMode = .shadow
+            noteSkipModeResolution(.unresolvedShowIdentity, episodeId: episodeId)
+        }
+EOF
+    snippet NEW <<'EOF'
+        } else {
+            activeSkipMode = .shadow
+            noteSkipModeResolution(.showTrustProfile, episodeId: episodeId)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J02: a brand-new show counted as a failure. This is the mistake that makes
+  # the failure numbers read as "we lose the show on every first listen".
+  J02)
+    snippet OLD <<'EOF'
+        case .noActiveEpisode, .showTrustProfile, .newShowDefault, .sessionOverride:
+            return false
+EOF
+    snippet NEW <<'EOF'
+        case .noActiveEpisode, .showTrustProfile, .sessionOverride:
+            return false
+        case .newShowDefault:
+            return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J03: an unresolved identity claiming to have a show. Widens the predicate
+  # that decides both the diagnostics code and whether the pill offers a menu
+  # whose selection cannot be stored.
+  J03)
+    snippet OLD <<'EOF'
+        case .noActiveEpisode, .unresolvedShowIdentity:
+            return false
+EOF
+    snippet NEW <<'EOF'
+        case .noActiveEpisode:
+            return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J04: an undecodable stored mode reported as the profile's verdict.
+  J04)
+    snippet OLD <<'EOF'
+            return (.shadow, .unrecognizedTrustProfileMode)
+EOF
+    snippet NEW <<'EOF'
+            return (.shadow, .showTrustProfile)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J05: named but not counted.
+  J05)
+    snippet OLD <<'EOF'
+        skipModeResolutionFailureCounts[resolution, default: 0] += 1
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J06: counted but not recorded — no durable trace, which is exactly the
+  # state the 2026-08-01 field investigation found.
+  J06)
+    snippet OLD <<'EOF'
+        invariantLogger.invariantViolated(
+            code: code,
+            description: """
+                skip mode fell back to \(activeSkipMode.rawValue) \
+                because \(resolution.rawValue) (episode \(episodeIdHash))
+                """
+        )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J07: one bucket for both failure classes. The audit could count them but
+  # not tell "we lost the show" from "we could not read its profile".
+  J07)
+    snippet OLD <<'EOF'
+        let code: InvariantViolation.Code = resolution.hasResolvedShowIdentity
+            ? .skipModeTrustLookupFailed
+            : .skipModeShowIdentityUnresolved
+EOF
+    snippet NEW <<'EOF'
+        let code: InvariantViolation.Code = .skipModeShowIdentityUnresolved
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J08: the listener answers the question and the pill keeps saying their
+  # show was not recognised.
+  J08)
+    snippet OLD <<'EOF'
+        activeSkipModeResolution = .sessionOverride
+        evaluateAndPush()
+EOF
+    snippet NEW <<'EOF'
+        evaluateAndPush()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J09: `endEpisode` leaves the finished episode's cause describing nothing.
+  J09)
+    snippet OLD <<'EOF'
+        // process-lifetime tally, not per-episode state.
+        activeSkipModeResolution = .noActiveEpisode
+EOF
+    snippet NEW <<'EOF'
+        // process-lifetime tally, not per-episode state.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J10: recovery admits a non-canonical stored identity, retargeting
+  # show-scoped recurrence evidence into a neighbouring namespace.
+  J10)
+    snippet OLD <<'EOF'
+            return normalizedCatalogShowId(recorded)
+EOF
+    snippet NEW <<'EOF'
+            return recorded
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J11: the lagging mirror overrides the live relationship.
+  J11)
+    snippet OLD <<'EOF'
+        var resolvedShowId = normalizedPodcastId
+        if resolvedShowId == nil {
+EOF
+    snippet NEW <<'EOF'
+        var resolvedShowId = normalizedPodcastId
+        if true {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J12: drop the NOT NULL filter, so an episode whose NEWEST enqueue was
+  # context-free hides an older row that knows the show.
+  J12)
+    snippet OLD <<'EOF'
+            WHERE episodeId = ? AND podcastId IS NOT NULL
+EOF
+    snippet NEW <<'EOF'
+            WHERE episodeId = ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J13: half one never wired — the caller's nullable hop is the only source.
+  J13)
+    snippet OLD <<'EOF'
+            resolvedShowId = await recoverShowIdentity(episodeId: episodeId)
+EOF
+    snippet NEW <<'EOF'
+            resolvedShowId = nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J14: the pill reads the mode alone again, so a lost show impersonates a
+  # show that is deliberately in shadow.
+  J14)
+    snippet OLD <<'EOF'
+        if resolution.hasResolvedShowIdentity {
+            label = Self.modeLabel(mode)
+            accessibilityLabel = "Skip mode: \(Self.modeLabel(mode))"
+            isModeSelectable = true
+        } else {
+EOF
+    snippet NEW <<'EOF'
+        if true {
+            label = Self.modeLabel(mode)
+            accessibilityLabel = "Skip mode: \(Self.modeLabel(mode))"
+            isModeSelectable = true
+        } else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J15: back to "render only when there is a podcast title" — and the title
+  # is missing for exactly the same reason the identity is.
+  J15)
+    snippet OLD <<'EOF'
+        if resolution == .unresolvedShowIdentity { return true }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J16: every layer correct, and the cause dropped on the last hop.
+  J16)
+    snippet OLD <<'EOF'
+        skipModeResolution = await orchestrator.currentSkipModeResolution()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -1878,6 +2186,9 @@ rec_file()   {
     VIEW)  printf '%s' "$VIEW" ;;
     TRIG)  printf '%s' "$TRIG" ;;
     RSVC)  printf '%s' "$RSVC" ;;
+    TRUST) printf '%s' "$TRUST" ;;
+    NPV)   printf '%s' "$NPV" ;;
+    NPVM)  printf '%s' "$NPVM" ;;
     *)     printf '%s' "" ;;
   esac
 }
