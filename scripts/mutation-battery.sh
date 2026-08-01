@@ -144,6 +144,32 @@
 #   mutation fault). Batches 1-55 and 59-60 were NOT re-run and carry the
 #   verdicts above. Recount: the array now holds 111 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-01 (playhead-b6r2). Batches 85-90 (B01-B07, 7 new
+#   entries) plus batch 81 — W01/W02, whose expectation this bead re-pointed.
+#   FINAL 9 KILLED / 0 SURVIVED / 0 ERROR, 8 builds, ~21m wall clock. Batches
+#   1-80 and 82-84 were NOT re-run and carry the verdicts above. Recount: the
+#   array now holds 152 live entries.
+#
+#   THE PRE-FLIGHT EARNED ITS KEEP. The first attempt refused to run: the
+#   focused set was already RED on two xr3t review-round tests
+#   (`managedAdWindowReplacementCannotBypassInventoryFilter` and its
+#   AdDecisionResult twin), both of which demonstrate "a same-ID geometry
+#   change re-runs inventory validation" by replacing a span with `[0, 60]`.
+#   That is a PRE-ROLL, which the corrected rule (b) admits. Without the
+#   baseline check, six mutations would have been credited KILLED off two
+#   failures that had nothing to do with them.
+#
+#   B01's issue list was READ, not trusted, and it says something the bead did
+#   not: restoring the old head rule reddens FOUR tests belonging to other
+#   beads — d3g0's `Pre-roll banners when the playhead is AT 0:00`, d3g0's
+#   field-batch test, djl0's no-show banner trace, and the shadow-mode markOnly
+#   banner. Those tests passed on main for eleven weeks while the field
+#   behaviour they describe was broken, because `SkipOrchestrator.init`
+#   defaulted the filter OFF. They are red under B01 only because this bead
+#   bound that default to production. That is the bead's option 3 measured
+#   rather than argued: the divergence, not the rule, is what made the loss
+#   invisible — flipping the default alone would have gone red in April.
+#
 #   L06 was RE-CUT rather than re-verified. Its edit (admit `.candidate`
 #   wholesale) used to be "the playhead-evc1 carve-out applied early"; since
 #   evc1 landed it is the WRONG carve — it admits the segment aggregator's
