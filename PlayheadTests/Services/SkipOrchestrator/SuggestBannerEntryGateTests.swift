@@ -105,14 +105,14 @@ struct SuggestBannerEntryGateTests {
 
     // MARK: - Fixture
 
-    private static let assetId = "asset-1"
-    private static let episodeId = "asset-1"
+    fileprivate static let assetId = "asset-1"
+    fileprivate static let episodeId = "asset-1"
     /// MUST be the show `makeSkipTestTrustService` seeds — a show with no
     /// profile resolves to `.shadow`. Nothing here depends on auto mode (a
     /// suggest window never enters the skip-evaluation path), but keeping the
     /// harness identical to `BannerConfirmationExtentGateTests` means a future
     /// cue assertion added here cannot become silently vacuous.
-    private static let podcastId = "podcast-1"
+    fileprivate static let podcastId = "podcast-1"
 
     /// The three field spans, verbatim.
     private static let fieldSpans: [(id: String, start: Double, end: Double)] = [
@@ -123,7 +123,7 @@ struct SuggestBannerEntryGateTests {
 
     /// A `markOnly` window — the only kind that reaches the suggest tier.
     /// Anchors default to the field case's both-edges-`unanchored`.
-    private static func makeSuggestion(
+    fileprivate static func makeSuggestion(
         id: String,
         start: Double,
         end: Double,
@@ -157,7 +157,7 @@ struct SuggestBannerEntryGateTests {
         )
     }
 
-    private static func makeHarness() async throws
+    fileprivate static func makeHarness() async throws
         -> (orchestrator: SkipOrchestrator, store: AnalysisStore) {
         let store = try await makeTestStore()
         try await store.insertAsset(
@@ -186,7 +186,7 @@ struct SuggestBannerEntryGateTests {
     /// after the windows under test, so that on the pre-fix (detection-time)
     /// emitter it is still ordered last — otherwise these tests would pass
     /// against the very defect they exist to catch.
-    private static func fireSentinel(
+    fileprivate static func fireSentinel(
         _ orchestrator: SkipOrchestrator,
         id: String,
         at time: Double
@@ -624,5 +624,213 @@ struct SuggestBannerEntryGateTests {
             \(banner.evidenceCatalogEntries.count) entries.
             """
         )
+    }
+}
+
+// MARK: - Skip affordance
+
+/// playhead-d3g0 folds in the consequence of playhead-ynmk (#313), and without
+/// it entry-firing ships a broken affordance.
+///
+/// ynmk made a banner confirmation assert PRESENCE, never EXTENT: the user
+/// answers "is this an ad?", the DETECTOR drew the edges, so a confirmation is
+/// governed by `AutoSkipEdgePadding` exactly like an auto-skip. On a span with
+/// both edges `unanchored` — the entire field population, 3 of 3 — that policy
+/// returns nil and the confirmation produces a MARK. Playback does not move.
+///
+/// Combine that with entry-firing and the user taps at the exact moment the ad
+/// starts and NOTHING HAPPENS. That is the opposite of "when it enters so I can
+/// skip". A banner must not offer an action it cannot perform, so the card
+/// carries `confirmationSkipsPlayback`, resolved from the SAME per-edge policy
+/// the acceptance transaction consults — not a second derivation that could
+/// drift from it. `affordanceMatchesWhatTheTapActuallyDoes` is the test that
+/// keeps the two honest with each other.
+@Suite("Suggest banner skip affordance (playhead-d3g0)")
+struct SuggestBannerSkipAffordanceTests {
+
+    /// Drive one markOnly window to its entry banner and hand back the card
+    /// plus the live harness, so a test can compare the card's claim against
+    /// what the acceptance transaction then durably does.
+    private static func banner(
+        for window: AdWindow,
+        entering time: Double
+    ) async throws -> (
+        item: AdSkipBannerItem,
+        orchestrator: SkipOrchestrator,
+        store: AnalysisStore
+    ) {
+        let harness = try await SuggestBannerEntryGateTests.makeHarness()
+        let recorder = BannerRecorder()
+        await recorder.observe(await harness.orchestrator.bannerItemStream())
+        try await harness.store.insertAdWindow(window)
+        await harness.orchestrator.receiveAdWindows([window])
+        await harness.orchestrator.updatePlayheadTime(time)
+        await SuggestBannerEntryGateTests.fireSentinel(
+            harness.orchestrator, id: "d3g0-affordance-sentinel", at: 8000
+        )
+        let received = try #require(
+            await recorder.drain(until: "d3g0-affordance-sentinel"),
+            "sentinel never arrived"
+        )
+        await recorder.stop()
+        let item = try #require(
+            received.first { $0.windowId == window.id },
+            "entry did not banner; got \(received.map(\.windowId))"
+        )
+        return (item, harness.orchestrator, harness.store)
+    }
+
+    /// The field population: confidence 0.40-0.42, both edges unanchored. ynmk
+    /// makes confirming these a MARK, so the card must not present a skip.
+    @Test("A both-edges-unanchored span does not offer a skip it cannot perform")
+    func unanchoredSpanDoesNotOfferSkip() async throws {
+        let window = SuggestBannerEntryGateTests.makeSuggestion(
+            id: "d3g0-afford-unanchored", start: 4800, end: 4950
+        )
+        let (item, _, _) = try await Self.banner(for: window, entering: 4800)
+        #expect(
+            item.confirmationSkipsPlayback == false,
+            """
+            Both edges unanchored: `AutoSkipEdgePadding` has no late-safe window, \
+            so confirming MARKS and playback does not move. Offering "skip" here \
+            is a button that does nothing at the exact moment the user wants it \
+            to do something.
+            """
+        )
+    }
+
+    /// playhead-qs0d's 2-of-2 byte-exact population. These must keep offering a
+    /// real skip — the fix must not overshoot into "never offer a skip".
+    @Test("A byte-exact span still offers a real skip")
+    func byteExactSpanStillOffersSkip() async throws {
+        let window = SuggestBannerEntryGateTests.makeSuggestion(
+            id: "d3g0-afford-byteexact",
+            start: 4800,
+            end: 4950,
+            startAnchor: .rediffByteExact,
+            endAnchor: .rediffByteExact
+        )
+        let (item, _, _) = try await Self.banner(for: window, entering: 4800)
+        #expect(
+            item.confirmationSkipsPlayback,
+            "a both-edges-byte-exact span is exactly the population qs0d activated skipping for"
+        )
+    }
+
+    /// The anti-lie test. Whatever the card claims, the acceptance transaction
+    /// must do — for both anchor populations, through the DURABLE row rather
+    /// than through the same in-memory predicate the card read.
+    @Test(
+        "The card's claim matches what the tap actually does",
+        arguments: [
+            (
+                label: "both-unanchored",
+                start: AutoSkipEdgeAnchor.unanchored,
+                end: AutoSkipEdgeAnchor.unanchored
+            ),
+            (
+                label: "both-byte-exact",
+                start: AutoSkipEdgeAnchor.rediffByteExact,
+                end: AutoSkipEdgeAnchor.rediffByteExact
+            ),
+            (
+                label: "anchored-start-unanchored-end",
+                start: AutoSkipEdgeAnchor.rediffByteExact,
+                end: AutoSkipEdgeAnchor.unanchored
+            ),
+        ]
+    )
+    func affordanceMatchesWhatTheTapActuallyDoes(
+        label: String,
+        start: AutoSkipEdgeAnchor,
+        end: AutoSkipEdgeAnchor
+    ) async throws {
+        let windowId = "d3g0-afford-match-\(label)"
+        let window = SuggestBannerEntryGateTests.makeSuggestion(
+            id: windowId,
+            start: 4800,
+            end: 4950,
+            startAnchor: start,
+            endAnchor: end
+        )
+        let (item, orchestrator, store) = try await Self.banner(
+            for: window, entering: 4800
+        )
+
+        #expect(await orchestrator.acceptSuggestedSkip(windowId: windowId))
+        let rows = try await store.fetchAdWindows(
+            assetId: SuggestBannerEntryGateTests.assetId
+        )
+        let promoted = try #require(
+            rows.first { $0.id != windowId && $0.startTime == 4800 },
+            "[\(label)] the confirmation did not persist a promoted row"
+        )
+        #expect(
+            promoted.wasSkipped == item.confirmationSkipsPlayback,
+            """
+            [\(label)] the card said confirmation \
+            \(item.confirmationSkipsPlayback ? "skips" : "only marks"), the durable \
+            row says wasSkipped=\(promoted.wasSkipped). A banner that promises a \
+            skip it will not perform is the affordance bug; a banner that hides a \
+            skip it WILL perform is the same bug mirrored.
+            """
+        )
+        #expect(
+            (promoted.decisionState == AdDecisionState.applied.rawValue)
+                == item.confirmationSkipsPlayback,
+            "[\(label)] decisionState and the card's claim must agree too"
+        )
+    }
+
+    /// The copy seam. Exactly one place produces the mark-only wording, so the
+    /// copy pass (playhead-1mq1.1) has one file to edit.
+    @Test("Mark-only copy drops the skip promise; skippable copy is untouched")
+    func markOnlyCopyDropsTheSkipPromise() {
+        let skippable = AdBannerView.feedbackChoiceContent(
+            for: .suggest, confirmationSkipsPlayback: true
+        )
+        #expect(skippable.confirmLabel == "Yes")
+        #expect(skippable.confirmAccessibilityLabel == "Yes, skip this sponsor break")
+        #expect(skippable.confirmAccessibilityHint == "Confirms this is an ad and skips it")
+
+        let markOnly = AdBannerView.feedbackChoiceContent(
+            for: .suggest, confirmationSkipsPlayback: false
+        )
+        #expect(
+            markOnly.confirmLabel != skippable.confirmLabel,
+            "the mark-only card must not present the same action as the skipping one"
+        )
+        for text in [
+            markOnly.confirmLabel,
+            markOnly.confirmAccessibilityLabel,
+            markOnly.confirmAccessibilityHint,
+        ] {
+            #expect(
+                !text.lowercased().contains("skip"),
+                """
+                "\(text)" promises a skip this confirmation cannot perform. \
+                Playback does not move on a both-edges-unanchored span (ynmk).
+                """
+            )
+        }
+        // The DENY side is unchanged in both: "No" already promises nothing.
+        #expect(markOnly.denyLabel == skippable.denyLabel)
+        #expect(
+            markOnly.denyAccessibilityHint == skippable.denyAccessibilityHint
+        )
+    }
+
+    /// An auto-skipped banner reports a skip that ALREADY happened, so the
+    /// field is meaningless there and its default must not perturb that copy.
+    @Test("Auto-skipped copy is unaffected by the affordance flag")
+    func autoSkippedCopyUnaffected() {
+        let base = AdBannerView.feedbackChoiceContent(for: .autoSkipped)
+        for flag in [true, false] {
+            #expect(
+                AdBannerView.feedbackChoiceContent(
+                    for: .autoSkipped, confirmationSkipsPlayback: flag
+                ) == base
+            )
+        }
     }
 }

@@ -101,6 +101,23 @@ struct AdSkipBannerItem: Identifiable, Equatable {
     /// Defaults to `.autoSkipped` to preserve every existing call site
     /// (the historical banner emitter is the high-confidence path).
     var tier: AdBannerTier = .autoSkipped
+    /// playhead-d3g0: will confirming this SUGGEST card actually move playback?
+    ///
+    /// playhead-ynmk made a confirmation assert PRESENCE, never EXTENT — the
+    /// user answers "is this an ad?" and the DETECTOR drew the edges — so the
+    /// acceptance transaction is governed by `AutoSkipEdgePadding`. On a span
+    /// with no late-safe window (the field population: both edges unanchored)
+    /// confirming produces a MARK and playback does not move.
+    ///
+    /// d3g0 fires the card the moment the playhead ENTERS the span, so a card
+    /// that offers a skip it cannot perform is a button that does nothing at
+    /// the exact moment the user wants it to do something. This field is how
+    /// the card knows, resolved by the orchestrator from the same policy the
+    /// transaction consults.
+    ///
+    /// Meaningless for `.autoSkipped` (the skip already happened); `true` is
+    /// the default so every existing call site is unchanged.
+    var confirmationSkipsPlayback: Bool = true
 }
 
 // MARK: - Banner Queue (ViewModel)
@@ -1003,7 +1020,14 @@ struct AdBannerView: View {
     /// `bannerCard`. Keeping the visible and accessibility copy in one value
     /// lets tests verify the actual content consumed by the controls without
     /// inspecting Swift source text.
-    static func feedbackChoiceContent(for tier: AdBannerTier) -> FeedbackChoiceContent {
+    ///
+    /// playhead-d3g0 STUB: `confirmationSkipsPlayback` is accepted but not yet
+    /// honoured, so the mark-only card still promises a skip it cannot perform.
+    /// Wired in the following commit.
+    static func feedbackChoiceContent(
+        for tier: AdBannerTier,
+        confirmationSkipsPlayback: Bool = true
+    ) -> FeedbackChoiceContent {
         switch tier {
         case .suggest:
             return FeedbackChoiceContent(
