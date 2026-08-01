@@ -253,16 +253,29 @@ struct BannerConfirmationExtentGateTests {
                     == AutoSkipEdgeAnchor.unanchored.rawValue,
             "the promoted row must carry the suggestion's real edge provenance"
         )
-        // The decision log is the audit trail for "the tap was honoured as
-        // feedback, and deliberately not as a skip". Without an explicit
-        // record, a refused confirmation is indistinguishable from a
-        // confirmation that never arrived.
+        // playhead-v7q6: the refusal must be RECORDED, not silent — but the
+        // record is this durable row, not the diagnostic decision log.
+        //
+        // ynmk originally asserted a `logDecision` entry here. That collided
+        // with `testExplicitBannerFeedbackRoutesDoNotWriteDetailedLogs`, which
+        // forbids every explicit-feedback route from reaching the decision
+        // logger, because `logDecision(managed:)` writes the window's exact
+        // span and exact feedback receipts belong only in the durable
+        // correction store. Two deliberate contracts, directly opposed; the
+        // privacy rail wins and the observability intent survives as an
+        // id-only os_log line.
+        //
+        // Nothing is lost. The pair asserted immediately above IS the audit
+        // trail and is strictly stronger than a log string: `.confirmed` with
+        // `wasSkipped == false` can only mean a confirmation that arrived and
+        // was deliberately not applied. A confirmation that never arrived
+        // writes no row at all — so the two cases the comment worried about
+        // conflating are already distinguishable, durably, and survive a
+        // relaunch in a way an in-memory decision log never did.
         #expect(
-            await orchestrator.getDecisionLog().contains {
-                $0.adWindowId == promoted.id
-                    && $0.reason.contains("unanchored extent")
-            },
-            "the refusal must be recorded, not silent"
+            promoted.decisionState == AdDecisionState.confirmed.rawValue
+                && promoted.wasSkipped == false,
+            "a refused confirmation must be durably distinguishable from one that never arrived"
         )
     }
 
