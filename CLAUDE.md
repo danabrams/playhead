@@ -60,6 +60,24 @@ scripts/fast-gate.sh    # PlayheadFastTests, single-host; forwards -only-testing
 ```
 ⚠️ **Run gates ONE AT A TIME, and do NOT add `-parallel-testing-worker-count ≥2` on this box.** Two memory drivers matter here: (1) a fresh-worktree **cold build** compiles the whole project with parallel `swiftc` — heavy enough on its own to get xcodebuild **OOM-killed** (`Killed: 9`), which is why the wrapper caps `-jobs` (default 4, env `PLAYHEAD_BUILD_JOBS`); (2) running **two gates/builds at once** exhausts the 16 GB box → one is killed mid-suite (`** BUILD INTERRUPTED **`, signal 144) with **no test failure** — pure resource exhaustion. **Clone-based parallel testing is unavailable here** (playhead-ekpn): worker-count ≥2 makes Xcode spawn sim clones, and the clone helper resolves `simctl` via the *global* `xcode-select` (`/Library/Developer/CommandLineTools`, no `simctl`), so it dies with `xcrun: error: unable to find utility "simctl"` (exit 65, ~18s, zero tests run) — `DEVELOPER_DIR` fixes `xcodebuild` but not the clone helper (the 2026-07-16 gotcha; enabling real clone parallelism would need a global `xcode-select -s` change — sudo, system-wide, Dan's call). The gate runs **single-host**: XCTest serial + Swift Testing's cheap **in-process** concurrency (the ~8,300-test bulk stays fast). Serialization + the `-jobs` cap, not in-gate clone parallelism, are the memory guardrails. Deferred (a coverage tradeoff for Dan's call): PerfGate-ing the load-sensitive behavioral flake families (gy2s pipeline-stall / RouteChange / Interruption / PlaybackService audio-session / playhead-7h2 runtime-shutdown) out of the default gate — those test real behaviors, so moving them is a coverage decision, not done here.
 
+**The gate's verdict is about the DIFF, not the count (`scripts/gate_baseline.py`, playhead-voez).** The default gate is RED on a clean checkout — the load-sensitive families above blow their 60s time limits under the full run's own concurrency — so its exit code used to say nothing. The known-broken set is now committed in `scripts/gate-baseline.<plan>.json` and `fast-gate.sh` reports the difference:
+
+```
+RED (N known / 0 new)   -> exit 0
+RED (N known / 2 NEW)   -> exit 65, both named
+a baseline test PASSES  -> exit 65, named
+```
+
+Refresh with `scripts/fast-gate.sh --accept-baseline` and **justify the diff in the commit message** — the file is the record of what is known-broken, so a shrinking diff is good news and a growing one needs a reason. Do not reach for `PLAYHEAD_SKIP_BASELINE=1` to make a red gate quiet; that is the bypass this mechanism exists to remove.
+
+Four things worth knowing before you argue with it:
+- **The baseline is measured, not labelled.** Each entry carries how many observations it was seen in and failed in. `failed == seen` over ≥2 observations is *deterministic* and its **passing hard-fails** the gate (Dan's call: the baseline is exact, not a ceiling). Anything else is *load-sensitive*: passing is reported as a removal candidate but is not fatal, because one quiet run is not evidence a starvation flake is fixed. Failure counts on unchanged main have ranged 33 → 72 in a day, so a flat exact set would fire constantly and get bypassed.
+- **The tolerance is not a hole, because identity includes the failure KIND.** A load-sensitive entry means "may TIME OUT", not "may fail". A known-timeout test that fails an *expectation* is reported NEW.
+- **A baseline member that did not RUN fails the gate.** Renamed, deleted or newly skipped, a name nobody can reach is not evidence. This is what makes step 2 of the bead (PerfGate-ing a family) show up as a gate failure demanding a refresh, rather than silently shrinking coverage.
+- **Selective runs are exempt.** `-only-testing:`/`-skip-testing:` (how `mutation-battery.sh` drives the gate) is a different population, so the check is skipped and the raw xcodebuild exit code passes through untouched.
+
+Rails: `scripts/mutation-battery-gate-baseline.py` (R series; the D/E/J/K/L/Q series stay in `mutation-battery.sh`, which is structurally a Swift battery). Unit tests: `python3 -m unittest scripts.tests.test_gate_baseline` — about a second, no build.
+
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadIntegrationTests \

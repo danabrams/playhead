@@ -67,6 +67,22 @@ Three further arms close the ways a failure could hide without being seen:
   * FICTION — zero failures against a non-empty baseline. Against a measured
     floor of dozens that is categorical, not quiet.
 
+KNOWN RESIDUE, WRITTEN DOWN RATHER THAN GLOSSED
+-----------------------------------------------
+Swift Testing's console line prints the test's display name and no suite, so two
+same-named tests in different suites share one key. Measured on the 2026-08-01
+full run: 56 of 9,819 names, 0.57%. Identity is resolved toward FAILED — a
+colliding pass never erases a failure — so the dangerous direction is closed,
+and the residue is that a regression landing in the passing twin of a colliding
+pair while the other twin still fails would read as known. Adding the source
+file to the key would separate them, but only failures carry a source (it comes
+from the issue line), so a baseline key built that way could never be matched
+against a pass and the pass-direction arm would stop working. The collision is
+the cheaper of the two costs.
+
+XCTest has no such problem: its key is the fully qualified
+`Target.Suite/testMethod`.
+
 BOTH FRAMEWORKS, AND WHY THE HEURISTIC INVERTS
 ----------------------------------------------
 Swift Testing prints `✘ Test "name" failed after 123.4 seconds`; XCTest prints

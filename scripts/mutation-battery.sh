@@ -29,6 +29,21 @@
 # exception: if the source moved on and the mutation no longer reproduces the
 # defect it describes, rewrite the EDIT — never the expectation.)
 #
+# THE R SERIES LIVES ELSEWHERE (playhead-voez)
+# --------------------------------------------
+# The rails for the gate baseline — `scripts/gate_baseline.py` and the baseline
+# half of `scripts/fast-gate.sh` — are in
+# `scripts/mutation-battery-gate-baseline.py`, not here. This script is
+# structurally a SWIFT battery: MUTABLE_FILES are Swift sources, `apply_mutation`
+# resolves a path from a Swift-file variable, and `run_focused` is an xcodebuild
+# run whose verdicts are read out of Swift Testing console glyphs. The R series
+# mutates Python and bash and is judged by `python3 -m unittest` in about a
+# second, so hosting it here would mean a second runner, a second failure
+# extractor and a second "did it run" extractor bolted onto the repo's
+# certification tool for no gain. Same discipline, same vocabulary (KILLED /
+# SURVIVED / a survivor is a coverage hole), same pre-flight check that every
+# expectation names a test that actually runs — see that file's header.
+#
 # HOW TO ADD A MUTATION
 # ---------------------
 #   1. Add a record to MUTATIONS: "NAME|BATCH|FILE_KEY|Expected Test Name;..."
