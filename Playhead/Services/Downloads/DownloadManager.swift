@@ -400,6 +400,10 @@ actor DownloadManager {
 
     /// Optional scheduler for enqueuing pre-analysis jobs after download.
     private var analysisWorkScheduler: AnalysisWorkScheduler?
+    /// playhead-4dqe: notified once per completed background download that
+    /// leaves a servable pinned artifact. See
+    /// `setBackgroundDownloadCompletionObserver`.
+    private var backgroundDownloadCompletionObserver: (@Sendable (String, URL?) -> Void)?
 
     /// playhead-xsdz.71 (Signal 1, ADDITIVE/observational): optional recorder
     /// that receives the enclosure download's redirect-chain hop hosts so the
@@ -3722,6 +3726,45 @@ actor DownloadManager {
         // the next foreground download. Best-effort: a failure here just
         // defers cleanup to the next eviction trigger.
         try? await evictIfNeeded()
+        // playhead-4dqe: announce the completed background deposit.
+        //
+        // Placed HERE, at the last statement of the success path, on purpose:
+        // every early `return` above is a completion that did NOT leave a
+        // servable pinned artifact (retired callback, foreground stream owns
+        // it, placement failed, unreadable size, pin write failed, hash failed,
+        // lost ownership). An observer told about those would start a
+        // preparation wait for bytes that will never resolve, and the resulting
+        // `no_pinned_file` give-up would be this hook's fault, not the network's.
+        notifyBackgroundDownloadCompleted(
+            episodeId: episodeId,
+            sourceURL: originalURL ?? URL(string: loadPin(for: episodeId)?.sourceURL ?? "")
+        )
+    }
+
+    /// playhead-4dqe: called once per background download that lands a servable
+    /// pinned artifact, with the episode's ORIGINAL enclosure URL when known.
+    ///
+    /// This is the seam that makes Dan's "yes rediff on background" possible:
+    /// before it, day-0 at download time existed only for the explicit
+    /// "Download & Analyze" tap, so every auto-downloaded episode had to wait
+    /// for the 19-second in-play race or the lagged ≥24 h sweep. Wired once by
+    /// `PlayheadRuntime`; left `nil` in tests and previews, so the download path
+    /// is byte-identical without it.
+    ///
+    /// A CALLBACK RATHER THAN A STREAM, deliberately. `progressUpdates()` is an
+    /// `AsyncStream` because it has many subscribers and drops are harmless;
+    /// this has exactly one consumer and a drop is a lost day-0 attempt, so it
+    /// is a direct hand-off with no buffer to overflow. Same `set…` shape as
+    /// `setAnalysisWorkScheduler` / `setDAIStitchRecorder`.
+    func setBackgroundDownloadCompletionObserver(
+        _ observer: @escaping @Sendable (String, URL?) -> Void
+    ) {
+        self.backgroundDownloadCompletionObserver = observer
+    }
+
+    private func notifyBackgroundDownloadCompleted(episodeId: String, sourceURL: URL?) {
+        guard let observer = backgroundDownloadCompletionObserver else { return }
+        observer(episodeId, sourceURL)
     }
 
     /// Rebuilds the LRU access log from file modification dates.
