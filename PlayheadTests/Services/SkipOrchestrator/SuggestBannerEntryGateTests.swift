@@ -337,45 +337,56 @@ struct SuggestBannerEntryGateTests {
         )
     }
 
-    @Test("A tick-by-tick approach banners within the stated budget")
-    func banneredWithinLatencyBudgetUnderRealTickCadence() async throws {
+    /// The WORST case, constructed rather than sampled: a position observation
+    /// lands a hair BEFORE the span start, so the next one — a full tick later —
+    /// is the first that can see the entry. Nothing the orchestrator does can
+    /// beat that; the only way to lose here is to demand more than one
+    /// observation (a dwell, a hysteresis count, an `evaluateAndPush` round
+    /// trip), which is exactly the regression this pins.
+    @Test("Worst-case tick alignment still banners inside the budget")
+    func worstCaseTickAlignmentBannersInsideTheBudget() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
         let recorder = BannerRecorder()
         await recorder.observe(await orchestrator.bannerItemStream())
         defer { Task { await recorder.stop() } }
 
         let spanStart = 60.0
+        let tick = PlaybackService.periodicTimeObserverIntervalSeconds
+        let lastObservationBefore = spanStart - 0.001
+        let firstObservationInside = lastObservationBefore + tick
+
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-budget", start: spanStart, end: 120)
         ])
 
-        // Walk in at the transport's true cadence, deliberately OFF-GRID so the
-        // playhead never lands exactly on the span start — the realistic case.
-        let tick = PlaybackService.periodicTimeObserverIntervalSeconds
-        var time = spanStart - 1.0 - tick / 3
-        var firstBanneredAt: Double?
-        while time <= spanStart + 2.0 {
-            await orchestrator.updatePlayheadTime(time)
-            if firstBanneredAt == nil,
-               await recorder.snapshot().contains(where: {
-                   $0.windowId == "d3g0-budget"
-               }) {
-                firstBanneredAt = time
-            }
-            time += tick
-        }
+        await orchestrator.updatePlayheadTime(lastObservationBefore)
+        try await Self.expectNothingBanneredYet(
+            orchestrator, recorder,
+            sentinelId: "d3g0-sentinel-budget-pre",
+            drivingPlayheadTo: 5,
+            "an observation 1 ms before the span start has not entered it"
+        )
 
-        let banneredAt = try #require(
-            firstBanneredAt,
-            "the banner never fired while the playhead walked through the span"
+        await orchestrator.updatePlayheadTime(firstObservationInside)
+        await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-budget", at: 300)
+        let received = try #require(
+            await recorder.drain(until: "d3g0-sentinel-budget")
         )
         #expect(
-            banneredAt - spanStart
+            received.map(\.windowId) == ["d3g0-budget"],
+            """
+            The FIRST observation inside the span must banner. Requiring a second \
+            one — any dwell or hysteresis — puts the affordance behind up to \
+            \(2 * tick) s of the ad. Got \(received.map(\.windowId)).
+            """
+        )
+        #expect(
+            firstObservationInside - spanStart
                 <= SkipOrchestrator.suggestEntryLatencyBudgetSeconds,
             """
-            Banner arrived \(banneredAt - spanStart) s into the ad, over the \
-            \(SkipOrchestrator.suggestEntryLatencyBudgetSeconds) s budget. The \
-            listener is already hearing what they wanted to skip.
+            Worst-case entry lateness is \(firstObservationInside - spanStart) s, \
+            over the \(SkipOrchestrator.suggestEntryLatencyBudgetSeconds) s budget. \
+            The listener is already hearing what they wanted to skip.
             """
         )
     }

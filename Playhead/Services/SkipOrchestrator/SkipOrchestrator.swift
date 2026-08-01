@@ -648,6 +648,43 @@ actor SkipOrchestrator {
     /// candidate. Cleared at episode end.
     private var suggestWindows: [String: AdWindow] = [:]
 
+    /// playhead-d3g0: suggestion IDs that are REGISTERED but have not yet had
+    /// their banner emitted, because the playhead has not entered their span.
+    ///
+    /// This set is the whole bead. `registerSuggestedWindow` used to emit
+    /// immediately from `receiveAdWindows` — the DETECTION delivery path — so
+    /// the uncertain banner had no playhead gate at all. On 2026-07-31 that
+    /// delivered three banners for spans 3.5, 44.5 and 80 minutes into an
+    /// episode as one batch; all three were answered inside 20.1 s, none of
+    /// them heard, and two were false positives that cost 210 s of show.
+    ///
+    /// Registration now ARMS. Emission happens in `updatePlayheadTime`, and
+    /// ONLY there — deliberately never synchronously at registration, because
+    /// `currentPlayheadTime` can be a stale 0 between `beginEpisode` and the
+    /// first position observation, and a preloaded pre-roll would then banner
+    /// for a listener who is resuming at 44 minutes. Waiting for the position
+    /// path costs at most one observer tick (see
+    /// `suggestEntryLatencyBudgetSeconds`) and cannot be wrong.
+    ///
+    /// Leaving the set is one-way per revision: an armed window fires once on
+    /// entry and is never re-armed unless the producer delivers materially new
+    /// material (`registerSuggestedWindow`'s revision-changed branch). That is
+    /// what makes a backwards seek not re-ask an answered question, and it is
+    /// the same "at most once per window per episode" guarantee the tier always
+    /// had, now with a position precondition in front of it.
+    ///
+    /// IDs are deliberately NOT pruned when a suggestion leaves `suggestWindows`
+    /// (veto, accept, retirement). An armed ID with no matching entry is inert —
+    /// both readers resolve through `suggestWindows` — and keeping it is the
+    /// consistent choice for the one path that puts a window BACK:
+    /// `restoreSuggestionAfterFailedResolution`'s fallback re-insert. A window
+    /// restored while still armed keeps waiting for its span; pruning would
+    /// instead make it replay-eligible to a newly attached host without the
+    /// playhead ever having reached it, which is the leak this bead closes.
+    /// The set is bounded by the episode's suggestion count and cleared at both
+    /// episode boundaries.
+    private var armedSuggestWindowIds: Set<String> = []
+
     /// Revision identity for each producer suggestion ID. A producer may
     /// recompute a window in-place (same ID and playback lifecycle, different
     /// span or attribution). The UI token must therefore identify the current
@@ -1156,7 +1193,14 @@ actor SkipOrchestrator {
 
     /// Register one mark-only producer value as the current suggest revision.
     /// Exact replays preserve their delivery gate. Material changes retire any
-    /// older card before emitting a fresh token-bound presentation.
+    /// older card before arming a fresh token-bound presentation.
+    ///
+    /// playhead-d3g0: registration ARMS, it does not emit. The banner is a
+    /// prospective skip affordance ("when it enters so I can skip"), so the
+    /// presentation belongs to the position path — see `armedSuggestWindowIds`
+    /// and `emitSuggestBannersOnPlayheadEntry`. The orchestrator still needs to
+    /// KNOW about the window at detection time, which is why everything else
+    /// here is unchanged.
     private func registerSuggestedWindow(_ adWindow: AdWindow) {
         guard !hasTerminalSuggestResolution(adWindow.id) else {
             return
@@ -1176,7 +1220,7 @@ actor SkipOrchestrator {
                 AdWindowMaterialIdentity.suggestionToken(adWindow)
             suggestBanneredWindowIds.remove(adWindow.id)
             suggestWindows[adWindow.id] = adWindow
-            emitSuggestBanner(for: adWindow)
+            armedSuggestWindowIds.insert(adWindow.id)
             return
         }
 
@@ -1189,7 +1233,43 @@ actor SkipOrchestrator {
         let isNewActiveSuggestion = suggestWindows[adWindow.id] == nil
         suggestWindows[adWindow.id] = adWindow
         if isNewActiveSuggestion {
-            emitSuggestBanner(for: adWindow)
+            armedSuggestWindowIds.insert(adWindow.id)
+        }
+    }
+
+    /// playhead-d3g0: the emit trigger. Fire every armed suggestion whose span
+    /// the playhead has ENTERED.
+    ///
+    /// "Entered" is the half-open interval `[start, end)`. Inclusive at the
+    /// start because that is the instant the skip becomes available and Dan
+    /// asked for it there; EXCLUSIVE at the end because a span the playhead has
+    /// left offers nothing to skip — asking about it is the "banner for audio
+    /// already gone" half of the same field incident.
+    ///
+    /// Deliberately NOT gated on `skipSuppressedAfterSeek`: that suppression
+    /// exists so an automatic skip does not fire on unstable post-seek
+    /// confidence. A suggest banner skips nothing on its own, and someone who
+    /// just scrubbed into an ad is precisely who wants the affordance.
+    ///
+    /// Emitting to zero subscribers still disarms. The gate is a fact about
+    /// PLAYBACK, not about the UI: a suggestion whose span was played while
+    /// Now Playing was absent has passed its precondition, and a host attaching
+    /// afterwards receives it through `replayPendingSuggestBanners` — delivered
+    /// exactly once, gated on position rather than dropped.
+    private func emitSuggestBannersOnPlayheadEntry(at time: TimeInterval) {
+        guard !armedSuggestWindowIds.isEmpty else { return }
+        let entered = armedSuggestWindowIds
+            .compactMap { suggestWindows[$0] }
+            .filter { time >= $0.startTime && time < $0.endTime }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+        for window in entered {
+            armedSuggestWindowIds.remove(window.id)
+            emitSuggestBanner(for: window)
         }
     }
 
@@ -1203,11 +1283,21 @@ actor SkipOrchestrator {
             == AdWindowMaterialIdentity.suggestionToken(rhs)
     }
 
+    /// playhead-d3g0: replay is now the SECOND consumer of the playhead gate.
+    /// A suggestion that is still armed has not had its span reached, so a host
+    /// attaching late must not receive it — otherwise the entry gate would hold
+    /// on the emit path and leak through this one, which is the same defect
+    /// through a different door. Everything else about replay is unchanged: a
+    /// suggestion produced while Now Playing was absent, whose span the
+    /// listener has since played, is still delivered exactly once.
     private func replayPendingSuggestBanners(
         to continuation: AsyncStream<AdSkipBannerItem>.Continuation
     ) {
         let pending = suggestWindows.values
             .filter {
+                guard !armedSuggestWindowIds.contains($0.id) else {
+                    return false
+                }
                 guard let revisionToken =
                         suggestRevisionTokensByWindowId[$0.id]
                 else {
@@ -1236,11 +1326,16 @@ actor SkipOrchestrator {
         }
     }
 
+    /// Event-stream twin of `replayPendingSuggestBanners`; the same playhead
+    /// gate applies for the same reason.
     private func replayPendingSuggestBannerEvents(
         to continuation: AsyncStream<AdBannerStreamEvent>.Continuation
     ) {
         let pending = suggestWindows.values
             .filter {
+                guard !armedSuggestWindowIds.contains($0.id) else {
+                    return false
+                }
                 guard let revisionToken =
                         suggestRevisionTokensByWindowId[$0.id]
                 else {
@@ -1609,6 +1704,7 @@ actor SkipOrchestrator {
         emittedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
+        armedSuggestWindowIds.removeAll()
         suggestRevisionTokensByWindowId.removeAll()
         lastSuggestRevisionByWindowId.removeAll()
         acknowledgedSuggestRevisionTokens.removeAll()
@@ -1775,6 +1871,7 @@ actor SkipOrchestrator {
         emittedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
+        armedSuggestWindowIds.removeAll()
         suggestRevisionTokensByWindowId.removeAll()
         lastSuggestRevisionByWindowId.removeAll()
         acknowledgedSuggestRevisionTokens.removeAll()
@@ -2741,6 +2838,13 @@ actor SkipOrchestrator {
         guard time.isFinite else { return }
         currentPlayheadTime = time
 
+        // playhead-d3g0: the suggest banner's emit trigger. This is the ONLY
+        // site that presents an armed suggestion; `receiveAdWindows` arms and
+        // nothing else emits. Kept first so the affordance is not queued behind
+        // the learning/seek bookkeeping below — Dan's decision makes this a
+        // latency-sensitive path (`suggestEntryLatencyBudgetSeconds`).
+        emitSuggestBannersOnPlayheadEntry(at: time)
+
         let consumed = pendingCatalogLearning.values.filter {
             time >= $0.eligiblePlayheadTime
         }
@@ -2772,6 +2876,21 @@ actor SkipOrchestrator {
     /// re-stabilizes.
     func recordUserSeek(to time: TimeInterval) {
         guard time.isFinite, time >= 0 else { return }
+        // playhead-d3g0: a seek deliberately does NOT re-arm anything, and
+        // deliberately does not emit either.
+        //
+        // Not re-arming: an armed suggestion fires once per revision, so
+        // scrubbing backwards into a span that has already asked its question
+        // does not ask it again. That is the once-per-window-per-episode
+        // guarantee, and it is what keeps the affordance from becoming noise on
+        // a rewind.
+        //
+        // Not emitting: a FORWARD seek that lands inside a still-armed span is
+        // a genuine entry, but it is presented by the next position observation
+        // rather than here. One trigger site is worth the ≤ one tick
+        // (`suggestEntryLatencyBudgetSeconds` covers it), and `currentPlayheadTime`
+        // set here is what that observation reads anyway.
+        //
         // A user seek can jump over a proposed span without consuming the
         // orchestrator's skip. Invalidate pending positives, including an
         // applied-persistence task that has not re-entered the actor yet.
