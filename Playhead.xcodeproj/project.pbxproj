@@ -734,6 +734,7 @@
 		90930A77DA5950EBD3A493FC /* SpectralShiftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43A39D1FC60851C08B1AA85A /* SpectralShiftTests.swift */; };
 		90A79069EE1894915984189A /* LearningArtifactIngestor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E92E101CAB8C2A796F492CC /* LearningArtifactIngestor.swift */; };
 		90B5A4621CC0F68378C19785 /* AcousticBreakDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 244FFBBBA9AFD5B49BF1C2DB /* AcousticBreakDetector.swift */; };
+		910BE28AAD73FCD3E4502602 /* AdPodContinuationDayZeroSeedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84A5F02358A8D33253B23E4E /* AdPodContinuationDayZeroSeedTests.swift */; };
 		915A0A62E946893DB08097D8 /* LearnedDeviceProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9160318F67B4178A75F7966A /* LearnedDeviceProfileStore.swift */; };
 		917D29E6B271105B81B6E764 /* AdDetectionServiceFragilityGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71C952E394759D43B34073C7 /* AdDetectionServiceFragilityGateTests.swift */; };
 		91950CE4F341FB5DCD2C376C /* BannerTallyStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B6754DCBF3CBBFB0A594C30 /* BannerTallyStoreTests.swift */; };
@@ -1966,6 +1967,7 @@
 		842382A1A5369363A4D358F3 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
 		844F3A7258F37E7985619A89 /* FMInferenceDeadlineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FMInferenceDeadlineTests.swift; sourceTree = "<group>"; };
 		84883C3B08468DF22ED99386 /* StingerBank.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StingerBank.swift; sourceTree = "<group>"; };
+		84A5F02358A8D33253B23E4E /* AdPodContinuationDayZeroSeedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdPodContinuationDayZeroSeedTests.swift; sourceTree = "<group>"; };
 		84AB255FD4CDF84CB023CD49 /* AdaptiveDeviceProfileFlagOffTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveDeviceProfileFlagOffTests.swift; sourceTree = "<group>"; };
 		84AF30B946A51A3346EF9726 /* SilenceBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SilenceBoundaryTests.swift; sourceTree = "<group>"; };
 		84B4F272B99D84ACF027F54F /* FusionLiftHarnessSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FusionLiftHarnessSupport.swift; sourceTree = "<group>"; };
@@ -4166,6 +4168,7 @@
 				5AE9D99B6A5C6D0D74AD19FA /* AdDetectionServiceTrustScoreCarryForwardTests.swift */,
 				7C805870E37E09C9D2B310DD /* AdDetectionServiceUpdatePriorsAtomicityCanaryTests.swift */,
 				0626D750ED8371BB1174D885 /* AdPodContinuationCorpusEvalTests.swift */,
+				84A5F02358A8D33253B23E4E /* AdPodContinuationDayZeroSeedTests.swift */,
 				F0FFF5EF2A716BA83948BD00 /* AdPodContinuationDeviceLaneTests.swift */,
 				7A4D76D596501A96AC7F43FD /* AdPodContinuationFlipTests.swift */,
 				C9DD88357B55C3DF16FADA08 /* AdPodContinuationTests.swift */,
@@ -5583,6 +5586,7 @@
 				628C615C453E46565428D750 /* AdDetectionServiceUpdatePriorsAtomicityCanaryTests.swift in Sources */,
 				532023E19DC1A1BD076324B1 /* AdListenRewindsV22MigrationTests.swift in Sources */,
 				417A28D05BBC52C45F75385B /* AdPodContinuationCorpusEvalTests.swift in Sources */,
+				910BE28AAD73FCD3E4502602 /* AdPodContinuationDayZeroSeedTests.swift in Sources */,
 				A5E102B5C531C9BC7544A982 /* AdPodContinuationDeviceLaneTests.swift in Sources */,
 				45006990CD20BD92DFDAAE80 /* AdPodContinuationFlipTests.swift in Sources */,
 				0C9F7E7A0156CC108D511D2D /* AdPodContinuationTests.swift in Sources */,
