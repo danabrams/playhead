@@ -465,9 +465,12 @@ actor SkipOrchestrator {
     ///
     /// playhead-ynmk: ACCEPTED SUGGESTIONS are no longer in either category.
     /// A banner Yes asserts presence over a span the detector drew, so its
-    /// extent is governed by `AutoSkipEdgePadding` — `acceptSuggestedSkip`
-    /// no longer inserts here, and `isUserInitiatedSkip` consults
-    /// `UserSpanAssertion` before this set so it cannot be re-exempted.
+    /// extent is governed by `AutoSkipEdgePadding`. Two independent guards
+    /// keep them out: `applyManualSkip` does not insert here for explicit
+    /// banner feedback, and `isUserInitiatedSkip` consults `UserSpanAssertion`
+    /// BEFORE this set. Each alone is sufficient — the mutation battery shows
+    /// either can be reverted with the suite still green — but reverting BOTH
+    /// re-exempts a confirmation and is caught.
     ///
     /// SCOPE CAVEAT: this set is in-memory and per-session — a manual
     /// skip's exemption does NOT survive relaunch. A previously
@@ -5563,19 +5566,29 @@ actor SkipOrchestrator {
         // the master switch and regardless of anchor tier. Before this bead it
         // was EXEMPT — and that exemption is how one tap skipped 150 s of show
         // over a 0.40-confidence span with neither edge anchored.
+        //
+        // Note the SHAPE of the expression, which the ynmk mutation battery
+        // corrected. The user-initiated exemption is the OUTER term, applied
+        // uniformly, rather than a second operand of the activation `||`. The
+        // shorter `extentIsDetectorOwned || (isActive && !isUserInitiated)`
+        // reads the same but short-circuits `isUserInitiatedSkip` away entirely
+        // for exactly the spans this bead is about — which made both of that
+        // function's ynmk guards unreachable, and made three separate mutations
+        // of them survive with the suite green. Behaviour is identical either
+        // way; only this shape is actually TESTED.
         let anchors = edgeAnchorsByWindowId[managed.adWindow.id]
             ?? (start: AutoSkipEdgeAnchor.unanchored, end: AutoSkipEdgeAnchor.unanchored)
         let extentIsDetectorOwned = managed.adWindow.userAssertion
             .map { !$0.assertsExtent } ?? false
         let policyGovernsThisSpan =
-            extentIsDetectorOwned
-            || (
-                AutoSkipEdgePadding.isActive(
+            !isUserInitiatedSkip(managed)
+            && (
+                extentIsDetectorOwned
+                || AutoSkipEdgePadding.isActive(
                     masterEnabled: edgePaddingEnabled,
                     startAnchor: anchors.start,
                     endAnchor: anchors.end
                 )
-                && !isUserInitiatedSkip(managed)
             )
         guard policyGovernsThisSpan else {
             return (start: managed.snappedStart, end: managed.snappedEnd)
