@@ -614,6 +614,8 @@ T_EKS2_WIREIN_COMPOSES="flag ON: runBackfill persists at least one continuation 
 # three defects in three columns, and Q01-Q03 are one rail each.
 T_KVS8_DEFERS="a daemon throttle in the coarse-pass PROLOGUE defers the job — it must not mark it failed"
 T_KVS8_COVERAGE="a throttled prologue leaves coverage accounting untouched — no cursor, no scan rows"
+T_KVS8_RETRY="a throttle does not spend a lifetime retry — the field row's retryCount=1"
+T_KVS8_CAUSE="a throttled prologue records a NAMED cause, not the daemon's raw prose"
 T_KVS8_VACUITY="VACUITY CONTROL: a non-throttle prologue throw still marks the job failed and burns a retry"
 T_KVS8_BATCH="a throttled batch leaves no job stranded in queued and none marked failed"
 T_KVS8_PERM="a daemon throttle on the permissive path persists as rateLimited, never as a permissive refusal"
@@ -1037,19 +1039,19 @@ MUTATIONS=(
   # Q01 makes the throttle arm unreachable (its guard can never hold), so a
   # throttled prologue falls through to the generic catch-all and the job is
   # marked terminally `failed` — the field row, restored.
-  "Q01|62|RUNNER|$T_KVS8_DEFERS;$T_KVS8_BATCH"
+  "Q01|62|RUNNER|$T_KVS8_DEFERS;$T_KVS8_RETRY;$T_KVS8_CAUSE;$T_KVS8_BATCH"
 
   # Q02 spends a lifetime retry on the throttle. Everything else about the
   # defer is intact, so ONLY the retryCount assertion moves — which is the
   # point: three unlucky throttles must not disqualify an episode that was
   # never scanned once.
-  "Q02|63|RUNNER|$T_KVS8_DEFERS"
+  "Q02|63|RUNNER|$T_KVS8_RETRY"
 
   # Q03 merges the prologue cause into pmp9's window cause. Both are honest
   # tokens, so nothing crashes and coverage looks fine; what is lost is the
   # operator's ability to tell "the daemon refused us outright, nothing was
   # scanned" from "a window lost its retries and we banked the rest".
-  "Q03|64|RUNNER|$T_KVS8_DEFERS"
+  "Q03|64|RUNNER|$T_KVS8_CAUSE"
 
   # Q04 restores `.permissiveRefusal` as the status a throttled permissive
   # window persists — a `.persistFailure` status, so a momentary throttle

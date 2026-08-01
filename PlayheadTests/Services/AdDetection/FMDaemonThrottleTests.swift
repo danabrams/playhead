@@ -237,23 +237,77 @@ struct FMThrottledPrologueRunnerTests {
         let jobId = try #require(result.admittedJobIds.first)
         let row = try #require(await store.fetchBackfillJob(byId: jobId))
 
-        // (1) NOT terminal. The daemon said "try again later"; the row must be
-        //     re-drivable, which `.failed` past `maxRetries` is not.
+        // NOT terminal. The daemon said "try again later"; the row must be
+        // re-drivable, which `.failed` past `maxRetries` is not.
         #expect(row.status == .deferred, "throttled prologue left the job \(row.status.rawValue)")
         #expect(row.status != .failed)
-
-        // (2) NO retry burned. This is the field row's `retryCount = 1`.
-        #expect(row.retryCount == 0, "a throttle must not spend a lifetime retry; got \(row.retryCount)")
-
-        // (3) A NAMED cause, not the framework's prose.
-        #expect(row.deferReason == FMDaemonThrottle.DeferCause.passPrologue.rawValue)
-        let reason = row.deferReason ?? ""
-        #expect(!reason.contains("rate limited"), "deferReason must not be the raw daemon string: \(reason)")
-        #expect(!reason.contains("streaming"))
 
         // The run reports the job as deferred so the caller's own accounting
         // agrees with the durable row.
         #expect(result.deferredJobIds.contains(jobId))
+    }
+
+    // The field row's other two columns get their OWN tests rather than riding
+    // along in the one above. A mutation battery verdict is per-TEST: a rail
+    // whose expectation names a test that asserts three unrelated claims is
+    // killed by any one of them, so "the retry is not burned" and "the cause is
+    // named" would both have been provable only by hand-reading issue lists.
+    // One claim per test makes each rail's KILL mean exactly what it says.
+
+    @available(iOS 26.0, *)
+    @Test("a throttle does not spend a lifetime retry — the field row's retryCount=1")
+    func throttleDoesNotBurnARetry() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-kvs8-retry"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            coarseSchemaTokenCountFailure: .rateLimited,
+            tokenCountRule: windowingTokenRule()
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs(assetId: assetId))
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+
+        // `AdmissionController.maxRetries` disqualifies a job permanently. It
+        // exists for jobs failing on their own merits; a throttle says nothing
+        // about the job, so three unlucky ones must not disqualify an episode
+        // that was never scanned once.
+        #expect(row.retryCount == 0, "a throttle spent a lifetime retry; got \(row.retryCount)")
+    }
+
+    @available(iOS 26.0, *)
+    @Test("a throttled prologue records a NAMED cause, not the daemon's raw prose")
+    func throttledPrologueRecordsANamedCause() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-kvs8-cause"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            coarseSchemaTokenCountFailure: .rateLimited,
+            tokenCountRule: windowingTokenRule()
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs(assetId: assetId))
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+
+        // The PROLOGUE cause, specifically — not pmp9's window cause. The two
+        // read differently to an operator: this one means the daemon refused
+        // before a single window was planned, so the episode is untouched.
+        #expect(row.deferReason == FMDaemonThrottle.DeferCause.passPrologue.rawValue,
+                "expected the prologue cause; got \(row.deferReason ?? "nil")")
+        #expect(row.deferReason != FMDaemonThrottle.DeferCause.window.rawValue)
+
+        // And never the framework's prose, which is what the field row carried.
+        let reason = row.deferReason ?? ""
+        #expect(!reason.contains("rate limited"), "deferReason is the raw daemon string: \(reason)")
+        #expect(!reason.contains("streaming"))
     }
 
     @available(iOS 26.0, *)
