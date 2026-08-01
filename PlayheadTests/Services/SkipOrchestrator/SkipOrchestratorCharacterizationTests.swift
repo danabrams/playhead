@@ -1252,6 +1252,12 @@ struct SkipOrchestratorSuggestTierTests {
 
         let window = makeMarkOnlyAdWindow(id: "ad-suggest-emit")
         await orchestrator.receiveAdWindows([window])
+        // playhead-d3g0: detection delivery ARMS; the playhead entering the
+        // span is what presents the card. This test's subject is unchanged —
+        // "a markOnly window surfaces as tier `.suggest`" — but it now has to
+        // satisfy the position precondition to observe it. The precondition
+        // itself is pinned in `SuggestBannerEntryGateTests`.
+        await orchestrator.updatePlayheadTime(window.startTime)
 
         let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
@@ -1624,6 +1630,13 @@ struct SkipOrchestratorSuggestTierTests {
         // fire. Same dedupe contract as the auto-skipped path.
         await orchestrator.receiveAdWindows([window])
         await orchestrator.receiveAdWindows([window])
+        // playhead-d3g0: entry is what presents the card, so the dedupe
+        // contract is now exercised across BOTH axes at once — two producer
+        // deliveries and several position observations inside the span still
+        // owe the user exactly one question.
+        await orchestrator.updatePlayheadTime(window.startTime)
+        await orchestrator.updatePlayheadTime(window.startTime + 1)
+        await orchestrator.updatePlayheadTime(window.startTime + 2)
 
         let collectTask = Task<Int, Never> {
             var count = 0

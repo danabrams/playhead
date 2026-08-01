@@ -38,69 +38,61 @@
 // was always playhead-driven ("after an automatic skip is actually applied").
 // The suggest path simply never got the same treatment.
 //
-// OBSERVATION METHOD — why there are no fixed sleeps here. Emission happens
-// synchronously inside the orchestrator actor, and `AsyncStream` preserves
-// yield order, so a SENTINEL window emitted after the operation under test
-// proves the absence of everything that did not arrive before it. `drain(until:)`
-// waits only until the sentinel lands. Asserting "zero banners" by sleeping and
-// hoping would be the weaker test.
+// OBSERVATION METHOD — no sleeps, no timeouts, no observer task.
+//
+// Emission happens SYNCHRONOUSLY inside the orchestrator actor, and
+// `AsyncStream` buffers on `yield`. So by the time
+// `await orchestrator.updatePlayheadTime(...)` returns, everything it emitted is
+// already in the stream's buffer, and a reader that owns the iterator pulls it
+// without ever suspending on an empty buffer. A SENTINEL window driven after
+// the operation under test is therefore an exact frame boundary: whatever comes
+// back before it is the complete set, including the empty set.
+//
+// The first version of this file used a separate observer actor polling a
+// 5 s deadline. It passed standalone and FAILED all fifteen of its own tests in
+// the full ~8,300-test gate, where the observer task was starved past the
+// deadline and every drain reported "nothing arrived". That is a test harness
+// asserting scheduler luck, and the fix was to stop needing a second task at
+// all rather than to raise the number. `.timeLimit` is the only bound left, and
+// it exists solely so a genuine regression fails instead of hanging.
 
 import Foundation
 import Testing
 
 @testable import Playhead
 
-// MARK: - Recorder
+// MARK: - Reader
 
-/// Order-preserving recorder over a banner stream, with a sentinel-bounded
-/// drain so "nothing was emitted" is a positive observation rather than the
-/// absence of one within an arbitrary sleep.
-private actor BannerRecorder {
-    private var items: [AdSkipBannerItem] = []
-    private var observation: Task<Void, Never>?
+/// Single-consumer reader over a banner stream. Owns the iterator, so a pull
+/// returns already-buffered items without depending on any other task getting
+/// scheduled.
+private struct BannerReader {
+    private var iterator: AsyncStream<AdSkipBannerItem>.AsyncIterator
 
-    func observe(_ stream: AsyncStream<AdSkipBannerItem>) {
-        observation = Task { [weak self] in
-            for await item in stream {
-                await self?.append(item)
+    init(_ stream: AsyncStream<AdSkipBannerItem>) {
+        iterator = stream.makeAsyncIterator()
+    }
+
+    /// Every item up to `sentinel`, consuming the sentinel. Empty means the
+    /// operation under test emitted nothing — a positive observation, not a
+    /// timeout.
+    mutating func drain(until sentinel: String) async -> [AdSkipBannerItem] {
+        var collected: [AdSkipBannerItem] = []
+        while let item = await iterator.next() {
+            if item.windowId == sentinel {
+                return collected
             }
+            collected.append(item)
         }
-    }
-
-    private func append(_ item: AdSkipBannerItem) {
-        items.append(item)
-    }
-
-    func stop() {
-        observation?.cancel()
-        observation = nil
-    }
-
-    func snapshot() -> [AdSkipBannerItem] {
-        items
-    }
-
-    /// Every item received BEFORE `sentinel`, consuming the sentinel. Returns
-    /// nil if the sentinel never arrives inside `timeout` (a hang would
-    /// otherwise be indistinguishable from a failure).
-    func drain(
-        until sentinel: String,
-        timeout: Duration = .seconds(5)
-    ) async -> [AdSkipBannerItem]? {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            if let index = items.firstIndex(where: { $0.windowId == sentinel }) {
-                let prefix = Array(items[..<index])
-                items.removeFirst(index + 1)
-                return prefix
-            }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        return nil
+        return collected
     }
 }
 
-@Suite("Suggest banner entry gate (playhead-d3g0)")
+// A stream read that never resolves would otherwise hang the whole gate. This
+// is the ONLY bound in the suite — every assertion below is a synchronous
+// consequence of an awaited actor call, so under load these tests get SLOWER
+// and never wrong.
+@Suite("Suggest banner entry gate (playhead-d3g0)", .timeLimit(.minutes(1)))
 struct SuggestBannerEntryGateTests {
 
     // MARK: - Fixture
@@ -203,20 +195,16 @@ struct SuggestBannerEntryGateTests {
     /// span passes against the pre-fix emitter for the wrong reason — the
     /// banner was already sitting in the buffer from detection time. Three of
     /// the tests here did exactly that on the first run. This is the guard.
-    private static func expectNothingBanneredYet(
+    fileprivate static func expectNothingBanneredYet(
         _ orchestrator: SkipOrchestrator,
-        _ recorder: BannerRecorder,
+        _ reader: inout BannerReader,
         sentinelId: String,
         drivingPlayheadTo time: Double,
         _ because: String,
         sourceLocation: SourceLocation = #_sourceLocation
-    ) async throws {
+    ) async {
         await fireSentinel(orchestrator, id: sentinelId, at: time)
-        let received = try #require(
-            await recorder.drain(until: sentinelId),
-            "sentinel never arrived — the entry path itself is broken",
-            sourceLocation: sourceLocation
-        )
+        let received = await reader.drain(until: sentinelId)
         #expect(
             received.isEmpty,
             "\(because); got \(received.map(\.windowId))",
@@ -229,9 +217,7 @@ struct SuggestBannerEntryGateTests {
     @Test("Field case: one batch of three spans emits NOTHING until the playhead reaches each")
     func fieldBatchEmitsNothingUntilPlayheadEntersEachSpan() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         // The delivery that caused the field incident: three spans at 3.5,
         // 44.5 and 80 minutes, in ONE detection batch.
@@ -247,10 +233,7 @@ struct SuggestBannerEntryGateTests {
 
         // The playhead is at 1 s. Nothing has been reached.
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-a", at: 1)
-        let beforeEntry = try #require(
-            await recorder.drain(until: "d3g0-sentinel-a"),
-            "sentinel never arrived — the entry path itself is broken"
-        )
+        let beforeEntry = await reader.drain(until: "d3g0-sentinel-a")
         #expect(
             beforeEntry.isEmpty,
             """
@@ -267,10 +250,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.updatePlayheadTime(4850)
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-b", at: 4990)
 
-        let afterEntry = try #require(
-            await recorder.drain(until: "d3g0-sentinel-b"),
-            "second sentinel never arrived"
-        )
+        let afterEntry = await reader.drain(until: "d3g0-sentinel-b")
         #expect(
             afterEntry.map(\.windowId) == Self.fieldSpans.map(\.id),
             "each span must banner exactly once, in playhead order; got \(afterEntry.map(\.windowId))"
@@ -283,9 +263,7 @@ struct SuggestBannerEntryGateTests {
     @Test("Fires on the first observation INSIDE the span, and not one tick earlier")
     func firesOnFirstObservationInsideSpanNotBefore() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-entry", start: 60, end: 120)
@@ -296,9 +274,7 @@ struct SuggestBannerEntryGateTests {
             60 - PlaybackService.periodicTimeObserverIntervalSeconds
         )
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-outside", at: 5)
-        let outside = try #require(
-            await recorder.drain(until: "d3g0-sentinel-outside")
-        )
+        let outside = await reader.drain(until: "d3g0-sentinel-outside")
         #expect(
             outside.isEmpty,
             "a playhead one tick BEFORE the span has not entered it; got \(outside.map(\.windowId))"
@@ -308,9 +284,7 @@ struct SuggestBannerEntryGateTests {
         // is that there is still an entire ad left to skip.
         await orchestrator.updatePlayheadTime(60)
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-inside", at: 130)
-        let inside = try #require(
-            await recorder.drain(until: "d3g0-sentinel-inside")
-        )
+        let inside = await reader.drain(until: "d3g0-sentinel-inside")
         #expect(
             inside.map(\.windowId) == ["d3g0-entry"],
             "entry at the span start must fire immediately; got \(inside.map(\.windowId))"
@@ -346,9 +320,7 @@ struct SuggestBannerEntryGateTests {
     @Test("Worst-case tick alignment still banners inside the budget")
     func worstCaseTickAlignmentBannersInsideTheBudget() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         let spanStart = 60.0
         let tick = PlaybackService.periodicTimeObserverIntervalSeconds
@@ -361,7 +333,7 @@ struct SuggestBannerEntryGateTests {
 
         await orchestrator.updatePlayheadTime(lastObservationBefore)
         try await Self.expectNothingBanneredYet(
-            orchestrator, recorder,
+            orchestrator, &reader,
             sentinelId: "d3g0-sentinel-budget-pre",
             drivingPlayheadTo: 5,
             "an observation 1 ms before the span start has not entered it"
@@ -369,9 +341,7 @@ struct SuggestBannerEntryGateTests {
 
         await orchestrator.updatePlayheadTime(firstObservationInside)
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-budget", at: 300)
-        let received = try #require(
-            await recorder.drain(until: "d3g0-sentinel-budget")
-        )
+        let received = await reader.drain(until: "d3g0-sentinel-budget")
         #expect(
             received.map(\.windowId) == ["d3g0-budget"],
             """
@@ -407,9 +377,7 @@ struct SuggestBannerEntryGateTests {
     @Test("Pre-roll banners when the playhead is AT 0:00 — and not when the episode is resumed past it")
     func preRollBannersOnlyWhenThePlayheadIsInIt() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         // Resumed at 10:00. Detection then delivers the pre-roll.
         await orchestrator.recordUserSeek(to: 600)
@@ -418,7 +386,7 @@ struct SuggestBannerEntryGateTests {
             Self.makeSuggestion(id: "d3g0-preroll", start: 0, end: 30)
         ])
         try await Self.expectNothingBanneredYet(
-            orchestrator, recorder,
+            orchestrator, &reader,
             sentinelId: "d3g0-sentinel-preroll-resumed",
             drivingPlayheadTo: 601,
             "a listener resumed at 10:00 is not in the pre-roll and must not be asked about it"
@@ -429,9 +397,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.updatePlayheadTime(0)
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-preroll", at: 400)
 
-        let received = try #require(
-            await recorder.drain(until: "d3g0-sentinel-preroll")
-        )
+        let received = await reader.drain(until: "d3g0-sentinel-preroll")
         #expect(
             received.map(\.windowId) == ["d3g0-preroll"],
             "a span starting at 0 must fire at playhead 0; got \(received.map(\.windowId))"
@@ -443,9 +409,7 @@ struct SuggestBannerEntryGateTests {
     @Test("A span already behind the playhead never banners")
     func spanBehindThePlayheadNeverBanners() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         await orchestrator.updatePlayheadTime(400)
         await orchestrator.receiveAdWindows([
@@ -455,9 +419,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.updatePlayheadTime(402)
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-past", at: 500)
 
-        let received = try #require(
-            await recorder.drain(until: "d3g0-sentinel-past")
-        )
+        let received = await reader.drain(until: "d3g0-sentinel-past")
         #expect(
             received.isEmpty,
             """
@@ -473,15 +435,13 @@ struct SuggestBannerEntryGateTests {
     @Test("Entry fires at most once per window, however many ticks land inside")
     func entryFiresAtMostOncePerWindow() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-once", start: 60, end: 120)
         ])
         try await Self.expectNothingBanneredYet(
-            orchestrator, recorder,
+            orchestrator, &reader,
             sentinelId: "d3g0-sentinel-once-pre",
             drivingPlayheadTo: 40,
             "detection delivery must not banner before the playhead reaches the span"
@@ -491,9 +451,7 @@ struct SuggestBannerEntryGateTests {
         }
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-once", at: 300)
 
-        let received = try #require(
-            await recorder.drain(until: "d3g0-sentinel-once")
-        )
+        let received = await reader.drain(until: "d3g0-sentinel-once")
         #expect(
             received.map(\.windowId) == ["d3g0-once"],
             "40 ticks inside one span must produce exactly one banner; got \(received.count)"
@@ -503,22 +461,20 @@ struct SuggestBannerEntryGateTests {
     @Test("Seeking backwards into an already-fired span does not re-ask")
     func seekingBackIntoAFiredSpanDoesNotRefire() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-seek", start: 60, end: 120)
         ])
         try await Self.expectNothingBanneredYet(
-            orchestrator, recorder,
+            orchestrator, &reader,
             sentinelId: "d3g0-sentinel-seek-pre",
             drivingPlayheadTo: 40,
             "detection delivery must not banner before the playhead reaches the span"
         )
         await orchestrator.updatePlayheadTime(60)
         await orchestrator.updatePlayheadTime(200)
-        _ = try #require(await recorder.drain(until: "d3g0-seek"))
+        _ = try #require(await reader.drain(until: "d3g0-seek"))
 
         // Scrub back into the span. The question was already asked; re-asking
         // it is how a banner becomes noise, and the once-per-window guarantee
@@ -528,9 +484,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.updatePlayheadTime(70)
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-seek", at: 300)
 
-        let received = try #require(
-            await recorder.drain(until: "d3g0-sentinel-seek")
-        )
+        let received = await reader.drain(until: "d3g0-sentinel-seek")
         #expect(
             received.isEmpty,
             "a backwards seek must not re-fire an answered span; got \(received.map(\.windowId))"
@@ -551,14 +505,10 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.updatePlayheadTime(65)
 
         // Now Playing appears.
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-replay", at: 200)
 
-        let replayed = try #require(
-            await recorder.drain(until: "d3g0-sentinel-replay")
-        )
+        let replayed = await reader.drain(until: "d3g0-sentinel-replay")
         #expect(
             replayed.map(\.windowId) == ["d3g0-replay-entered"],
             """
@@ -575,9 +525,7 @@ struct SuggestBannerEntryGateTests {
     @Test("Moving the emit later means the banner carries the RICHER catalog")
     func emitAtEntryCarriesTheCatalogThatArrivedAfterDetection() async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await orchestrator.bannerItemStream())
-        defer { Task { await recorder.stop() } }
+        var reader = BannerReader(await orchestrator.bannerItemStream())
 
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-catalog", start: 60, end: 120)
@@ -609,9 +557,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.updatePlayheadTime(60)
         await Self.fireSentinel(orchestrator, id: "d3g0-sentinel-catalog", at: 300)
 
-        let received = try #require(
-            await recorder.drain(until: "d3g0-sentinel-catalog")
-        )
+        let received = await reader.drain(until: "d3g0-sentinel-catalog")
         let banner = try #require(
             received.first { $0.windowId == "d3g0-catalog" },
             "entry did not banner; got \(received.map(\.windowId))"
@@ -645,7 +591,7 @@ struct SuggestBannerEntryGateTests {
 /// the acceptance transaction consults — not a second derivation that could
 /// drift from it. `affordanceMatchesWhatTheTapActuallyDoes` is the test that
 /// keeps the two honest with each other.
-@Suite("Suggest banner skip affordance (playhead-d3g0)")
+@Suite("Suggest banner skip affordance (playhead-d3g0)", .timeLimit(.minutes(1)))
 struct SuggestBannerSkipAffordanceTests {
 
     /// Drive one markOnly window to its entry banner and hand back the card
@@ -660,19 +606,16 @@ struct SuggestBannerSkipAffordanceTests {
         store: AnalysisStore
     ) {
         let harness = try await SuggestBannerEntryGateTests.makeHarness()
-        let recorder = BannerRecorder()
-        await recorder.observe(await harness.orchestrator.bannerItemStream())
+        var reader = BannerReader(
+            await harness.orchestrator.bannerItemStream()
+        )
         try await harness.store.insertAdWindow(window)
         await harness.orchestrator.receiveAdWindows([window])
         await harness.orchestrator.updatePlayheadTime(time)
         await SuggestBannerEntryGateTests.fireSentinel(
             harness.orchestrator, id: "d3g0-affordance-sentinel", at: 8000
         )
-        let received = try #require(
-            await recorder.drain(until: "d3g0-affordance-sentinel"),
-            "sentinel never arrived"
-        )
-        await recorder.stop()
+        let received = await reader.drain(until: "d3g0-affordance-sentinel")
         let item = try #require(
             received.first { $0.windowId == window.id },
             "entry did not banner; got \(received.map(\.windowId))"

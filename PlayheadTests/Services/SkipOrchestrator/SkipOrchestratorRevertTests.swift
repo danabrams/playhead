@@ -2911,6 +2911,7 @@ struct SkipOrchestratorRevertTests {
         let suggestion = makeSuggestWindow(id: "nil-store-suggest-yes")
         try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
+        await enterSuggestSpan(orchestrator)
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected suggestion card")
             return
@@ -2964,6 +2965,7 @@ struct SkipOrchestratorRevertTests {
         let suggestion = makeSuggestWindow(id: "nil-store-suggest-no")
         try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
+        await enterSuggestSpan(orchestrator)
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected suggestion card")
             return
@@ -4593,6 +4595,26 @@ struct SkipOrchestratorRevertTests {
 
     // MARK: - playhead-lc7z: explicit suggest denial persists a falsePositive correction
 
+    /// playhead-d3g0: detection delivery ARMS a suggestion; the PLAYHEAD
+    /// entering its span is what presents the card.
+    ///
+    /// Every test in this file that expects a suggest presentation now has to
+    /// satisfy that precondition, so this is one call putting the listener
+    /// inside the span they are being asked about. The default matches
+    /// `makeSuggestWindow`'s `[60, 120]`.
+    ///
+    /// The gate itself — that detection delivery alone banners NOTHING, and
+    /// what happens on seek, pre-roll, replay and re-entry — is pinned in
+    /// `SuggestBannerEntryGateTests`, not here. These tests are about
+    /// retirement, revision identity and durable receipts, and they keep
+    /// testing exactly that.
+    private func enterSuggestSpan(
+        _ orchestrator: SkipOrchestrator,
+        at time: Double = 60
+    ) async {
+        await orchestrator.updatePlayheadTime(time)
+    }
+
     /// Build a markOnly suggest-tier AdWindow with a brand + producer tag so
     /// the explicit-denial path has something to attribute (causalSource) and
     /// something to key hard-negative mining on (sponsorEntity).
@@ -4684,6 +4706,7 @@ struct SkipOrchestratorRevertTests {
 
         let suggest = makeSuggestWindow(id: "gate-flip-window")
         await orchestrator.receiveAdWindows([suggest])
+        await enterSuggestSpan(orchestrator)
         guard case let .present(suggestItem) = await probe.next() else {
             Issue.record("Expected initial suggest presentation")
             return
@@ -4748,6 +4771,7 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(blockedSuggestion)
         await orchestrator.receiveAdWindows([blockedSuggestion])
+        await enterSuggestSpan(orchestrator)
         guard case .present = await probe.next() else {
             Issue.record("Expected blocked-path suggestion presentation")
             return
@@ -4773,6 +4797,7 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(rejectedSuggestion)
         await orchestrator.receiveAdWindows([rejectedSuggestion])
+        await enterSuggestSpan(orchestrator)
         guard case .present = await probe.next() else {
             Issue.record("Expected inventory-path suggestion presentation")
             return
@@ -4846,6 +4871,7 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(blockedSuggestion)
         await orchestrator.receiveAdWindows([blockedSuggestion])
+        await enterSuggestSpan(orchestrator)
         guard case .present = await probe.next() else {
             Issue.record("Expected blocked-decision suggestion presentation")
             return
@@ -4876,6 +4902,7 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(rejectedSuggestion)
         await orchestrator.receiveAdWindows([rejectedSuggestion])
+        await enterSuggestSpan(orchestrator)
         guard case .present = await probe.next() else {
             Issue.record("Expected rejected-decision suggestion presentation")
             return
@@ -4951,6 +4978,7 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
+        await enterSuggestSpan(orchestrator)
         guard case .present = await probe.next() else {
             Issue.record("Expected explicit-retirement presentation")
             return
@@ -5039,6 +5067,7 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
+        await enterSuggestSpan(orchestrator)
         guard case .present = await probe.next() else {
             Issue.record("Expected pre-context suggestion presentation")
             return
@@ -5307,6 +5336,11 @@ struct SkipOrchestratorRevertTests {
 
         let markOnly = makeSuggestWindow(id: eligible.id)
         await orchestrator.receiveAdWindows([markOnly])
+        // The downgrade's RETIREMENT is emitted by the delivery itself; only
+        // the replacement suggest card waits for the playhead (playhead-d3g0).
+        // Ticking after the receive therefore leaves the observed ORDER —
+        // retire, then present — exactly as it was.
+        await enterSuggestSpan(orchestrator)
         guard case let .retireWindow(retirement) =
             await probe.next()
         else {
@@ -5986,6 +6020,7 @@ struct SkipOrchestratorRevertTests {
         let suggest = makeAnchoredSuggestWindow(id: "accept-shadow-window")
         try await store.insertAdWindow(suggest)
         await orchestrator.receiveAdWindows([suggest])
+        await enterSuggestSpan(orchestrator)
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected suggest presentation")
             return
@@ -7048,6 +7083,13 @@ struct SkipOrchestratorRevertTests {
             await orchestrator.activeSuggestWindowIDs().contains(suggest.id),
             "The undecided window remains pending while no UI can answer it"
         )
+        // playhead-d3g0: the span is PLAYED while no host exists. That
+        // satisfies the position gate — replay is now gated on position rather
+        // than dropped, and this test's subject (delivered exactly once when
+        // the host attaches) is unchanged. The complementary case, a suggestion
+        // whose span the playhead never reached NOT being replayed, is pinned
+        // in `SuggestBannerEntryGateTests`.
+        await enterSuggestSpan(orchestrator)
 
         let stream = await orchestrator.bannerItemStream()
         let probe = BoundedStreamProbe(stream)
@@ -7085,6 +7127,7 @@ struct SkipOrchestratorRevertTests {
         let suggest = makeSuggestWindow(id: "same-id-replacement")
         try await store.insertAdWindow(suggest)
         await orchestrator.receiveAdWindows([suggest])
+        await enterSuggestSpan(orchestrator)
 
         let oldStream = await orchestrator.bannerItemStream()
         let oldProbe = BoundedStreamProbe(oldStream)
@@ -7158,6 +7201,7 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(original)
         await orchestrator.receiveAdWindows([original])
+        await enterSuggestSpan(orchestrator, at: 61)
         let oldItem = try #require(await probe.next())
         let oldRevision = try #require(
             oldItem.suggestionRevisionToken
@@ -7170,6 +7214,9 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertOrReplaceAdWindow(revised)
         await orchestrator.receiveAdWindows([revised])
+        // A material revision RE-ARMS (playhead-d3g0), so the replacement card
+        // needs its own entry — which is right: the new span is a new question.
+        await enterSuggestSpan(orchestrator, at: 61)
         let revisedItem = try #require(await probe.next())
         let revisedToken = try #require(
             revisedItem.suggestionRevisionToken
