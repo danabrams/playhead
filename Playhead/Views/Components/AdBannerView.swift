@@ -101,6 +101,23 @@ struct AdSkipBannerItem: Identifiable, Equatable {
     /// Defaults to `.autoSkipped` to preserve every existing call site
     /// (the historical banner emitter is the high-confidence path).
     var tier: AdBannerTier = .autoSkipped
+    /// playhead-d3g0: will confirming this SUGGEST card actually move playback?
+    ///
+    /// playhead-ynmk made a confirmation assert PRESENCE, never EXTENT — the
+    /// user answers "is this an ad?" and the DETECTOR drew the edges — so the
+    /// acceptance transaction is governed by `AutoSkipEdgePadding`. On a span
+    /// with no late-safe window (the field population: both edges unanchored)
+    /// confirming produces a MARK and playback does not move.
+    ///
+    /// d3g0 fires the card the moment the playhead ENTERS the span, so a card
+    /// that offers a skip it cannot perform is a button that does nothing at
+    /// the exact moment the user wants it to do something. This field is how
+    /// the card knows, resolved by the orchestrator from the same policy the
+    /// transaction consults.
+    ///
+    /// Meaningless for `.autoSkipped` (the skip already happened); `true` is
+    /// the default so every existing call site is unchanged.
+    var confirmationSkipsPlayback: Bool = true
 }
 
 // MARK: - Banner Queue (ViewModel)
@@ -924,6 +941,12 @@ struct AdBannerView: View {
     static let feedbackPrompt = "Was this right?"
     static let confirmFeedbackLabel = "Yes"
     static let denyFeedbackLabel = "No"
+    /// playhead-d3g0: the confirm label on a suggest card whose confirmation
+    /// will only MARK — the span's edges are the detector's and cannot be
+    /// proven late-safe, so accepting records a mark and playback does not
+    /// move (playhead-ynmk). Deliberately minimal; the wording is
+    /// playhead-1mq1.1's call and this is the single place to change it.
+    static let markOnlyConfirmFeedbackLabel = "Mark"
     static let feedbackMinimumTapSize: CGFloat = 44
 
     /// Semantic roles used by every essential banner text surface. Unlike the
@@ -1003,9 +1026,39 @@ struct AdBannerView: View {
     /// `bannerCard`. Keeping the visible and accessibility copy in one value
     /// lets tests verify the actual content consumed by the controls without
     /// inspecting Swift source text.
-    static func feedbackChoiceContent(for tier: AdBannerTier) -> FeedbackChoiceContent {
+    ///
+    /// playhead-d3g0: a suggest card whose confirmation will only MARK must not
+    /// present a skip. See `AdSkipBannerItem.confirmationSkipsPlayback` — on a
+    /// span whose edges the detector drew and cannot prove late-safe (playhead-ynmk),
+    /// confirming records a mark and playback does not move, so "Yes, skip this
+    /// sponsor break" would be a promise the tap cannot keep. `confirmationSkipsPlayback`
+    /// is meaningless for `.autoSkipped` (that skip already happened) and is
+    /// ignored there.
+    ///
+    /// COPY OWNERSHIP: the mark-only strings below are the only new user-facing
+    /// text in this bead and they live in this one branch so playhead-1mq1.1
+    /// (banner copy pass) has a single place to edit. The skippable branch is
+    /// deliberately byte-identical to what shipped — this bead does not
+    /// pre-empt that bead's "lead with the skip" reorder.
+    static func feedbackChoiceContent(
+        for tier: AdBannerTier,
+        confirmationSkipsPlayback: Bool = true
+    ) -> FeedbackChoiceContent {
         switch tier {
         case .suggest:
+            guard confirmationSkipsPlayback else {
+                return FeedbackChoiceContent(
+                    prompt: feedbackPrompt,
+                    confirmLabel: markOnlyConfirmFeedbackLabel,
+                    denyLabel: denyFeedbackLabel,
+                    confirmAccessibilityLabel: "Yes, this is a sponsor break",
+                    confirmAccessibilityHint:
+                        "Marks this as an ad; playback continues",
+                    denyAccessibilityLabel: "No, this was not an ad",
+                    denyAccessibilityHint:
+                        "Marks this suggestion wrong and leaves playback unchanged"
+                )
+            }
             return FeedbackChoiceContent(
                 prompt: feedbackPrompt,
                 confirmLabel: confirmFeedbackLabel,
@@ -2123,7 +2176,10 @@ struct AdBannerView: View {
     /// The same compact, accessible learning choice appears on every tier.
     @ViewBuilder
     private func feedbackChoice(for item: AdSkipBannerItem) -> some View {
-        let content = Self.feedbackChoiceContent(for: item.tier)
+        let content = Self.feedbackChoiceContent(
+            for: item.tier,
+            confirmationSkipsPlayback: item.confirmationSkipsPlayback
+        )
 
         if Self.feedbackChoiceUsesStackedLayout(for: dynamicTypeSize) {
             stackedFeedbackChoice(content: content, item: item)

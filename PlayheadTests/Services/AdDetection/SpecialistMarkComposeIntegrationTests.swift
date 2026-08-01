@@ -229,6 +229,13 @@ struct SpecialistMarkComposeIntegrationTests {
             analysisAssetId: assetId
         )
         await orchestrator.receiveAdWindows([mark])
+        // playhead-d3g0: detection delivery ARMS the suggestion; the playhead
+        // entering the span is what presents the card. This test's subject —
+        // markOnly routes to suggest and NEVER to auto-skip — is unchanged, and
+        // the negative half (no auto-skip banner, no applied decision) is if
+        // anything stronger now: the auto path had its whole chance during the
+        // delivery above.
+        await orchestrator.updatePlayheadTime(60)
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
         let received = await collectTask.value
@@ -274,6 +281,11 @@ struct SpecialistMarkComposeIntegrationTests {
             return items
         }
         await orchestrator.beginEpisode(analysisAssetId: assetId, episodeId: assetId, podcastId: "podcast-1")
+        // playhead-d3g0: preload ARMS the persisted mark. The banner is the
+        // playhead's to present — deliberately so, because `beginEpisode` runs
+        // before the first position observation and a listener resuming past
+        // this span must not be asked about it.
+        await orchestrator.updatePlayheadTime(60)
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
         let received = await collectTask.value
