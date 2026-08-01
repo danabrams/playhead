@@ -995,9 +995,18 @@ struct SkipModePillPresentation: Equatable {
     ///
     /// `false` only when the session has no show. `PlayheadRuntime
     /// .setShowSkipMode` persists a choice through
-    /// `trustService.setUserOverride(podcastId:mode:)` and silently skips the
-    /// write when `currentPodcastId` is nil — so a menu here would accept a
-    /// selection and forget it, which is this bead's own defect one layer up.
+    /// `trustService.setUserOverride(podcastId:mode:)`, and a session with no
+    /// canonical show has nothing to key that write on — so a menu here would
+    /// accept a selection and forget it, which is this bead's own defect one
+    /// layer up.
+    ///
+    /// playhead-usn1: `.noActiveEpisode` reaches this branch too, and used to
+    /// reach it PERMANENTLY. The screen is presented in the same turn as the tap
+    /// that starts playback, so its one-shot reading of the mode landed before
+    /// `beginEpisode` had resolved the show and was never refreshed — every
+    /// show, every time, read "Show Unknown" with the control withheld. The
+    /// resolution is now pushed, so this branch describes what it always meant
+    /// to: a session that genuinely has no show.
     let isModeSelectable: Bool
 
     init(mode: SkipMode, resolution: SkipModeResolution) {

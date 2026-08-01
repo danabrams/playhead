@@ -708,6 +708,17 @@ struct RecoveredShowIdentityAdoptionTests {
         #expect(runtime.currentPodcastId == nil)
     }
 }
+
+// MARK: - The refusal's durable trace
+
+/// Drain the runtime logger's JSON Lines session file. Mirrors the retry-drain
+/// playhead-djl0's suites use: the sentinel is enqueued AFTER the write under
+/// test on the same serial queue, so its arrival proves that write has landed.
+///
+/// Asserts PRESENCE only. The runtime's logger writes to the shared default
+/// session directory, so an absence assertion here would be an assertion about
+/// every other test in the process too.
+private func drainRuntimeInvariantCodes(
     _ logger: SurfaceStatusInvariantLogger,
     untilSentinel sentinel: String
 ) -> [InvariantViolation.Code] {
@@ -740,6 +751,16 @@ struct RecoveredShowIdentityAdoptionTests {
 @MainActor
 struct RefusedShowSkipModeWriteDiagnosticsTests {
 
+    /// The third of "named, counted, SURFACED". The field investigation this bead
+    /// came from went looking for a line explaining a control that did nothing,
+    /// and the branch wrote none.
+    ///
+    /// The code is its OWN, not playhead-djl0's `.skipModeShowIdentityUnresolved`:
+    /// that one records a READ at episode start that found no show, this one
+    /// records a WRITE the listener actually asked for and did not get. Merging
+    /// them would leave an operator unable to tell "we never knew the show" from
+    /// "the listener tried to set a preference and it went nowhere" — the same
+    /// collapse djl0 spent a bead undoing, one layer over.
     @Test("a refused write is recorded under its own code")
     func aRefusedWriteIsRecorded() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)

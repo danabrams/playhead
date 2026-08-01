@@ -60,10 +60,18 @@ struct SkipModePillPresentationTests {
     }
 
     /// `PlayheadRuntime.setShowSkipMode` writes the user's choice through
-    /// `trustService.setUserOverride(podcastId:mode:)` and silently skips the
-    /// write when `currentPodcastId` is nil. Offering a menu whose selection
-    /// cannot be stored is the same defect one layer up, so the control is
-    /// withheld rather than lying.
+    /// `trustService.setUserOverride(podcastId:mode:)`, and there is nothing to
+    /// key that write on when the session has no show. Offering a menu whose
+    /// selection cannot be stored is the same defect one layer up, so the
+    /// control is withheld rather than lying.
+    ///
+    /// playhead-usn1: the write no longer SILENTLY skips — it returns a named
+    /// refusal, counts it, and records it. This rail is unchanged, because a
+    /// loud refusal is the guard for the rare genuinely-showless episode, not a
+    /// licence to offer the control for it. What usn1 changed is how OFTEN this
+    /// case is reached: `.unresolvedShowIdentity` now means the show really is
+    /// unknown, rather than the surface having sampled the mode before
+    /// `beginEpisode` had a chance to resolve it.
     @Test("an unresolved identity withholds the per-show control")
     func anUnresolvedIdentityIsNotSelectable() {
         let presentation = SkipModePillPresentation(
