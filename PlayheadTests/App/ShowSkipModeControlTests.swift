@@ -91,6 +91,27 @@ private enum ShowControlFixture {
     }
 }
 
+/// Wait for `condition` on a WALL-CLOCK deadline rather than a fixed iteration
+/// count.
+///
+/// The gate runs ~10,000 tests with Swift Testing's in-process concurrency, and
+/// under that load a `Task.sleep(for: .milliseconds(5))` routinely takes closer
+/// to a second. A 200-iteration budget that reads as "one second" on a quiet
+/// machine therefore becomes a three-minute test in the gate — which is how
+/// five of this file's tests joined the ≥97 s load-flake family on their first
+/// full run. A deadline says what was actually meant: give the other task a
+/// generous chance to be scheduled, and stop.
+@MainActor
+private func waitUntil(
+    seconds: TimeInterval = 20,
+    _ condition: @MainActor () -> Bool
+) async {
+    let deadline = Date().addingTimeInterval(seconds)
+    while !condition(), Date() < deadline {
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+}
+
 /// Collects everything a `skipModeStream()` has emitted so far, in order.
 ///
 /// `AsyncStream`'s default buffering is unbounded, so nothing is dropped between
@@ -116,8 +137,9 @@ private actor SkipModeRecorder {
     /// than a timeout on the stream itself so "nothing further arrived" is a
     /// bounded observation instead of a hang.
     func waitForCount(_ count: Int) async -> [SkipModeSnapshot] {
-        for _ in 0..<200 where snapshots.count < count {
-            try? await Task.sleep(for: .milliseconds(5))
+        let deadline = Date().addingTimeInterval(20)
+        while snapshots.count < count, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
         }
         return snapshots
     }
@@ -207,7 +229,7 @@ struct EpisodeShowIdentityTests {
 // MARK: - B. The orchestrator pushes the mode and its cause
 
 @Suite("The skip mode reaches the surface by push, not by sampling (playhead-usn1)",
-       .timeLimit(.minutes(1)))
+       .timeLimit(.minutes(5)))
 struct SkipModeStreamTests {
 
     private static let assetId = "asset-usn1"
@@ -357,7 +379,7 @@ struct SkipModeStreamTests {
 // MARK: - C. The view model tracks the push
 
 @Suite("Now Playing tracks the skip mode for as long as it is mounted (playhead-usn1)",
-       .timeLimit(.minutes(1)))
+       .timeLimit(.minutes(5)))
 @MainActor
 struct NowPlayingSkipModeSubscriptionTests {
 
@@ -382,9 +404,8 @@ struct NowPlayingSkipModeSubscriptionTests {
     ) async {
         viewModel.skipModeResolution = .trustProfileUnreadable
         viewModel.observeSkipMode(from: orchestrator)
-        for _ in 0..<400
-        where viewModel.skipModeResolution == .trustProfileUnreadable {
-            try? await Task.sleep(for: .milliseconds(5))
+        await waitUntil {
+            viewModel.skipModeResolution != .trustProfileUnreadable
         }
     }
 
@@ -472,7 +493,7 @@ struct NowPlayingSkipModeSubscriptionTests {
 // MARK: - D. The write refuses loudly rather than skipping silently
 
 @Suite("A per-show skip-mode write is never silently skipped (playhead-usn1)",
-       .timeLimit(.minutes(1)))
+       .timeLimit(.minutes(5)))
 @MainActor
 struct ShowSkipModeWriteTests {
 
@@ -587,7 +608,7 @@ struct ShowSkipModeWriteTests {
 }
 
 @Suite("A refused write withdraws the surface's optimistic claim (playhead-usn1)",
-       .timeLimit(.minutes(1)))
+       .timeLimit(.minutes(5)))
 @MainActor
 struct RefusedSkipModeSelectionTests {
 
@@ -618,7 +639,7 @@ struct RefusedSkipModeSelectionTests {
 // MARK: - E. A recovered identity reaches BOTH halves of the session
 
 @Suite("An identity only the orchestrator recovered reaches the runtime (playhead-usn1)",
-       .timeLimit(.minutes(1)))
+       .timeLimit(.minutes(5)))
 @MainActor
 struct RecoveredShowIdentityAdoptionTests {
 
@@ -630,14 +651,11 @@ struct RecoveredShowIdentityAdoptionTests {
     /// That is the "accepts a choice and forgets it" defect djl0 withheld the
     /// control to avoid; carrying the value back closes it instead.
     @Test("the runtime adopts an identity only the orchestrator could recover")
-    func theRuntimeAdoptsTheRecoveredIdentity() async throws {
+    func theRuntimeAdoptsTheRecoveredIdentity() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let episodeId = "ep-usn1-adopt-\(UUID().uuidString)"
         let assetId = "asset-\(UUID().uuidString)"
         let podcastId = Fx.uniquePodcastId()
-        try await runtime.analysisStore.insertAsset(
-            makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId)
-        )
         await runtime.skipOrchestrator.beginEpisode(
             analysisAssetId: assetId,
             episodeId: episodeId,
@@ -656,14 +674,11 @@ struct RecoveredShowIdentityAdoptionTests {
 
     /// The caller's value always wins. Adoption only ever widens.
     @Test("adoption never overwrites an identity the runtime already has")
-    func adoptionNeverOverwrites() async throws {
+    func adoptionNeverOverwrites() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let episodeId = "ep-usn1-keep-\(UUID().uuidString)"
         let assetId = "asset-\(UUID().uuidString)"
         let runtimeShow = Fx.uniquePodcastId()
-        try await runtime.analysisStore.insertAsset(
-            makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId)
-        )
         await runtime.skipOrchestrator.beginEpisode(
             analysisAssetId: assetId,
             episodeId: episodeId,
@@ -682,13 +697,10 @@ struct RecoveredShowIdentityAdoptionTests {
     /// A superseded playback request must not write its show onto the session
     /// that replaced it.
     @Test("a superseded play request does not adopt")
-    func aSupersededRequestDoesNotAdopt() async throws {
+    func aSupersededRequestDoesNotAdopt() async {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let episodeId = "ep-usn1-stale-\(UUID().uuidString)"
         let assetId = "asset-\(UUID().uuidString)"
-        try await runtime.analysisStore.insertAsset(
-            makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId)
-        )
         await runtime.skipOrchestrator.beginEpisode(
             analysisAssetId: assetId,
             episodeId: episodeId,
@@ -747,7 +759,7 @@ private func drainRuntimeInvariantCodes(
 }
 
 @Suite("A refused per-show write leaves a durable trace (playhead-usn1)",
-       .timeLimit(.minutes(1)))
+       .timeLimit(.minutes(5)))
 @MainActor
 struct RefusedShowSkipModeWriteDiagnosticsTests {
 
