@@ -596,7 +596,6 @@ T_EKS2_WIREIN_COMPOSES="flag ON: runBackfill persists at least one continuation 
 # still hold for the coarse aggregator tile that cost 210 s of show?
 T_EVC1_SEEDS="a strict day-0 byte-exact mark seeds while still candidate"
 T_EVC1_FIELD="Field case: the day-0 mark that found ad 1 now marks ad 2"
-T_EVC1_E2E="Field case end to end: only the day-0 provenance recovers the missed creative"
 T_EVC1_SURVIVES="the production-faithful day-0 seed survives its own backfill"
 T_EVC1_OTHERS_REFUSED="every other candidate row is still refused as a seed"
 T_EVC1_TILE_SILENT="an aggregator candidate tile composes nothing while a day-0 row composes a mark"
@@ -607,6 +606,7 @@ T_EVC1_NO_AUTOSKIP="2350: a day-0 seeded continuation span never auto-skips, and
 T_EVC1_CONFIRM_MARKS="ynmk: confirming a day-0 seeded banner marks, it does not skip"
 T_EVC1_ENTRY_ONCE="d3g0: a day-0 seeded continuation window arms on ingest, fires on entry, once"
 T_EVC1_SEED_UNTOUCHED="the day-0 seed row itself is never modified"
+T_EVC1_DELIVERY="the carve-out raises a continuation row across the delivery floor"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1018,7 +1018,7 @@ MUTATIONS=(
   # `markConfidenceCeiling`'s doc asserts the two are the same number; without
   # that, 96ot's ingest filters every continuation row out and the banner the
   # whole bead exists for never reaches the session.
-  "L09|61|PODC|$T_EKS2_ENTRY_ONCE;$T_EVC1_ENTRY_ONCE"
+  "L09|61|PODC|$T_EKS2_ENTRY_ONCE;$T_EVC1_ENTRY_ONCE;$T_EVC1_DELIVERY"
 
   # playhead-evc1 — the DAY-0 SEED CARVE-OUT (V01-V06).
   #
@@ -1031,7 +1031,7 @@ MUTATIONS=(
   # which makes it the vacuity audit for this suite: if any of these stays green
   # with the carve-out gone, that test was never measuring it. The three
   # exclusion tests (V02/V03/V05's subjects) correctly stay green here.
-  "V01|62|PODC|$T_EVC1_SEEDS;$T_EVC1_FIELD;$T_EVC1_E2E;$T_EVC1_SURVIVES;$T_EVC1_TILE_SILENT;$T_EVC1_GATE_BLIND;$T_EVC1_SEED_UNTOUCHED;$T_EVC1_NO_AUTOSKIP;$T_EVC1_CONFIRM_MARKS;$T_EVC1_ENTRY_ONCE;$T_EKS2_DAY0_SEED"
+  "V01|62|PODC|$T_EVC1_SEEDS;$T_EVC1_FIELD;$T_EVC1_SURVIVES;$T_EVC1_DELIVERY;$T_EVC1_TILE_SILENT;$T_EVC1_GATE_BLIND;$T_EVC1_SEED_UNTOUCHED;$T_EVC1_NO_AUTOSKIP;$T_EVC1_CONFIRM_MARKS;$T_EVC1_ENTRY_ONCE;$T_EKS2_DAY0_SEED"
 
   # V02 drops the `boundaryState` leg, so the byte-exact ANCHORS alone admit a
   # row. Anchors are a per-edge provenance tier that several producers can set;

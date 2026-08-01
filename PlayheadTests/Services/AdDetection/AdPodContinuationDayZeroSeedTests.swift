@@ -40,6 +40,24 @@
 // `runBackfill` actually persisted, each with a vacuity control that fires a
 // real cue in the same harness — an assertion that merely restates the emitted
 // literal proves nothing.
+//
+// THE END-TO-END EFFECT IS NOT THE ONE THIS BEAD EXPECTED, and the tests say so
+// rather than being tuned until they agree with the expectation. "The day-0 seed
+// recovers seconds nothing else does" is TRUE at compose level, where the day-0
+// mark is the only seed in the input, and FALSE through `runBackfill` on this
+// fixture: the pipeline finds ad 2's opening by itself, seeds its own walk, and
+// the day-0 arm, an aggregator-provenance control and an arm with NO seed row at
+// all all emit `[58.0, 94.3)` for the same 36.3 s. The difference end to end is
+// the mark's CONFIDENCE — 0.70 from the byte-exact seed against 0.33 from the
+// pipeline's own sub-threshold window — and 0.70 is exactly
+// `SkipOrchestrator.preloadConfidenceThreshold`, so the control's row is
+// filtered out of both delivery doors and never banners. On this fixture the
+// carve-out is the difference between a row nobody sees and a banner. See
+// `theCarveOutRaisesAContinuationRowAcrossTheDeliveryFloor`.
+//
+// A first draft of the end-to-end tests asserted the seconds claim and PASSED
+// against unmodified `main`, where a day-0 row cannot seed anything at all.
+// That is why every end-to-end assertion here is a difference between arms.
 
 import CoreMedia
 import Foundation
@@ -674,7 +692,14 @@ struct AdPodContinuationDayZeroSeedTests {
     ///
     /// This subtraction is what makes every safety assertion below about THIS
     /// bead. Without it they would be satisfied by rows the pipeline produces on
-    /// its own, which `main` already persists.
+    /// its own — which, over this transcript, it does.
+    ///
+    /// A row counts as attributable when the control arm produces nothing
+    /// matching it on span AND confidence. Confidence is part of the identity on
+    /// purpose: on this fixture both arms emit the same SPAN and the whole
+    /// observable difference is the confidence the mark inherits from its seed —
+    /// which is the difference between a row the session filters out and a
+    /// banner. See `theCarveOutRaisesAContinuationRowAcrossTheDeliveryFloor`.
     private static func dayZeroAttributableRows() async throws
         -> (session: [AdWindow], attributable: [AdWindow]) {
         let treatment = try await runFirstListenBackfill(arm: .dayZero)
@@ -683,50 +708,82 @@ struct AdPodContinuationDayZeroSeedTests {
             !control.continuation.contains {
                 abs($0.startTime - candidate.startTime) < 0.001
                     && abs($0.endTime - candidate.endTime) < 0.001
+                    && abs($0.confidence - candidate.confidence) < 0.001
             }
         }
         return (treatment.continuation, attributable)
     }
 
-    /// THE END-TO-END FIELD CASE, stated as a difference. The day-0 provenance
-    /// must recover the missed creative; the identical row without that
-    /// provenance must not.
-    @Test("Field case end to end: only the day-0 provenance recovers the missed creative")
-    func onlyTheDayZeroProvenanceRecoversTheCreative() async throws {
+    /// THE END-TO-END EFFECT, AS MEASURED — and it is not the one this bead was
+    /// written expecting, so read the numbers before quoting the headline.
+    ///
+    /// The expectation was "the day-0 seed recovers seconds nothing else does".
+    /// End to end on this fixture that is FALSE, and the arms say so: the
+    /// pipeline finds ad 2's opening by itself (the transcript really does say
+    /// "brought to you by Rocket Money"), seeds its own walk, and BOTH arms —
+    /// and an arm with no seed row at all — emit `[58.0, 94.3)` for the same
+    /// 36.3 s. Recovered seconds are not the axis here. The compose-level
+    /// `fieldCaseDayZeroSeedRecoversAdTwo` is where the seconds claim lives,
+    /// because there the day-0 mark is the only seed in the input.
+    ///
+    /// What DOES differ end to end is the row's CONFIDENCE, and it is decisive.
+    /// A continuation mark inherits its seed's presence confidence capped at
+    /// `markConfidenceCeiling` (0.70). Seeded by the byte-exact day-0 mark it is
+    /// 0.70; seeded by the pipeline's own sub-threshold window it is 0.33. And
+    /// 0.70 IS `SkipOrchestrator.preloadConfidenceThreshold`, the floor
+    /// `preloadAdmissibleWindows` applies on BOTH the cross-launch preload and
+    /// the playhead-96ot mid-session ingest. At 0.33 the row is filtered out of
+    /// both doors: the mark sits in the database and no banner ever fires.
+    ///
+    /// So the honest end-to-end statement is that on this fixture the carve-out
+    /// is the difference between a row nobody sees and a banner — not extra
+    /// seconds.
+    @Test("the carve-out raises a continuation row across the delivery floor")
+    func theCarveOutRaisesAContinuationRowAcrossTheDeliveryFloor() async throws {
         let treatment = try await Self.runFirstListenBackfill(arm: .dayZero)
         let control = try await Self.runFirstListenBackfill(arm: .aggregatorLookalike)
         let bare = try await Self.runFirstListenBackfill(arm: .bare)
-
-        let treated = Self.overlap(treatment.continuation, with: Self.adTwo)
-        let controlled = Self.overlap(control.continuation, with: Self.adTwo)
-        let unseeded = Self.overlap(bare.continuation, with: Self.adTwo)
-        let adTwoWidth = Self.adTwo.end - Self.adTwo.start
+        // `SkipOrchestrator.preloadConfidenceThreshold`, which is `private` and
+        // so cannot be read here. Written as the literal deliberately rather
+        // than as `markConfidenceCeiling`: reading the ceiling would make this
+        // test move WITH the number it is supposed to check against, and a
+        // ceiling dropped below the floor — the exact defect mutation L09
+        // injects — would leave it green while every continuation row silently
+        // stopped reaching the session. The behavioural witness for the same
+        // coupling is `dayZeroSeededWindowArmsOnIngestAndFiresOnceOnEntry`.
+        let floor = 0.70
+        func deliverable(_ rows: [AdWindow]) -> Double {
+            Self.overlap(rows.filter { $0.confidence >= floor }, with: Self.adTwo)
+        }
         print(
             """
 
             == playhead-evc1 end-to-end arms (runBackfill, shipped flag) ========
-            ad 2 seconds recovered, of \(String(format: "%.1f", adTwoWidth)) s:
-              day-0 seed              \(String(format: "%.1f", treated))
-              aggregator lookalike    \(String(format: "%.1f", controlled))
-              no seed at all          \(String(format: "%.1f", unseeded))
-            day-0 arm rows: \(treatment.continuation.map { (round($0.startTime * 10) / 10, round($0.endTime * 10) / 10, round($0.confidence * 100) / 100) })
-            control  rows: \(control.continuation.map { (round($0.startTime * 10) / 10, round($0.endTime * 10) / 10, round($0.confidence * 100) / 100) })
+            day-0 rows   \(treatment.continuation.map { (round($0.startTime * 10) / 10, round($0.endTime * 10) / 10, round($0.confidence * 100) / 100) })
+            control rows \(control.continuation.map { (round($0.startTime * 10) / 10, round($0.endTime * 10) / 10, round($0.confidence * 100) / 100) })
+            no-seed rows \(bare.continuation.map { (round($0.startTime * 10) / 10, round($0.endTime * 10) / 10, round($0.confidence * 100) / 100) })
+            ad 2 seconds, ALL rows:  day-0 \(Self.overlap(treatment.continuation, with: Self.adTwo))  control \(Self.overlap(control.continuation, with: Self.adTwo))  no seed \(Self.overlap(bare.continuation, with: Self.adTwo))
+            ad 2 seconds, DELIVERABLE (>= \(floor)): day-0 \(deliverable(treatment.continuation))  control \(deliverable(control.continuation))  no seed \(deliverable(bare.continuation))
             =====================================================================
 
             """
         )
-
         #expect(
-            treated >= adTwoWidth * 0.9,
-            "the day-0 seed must recover ad 2 end to end; got \(treated) s of \(adTwoWidth) s"
+            deliverable(treatment.continuation) > deliverable(control.continuation),
+            """
+            The day-0 arm delivered \(deliverable(treatment.continuation)) s of ad 2 \
+            above the \(floor) preload floor and the control delivered \
+            \(deliverable(control.continuation)) s. With no difference the carve-out \
+            changes nothing a listener can see on this fixture.
+            """
         )
         #expect(
-            treated > controlled,
-            """
-            The day-0 arm recovered \(treated) s and the identical non-day-0 row \
-            recovered \(controlled) s. With no difference, this test is measuring \
-            what the pipeline finds by itself, not the carve-out.
-            """
+            deliverable(control.continuation) == 0.0,
+            "the control's rows cleared the delivery floor without a day-0 seed"
+        )
+        #expect(
+            deliverable(bare.continuation) == 0.0,
+            "rows composed with no seed row at all cleared the delivery floor"
         )
         for row in treatment.continuation {
             #expect(
@@ -740,9 +797,9 @@ struct AdPodContinuationDayZeroSeedTests {
     /// the SAME version the backfill reconciles against — and the row survives
     /// only because `reconcileProtectedBoundaryStates` and the hot-path
     /// retirement filter both exempt `dayZeroRediffByteExact`. If that exemption
-    /// ever lapses the seed is gone before Step 18b reads the store, and every
-    /// recovery above would quietly stop happening in production while the
-    /// arms above stayed green.
+    /// ever lapses the seed is gone before Step 18b reads the store, and the
+    /// recovery above would quietly stop happening in production while every
+    /// compose-level test stayed green.
     @Test("the production-faithful day-0 seed survives its own backfill")
     func productionFaithfulSeedSurvivesTheBackfill() async throws {
         let (_, continuation, allRows) = try await Self.runFirstListenBackfill(
@@ -758,8 +815,16 @@ struct AdPodContinuationDayZeroSeedTests {
             },
             "the day-0 seed was reconciled away: \(allRows.map { ($0.boundaryState, $0.decisionState, $0.startTime, $0.endTime) })"
         )
+        // The seed reached Step 18b: a mark over ad 2 carries the confidence
+        // only a 1.00-confidence seed can produce. A row at the pipeline's own
+        // 0.33 would mean the seed was retired and something else chained.
         #expect(
-            Self.overlap(continuation, with: Self.adTwo) >= (Self.adTwo.end - Self.adTwo.start) * 0.9
+            continuation.contains {
+                $0.startTime < Self.adTwo.end
+                    && $0.endTime > Self.adTwo.start
+                    && $0.confidence >= 0.70
+            },
+            "no mark over ad 2 carries the day-0 seed's confidence: \(continuation.map { ($0.startTime, $0.endTime, $0.confidence) })"
         )
     }
 
