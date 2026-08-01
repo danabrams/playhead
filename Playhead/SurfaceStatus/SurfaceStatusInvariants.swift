@@ -404,6 +404,25 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// rather than a precedence inconsistency.
         case unmappedForwardCompatCause = "unmapped_forward_compat_cause"
 
+        /// playhead-djl0: `SkipOrchestrator.beginEpisode` could not resolve a
+        /// canonical show identifier for the episode — neither from the caller
+        /// nor from the durable `analysis_jobs` row — so the show's trust mode
+        /// was never looked up and the session fell back to the non-actioning
+        /// default. The detection pipeline is unaffected and still marks; what
+        /// is lost is the SHOW: its stored preference, and the ability to store
+        /// a new one. Its own code because the pre-djl0 behaviour was to reach
+        /// the same `.shadow` as a deliberately-observed show and log nothing,
+        /// which is what made the 2026-08-01 field case unattributable.
+        case skipModeShowIdentityUnresolved = "skip_mode_show_identity_unresolved"
+
+        /// playhead-djl0: a show identifier WAS available but its trust mode
+        /// still could not be read — no trust service was wired, the profile
+        /// read threw, or the stored `mode` string did not decode. Distinct
+        /// from ``skipModeShowIdentityUnresolved`` because the show is known
+        /// here: the session can still store a preference, and the remedy is a
+        /// different one. The specific cause is carried in the description.
+        case skipModeTrustLookupFailed = "skip_mode_trust_lookup_failed"
+
         /// playhead-cthe Invariant A (part 1): `PlaybackReadiness
         /// == .complete` but the coverage record is nil OR its
         /// `isComplete` flag is false. "complete" must be backed by a

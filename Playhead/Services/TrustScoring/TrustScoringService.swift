@@ -25,6 +25,103 @@ enum SkipMode: String, Sendable, CaseIterable {
     case auto
 }
 
+// MARK: - Skip Mode Resolution (playhead-djl0)
+
+/// WHY the active `SkipMode` holds the value it does.
+///
+/// `SkipMode.shadow` names a DELIBERATE posture: detection runs, nothing fires,
+/// the show is being watched while it earns trust. Before playhead-djl0 it also
+/// named four failures that are not that posture — an episode that carried no
+/// canonical show identifier, a trust service that was never wired, a profile
+/// read that threw, and a stored `mode` string that did not decode. All five
+/// produced a byte-identical `SkipMode`, a byte-identical decision-log line and
+/// a byte-identical pill, so a fully working detection pipeline could lose the
+/// show's identity with no user-visible trace and no way to tell it apart from
+/// "this show is deliberately in shadow".
+///
+/// This type is the missing distinction. It never changes what the orchestrator
+/// DOES — `SkipMode` is still the only input to the skip policy — it records
+/// what happened on the way to that mode so the failures can be counted,
+/// logged and shown.
+///
+/// The partition is deliberate: `newShowDefault` is NOT a failure, because
+/// `SkipMode.shadow`'s own contract is "Default for new shows". Merging it into
+/// the failure set would make the counters read as if every first listen were
+/// broken — the same class of mistake this type exists to end.
+enum SkipModeResolution: String, Sendable, Hashable, CaseIterable {
+
+    // MARK: Non-failures
+
+    /// No episode is active. The mode is the pre-episode, non-actioning default.
+    case noActiveEpisode
+
+    /// The show was identified, its profile was read, and the mode is that
+    /// profile's verdict.
+    case showTrustProfile
+
+    /// The show was identified and has no profile yet. Shadow here is the
+    /// designed default for a show nobody has listened to.
+    case newShowDefault
+
+    /// The mode was set explicitly for this session — by the listener through
+    /// the Now Playing control, or by a harness.
+    case sessionOverride
+
+    // MARK: Failures — each was previously indistinguishable from the above
+
+    /// No canonical show identifier reached `beginEpisode`, and none could be
+    /// recovered from the durable job row. The show's trust mode was never
+    /// looked up because there was nothing to look it up by.
+    case unresolvedShowIdentity
+
+    /// A show identifier was present but no trust service was wired, so there
+    /// was nothing to ask. Production always wires one; reaching this in the
+    /// field is a wiring regression.
+    case trustServiceUnavailable
+
+    /// The show's profile read failed. The show is known and its stored
+    /// preference exists — it just could not be reached this time.
+    case trustProfileUnreadable
+
+    /// The show's profile was read and its stored `mode` string did not decode
+    /// to a `SkipMode`. A forward-compatibility or corruption signal, not a
+    /// verdict.
+    case unrecognizedTrustProfileMode
+
+    /// Whether this cause is a LOOKUP FAILURE — something went wrong on the way
+    /// to the mode — rather than a mode that was genuinely decided.
+    ///
+    /// One definition, three consumers: the per-cause counters, the durable
+    /// diagnostics record, and the Now Playing pill. Keeping it here is what
+    /// stops the three from drifting apart.
+    var isLookupFailure: Bool {
+        switch self {
+        case .noActiveEpisode, .showTrustProfile, .newShowDefault, .sessionOverride:
+            return false
+        case .unresolvedShowIdentity, .trustServiceUnavailable,
+             .trustProfileUnreadable, .unrecognizedTrustProfileMode:
+            return true
+        }
+    }
+
+    /// Whether the session knows which show it is playing.
+    ///
+    /// Strictly narrower than ``isLookupFailure``: a profile that failed to READ
+    /// still belongs to a show, so a per-show preference can still be stored
+    /// against it. Only an unresolved identity leaves nothing to attach a
+    /// preference to — which is why it, and only it, withholds the control.
+    var hasResolvedShowIdentity: Bool {
+        switch self {
+        case .noActiveEpisode, .unresolvedShowIdentity:
+            return false
+        case .showTrustProfile, .newShowDefault, .sessionOverride,
+             .trustServiceUnavailable, .trustProfileUnreadable,
+             .unrecognizedTrustProfileMode:
+            return true
+        }
+    }
+}
+
 // MARK: - Trust Scoring Configuration
 
 struct TrustScoringConfig: Sendable {
@@ -125,15 +222,35 @@ actor TrustScoringService {
     /// Return the effective skip mode for a podcast. Respects user override.
     /// If no profile exists yet, returns `.shadow`.
     func effectiveMode(podcastId: String) async -> SkipMode {
+        await resolveMode(podcastId: podcastId).mode
+    }
+
+    /// playhead-djl0: `effectiveMode` with the CAUSE attached.
+    ///
+    /// Three of this function's four exits return `.shadow`, and only one of
+    /// them means "this show is deliberately being observed". The other two —
+    /// a read that threw, and a stored `mode` that did not decode — are
+    /// failures wearing the same value, and a caller that only sees `SkipMode`
+    /// cannot tell them apart. `effectiveMode` is kept as the mode-only front
+    /// door for the callers that genuinely only need the policy input.
+    func resolveMode(
+        podcastId: String
+    ) async -> (mode: SkipMode, resolution: SkipModeResolution) {
         let profile: PodcastProfile?
         do {
             profile = try await store.fetchProfile(podcastId: podcastId)
         } catch {
             logger.warning("Failed to fetch profile for \(podcastId): \(error.localizedDescription)")
-            return .shadow
+            return (.shadow, .trustProfileUnreadable)
         }
-        guard let profile else { return .shadow }
-        return SkipMode(rawValue: profile.mode) ?? .shadow
+        guard let profile else { return (.shadow, .newShowDefault) }
+        guard let mode = SkipMode(rawValue: profile.mode) else {
+            logger.warning(
+                "Profile for \(podcastId) carries unrecognized mode '\(profile.mode)'"
+            )
+            return (.shadow, .unrecognizedTrustProfileMode)
+        }
+        return (mode, .showTrustProfile)
     }
 
     // MARK: - Observation Recording

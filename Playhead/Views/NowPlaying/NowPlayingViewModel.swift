@@ -25,6 +25,11 @@ final class NowPlayingViewModel {
 
     var activeSkipMode: SkipMode = .shadow
 
+    /// playhead-djl0: WHY `activeSkipMode` holds its value. Carried alongside
+    /// the mode because `.shadow` alone cannot tell the listener whether their
+    /// show is being observed on purpose or was never recognised.
+    var skipModeResolution: SkipModeResolution = .noActiveEpisode
+
     /// Debounce guard for the "Hearing an ad" button — prevents duplicate reports
     /// within a 5-second window from rapid taps.
     private var lastHearingAdReportTime: Date?
@@ -160,13 +165,23 @@ final class NowPlayingViewModel {
 
     func loadSkipMode(from orchestrator: SkipOrchestrator) async {
         activeSkipMode = await orchestrator.currentSkipMode()
+        skipModeResolution = await orchestrator.currentSkipModeResolution()
     }
 
     func setSkipMode(_ mode: SkipMode, orchestrator: SkipOrchestrator) {
-        activeSkipMode = mode
+        noteSkipModeSelection(mode)
         Task {
             await runtime.setShowSkipMode(mode, orchestrator: orchestrator)
         }
+    }
+
+    /// playhead-djl0: the synchronous half of `setSkipMode`, split out so the
+    /// state transition is reachable without spawning the runtime write. The
+    /// listener's own choice is not the orchestrator's lookup failure, so the
+    /// resolution moves to `.sessionOverride` the moment they answer.
+    func noteSkipModeSelection(_ mode: SkipMode) {
+        activeSkipMode = mode
+        skipModeResolution = .sessionOverride
     }
 
     // MARK: - Actions

@@ -8462,6 +8462,32 @@ actor AnalysisStore {
     /// export and the test harness. Production callers should not depend
     /// on it.
     func fetchPodcastId(forEpisodeId episodeId: String) throws -> String? {
+        try fetchRecordedPodcastId(forEpisodeId: episodeId)
+    }
+#endif
+
+    /// playhead-djl0: the durable answer to "which show is this episode?".
+    ///
+    /// Promoted out of `#if DEBUG` (where it lived as `fetchPodcastId`, for the
+    /// corpus export) because `SkipOrchestrator.beginEpisode` now reads it. Its
+    /// caller previously depended on ONE nullable in-memory hop —
+    /// `episode.podcast?.feedURL.absoluteString`, read on the MainActor in
+    /// `PlayheadRuntime.performPlayEpisode` — and losing a show's trust mode
+    /// because a SwiftData relationship was momentarily unavailable is not a
+    /// decision anyone made.
+    ///
+    /// `analysis_jobs` is the only table that carries a `podcastId` for an
+    /// episode; `analysis_assets` was never given the column. That makes this a
+    /// LAGGING MIRROR, not an authority: rows enqueued through a path that
+    /// supplies no `DownloadContext` (every background / auto download) store
+    /// NULL here even when the show is perfectly well known upstream. So it is
+    /// a recovery source only — the caller's value always wins, and a NULL
+    /// column resolves to `nil` rather than to a fabricated identity.
+    ///
+    /// Newest row wins. Guarded on `tableExists` so seeded fixtures that omit
+    /// the scheduler tables read `nil` instead of throwing on the playback path.
+    func fetchRecordedPodcastId(forEpisodeId episodeId: String) throws -> String? {
+        guard try tableExists("analysis_jobs") else { return nil }
         let sql = """
             SELECT podcastId
             FROM analysis_jobs
@@ -8475,7 +8501,6 @@ actor AnalysisStore {
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return optionalText(stmt, 0)
     }
-#endif
 
     func updateAssetState(id: String, state: String) throws {
         let sql = "UPDATE analysis_assets SET analysisState = ? WHERE id = ?"

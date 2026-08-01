@@ -796,28 +796,49 @@ private extension NowPlayingView {
 
     @ViewBuilder
     var skipModePill: some View {
-        if !viewModel.podcastTitle.isEmpty {
-            Menu {
-                ForEach(SkipMode.allCases, id: \.self) { mode in
-                    Button(mode.pillLabel) {
-                        viewModel.setSkipMode(mode, orchestrator: runtime.skipOrchestrator)
+        // playhead-djl0: the pill is a function of the mode AND the cause. A
+        // session that lost the show says so, instead of impersonating a show
+        // that is deliberately in shadow.
+        let presentation = SkipModePillPresentation(
+            mode: viewModel.activeSkipMode,
+            resolution: viewModel.skipModeResolution
+        )
+        if SkipModePillPresentation.isVisible(
+            podcastTitle: viewModel.podcastTitle,
+            resolution: viewModel.skipModeResolution
+        ) {
+            if presentation.isModeSelectable {
+                Menu {
+                    ForEach(SkipMode.allCases, id: \.self) { mode in
+                        Button(SkipModePillPresentation.modeLabel(mode)) {
+                            viewModel.setSkipMode(mode, orchestrator: runtime.skipOrchestrator)
+                        }
                     }
+                } label: {
+                    skipModePillLabel(presentation)
                 }
-            } label: {
-                Text(viewModel.activeSkipMode.pillLabel)
-                    .font(AppTypography.sans(size: 10, weight: .semibold))
-                    .foregroundStyle(viewModel.activeSkipMode.pillForeground)
-                    .tracking(0.8)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(viewModel.activeSkipMode.pillBackground)
-                    .clipShape(Capsule())
-                    .contentShape(Rectangle().size(width: 80, height: 44))
-                    .frame(minWidth: 44, minHeight: 44)
+                .accessibilityLabel(presentation.accessibilityLabel)
+                .accessibilityHint("Tap to change skip mode for this show")
+            } else {
+                skipModePillLabel(presentation)
+                    .accessibilityLabel(presentation.accessibilityLabel)
             }
-            .accessibilityLabel("Skip mode: \(viewModel.activeSkipMode.pillLabel)")
-            .accessibilityHint("Tap to change skip mode for this show")
         }
+    }
+
+    private func skipModePillLabel(
+        _ presentation: SkipModePillPresentation
+    ) -> some View {
+        Text(presentation.label)
+            .font(AppTypography.sans(size: 10, weight: .semibold))
+            .foregroundStyle(viewModel.activeSkipMode.pillForeground)
+            .tracking(0.8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(viewModel.activeSkipMode.pillBackground)
+            .clipShape(Capsule())
+            .contentShape(Rectangle().size(width: 80, height: 44))
+            .frame(minWidth: 44, minHeight: 44)
     }
 
     // MARK: Timeline
@@ -935,15 +956,73 @@ private extension NowPlayingView {
 
 // MARK: - SkipMode Pill Style
 
-private extension SkipMode {
-    var pillLabel: String {
-        switch self {
+/// playhead-djl0: what the Now Playing skip-mode pill says, given the mode AND
+/// the cause behind it.
+///
+/// The pill used to read `SkipMode` alone, so the distinction
+/// `SkipModeResolution` draws collapsed again at the last step: a session that
+/// had LOST the show's identity rendered the same "Shadow" pill as a show
+/// deliberately being observed. It was also rendered only when the podcast
+/// title was non-empty — and the title comes from the SAME `episode.podcast?`
+/// relationship the identifier does, so the one session with something to say
+/// said nothing at all.
+///
+/// A struct rather than a `SkipMode` extension because the presentation is a
+/// function of two values, and because tests need to reach it.
+struct SkipModePillPresentation: Equatable {
+
+    /// The pill's visible text.
+    let label: String
+
+    /// The VoiceOver label. Distinct from `label` for the unresolved case,
+    /// where the two words on screen cannot carry the whole explanation.
+    let accessibilityLabel: String
+
+    /// Whether to offer the per-show mode menu.
+    ///
+    /// `false` only when the session has no show. `PlayheadRuntime
+    /// .setShowSkipMode` persists a choice through
+    /// `trustService.setUserOverride(podcastId:mode:)` and silently skips the
+    /// write when `currentPodcastId` is nil — so a menu here would accept a
+    /// selection and forget it, which is this bead's own defect one layer up.
+    let isModeSelectable: Bool
+
+    init(mode: SkipMode, resolution: SkipModeResolution) {
+        if resolution.hasResolvedShowIdentity {
+            label = Self.modeLabel(mode)
+            accessibilityLabel = "Skip mode: \(Self.modeLabel(mode))"
+            isModeSelectable = true
+        } else {
+            label = "Show Unknown"
+            accessibilityLabel =
+                "This episode isn't matched to a show, so its saved setting can't be used."
+            isModeSelectable = false
+        }
+    }
+
+    /// Whether the pill is rendered at all.
+    ///
+    /// The pre-djl0 rule was "a non-empty podcast title". That is kept, because
+    /// a titled show is the normal case — and widened by the one resolution
+    /// that guarantees the title is missing for the same reason the identity is.
+    static func isVisible(
+        podcastTitle: String,
+        resolution: SkipModeResolution
+    ) -> Bool {
+        if resolution == .unresolvedShowIdentity { return true }
+        return !podcastTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func modeLabel(_ mode: SkipMode) -> String {
+        switch mode {
         case .shadow: "Shadow"
         case .manual: "Manual"
         case .auto:   "Auto"
         }
     }
+}
 
+private extension SkipMode {
     var pillForeground: Color {
         switch self {
         case .shadow: AppColors.textTertiary
