@@ -671,7 +671,14 @@ MUTATIONS=(
   "J07|43|ORCH|$T_DJL0_TRUSTCODE"
   # J08/J09 are the two lifecycle resets. `setActiveSkipMode` and `endEpisode`
   # are distinct functions with distinct victims.
-  "J08|43|ORCH|$T_DJL0_OVERRIDE;$T_DJL0_VM_OVERRIDE"
+  #
+  # J08 names ONLY the orchestrator's test. It first named the view model's
+  # too and SURVIVED on it — measured, and the measurement was right: the view
+  # model sets its own `skipModeResolution` in `noteSkipModeSelection` and never
+  # reads the orchestrator back on that path, so an orchestrator-side edit
+  # cannot reach it. That is a mis-authored expectation, not a coverage hole —
+  # the view-model half is a separate production value and is mutated as J17.
+  "J08|43|ORCH|$T_DJL0_OVERRIDE"
   "J09|43|ORCH|$T_DJL0_NOEPISODE"
 
   # J10-J12: half one, the recovery. J10 and J11 both edit `recoverShowIdentity`
@@ -691,6 +698,11 @@ MUTATIONS=(
   "J14|46|NPV|$T_DJL0_PILL_DISTINCT;$T_DJL0_PILL_LABELS"
   "J15|46|NPV|$T_DJL0_PILL_VISIBLE"
   "J16|46|NPVM|$T_DJL0_VM_LOAD"
+
+  # J17: the view-model half of the override. Separate batch from J16 — both
+  # edit `NowPlayingViewModel`'s skip-mode block, so they would eat each
+  # other's anchors.
+  "J17|47|NPVM|$T_DJL0_VM_OVERRIDE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2167,6 +2179,18 @@ EOF
         skipModeResolution = await orchestrator.currentSkipModeResolution()
 EOF
     snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J17: the listener chooses a mode and the pill keeps reporting the lookup
+  # failure that preceded it.
+  J17)
+    snippet OLD <<'EOF'
+        activeSkipMode = mode
+        skipModeResolution = .sessionOverride
+EOF
+    snippet NEW <<'EOF'
+        activeSkipMode = mode
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
