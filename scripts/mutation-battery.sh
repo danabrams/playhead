@@ -726,6 +726,7 @@ T_USN1_NOOVERWRITE="adoption never overwrites an identity the runtime already ha
 T_USN1_STALE="a superseded play request does not adopt"
 T_USN1_VMREVERT="a refused write restores the pill to what it said before the tap"
 T_USN1_TRACE="a refused write is recorded under its own code"
+T_USN1_MISMATCH="a key that is not this episode's key recovers nothing"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1259,14 +1260,23 @@ MUTATIONS=(
   # because U07 reddens two of the same tests from a different direction.
   "U06|73|MODEL|$T_USN1_RECOVER;$T_USN1_IDENTICAL;$T_USN1_GUIDSEP;$T_USN1_IPV6"
 
-  # U07 splits the key on the FIRST `::` instead of stripping the known guid
-  # suffix. Correct for the common case and wrong for a guid that contains the
-  # separator or a feed URL with an IPv6 literal host — and a WRONG show
-  # identifier is worse than none, because it keys trust and recurrence evidence
-  # into a neighbouring namespace. U08 drops the canonicalisation, admitting a
-  # spelling that resolves to a different persisted namespace for the same show.
-  "U07|74|MODEL|$T_USN1_GUIDSEP;$T_USN1_IPV6"
+  # U07 splits the key on the FIRST `::`. It first shipped naming the
+  # guid-with-separator test too, and SURVIVED on that one — correctly: the guid
+  # is the SUFFIX, so a first-split still recovers the right feed URL when the
+  # GUID contains `::`. What a first-split breaks is a feed URL with an IPv6
+  # literal host, and any key that is not this episode's at all (it will happily
+  # invent a show for a mismatched guid). Those are the two it names now. The
+  # guid case gets its own mutation below rather than a relaxed expectation.
+  # U08 drops the canonicalisation, admitting a spelling that resolves to a
+  # different persisted namespace for the same show.
+  "U07|74|MODEL|$T_USN1_IPV6;$T_USN1_MISMATCH"
   "U08|74|MODEL|$T_USN1_CANON"
+
+  # U18 is the OTHER plausible way to write the derivation: split on the LAST
+  # `::`. Correct for an IPv6 host and wrong for a guid containing the separator
+  # — the exact complement of U07, which is why the pair exists. Separate batch
+  # from U07: same lines, and both redden the mismatched-key rail.
+  "U18|79|MODEL|$T_USN1_GUIDSEP;$T_USN1_MISMATCH"
 
   # U09-U11 are the three halves of "never silently skip". U09 answers a write
   # it did not perform with a success carrying a fabricated empty identity —
@@ -1278,15 +1288,24 @@ MUTATIONS=(
   "U10|75|RT|$T_USN1_COUNT"
   "U11|75|RT|$T_USN1_SESSION"
 
-  # U12-U16 are the identity handoff. U16 drops the adoption entirely, which is
-  # the state playhead-djl0 shipped: the orchestrator holds a recovered show and
-  # reports a resolved identity — so the pill offers the menu — while the
-  # runtime's write target is still nil. U12 lets a late recovery overwrite the
+  # U12-U16 are the identity handoff. U12 lets a late recovery overwrite the
   # identity the caller supplied; U13 lets a superseded play request write its
-  # show onto the session that replaced it.
+  # show onto the session that replaced it. They share a batch because neither
+  # masks the other — both leave the adoption body reachable.
   "U12|76|RT|$T_USN1_NOOVERWRITE"
   "U13|76|RT|$T_USN1_STALE"
-  "U16|76|RT|$T_USN1_ADOPT"
+
+  # U16 drops the adoption entirely, which is the state playhead-djl0 shipped:
+  # the orchestrator holds a recovered show and reports a resolved identity — so
+  # the pill offers the menu — while the runtime's write target is still nil.
+  #
+  # ITS OWN BATCH, and that is the whole point. It first shipped batched with
+  # U12/U13 and reported both of them SURVIVED — a FALSE survivor: an early
+  # `return` makes every other edit in the same function unreachable, so their
+  # rails had nothing to fail on. This is the "blast radius overlaps" case the
+  # batching rule at the top of this file warns about, and it produced exactly
+  # the misleading verdict that rule exists to prevent.
+  "U16|80|RT|$T_USN1_ADOPT"
 
   # U14 leaves the optimistic `.sessionOverride` standing after a refusal, so
   # the pill reports the listener's choice back to them while nothing has
@@ -3480,6 +3499,20 @@ EOF
             let stream = await orchestrator.skipModeStream()
             for await snapshot in AsyncStream<SkipModeSnapshot>.makeStream().stream {
                 _ = stream
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U18)
+    snippet OLD <<'EOF'
+        let suffix = "::\(feedItemGUID)"
+        guard key.hasSuffix(suffix), key.count > suffix.count else { return nil }
+        let feedURLString = String(key.dropLast(suffix.count))
+EOF
+    snippet NEW <<'EOF'
+        guard let separator = key.range(of: "::", options: .backwards) else {
+            return nil
+        }
+        let feedURLString = String(key[key.startIndex..<separator.lowerBound])
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
