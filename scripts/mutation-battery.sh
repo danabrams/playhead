@@ -759,6 +759,7 @@ T_ISP5_LIFETIME="endEpisode clears the per-window stamps and keeps the counts"
 T_ISP5_DELIVERED="exactly three outcomes count as delivered"
 T_ISP5_ROW="the delivery leaves ONE durable census row that names the cause"
 T_ISP5_READ="no admissible rows records how many rows were read"
+T_ISP5_SILENT="a preload that read nothing counts but writes no durable row"
 T_USN1_NOOVERWRITE="adoption never overwrites an identity the runtime already has"
 T_USN1_STALE="a superseded play request does not adopt"
 T_USN1_VMREVERT="a refused write restores the pill to what it said before the tap"
@@ -1391,6 +1392,15 @@ MUTATIONS=(
   # W06's rail runs through the DOOR path, which W05 does not reorder.
   "W05|83|ORCH|$T_ISP5_ROW"
   "W06|83|INGO|$T_ISP5_READ"
+
+  # W07 is the OTHER direction of the same judgement: make the empty-store
+  # preload durable again. It is the shape the first draft shipped, and it cost
+  # a diagnostics session file per episode start — measured as ~18 extra
+  # 60 s time-limit exceedances across the load-sensitive families in a full
+  # gate run. Its own batch because it is the only rail whose defect is a COST
+  # rather than a lost fact, and batching it with an edit that suppresses rows
+  # would confuse the two.
+  "W07|84|ORCH|$T_ISP5_SILENT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -1516,6 +1526,7 @@ describe_mutation() {
     W04) echo "AdWindowIngestOutcome.isDelivered: count an already-bannered DROP as a delivery" ;;
     W05) echo "forwardPersistedAdWindows: write the census BEFORE receiveAdWindows, so every row reads unstamped" ;;
     W06) echo "AdWindowIngestCensus.auditDescription: drop the detail rendering, so the reason never reaches the file" ;;
+    W07) echo "forwardPersistedAdWindows: make the empty-store preload durable again (a session file per episode start)" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -3688,6 +3699,15 @@ EOF
 EOF
     snippet NEW <<'EOF'
         _ = details
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  W07)
+    snippet OLD <<'EOF'
+                durable: !preWindows.isEmpty
+EOF
+    snippet NEW <<'EOF'
+                durable: true
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

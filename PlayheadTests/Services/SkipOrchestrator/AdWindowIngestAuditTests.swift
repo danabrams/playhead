@@ -470,6 +470,33 @@ struct AdWindowIngestDoorOutcomeTests {
         ), "the row separates an empty table from a filter that rejected everything — got \(rows)")
     }
 
+    /// The one silence in the audit, and it is deliberate. `beginEpisode` runs
+    /// on every episode start; an episode with no persisted windows cannot have
+    /// lost one, so a row there would bootstrap a diagnostics session file for
+    /// every episode ever opened in order to say nothing. The COUNT is still
+    /// kept, so the partition stays complete and the silence is not a hole.
+    @Test("a preload that read nothing counts but writes no durable row")
+    func aPreloadThatReadNothingWritesNoRow() async throws {
+        let (logger, directory) = makeScopedInvariantLogger()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try await makeTestStore()
+        let orchestrator = try await Fx.makeOrchestrator(
+            store: store, inventoryFilterEnabled: true, invariantLogger: logger
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: Fx.assetId,
+            episodeId: Fx.episodeId,
+            podcastId: Fx.podcastId
+        )
+        #expect(await orchestrator.adWindowIngestOutcomeCount(.doorDroppedNoAdmissibleRows) == 1,
+                "the outcome is still counted — the silence is only about the FILE")
+
+        let rows = try drainDescriptions(
+            logger, code: .adWindowIngestCensus, sentinel: "isp5-silent"
+        )
+        #expect(rows.isEmpty, "an empty store has nothing to account for — got \(rows)")
+    }
+
     /// Both doors run the SAME admission rule, so both must be auditable. The
     /// cross-launch preload's row is what makes an episode-start loss visible
     /// without a mid-session mint ever happening.

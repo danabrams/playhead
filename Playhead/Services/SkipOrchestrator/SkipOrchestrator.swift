@@ -2041,13 +2041,24 @@ actor SkipOrchestrator {
 
     /// Record a whole-call outcome for a delivery that never reached
     /// `receiveAdWindows`, and write its audit row.
+    ///
+    /// - Parameter durable: pass `false` for the ONE outcome that has nothing
+    ///   to account for — a preload whose store read returned no rows at all.
+    ///   An episode with no persisted windows cannot have lost one, so the row
+    ///   would carry no information, and `beginEpisode` runs on every episode
+    ///   start: writing there would bootstrap a diagnostics session file for
+    ///   every episode ever opened (and, in the test suite, for every
+    ///   orchestrator ever constructed) to say nothing. The COUNT is still
+    ///   kept — it is free, and it keeps the counter API's partition complete.
     private func noteIngestDoorOutcome(
         _ outcome: AdWindowIngestOutcome,
         door: AdWindowIngestDoor,
         analysisAssetId: String,
-        detail: String? = nil
+        detail: String? = nil,
+        durable: Bool = true
     ) {
         adWindowIngestOutcomeCounts[outcome, default: 0] += 1
+        guard durable else { return }
         recordIngestCensus(
             AdWindowIngestCensus(
                 door: door,
@@ -2215,7 +2226,11 @@ actor SkipOrchestrator {
                 .doorDroppedNoAdmissibleRows,
                 door: door,
                 analysisAssetId: analysisAssetId,
-                detail: "read=\(preWindows.count)"
+                detail: "read=\(preWindows.count)",
+                // "the store had nothing" is not news; "the store had rows and
+                // the admission rule took all of them" is exactly the news this
+                // audit exists for.
+                durable: !preWindows.isEmpty
             )
             return 0
         }
