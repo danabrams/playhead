@@ -6172,7 +6172,18 @@ actor AnalysisStore {
     /// column ALTERs are guarded on `tableExists` so a seeded fixture without
     /// the ledger still reaches v41.
     private func migrateRediffDayZeroKickoffsV41IfNeeded() throws {
-        guard (try schemaVersion() ?? 1) < 41 else { return }
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 41 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39/V40, exactly as V40 does not step
+        // over a rolled-back V39. V39 is allowed to fail without throwing: it
+        // rolls back to its savepoint and leaves `schema_version` at 38 so the
+        // next launch retries, and V40 declines to run in that state. A plain
+        // `< 41` guard here would then stamp 41 onto a database that never
+        // built the unique asset-identity index or the merged-child-row dedupe
+        // — and because those rungs are gated on the version, they could never
+        // be retried. (This is not hypothetical: the first cut of this rung had
+        // the plain guard and reddened the entire V39/V40 containment suite.)
+        guard observed >= 40 else { return }
         try exec("""
             CREATE TABLE IF NOT EXISTS rediff_day_zero_kickoffs (
                 episodeId        TEXT PRIMARY KEY,

@@ -480,7 +480,7 @@ struct MergedChildRowDedupeV40MigrationTests {
                 == "{ this is not an AnchorRef array",
                 "and the unreadable keeper is not rewritten with a truncated anchor list")
         // The rung still COMPLETES — one unreadable group is not a migration failure.
-        #expect(try scalarText(db, "SELECT value FROM _meta WHERE key = 'schema_version'") == "40")
+        #expect(try scalarText(db, "SELECT value FROM _meta WHERE key = 'schema_version'") == String(AnalysisStore.currentSchemaVersion))
     }
 
     // MARK: - 8. ad_windows is deliberately untouched
@@ -536,7 +536,7 @@ struct MergedChildRowDedupeV40MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 40)
+        #expect(AnalysisStore.currentSchemaVersion == 41)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }
@@ -585,7 +585,7 @@ struct MergedChildRowDedupeV40MigrationTests {
         try exec(after, "DROP TRIGGER bd6av0_v39_guard")
         sqlite3_close_v2(after)
         try await store.migrateOnlyForTesting()
-        #expect(try await store.schemaVersion() == 40)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try probeIndexExists(in: dir, indexName: "idx_chunks_asset_pass_fingerprint"))
     }
 
@@ -687,7 +687,7 @@ struct MergedChildRowDedupeV40MigrationTests {
 
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 40)
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try probeIndexExists(in: dir, indexName: "idx_chunks_asset_pass_fingerprint"))
         let after = try openRaw(dir)
         defer { sqlite3_close_v2(after) }
@@ -743,7 +743,7 @@ struct MergedChildRowDedupeV40MigrationTests {
         defer { sqlite3_close_v2(after) }
         // Without the rebuild the DELETE raises SQLITE_CORRUPT, the savepoint
         // rolls back, and BOTH rows are still here at schema_version 39.
-        #expect(try scalarText(after, "SELECT value FROM _meta WHERE key = 'schema_version'") == "40",
+        #expect(try scalarText(after, "SELECT value FROM _meta WHERE key = 'schema_version'") == String(AnalysisStore.currentSchemaVersion),
                 "the rung COMPLETED — a rollback here leaves the duplicates on disk forever")
         #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks") == 1)
         #expect(try scalarText(after, "SELECT id FROM transcript_chunks") == "own")

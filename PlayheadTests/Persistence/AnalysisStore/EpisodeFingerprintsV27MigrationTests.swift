@@ -78,7 +78,7 @@ struct EpisodeFingerprintsV27MigrationTests {
         // Head has moved on repeatedly since V27 — most recently 36 → 37
         // (playhead-0sro fast-transcript watermark reconcile, data-only).
         // The V27 table pins below are unchanged by any of it.
-        #expect(AnalysisStore.currentSchemaVersion == 40)
+        #expect(AnalysisStore.currentSchemaVersion == 41)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 
