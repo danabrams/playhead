@@ -777,3 +777,150 @@ struct SuggestBannerSkipAffordanceTests {
         }
     }
 }
+
+// MARK: - Second-pass rails
+
+/// Four seams the first ten mutations did not reach. Every one of them SURVIVED
+/// when probed, meaning nothing in the focused set rejected the defect:
+///
+///   • the EVENT-stream replay filter — a duplicated guard, and D05 only
+///     mutated its item-stream twin, so half the gate was unpinned;
+///   • the emission ORDER when one observation enters two spans at once;
+///   • the re-arm on an exact producer replay after a neutral dismissal.
+///
+/// The fourth, `endEpisode`'s `armedSuggestWindowIds.removeAll()`, is recorded
+/// as a KNOWN-INERT mutation in the battery rather than tested here: an armed id
+/// with no matching `suggestWindows` entry cannot reach either reader, and
+/// `endEpisode` clears `suggestWindows` too. The clear is bounded-growth
+/// hygiene, not behaviour, and a test asserting otherwise would be theatre.
+@Suite("Suggest banner entry gate — second pass (playhead-d3g0)", .timeLimit(.minutes(1)))
+struct SuggestBannerEntryGateSecondPassTests {
+
+    /// Single-consumer reader over the ORDERED production event stream.
+    private struct EventReader {
+        private var iterator: AsyncStream<AdBannerStreamEvent>.AsyncIterator
+
+        init(_ stream: AsyncStream<AdBannerStreamEvent>) {
+            iterator = stream.makeAsyncIterator()
+        }
+
+        mutating func drainPresented(
+            until sentinel: String
+        ) async -> [String] {
+            var collected: [String] = []
+            while let event = await iterator.next() {
+                guard case let .present(item) = event else { continue }
+                if item.windowId == sentinel {
+                    return collected
+                }
+                collected.append(item.windowId)
+            }
+            return collected
+        }
+    }
+
+    @Test("The EVENT stream replays only entered spans too")
+    func eventStreamReplayIsGatedOnPositionAsWell() async throws {
+        let (orchestrator, _) = try await SuggestBannerEntryGateTests.makeHarness()
+
+        // No Now Playing surface: neither stream is being observed.
+        await orchestrator.receiveAdWindows([
+            SuggestBannerEntryGateTests.makeSuggestion(
+                id: "d3g0-ev-entered", start: 60, end: 120
+            ),
+            SuggestBannerEntryGateTests.makeSuggestion(
+                id: "d3g0-ev-unentered", start: 3000, end: 3060
+            ),
+        ])
+        await orchestrator.updatePlayheadTime(65)
+
+        var reader = EventReader(await orchestrator.bannerEventStream())
+        await SuggestBannerEntryGateTests.fireSentinel(
+            orchestrator, id: "d3g0-ev-sentinel", at: 200
+        )
+
+        #expect(
+            await reader.drainPresented(until: "d3g0-ev-sentinel")
+                == ["d3g0-ev-entered"],
+            """
+            `replayPendingSuggestBannerEvents` carries the same playhead gate as \
+            its item-stream twin. It is a DUPLICATED guard, which is why it needs \
+            its own rail: repairing one and forgetting the other leaves the gate \
+            holding on emit and leaking on attach.
+            """
+        )
+    }
+
+    @Test("Two spans entered by one observation banner in playhead order")
+    func sameObservationEntersTwoSpansInPlayheadOrder() async throws {
+        let (orchestrator, _) = try await SuggestBannerEntryGateTests.makeHarness()
+        var reader = BannerReader(await orchestrator.bannerItemStream())
+
+        // Overlapping spans — a real shape when a coarse pass and a refined
+        // pass both survive to the suggest tier. One observation at 75 is
+        // inside BOTH.
+        await orchestrator.receiveAdWindows([
+            SuggestBannerEntryGateTests.makeSuggestion(
+                id: "d3g0-order-later", start: 70, end: 130
+            ),
+            SuggestBannerEntryGateTests.makeSuggestion(
+                id: "d3g0-order-earlier", start: 60, end: 120
+            ),
+        ])
+        await orchestrator.updatePlayheadTime(75)
+        await SuggestBannerEntryGateTests.fireSentinel(
+            orchestrator, id: "d3g0-order-sentinel", at: 300
+        )
+
+        #expect(
+            await reader.drain(until: "d3g0-order-sentinel").map(\.windowId)
+                == ["d3g0-order-earlier", "d3g0-order-later"],
+            """
+            Emission order is the PLAYHEAD's order, not the producer's and not \
+            the set's. Without the sort this reads whatever order `Set` iteration \
+            happened to give — nondeterministic between runs, and the banner \
+            queue coalesces on arrival order.
+            """
+        )
+    }
+
+    @Test("An exact producer replay after retirement re-arms rather than re-asking")
+    func exactReplayAfterNeutralDismissalReArms() async throws {
+        let (orchestrator, _) = try await SuggestBannerEntryGateTests.makeHarness()
+        var reader = BannerReader(await orchestrator.bannerItemStream())
+
+        let window = SuggestBannerEntryGateTests.makeSuggestion(
+            id: "d3g0-exact-replay", start: 60, end: 120
+        )
+        await orchestrator.receiveAdWindows([window])
+        await orchestrator.updatePlayheadTime(60)
+        #expect(
+            await reader.drain(until: "d3g0-exact-replay").isEmpty,
+            "first entry must banner"
+        )
+
+        // Neutral auto-fade: the card goes away without an answer, and nothing
+        // becomes terminal for the producer id.
+        await orchestrator.declineSuggestedSkip(
+            windowId: "d3g0-exact-replay", isExplicitDenial: false
+        )
+        // The producer re-asserts the SAME material while the listener is still
+        // inside the span. Pre-d3g0 this re-emitted immediately; now it re-arms,
+        // and the next observation presents it. The behaviour is preserved —
+        // only its trigger moved.
+        await orchestrator.receiveAdWindows([window])
+        await orchestrator.updatePlayheadTime(61)
+        await SuggestBannerEntryGateTests.fireSentinel(
+            orchestrator, id: "d3g0-exact-replay-sentinel", at: 300
+        )
+
+        #expect(
+            await reader.drain(until: "d3g0-exact-replay-sentinel")
+                .map(\.windowId) == ["d3g0-exact-replay"],
+            """
+            A re-asserted suggestion the user never answered must be re-armed, or \
+            the exact-replay path silently loses its card forever.
+            """
+        )
+    }
+}

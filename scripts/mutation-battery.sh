@@ -196,6 +196,7 @@ FOCUSED_SUITES=(
   # (D07-D09).
   -only-testing:PlayheadTests/SuggestBannerEntryGateTests
   -only-testing:PlayheadTests/SuggestBannerSkipAffordanceTests
+  -only-testing:PlayheadTests/SuggestBannerEntryGateSecondPassTests
   # playhead-ynmk's extent gate. D07 is a direct revert of it, so leaving it out
   # would have let a mutation that re-skips 150 s of show be judged solely on
   # d3g0's own card-side assertion.
@@ -304,6 +305,9 @@ T_D3G0_MATCH="The card's claim matches what the tap actually does"
 # taught to escape: one fewer thing to remember.
 T_D3G0_COPY="Mark-only copy drops the skip promise and skippable copy is untouched"
 T_D3G0_LATENCY="Entry latency budget is derived from the real transport tick, not chosen"
+T_D3G0_REPLAY_EVENTS="The EVENT stream replays only entered spans too"
+T_D3G0_SAME_TICK_ORDER="Two spans entered by one observation banner in playhead order"
+T_D3G0_EXACT_REPLAY="An exact producer replay after retirement re-arms rather than re-asking"
 
 # playhead-o4qr MERGE NOTE — READ BEFORE "FIXING" M01/M02/M03/M04/M06.
 #
@@ -511,6 +515,19 @@ MUTATIONS=(
   # D10: widen the latency budget past the transport tick's meaning. The
   # constant is only honest while it is derived from the observer cadence.
   "D10|27|ORCH|$T_D3G0_LATENCY"
+
+  # Second pass, hunting for what the first ten did NOT reach. Each of these
+  # names a seam D01-D10 leave untouched: the EVENT-stream replay filter (D05
+  # only mutates the item-stream twin), the same-tick emission ORDER, the
+  # cross-episode clear, and the exact-replay re-arm arm of
+  # `registerSuggestedWindow` (D01 only rewrites the revision-changed arm).
+  # All three SURVIVED when first probed, with NOTHING in the focused set going
+  # red — three real gaps, each closed by a test in
+  # `SuggestBannerEntryGateSecondPassTests`. D13 is deliberately absent; see the
+  # KNOWN GAP note below.
+  "D11|30|ORCH|$T_D3G0_REPLAY_EVENTS"
+  "D12|31|ORCH|$T_D3G0_SAME_TICK_ORDER"
+  "D14|33|ORCH|$T_D3G0_EXACT_REPLAY"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -521,6 +538,14 @@ MUTATIONS=(
 #   `store.persistRevertedAdWindow` discards feedback the CAPTURED show is
 #   owed — the exact defect the seam's own comment says the ordering prevents.
 #   Probed 2026-07-27; SURVIVED the focused set.
+#
+#   D13 (playhead-d3g0) — delete `endEpisode`'s
+#   `armedSuggestWindowIds.removeAll()`. Probed 2026-07-31; SURVIVED, and it is
+#   INERT rather than unpinned. Both readers of that set resolve through
+#   `suggestWindows`, which `endEpisode` also clears, so a leaked armed id has
+#   nothing to resolve to and cannot reach an emission or a replay. The clear is
+#   bounded-growth hygiene across a long session, not behaviour. Writing a test
+#   for it would be theatre: there is no observable difference to assert.
 #
 #   Every sibling seam now has this pinned (`recordListenRevert`,
 #   `revertByTimeRange`, `acceptSuggestedSkip`, `denyAutoSkippedBanner`).
@@ -584,6 +609,9 @@ describe_mutation() {
     D08) echo "suggest card: never claim the confirmation will skip (the overshoot)" ;;
     D09) echo "banner copy: give the mark-only card the skipping card's confirm wording" ;;
     D10) echo "latency budget: raise it past any meaning the transport tick gives it" ;;
+    D11) echo "EVENT-stream replay: drop the armed filter (D05's twin, a duplicated guard)" ;;
+    D12) echo "same-tick emission: drop the ordering, so two spans banner in Set order" ;;
+    D14) echo "registerSuggestedWindow: drop the re-arm on an exact replay after retirement" ;;
     O05) echo "denyAutoSkippedBanner: restore the outright refusal, so a banner No naming another show loses its receipt" ;;
     *)   echo "(no description)" ;;
   esac
@@ -1543,6 +1571,117 @@ EOF
 EOF
     snippet NEW <<'EOF'
     static let suggestEntryLatencyBudgetSeconds: TimeInterval = 3.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D11)
+    snippet OLD <<'EOF'
+        let pending = suggestWindows.values
+            .filter {
+                guard !armedSuggestWindowIds.contains($0.id) else {
+                    return false
+                }
+                guard let revisionToken =
+                        suggestRevisionTokensByWindowId[$0.id]
+                else {
+                    return true
+                }
+                return !acknowledgedSuggestRevisionTokens
+                    .contains(revisionToken)
+                    && !banneredWindowIds.contains($0.id)
+            }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+
+        for window in pending {
+            continuation.yield(.present(makeSuggestBannerItem(for: window)))
+        }
+EOF
+    snippet NEW <<'EOF'
+        let pending = suggestWindows.values
+            .filter {
+                guard let revisionToken =
+                        suggestRevisionTokensByWindowId[$0.id]
+                else {
+                    return true
+                }
+                return !acknowledgedSuggestRevisionTokens
+                    .contains(revisionToken)
+                    && !banneredWindowIds.contains($0.id)
+            }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+
+        for window in pending {
+            continuation.yield(.present(makeSuggestBannerItem(for: window)))
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D12)
+    snippet OLD <<'EOF'
+            .filter { time >= $0.startTime && time < $0.endTime }
+            .sorted {
+                if $0.startTime != $1.startTime {
+                    return $0.startTime < $1.startTime
+                }
+                return $0.id < $1.id
+            }
+        for window in entered {
+EOF
+    snippet NEW <<'EOF'
+            .filter { time >= $0.startTime && time < $0.endTime }
+            .sorted { $0.startTime > $1.startTime }
+        for window in entered {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D13)
+    snippet OLD <<'EOF'
+        suggestBanneredWindowIds.removeAll()
+        suggestWindows.removeAll()
+        armedSuggestWindowIds.removeAll()
+        suggestRevisionTokensByWindowId.removeAll()
+        lastSuggestRevisionByWindowId.removeAll()
+        acknowledgedSuggestRevisionTokens.removeAll()
+        vetoedSuggestWindowIds.removeAll()
+        recentlyAcceptedSuggestIds.removeAll()
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
+        // playhead-98co: clear per-episode edge-padding state here as well
+EOF
+    snippet NEW <<'EOF'
+        suggestBanneredWindowIds.removeAll()
+        suggestWindows.removeAll()
+        suggestRevisionTokensByWindowId.removeAll()
+        lastSuggestRevisionByWindowId.removeAll()
+        acknowledgedSuggestRevisionTokens.removeAll()
+        vetoedSuggestWindowIds.removeAll()
+        recentlyAcceptedSuggestIds.removeAll()
+        provisionallyResolvingSuggestWindowIds.removeAll()
+        bufferedSuggestProducerUpdates.removeAll()
+        // playhead-98co: clear per-episode edge-padding state here as well
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  D14)
+    snippet OLD <<'EOF'
+        let isNewActiveSuggestion = suggestWindows[adWindow.id] == nil
+        suggestWindows[adWindow.id] = adWindow
+        if isNewActiveSuggestion {
+            armedSuggestWindowIds.insert(adWindow.id)
+        }
+EOF
+    snippet NEW <<'EOF'
+        suggestWindows[adWindow.id] = adWindow
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
