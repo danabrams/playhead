@@ -60,6 +60,26 @@ scripts/fast-gate.sh    # PlayheadFastTests, single-host; forwards -only-testing
 ```
 ⚠️ **Run gates ONE AT A TIME, and do NOT add `-parallel-testing-worker-count ≥2` on this box.** Two memory drivers matter here: (1) a fresh-worktree **cold build** compiles the whole project with parallel `swiftc` — heavy enough on its own to get xcodebuild **OOM-killed** (`Killed: 9`), which is why the wrapper caps `-jobs` (default 4, env `PLAYHEAD_BUILD_JOBS`); (2) running **two gates/builds at once** exhausts the 16 GB box → one is killed mid-suite (`** BUILD INTERRUPTED **`, signal 144) with **no test failure** — pure resource exhaustion. **Clone-based parallel testing is unavailable here** (playhead-ekpn): worker-count ≥2 makes Xcode spawn sim clones, and the clone helper resolves `simctl` via the *global* `xcode-select` (`/Library/Developer/CommandLineTools`, no `simctl`), so it dies with `xcrun: error: unable to find utility "simctl"` (exit 65, ~18s, zero tests run) — `DEVELOPER_DIR` fixes `xcodebuild` but not the clone helper (the 2026-07-16 gotcha; enabling real clone parallelism would need a global `xcode-select -s` change — sudo, system-wide, Dan's call). The gate runs **single-host**: XCTest serial + Swift Testing's cheap **in-process** concurrency (the ~8,300-test bulk stays fast). Serialization + the `-jobs` cap, not in-gate clone parallelism, are the memory guardrails. Deferred (a coverage tradeoff for Dan's call): PerfGate-ing the load-sensitive behavioral flake families (gy2s pipeline-stall / RouteChange / Interruption / PlaybackService audio-session / playhead-7h2 runtime-shutdown) out of the default gate — those test real behaviors, so moving them is a coverage decision, not done here.
 
+**The gate's verdict is about the DIFF, not the count (`scripts/gate_baseline.py`, playhead-voez).** The default gate is RED on a clean checkout — the load-sensitive families above blow their 60s time limits under the full run's own concurrency — so its exit code used to say nothing. The known-broken set is now committed in `scripts/gate-baseline.<plan>.json` and `fast-gate.sh` reports the difference:
+
+```
+RED (N known / 0 new)   -> exit 0
+RED (N known / 2 NEW)   -> exit 65, both named
+a baseline test PASSES  -> exit 65, named
+```
+
+Refresh with `scripts/fast-gate.sh --accept-baseline` and **justify the diff in the commit message** — the file is the record of what is known-broken, so a shrinking diff is good news and a growing one needs a reason. Do not reach for `PLAYHEAD_SKIP_BASELINE=1` to make a red gate quiet; that is the bypass this mechanism exists to remove.
+
+Four things worth knowing before you argue with it:
+- **The baseline is measured, not labelled.** Each entry carries how many observations it was seen in and failed in. `failed == seen` over ≥3 observations is *deterministic* and its **passing hard-fails** the gate (Dan's call: the baseline is exact, not a ceiling). Anything else is *load-sensitive*: passing is reported as a removal candidate but is not fatal, because one quiet run is not evidence a starvation flake is fixed. **How much this churns, measured 2026-08-01:** two full runs on identical code, quiet box, nothing else running gave 32 and 28 failures with only 19 in common — union 41, **Jaccard 0.46**. Fewer than half the failures recur. That is why a flat exact set is unusable here, and why promotion needs three observations rather than two.
+- **The tolerance is not a hole, because identity includes the failure KIND.** A load-sensitive entry means "may TIME OUT", not "may fail". A known-timeout test that fails an *expectation* is reported NEW.
+- **A baseline member that did not RUN fails the gate.** Renamed, deleted or newly skipped, a name nobody can reach is not evidence. This is what makes step 2 of the bead (PerfGate-ing a family) show up as a gate failure demanding a refresh, rather than silently shrinking coverage.
+- **Selective runs are exempt.** `-only-testing:`/`-skip-testing:` (how `mutation-battery.sh` drives the gate) is a different population, so the check is skipped and the raw xcodebuild exit code passes through untouched.
+
+**Expect the file to grow for a run or two before it settles, and do not read that as regressions.** The recorded set is the UNION of what has been observed, and with a 0.46 Jaccard each new run surfaces flakes the earlier ones missed. Capture–recapture on the first two runs (32 and 28 failures, 19 shared) estimates the true population at **~47**; 41 are recorded after two observations. So the next `--accept-baseline` or two will legitimately add a handful of names, and the gate will report them as NEW until they are recorded. That is the mechanism working — a newly-observed flake is indistinguishable from a regression until it has been seen, which is exactly why it is reported rather than absorbed. Once the union saturates, `RED (N known / 0 new)` is the steady state. The third accepted observation is also what arms the pass-direction check.
+
+Rails: `scripts/mutation-battery-gate-baseline.py` (R series; the D/E/J/K/L/Q series stay in `mutation-battery.sh`, which is structurally a Swift battery). Unit tests: `python3 -m unittest scripts.tests.test_gate_baseline` — about a second, no build.
+
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadIntegrationTests \
@@ -143,6 +163,20 @@ Two further traps this sequence exists to avoid (both hit on 2026-07-26):
 - Before `rm -rf`: path must start with `/Users/dabrams/playhead/.worktrees/` or `/private/tmp/playhead-`, and must NOT appear in `git worktree list --porcelain`.
 - Never pass `--force` to `git worktree remove` without explicit user approval — the refusal is the safety net.
 - Echo what was removed so the transcript audits the session.
+
+### A full gate run needs ~8 GB of headroom, and leaves ~100 MB behind (playhead-voez)
+
+Measured 2026-08-01 across three runs. Beyond the ~2.7 GB of `.derivedData` that CLAUDE.md already accounts for, one full-plan gate is a **transient** disk event: the destination simulator grows from ~3.7 GB to ~9 GB during the Swift Testing bulk and shrinks back afterwards. Starting a run with ~13 GB free finished; starting with ~10 GB free hit 100 % capacity and **wedged** — xcodebuild stayed alive with zero output for four minutes, having failed to write its result bundle. That presents as a hang, not as an error.
+
+Two consequences:
+
+- **Check free space before a gate.** Under ~8 GB, reclaim first. The remedy for a wedge is the documented one: kill the run, then `xcrun simctl shutdown <udid>` and `xcrun simctl erase <udid>` (needs `DEVELOPER_DIR`), which returns the sim to ~0. **Never `rm` a booted sim's directory.**
+- **`.derivedData/Logs/Test/*.xcresult` is the one part that does not shrink back** — ~100 MB per run, accumulating forever. It is safe to delete (the build cache is `.derivedData/Build`, untouched), and it is inside the `.worktrees/` prefix the `rm -rf` rail already permits:
+  ```bash
+  rm -rf .worktrees/<slug>/.derivedData/Logs/Test/*.xcresult
+  ```
+
+A wedged run is also the case the baseline check is built to survive: it printed `CANNOT EVALUATE — the log is incomplete` and passed xcodebuild's own exit through (143), rather than reading ~9,900 unfinished tests as a clean sweep.
 
 ### Orphan sweep script
 
