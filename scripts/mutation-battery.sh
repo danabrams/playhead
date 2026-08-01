@@ -337,10 +337,15 @@ PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
 # recovery of that identity from the episode row itself.
 RT="Playhead/App/PlayheadRuntime.swift"
 MODEL="Playhead/Models/Podcast.swift"
+# playhead-isp5: the ingest-outcome TAXONOMY. Its own file because two of the
+# W rails are about the audit row's own arithmetic — a drop counted as a
+# delivery, a reason that never renders — and those live in the value type, not
+# in the orchestrator that stamps it.
+INGO="Playhead/Services/SkipOrchestrator/AdWindowIngestOutcome.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL"
+  "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO"
 )
 
 FOCUSED_SUITES=(
@@ -443,6 +448,15 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/RefusedSkipModeSelectionTests
   -only-testing:PlayheadTests/RecoveredShowIdentityAdoptionTests
   -only-testing:PlayheadTests/RefusedShowSkipModeWriteDiagnosticsTests
+  # playhead-isp5: the ingest audit trail (W01-W06). The 96ot delivery suites
+  # above stay in scope deliberately — the census wraps the SAME door those
+  # suites drive, so an instrumentation edit that also broke the delivery would
+  # otherwise be judged only by its own assertions.
+  -only-testing:PlayheadTests/AdWindowIngestFieldCaseTests
+  -only-testing:PlayheadTests/AdWindowIngestOutcomeCountTests
+  -only-testing:PlayheadTests/AdWindowIngestDoorOutcomeTests
+  -only-testing:PlayheadTests/AdWindowIngestLifetimeTests
+  -only-testing:PlayheadTests/AdWindowIngestTaxonomyTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -737,6 +751,14 @@ T_USN1_REFUSE="a session with no show REFUSES the write instead of skipping it"
 T_USN1_COUNT="a refused write is counted"
 T_USN1_SESSION="a refused write does not change the session mode either"
 T_USN1_ADOPT="the runtime adopts an identity only the orchestrator could recover"
+
+# playhead-isp5 — the ingest audit trail (W01-W06).
+T_ISP5_NOTPLAYING="an ingest for an episode that is not playing is counted, not just logged"
+T_ISP5_TOOEARLY="the field pre-roll is dropped by the inventory filter as tooEarly"
+T_ISP5_LIFETIME="endEpisode clears the per-window stamps and keeps the counts"
+T_ISP5_DELIVERED="exactly three outcomes count as delivered"
+T_ISP5_ROW="the delivery leaves ONE durable census row that names the cause"
+T_ISP5_READ="no admissible rows records how many rows were read"
 T_USN1_NOOVERWRITE="adoption never overwrites an identity the runtime already has"
 T_USN1_STALE="a superseded play request does not adopt"
 T_USN1_VMREVERT="a refused write restores the pill to what it said before the tap"
@@ -1334,6 +1356,41 @@ MUTATIONS=(
   # "we never knew the show" from "the listener tried to set a preference and it
   # went nowhere". The same collapse djl0 spent a bead undoing, one layer over.
   "U17|78|RT|$T_USN1_TRACE"
+
+  # playhead-isp5 — the ingest audit trail (W01-W06). Batch ids 81-83: 61 is
+  # unusable (a duplicate L09 record ERRORs a rerun) and 62-67 are shared by
+  # evc1 and kvs8, so these start above the highest id in the file.
+  #
+  # W01 restores the pre-isp5 state of the door verbatim: the drop still writes
+  # its `os_log` line, and nothing durable. That is precisely the state in which
+  # "the ingest never fired" and "the ingest fired and refused" were the same
+  # observation, which is what kept this bead open through two investigations.
+  # W02 keeps the outcome and drops its REASON — the more tempting mistake,
+  # because the row still looks informative while `tooEarly` (every pre-roll)
+  # and `overlapsDeclaredChapter` (a chapter-metadata bug) collapse into one
+  # bucket. Batched: different functions, disjoint rails, neither edit makes the
+  # other's site unreachable.
+  "W01|81|ORCH|$T_ISP5_NOTPLAYING"
+  "W02|81|ORCH|$T_ISP5_TOOEARLY"
+
+  # W03 inverts the lifetime rule — clearing the per-cause tally at episode end
+  # turns a build-level measurement ("this build loses pre-rolls") into a
+  # per-episode one that reads zero by the time anyone looks. W04 is the
+  # audit's own arithmetic: count a DROP as a delivery and every future
+  # `delivered=` figure in the field logs is inflated, which is the
+  # "what would this number read if the thing never happened?" check applied to
+  # the instrument rather than the product.
+  "W03|82|ORCH|$T_ISP5_LIFETIME"
+  "W04|82|INGO|$T_ISP5_DELIVERED"
+
+  # W05 writes the census BEFORE `receiveAdWindows` returns, so every forwarded
+  # row reads as unstamped and a total loss renders identically to a healthy
+  # delivery. W06 drops the detail rendering, which is W02 one layer down: the
+  # reason is captured and then never reaches the file. Batched because W05
+  # touches only the forwarding order and W06 only the value type's rendering —
+  # W06's rail runs through the DOOR path, which W05 does not reorder.
+  "W05|83|ORCH|$T_ISP5_ROW"
+  "W06|83|INGO|$T_ISP5_READ"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -1453,6 +1510,12 @@ describe_mutation() {
     K20) echo "RediffFetchRequest: the request refuses cellular whatever the setting says" ;;
     K21) echo "URLSessionRangedAudioSampler: the cellular session admits Low Data Mode" ;;
     K22) echo "URLSessionFullEpisodeFetcher: use the cellular session regardless of the setting" ;;
+    W01) echo "ingestPersistedAdWindows: the not-playing drop writes no durable row (the pre-isp5 state)" ;;
+    W02) echo "receiveAdWindows: the inventory-filter drop is stamped without its rejection REASON" ;;
+    W03) echo "endEpisode: clear the per-cause ingest tally too, so the measurement never survives an episode" ;;
+    W04) echo "AdWindowIngestOutcome.isDelivered: count an already-bannered DROP as a delivery" ;;
+    W05) echo "forwardPersistedAdWindows: write the census BEFORE receiveAdWindows, so every row reads unstamped" ;;
+    W06) echo "AdWindowIngestCensus.auditDescription: drop the detail rendering, so the reason never reaches the file" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -3540,6 +3603,94 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  W01)
+    snippet OLD <<'EOF'
+            noteIngestDoorOutcome(
+                .doorDroppedNotPlaying,
+                door: .midSessionIngest,
+                analysisAssetId: analysisAssetId,
+                detail: "active=\(activeAssetId ?? "nil")"
+            )
+            return 0
+EOF
+    snippet NEW <<'EOF'
+            return 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  W02)
+    snippet OLD <<'EOF'
+                    noteIngestOutcome(
+                        .droppedInventorySanity,
+                        windowId: adWindow.id,
+                        detail: reason.rawValue
+                    )
+EOF
+    snippet NEW <<'EOF'
+                    noteIngestOutcome(
+                        .droppedInventorySanity,
+                        windowId: adWindow.id
+                    )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  W03)
+    snippet OLD <<'EOF'
+        // playhead-isp5: mirrors the `beginEpisode` clear. The per-cause
+        // COUNTS survive on purpose (process-lifetime tally).
+        lastIngestOutcomeByWindowId.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        lastIngestOutcomeByWindowId.removeAll()
+        adWindowIngestOutcomeCounts.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  W04)
+    snippet OLD <<'EOF'
+    var isDelivered: Bool {
+        switch self {
+EOF
+    snippet NEW <<'EOF'
+    var isDelivered: Bool {
+        if self == .droppedAlreadyBannered { return true }
+        switch self {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  W05)
+    snippet OLD <<'EOF'
+        let forwardedWindowIds = eligible.map(\.id)
+        await receiveAdWindows(eligible)
+        recordIngestCensus(
+            door: door,
+            analysisAssetId: analysisAssetId,
+            forwardedWindowIds: forwardedWindowIds
+        )
+EOF
+    snippet NEW <<'EOF'
+        let forwardedWindowIds = eligible.map(\.id)
+        recordIngestCensus(
+            door: door,
+            analysisAssetId: analysisAssetId,
+            forwardedWindowIds: forwardedWindowIds
+        )
+        await receiveAdWindows(eligible)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  W06)
+    snippet OLD <<'EOF'
+        for (detail, count) in details.sorted(by: { $0.key < $1.key })
+        where count > 0 {
+            parts.append("\(detail)=\(count)")
+        }
+EOF
+    snippet NEW <<'EOF'
+        _ = details
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -3575,6 +3726,7 @@ rec_file()   {
     PROBE) printf '%s' "$PROBE" ;;
     RT)    printf '%s' "$RT" ;;
     MODEL) printf '%s' "$MODEL" ;;
+    INGO)  printf '%s' "$INGO" ;;
     *)     printf '%s' "" ;;
   esac
 }
