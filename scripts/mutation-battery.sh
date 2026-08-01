@@ -286,6 +286,12 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/DayZeroFetchTransportTests
   -only-testing:PlayheadTests/DayZeroDownloadTimeStoreTests
   -only-testing:PlayheadTests/DayZeroTriggerTransportBudgetTests
+  # The playhead-p70f trigger suite: K15 re-injects the silent gate refusal,
+  # and the assertion that a refused transport still does not READ the attempt
+  # record lives here rather than in this bead's own file. Without this line
+  # K15 reported ERROR ("expected test never ran") rather than KILLED — the
+  # script's own named failure mode for a suite missing from this list.
+  -only-testing:PlayheadTests/RediffDayZeroTriggerIdempotencyTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
