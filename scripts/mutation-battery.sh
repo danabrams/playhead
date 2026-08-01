@@ -695,9 +695,16 @@ MUTATIONS=(
 
   # J14-J16: the surface. Three files, three disjoint victims, no anchor
   # overlap — the cheapest honest batch in the bead.
-  "J14|46|NPV|$T_DJL0_PILL_DISTINCT;$T_DJL0_PILL_LABELS"
+  #
+  # J14 names the two tests an "ignore the resolution" edit can actually
+  # redden. It first also named the resolved-show label test and SURVIVED on
+  # it — measured, and correct: J14 routes EVERY resolution down the resolved
+  # branch, so a resolved show's label is exactly what it was. That constant is
+  # a separate production value, mutated as J18.
+  "J14|46|NPV|$T_DJL0_PILL_DISTINCT;$T_DJL0_PILL_LOCKED"
   "J15|46|NPV|$T_DJL0_PILL_VISIBLE"
   "J16|46|NPVM|$T_DJL0_VM_LOAD"
+  "J18|46|NPV|$T_DJL0_PILL_LABELS"
 
   # J17: the view-model half of the override. Separate batch from J16 — both
   # edit `NowPlayingViewModel`'s skip-mode block, so they would eat each
@@ -2179,6 +2186,18 @@ EOF
         skipModeResolution = await orchestrator.currentSkipModeResolution()
 EOF
     snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # J18: the pill's own copy. A resolved show's three labels are the pre-djl0
+  # strings and must stay byte-identical — this bead adds a state, it does not
+  # rename the ones that were already right.
+  J18)
+    snippet OLD <<'EOF'
+        case .manual: "Manual"
+EOF
+    snippet NEW <<'EOF'
+        case .manual: "Shadow"
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
