@@ -1130,12 +1130,26 @@ final class PlaybackService: NSObject, Sendable {
 
     // MARK: - Time Observer
 
+    /// Cadence of the `AVPlayer` periodic time observer, in seconds.
+    ///
+    /// Named because it is no longer a private implementation detail:
+    /// playhead-d3g0 makes the suggest banner fire when the playhead ENTERS an
+    /// ad span, so this interval is the quantisation floor on how quickly the
+    /// orchestrator can learn that entry happened. Anything downstream that
+    /// states a position-latency budget must be derived from this value rather
+    /// than from a hopeful constant — see
+    /// `SkipOrchestrator.suggestEntryLatencyBudgetSeconds`.
+    nonisolated static let periodicTimeObserverIntervalSeconds: TimeInterval = 0.25
+
     private func restartPeriodicTimeObserver() {
         if let token = timeObserverToken {
             player.removeTimeObserver(token)
             timeObserverToken = nil
         }
-        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        let interval = CMTime(
+            seconds: Self.periodicTimeObserverIntervalSeconds,
+            preferredTimescale: 600
+        )
         let item = player.currentItem
         let itemGeneration = playerItemGeneration
         let block = makeTimeObserverBlock(

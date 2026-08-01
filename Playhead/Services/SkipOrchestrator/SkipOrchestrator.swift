@@ -616,6 +616,22 @@ actor SkipOrchestrator {
     ///     fails if this clear is dropped).
     private var emittedAutoSkipBannerWindowIds: Set<String> = []
 
+    /// playhead-d3g0: worst-case wall-clock delay the suggest banner is allowed
+    /// between the playhead crossing an ad span's start and the banner item
+    /// reaching the stream.
+    ///
+    /// Dan's decision ("when it enters so I can skip") turns this from polish
+    /// into correctness: the banner is a PROSPECTIVE skip affordance, so a
+    /// banner that arrives three seconds late is a banner for audio the
+    /// listener is already hearing. The budget is not a preference — the
+    /// dominant term is `PlaybackService.periodicTimeObserverIntervalSeconds`
+    /// (the orchestrator cannot learn the playhead moved sooner than the
+    /// position observer says it did), and the rest is the actor hop from the
+    /// position observer into this actor, which is sub-millisecond. Pinned
+    /// against the transport constant by
+    /// `SuggestBannerEntryGateTests.entryLatencyBudgetIsTiedToTheTransportTick`.
+    static let suggestEntryLatencyBudgetSeconds: TimeInterval = 0.5
+
     /// playhead-gtt9.23: window IDs for which a `.suggest` tier banner has
     /// already been emitted. Tracked separately from `banneredWindowIds`
     /// (auto-skip-tier emissions) so the two paths don't collide on a
