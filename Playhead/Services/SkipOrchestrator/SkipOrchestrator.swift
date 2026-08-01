@@ -576,6 +576,23 @@ actor SkipOrchestrator {
     /// at episode start. Defaults to `.shadow` if no trust service is wired.
     private var activeSkipMode: SkipMode = .shadow
 
+    /// playhead-djl0: WHY `activeSkipMode` holds its current value.
+    ///
+    /// `activeSkipMode` alone cannot distinguish a show deliberately being
+    /// observed from a session that lost the show's identity — both are
+    /// `.shadow`. This field carries the distinction so the failures can be
+    /// counted, recorded and shown. Nothing in the skip policy reads it: the
+    /// policy input is still `activeSkipMode` and only `activeSkipMode`.
+    private var activeSkipModeResolution: SkipModeResolution = .noActiveEpisode
+
+    /// playhead-djl0: how many episode starts have hit each lookup failure,
+    /// this process. Per cause rather than one total, so "the trust service is
+    /// unwired" can never be read as "we keep losing show identities" — the
+    /// mistake the single silent `.shadow` branch made possible in the first
+    /// place. Non-failure resolutions are never counted (see
+    /// `SkipModeResolution.isLookupFailure`).
+    private var skipModeResolutionFailureCounts: [SkipModeResolution: Int] = [:]
+
     /// Continuation-backed stream of applied ad segment time ranges (seconds).
     /// Consumers receive the full set of applied segments whenever the set changes.
     private var segmentContinuations: [UUID: AsyncStream<[(start: Double, end: Double)]>.Continuation] = [:]
@@ -1720,6 +1737,10 @@ actor SkipOrchestrator {
         // to the non-actioning mode before the first suspension so producer
         // input can never inherit the prior show's automatic authority.
         activeSkipMode = .shadow
+        // playhead-djl0: the cause is cleared with the mode. Leaving the prior
+        // episode's resolution in place would make the pill describe a show
+        // that is no longer playing.
+        activeSkipModeResolution = .noActiveEpisode
         // playhead-xr3t: clear per-episode inventory-filter context.
         // Episode duration is rehydrated from the persisted asset row
         // immediately below; declared chapters arrive later via
@@ -1763,14 +1784,49 @@ actor SkipOrchestrator {
         #endif
 
         // Load per-show trust mode.
-        if let podcastId = normalizedPodcastId, let trustService {
-            let mode = await trustService.effectiveMode(podcastId: podcastId)
+        //
+        // playhead-djl0. This used to be a two-arm `if`, whose `else` swallowed
+        // two different failures into `.shadow` with no log, no counter and no
+        // user-visible difference from a show that is deliberately in shadow.
+        // It is now three steps, each of which names what it found:
+        //
+        //   1. RECOVER the show identity when the caller had none. The caller's
+        //      value comes from a single nullable in-memory hop; the durable
+        //      job row is a second, lagging chance at the same answer.
+        //   2. ASK the trust service, and keep the CAUSE it returns — three of
+        //      its four exits are `.shadow` and only one of them is a verdict.
+        //   3. RECORD any failure: count it, and write a coded line to the
+        //      diagnostics session file the device pull reads.
+        //
+        // Behaviour for a resolvable show is unchanged, and every failure still
+        // lands on `.shadow` — the non-actioning default remains the safe one.
+        var resolvedShowId = normalizedPodcastId
+        if resolvedShowId == nil {
+            resolvedShowId = await recoverShowIdentity(episodeId: episodeId)
             guard episodeLifecycleGeneration == lifecycleGeneration else {
                 return
             }
-            activeSkipMode = mode
+            if let resolvedShowId {
+                activePodcastId = resolvedShowId
+                logger.info(
+                    "beginEpisode: show identity recovered from the durable job row for \(episodeId, privacy: .public)"
+                )
+            }
+        }
+
+        if let podcastId = resolvedShowId, let trustService {
+            let resolved = await trustService.resolveMode(podcastId: podcastId)
+            guard episodeLifecycleGeneration == lifecycleGeneration else {
+                return
+            }
+            activeSkipMode = resolved.mode
+            noteSkipModeResolution(resolved.resolution, episodeId: episodeId)
+        } else if resolvedShowId != nil {
+            activeSkipMode = .shadow
+            noteSkipModeResolution(.trustServiceUnavailable, episodeId: episodeId)
         } else {
             activeSkipMode = .shadow
+            noteSkipModeResolution(.unresolvedShowIdentity, episodeId: episodeId)
         }
 
         // playhead-xr3t: hydrate the inventory filter's episode duration
@@ -1813,6 +1869,64 @@ actor SkipOrchestrator {
         }
 
         logger.info("Begin episode: asset=\(analysisAssetId)")
+    }
+
+    /// playhead-djl0: second chance at the show's identity.
+    ///
+    /// `beginEpisode`'s `podcastId` argument comes from one nullable in-memory
+    /// hop (`episode.podcast?.feedURL.absoluteString`, read on the MainActor in
+    /// `PlayheadRuntime.performPlayEpisode`). When that hop yields nothing the
+    /// `analysis_jobs` row for the episode may still know the answer.
+    ///
+    /// The recovered value goes through the SAME canonicalization the caller's
+    /// value does. A stored identity in non-canonical spelling is not an
+    /// identity we may key show-scoped evidence on, and admitting one here
+    /// would retarget recurrence learning into a neighbouring namespace —
+    /// strictly worse than resolving nothing.
+    private func recoverShowIdentity(episodeId: String) async -> String? {
+        do {
+            let recorded = try await store.fetchRecordedPodcastId(
+                forEpisodeId: episodeId
+            )
+            return normalizedCatalogShowId(recorded)
+        } catch {
+            logger.debug(
+                "beginEpisode: show-identity recovery failed for \(episodeId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    /// playhead-djl0: install a resolution, and — when it is a failure — count
+    /// it and leave a durable trace.
+    ///
+    /// The trace goes to `SurfaceStatusInvariantLogger`, the JSON Lines session
+    /// file that already ships in the diagnostics bundle and that the device
+    /// pull reads. That is deliberate: the field investigation this bead came
+    /// from went looking for exactly such a line and found that the failure
+    /// branch logged nothing at all.
+    private func noteSkipModeResolution(
+        _ resolution: SkipModeResolution,
+        episodeId: String
+    ) {
+        activeSkipModeResolution = resolution
+        guard resolution.isLookupFailure else { return }
+        skipModeResolutionFailureCounts[resolution, default: 0] += 1
+
+        let episodeIdHash = episodeIdHasher(episodeId)
+        let code: InvariantViolation.Code = resolution.hasResolvedShowIdentity
+            ? .skipModeTrustLookupFailed
+            : .skipModeShowIdentityUnresolved
+        invariantLogger.invariantViolated(
+            code: code,
+            description: """
+                skip mode fell back to \(activeSkipMode.rawValue) \
+                because \(resolution.rawValue) (episode \(episodeIdHash))
+                """
+        )
+        logger.error(
+            "beginEpisode: skip mode is \(self.activeSkipMode.rawValue, privacy: .public) because \(resolution.rawValue, privacy: .public) — this is NOT a deliberate shadow"
+        )
     }
 
     /// The rows `beginEpisode`'s cross-launch preload and the playhead-96ot
@@ -1964,6 +2078,10 @@ actor SkipOrchestrator {
         activePlaybackLifecycleGeneration = nil
         activeEvidenceCatalog = nil
         activeSkipMode = .shadow
+        // playhead-djl0: nothing is playing, so no cause describes anything.
+        // The per-cause failure COUNTS deliberately survive — they are a
+        // process-lifetime tally, not per-episode state.
+        activeSkipModeResolution = .noActiveEpisode
         // playhead-xr3t: clear per-episode inventory-filter context so
         // the next episode doesn't inherit stale duration/chapters.
         activeEpisodeDuration = nil
@@ -5636,11 +5754,41 @@ actor SkipOrchestrator {
         activeSkipMode
     }
 
+    /// playhead-djl0: WHY the active skip mode holds its current value.
+    ///
+    /// Always a companion to ``currentSkipMode()``, never a replacement: the
+    /// skip policy reads the MODE, and this reads the CAUSE. Consumers use it
+    /// to tell a deliberate shadow apart from a session that lost the show.
+    func currentSkipModeResolution() -> SkipModeResolution {
+        activeSkipModeResolution
+    }
+
+    /// playhead-djl0: how many episode starts have hit `resolution` this
+    /// process. Always `0` for a resolution that is not a lookup failure — a
+    /// successful lookup is not an event worth tallying, and counting it would
+    /// make the failure numbers unreadable.
+    func skipModeResolutionFailureCount(_ resolution: SkipModeResolution) -> Int {
+        skipModeResolutionFailureCounts[resolution] ?? 0
+    }
+
     /// Override the active skip mode for the current episode and re-evaluate pending windows.
     func setActiveSkipMode(_ mode: SkipMode) {
         activeSkipMode = mode
+        // playhead-djl0: an explicit choice replaces whatever the lookup
+        // concluded. Leaving a failure cause installed here would keep telling
+        // the listener their show was unrecognized after they had answered the
+        // question themselves.
+        activeSkipModeResolution = .sessionOverride
         evaluateAndPush()
     }
+
+    #if DEBUG
+    /// Test hook: the show identity this session actually resolved, including
+    /// one recovered from the durable job row (playhead-djl0).
+    func activePodcastIdForTesting() -> String? {
+        activePodcastId
+    }
+    #endif
 
     /// Windows in the confirmed state (available for manual skip UI).
     func confirmedWindows() -> [AdWindow] {
