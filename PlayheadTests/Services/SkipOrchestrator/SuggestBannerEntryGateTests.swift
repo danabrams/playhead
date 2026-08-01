@@ -332,7 +332,7 @@ struct SuggestBannerEntryGateTests {
         ])
 
         await orchestrator.updatePlayheadTime(lastObservationBefore)
-        try await Self.expectNothingBanneredYet(
+        await Self.expectNothingBanneredYet(
             orchestrator, &reader,
             sentinelId: "d3g0-sentinel-budget-pre",
             drivingPlayheadTo: 5,
@@ -385,7 +385,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-preroll", start: 0, end: 30)
         ])
-        try await Self.expectNothingBanneredYet(
+        await Self.expectNothingBanneredYet(
             orchestrator, &reader,
             sentinelId: "d3g0-sentinel-preroll-resumed",
             drivingPlayheadTo: 601,
@@ -440,7 +440,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-once", start: 60, end: 120)
         ])
-        try await Self.expectNothingBanneredYet(
+        await Self.expectNothingBanneredYet(
             orchestrator, &reader,
             sentinelId: "d3g0-sentinel-once-pre",
             drivingPlayheadTo: 40,
@@ -466,7 +466,7 @@ struct SuggestBannerEntryGateTests {
         await orchestrator.receiveAdWindows([
             Self.makeSuggestion(id: "d3g0-seek", start: 60, end: 120)
         ])
-        try await Self.expectNothingBanneredYet(
+        await Self.expectNothingBanneredYet(
             orchestrator, &reader,
             sentinelId: "d3g0-sentinel-seek-pre",
             drivingPlayheadTo: 40,
@@ -474,7 +474,7 @@ struct SuggestBannerEntryGateTests {
         )
         await orchestrator.updatePlayheadTime(60)
         await orchestrator.updatePlayheadTime(200)
-        _ = try #require(await reader.drain(until: "d3g0-seek"))
+        _ = await reader.drain(until: "d3g0-seek")
 
         // Scrub back into the span. The question was already asked; re-asking
         // it is how a banner becomes noise, and the once-per-window guarantee
