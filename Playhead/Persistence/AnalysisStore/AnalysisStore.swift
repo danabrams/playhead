@@ -1574,7 +1574,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 40
+    nonisolated static let currentSchemaVersion = 41
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2380,6 +2380,9 @@ actor AnalysisStore {
             // playhead-6av0: repair the child rows V39's re-point duplicated,
             // then add the constraint that makes the re-point self-correcting.
             try migrateDeduplicateMergedChildRowsV40IfNeeded()
+            // playhead-4dqe: the per-EPISODE day-0 kickoff ledger + the rolling
+            // day-0 byte window.
+            try migrateRediffDayZeroKickoffsV41IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2705,6 +2708,9 @@ actor AnalysisStore {
         // seam. Both helpers guard on `tableExists`, so seeded fixtures without
         // `transcript_chunks` / `decoded_spans` still reach v40.
         try migrateDeduplicateMergedChildRowsV40IfNeeded()
+        // playhead-4dqe (v41): both halves guard on `tableExists`, so a seeded
+        // fixture without `rediff_bandwidth_ledger` still reaches v41.
+        try migrateRediffDayZeroKickoffsV41IfNeeded()
     }
     #endif
 
@@ -6138,6 +6144,218 @@ actor AnalysisStore {
             )
         }
         try setSchemaVersion(38)
+    }
+
+    // MARK: - V41: day-0 kickoff ledger + rolling byte window (playhead-4dqe)
+    //
+    // `rediff_day_zero_kickoffs` — one row per EPISODE that a download-time
+    // day-0 kickoff was requested for, recording whether it ever reached the
+    // trigger and, when it did not, which precondition it died waiting for.
+    //
+    // WHY IT IS NOT `rediff_day_zero_attempts`. That table is keyed
+    // `analysisAssetId … REFERENCES analysis_assets(id)` under
+    // `PRAGMA foreign_keys = ON`. The give-up this ledger exists to record is
+    // PRECISELY the one where no `analysis_assets` row was ever registered — the
+    // pre-ewag state, where the FK would reject every insert. `assetRowMissing`
+    // already documents that tautology for the mint path; this table is what
+    // makes the same class of event recordable one layer up, where the only
+    // identity in hand is an episode id. It is deliberately NOT foreign-keyed.
+    //
+    // Plus two columns on `rediff_bandwidth_ledger` for the rolling 24 h day-0
+    // byte WINDOW. The ledger's existing seven counters are a cumulative
+    // ACCUMULATOR that bounds nothing; these two are the first thing in it that
+    // any decision reads. They live on the same single row because the window is
+    // a property of the lane, not of an episode.
+
+    /// V41 migration — the kickoff ledger + the day-0 byte window.
+    /// Idempotent (`CREATE TABLE IF NOT EXISTS` + `addColumnIfNeeded`); the
+    /// column ALTERs are guarded on `tableExists` so a seeded fixture without
+    /// the ledger still reaches v41.
+    private func migrateRediffDayZeroKickoffsV41IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 41 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS rediff_day_zero_kickoffs (
+                episodeId        TEXT PRIMARY KEY,
+                lastSource       TEXT NOT NULL,
+                kickoffCount     INTEGER NOT NULL DEFAULT 0,
+                firedCount       INTEGER NOT NULL DEFAULT 0,
+                gaveUpCount      INTEGER NOT NULL DEFAULT 0,
+                lastOutcome      TEXT NOT NULL,
+                lastPollCount    INTEGER NOT NULL DEFAULT 0,
+                lastWaitedSeconds REAL NOT NULL DEFAULT 0,
+                updatedAt        REAL NOT NULL
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_rediff_day_zero_kickoffs_updated ON rediff_day_zero_kickoffs(updatedAt DESC);")
+        if try tableExists("rediff_bandwidth_ledger") {
+            // NULL-able on purpose: "never spent" and "a window that began at
+            // time 0" are different facts, and a `DEFAULT 0` here would make an
+            // untouched install look like it holds an ancient window.
+            try addColumnIfNeeded(
+                table: "rediff_bandwidth_ledger",
+                column: "dayZeroBudgetWindowStartedAt",
+                definition: "REAL"
+            )
+            try addColumnIfNeeded(
+                table: "rediff_bandwidth_ledger",
+                column: "dayZeroBudgetSpentBytes",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+        }
+        try setSchemaVersion(41)
+    }
+
+    /// Fold ONE settled day-0 kickoff into its episode's row.
+    ///
+    /// The counters accumulate in SQL rather than in Swift so two writers can
+    /// never race a read-modify-write. `kickoffCount` large with `firedCount`
+    /// zero is the pre-ewag failure, readable without a join.
+    func noteRediffDayZeroKickoff(
+        episodeId: String,
+        source: RediffDayZeroKickoffSource,
+        outcome: RediffDayZeroKickoffOutcome,
+        pollCount: Int,
+        waitedSeconds: Double,
+        at now: Double
+    ) throws {
+        let fired = outcome.isGiveUp ? 0 : 1
+        let gaveUp = outcome.isGiveUp ? 1 : 0
+        let sql = """
+            INSERT INTO rediff_day_zero_kickoffs
+            (episodeId, lastSource, kickoffCount, firedCount, gaveUpCount,
+             lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(episodeId) DO UPDATE SET
+                lastSource = excluded.lastSource,
+                kickoffCount = kickoffCount + 1,
+                firedCount = firedCount + excluded.firedCount,
+                gaveUpCount = gaveUpCount + excluded.gaveUpCount,
+                lastOutcome = excluded.lastOutcome,
+                lastPollCount = excluded.lastPollCount,
+                lastWaitedSeconds = excluded.lastWaitedSeconds,
+                updatedAt = excluded.updatedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        bind(stmt, 2, source.rawValue)
+        bind(stmt, 3, fired)
+        bind(stmt, 4, gaveUp)
+        bind(stmt, 5, outcome.rawValue)
+        bind(stmt, 6, pollCount)
+        bind(stmt, 7, waitedSeconds)
+        bind(stmt, 8, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    private static let rediffDayZeroKickoffSelectColumns = """
+        SELECT episodeId, lastSource, kickoffCount, firedCount, gaveUpCount,
+               lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt
+        FROM rediff_day_zero_kickoffs
+        """
+
+    private func readRediffDayZeroKickoffRow(_ stmt: OpaquePointer?) -> RediffDayZeroKickoffRecord {
+        RediffDayZeroKickoffRecord(
+            episodeId: text(stmt, 0),
+            // An unrecognized raw value means a row written by a build with a
+            // wider vocabulary. Fall back rather than drop the row: the COUNTS
+            // are the evidence, and losing them to an unknown enum case would
+            // reintroduce exactly the silence this table exists to end.
+            lastSource: RediffDayZeroKickoffSource(rawValue: text(stmt, 1)) ?? .backgroundDownload,
+            kickoffCount: Int(sqlite3_column_int64(stmt, 2)),
+            firedCount: Int(sqlite3_column_int64(stmt, 3)),
+            gaveUpCount: Int(sqlite3_column_int64(stmt, 4)),
+            lastOutcome: RediffDayZeroKickoffOutcome(rawValue: text(stmt, 5)) ?? .cancelled,
+            lastPollCount: Int(sqlite3_column_int64(stmt, 6)),
+            lastWaitedSeconds: sqlite3_column_double(stmt, 7),
+            updatedAt: sqlite3_column_double(stmt, 8)
+        )
+    }
+
+    /// One episode's kickoff history, or `nil` when none was ever requested.
+    /// `nil` rather than a zeroed row on purpose: "never asked" and "asked and
+    /// never fired" are the two states this whole bead is about telling apart.
+    func fetchRediffDayZeroKickoff(episodeId: String) throws -> RediffDayZeroKickoffRecord? {
+        let stmt = try prepare("\(Self.rediffDayZeroKickoffSelectColumns) WHERE episodeId = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readRediffDayZeroKickoffRow(stmt)
+    }
+
+    /// Every kickoff record, most recent first — the diagnostics-bundle surface.
+    func fetchRediffDayZeroKickoffs(limit: Int = 200) throws -> [RediffDayZeroKickoffRecord] {
+        let stmt = try prepare(
+            "\(Self.rediffDayZeroKickoffSelectColumns) ORDER BY updatedAt DESC LIMIT ?"
+        )
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, max(0, limit))
+        var rows: [RediffDayZeroKickoffRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(readRediffDayZeroKickoffRow(stmt))
+        }
+        return rows
+    }
+
+    /// The rolling day-0 byte window. Zeros/`nil` when nothing has ever spent.
+    func fetchRediffDayZeroBudgetWindow() throws -> RediffDayZeroBudgetWindow {
+        let sql = """
+            SELECT dayZeroBudgetWindowStartedAt, dayZeroBudgetSpentBytes
+            FROM rediff_bandwidth_ledger WHERE id = 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return .empty }
+        let startedAt = sqlite3_column_type(stmt, 0) == SQLITE_NULL
+            ? nil : sqlite3_column_double(stmt, 0)
+        return RediffDayZeroBudgetWindow(
+            startedAt: startedAt,
+            spentBytes: Int(sqlite3_column_int64(stmt, 1))
+        )
+    }
+
+    /// Charge `bytes` to the rolling window, ROLLING it first if 24 h have
+    /// elapsed since it started.
+    ///
+    /// The roll is expressed in SQL rather than as read-decide-write in Swift
+    /// so the whole operation is one atomic statement. `RediffDayZeroDailyBudget.spend`
+    /// is the pure statement of the same rule and the two are checked against
+    /// each other by test; if they ever disagree, the one that decides is this
+    /// one, so it is the one that must be atomic.
+    func recordRediffDayZeroBudgetSpend(bytes: Int, at now: Double) throws {
+        guard bytes > 0 else { return }
+        let window = RediffDayZeroDailyBudget.windowSeconds
+        let sql = """
+            INSERT INTO rediff_bandwidth_ledger
+            (id, dayZeroBudgetWindowStartedAt, dayZeroBudgetSpentBytes, lastUpdatedAt)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                dayZeroBudgetWindowStartedAt = CASE
+                    WHEN rediff_bandwidth_ledger.dayZeroBudgetWindowStartedAt IS NULL
+                      OR excluded.dayZeroBudgetWindowStartedAt
+                         >= rediff_bandwidth_ledger.dayZeroBudgetWindowStartedAt + ?
+                    THEN excluded.dayZeroBudgetWindowStartedAt
+                    ELSE rediff_bandwidth_ledger.dayZeroBudgetWindowStartedAt END,
+                dayZeroBudgetSpentBytes = CASE
+                    WHEN rediff_bandwidth_ledger.dayZeroBudgetWindowStartedAt IS NULL
+                      OR excluded.dayZeroBudgetWindowStartedAt
+                         >= rediff_bandwidth_ledger.dayZeroBudgetWindowStartedAt + ?
+                    THEN excluded.dayZeroBudgetSpentBytes
+                    ELSE rediff_bandwidth_ledger.dayZeroBudgetSpentBytes
+                         + excluded.dayZeroBudgetSpentBytes END,
+                lastUpdatedAt = excluded.lastUpdatedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        // Byte counts bind as INT64 for the same reason
+        // `accumulateRediffBandwidth` does: a CDN-controlled enclosure size is
+        // not bounded by Int32 and the `bind(_:_:Int)` helper traps.
+        sqlite3_bind_int64(stmt, 2, Int64(bytes))
+        bind(stmt, 3, now)
+        bind(stmt, 4, window)
+        bind(stmt, 5, window)
+        try step(stmt, expecting: SQLITE_DONE)
     }
 
     // MARK: - V39: one row per (episode, content identity) (playhead-0hi9)

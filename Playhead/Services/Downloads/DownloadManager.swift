@@ -3829,25 +3829,56 @@ struct UserPreferencesSnapshot: Sendable {
     /// SwiftData default; the Settings toggle calls
     /// `save(episodeSummariesEnabled:)` to keep the slot in sync.
     var episodeSummariesEnabled: Bool
+    /// playhead-4dqe: mirrored copy of `UserPreferences.dayZeroAllowsCellular`
+    /// — whether background PREPARATION traffic may use cellular. Read from
+    /// `DayZeroRediffTrigger` and `URLSessionFullEpisodeFetcher`, neither of
+    /// which has a SwiftData hop. Defaults to
+    /// `RediffActivation.dayZeroAllowsCellularByDefault` (WiFi only), matching
+    /// the SwiftData default so the two stores cannot disagree on day 1.
+    var dayZeroAllowsCellular: Bool
 
     static let defaultsKey = "UserPreferencesSnapshot.allowsCellular"
     static let episodeSummariesDefaultsKey = "UserPreferencesSnapshot.episodeSummariesEnabled"
+    static let dayZeroAllowsCellularDefaultsKey = "UserPreferencesSnapshot.dayZeroAllowsCellular"
 
     static var current: UserPreferencesSnapshot {
-        let allows = UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
-        let summaries = UserDefaults.standard.object(forKey: episodeSummariesDefaultsKey) as? Bool ?? true
+        current(from: .standard)
+    }
+
+    /// playhead-4dqe: the `UserDefaults`-injectable read. Extracted so the
+    /// defaults and the round-trip are testable in an isolated suite rather
+    /// than against the shared standard domain, where one test's write leaks
+    /// into every other test in the process.
+    static func current(from defaults: UserDefaults) -> UserPreferencesSnapshot {
+        let allows = defaults.object(forKey: defaultsKey) as? Bool ?? true
+        let summaries = defaults.object(forKey: episodeSummariesDefaultsKey) as? Bool ?? true
+        let dayZeroCellular = defaults.object(forKey: dayZeroAllowsCellularDefaultsKey) as? Bool
+            ?? RediffActivation.dayZeroAllowsCellularByDefault
         return UserPreferencesSnapshot(
             allowsCellular: allows,
-            episodeSummariesEnabled: summaries
+            episodeSummariesEnabled: summaries,
+            dayZeroAllowsCellular: dayZeroCellular
         )
     }
 
     static func save(allowsCellular: Bool) {
-        UserDefaults.standard.set(allowsCellular, forKey: defaultsKey)
+        save(allowsCellular: allowsCellular, to: .standard)
+    }
+
+    static func save(allowsCellular: Bool, to defaults: UserDefaults) {
+        defaults.set(allowsCellular, forKey: defaultsKey)
     }
 
     static func save(episodeSummariesEnabled: Bool) {
         UserDefaults.standard.set(episodeSummariesEnabled, forKey: episodeSummariesDefaultsKey)
+    }
+
+    static func save(dayZeroAllowsCellular: Bool) {
+        save(dayZeroAllowsCellular: dayZeroAllowsCellular, to: .standard)
+    }
+
+    static func save(dayZeroAllowsCellular: Bool, to defaults: UserDefaults) {
+        defaults.set(dayZeroAllowsCellular, forKey: dayZeroAllowsCellularDefaultsKey)
     }
 }
 

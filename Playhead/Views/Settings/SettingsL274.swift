@@ -43,6 +43,24 @@ enum SettingsL274Copy {
     static let downloadOverCellularLabel: String = "Download over cellular"
     static let downloadNextDefaultCountLabel: String = "\"Download Next N\" default count"
 
+    // MARK: Preparation transport (playhead-4dqe)
+    //
+    // Dan, 2026-08-01: "wifi vs 5g should be a user setting, most people have
+    // unlimited bandwidth." This is that setting.
+    //
+    // COPY RULES THAT APPLY HERE. The external-copy ban on "ad detection" and
+    // "AI" holds: the row says what the feature DOES for the listener
+    // ("prepare episodes", so ads are marked before playback), never how. And
+    // the sub-line names the COST in a unit the reader can act on. That second
+    // part is the whole reason the default is off — a row that quietly costs
+    // ~130 MB an episode and does not say so is how an App Store data-usage
+    // complaint gets written.
+    static let prepareOverCellularLabel: String = "Prepare episodes over cellular"
+    /// Sub-line beneath the preparation-transport toggle. Names the cost, and
+    /// states the one thing the toggle cannot override.
+    static let prepareOverCellularSubLine: String =
+        "Preparing an episode re-checks it against the source, using roughly 130 MB of data per episode. Off by default, so preparation waits for Wi-Fi. Low Data Mode always pauses it."
+
     // MARK: Storage group — control labels
     static let episodeStorageCapLabel: String = "Episode storage cap"
     static let currentUsageLabel: String = "Current usage"
