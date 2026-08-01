@@ -790,16 +790,24 @@ struct AdDetectionConfig: Sendable {
     ///    Both gates are asserted against rows `runBackfill` actually persisted
     ///    at this flag's shipped value in `AdPodContinuationFlipTests`.
     ///
-    /// **KNOWN GAP, measured, not hypothesised.** `AdPodContinuation
-    /// .seedDecisionStates` is `{confirmed, applied}`, and
-    /// `mintByteExactDayZeroMarks` persists a day-0 byte-exact rediff mark as
-    /// `.candidate`. So the exact state Dan's device was in — ad 1 found ONLY by
-    /// day-0 rediff — seeds no chain and recovers nothing, even with this ON.
-    /// Pinned two-armed by
-    /// `AdPodContinuationFlipTests.dayZeroRediffMarkCannotSeedAContinuationChain`
-    /// (same row, same links, only `decisionState` differs: 0 s vs ~all of ad 2).
-    /// Admitting byte-derived candidates as seeds is a separate, measured
-    /// decision — see playhead-evc1.
+    /// **THE FIRST-LISTEN GAP, CLOSED BY playhead-evc1.** For one day this flag
+    /// shipped ON and still recovered nothing from the state Dan's device was
+    /// actually in: `AdPodContinuation.seedDecisionStates` is
+    /// `{confirmed, applied}` and `mintByteExactDayZeroMarks` persists a day-0
+    /// byte-exact rediff mark as `.candidate` for life, so the ONLY row that had
+    /// found ad 1 could not seed the mechanism built to find its neighbours.
+    /// `AdPodContinuation.isDayZeroByteExactSeed` now admits that row on
+    /// PROVENANCE — the single-writer day-0 `boundaryState` plus
+    /// `.rediffByteExact` on both edges — while the aggregator's coarse
+    /// `.candidate` tiles stay refused. `AdPodContinuationDayZeroSeedTests`
+    /// carries the field case and the exclusion sweep.
+    ///
+    /// **THE HONEST LIMIT ON THE MEASUREMENT.** The corpus A/B could not have
+    /// caught the gap and cannot evaluate the fix: the dump is 132 of 132
+    /// `confirmed`/`eligible` windows with ZERO day-0 rows, and every corpus
+    /// artifact in the repo contains zero occurrences of the day-0 boundary
+    /// state. The evidence for the carve-out is the field case plus the bounded
+    /// downside below, not a corpus number.
     let podContinuationEnabled: Bool
 
     /// playhead-hvk0: require a full rescan to have MEASURABLY read its episode
@@ -6430,11 +6438,15 @@ actor AdDetectionService {
         // it off this short-circuits BEFORE any fetch/derivation/write and the
         // backfill is byte-identical to pre-xsdz.65.
         //
-        // ONLY A `.confirmed` / `.applied` WINDOW SEEDS A CHAIN HERE. That
-        // excludes a day-0 byte-exact rediff mark, which is persisted
-        // `.candidate` — so a pod whose only detected ad came from day-0 rediff
-        // recovers nothing from this step. Measured, not assumed; see
-        // playhead-evc1 and `podContinuationEnabled`'s note.
+        // A `.confirmed` / `.applied` WINDOW SEEDS A CHAIN HERE — and so, since
+        // playhead-evc1, does a STRICT day-0 byte-exact rediff mark, which is
+        // persisted `.candidate` for life. That carve-out is scoped on
+        // PROVENANCE (`AdPodContinuation.isDayZeroByteExactSeed`), not by
+        // admitting `.candidate` wholesale: the aggregator's coarse 30 s
+        // candidate tiles are exactly what the original filter was right to
+        // exclude. It is what lets a pod whose only detected ad came from day-0
+        // rediff — the FIRST-LISTEN population, and the only one that can be
+        // covered before the listener presses play — recover its neighbours.
         //
         // A FAILURE HERE MUST NEVER COST THE BACKFILL. This is the last
         // additive step before the priors update and the coverage watermark, so
