@@ -1616,6 +1616,14 @@ final class PlayheadRuntime {
             // it declines. Without these two closures the trigger falls back to
             // "always attempt", which is exactly the ~108 MB-per-replay bleed.
             let dayZeroAttemptStore = analysisStore
+            // playhead-96ot: the LIVE-SESSION delivery target. Day-0 fires ~19 s
+            // into a first listen, so the ads it mints are still AHEAD of the
+            // playhead — but until this closure existed nothing handed them to
+            // the orchestrator until the NEXT `beginEpisode`, i.e. the user had
+            // to re-open the episode. The orchestrator itself decides whether
+            // the minted asset is the one playing, so the check is atomic
+            // inside its actor rather than raced across a hop.
+            let dayZeroDeliveryTarget = skipOrchestrator
             self.dayZeroRediffTrigger = DayZeroRediffTrigger(
                 service: rediffRefetchService,
                 reachabilityProvider: { [transportStatusProvider] in
@@ -1633,6 +1641,11 @@ final class PlayheadRuntime {
                 suppressionRecorder: { assetId, reason, now in
                     try? await dayZeroAttemptStore.noteRediffDayZeroSuppression(
                         assetId: assetId, reason: reason, at: now
+                    )
+                },
+                mintedMarkDelivery: { assetId in
+                    await dayZeroDeliveryTarget.ingestPersistedAdWindows(
+                        analysisAssetId: assetId
                     )
                 }
             )

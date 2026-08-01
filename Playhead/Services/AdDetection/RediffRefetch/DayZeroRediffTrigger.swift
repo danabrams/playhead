@@ -91,6 +91,19 @@ struct DayZeroRediffTrigger: Sendable {
     /// trigger that never fired, which is the mistake this whole bead exists to
     /// correct.
     let suppressionRecorder: @Sendable (String, RediffDayZeroExit, Double) async -> Void
+    /// playhead-96ot: hand the just-minted asset id to whoever can deliver its
+    /// new `AdWindow` rows to the LIVE session. Production passes
+    /// `SkipOrchestrator.ingestPersistedAdWindows`, which no-ops unless the
+    /// asset is the one currently playing.
+    ///
+    /// WHY IT LIVES HERE rather than at the two `PlayheadRuntime` call sites.
+    /// The defect this bead fixes is precisely that BOTH call sites are
+    /// fire-and-forget and drop the outcome on the floor. Putting the decision
+    /// at the one place that already computes the outcome means a third caller
+    /// cannot reintroduce the bug by forgetting, and it is the same reasoning
+    /// (and the same required-parameter discipline) as `attemptRecordProvider`
+    /// above.
+    let mintedMarkDelivery: @Sendable (String) async -> Void
 
     init(
         service: RediffRefetchService,
@@ -109,7 +122,14 @@ struct DayZeroRediffTrigger: Sendable {
         // guarantee than any test could give. Callers that genuinely have no
         // store pass the opt-outs explicitly and say why.
         attemptRecordProvider: @escaping @Sendable (String) async -> RediffDayZeroAttemptRecord?,
-        suppressionRecorder: @escaping @Sendable (String, RediffDayZeroExit, Double) async -> Void
+        suppressionRecorder: @escaping @Sendable (String, RediffDayZeroExit, Double) async -> Void,
+        // DELIBERATELY NOT DEFAULTED, for exactly the reason recorded above
+        // `attemptRecordProvider`. A `{ _ in }` default reproduces the
+        // playhead-96ot defect verbatim — marks minted, nothing delivered, the
+        // whole suite green — and nothing in the suite builds a real
+        // `PlayheadRuntime`, so deleting the wiring there would be invisible.
+        // A required parameter turns that regression into a compile error.
+        mintedMarkDelivery: @escaping @Sendable (String) async -> Void
     ) {
         self.service = service
         self.enabled = enabled
@@ -119,6 +139,7 @@ struct DayZeroRediffTrigger: Sendable {
         self.deepScanOptInProvider = deepScanOptInProvider
         self.attemptRecordProvider = attemptRecordProvider
         self.suppressionRecorder = suppressionRecorder
+        self.mintedMarkDelivery = mintedMarkDelivery
     }
 
     /// Fire an immediate day-0 rediff for the just-started episode IF the flag is

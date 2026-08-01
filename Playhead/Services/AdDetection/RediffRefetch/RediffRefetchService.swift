@@ -270,6 +270,19 @@ actor RediffRefetchService {
         var failedCount = 0
         var precheckBytes = 0
         var fullFetchBytes = 0
+        /// playhead-96ot: AdWindows a DAY-0 mint actually PERSISTED on this run.
+        ///
+        /// Deliberately not `rotatedCount`. That counter carries the lagged
+        /// sweep's vocabulary ("the CDN served different bytes"), and day-0
+        /// happens to set it for an unrelated reason — a mark RESOLVES the
+        /// shared attempt state. The delivery decision this bead adds is about
+        /// "new rows are on disk for this asset", which is a different fact,
+        /// and keying it off a counter that means something else is exactly the
+        /// "trusting a number without asking what it measures" defect.
+        /// Always `0` for the lagged sweep, which mints nothing.
+        ///
+        /// RED STATE (playhead-96ot): declared but never incremented.
+        var dayZeroMarkCount = 0
         var totalBytes: Int { precheckBytes + fullFetchBytes }
     }
 

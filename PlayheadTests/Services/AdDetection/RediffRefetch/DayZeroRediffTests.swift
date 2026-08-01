@@ -127,7 +127,10 @@ struct DayZeroRediffTriggerTests {
             // (the parameters are required precisely so this is a visible
             // choice, not an inherited default).
             attemptRecordProvider: { _ in nil },
-            suppressionRecorder: { _, _, _ in }
+            suppressionRecorder: { _, _, _ in },
+            // playhead-96ot: no orchestrator in this suite — the in-session
+            // delivery of a minted mark is asserted by DayZeroMarkDeliveryTests.
+            mintedMarkDelivery: { _ in }
         )
     }
 
@@ -297,7 +300,10 @@ struct DayZeroRediffTriggerTests {
             chargeStateProvider: { chargeRead.mark(); return true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in nil },   // no store in this suite —
-            suppressionRecorder: { _, _, _ in }     // opt OUT of idempotency, explicitly
+            suppressionRecorder: { _, _, _ in },    // opt OUT of idempotency, explicitly
+            // playhead-96ot: no orchestrator in this suite either — the
+            // in-session delivery is asserted by DayZeroMarkDeliveryTests.
+            mintedMarkDelivery: { _ in }
         )
         let summary = await fire(trigger)
 
@@ -380,7 +386,10 @@ struct DayZeroRediffTriggerTests {
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in nil },   // no store in this suite —
-            suppressionRecorder: { _, _, _ in }     // opt OUT of idempotency, explicitly
+            suppressionRecorder: { _, _, _ in },    // opt OUT of idempotency, explicitly
+            // playhead-96ot: no orchestrator in this suite either — the
+            // in-session delivery is asserted by DayZeroMarkDeliveryTests.
+            mintedMarkDelivery: { _ in }
         )
         await fire(trigger)
         #expect(!FileManager.default.fileExists(atPath: bCopy.path),

@@ -1873,6 +1873,19 @@ actor SkipOrchestrator {
         logger.info("Begin episode: asset=\(analysisAssetId)")
     }
 
+    /// playhead-96ot: re-read `ad_windows` for `analysisAssetId` and deliver
+    /// them MID-SESSION, through the same path `beginEpisode`'s cross-launch
+    /// preload uses.
+    ///
+    /// RED STATE (playhead-96ot): deliberately inert. The behaviour lands in the
+    /// following commit; this stub exists only so the failing tests fail for a
+    /// BEHAVIOURAL reason rather than a compile error.
+    @discardableResult
+    func ingestPersistedAdWindows(analysisAssetId: String) async -> Int {
+        _ = analysisAssetId
+        return 0
+    }
+
     /// End orchestration for the current episode.
     func endEpisode() {
         episodeLifecycleGeneration &+= 1
