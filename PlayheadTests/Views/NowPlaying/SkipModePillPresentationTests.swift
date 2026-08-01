@@ -155,4 +155,40 @@ struct NowPlayingViewModelSkipModeResolutionTests {
         #expect(viewModel.activeSkipMode == .manual)
         #expect(viewModel.skipModeResolution == .sessionOverride)
     }
+
+    /// The load hop is where the orchestrator's cause actually reaches the
+    /// pill. Carrying only the MODE across it would restore the whole defect at
+    /// the last step, with every layer below it correct.
+    @Test("loadSkipMode carries the CAUSE across, not just the mode")
+    func loadSkipModeCarriesTheCause() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: try await makeSkipTestTrustService(
+                mode: "auto", trustScore: 0.9, observations: 10
+            )
+        )
+        let viewModel = NowPlayingViewModel(
+            runtime: PlayheadRuntime(isPreviewRuntime: true)
+        )
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: nil
+        )
+        await viewModel.loadSkipMode(from: orchestrator)
+        #expect(viewModel.activeSkipMode == .shadow)
+        #expect(viewModel.skipModeResolution == .unresolvedShowIdentity)
+
+        // ...and the resolved case, so the assertion above is not simply the
+        // view model's own default leaking through.
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+        )
+        await viewModel.loadSkipMode(from: orchestrator)
+        #expect(viewModel.activeSkipMode == .auto)
+        #expect(viewModel.skipModeResolution == .showTrustProfile)
+    }
 }

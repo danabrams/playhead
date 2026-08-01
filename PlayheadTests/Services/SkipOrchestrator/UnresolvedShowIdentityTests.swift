@@ -358,6 +358,65 @@ struct SkipModeResolutionNamingTests {
         #expect(await orchestrator.currentSkipModeResolution() == .unresolvedShowIdentity)
     }
 
+    /// A stored `mode` string that does not decode is a corruption or a
+    /// forward-compatibility signal, not a verdict. Pre-djl0 it silently became
+    /// `.shadow`, indistinguishable from the show having chosen shadow.
+    @Test("a profile whose stored mode does not decode is its own cause")
+    func anUnrecognizedStoredModeIsItsOwnCause() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = try await Fx.makeOrchestrator(
+            store: store, trustMode: "supersonic"
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: Fx.assetId,
+            episodeId: Fx.episodeId,
+            podcastId: Fx.seededPodcastId
+        )
+        #expect(await orchestrator.currentSkipMode() == .shadow)
+        #expect(await orchestrator.currentSkipModeResolution() == .unrecognizedTrustProfileMode)
+        #expect(
+            await orchestrator.skipModeResolutionFailureCount(.unrecognizedTrustProfileMode) == 1
+        )
+        #expect(
+            await orchestrator.skipModeResolutionFailureCount(.newShowDefault) == 0,
+            "an undecodable mode is not the same as having no profile"
+        )
+    }
+
+    /// A `beginEpisode` that is superseded mid-hydration returns early. Its
+    /// partial state must not leave the PRIOR episode's cause installed under
+    /// the new episode's mode — the mode is reset before the first suspension,
+    /// so the cause has to be too or the two describe different episodes.
+    @Test("a beginEpisode superseded mid-hydration leaves no stale cause")
+    func aSupersededBeginEpisodeLeavesNoStaleCause() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = try await Fx.makeOrchestrator(store: store)
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: Fx.assetId,
+            episodeId: Fx.episodeId,
+            podcastId: Fx.seededPodcastId
+        )
+        #expect(await orchestrator.currentSkipModeResolution() == .showTrustProfile,
+                "control: the first episode really did resolve")
+
+        // The replacement bumps the lifecycle generation from inside the
+        // barrier, so the outer call returns at the guard immediately after it.
+        await orchestrator._setBeginEpisodeHydrationBarrierForTesting {
+            await orchestrator._setBeginEpisodeHydrationBarrierForTesting(nil)
+            await orchestrator.beginEpisode(
+                analysisAssetId: Fx.assetId, episodeId: "ep-replacement", podcastId: nil
+            )
+        }
+        await orchestrator.beginEpisode(
+            analysisAssetId: Fx.assetId, episodeId: "ep-superseded", podcastId: nil
+        )
+
+        #expect(await orchestrator.currentSkipMode() == .shadow)
+        #expect(await orchestrator.currentSkipModeResolution() != .showTrustProfile,
+                "the superseded start must not still report the PRIOR episode's show")
+    }
+
     @Test("an explicit session override is its own cause")
     func aSessionOverrideIsItsOwnCause() async throws {
         let store = try await makeTestStore()
@@ -678,6 +737,27 @@ struct ShowIdentityRecoveryTests {
 
         #expect(await orchestrator.currentSkipModeResolution() == .unresolvedShowIdentity)
         #expect(await orchestrator.activePodcastIdForTesting() == nil)
+    }
+
+    /// The realistic mixed history: an episode enqueued once through a
+    /// context-free background download (NULL) and once through a path that
+    /// knew the show. "Newest row" alone would return the NULL and give up, so
+    /// the query filters to rows that actually carry an answer.
+    @Test("a NULL newest row does not mask an older row that knows the show")
+    func aNullNewestRowDoesNotMaskAnOlderAnswer() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = try await Fx.makeOrchestrator(store: store)
+        try await Fx.seedJobRow(
+            in: store, podcastId: Fx.seededPodcastId, createdAt: 1_000
+        )
+        try await Fx.seedJobRow(in: store, podcastId: nil, createdAt: 2_000)
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: Fx.assetId, episodeId: Fx.episodeId, podcastId: nil
+        )
+
+        #expect(await orchestrator.activePodcastIdForTesting() == Fx.seededPodcastId)
+        #expect(await orchestrator.currentSkipMode() == .auto)
     }
 
     @Test("the newest job row wins when an episode has several")
