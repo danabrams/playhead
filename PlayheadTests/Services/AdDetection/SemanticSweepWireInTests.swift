@@ -262,3 +262,146 @@ struct SemanticSweepWireInTests {
         #expect(first == second)
     }
 }
+
+// MARK: - The runner-tail site
+
+/// playhead-y3ya: the TIMELY half of the wire. Step 18c only composes when a
+/// backfill runs; on the field episode the FM sweep spent fifteen hours writing
+/// rows in background jobs while nothing re-fused. `BackfillJobRunner.runJob`
+/// therefore composes from the asset's persisted rows before it returns, so a
+/// verdict becomes a durable mark within one job cycle of the model producing
+/// it.
+///
+/// The fixture pre-inserts the verdict rather than driving the fake model to
+/// produce it, and that is deliberate: the tail reads PERSISTED rows, so a row
+/// written by an earlier job — the field shape, where the job that wrote the
+/// verdict later ended `cancelled` — is exactly the input under test.
+@Suite("Semantic-sweep mark compose at the runner tail (playhead-y3ya)")
+struct SemanticSweepRunnerTailTests {
+
+    private static let assetId = "asset-sweep-runner"
+    private static let transcriptVersion = "tx-sweep-runner-v1"
+
+    /// A verdict inside the transcript's span with no `ad_window` near it —
+    /// the state in which the sweep lane's output was discarded.
+    private static let verdict = (start: 30.0, end: 60.0)
+
+    private func makeAsset() -> AnalysisAsset {
+        AnalysisAsset(
+            id: Self.assetId,
+            episodeId: "ep-\(Self.assetId)",
+            assetFingerprint: "fp-\(Self.assetId)",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/\(Self.assetId).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+    }
+
+    private func makeInputs() -> BackfillJobRunner.AssetInputs {
+        let segments = makeFMSegments(
+            analysisAssetId: Self.assetId,
+            transcriptVersion: Self.transcriptVersion,
+            lines: [
+                (0, 30, "Welcome to the show. Today we're discussing podcasts."),
+                (30, 60, "Use code SHOW for 20 percent off at example dot com."),
+                (60, 90, "Now back to the interview with our guest.")
+            ]
+        )
+        return BackfillJobRunner.AssetInputs(
+            analysisAssetId: Self.assetId,
+            podcastId: "podcast-sweep-runner",
+            segments: segments,
+            evidenceCatalog: EvidenceCatalogBuilder.build(
+                atoms: segments.flatMap(\.atoms),
+                analysisAssetId: Self.assetId,
+                transcriptVersion: Self.transcriptVersion
+            ),
+            transcriptVersion: Self.transcriptVersion,
+            plannerContext: CoveragePlannerContext(
+                observedEpisodeCount: 0,
+                stableRecall: false,
+                isFirstEpisodeAfterCohortInvalidation: false,
+                recallDegrading: false,
+                sponsorDriftDetected: false,
+                auditMissDetected: false,
+                episodesSinceLastFullRescan: 0,
+                periodicFullRescanIntervalEpisodes: 10
+            )
+        )
+    }
+
+    /// A verdict an EARLIER job persisted, keyed to this asset and transcript.
+    private func makePriorVerdictRow() -> SemanticScanResult {
+        SemanticScanResult(
+            id: "scan-runner-tail-1",
+            analysisAssetId: Self.assetId,
+            windowFirstAtomOrdinal: 1,
+            windowLastAtomOrdinal: 1,
+            windowStartTime: Self.verdict.start,
+            windowEndTime: Self.verdict.end,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: makeTestScanCohortJSON(),
+            transcriptVersion: Self.transcriptVersion
+        )
+    }
+
+    private func runArm(semanticSweepMarkEnabled: Bool) async throws -> [AdWindow] {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertSemanticScanResult(makePriorVerdictRow())
+        let fmRuntime = TestFMRuntime()
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON(),
+            semanticSweepMarkEnabled: semanticSweepMarkEnabled
+        )
+
+        _ = try await runner.runPendingBackfill(for: makeInputs())
+
+        return try await store.fetchAdWindows(assetId: Self.assetId)
+            .filter { $0.detectorVersion == SemanticSweepMarkComposer.detectorVersion }
+    }
+
+    /// THE TIMELY WIRE. Deleting the runner-tail compose leaves Step 18c green
+    /// and the field episode silent until something re-fuses.
+    @Test("flag ON: a job run composes the persisted verdict into a mark")
+    func theRunnerTailComposes() async throws {
+        let rows = try await runArm(semanticSweepMarkEnabled: true)
+
+        #expect(rows.count == 1)
+        #expect(rows.first?.startTime == Self.verdict.start)
+        #expect(rows.first?.endTime == Self.verdict.end)
+        #expect(rows.first?.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+    }
+
+    /// The rollback, and the control for the test above: a green
+    /// `theRunnerTailComposes` with no OFF arm could be satisfied by Step 18c
+    /// running somewhere else in the same process.
+    @Test("flag OFF: a job run composes nothing")
+    func theRunnerTailIsInertWhenOff() async throws {
+        let rows = try await runArm(semanticSweepMarkEnabled: false)
+
+        #expect(rows.isEmpty)
+    }
+}
