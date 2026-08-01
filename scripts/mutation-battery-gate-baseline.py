@@ -43,7 +43,9 @@ scripts/fast-gate.sh in place, and bash reads a script incrementally.
 
 import argparse
 import hashlib
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -211,7 +213,20 @@ MUTATIONS = [
         "prefixes hide a failure",
         "        m = _ST_FAIL_NAMED.search(line) or _ST_FAIL_FUNC.search(line)",
         "        m = _ST_FAIL_NAMED.match(line) or _ST_FAIL_FUNC.match(line)",
-        [P + "test_carriage_return_junk_before_the_glyph_does_not_hide_a_failure"],
+        # SURVIVED on first run against
+        # test_carriage_return_junk_before_the_glyph_does_not_hide_a_failure,
+        # because that fixture also carries an issue line and the issue line
+        # alone creates the failure. The rail is unchanged; the test that had to
+        # exist is the one where the fail line is the only evidence.
+        [P + "test_a_failure_evidenced_ONLY_by_its_failed_after_line_survives_junk"],
+    ),
+    (
+        "R24", GB,
+        "the PASS patterns anchor at the line start, so a \\r-overwritten pass "
+        "is invisible and every baseline member that passed reads as ABSENT",
+        "        m = _ST_PASS_NAMED.search(line) or _ST_PASS_FUNC.search(line)",
+        "        m = _ST_PASS_NAMED.match(line) or _ST_PASS_FUNC.match(line)",
+        [P + "test_carriage_return_junk_does_not_hide_a_PASS_either"],
     ),
     (
         "R19", FG,
@@ -268,10 +283,25 @@ def sha(path):
 
 
 def run_tests(test_ids):
-    """Return (rc, output). Non-zero rc means at least one named test failed."""
+    """Return (rc, output). Non-zero rc means at least one named test failed.
+
+    BYTECODE CACHING WILL LIE TO YOU IF YOU LET IT. The suite loads the module
+    under test through importlib, and SourceFileLoader validates its cached
+    bytecode on (mtime, size) — both of which are second-granular and
+    coincidence-prone here. R18 and R24 replace `.search(` with `.match(` twice
+    each, so their mutated files are byte-for-byte the SAME SIZE; applied within
+    the same second, R24 loaded R18's cached bytecode, ran against unmutated
+    PASS patterns, and reported SURVIVED against a rail that actually works.
+    A mutation battery that mis-reports a verdict is worse than none, so the
+    cache is purged and disabled rather than trusted.
+    """
+    for cache in ROOT.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     proc = subprocess.run(
-        [sys.executable, "-m", "unittest"] + list(test_ids),
-        cwd=str(ROOT), capture_output=True, text=True,
+        [sys.executable, "-B", "-m", "unittest"] + list(test_ids),
+        cwd=str(ROOT), capture_output=True, text=True, env=env,
     )
     return proc.returncode, proc.stdout + proc.stderr
 

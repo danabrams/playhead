@@ -207,6 +207,23 @@ class ParseSwiftTestingTests(unittest.TestCase):
         run = gb.parse_run(text)
         self.assertIn("swift-testing::starved", run.failures)
 
+    def test_a_failure_evidenced_ONLY_by_its_failed_after_line_survives_junk(self):
+        # The test above does not actually pin the fail-line patterns: the ISSUE
+        # line alone is enough to create the failure, so anchoring the fail
+        # patterns to the line start left it green (R18 SURVIVED on first run).
+        # Strip the issue line and the fail line is the only evidence there is.
+        run = gb.parse_run(log('r✘ Test "starved" failed after 149.7 seconds.\n'))
+        self.assertIn("swift-testing::starved", run.failures)
+        self.assertAlmostEqual(
+            149.7, run.failures["swift-testing::starved"].seconds, places=1
+        )
+
+    def test_carriage_return_junk_does_not_hide_a_PASS_either(self):
+        # A missed pass is not harmless: every baseline member that passed would
+        # read as "did not run" and turn the gate red for nothing.
+        run = gb.parse_run(log('r✔ Test "quiet" passed after 0.4 seconds.\n'))
+        self.assertIn("swift-testing::quiet", run.passed)
+
     def test_passes_are_collected(self):
         run = gb.parse_run(log(st_pass("quiet one"), st_fail_timeout("loud one")))
         self.assertIn("swift-testing::quiet one", run.passed)
