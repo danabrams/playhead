@@ -97,6 +97,27 @@ enum RediffDayZeroKickoffOutcome: String, Sendable, Equatable, Codable, CaseIter
     /// ledger's `gaveUpCount` accumulates.
     var isGiveUp: Bool { self != .fired }
 
+    /// The invariant code this outcome SURFACES on the JSON Lines session file
+    /// that ships in the diagnostics bundle and that a device pull reads, or
+    /// `nil` when there is nothing to surface.
+    ///
+    /// The two give-ups get DISTINCT codes because their remedies are unrelated
+    /// — one is a networking problem, the other a stalled analysis dispatcher —
+    /// and a single "day-0 kickoff failed" code would have been just as
+    /// unattributable as the bare `return` it replaces.
+    ///
+    /// `.fired` is not a violation. `.cancelled` is teardown, not a defect: it
+    /// is still COUNTED and RECORDED in the durable ledger, but logging app
+    /// shutdown as an invariant violation would train a reader to ignore the
+    /// stream, which costs more than the line is worth.
+    var invariantCode: InvariantViolation.Code? {
+        switch self {
+        case .fired, .cancelled: return nil
+        case .noPinnedFile: return .rediffDayZeroKickoffNoPinnedFile
+        case .noAnalysisAsset: return .rediffDayZeroKickoffNoAnalysisAsset
+        }
+    }
+
     /// Ordering used ONLY to pick the furthest-observed blame across a bounded
     /// wait's probes (see `DayZeroReadinessOutcome`). A probe can genuinely go
     /// backwards — LRU eviction can delete a pinned file after the asset row
@@ -151,6 +172,76 @@ struct DayZeroReadinessOutcome<Ready: Sendable>: Sendable {
     let pollCount: Int
 }
 
+/// What the readiness probe hands the trigger once BOTH preconditions hold.
+struct DayZeroKickoffReady: Sendable, Equatable {
+    /// The registered `analysis_assets` row id — the mint key, and the source
+    /// of the read-only pinned A-side.
+    let analysisAssetId: String
+    /// The pinned downloaded file. Informational for the day-0 path (which
+    /// reads the A-side from the asset row) and never written.
+    let playedFileURL: URL
+
+    init(analysisAssetId: String, playedFileURL: URL) {
+        self.analysisAssetId = analysisAssetId
+        self.playedFileURL = playedFileURL
+    }
+}
+
+/// The bounded WAIT for the two download-time preconditions.
+///
+/// Lifted out of `PlayheadRuntime` (where it was
+/// `awaitDayZeroPreparationReadiness`, returning `T?`) for two reasons. It is
+/// now shared by BOTH download entry points — the tap and the background hook —
+/// and it must report WHY it gave up, which a `T?` structurally cannot.
+enum DayZeroReadinessWait {
+
+    /// Probe up to `maxAttempts` times, sleeping `pollNanos` between misses.
+    ///
+    /// Returns as soon as a probe is `.ready`. Otherwise returns the FURTHEST
+    /// progress any probe observed — not the last one. A probe can genuinely
+    /// regress (LRU eviction can delete a pinned file after the asset row
+    /// registered), and reporting "we never even saw the file" about a kickoff
+    /// that got further would send a reader to the wrong subsystem.
+    ///
+    /// Cancellation is its OWN outcome, checked before every probe and after
+    /// every sleep, so app teardown is never miscounted as a defect.
+    static func run<Ready: Sendable>(
+        maxAttempts: Int,
+        pollNanos: UInt64,
+        sleep: @Sendable (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) },
+        probe: @Sendable () async -> DayZeroReadinessProbe<Ready>
+    ) async -> DayZeroReadinessOutcome<Ready> {
+        var polls = 0
+        var furthest = RediffDayZeroKickoffOutcome.noPinnedFile
+        while polls < maxAttempts {
+            if Task.isCancelled {
+                return DayZeroReadinessOutcome(
+                    ready: nil, outcome: .cancelled, pollCount: polls
+                )
+            }
+            polls += 1
+            let observed = await probe()
+            if case let .ready(value) = observed {
+                return DayZeroReadinessOutcome(
+                    ready: value, outcome: .fired, pollCount: polls
+                )
+            }
+            let reached = observed.reachedOutcome
+            if reached.readinessProgressRank > furthest.readinessProgressRank {
+                furthest = reached
+            }
+            if polls < maxAttempts { await sleep(pollNanos) }
+        }
+        // A zero/negative budget never probed, so it observed nothing; blaming
+        // the file would be inventing an observation. Cancellation is the only
+        // honest "we never looked" outcome available.
+        guard polls > 0 else {
+            return DayZeroReadinessOutcome(ready: nil, outcome: .cancelled, pollCount: 0)
+        }
+        return DayZeroReadinessOutcome(ready: nil, outcome: furthest, pollCount: polls)
+    }
+}
+
 // MARK: - Durable kickoff record
 
 /// One row of `rediff_day_zero_kickoffs` — the per-EPISODE record of whether a
@@ -197,6 +288,37 @@ struct RediffDayZeroKickoffRecord: Sendable, Equatable {
         self.lastPollCount = lastPollCount
         self.lastWaitedSeconds = lastWaitedSeconds
         self.updatedAt = updatedAt
+    }
+}
+
+/// One settled kickoff, as handed to whoever persists it. Separate from
+/// `RediffDayZeroKickoffRecord` (the accumulated ROW) because a writer needs
+/// the delta, not the total — the accumulation is the store's job and doing it
+/// in two places is how two counters drift apart.
+struct RediffDayZeroKickoffRecordUpdate: Sendable, Equatable {
+    let episodeId: String
+    let source: RediffDayZeroKickoffSource
+    let outcome: RediffDayZeroKickoffOutcome
+    /// Probes the wait ran before settling.
+    let pollCount: Int
+    /// Wall-clock seconds the wait ran.
+    let waitedSeconds: Double
+    let at: Double
+
+    init(
+        episodeId: String,
+        source: RediffDayZeroKickoffSource,
+        outcome: RediffDayZeroKickoffOutcome,
+        pollCount: Int,
+        waitedSeconds: Double,
+        at: Double
+    ) {
+        self.episodeId = episodeId
+        self.source = source
+        self.outcome = outcome
+        self.pollCount = pollCount
+        self.waitedSeconds = waitedSeconds
+        self.at = at
     }
 }
 

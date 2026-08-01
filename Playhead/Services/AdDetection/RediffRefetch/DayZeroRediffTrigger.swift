@@ -208,7 +208,7 @@ struct DayZeroRediffTrigger: Sendable {
         // incrementing counter, so a user who plays on cellular all week still
         // owns exactly one row per episode.
         guard transportDecision.isAllowed else {
-            if let exit = transportDecision.recordedExit {
+            if let exit = transportDecision.deniedExit {
                 await suppressionRecorder(analysisAssetId, exit, now)
             }
             return SweepSummary()
@@ -238,7 +238,7 @@ struct DayZeroRediffTrigger: Sendable {
             kWayFetchCount: kWayFetchCount
         )
         guard RediffDayZeroDailyBudget.allows(window, estimatedCost: estimate, now: now) else {
-            await suppressionRecorder(analysisAssetId, .deniedByDailyBudget, now)
+            await suppressionRecorder(analysisAssetId, .deniedDailyBudget, now)
             return SweepSummary()
         }
 

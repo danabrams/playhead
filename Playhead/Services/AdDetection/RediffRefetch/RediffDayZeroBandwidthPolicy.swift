@@ -207,4 +207,28 @@ enum RediffDayZeroDailyBudget {
     ) -> Bool {
         estimatedCost <= remainingBytes(window, now: now)
     }
+
+    /// Fold one attempt's ACTUAL byte cost into the window, rolling it first if
+    /// it has elapsed. Pure, so the store's SQL and this function can be
+    /// checked against each other.
+    ///
+    /// A ZERO-byte spend returns the window untouched. That is not tidiness: a
+    /// run that fetched nothing has not opened a day, and stamping `startedAt`
+    /// on it would start the 24 h clock early — the next real attempt would
+    /// then inherit a window that is already partly used up, and a device that
+    /// only ever fails would silently shrink its own allowance.
+    static func spend(
+        _ window: RediffDayZeroBudgetWindow,
+        bytes: Int,
+        now: Double
+    ) -> RediffDayZeroBudgetWindow {
+        guard bytes > 0 else { return window }
+        guard !windowHasElapsed(window, now: now) else {
+            return RediffDayZeroBudgetWindow(startedAt: now, spentBytes: bytes)
+        }
+        return RediffDayZeroBudgetWindow(
+            startedAt: window.startedAt ?? now,
+            spentBytes: window.spentBytes + bytes
+        )
+    }
 }

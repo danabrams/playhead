@@ -446,6 +446,29 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// `derivePlaybackReadiness(coverage:anchor:)`.
         case proximalReadinessMissingFirstOffset =
             "proximal_readiness_missing_first_offset"
+
+        /// playhead-4dqe: a download-time day-0 kickoff waited out its whole
+        /// budget and the PINNED DOWNLOADED FILE never appeared, so the trigger
+        /// was never reached. On the "Download & Analyze" tap this can be an
+        /// honestly slow or failed download; on the background-download hook it
+        /// is a real defect, because that hook fires only once the bytes have
+        /// landed.
+        case rediffDayZeroKickoffNoPinnedFile =
+            "rediff_day_zero_kickoff_no_pinned_file"
+
+        /// playhead-4dqe: the pinned file DID appear but no `analysis_assets`
+        /// row was ever registered, so the day-0 trigger was never reached.
+        ///
+        /// **This is the pre-ewag signature and the reason this bead exists.**
+        /// Dispatch was frozen by the thermal depth gate, nothing registered an
+        /// asset, the bounded wait expired, and the kickoff died on a bare
+        /// `return` — for every download, for weeks, while every table it would
+        /// have written read a healthy zero. Its own code, distinct from
+        /// ``rediffDayZeroKickoffNoPinnedFile``, because the remedies are
+        /// unrelated: one is a networking problem, the other is a stalled
+        /// analysis dispatcher.
+        case rediffDayZeroKickoffNoAnalysisAsset =
+            "rediff_day_zero_kickoff_no_analysis_asset"
     }
 
     let code: Code

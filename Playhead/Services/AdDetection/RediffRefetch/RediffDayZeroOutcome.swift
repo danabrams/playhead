@@ -98,29 +98,29 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
     // charger, or after the budget window rolls, can succeed.
 
     /// No reachable network path at all.
-    case deniedNoNetwork = "denied_no_network"
+    case deniedUnreachable = "denied_unreachable"
 
     /// iOS Low Data Mode is active on the current path. Refused on BOTH
     /// transports and regardless of the user's cellular setting — Low Data Mode
     /// is the user's OS-level instruction and an in-app toggle is not consent to
     /// override it.
-    case deniedByLowDataMode = "denied_by_low_data_mode"
+    case deniedLowDataMode = "denied_low_data_mode"
 
     /// The path is cellular (or an "expensive" metered path such as a personal
     /// hotspot) and the user has not turned on cellular preparation. The
     /// shipping default is WiFi-only, so this is the EXPECTED refusal for a
     /// user who has never visited the setting — not a defect.
-    case deniedByCellularSetting = "denied_by_cellular_setting"
+    case deniedCellularNotAllowed = "denied_cellular_not_allowed"
 
     /// Unplugged, with no deep-scan opt-in and no explicit
     /// "Download & Analyze" tap.
-    case deniedByPower = "denied_by_power"
+    case deniedPower = "denied_power"
 
     /// The rolling 24 h day-0 byte budget (`RediffDayZeroDailyBudget`) has no
     /// room for a full k-way attempt. Costs zero bytes by construction — this
     /// is the check that stops the newly-permitted cellular transport from
     /// having no ceiling at all.
-    case deniedByDailyBudget = "denied_by_daily_budget"
+    case deniedDailyBudget = "denied_daily_budget"
 
     // MARK: Fetch
 
@@ -172,8 +172,8 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
         switch self {
         case .minterUnavailable, .assetRowMissing, .assetFetchFailed,
              .aSideNotAnchored, .aSideReadFailed, .suppressedByBackoff,
-             .alreadyInFlight, .deniedNoNetwork, .deniedByLowDataMode,
-             .deniedByCellularSetting, .deniedByPower, .deniedByDailyBudget:
+             .alreadyInFlight, .deniedUnreachable, .deniedLowDataMode,
+             .deniedCellularNotAllowed, .deniedPower, .deniedDailyBudget:
             return false
         case .fetchFailed, .tooFewBCopies, .noAcceptedByteDiff, .noDivergentSlot,
              .allSlotsAlreadyCovered, .persistFailed, .marked:
@@ -197,8 +197,8 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
              .aSideNotAnchored, .aSideReadFailed, .suppressedByBackoff,
              .alreadyInFlight, .fetchFailed, .tooFewBCopies,
              .noAcceptedByteDiff, .noDivergentSlot, .allSlotsAlreadyCovered,
-             .persistFailed, .deniedNoNetwork, .deniedByLowDataMode,
-             .deniedByCellularSetting, .deniedByPower, .deniedByDailyBudget:
+             .persistFailed, .deniedUnreachable, .deniedLowDataMode,
+             .deniedCellularNotAllowed, .deniedPower, .deniedDailyBudget:
             return true
         }
     }
@@ -215,13 +215,13 @@ extension DayZeroTransportDecision {
     /// so a row here would be unreachable — and an unreachable branch whose doc
     /// comment claims otherwise is a defect this arc has already been bitten by.
     /// The flag-off build stays byte-identical, writing nothing.
-    var recordedExit: RediffDayZeroExit? {
+    var deniedExit: RediffDayZeroExit? {
         switch self {
         case .allow, .denyDisabled: return nil
-        case .denyUnreachable: return .deniedNoNetwork
-        case .denyLowDataMode: return .deniedByLowDataMode
-        case .denyCellularNotAllowed: return .deniedByCellularSetting
-        case .denyPower: return .deniedByPower
+        case .denyUnreachable: return .deniedUnreachable
+        case .denyLowDataMode: return .deniedLowDataMode
+        case .denyCellularNotAllowed: return .deniedCellularNotAllowed
+        case .denyPower: return .deniedPower
         }
     }
 }

@@ -452,10 +452,21 @@ enum RediffFetchRequest {
     /// Build the base GET request for a rediff fetch against an ALREADY
     /// cache-busted URL: WiFi-only, cache-ignoring, persona-stamped. Callers
     /// add the `Range` header (ranged pre-check) or nothing (full download).
-    static func makeBaseRequest(cacheBustedURL: URL, persona: RediffFetchPersona?) -> URLRequest {
+    /// - Parameter allowsCellular: playhead-4dqe. Defaults to `false`, which is
+    ///   the LAGGED sweep's unchanged WiFi-only behavior. Only the DAY-0 path
+    ///   passes `true`, and only when the user's preparation-over-cellular
+    ///   setting is on. This is load-bearing rather than cosmetic: the gate
+    ///   deciding "cellular is allowed" is worth nothing if the request itself
+    ///   still refuses the radio — the fetch would simply fail, and day-0 would
+    ///   look broken on exactly the devices whose owners opted in.
+    static func makeBaseRequest(
+        cacheBustedURL: URL,
+        persona: RediffFetchPersona?,
+        allowsCellular: Bool = false
+    ) -> URLRequest {
         var request = URLRequest(url: cacheBustedURL)
         request.httpMethod = "GET"
-        request.allowsCellularAccess = false
+        request.allowsCellularAccess = allowsCellular
         // Ignore any local cache entry — belt-and-suspenders with the `_cb`
         // query item and the `urlCache = nil` session so a per-request-rotating
         // DAI edge/URL cache can never serve a stale, byte-identical stitch
@@ -501,17 +512,39 @@ struct URLSessionRangedAudioSampler: RangedAudioSampling {
 
     /// A WiFi-and-not-constrained URLSession for rediff traffic (spike §5:
     /// "~1 GB/week over WiFi is acceptable … unacceptable on cellular").
+    /// The LAGGED sweep's session, unchanged by playhead-4dqe.
     static func makeWiFiOnlySession() -> URLSession {
+        makeSession(allowsCellular: false)
+    }
+
+    /// playhead-4dqe: a rediff session for either transport.
+    static func makeSession(allowsCellular: Bool) -> URLSession {
+        URLSession(configuration: makeSessionConfiguration(allowsCellular: allowsCellular))
+    }
+
+    /// The session configuration, extracted so the transport policy is
+    /// assertable without standing up a `URLSession`.
+    ///
+    /// `allowsConstrainedNetworkAccess` stays `false` on BOTH transports. That
+    /// is iOS Low Data Mode, and it is refused at the SOCKET as well as at
+    /// `DayZeroTransportPolicy` — belt and suspenders on the one leg of the
+    /// policy the user-facing cellular toggle is not allowed to outrank. A gate
+    /// alone would be one dropped `if` away from spending a metered user's data
+    /// against an explicit OS-level instruction.
+    static func makeSessionConfiguration(allowsCellular: Bool) -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
-        config.allowsCellularAccess = false
+        config.allowsCellularAccess = allowsCellular
         config.allowsConstrainedNetworkAccess = false
-        config.allowsExpensiveNetworkAccess = false
+        // `isExpensive` covers personal hotspots and other metered paths that
+        // report as WiFi. They ride the same decision as cellular because they
+        // cost the user the same way.
+        config.allowsExpensiveNetworkAccess = allowsCellular
         // playhead-xsdz.36.3: disable the in-memory URL cache entirely so a
         // rediff pre-check / full fetch can never be satisfied from a stale
         // cached body (belt-and-suspenders with the per-request `_cb`
         // cache-buster and the reload cache policy).
         config.urlCache = nil
-        return URLSession(configuration: config)
+        return config
     }
 
     enum SampleError: Error, Equatable {
@@ -614,15 +647,61 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
     /// `download()` so the B-side full fetch is a UNIQUE request (never a
     /// stale cached stitch). Injectable for tests; defaults to a UUID.
     let cacheBuster: @Sendable () -> String
+    /// playhead-4dqe: the cellular-capable session, used ONLY when
+    /// `allowsCellular()` says the user opted in. `nil` (the default, and every
+    /// lagged-sweep caller) means this fetcher structurally CANNOT reach
+    /// cellular no matter what the preference says — the lagged sweep's
+    /// WiFi-only policy is preserved by construction, not by remembering to
+    /// check a flag.
+    let cellularSession: URLSession?
+    /// The live user preference, read per download so flipping the Settings
+    /// toggle takes effect without rebuilding the service graph.
+    let allowsCellular: @Sendable () -> Bool
 
     init(
         session: URLSession = URLSessionRangedAudioSampler.makeWiFiOnlySession(),
         persona: RediffFetchPersona? = nil,
-        cacheBuster: @escaping @Sendable () -> String = { UUID().uuidString }
+        cacheBuster: @escaping @Sendable () -> String = { UUID().uuidString },
+        cellularSession: URLSession? = nil,
+        allowsCellular: @escaping @Sendable () -> Bool = { false }
     ) {
         self.session = session
         self.persona = persona
         self.cacheBuster = cacheBuster
+        self.cellularSession = cellularSession
+        self.allowsCellular = allowsCellular
+    }
+
+    /// playhead-4dqe: a k-way-friendly init that names the transport seams
+    /// first, matching how the day-0 wiring reads.
+    init(
+        session: URLSession,
+        cellularSession: URLSession?,
+        allowsCellular: @escaping @Sendable () -> Bool,
+        persona: RediffFetchPersona? = nil,
+        cacheBuster: @escaping @Sendable () -> String = { UUID().uuidString }
+    ) {
+        self.init(
+            session: session,
+            persona: persona,
+            cacheBuster: cacheBuster,
+            cellularSession: cellularSession,
+            allowsCellular: allowsCellular
+        )
+    }
+
+    /// Which session THIS fetch will use. Both conditions must hold: a
+    /// cellular session must have been supplied AND the user must have opted
+    /// in. Either alone is not enough.
+    private var activeSession: URLSession {
+        guard let cellularSession, allowsCellular() else { return session }
+        return cellularSession
+    }
+
+    /// Test-visible mirror of `activeSession`'s decision. Named `ForTesting`
+    /// because production has no business asking — it just fetches.
+    func usesCellularSessionForTesting() -> Bool {
+        cellularSession != nil && allowsCellular()
     }
 
     enum FetchError: Error, Equatable {
@@ -649,10 +728,18 @@ struct URLSessionFullEpisodeFetcher: FullEpisodeFetching {
         // playhead-xsdz.36.3: fresh cache-buster per download so the B-side
         // full fetch is a UNIQUE request (never a stale cached stitch).
         let bustedURL = RediffFetchRequest.cacheBustedURL(url, token: cacheBuster())
-        let request = RediffFetchRequest.makeBaseRequest(cacheBustedURL: bustedURL, persona: persona)
+        // playhead-4dqe: the REQUEST's transport flag and the SESSION must
+        // agree, or the more restrictive of the two silently wins and the
+        // opted-in user's fetch fails for a reason nothing records.
+        let useCellular = cellularSession != nil && allowsCellular()
+        let request = RediffFetchRequest.makeBaseRequest(
+            cacheBustedURL: bustedURL,
+            persona: persona,
+            allowsCellular: useCellular
+        )
 
         let fileManager = FileManager.default
-        let (tempURL, response) = try await session.download(for: request)
+        let (tempURL, response) = try await activeSession.download(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             try? fileManager.removeItem(at: tempURL)
             throw FetchError.notOK(status: http.statusCode)
