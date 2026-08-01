@@ -138,6 +138,30 @@ enum FoundationModelsUsabilityProbe {
         userDefaults.set(data, forKey: cacheKey)
     }
 
+    /// playhead-kvs8: is this probe failure a USABILITY verdict worth caching?
+    ///
+    /// Everything reachable here is cacheable except one thing. A guardrail
+    /// rejection, a decode failure, a timeout, an unavailable model — each says
+    /// something durable about whether this device can run the model right now,
+    /// and each is worth remembering for `falseCacheTTL` so the probe does not
+    /// hammer a model that cannot answer.
+    ///
+    /// A daemon THROTTLE says nothing of the kind. The model is fine; the
+    /// daemon was busy for a moment. Caching it is uniquely expensive because
+    /// this probe is not advisory — `FoundationModelClassifier.liveRuntime`'s
+    /// `availabilityStatus` awaits it before `coarsePassA` plans a single
+    /// window, so a cached `false` turns one momentary refusal into fifteen
+    /// minutes with no ad scanning at all, on a device that is perfectly
+    /// healthy. On a night of intermittent throttling that alone can account
+    /// for hours of the FM lane producing nothing.
+    ///
+    /// The throttled call still returns `false` for THIS probe — we genuinely
+    /// did not verify usability — but the next caller re-asks instead of
+    /// inheriting a verdict the probe never actually reached.
+    static func shouldCacheFailure(for error: Error) -> Bool {
+        !FMDaemonThrottle.isThrottle(error)
+    }
+
     static func clearCache(userDefaults: UserDefaults = .standard) {
         userDefaults.removeObject(forKey: cacheKey)
     }
@@ -194,7 +218,14 @@ enum FoundationModelsUsabilityProbe {
             return true
         } catch {
             logger.warning("Foundation Models readiness probe failed: \(error.localizedDescription)")
-            cache(usable: false)
+            // playhead-kvs8: a daemon throttle is not a usability verdict — see
+            // `shouldCacheFailure(for:)`. Guarding the WRITE rather than the
+            // return value is deliberate: this probe did not verify anything,
+            // so it must still answer `false`, but it must not teach the next
+            // fifteen minutes of callers that the model is unusable.
+            if shouldCacheFailure(for: error) {
+                cache(usable: false)
+            }
             return false
         }
     }

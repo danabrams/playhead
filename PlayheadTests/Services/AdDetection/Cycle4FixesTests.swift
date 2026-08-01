@@ -214,6 +214,17 @@ struct Cycle4PermissiveEndToEndTests {
             #expect(snapshot.contextOverflow >= 1)
             #expect(snapshot.refusal == 0)
             #expect(snapshot.decodingFailure == 0)
+        case .rateLimited:
+            // playhead-kvs8: a daemon throttle is charged to NONE of the three
+            // permissive counters — they are evidence about the model's
+            // judgment, and the model was never asked. The persisted row still
+            // carries `.rateLimited`, which the `expectedStatus` assertion
+            // above already covers. Asserted here rather than skipped so this
+            // helper stays a total function over `Reason`; the dedicated case
+            // lives in `FMThrottlePermissiveLaneTests`.
+            #expect(snapshot.refusal == 0)
+            #expect(snapshot.decodingFailure == 0)
+            #expect(snapshot.contextOverflow == 0)
         }
     }
 

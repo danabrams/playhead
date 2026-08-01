@@ -771,6 +771,15 @@ struct PermissiveFailureCounts: Sendable, Equatable {
         case .permissiveRefusal: refusal += 1
         case .permissiveDecodingFailure: decodingFailure += 1
         case .permissiveContextOverflow: contextOverflow += 1
+        case .rateLimited:
+            // playhead-kvs8: charged to NOTHING, on purpose. Every counter in
+            // this struct is evidence about the permissive model's judgment —
+            // it refused, it produced unparseable output, it overflowed. A
+            // throttle is evidence about the daemon's queue depth, and folding
+            // it into any of these three would make the model look worse the
+            // busier the device is. Its own status (`.rateLimited`) is what
+            // carries it into `failedWindowStatuses` and onto the persisted row.
+            break
         }
     }
 }
@@ -2104,14 +2113,22 @@ struct FoundationModelClassifier: Sendable {
                         // path status) while bumping the permissive
                         // counter, leaving the two sources of telemetry
                         // in disagreement.
+                        //
+                        // playhead-kvs8: the reason is now derived, not
+                        // hard-coded, so a daemon throttle reaching this arm is
+                        // filed as `.rateLimited` (retryable) instead of as a
+                        // safety refusal (permanent). Status and counter still
+                        // come from the same value, preserving Cycle 6's
+                        // invariant.
+                        let unexpectedReason = Self.permissiveUnexpectedReason(for: error)
                         failedWindows.append(
                             CoarseWindowFailure(
                                 plan: plan,
-                                status: .permissiveRefusal,
+                                status: Self.permissiveStatus(for: unexpectedReason),
                                 latencyMillis: Self.latencyMillis(since: permissiveStart, clock: clock)
                             )
                         )
-                        permissiveCounts.increment(reason: .permissiveRefusal)
+                        permissiveCounts.increment(reason: unexpectedReason)
                         logger.error(
                             "fm.classifier.coarse_pass_window_permissive_unexpected window=\(planIndex + 1, privacy: .public) error=\(String(describing: error), privacy: .private)"
                         )
@@ -3531,9 +3548,12 @@ struct FoundationModelClassifier: Sendable {
                         // counter must agree on the permissive path
                         // even in the defensive "should not happen"
                         // arm. See matching comment on the coarse
-                        // defensive arm.
-                        failedWindowStatuses.append(.permissiveRefusal)
-                        permissiveCounts.increment(reason: .permissiveRefusal)
+                        // defensive arm — including playhead-kvs8's
+                        // derived reason, which keeps a daemon throttle
+                        // retryable instead of filing it as a safety refusal.
+                        let unexpectedReason = Self.permissiveUnexpectedReason(for: error)
+                        failedWindowStatuses.append(Self.permissiveStatus(for: unexpectedReason))
+                        permissiveCounts.increment(reason: unexpectedReason)
                         logger.error(
                             "fm.classifier.refinement_pass_window_permissive_unexpected window=\(plan.windowIndex, privacy: .public) error=\(String(describing: error), privacy: .private)"
                         )
@@ -3656,8 +3676,11 @@ struct FoundationModelClassifier: Sendable {
                             "fm.classifier.refinement_pass_eu1_fallback_timeout window=\(plan.windowIndex, privacy: .public)"
                         )
                     } catch {
-                        failedWindowStatuses.append(.permissiveRefusal)
-                        permissiveCounts.increment(reason: .permissiveRefusal)
+                        // playhead-kvs8: derived, not hard-coded — see the
+                        // coarse defensive arm.
+                        let unexpectedReason = Self.permissiveUnexpectedReason(for: error)
+                        failedWindowStatuses.append(Self.permissiveStatus(for: unexpectedReason))
+                        permissiveCounts.increment(reason: unexpectedReason)
                         logger.error(
                             "fm.classifier.refinement_pass_eu1_fallback_unexpected window=\(plan.windowIndex, privacy: .public) error=\(String(describing: error), privacy: .private)"
                         )
@@ -3792,6 +3815,19 @@ struct FoundationModelClassifier: Sendable {
     ///
     /// Cycle 4 H-1: changed from collapsing onto the non-permissive
     /// statuses to returning the dedicated permissive variants.
+    /// playhead-kvs8: what the three defensive "should not happen" permissive
+    /// arms should file for an error they do not recognise.
+    ///
+    /// Those arms hard-coded `.permissiveRefusal` — "Apple's safety layer
+    /// declined this window" — which is the single most misleading thing to say
+    /// about a daemon throttle: the safety layer never ran, and
+    /// `.permissiveRefusal` is a `.persistFailure` status, so the window became
+    /// a permanent hole. One helper rather than three copies so the status and
+    /// the counter cannot drift apart the way Cycle 5 caught them doing.
+    static func permissiveUnexpectedReason(for error: Error) -> PermissiveClassificationError.Reason {
+        FMDaemonThrottle.isThrottle(error) ? .rateLimited : .permissiveRefusal
+    }
+
     static func permissiveStatus(for reason: PermissiveClassificationError.Reason) -> SemanticScanStatus {
         switch reason {
         case .permissiveRefusal:
@@ -3800,6 +3836,16 @@ struct FoundationModelClassifier: Sendable {
             return .permissiveDecodingFailure
         case .permissiveContextOverflow:
             return .permissiveContextOverflow
+        case .rateLimited:
+            // playhead-kvs8: there is deliberately no `.permissiveRateLimited`
+            // variant. The permissive prefix exists to say WHICH classifier
+            // produced a model verdict, and a throttle is not a verdict from
+            // either one — it is the daemon declining the call. Reusing the
+            // shared `.rateLimited` also hands the window pmp9's
+            // `.backoffAndRetry` policy and the runner's existing
+            // rate-limit-defer plumbing for free, instead of minting a fourth
+            // `.persistFailure` status that would strand it.
+            return .rateLimited
         }
     }
 
@@ -6569,6 +6615,25 @@ extension FoundationModelClassifier {
 /// MORE likely — the exact failure pmp9 hardens against (rate-limited windows
 /// were being stranded as permanent coverage holes). Rate-limit resilience
 /// lives in the capped-exponential backoff + resumable DEFER, not in streaming.
+///
+/// playhead-kvs8 — APPLE'S DAEMON HAS NOW SAID THIS ITSELF. A `fullEpisodeScan`
+/// on Dan's device (DE0784D8, 2026-07-31 20:42:34) recorded the daemon's
+/// rate-limit error verbatim, and its recovery suggestion is this guard:
+///
+///     "Request has been rate limited. Please try again later. If you are using
+///      streaming responses in a background request, consider using
+///      non-streaming requests in background activities to reduce the
+///      likelihood of rate limiting."
+///
+/// Read the direction carefully before drawing the wrong conclusion from it.
+/// That text is the daemon's GENERIC advice; it is emitted whether or not the
+/// caller streams, and this app streams nowhere — there is no `streamResponse`,
+/// `ResponseStream` or `PartiallyGenerated` call site anywhere in the target,
+/// which `FMDaemonThrottleCanaryTests` now pins structurally. So the message is
+/// confirmation that this guard has been on the right side of Apple's guidance
+/// since pmp9, NOT an unactioned finding. The throttle it accompanied was real;
+/// what needed fixing was how the runner RESPONDED to it (see
+/// `FMDaemonThrottle`), not how the request was delivered.
 @available(iOS 26.0, *)
 final actor LiveSessionActor {
     private let session: LanguageModelSession
