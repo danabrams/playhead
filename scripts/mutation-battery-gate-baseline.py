@@ -110,8 +110,8 @@ MUTATIONS = [
         "R06", GB,
         "XCTest output stops being parsed at all — the exact shape that let "
         "playhead-ynmk (#313) merge unnoticed",
-        r"    r\"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed) \(([\d.]+) seconds\)\"",
-        r"    r\"Test Kase '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed) \(([\d.]+) seconds\)\"",
+        r'''    r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed) \(([\d.]+) seconds\)"''',
+        r'''    r"Test Kase '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed) \(([\d.]+) seconds\)"''',
         [X + "test_xctest_failure_is_captured_fully_qualified",
          V + "test_a_NEW_xctest_failure_fails_the_gate"],
     ),
@@ -194,8 +194,8 @@ MUTATIONS = [
         "R16", GB,
         "kinds are REPLACED rather than unioned on refresh, so accepting a "
         "quiet run narrows an entry that legitimately fails two ways",
-        '                entry["kinds"] = sorted(set(previous.get("kinds", [])) | failure.kinds)',
-        '                entry["kinds"] = sorted(failure.kinds)',
+        '            entry["kinds"] = sorted(set(previous.get("kinds", [])) | failure.kinds)',
+        '            entry["kinds"] = sorted(failure.kinds)',
         [M + "test_merge_unions_kinds_rather_than_replacing_them"],
     ),
     (
@@ -303,6 +303,24 @@ def main(argv=None):
     # with (a test that is ALREADY red would credit every rail that names it),
     # and every expectation names a test that actually exists and runs.
     # ---------------------------------------------------------------------
+    # Anchors first, ALL of them, before a single test is run. A drifted anchor
+    # found halfway through is an ERROR you pay for after the battery has already
+    # started rewriting files; found here it costs nothing. Two of this file's own
+    # anchors were wrong on first authoring — the escaping in R06 and the
+    # indentation in R16 — and both would have read as ERROR mid-run.
+    drift = []
+    for name, rel, _, old, _, _ in selected:
+        found = (ROOT / rel).read_text(encoding="utf-8").count(old)
+        if found != 1:
+            drift.append("    %-5s %s: anchor matched %d times, expected 1"
+                         % (name, rel, found))
+    if drift:
+        sys.stderr.write("mutation-battery: anchor drift — the source moved on.\n")
+        sys.stderr.write("\n".join(drift) + "\n")
+        sys.stderr.write("Rewrite the EDIT, never the expectation.\n")
+        return 2
+    print("=== anchors: %d/%d match exactly once ===" % (len(selected), len(selected)))
+
     every_test = sorted({t for m in selected for t in m[5]})
     print("=== baseline: %d expected test(s) on UNMUTATED sources ===" % len(every_test))
     rc, out = run_tests(every_test)
