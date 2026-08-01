@@ -480,11 +480,25 @@ struct RediffDayZeroKickoffOrderingTests {
 
     @Test("an UNKNOWN publish date sorts LAST — a missing date is not evidence of newness")
     func unknownDateSortsLast() {
-        let order = RediffDayZeroKickoffOrdering.drainOrder([
-            request("undated", publishedAt: nil),
-            request("ancient", publishedAt: 1)
-        ])
+        let undated = request("undated", publishedAt: nil)
+        let ancient = request("ancient", publishedAt: 1)
+        let order = RediffDayZeroKickoffOrdering.drainOrder([undated, ancient])
         #expect(order.map(\.episodeId) == ["ancient", "undated"])
+
+        // BOTH DIRECTIONS, and this is not belt-and-braces — it is the whole
+        // test. Mutation K10 (`case (nil, .some): return true`) left the
+        // `drainOrder` assertion above GREEN: with only two elements,
+        // `sorted(by:)` reached its answer through the OTHER arm
+        // (`isOrderedBefore(ancient, undated)`, still `true`) and swapped them
+        // into the expected order anyway. A comparator that says "a precedes b"
+        // AND "b precedes a" is not merely wrong, it is an INVALID predicate,
+        // and `sorted(by:)`'s behaviour on one is undefined — so the list order
+        // is not evidence about the comparator at all. Asserting the relation
+        // itself is.
+        #expect(RediffDayZeroKickoffOrdering.isOrderedBefore(ancient, undated),
+                "a known date precedes an unknown one")
+        #expect(!RediffDayZeroKickoffOrdering.isOrderedBefore(undated, ancient),
+                "an unknown date NEVER precedes a known one — K10 survived on exactly this")
     }
 
     @Test("equal publish dates fall back to FIFO, then to episode id — the order is TOTAL")
