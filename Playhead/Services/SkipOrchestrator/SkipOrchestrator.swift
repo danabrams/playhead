@@ -1187,8 +1187,41 @@ actor SkipOrchestrator {
                 activePlaybackLifecycleGeneration,
             suggestionRevisionToken: revisionToken,
             evidenceCatalogEntries: entries,
-            tier: .suggest
+            tier: .suggest,
+            // playhead-d3g0: the card must not offer an action it cannot
+            // perform. Resolved through the SAME helper `acceptSuggestedSkip`
+            // uses, so the promise and the transaction cannot drift apart.
+            confirmationSkipsPlayback: confirmationWouldSkip(adWindow)
         )
+    }
+
+    /// playhead-d3g0 / playhead-ynmk: would confirming this suggestion actually
+    /// MOVE playback, or only record a mark?
+    ///
+    /// ynmk's answer, verbatim in one place: a confirmation asserts presence,
+    /// not extent, so its extent stays the detector's and is governed by
+    /// `AutoSkipEdgePadding`. A nil late-safe window means the confirmation is
+    /// recorded as a MARK and no cue fires.
+    ///
+    /// This is deliberately the ONLY derivation of that answer. `acceptSuggestedSkip`
+    /// decides `decisionState` / `wasSkipped` from it and the banner decides
+    /// whether to offer a Skip from it — two readers, one policy call. A second
+    /// copy of the expression is how a card comes to promise something the
+    /// transaction will not do.
+    ///
+    /// Anchors come from `resolvedEdgeAnchors`, which falls back to the row's
+    /// persisted provenance: a suggest-tier window returns out of
+    /// `receiveAdWindows` before the ingest stamp site, so
+    /// `edgeAnchorsByWindowId` has no entry for it.
+    private func confirmationWouldSkip(_ window: AdWindow) -> Bool {
+        let anchors = resolvedEdgeAnchors(for: window)
+        return AutoSkipEdgePadding.skipWindow(
+            spanStart: window.startTime,
+            spanEnd: window.endTime,
+            startAnchor: anchors.start,
+            endAnchor: anchors.end,
+            showKey: activePodcastId
+        ) != nil
     }
 
     /// Register one mark-only producer value as the current suggest revision.
@@ -4939,14 +4972,15 @@ actor SkipOrchestrator {
         // Anchors come from the persisted row: a suggest-tier window returns
         // out of `receiveAdWindows` before the ingest stamp site, so
         // `edgeAnchorsByWindowId` has no entry for it.
+        //
+        // playhead-d3g0 moved the expression into `confirmationWouldSkip` so
+        // the BANNER can ask the same question before offering a Skip action.
+        // Two readers, one policy call — a second copy is how a card comes to
+        // promise something this transaction will not do. Still resolved BEFORE
+        // the row is built, and still synchronous with `sourcePodcastId`'s
+        // capture (no suspension between them), so the value is unchanged.
         let suggestedAnchors = resolvedEdgeAnchors(for: suggested)
-        let extentIsSkippable = AutoSkipEdgePadding.skipWindow(
-            spanStart: suggested.startTime,
-            spanEnd: suggested.endTime,
-            startAnchor: suggestedAnchors.start,
-            endAnchor: suggestedAnchors.end,
-            showKey: sourcePodcastId
-        ) != nil
+        let extentIsSkippable = confirmationWouldSkip(suggested)
 
         // Build a fresh durable AdWindow with the suggest window's span, its
         // MEASURED confidence carried through unchanged, and the tap recorded
