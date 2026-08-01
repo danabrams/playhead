@@ -555,6 +555,14 @@ actor BackfillJobRunner {
         // in-memory window outputs rather than reconstructing them from
         // `semantic_scan_results.spansJSON`.
         var fmRefinementWindows: [FMRefinementWindowOutput] = []
+        // playhead-kvs8: CONSECUTIVE jobs the FoundationModels daemon refused
+        // to serve, reset by any job that reached the daemon at all. Consecutive
+        // rather than lifetime for the same reason
+        // `consecutiveInferenceTimeoutAbortThreshold` is: one throttle is an
+        // event on a daemon shared with the rest of the OS; two back-to-back
+        // with nothing in between is a fact about its current disposition, and
+        // the only useful response to that is to stop asking.
+        var consecutiveThrottledJobs = 0
 
         // Drain the queue. AdmissionController is serial; one job at a time.
         for _ in enqueuedJobs {
@@ -659,6 +667,9 @@ actor BackfillJobRunner {
             // the CancellationError branch below (BG-window expiry) can
             // checkpoint durable progress before deferring. Fresh per job.
             let honestCursorBox = BackfillHonestCursorBox()
+            // playhead-kvs8: did THIS job end in a daemon throttle? Read below
+            // to decide whether the consecutive counter advances or resets.
+            var throttledThisJob = false
 
             do {
                 // C-2: split lifecycle API. `markBackfillJobRunning` preserves
@@ -1006,6 +1017,66 @@ actor BackfillJobRunner {
                 ) {
                     evidenceEventIds.append(metricsEventId)
                 }
+            } catch let throttle where FMDaemonThrottle.isThrottle(throttle) {
+                // playhead-kvs8: the FoundationModels daemon declined to serve
+                // this job. This arm sits ABOVE the generic catch-all, which is
+                // where the 2026-07-31 field row came from: a throttle escaping
+                // the coarse pass PROLOGUE (`promptBudget` /
+                // `planPassA`'s `tokenCount` XPC round trips, all made before
+                // the first window is planned and all of them `throws`) was
+                // recorded as `status=failed`, `retryCount=1`, with the
+                // daemon's prose raw in `deferReason`.
+                //
+                // Every part of that is wrong for a throttle, and the three
+                // corrections are visible here:
+                //
+                //   * DEFER, never fail. A throttle is temporary — "try again
+                //     later" is the daemon's own wording — so a terminal state
+                //     would strand the episode exactly the way pmp9's
+                //     complete-with-holes did one level down.
+                //   * `retryCount` is PRESERVED. `markBackfillJobDeferred`
+                //     leaves it alone, so a throttle never spends the lifetime
+                //     `AdmissionController.maxRetries` budget that exists to
+                //     disqualify jobs failing on their own merits.
+                //   * A NAMED cause, groupable from a database pull.
+                //
+                // No progress checkpoint is written and no scan row is
+                // fabricated: a throttled prologue examined nothing, and
+                // claiming otherwise is the false-coverage bug qbib and pmp9
+                // both fought. The job resumes from whatever cursor it already
+                // had.
+                throttledThisJob = true
+                consecutiveThrottledJobs += 1
+                do {
+                    try await store.markBackfillJobDeferred(
+                        jobId: job.jobId,
+                        reason: FMDaemonThrottle.DeferCause.passPrologue.rawValue
+                    )
+                    deferred.append(job.jobId)
+                } catch {
+                    logger.warning(
+                        "Failed to mark FM job throttle-deferred (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
+                logger.error(
+                    """
+                    fm.backfill.job_throttled job=\(job.jobId, privacy: .public) \
+                    phase=\(job.phase.rawValue, privacy: .public) \
+                    consecutive=\(consecutiveThrottledJobs, privacy: .public) \
+                    cause=\(FMDaemonThrottle.DeferCause.passPrologue.rawValue, privacy: .public)
+                    """
+                )
+                if let metricsEventId = await recordFailedOperationalMetricsEvent(
+                    job: job,
+                    inputs: inputs,
+                    audioSegments: jobMetricsAudioSegments,
+                    wallStart: jobWallStart,
+                    jobCounters: jobMetricsCounters,
+                    plannerContext: inputs.plannerContext,
+                    resumeAttempted: resumedJobIds.contains(job.jobId)
+                ) {
+                    evidenceEventIds.append(metricsEventId)
+                }
             } catch {
                 // C-2: markBackfillJobFailed writes deferReason so operators
                 // can diagnose the failure without scraping logs. The prior
@@ -1046,6 +1117,61 @@ actor BackfillJobRunner {
             }
 
             await admissionController.finish(jobId: job.jobId)
+
+            // playhead-kvs8: a job that reached the daemon — successfully or
+            // not — clears the throttle evidence. Only back-to-back refusals
+            // count, so a single unlucky job never stops a healthy drain.
+            guard throttledThisJob else {
+                consecutiveThrottledJobs = 0
+                continue
+            }
+            guard FMDaemonThrottle.shouldStopDraining(
+                consecutiveThrottles: consecutiveThrottledJobs
+            ) else {
+                continue
+            }
+
+            // Stop asking. The remaining jobs face the same daemon in the same
+            // second and would each spend an XPC round trip to be told the same
+            // thing.
+            //
+            // They MUST be deferred, not simply left behind: the drain loop is
+            // `for _ in enqueuedJobs`, so breaking out with siblings still
+            // `.queued` strands them exactly the way the H-1 orchestration bug
+            // did before the admission-defer branch above began sweeping them.
+            // They carry their own cause because nothing about THEM was
+            // throttled — re-driving them is unconditionally worth doing.
+            for candidate in enqueuedJobs where
+                !admitted.contains(candidate.jobId)
+                && !deferred.contains(candidate.jobId)
+            {
+                do {
+                    try await store.markBackfillJobDeferred(
+                        jobId: candidate.jobId,
+                        reason: FMDaemonThrottle.DeferCause.batchSibling.rawValue
+                    )
+                    deferred.append(candidate.jobId)
+                } catch let error as AnalysisStoreError {
+                    // R4-Fix1's reasoning: the M-5 idempotency path re-enqueues
+                    // terminal rows, and the C-R3-1 status guard rejects the
+                    // transition. That must not abort the batch.
+                    if case .invalidStateTransition = error {
+                        logger.warning(
+                            "Skipping throttle defer for terminal job: \(candidate.jobId, privacy: .public)"
+                        )
+                        continue
+                    }
+                    throw error
+                }
+            }
+            logger.error(
+                """
+                fm.backfill.drain_stopped_by_throttle \
+                consecutive=\(consecutiveThrottledJobs, privacy: .public) \
+                deferredSiblings=\(deferred.count, privacy: .public)
+                """
+            )
+            break
         }
 
         // bd-m8k: this call site is the persisted equivalent of
@@ -2111,7 +2237,11 @@ actor BackfillJobRunner {
         if coverageFullyCovered {
             coarseIncompleteDeferReason = nil
         } else if coarseHitRateLimit {
-            coarseIncompleteDeferReason = "rateLimited-backoff"
+            // playhead-kvs8: the literal moved to `FMDaemonThrottle.DeferCause`
+            // (same string, byte for byte — device pulls already grep for it)
+            // so every throttle cause this runner can write is enumerable from
+            // one place.
+            coarseIncompleteDeferReason = FMDaemonThrottle.DeferCause.window.rawValue
         } else if coarse.status == .inferenceTimeout {
             coarseIncompleteDeferReason = "inferenceTimeout-noProgress"
         } else {
