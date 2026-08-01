@@ -123,6 +123,16 @@ final class PlayheadRuntime {
     /// keeps it INERT until the day-0 rollout flips it on — nil/inert means no
     /// play-time re-fetch is ever started.
     let dayZeroRediffTrigger: DayZeroRediffTrigger?
+    /// playhead-4dqe: the DOWNLOAD-TIME day-0 entry point, shared by the
+    /// explicit "Download & Analyze" tap and by every plain/auto background
+    /// download that completes (Dan: "yes rediff on background").
+    ///
+    /// Non-nil exactly when `dayZeroRediffTrigger` is, and inert with it. It
+    /// owns the bounded wait for the two preconditions, the serial
+    /// newest-episode-first drain, and — the part this bead exists for — the
+    /// counting, recording and surfacing of a kickoff that never reaches the
+    /// trigger.
+    let dayZeroKickoffCoordinator: RediffDayZeroKickoffCoordinator?
     /// playhead-xsdz.36: late-binding episodeId → CURRENT enclosure-URL
     /// resolver for the re-fetch enumerator. Installed by
     /// `attachRediffEnclosureResolver(modelContainer:)` from
@@ -1575,7 +1585,23 @@ final class PlayheadRuntime {
                 // iPhone persona, byte-identical to Unit 1's single fetch.
                 rangedSampler: URLSessionRangedAudioSampler(persona: .default),
                 localSampler: FileHandleLocalAudioSampler(),
-                fullFetcher: URLSessionFullEpisodeFetcher(persona: .default),
+                // playhead-4dqe: the transport SETTING has to reach the socket,
+                // not just the gate. `DayZeroTransportPolicy` deciding "cellular
+                // is allowed" is worth nothing if the session and the request
+                // still refuse the radio — the fetch would fail, and day-0 would
+                // look broken on precisely the devices whose owners opted in.
+                // Both sessions keep `allowsConstrainedNetworkAccess = false`,
+                // so iOS Low Data Mode is honored at the socket too.
+                fullFetcher: URLSessionFullEpisodeFetcher(
+                    session: URLSessionRangedAudioSampler.makeWiFiOnlySession(),
+                    persona: .default,
+                    cellularSession: URLSessionRangedAudioSampler.makeSession(
+                        allowsCellular: true
+                    ),
+                    allowsCellular: {
+                        UserPreferencesSnapshot.current.dayZeroAllowsCellular
+                    }
+                ),
                 bsideFingerprinter: EpisodeCaptureBSideFingerprinter(
                     decoder: AnalysisAudioBSideDecoder(audioService: audioService)
                 ),
@@ -1626,8 +1652,17 @@ final class PlayheadRuntime {
             let dayZeroDeliveryTarget = skipOrchestrator
             self.dayZeroRediffTrigger = DayZeroRediffTrigger(
                 service: rediffRefetchService,
-                reachabilityProvider: { [transportStatusProvider] in
-                    await transportStatusProvider.currentReachability()
+                // playhead-4dqe: reachability, iOS Low Data Mode and the user's
+                // preparation-over-cellular setting, read as ONE snapshot so
+                // the gate cannot decide over three different instants.
+                transportProvider: { [transportStatusProvider] in
+                    async let reachability = transportStatusProvider.currentReachability()
+                    async let lowDataMode = transportStatusProvider.isLowDataMode()
+                    return await DayZeroTransportSnapshot(
+                        reachability: reachability,
+                        isLowDataMode: lowDataMode,
+                        allowsCellular: UserPreferencesSnapshot.current.dayZeroAllowsCellular
+                    )
                 },
                 chargeStateProvider: { [batteryProvider] in
                     await batteryProvider.currentBatteryState().isCharging
@@ -1647,10 +1682,89 @@ final class PlayheadRuntime {
                     await dayZeroDeliveryTarget.ingestPersistedAdWindows(
                         analysisAssetId: assetId
                     )
+                },
+                // playhead-4dqe: the rolling 24 h day-0 byte budget. A read
+                // failure FAILS OPEN (an empty window ⇒ the whole cap) for the
+                // same reason `attemptRecordProvider` does: a transient store
+                // error must not permanently starve the lane. The bound that
+                // matters is still enforced on the write side, which is atomic.
+                budgetWindowProvider: {
+                    (try? await dayZeroAttemptStore.fetchRediffDayZeroBudgetWindow())
+                        ?? .empty
+                },
+                budgetSpendRecorder: { bytes, at in
+                    try? await dayZeroAttemptStore.recordRediffDayZeroBudgetSpend(
+                        bytes: bytes, at: at
+                    )
                 }
             )
         } else {
             self.dayZeroRediffTrigger = nil
+        }
+
+        // playhead-4dqe: the DOWNLOAD-TIME kickoff coordinator.
+        //
+        // Constructed here, beside the trigger it feeds, and nil with it — so a
+        // build with day-0 off has no queue, no probes and no store writes, and
+        // stays byte-identical to the pre-4dqe app on that path.
+        if let dayZeroRediffTrigger = self.dayZeroRediffTrigger,
+           dayZeroRediffTrigger.enabled {
+            let kickoffStore = analysisStore
+            let kickoffDownloads = downloadManager
+            self.dayZeroKickoffCoordinator = RediffDayZeroKickoffCoordinator(
+                maxAttempts: Self.dayZeroPreparationReadinessMaxAttempts,
+                pollNanos: Self.dayZeroPreparationReadinessPollNanos,
+                // The two preconditions, probed in the order they become true,
+                // so the give-up can name WHICH one was missing. Before
+                // playhead-4dqe both collapsed into one `nil`.
+                probe: { episodeId in
+                    guard let playedFileURL = await kickoffDownloads.cachedFileURL(for: episodeId) else {
+                        return .awaitingPinnedFile
+                    }
+                    guard let asset = (try? await kickoffStore.fetchAssetByEpisodeId(episodeId)) ?? nil else {
+                        return .awaitingAnalysisAsset
+                    }
+                    return .ready(DayZeroKickoffReady(
+                        analysisAssetId: asset.id,
+                        playedFileURL: playedFileURL
+                    ))
+                },
+                fire: { ready, request in
+                    // BOTH download paths grant the deep-scan opt-in. The tap is
+                    // an explicit user request; a background download is work
+                    // the user already asked for by subscribing or queueing, and
+                    // requiring a charger on top would put day-0 back where this
+                    // bead found it — never running. The TRANSPORT gate, Low
+                    // Data Mode and the byte budget are untouched by this.
+                    await dayZeroRediffTrigger.triggerIfEligible(
+                        analysisAssetId: ready.analysisAssetId,
+                        enclosureURL: request.enclosureURL,
+                        playedFileURL: ready.playedFileURL,
+                        forceDeepScanOptIn: true
+                    )
+                },
+                recordKickoff: { update in
+                    try? await kickoffStore.noteRediffDayZeroKickoff(
+                        episodeId: update.episodeId,
+                        source: update.source,
+                        outcome: update.outcome,
+                        pollCount: update.pollCount,
+                        waitedSeconds: update.waitedSeconds,
+                        at: update.at
+                    )
+                },
+                // The JSON Lines session file that already ships in the
+                // diagnostics bundle and that the device pull reads — the same
+                // stream playhead-djl0 chose, for the same reason: the field
+                // investigation went looking for exactly such a line and the
+                // failure branch wrote nothing at all.
+                reportViolation: { [surfaceStatusLogger] code, description in
+                    surfaceStatusLogger.invariantViolated(code: code, description: description)
+                },
+                episodeIdHasher: surfaceStatusHasher
+            )
+        } else {
+            self.dayZeroKickoffCoordinator = nil
         }
 
         let lanePreemptionCoordinator = LanePreemptionCoordinator()
@@ -3610,7 +3724,11 @@ final class PlayheadRuntime {
         // deep-scan opt-in, so this fires unplugged on WiFi (charging not
         // required); WiFi + the default-OFF `dayZeroEnabledByDefault` flag still
         // gate it. Inert unless the flag is flipped on.
-        kickOffDayZeroRediffForPreparation(episodeId: episodeId, enclosureURL: enclosureURL)
+        kickOffDayZeroRediffForPreparation(
+            episodeId: episodeId,
+            enclosureURL: enclosureURL,
+            publishedAt: episode.publishedAt?.timeIntervalSince1970
+        )
         return outcome
     }
 
@@ -3629,72 +3747,62 @@ final class PlayheadRuntime {
     /// transcript, only the asset row's `sourceURL` + the file).
     nonisolated static let dayZeroPreparationReadinessPollNanos: UInt64 = 10 * 1_000_000_000
 
-    /// Poll `resolveReady` up to `maxAttempts` times (sleeping `pollNanos` between
-    /// misses) and return its first non-nil value, or `nil` if the budget elapses
-    /// or the task is cancelled. Pure over its seams (the resolver + an injectable
-    /// sleep) so the WAIT-then-fire behavior is unit-testable without a live
-    /// DownloadManager / analysis pipeline.
-    nonisolated static func awaitDayZeroPreparationReadiness<T: Sendable>(
-        maxAttempts: Int,
-        pollNanos: UInt64,
-        sleep: @Sendable (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) },
-        resolveReady: @Sendable () async -> T?
-    ) async -> T? {
-        var attempt = 0
-        while attempt < maxAttempts {
-            if Task.isCancelled { return nil }
-            if let ready = await resolveReady() { return ready }
-            attempt += 1
-            if attempt < maxAttempts { await sleep(pollNanos) }
-        }
-        return nil
-    }
-
-    /// playhead-xsdz.36.4: kick off an immediate day-0 rediff for an episode the
-    /// user asked to "Download & Analyze" (playhead-3xtw), OFF the caller's path.
-    /// A no-op unless `dayZeroRediffTrigger` is wired (activation on) AND
-    /// `RediffActivation.dayZeroEnabledByDefault` is flipped on — checked before
-    /// spawning any task so the inert default costs nothing. The tap is the
-    /// deep-scan opt-in (`forceDeepScanOptIn: true`), so the live gate only needs
-    /// WiFi; charging is not required.
+    /// playhead-xsdz.36.4 / playhead-4dqe: ask for a day-0 rediff for an episode
+    /// the user just asked to "Download & Analyze" (playhead-3xtw), OFF the
+    /// caller's path.
     ///
-    /// The detached task WAITS (bounded) for the pinned downloaded file AND the
-    /// registered analysis asset before firing — on a genuine first-listen
-    /// Download & Analyze both materialize AFTER `prepare()` returns (the download
-    /// runs async and the asset is registered by the analysis pipeline). If
-    /// neither materializes within the budget it gives up (the lagged sweep is
-    /// the backstop). The day-0 mint itself needs no transcript/analysis.
+    /// A no-op unless `dayZeroKickoffCoordinator` is wired (activation on AND
+    /// `RediffActivation.dayZeroEnabledByDefault`), so the inert default costs
+    /// nothing — no queue, no probes, no store writes.
     ///
-    /// SAFETY (wrj8): identical to the play-time trigger — the A-side is the
-    /// pinned downloaded file (read-only, resolved from the asset row inside the
-    /// minter); the B-side(s) are separate temp copies deleted on every exit.
+    /// WHAT CHANGED IN playhead-4dqe. This used to spawn its own `Task.detached`
+    /// carrying a bounded poll for the pinned file and the registered asset, and
+    /// on expiry it did `guard let ready else { return }` — a bare return with
+    /// no counter, no row and no log line. That silence hid the feature being
+    /// completely dead for weeks: pre-ewag the analysis-asset row never
+    /// materialized (dispatch was frozen), so the wait expired for EVERY
+    /// download and nothing anywhere recorded it. The wait now lives in
+    /// `RediffDayZeroKickoffCoordinator`, which names WHICH precondition was
+    /// missing, counts the two causes separately, writes a durable per-episode
+    /// row, and surfaces the give-up on the diagnostics session file.
+    ///
+    /// SAFETY (wrj8): unchanged — the A-side is the pinned downloaded file
+    /// (read-only, resolved from the asset row inside the minter); the
+    /// B-side(s) are separate temp copies deleted on every exit.
     private func kickOffDayZeroRediffForPreparation(
         episodeId: String,
-        enclosureURL: URL
+        enclosureURL: URL,
+        publishedAt: Double?
     ) {
-        guard let trigger = dayZeroRediffTrigger, trigger.enabled else { return }
-        let store = analysisStore
-        let downloads = downloadManager
-        Task.detached {
-            // Wait (bounded) for BOTH the pinned file (the byte differ's A-side)
-            // and the registered asset (the mint key + A-side `sourceURL` source)
-            // — neither is ready when `prepare()` returns on a first-listen tap.
-            let ready = await Self.awaitDayZeroPreparationReadiness(
-                maxAttempts: Self.dayZeroPreparationReadinessMaxAttempts,
-                pollNanos: Self.dayZeroPreparationReadinessPollNanos
-            ) { () -> (assetId: String, playedFileURL: URL)? in
-                guard let playedFileURL = await downloads.cachedFileURL(for: episodeId) else { return nil }
-                guard let asset = (try? await store.fetchAssetByEpisodeId(episodeId)) ?? nil else { return nil }
-                return (asset.id, playedFileURL)
-            }
-            guard let ready else { return }   // budget elapsed / cancelled → lagged sweep backstops
-            await trigger.triggerIfEligible(
-                analysisAssetId: ready.assetId,
-                enclosureURL: enclosureURL,
-                playedFileURL: ready.playedFileURL,
-                forceDeepScanOptIn: true
-            )
-        }
+        requestDayZeroKickoff(
+            episodeId: episodeId,
+            enclosureURL: enclosureURL,
+            publishedAt: publishedAt,
+            source: .downloadAndAnalyzeTap
+        )
+    }
+
+    /// playhead-4dqe: THE download-time day-0 entry point, shared by the
+    /// explicit tap and by every plain/auto background download that completes
+    /// (Dan: "yes rediff on background").
+    ///
+    /// Returns immediately — the coordinator owns the wait, so a URLSession
+    /// completion callback is never held up by it.
+    nonisolated func requestDayZeroKickoff(
+        episodeId: String,
+        enclosureURL: URL,
+        publishedAt: Double?,
+        source: RediffDayZeroKickoffSource
+    ) {
+        guard let coordinator = dayZeroKickoffCoordinator else { return }
+        let request = RediffDayZeroKickoffRequest(
+            episodeId: episodeId,
+            enclosureURL: enclosureURL,
+            publishedAt: publishedAt,
+            source: source,
+            enqueuedAt: Date().timeIntervalSince1970
+        )
+        Task.detached { await coordinator.requestKickoff(request) }
     }
 
     func playEpisode(_ episode: Episode) async {
@@ -5121,6 +5229,53 @@ final class PlayheadRuntime {
                     return nil
                 }
                 return episode.audioURL
+            }
+        }
+        attachDayZeroBackgroundDownloadKickoff(modelContainer: modelContainer)
+    }
+
+    /// playhead-4dqe: make every PLAIN / AUTO background download reach day-0.
+    ///
+    /// Dan, 2026-08-01: "yes rediff on background". Until this, download-time
+    /// day-0 existed only for the explicit "Download & Analyze" tap, so an
+    /// auto-downloaded episode's only chances at marks were the 19-second
+    /// in-play race and the lagged ≥24 h sweep — i.e. exactly not "the marks are
+    /// there before he presses play".
+    ///
+    /// Installed on the SAME late-attach hook as the enclosure resolver, and for
+    /// the same reason: the identity this needs (the CURRENT enclosure URL and
+    /// the publish date that drives newest-first ordering) lives in SwiftData,
+    /// which is not available when the runtime is constructed.
+    ///
+    /// The observer is deliberately cheap and non-blocking — it hands a request
+    /// to the coordinator and returns, so a URLSession completion callback is
+    /// never held up by a day-0 wait.
+    private func attachDayZeroBackgroundDownloadKickoff(modelContainer: ModelContainer) {
+        guard dayZeroKickoffCoordinator != nil else { return }
+        let downloads = downloadManager
+        Task { [weak self] in
+            await downloads.setBackgroundDownloadCompletionObserver {
+                @Sendable episodeId, fallbackURL in
+                Task { @MainActor in
+                    guard let self else { return }
+                    let context = modelContainer.mainContext
+                    let descriptor = FetchDescriptor<Episode>(
+                        predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                    )
+                    let episode = try? context.fetch(descriptor).first
+                    // Prefer the feed's CURRENT enclosure URL over the URL the
+                    // download happened to follow: day-0 re-fetches the live
+                    // enclosure K ways, exactly as the play path does. The
+                    // download's own URL is the fallback for an episode that has
+                    // since left the library.
+                    guard let enclosureURL = episode?.audioURL ?? fallbackURL else { return }
+                    self.requestDayZeroKickoff(
+                        episodeId: episodeId,
+                        enclosureURL: enclosureURL,
+                        publishedAt: episode?.publishedAt?.timeIntervalSince1970,
+                        source: .backgroundDownload
+                    )
+                }
             }
         }
     }

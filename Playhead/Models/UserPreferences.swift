@@ -47,6 +47,24 @@ final class UserPreferences {
     /// upgrade quietly preserves the spec'd opt-out behavior.
     var newEpisodeNotificationsEnabled: Bool = true
 
+    /// playhead-4dqe: whether background PREPARATION traffic (the day-0 rediff
+    /// re-fetch that produces ad marks before first listen) may use cellular.
+    ///
+    /// Dan, 2026-08-01: "wifi vs 5g should be a user setting, most people have
+    /// unlimited bandwidth." Default `false` — see
+    /// `RediffActivation.dayZeroAllowsCellularByDefault` for why the default
+    /// goes the other way from the population.
+    ///
+    /// DELIBERATELY SEPARATE from `allowsCellular`, which governs whether the
+    /// EPISODE DOWNLOAD may use cellular. They are different bargains: a
+    /// download is bytes the user asked for and will listen to, while
+    /// preparation is a speculative second copy of the same episode that is
+    /// discarded immediately. Someone can reasonably say yes to one and no to
+    /// the other, and folding them into one switch would silently answer a
+    /// question they were never asked. Additive optional with a Swift default,
+    /// so existing rows decode as WiFi-only on upgrade.
+    var dayZeroAllowsCellular: Bool = RediffActivation.dayZeroAllowsCellularByDefault
+
     init(
         skipBehavior: SkipBehavior = .auto,
         playbackSpeed: Double = 1.0,
@@ -55,7 +73,8 @@ final class UserPreferences {
         allowsCellular: Bool = true,
         notificationPermissionAsked: Bool = false,
         episodeSummariesEnabled: Bool = true,
-        newEpisodeNotificationsEnabled: Bool = true
+        newEpisodeNotificationsEnabled: Bool = true,
+        dayZeroAllowsCellular: Bool = RediffActivation.dayZeroAllowsCellularByDefault
     ) {
         self.skipBehavior = skipBehavior
         self.playbackSpeed = playbackSpeed
@@ -65,6 +84,7 @@ final class UserPreferences {
         self.notificationPermissionAsked = notificationPermissionAsked
         self.episodeSummariesEnabled = episodeSummariesEnabled
         self.newEpisodeNotificationsEnabled = newEpisodeNotificationsEnabled
+        self.dayZeroAllowsCellular = dayZeroAllowsCellular
     }
 }
 

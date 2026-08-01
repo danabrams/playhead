@@ -936,8 +936,15 @@ final class PlayheadRuntimeWiringSourceCanaryTests: XCTestCase {
             )
         )
 
+        // playhead-4dqe RE-CALIBRATED the second seam. The full-episode fetcher
+        // now also takes the cellular session + the user's transport setting, so
+        // it can no longer be spelled `URLSessionFullEpisodeFetcher(persona:
+        // .default)` on one line. What this canary protects is unchanged and is
+        // still exactly what is checked: that BOTH rediff constructions in
+        // `PlayheadRuntime` name `persona: .default`. The narrower string was
+        // never the contract; the persona argument is.
         for seam in ["URLSessionRangedAudioSampler(persona: .default)",
-                     "URLSessionFullEpisodeFetcher(persona: .default)"] {
+                     "persona: .default,"] {
             XCTAssertTrue(
                 source.contains(seam),
                 """

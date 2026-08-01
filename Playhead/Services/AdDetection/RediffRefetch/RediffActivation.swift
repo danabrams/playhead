@@ -91,9 +91,12 @@ enum RediffActivation {
     /// personas + 9s6q segment recovery turn the two dominant client-PINNED
     /// stacks from 0 → real day-0 width (Conan 211 s; Fresh Air 203 s,
     /// corroborated across Mac+Overcast at matching A-times). A day-0 fetch is
-    /// ~54 MB × K at PLAY TIME, so it only runs on WiFi + (charging OR a user
-    /// "deep-scan" opt-in), never on cellular or unplugged-without-opt-in; see
-    /// `DayZeroRediffGate`. Auto-skip stays held — day-0 is MARK-ONLY, on the
+    /// ~54 MB × K at PLAY TIME, so it only runs on a permitted transport +
+    /// (charging OR a user "deep-scan" opt-in); see `DayZeroTransportPolicy`
+    /// (playhead-4dqe moved the WiFi-vs-cellular leg to a user setting and
+    /// added the Low Data Mode override and the daily byte budget — before
+    /// that this gate was hardcoded WiFi-only). Auto-skip stays held — day-0 is
+    /// MARK-ONLY, on the
     /// SAME `RediffSlotOwnership` marks path as the lagged sweep (a wrong slot
     /// is a banner, never a skip).
     static let dayZeroEnabledByDefault = true
@@ -118,6 +121,23 @@ enum RediffActivation {
     /// path's single-fetch default. Capped at the distinct-persona count by
     /// `kWayPersonasDistinct`.
     static let dayZeroKWayFetchCount = 2
+
+    /// playhead-4dqe: the SHIPPING DEFAULT for the day-0 transport setting Dan
+    /// moved out of code on 2026-08-01 ("wifi vs 5g should be a user setting,
+    /// most people have unlimited bandwidth").
+    ///
+    /// **`false` — WiFi only by default**, with the toggle surfaced plainly in
+    /// Settings. Dan is right about the population; the reason the default goes
+    /// the other way is that the cost of a wrong default is ASYMMETRIC. A
+    /// metered user who never finds the toggle silently loses ~130 MB per
+    /// episode to preparation they did not ask for — the kind of thing that
+    /// earns an App Store data-usage complaint. A user with unlimited data
+    /// flips it once, costlessly, and never thinks about it again.
+    ///
+    /// This is only the DEFAULT: the live value is the user's preference
+    /// (`UserPreferencesSnapshot.dayZeroAllowsCellular`), and iOS Low Data Mode
+    /// overrides both (see `DayZeroTransportPolicy`).
+    static let dayZeroAllowsCellularByDefault = false
 
     // MARK: - playhead-9s6q FIX A (non-monotonic segment recovery)
 

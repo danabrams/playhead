@@ -513,17 +513,48 @@ final class StubBatteryProvider: BatteryStateProviding, @unchecked Sendable {
 struct StubTransportStatusProvider: TransportStatusProviding {
     let reachability: TransportSnapshot.Reachability
     let allowsCellular: Bool
+    /// playhead-4dqe: iOS Low Data Mode. Defaults to `false` — a stub device is
+    /// not in Low Data Mode — but it is an explicit parameter rather than a
+    /// hardcoded `false` so a test that wants the constrained path can ask for
+    /// it, for the same reason `allowsCellular` is a parameter.
+    let isLowData: Bool
 
     init(
         reachability: TransportSnapshot.Reachability = .wifi,
-        allowsCellular: Bool = true
+        allowsCellular: Bool = true,
+        isLowData: Bool = false
     ) {
         self.reachability = reachability
         self.allowsCellular = allowsCellular
+        self.isLowData = isLowData
     }
 
     func currentReachability() async -> TransportSnapshot.Reachability {
         reachability
     }
     func userAllowsCellular() async -> Bool { allowsCellular }
+    func isLowDataMode() async -> Bool { isLowData }
+}
+
+// MARK: - Day-0 transport snapshots (playhead-4dqe)
+
+extension DayZeroTransportSnapshot {
+    /// The PRE-4dqe world, reproduced exactly: a reachability, no Low Data
+    /// Mode, and the shipping default of WiFi-only.
+    ///
+    /// Used by the suites written before the transport setting existed, so they
+    /// keep asserting what they always asserted — WiFi passes, cellular is
+    /// refused. A test that wants the NEW behavior (cellular admitted by the
+    /// setting) states `allowsCellular: true` itself, which is what makes the
+    /// difference visible in the diff rather than inherited from a helper.
+    static func testSnapshot(_ reachability: TransportSnapshot.Reachability) -> Self {
+        DayZeroTransportSnapshot(
+            reachability: reachability,
+            isLowDataMode: false,
+            allowsCellular: false
+        )
+    }
+
+    static let testWifi = testSnapshot(.wifi)
+    static let testCellularNotAllowed = testSnapshot(.cellular)
 }

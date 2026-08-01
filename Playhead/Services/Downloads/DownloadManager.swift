@@ -400,6 +400,10 @@ actor DownloadManager {
 
     /// Optional scheduler for enqueuing pre-analysis jobs after download.
     private var analysisWorkScheduler: AnalysisWorkScheduler?
+    /// playhead-4dqe: notified once per completed background download that
+    /// leaves a servable pinned artifact. See
+    /// `setBackgroundDownloadCompletionObserver`.
+    private var backgroundDownloadCompletionObserver: (@Sendable (String, URL?) -> Void)?
 
     /// playhead-xsdz.71 (Signal 1, ADDITIVE/observational): optional recorder
     /// that receives the enclosure download's redirect-chain hop hosts so the
@@ -3722,6 +3726,45 @@ actor DownloadManager {
         // the next foreground download. Best-effort: a failure here just
         // defers cleanup to the next eviction trigger.
         try? await evictIfNeeded()
+        // playhead-4dqe: announce the completed background deposit.
+        //
+        // Placed HERE, at the last statement of the success path, on purpose:
+        // every early `return` above is a completion that did NOT leave a
+        // servable pinned artifact (retired callback, foreground stream owns
+        // it, placement failed, unreadable size, pin write failed, hash failed,
+        // lost ownership). An observer told about those would start a
+        // preparation wait for bytes that will never resolve, and the resulting
+        // `no_pinned_file` give-up would be this hook's fault, not the network's.
+        notifyBackgroundDownloadCompleted(
+            episodeId: episodeId,
+            sourceURL: originalURL ?? URL(string: loadPin(for: episodeId)?.sourceURL ?? "")
+        )
+    }
+
+    /// playhead-4dqe: called once per background download that lands a servable
+    /// pinned artifact, with the episode's ORIGINAL enclosure URL when known.
+    ///
+    /// This is the seam that makes Dan's "yes rediff on background" possible:
+    /// before it, day-0 at download time existed only for the explicit
+    /// "Download & Analyze" tap, so every auto-downloaded episode had to wait
+    /// for the 19-second in-play race or the lagged ≥24 h sweep. Wired once by
+    /// `PlayheadRuntime`; left `nil` in tests and previews, so the download path
+    /// is byte-identical without it.
+    ///
+    /// A CALLBACK RATHER THAN A STREAM, deliberately. `progressUpdates()` is an
+    /// `AsyncStream` because it has many subscribers and drops are harmless;
+    /// this has exactly one consumer and a drop is a lost day-0 attempt, so it
+    /// is a direct hand-off with no buffer to overflow. Same `set…` shape as
+    /// `setAnalysisWorkScheduler` / `setDAIStitchRecorder`.
+    func setBackgroundDownloadCompletionObserver(
+        _ observer: @escaping @Sendable (String, URL?) -> Void
+    ) {
+        self.backgroundDownloadCompletionObserver = observer
+    }
+
+    private func notifyBackgroundDownloadCompleted(episodeId: String, sourceURL: URL?) {
+        guard let observer = backgroundDownloadCompletionObserver else { return }
+        observer(episodeId, sourceURL)
     }
 
     /// Rebuilds the LRU access log from file modification dates.
@@ -3829,25 +3872,56 @@ struct UserPreferencesSnapshot: Sendable {
     /// SwiftData default; the Settings toggle calls
     /// `save(episodeSummariesEnabled:)` to keep the slot in sync.
     var episodeSummariesEnabled: Bool
+    /// playhead-4dqe: mirrored copy of `UserPreferences.dayZeroAllowsCellular`
+    /// — whether background PREPARATION traffic may use cellular. Read from
+    /// `DayZeroRediffTrigger` and `URLSessionFullEpisodeFetcher`, neither of
+    /// which has a SwiftData hop. Defaults to
+    /// `RediffActivation.dayZeroAllowsCellularByDefault` (WiFi only), matching
+    /// the SwiftData default so the two stores cannot disagree on day 1.
+    var dayZeroAllowsCellular: Bool
 
     static let defaultsKey = "UserPreferencesSnapshot.allowsCellular"
     static let episodeSummariesDefaultsKey = "UserPreferencesSnapshot.episodeSummariesEnabled"
+    static let dayZeroAllowsCellularDefaultsKey = "UserPreferencesSnapshot.dayZeroAllowsCellular"
 
     static var current: UserPreferencesSnapshot {
-        let allows = UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true
-        let summaries = UserDefaults.standard.object(forKey: episodeSummariesDefaultsKey) as? Bool ?? true
+        current(from: .standard)
+    }
+
+    /// playhead-4dqe: the `UserDefaults`-injectable read. Extracted so the
+    /// defaults and the round-trip are testable in an isolated suite rather
+    /// than against the shared standard domain, where one test's write leaks
+    /// into every other test in the process.
+    static func current(from defaults: UserDefaults) -> UserPreferencesSnapshot {
+        let allows = defaults.object(forKey: defaultsKey) as? Bool ?? true
+        let summaries = defaults.object(forKey: episodeSummariesDefaultsKey) as? Bool ?? true
+        let dayZeroCellular = defaults.object(forKey: dayZeroAllowsCellularDefaultsKey) as? Bool
+            ?? RediffActivation.dayZeroAllowsCellularByDefault
         return UserPreferencesSnapshot(
             allowsCellular: allows,
-            episodeSummariesEnabled: summaries
+            episodeSummariesEnabled: summaries,
+            dayZeroAllowsCellular: dayZeroCellular
         )
     }
 
     static func save(allowsCellular: Bool) {
-        UserDefaults.standard.set(allowsCellular, forKey: defaultsKey)
+        save(allowsCellular: allowsCellular, to: .standard)
+    }
+
+    static func save(allowsCellular: Bool, to defaults: UserDefaults) {
+        defaults.set(allowsCellular, forKey: defaultsKey)
     }
 
     static func save(episodeSummariesEnabled: Bool) {
         UserDefaults.standard.set(episodeSummariesEnabled, forKey: episodeSummariesDefaultsKey)
+    }
+
+    static func save(dayZeroAllowsCellular: Bool) {
+        save(dayZeroAllowsCellular: dayZeroAllowsCellular, to: .standard)
+    }
+
+    static func save(dayZeroAllowsCellular: Bool, to defaults: UserDefaults) {
+        defaults.set(dayZeroAllowsCellular, forKey: dayZeroAllowsCellularDefaultsKey)
     }
 }
 

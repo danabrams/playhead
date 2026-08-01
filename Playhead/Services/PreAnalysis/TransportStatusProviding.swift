@@ -30,14 +30,26 @@ protocol TransportStatusProviding: Sendable {
     /// interactive jobs. Maintenance jobs ignore this value — they are
     /// Wi-Fi-only regardless.
     func userAllowsCellular() async -> Bool
+    /// playhead-4dqe: whether the active path is CONSTRAINED — i.e. iOS
+    /// Low Data Mode is on for it (`NWPath.isConstrained`).
+    ///
+    /// DELIBERATELY NOT GIVEN A PROTOCOL DEFAULT. A `{ false }` default
+    /// would mean "Low Data Mode is off" for any conformer that forgot
+    /// to implement it — the direction that SPENDS a user's data against
+    /// an explicit OS-level instruction, and it would do so invisibly.
+    /// There are three conformers; each states its answer.
+    func isLowDataMode() async -> Bool
 }
 
-/// Deterministic stub: assume Wi-Fi + user allows cellular. Retained
-/// post-ml96 for SwiftUI previews and as a unit-test fixture default.
-/// Production callers use `LiveTransportStatusProvider`.
+/// Deterministic stub: assume Wi-Fi + user allows cellular + no Low Data
+/// Mode. Retained post-ml96 for SwiftUI previews and as a unit-test
+/// fixture default. Production callers use `LiveTransportStatusProvider`.
 struct WifiTransportStatusProvider: TransportStatusProviding {
     func currentReachability() async -> TransportSnapshot.Reachability { .wifi }
     func userAllowsCellular() async -> Bool { true }
+    /// A preview/fixture device is not in Low Data Mode. Stated, not
+    /// inherited — see the protocol's note on why there is no default.
+    func isLowDataMode() async -> Bool { false }
 }
 
 // MARK: - LiveTransportStatusProvider
@@ -65,13 +77,27 @@ struct WifiTransportStatusProvider: TransportStatusProviding {
 /// to the monitor object is constrained to `init`/`deinit` and to its
 /// own dispatch queue inside the path update handler.
 final class LiveTransportStatusProvider: TransportStatusProviding, @unchecked Sendable {
+
+    /// The Sendable projection of an `NWPath` this provider caches.
+    ///
+    /// playhead-4dqe widened this from a bare `Reachability` to a struct so
+    /// reachability and Low Data Mode are captured from the SAME path update.
+    /// Two separately-cached reads could otherwise describe two different
+    /// moments, and the consumer that matters (`DayZeroTransportPolicy`) decides
+    /// over both at once.
+    struct PathSnapshot: Sendable, Equatable {
+        var reachability: TransportSnapshot.Reachability
+        /// `NWPath.isConstrained` — iOS Low Data Mode for this path.
+        var isConstrained: Bool
+    }
+
     private let monitor: NWPathMonitor
     private let queue: DispatchQueue
-    /// We store the mapped `Reachability` (a Sendable enum) rather than
-    /// the raw `NWPath` so the lock's wrapped state is unambiguously
-    /// Sendable under Swift 6 concurrency. The path → reachability
-    /// mapping happens inside the update handler on `queue`.
-    private let latestReachability: OSAllocatedUnfairLock<TransportSnapshot.Reachability>
+    /// We store the mapped `PathSnapshot` (Sendable) rather than the raw
+    /// `NWPath` so the lock's wrapped state is unambiguously Sendable under
+    /// Swift 6 concurrency. The path → snapshot mapping happens inside the
+    /// update handler on `queue`.
+    private let latestPath: OSAllocatedUnfairLock<PathSnapshot>
     private let allowsCellularProvider: @Sendable () -> Bool
 
     /// - Parameters:
@@ -98,11 +124,11 @@ final class LiveTransportStatusProvider: TransportStatusProviding, @unchecked Se
         // `.unreachable` during the boot-time race.
         // NWPathMonitor's `currentPath` is safe to read before
         // `start(...)` returns.
-        let seed = Self.reachability(from: monitor.currentPath)
-        let lock = OSAllocatedUnfairLock<TransportSnapshot.Reachability>(initialState: seed)
-        self.latestReachability = lock
+        let seed = Self.snapshot(from: monitor.currentPath)
+        let lock = OSAllocatedUnfairLock<PathSnapshot>(initialState: seed)
+        self.latestPath = lock
         monitor.pathUpdateHandler = { path in
-            let mapped = Self.reachability(from: path)
+            let mapped = Self.snapshot(from: path)
             lock.withLock { $0 = mapped }
         }
         monitor.start(queue: queue)
@@ -113,11 +139,16 @@ final class LiveTransportStatusProvider: TransportStatusProviding, @unchecked Se
     }
 
     func currentReachability() async -> TransportSnapshot.Reachability {
-        latestReachability.withLock { $0 }
+        latestPath.withLock { $0.reachability }
     }
 
     func userAllowsCellular() async -> Bool {
         allowsCellularProvider()
+    }
+
+    /// playhead-4dqe: iOS Low Data Mode for the active path.
+    func isLowDataMode() async -> Bool {
+        latestPath.withLock { $0.isConstrained }
     }
 
     /// Pure mapping function — extracted so unit tests can probe the
@@ -129,5 +160,20 @@ final class LiveTransportStatusProvider: TransportStatusProviding, @unchecked Se
             return .cellular
         }
         return .wifi
+    }
+
+    /// playhead-4dqe: the full Sendable projection of a path.
+    ///
+    /// `isConstrained` is read only from a SATISFIED path. On an unsatisfied
+    /// (or nil) path the flag is meaningless — there is no path to be
+    /// constrained — and reporting `true` there would let "airplane mode" be
+    /// mistaken for "the user asked us to use less data", which are different
+    /// diagnoses and different repairs. `.unreachable` already refuses first in
+    /// `DayZeroTransportPolicy`, so the value is never load-bearing in that
+    /// case; the point is that it not be a LIE if something else reads it.
+    static func snapshot(from path: NWPath?) -> PathSnapshot {
+        let reach = reachability(from: path)
+        let constrained = (reach == .unreachable) ? false : (path?.isConstrained ?? false)
+        return PathSnapshot(reachability: reach, isConstrained: constrained)
     }
 }

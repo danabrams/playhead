@@ -28,33 +28,14 @@
 
 import Foundation
 
-/// The pure eligibility decision for the day-0 (play-time) rediff trigger. A
-/// day-0 fetch is a full ~54 MB × K second download at play time, so it is
-/// WiFi-ONLY and gated on charging OR an explicit user "deep-scan" opt-in —
-/// never cellular, never unplugged-without-opt-in. Pure so the truth table is
-/// unit-tested without `NWPathMonitor` / `UIDevice`.
-enum DayZeroRediffGate {
-    /// Whether the day-0 trigger may run given the flag + the live power/network
-    /// context. `false` for a disabled flag, any non-WiFi reachability
-    /// (cellular / unreachable), or an unplugged device with no deep-scan
-    /// opt-in.
-    static func allows(
-        enabled: Bool,
-        reachability: TransportSnapshot.Reachability,
-        isCharging: Bool,
-        deepScanOptIn: Bool
-    ) -> Bool {
-        guard enabled else { return false }
-        // WiFi-only: a ~54 MB × K second fetch must never run on cellular
-        // (`.cellular`) or with no reachable path (`.unreachable`).
-        guard reachability == .wifi else { return false }
-        // On WiFi: charging is the default power gate; a deep-scan opt-in lets a
-        // user who wants marks-on-first-listen accept the battery cost unplugged.
-        return isCharging || deepScanOptIn
-    }
-}
+// playhead-4dqe: the former `DayZeroRediffGate` — a `Bool`-returning,
+// hardcoded-WiFi-only gate — was replaced by `DayZeroTransportPolicy` in
+// `RediffDayZeroBandwidthPolicy.swift`. It returns a NAMED decision rather than
+// a bare `false`, so a refusal is recordable; it reads the WiFi-vs-cellular leg
+// from the user's setting (Dan 2026-08-01) instead of from code; and it honors
+// iOS Low Data Mode on both transports.
 
-/// The play-time day-0 rediff trigger. `PlayheadRuntime.playEpisode` calls
+/// The day-0 rediff trigger. `PlayheadRuntime.playEpisode` calls
 /// `triggerIfEligible` (fire-and-forget, OFF the playback hot path) once it has
 /// resolved the analysis asset id for the just-started episode.
 ///
@@ -72,9 +53,14 @@ struct DayZeroRediffTrigger: Sendable {
     /// The day-0 k-way fetch count (`RediffActivation.dayZeroKWayFetchCount`),
     /// independent of the lagged sweep's single-fetch default.
     let kWayFetchCount: Int
-    /// Live network reachability (production: the shared
-    /// `LiveTransportStatusProvider`, `NWPathMonitor`-backed).
-    let reachabilityProvider: @Sendable () async -> TransportSnapshot.Reachability
+    /// playhead-4dqe: the live network context, read as ONE snapshot —
+    /// reachability, iOS Low Data Mode, and the user's cellular preference
+    /// (production: the shared `LiveTransportStatusProvider` +
+    /// `UserPreferencesSnapshot`).
+    ///
+    /// One provider rather than three so the three legs cannot be sampled at
+    /// three different instants; the gate then decides over a coherent view.
+    let transportProvider: @Sendable () async -> DayZeroTransportSnapshot
     /// Live charging state (production: `UIDeviceBatteryProvider`).
     let chargeStateProvider: @Sendable () async -> Bool
     /// The user's "deep-scan" opt-in — lets a day-0 fetch run unplugged on WiFi.
@@ -104,12 +90,21 @@ struct DayZeroRediffTrigger: Sendable {
     /// (and the same required-parameter discipline) as `attemptRecordProvider`
     /// above.
     let mintedMarkDelivery: @Sendable (String) async -> Void
+    /// playhead-4dqe: the rolling 24 h day-0 byte window
+    /// (`rediff_bandwidth_ledger`). Read AFTER the transport gate and the
+    /// per-asset backoff, so a refused attempt costs no budget read.
+    let budgetWindowProvider: @Sendable () async -> RediffDayZeroBudgetWindow
+    /// playhead-4dqe: folds the bytes an attempt ACTUALLY spent into the
+    /// rolling window. Called with the real `fullFetchBytes` from the sweep, not
+    /// the pre-flight estimate — the estimate bounds admission, the ledger
+    /// records truth.
+    let budgetSpendRecorder: @Sendable (Int, Double) async -> Void
 
     init(
         service: RediffRefetchService,
         enabled: Bool = RediffActivation.dayZeroEnabledByDefault,
         kWayFetchCount: Int = RediffActivation.dayZeroKWayFetchCount,
-        reachabilityProvider: @escaping @Sendable () async -> TransportSnapshot.Reachability,
+        transportProvider: @escaping @Sendable () async -> DayZeroTransportSnapshot,
         chargeStateProvider: @escaping @Sendable () async -> Bool,
         deepScanOptInProvider: @escaping @Sendable () -> Bool = { false },
         // DELIBERATELY NOT DEFAULTED (review round 1). The `nil`-returning /
@@ -129,21 +124,36 @@ struct DayZeroRediffTrigger: Sendable {
         // whole suite green — and nothing in the suite builds a real
         // `PlayheadRuntime`, so deleting the wiring there would be invisible.
         // A required parameter turns that regression into a compile error.
-        mintedMarkDelivery: @escaping @Sendable (String) async -> Void
+        mintedMarkDelivery: @escaping @Sendable (String) async -> Void,
+        // DELIBERATELY NOT DEFAULTED, third instance of the same discipline
+        // (playhead-4dqe). An `.empty`-returning / no-op pair IS "no daily
+        // budget" — the state this bead exists to leave behind, now that the
+        // transport setting can open the cellular door. Nothing in the suite
+        // builds a real `PlayheadRuntime`, so a dropped wiring argument there
+        // would restore an UNBOUNDED day-0 byte spend with the whole suite
+        // green. A required parameter makes it a compile error.
+        budgetWindowProvider: @escaping @Sendable () async -> RediffDayZeroBudgetWindow,
+        budgetSpendRecorder: @escaping @Sendable (Int, Double) async -> Void
     ) {
         self.service = service
         self.enabled = enabled
         self.kWayFetchCount = kWayFetchCount
-        self.reachabilityProvider = reachabilityProvider
+        self.transportProvider = transportProvider
         self.chargeStateProvider = chargeStateProvider
         self.deepScanOptInProvider = deepScanOptInProvider
         self.attemptRecordProvider = attemptRecordProvider
         self.suppressionRecorder = suppressionRecorder
         self.mintedMarkDelivery = mintedMarkDelivery
+        self.budgetWindowProvider = budgetWindowProvider
+        self.budgetSpendRecorder = budgetSpendRecorder
     }
 
-    /// Fire an immediate day-0 rediff for the just-started episode IF the flag is
-    /// on AND the live WiFi + (charging OR deep-scan) gate passes.
+    /// Fire an immediate day-0 rediff for this episode IF the flag is on AND
+    /// three independent gates pass, in this order: the TRANSPORT gate
+    /// (reachability + Low Data Mode + the user's cellular setting + power), the
+    /// per-asset BACKOFF (playhead-p70f), and the daily BYTE BUDGET
+    /// (playhead-4dqe). Every refusal names itself in
+    /// `rediff_day_zero_attempts.lastExit`.
     ///
     /// The gate signals are read LAZILY (only when `enabled`), so the inert
     /// default path costs nothing — no `NWPathMonitor` / battery reads. Returns
@@ -163,8 +173,9 @@ struct DayZeroRediffTrigger: Sendable {
     ///     on-demand "Download & Analyze" trigger (playhead-3xtw) sets this
     ///     because the user EXPLICITLY requested analysis by tapping the control,
     ///     which satisfies "charging OR deep-scan opt-in" (so an unplugged WiFi
-    ///     device still runs). The WiFi requirement and the `enabled` flag are
-    ///     UNAFFECTED. The play-time trigger leaves it `false` (reads the
+    ///     device still runs). It grants the POWER leg ONLY: the transport
+    ///     decision, Low Data Mode, the daily budget and the `enabled` flag are
+    ///     all UNAFFECTED. The play-time trigger leaves it `false` (reads the
     ///     provider), so its behavior is unchanged.
     @discardableResult
     func triggerIfEligible(
@@ -175,17 +186,31 @@ struct DayZeroRediffTrigger: Sendable {
         at now: Double = Date().timeIntervalSince1970
     ) async -> RediffRefetchService.SweepSummary {
         guard enabled else { return SweepSummary() }
-        let reachability = await reachabilityProvider()
+        let transport = await transportProvider()
         let isCharging = await chargeStateProvider()
         // The explicit "Download & Analyze" tap is itself the deep-scan opt-in —
         // don't even read the (settings-backed) provider in that case.
         let deepScanOptIn = forceDeepScanOptIn || deepScanOptInProvider()
-        guard DayZeroRediffGate.allows(
+        let transportDecision = DayZeroTransportPolicy.decide(
             enabled: enabled,
-            reachability: reachability,
+            transport: transport,
             isCharging: isCharging,
             deepScanOptIn: deepScanOptIn
-        ) else {
+        )
+        // playhead-4dqe — A REFUSED GATE IS NO LONGER SILENT. This used to be a
+        // bare `return SweepSummary()`: on a device where day-0 never ran, the
+        // gate, a dropped wiring and a flag that was off were indistinguishable
+        // from each other. Each refusal now names itself in
+        // `rediff_day_zero_attempts.lastExit`, so "why has day-0 never fired on
+        // this phone?" is answerable from a database pull.
+        //
+        // The write is bounded: an UPSERT on the asset's single row with an
+        // incrementing counter, so a user who plays on cellular all week still
+        // owns exactly one row per episode.
+        guard transportDecision.isAllowed else {
+            if let exit = transportDecision.deniedExit {
+                await suppressionRecorder(analysisAssetId, exit, now)
+            }
             return SweepSummary()
         }
 
@@ -195,11 +220,25 @@ struct DayZeroRediffTrigger: Sendable {
         // per-episode guard, and an unmarked run wrote nothing for a later run
         // to read. Replaying one episode cost ~108 MB every time, forever.
         //
-        // The check runs AFTER the WiFi/charging gate (so a cellular play never
-        // even touches the store) but BEFORE anything is fetched.
+        // The check runs AFTER the transport/power gate but BEFORE anything is
+        // fetched.
         let prior = await attemptRecordProvider(analysisAssetId)
         if case let .suppress(reason, _) = DayZeroRediffAttemptPolicy.decide(record: prior, now: now) {
             await suppressionRecorder(analysisAssetId, reason, now)
+            return SweepSummary()
+        }
+
+        // playhead-4dqe — THE DAILY BYTE BUDGET. Separate question, separate
+        // gate, deliberately AFTER the per-asset backoff (a replay that is
+        // suppressed anyway must not consume a budget read) and BEFORE any
+        // fetch. Applies on BOTH transports: the gate above chose the network,
+        // this one chooses how much.
+        let window = await budgetWindowProvider()
+        let estimate = RediffDayZeroDailyBudget.estimatedAttemptBytes(
+            kWayFetchCount: kWayFetchCount
+        )
+        guard RediffDayZeroDailyBudget.allows(window, estimatedCost: estimate, now: now) else {
+            await suppressionRecorder(analysisAssetId, .deniedDailyBudget, now)
             return SweepSummary()
         }
 
@@ -218,6 +257,15 @@ struct DayZeroRediffTrigger: Sendable {
         let summary = await service.runDayZeroRefetch(
             for: candidate, kWayFetchCount: kWayFetchCount
         )
+
+        // playhead-4dqe — charge the rolling window with what was ACTUALLY
+        // spent, not the admission estimate. Recorded before the delivery hop
+        // so a slow orchestrator read can never delay the accounting, and
+        // guarded on `> 0` so a run that fetched nothing (a disabled service, an
+        // immediate throw) does not stamp a window start it never used.
+        if summary.fullFetchBytes > 0 {
+            await budgetSpendRecorder(summary.fullFetchBytes, now)
+        }
 
         // playhead-96ot — DELIVER WHAT WE JUST MINTED, in this session.
         //

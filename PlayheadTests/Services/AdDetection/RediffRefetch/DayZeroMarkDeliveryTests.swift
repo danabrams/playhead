@@ -527,12 +527,14 @@ struct DayZeroTriggerMarkDeliveryTests {
             service: service,
             enabled: true,
             kWayFetchCount: 2,
-            reachabilityProvider: { reachability },
+            transportProvider: { .testSnapshot(reachability) },
             chargeStateProvider: { isCharging },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in nil },
             suppressionRecorder: { _, _, _ in },
-            mintedMarkDelivery: { delivery.record($0) }
+            mintedMarkDelivery: { delivery.record($0) },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
     }
 
@@ -693,12 +695,14 @@ struct DayZeroFirstListenInSessionSkipTests {
             service: service,
             enabled: true,
             kWayFetchCount: 2,
-            reachabilityProvider: { .wifi },
+            transportProvider: { .testWifi },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in nil },
             suppressionRecorder: { _, _, _ in },
-            mintedMarkDelivery: delivery
+            mintedMarkDelivery: delivery,
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
     }
 

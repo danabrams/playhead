@@ -23,60 +23,12 @@ import Foundation
 import Testing
 @testable import Playhead
 
-// MARK: - Pure gate truth table
-
-@Suite("DayZeroRediffGate (playhead-xsdz.36.4)")
-struct DayZeroRediffGateTests {
-
-    @Test("a disabled flag is inert regardless of power/network")
-    func disabledIsInert() {
-        for reachability: TransportSnapshot.Reachability in [.wifi, .cellular, .unreachable] {
-            for charging in [true, false] {
-                for optIn in [true, false] {
-                    #expect(!DayZeroRediffGate.allows(
-                        enabled: false, reachability: reachability,
-                        isCharging: charging, deepScanOptIn: optIn
-                    ))
-                }
-            }
-        }
-    }
-
-    @Test("WiFi + charging allows (the default power gate)")
-    func wifiChargingAllows() {
-        #expect(DayZeroRediffGate.allows(
-            enabled: true, reachability: .wifi, isCharging: true, deepScanOptIn: false
-        ))
-    }
-
-    @Test("WiFi + unplugged + deep-scan opt-in allows")
-    func wifiOptInAllows() {
-        #expect(DayZeroRediffGate.allows(
-            enabled: true, reachability: .wifi, isCharging: false, deepScanOptIn: true
-        ))
-    }
-
-    @Test("WiFi + unplugged + no opt-in is rejected")
-    func wifiUnpluggedNoOptInRejected() {
-        #expect(!DayZeroRediffGate.allows(
-            enabled: true, reachability: .wifi, isCharging: false, deepScanOptIn: false
-        ))
-    }
-
-    @Test("cellular is rejected even charging + opt-in (a ~54 MB × K fetch is never on cellular)")
-    func cellularRejected() {
-        #expect(!DayZeroRediffGate.allows(
-            enabled: true, reachability: .cellular, isCharging: true, deepScanOptIn: true
-        ))
-    }
-
-    @Test("no reachable network is rejected")
-    func unreachableRejected() {
-        #expect(!DayZeroRediffGate.allows(
-            enabled: true, reachability: .unreachable, isCharging: true, deepScanOptIn: true
-        ))
-    }
-}
+// playhead-4dqe: the pure gate truth table that lived here tested
+// `DayZeroRediffGate.allows(...)`, a Bool-returning gate with WiFi-only
+// hardcoded. It was replaced by `DayZeroTransportPolicy`, whose truth table
+// (including the user setting, iOS Low Data Mode, and the NAMED refusal each
+// leg produces) is pinned in `DayZeroDownloadTimeTests`. Not duplicated here:
+// two copies of a truth table is how one of them silently stops being run.
 
 // MARK: - Trigger: fires vs inert, through the shared service
 
@@ -120,7 +72,7 @@ struct DayZeroRediffTriggerTests {
             service: service,
             enabled: enabled,
             kWayFetchCount: kWayFetchCount,
-            reachabilityProvider: { reachability },
+            transportProvider: { .testSnapshot(reachability) },
             chargeStateProvider: { isCharging },
             deepScanOptInProvider: { deepScanOptIn },
             // No store in this suite — opt OUT of day-0 idempotency explicitly
@@ -130,7 +82,9 @@ struct DayZeroRediffTriggerTests {
             suppressionRecorder: { _, _, _ in },
             // playhead-96ot: no orchestrator in this suite — the in-session
             // delivery of a minted mark is asserted by DayZeroMarkDeliveryTests.
-            mintedMarkDelivery: { _ in }
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
     }
 
@@ -296,14 +250,16 @@ struct DayZeroRediffTriggerTests {
             service: service,
             enabled: false,
             kWayFetchCount: RediffActivation.dayZeroKWayFetchCount,
-            reachabilityProvider: { reachRead.mark(); return .wifi },
+            transportProvider: { reachRead.mark(); return .testWifi },
             chargeStateProvider: { chargeRead.mark(); return true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in nil },   // no store in this suite —
             suppressionRecorder: { _, _, _ in },    // opt OUT of idempotency, explicitly
             // playhead-96ot: no orchestrator in this suite either — the
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.
-            mintedMarkDelivery: { _ in }
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
         let summary = await fire(trigger)
 
@@ -382,14 +338,16 @@ struct DayZeroRediffTriggerTests {
         )
         let trigger = DayZeroRediffTrigger(
             service: service, enabled: true, kWayFetchCount: 1,
-            reachabilityProvider: { .wifi },
+            transportProvider: { .testWifi },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in nil },   // no store in this suite —
             suppressionRecorder: { _, _, _ in },    // opt OUT of idempotency, explicitly
             // playhead-96ot: no orchestrator in this suite either — the
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.
-            mintedMarkDelivery: { _ in }
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
         await fire(trigger)
         #expect(!FileManager.default.fileExists(atPath: bCopy.path),
@@ -409,62 +367,8 @@ struct DayZeroRediffTriggerTests {
     }
 }
 
-// MARK: - Download & Analyze readiness WAIT (playhead-xsdz.36.4)
-
-/// The on-demand "Download & Analyze" (playhead-3xtw) day-0 kickoff cannot fire
-/// synchronously after `prepare()` — on a genuine first listen the download runs
-/// async and the analysis asset is registered LATER, so neither the pinned file
-/// nor the asset row exists yet. `awaitDayZeroPreparationReadiness` is the
-/// bounded WAIT that closes that gap; these pin its wait-then-fire / give-up
-/// behavior directly (the seam the earlier trigger-only test could not reach).
-@Suite("PlayheadRuntime.awaitDayZeroPreparationReadiness (playhead-xsdz.36.4)")
-struct DayZeroPreparationReadinessTests {
-
-    private final class Counter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var n = 0
-        func bump() { lock.lock(); n += 1; lock.unlock() }
-        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
-    }
-
-    @Test("ready on the first attempt → returns immediately, never sleeps")
-    func readyImmediately() async {
-        let sleeps = Counter()
-        let result = await PlayheadRuntime.awaitDayZeroPreparationReadiness(
-            maxAttempts: 5, pollNanos: 1,
-            sleep: { _ in sleeps.bump() },
-            resolveReady: { "ready" }
-        )
-        #expect(result == "ready")
-        #expect(sleeps.count == 0, "a first-attempt hit never sleeps")
-    }
-
-    @Test("WAITS across misses then fires: resolves after 2 nil polls (the D&A download + asset-registration lag)")
-    func readyAfterMisses() async {
-        let sleeps = Counter()
-        let attempts = Counter()
-        let result = await PlayheadRuntime.awaitDayZeroPreparationReadiness(
-            maxAttempts: 10, pollNanos: 1,
-            sleep: { _ in sleeps.bump() },
-            resolveReady: { () -> String? in
-                attempts.bump()
-                return attempts.count >= 3 ? "ready" : nil   // nil, nil, ready
-            }
-        )
-        #expect(result == "ready")
-        #expect(attempts.count == 3)
-        #expect(sleeps.count == 2, "slept between the two misses, not after the hit")
-    }
-
-    @Test("never ready → gives up (nil) after the attempt budget; the lagged sweep is the backstop")
-    func neverReadyGivesUp() async {
-        let sleeps = Counter()
-        let result: String? = await PlayheadRuntime.awaitDayZeroPreparationReadiness(
-            maxAttempts: 4, pollNanos: 1,
-            sleep: { _ in sleeps.bump() },
-            resolveReady: { nil }
-        )
-        #expect(result == nil, "budget elapsed ⇒ give up (fail-safe)")
-        #expect(sleeps.count == 3, "sleeps between attempts (maxAttempts - 1), never after the last")
-    }
-}
+// playhead-4dqe: the `PlayheadRuntime.awaitDayZeroPreparationReadiness` suite
+// that lived here moved to `DayZeroReadinessWaitTests`, alongside the wait
+// itself (`DayZeroReadinessWait`). The wait no longer returns `T?` — a `nil`
+// could not say WHICH precondition was missing, and that ambiguity is exactly
+// what hid the pre-ewag failure for weeks.

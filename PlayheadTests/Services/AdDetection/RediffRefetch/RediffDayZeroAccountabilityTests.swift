@@ -74,7 +74,15 @@ struct RediffDayZeroAccountabilityTests {
             .noDivergentSlot: "no_divergent_slot",
             .allSlotsAlreadyCovered: "all_slots_already_covered",
             .persistFailed: "persist_failed",
-            .marked: "marked"
+            .marked: "marked",
+            // playhead-4dqe — the gate refusals. Same frozen-wire-format
+            // contract: these are persisted in `lastExit` and read back by a
+            // device pull, so renaming one silently reclassifies existing rows.
+            .deniedUnreachable: "denied_unreachable",
+            .deniedLowDataMode: "denied_low_data_mode",
+            .deniedCellularNotAllowed: "denied_cellular_not_allowed",
+            .deniedPower: "denied_power",
+            .deniedDailyBudget: "denied_daily_budget"
         ]
         for exit in Exit.allCases {
             #expect(exit.rawValue == expected[exit],
@@ -650,7 +658,7 @@ struct RediffDayZeroTriggerIdempotencyTests {
             service: service,
             enabled: true,
             kWayFetchCount: 2,
-            reachabilityProvider: { .wifi },
+            transportProvider: { .testWifi },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in prior },
@@ -659,7 +667,9 @@ struct RediffDayZeroTriggerIdempotencyTests {
             },
             // playhead-96ot: no orchestrator in this suite — the delivery is
             // asserted by DayZeroMarkDeliveryTests, so opt OUT explicitly.
-            mintedMarkDelivery: { _ in }
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
     }
 
@@ -754,7 +764,7 @@ struct RediffDayZeroTriggerIdempotencyTests {
         )
         let trigger = DayZeroRediffTrigger(
             service: service, enabled: true, kWayFetchCount: 2,
-            reachabilityProvider: { .cellular },
+            transportProvider: { .testCellularNotAllowed },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { assetId in
@@ -762,14 +772,24 @@ struct RediffDayZeroTriggerIdempotencyTests {
                 return nil
             },
             suppressionRecorder: { assetId, reason, at in spy.recorded.append((assetId, reason, at)) },
-            mintedMarkDelivery: { _ in }
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
 
         _ = await fire(trigger, at: 1)
 
         #expect(fetcher.calls.isEmpty)
-        #expect(reads.recorded.isEmpty, "a cellular play short-circuits before touching the store")
-        #expect(spy.recorded.isEmpty, "a gate rejection is not an attempt suppression")
+        #expect(reads.recorded.isEmpty, "a cellular play short-circuits before READING the attempt record")
+        // playhead-4dqe CHANGED THIS ASSERTION, deliberately. It used to demand
+        // that a gate rejection leave NO trace at all — which is precisely the
+        // silence that made "why has day-0 never fired on this phone?"
+        // unanswerable from a device pull. A refusal is now NAMED. What the
+        // test still pins, and what it was really protecting, is that the gate
+        // short-circuits before the per-asset RECORD READ: a refused play does
+        // not pay for a store query it cannot act on.
+        #expect(spy.recorded.map(\.1) == [.deniedCellularNotAllowed],
+                "a gate rejection is recorded under its OWN exit, not silently dropped")
     }
 }
 
@@ -1331,7 +1351,24 @@ struct DayZeroPolicyGenerationCanaryTests {
         #expect(AdDetectionService.dayZeroRediffByteExactMetadataSource == "rediffDayZeroByteExact",
                 "\(Self.bumpHint)")
         // The exit vocabulary — what day-0 is capable of concluding at all.
-        #expect(RediffDayZeroExit.allCases.count == 14, "\(Self.bumpHint)")
+        //
+        // RE-CALIBRATED 14 → 19 by playhead-4dqe, DELIBERATELY and without a
+        // generation bump, which is the escape hatch this canary's own doc
+        // comment provides for a change that "cannot alter what day-0
+        // concludes". The five additions
+        // (`.deniedUnreachable`, `.deniedLowDataMode`,
+        // `.deniedCellularNotAllowed`, `.deniedPower`, `.deniedDailyBudget`)
+        // are all TRANSPORT/BUDGET REFUSALS that fire BEFORE the mint is
+        // reached. They cost no bytes, consume no attempt budget
+        // (`spentBandwidth == false`, so `advance` moves neither `attemptCount`
+        // nor `lastAttemptAt`), and are never returned by
+        // `mintByteExactDayZeroMarks`. Nothing about what the mint concludes on
+        // an episode it actually diffs changed here — the mint, the byte gate,
+        // the persona staging and the B-copy floor are all untouched, and each
+        // is still pinned above. Bumping the generation for this would spend
+        // ~390 MB of re-fetch per already-exhausted asset to re-derive the same
+        // verdict.
+        #expect(RediffDayZeroExit.allCases.count == 19, "\(Self.bumpHint)")
     }
 }
 

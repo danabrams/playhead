@@ -170,6 +170,7 @@ struct SettingsView: View {
                         storageSettingsSection
                         diagnosticsSection
                         backgroundSection(prefs)
+                        prepareOverCellularSection(prefs)
                         episodeSummariesSection(prefs)
                         notificationsSection(prefs)
                         storageSection
@@ -698,6 +699,47 @@ private extension SettingsView {
             sectionHeader("Episode Summaries")
         } footer: {
             Text("Generate short, on-device summaries for episodes you've finished analyzing. Tap an episode in the library to expand and read the summary.")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.textTertiary)
+        }
+    }
+
+    /// playhead-4dqe: the preparation-transport setting Dan moved out of code
+    /// on 2026-08-01 ("wifi vs 5g should be a user setting, most people have
+    /// unlimited bandwidth").
+    ///
+    /// Default OFF (Wi-Fi only). Dan is right about the population; the default
+    /// goes the other way because the cost of being wrong is asymmetric — a
+    /// metered user who never finds this row silently loses ~130 MB per
+    /// episode, while a user with unlimited data flips it once. The footer
+    /// names the byte cost for exactly that reason, and states the one thing
+    /// this switch cannot override: iOS Low Data Mode.
+    func prepareOverCellularSection(_ prefs: UserPreferences) -> some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { prefs.dayZeroAllowsCellular },
+                set: { newValue in
+                    prefs.dayZeroAllowsCellular = newValue
+                    // Mirror into the UserDefaults slot: the day-0 trigger and
+                    // the re-fetch session both read this from off the main
+                    // actor, with no SwiftData hop available to them.
+                    UserPreferencesSnapshot.save(dayZeroAllowsCellular: newValue)
+                }
+            )) {
+                Label(
+                    SettingsL274Copy.prepareOverCellularLabel,
+                    systemImage: "antenna.radiowaves.left.and.right"
+                )
+                .font(AppTypography.body)
+                .foregroundStyle(AppColors.textPrimary)
+            }
+            .tint(AppColors.accent)
+            .listRowBackground(AppColors.surface)
+            .accessibilityIdentifier("Settings.prepareOverCellular.toggle")
+        } header: {
+            sectionHeader("Preparation")
+        } footer: {
+            Text(SettingsL274Copy.prepareOverCellularSubLine)
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.textTertiary)
         }
