@@ -3835,7 +3835,16 @@ final class PlayheadRuntime {
         playGeneration: UInt64
     ) async {
         let episodeId = episode.canonicalEpisodeKey
-        let podcastId = episode.podcast?.feedURL.absoluteString
+        // playhead-usn1: the show identity, resolved from the row rather than
+        // from the relationship alone. `episode.podcast` is the primary source
+        // and still wins; when it is unavailable the identifier is recovered
+        // from this episode's own `canonicalEpisodeKey`, which is built as
+        // `feedURL + "::" + feedItemGUID` and therefore still carries the
+        // answer. One nullable in-memory hop used to decide, for the whole
+        // session, whether the runtime had a show at all — and everything
+        // downstream (the trust lookup, the per-show menu's write target, the
+        // pill) hangs off this single value.
+        let podcastId = episode.resolvedShowIdentity
         let position = episode.playbackPosition
         // playhead-xsdz.36.4: the CURRENT episode enclosure URL — the source the
         // day-0 rediff trigger re-fetches K ways (distinct personas) to reveal
@@ -4134,6 +4143,15 @@ final class PlayheadRuntime {
                                 generation: playGeneration,
                                 episodeId: episodeId
                               ) else { return }
+                        await self.adoptRecoveredShowIdentity(
+                            generation: playGeneration,
+                            episodeId: episodeId
+                        )
+                        guard !Task.isCancelled,
+                              self.isCurrentPlayRequest(
+                                generation: playGeneration,
+                                episodeId: episodeId
+                              ) else { return }
                         // playhead-epii: hand the asset id and the
                         // per-show override to the silence-compression
                         // coordinator. Until this call lands the
@@ -4229,6 +4247,14 @@ final class PlayheadRuntime {
                 episodeId: episodeId,
                 podcastId: podcastId,
                 playbackLifecycleGeneration: playGeneration
+            )
+            guard isCurrentPlayRequest(
+                generation: playGeneration,
+                episodeId: episodeId
+            ) else { return }
+            await adoptRecoveredShowIdentity(
+                generation: playGeneration,
+                episodeId: episodeId
             )
             guard isCurrentPlayRequest(
                 generation: playGeneration,
@@ -5034,11 +5060,82 @@ final class PlayheadRuntime {
         }
     }
 
-    func setShowSkipMode(_ mode: SkipMode, orchestrator: SkipOrchestrator) async {
-        if let podcastId = currentPodcastId {
-            await trustService.setUserOverride(podcastId: podcastId, mode: mode)
+    /// playhead-usn1: adopt the show identity `SkipOrchestrator.beginEpisode`
+    /// resolved, when the runtime itself had none.
+    ///
+    /// playhead-djl0 gave `beginEpisode` a second chance at the identity (the
+    /// durable `analysis_jobs` row) but nothing carried the recovered value
+    /// back. That left the two halves of one session disagreeing: the
+    /// orchestrator holds a real show and reports a resolved identity — so the
+    /// pill offers the per-show menu — while `currentPodcastId` is still nil and
+    /// every write goes nowhere. One direction of recovery is not a recovery.
+    ///
+    /// Only ever WIDENS: a runtime that already has an identity keeps it, and a
+    /// nil-for-nil episode stays nil so the refusal below still fires.
+    func adoptRecoveredShowIdentity(
+        generation: UInt64,
+        episodeId: String
+    ) async {
+        guard currentPodcastId == nil else { return }
+        let recovered = await skipOrchestrator.activeShowIdentity()
+        guard isCurrentPlayRequest(generation: generation, episodeId: episodeId),
+              let recovered else { return }
+        currentPodcastId = recovered
+        logger.info(
+            "Show identity recovered from the orchestrator for the active session"
+        )
+    }
+
+    /// The outcome of a per-show skip-mode write.
+    ///
+    /// playhead-usn1. This used to return `Void` from an `if let podcastId =
+    /// currentPodcastId { … }` with NO `else`: when the session had no show the
+    /// persist was skipped and the function returned exactly as it does on
+    /// success. The caller could not tell, so the Now Playing menu accepted a
+    /// choice and forgot it — which is why playhead-djl0 withheld the control
+    /// rather than offer one that lies. A refusal is now a value.
+    enum ShowSkipModeWrite: Sendable, Equatable {
+        /// The preference was stored against this show.
+        case persisted(podcastId: String)
+        /// No canonical show identity for the active session, so there was
+        /// nothing to attach the preference to. Nothing was written and the
+        /// session mode was NOT changed either — a mode that survives only
+        /// until the next episode, presented as a stored preference, is the
+        /// same lie in a shorter-lived form.
+        case refusedNoShowIdentity
+    }
+
+    /// playhead-usn1: how many per-show writes have been refused for want of a
+    /// show, this process. Counted rather than merely logged so a rail can
+    /// assert the refusal HAPPENED, not just that a branch was taken.
+    private(set) var refusedShowSkipModeWriteCount: Int = 0
+
+    @discardableResult
+    func setShowSkipMode(
+        _ mode: SkipMode,
+        orchestrator: SkipOrchestrator
+    ) async -> ShowSkipModeWrite {
+        guard let podcastId = currentPodcastId else {
+            refusedShowSkipModeWriteCount += 1
+            let episodeReference = currentEpisodeId.map(
+                surfaceStatusLogger.hashEpisodeId
+            ) ?? "no-episode"
+            surfaceStatusLogger.invariantViolated(
+                code: .skipModeWriteRefusedNoShowIdentity,
+                description: """
+                    per-show skip mode \(mode.rawValue) was NOT stored because \
+                    the session has no canonical show identity \
+                    (episode \(episodeReference))
+                    """
+            )
+            logger.error(
+                "setShowSkipMode: REFUSED \(mode.rawValue, privacy: .public) — the session has no show to attach it to; nothing was written"
+            )
+            return .refusedNoShowIdentity
         }
+        await trustService.setUserOverride(podcastId: podcastId, mode: mode)
         await orchestrator.setActiveSkipMode(mode)
+        return .persisted(podcastId: podcastId)
     }
 
     // MARK: - Adaptive device-profile estimator wiring (playhead-beh3 R13)

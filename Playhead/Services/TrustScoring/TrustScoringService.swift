@@ -122,6 +122,26 @@ enum SkipModeResolution: String, Sendable, Hashable, CaseIterable {
     }
 }
 
+// MARK: - Skip Mode Snapshot (playhead-usn1)
+
+/// The mode AND its cause as ONE value.
+///
+/// playhead-djl0 split "what the skip mode is" from "why it is that", and the
+/// Now Playing pill needs both to say anything true. Delivering them as a pair
+/// is what stops a consumer from refreshing one and not the other — the exact
+/// shape of the playhead-usn1 field defect, where the podcast TITLE was
+/// re-read on every playback tick while the mode and its cause were read once,
+/// before the episode had begun, and never again.
+struct SkipModeSnapshot: Sendable, Equatable {
+    let mode: SkipMode
+    let resolution: SkipModeResolution
+
+    /// The pre-episode value. Matches `SkipOrchestrator`'s own initial state.
+    static let noActiveEpisode = SkipModeSnapshot(
+        mode: .shadow, resolution: .noActiveEpisode
+    )
+}
+
 // MARK: - Trust Scoring Configuration
 
 struct TrustScoringConfig: Sendable {

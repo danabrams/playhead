@@ -56,6 +56,7 @@ final class NowPlayingViewModel {
     private var observationTask: Task<Void, Never>?
     private var segmentObservationTask: Task<Void, Never>?
     private var bannerObservationTask: Task<Void, Never>?
+    private var skipModeObservationTask: Task<Void, Never>?
 
     init(runtime: PlayheadRuntime) {
         self.runtime = runtime
@@ -84,6 +85,12 @@ final class NowPlayingViewModel {
         observationTask = nil
         stopObservingAdSegments()
         stopObservingBanners()
+        stopObservingSkipMode()
+    }
+
+    func stopObservingSkipMode() {
+        skipModeObservationTask?.cancel()
+        skipModeObservationTask = nil
     }
 
     func stopObservingAdSegments() {
@@ -168,10 +175,52 @@ final class NowPlayingViewModel {
         skipModeResolution = await orchestrator.currentSkipModeResolution()
     }
 
+    /// playhead-usn1: track the skip mode and its cause for as long as this
+    /// screen is mounted.
+    ///
+    /// `loadSkipMode` is a single read, and the Now Playing screen is presented
+    /// SYNCHRONOUSLY with the tap that starts playback
+    /// (`EpisodeListView.playEpisode` sets `navigateToNowPlaying = true` in the
+    /// same turn it spawns `runtime.playEpisode`). `SkipOrchestrator
+    /// .beginEpisode` — the only thing that resolves the show — runs many
+    /// suspensions later, after transport load, `play()`, and analysis-asset
+    /// resolution. So the one read reliably observed the value `endEpisode` had
+    /// just installed: `.shadow` / `.noActiveEpisode`, i.e. "Show Unknown" with
+    /// the per-show menu withheld, for shows whose identity resolves perfectly.
+    ///
+    /// The podcast TITLE never had this problem because `syncMetadata` re-reads
+    /// it on every playback state event. The mode is now on a push cadence,
+    /// which is strictly better than matching that one.
+    func observeSkipMode(from orchestrator: SkipOrchestrator) {
+        skipModeObservationTask?.cancel()
+        skipModeObservationTask = Task {
+            let stream = await orchestrator.skipModeStream()
+            for await snapshot in stream {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.activeSkipMode = snapshot.mode
+                    self.skipModeResolution = snapshot.resolution
+                }
+            }
+        }
+    }
+
     func setSkipMode(_ mode: SkipMode, orchestrator: SkipOrchestrator) {
+        let previousMode = activeSkipMode
+        let previousResolution = skipModeResolution
         noteSkipModeSelection(mode)
         Task {
-            await runtime.setShowSkipMode(mode, orchestrator: orchestrator)
+            let outcome = await runtime.setShowSkipMode(mode, orchestrator: orchestrator)
+            // playhead-usn1: the optimistic `.sessionOverride` above is a claim
+            // that the choice was taken. When the write is refused for want of a
+            // show, that claim is false and must be withdrawn — otherwise the
+            // pill reports the listener's choice back to them while nothing
+            // anywhere has stored it, which is the defect this bead closes,
+            // relocated to the surface.
+            if outcome == .refusedNoShowIdentity {
+                self.activeSkipMode = previousMode
+                self.skipModeResolution = previousResolution
+            }
         }
     }
 

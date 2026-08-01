@@ -222,6 +222,56 @@ final class Episode {
     static func makeCanonicalKey(feedItemGUID: String, feedURL: URL) -> String {
         "\(feedURL.absoluteString)::\(feedItemGUID)"
     }
+
+    /// playhead-usn1: the show this episode belongs to, as a canonical
+    /// identifier, WITHOUT depending on the `podcast` relationship being
+    /// materialised.
+    ///
+    /// The relationship is the primary source and is used verbatim when it is
+    /// there. When it is not, the answer is still on the row: every
+    /// `canonicalEpisodeKey` is built by ``makeCanonicalKey(feedItemGUID:feedURL:)``
+    /// as `feedURL.absoluteString + "::" + feedItemGUID`, and this row carries
+    /// its own `feedItemGUID`. Stripping that exact suffix recovers the exact
+    /// feed URL string the key was built from — no parsing, no guessing, no
+    /// splitting on the first `::` (which an IPv6 host or a GUID containing
+    /// `::` would defeat).
+    ///
+    /// The two agree by construction: `PodcastDiscoveryService.persist` matches
+    /// or creates the `Podcast` from the SAME `feedURL` value it hands
+    /// `Episode.init`, so the derived identifier is byte-identical to
+    /// `podcast!.feedURL.absoluteString` for every row that path created.
+    ///
+    /// Both branches go through `RecurrenceMaterialIdentity.canonicalIdentifier`
+    /// — the same canonicalisation `SkipOrchestrator.beginEpisode` applies to
+    /// the value it is handed. An identifier in non-canonical spelling is not an
+    /// identity we may key show-scoped evidence on, and admitting one here would
+    /// retarget trust and recurrence learning into a neighbouring namespace,
+    /// which is strictly worse than resolving nothing.
+    var resolvedShowIdentity: String? {
+        if let feedURL = podcast?.feedURL.absoluteString,
+           let canonical = RecurrenceMaterialIdentity.canonicalIdentifier(feedURL) {
+            return canonical
+        }
+        return Self.showIdentity(
+            fromCanonicalEpisodeKey: canonicalEpisodeKey,
+            feedItemGUID: feedItemGUID
+        )
+    }
+
+    /// The inverse of ``makeCanonicalKey(feedItemGUID:feedURL:)``.
+    ///
+    /// Returns `nil` — never a fabricated identity — when the key does not have
+    /// the shape this type writes, when nothing precedes the separator, or when
+    /// what precedes it is not a canonical identifier.
+    static func showIdentity(
+        fromCanonicalEpisodeKey key: String,
+        feedItemGUID: String
+    ) -> String? {
+        let suffix = "::\(feedItemGUID)"
+        guard key.hasSuffix(suffix), key.count > suffix.count else { return nil }
+        let feedURLString = String(key.dropLast(suffix.count))
+        return RecurrenceMaterialIdentity.canonicalIdentifier(feedURLString)
+    }
 }
 
 // MARK: - DownloadState

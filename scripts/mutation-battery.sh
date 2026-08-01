@@ -329,10 +329,18 @@ THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
+# playhead-usn1: the per-show skip-mode CONTROL. Two more files join the
+# djl0 trio because the field defect was not in the cause taxonomy at all — it
+# was a surface that sampled the mode ONCE, before `beginEpisode` had resolved
+# the show, and never looked again. RT owns the write (which used to be an
+# `if let` with no `else`) and the identity the write targets; MODEL owns the
+# recovery of that identity from the episode row itself.
+RT="Playhead/App/PlayheadRuntime.swift"
+MODEL="Playhead/Models/Podcast.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$RUNNER" "$FMCLS" "$PROBE"
+  "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL"
 )
 
 FOCUSED_SUITES=(
@@ -424,6 +432,17 @@ FOCUSED_SUITES=(
   # prologue cause to the WINDOW cause, and a mutation that quietly merged the
   # two would otherwise be judged only by this bead's own suite.
   -only-testing:PlayheadTests/BackfillRateLimitDeferTests
+  # playhead-usn1: the per-show skip-mode control (U01-U16). The djl0 suites
+  # above stay in scope deliberately — this bead's push replaces the one-shot
+  # read djl0's pill consumes, so a mutation that broke the CAUSE taxonomy while
+  # satisfying the push would otherwise be judged only by its own suites.
+  -only-testing:PlayheadTests/EpisodeShowIdentityTests
+  -only-testing:PlayheadTests/SkipModeStreamTests
+  -only-testing:PlayheadTests/NowPlayingSkipModeSubscriptionTests
+  -only-testing:PlayheadTests/ShowSkipModeWriteTests
+  -only-testing:PlayheadTests/RefusedSkipModeSelectionTests
+  -only-testing:PlayheadTests/RecoveredShowIdentityAdoptionTests
+  -only-testing:PlayheadTests/RefusedShowSkipModeWriteDiagnosticsTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -698,6 +717,31 @@ T_KVS8_REASON="a throttle Reason maps to rateLimited and is charged to no permis
 T_KVS8_PROBE="a throttle is not a usability verdict, so it must not be cached"
 T_KVS8_NAMES="the pass-prologue defer cause is a NAMED token, distinct from pmp9's window token"
 T_KVS8_CONSEC="the drain stops CONSECUTIVELY, not on a lifetime tally"
+# playhead-usn1 — the per-show skip-mode CONTROL. The field symptom ("show
+# unknown", no menu) was not a lost identity: it was a surface that read the
+# mode ONCE, before `beginEpisode` had resolved the show, and never again.
+T_USN1_LATE="a subscriber attached before beginEpisode receives the resolved mode"
+T_USN1_NOTFINAL="the cleared pair is not the LAST thing a pre-attached subscriber sees"
+T_USN1_REPLAY="the current pair is replayed the moment a subscriber attaches"
+T_USN1_ENDCLEAR="endEpisode publishes the cleared pair"
+T_USN1_OVERRIDE="an explicit choice publishes the session override"
+T_USN1_PRECLEAR="beginEpisode publishes the cleared pair before it resolves the show"
+T_USN1_VMLATE="the view model learns the mode resolved after it appeared"
+T_USN1_VMMENU="the pill the tracked resolution drives offers the per-show menu"
+T_USN1_RECOVER="a missing relationship still resolves the show from the episode key"
+T_USN1_IDENTICAL="the recovered identity is byte-identical to the relationship's"
+T_USN1_GUIDSEP="a guid containing the separator still recovers the feed URL"
+T_USN1_IPV6="an IPv6 feed host still recovers the feed URL"
+T_USN1_CANON="a non-canonical spelling is refused rather than trimmed"
+T_USN1_REFUSE="a session with no show REFUSES the write instead of skipping it"
+T_USN1_COUNT="a refused write is counted"
+T_USN1_SESSION="a refused write does not change the session mode either"
+T_USN1_ADOPT="the runtime adopts an identity only the orchestrator could recover"
+T_USN1_NOOVERWRITE="adoption never overwrites an identity the runtime already has"
+T_USN1_STALE="a superseded play request does not adopt"
+T_USN1_VMREVERT="a refused write restores the pill to what it said before the tap"
+T_USN1_TRACE="a refused write is recorded under its own code"
+T_USN1_MISMATCH="a key that is not this episode's key recovers nothing"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1203,6 +1247,93 @@ MUTATIONS=(
   # ends the whole drain. The counter still resets, so this is specifically the
   # "one event is not a device fact" rail.
   "Q08|69|THROT|$T_KVS8_CONSEC"
+
+  # playhead-usn1 — the per-show skip-mode CONTROL (U01-U16).
+  #
+  # U01 is THE field defect, restored: drop the publish that carries
+  # `beginEpisode`'s verdict to the surface. Everything still resolves — the
+  # trust profile is read, the mode is correct inside the orchestrator — and the
+  # screen keeps showing the cleared pair it sampled before the episode began,
+  # which playhead-djl0's pill renders as "Show Unknown" with the menu withheld.
+  # Its own batch: U15 reddens the same two view-model tests from the other end.
+  "U01|70|ORCH|$T_USN1_LATE;$T_USN1_NOTFINAL;$T_USN1_VMLATE;$T_USN1_VMMENU"
+
+  # U02-U04 are the other three transitions. Disjoint expectations, one batch:
+  # U02 lets the PREVIOUS show's mode stand across the next lookup's
+  # suspensions; U03 leaves a mounted screen describing a show that stopped
+  # playing; U04 makes the listener's own choice invisible to the surface.
+  "U02|71|ORCH|$T_USN1_PRECLEAR"
+  "U03|71|ORCH|$T_USN1_ENDCLEAR"
+  "U04|71|ORCH|$T_USN1_OVERRIDE"
+
+  # U05 removes the replay-on-attach. Subtle, because every LATER transition
+  # still arrives: what breaks is the screen opened from the mini player
+  # mid-episode, which subscribes to a stream that has nothing left to say.
+  "U05|72|ORCH|$T_USN1_REPLAY"
+
+  # U06 restores the pre-bead read: the relationship or nothing. Its own batch
+  # because U07 reddens two of the same tests from a different direction.
+  "U06|73|MODEL|$T_USN1_RECOVER;$T_USN1_IDENTICAL;$T_USN1_GUIDSEP;$T_USN1_IPV6"
+
+  # U07 splits the key on the FIRST `::`. It first shipped naming the
+  # guid-with-separator test too, and SURVIVED on that one — correctly: the guid
+  # is the SUFFIX, so a first-split still recovers the right feed URL when the
+  # GUID contains `::`. What a first-split breaks is a feed URL with an IPv6
+  # literal host, and any key that is not this episode's at all (it will happily
+  # invent a show for a mismatched guid). Those are the two it names now. The
+  # guid case gets its own mutation below rather than a relaxed expectation.
+  # U08 drops the canonicalisation, admitting a spelling that resolves to a
+  # different persisted namespace for the same show.
+  "U07|74|MODEL|$T_USN1_IPV6;$T_USN1_MISMATCH"
+  "U08|74|MODEL|$T_USN1_CANON"
+
+  # U18 is the OTHER plausible way to write the derivation: split on the LAST
+  # `::`. Correct for an IPv6 host and wrong for a guid containing the separator
+  # — the exact complement of U07, which is why the pair exists. Separate batch
+  # from U07: same lines, and both redden the mismatched-key rail.
+  "U18|79|MODEL|$T_USN1_GUIDSEP;$T_USN1_MISMATCH"
+
+  # U09-U11 are the three halves of "never silently skip". U09 answers a write
+  # it did not perform with a success carrying a fabricated empty identity —
+  # the `if let` with no `else`, wearing the new return type. U10 keeps the
+  # refusal honest but stops counting it. U11 applies the mode for the session
+  # only: the same lie in a shorter-lived form, and the one that looks most like
+  # it worked.
+  "U09|75|RT|$T_USN1_REFUSE"
+  "U10|75|RT|$T_USN1_COUNT"
+  "U11|75|RT|$T_USN1_SESSION"
+
+  # U12-U16 are the identity handoff. U12 lets a late recovery overwrite the
+  # identity the caller supplied; U13 lets a superseded play request write its
+  # show onto the session that replaced it. They share a batch because neither
+  # masks the other — both leave the adoption body reachable.
+  "U12|76|RT|$T_USN1_NOOVERWRITE"
+  "U13|76|RT|$T_USN1_STALE"
+
+  # U16 drops the adoption entirely, which is the state playhead-djl0 shipped:
+  # the orchestrator holds a recovered show and reports a resolved identity — so
+  # the pill offers the menu — while the runtime's write target is still nil.
+  #
+  # ITS OWN BATCH, and that is the whole point. It first shipped batched with
+  # U12/U13 and reported both of them SURVIVED — a FALSE survivor: an early
+  # `return` makes every other edit in the same function unreachable, so their
+  # rails had nothing to fail on. This is the "blast radius overlaps" case the
+  # batching rule at the top of this file warns about, and it produced exactly
+  # the misleading verdict that rule exists to prevent.
+  "U16|80|RT|$T_USN1_ADOPT"
+
+  # U14 leaves the optimistic `.sessionOverride` standing after a refusal, so
+  # the pill reports the listener's choice back to them while nothing has
+  # stored it. U15 subscribes and then never consumes, which is the one shape
+  # that looks wired and is not.
+  "U14|77|NPVM|$T_USN1_VMREVERT"
+  "U15|77|NPVM|$T_USN1_VMLATE;$T_USN1_VMMENU"
+
+  # U17 files the refusal under playhead-djl0's READ-side code. Both tokens are
+  # honest and nothing crashes; what is lost is an operator's ability to tell
+  # "we never knew the show" from "the listener tried to set a preference and it
+  # went nowhere". The same collapse djl0 spent a bead undoing, one layer over.
+  "U17|78|RT|$T_USN1_TRACE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3202,6 +3333,213 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  U01)
+    snippet OLD <<'EOF'
+        // playhead-usn1: the verdict reaches the surface HERE, not on the next
+        // pull. This is the emission the Now Playing pill was missing.
+        publishSkipMode()
+EOF
+    snippet NEW <<'EOF'
+        // playhead-usn1: the verdict reaches the surface HERE, not on the next
+        // pull. This is the emission the Now Playing pill was missing.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U02)
+    snippet OLD <<'EOF'
+        // playhead-usn1: the cleared pair is published too. A subscriber that
+        // attached during the PREVIOUS episode must not keep rendering that
+        // show's mode across the suspensions the lookup below is about to take.
+        publishSkipMode()
+EOF
+    snippet NEW <<'EOF'
+        // playhead-usn1: the cleared pair is published too. A subscriber that
+        // attached during the PREVIOUS episode must not keep rendering that
+        // show's mode across the suspensions the lookup below is about to take.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U03)
+    snippet OLD <<'EOF'
+        // playhead-usn1: publish the cleared pair so a mounted Now Playing
+        // screen stops describing a show that is no longer playing.
+        publishSkipMode()
+EOF
+    snippet NEW <<'EOF'
+        // playhead-usn1: publish the cleared pair so a mounted Now Playing
+        // screen stops describing a show that is no longer playing.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U04)
+    snippet OLD <<'EOF'
+        // playhead-usn1: an explicit choice is a transition like any other.
+        publishSkipMode()
+EOF
+    snippet NEW <<'EOF'
+        // playhead-usn1: an explicit choice is a transition like any other.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U05)
+    snippet OLD <<'EOF'
+            continuation.yield(self.currentSkipModeSnapshot())
+EOF
+    snippet NEW <<'EOF'
+            _ = self.currentSkipModeSnapshot()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U06)
+    snippet OLD <<'EOF'
+        return Self.showIdentity(
+            fromCanonicalEpisodeKey: canonicalEpisodeKey,
+            feedItemGUID: feedItemGUID
+        )
+EOF
+    snippet NEW <<'EOF'
+        return nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U07)
+    snippet OLD <<'EOF'
+        let suffix = "::\(feedItemGUID)"
+        guard key.hasSuffix(suffix), key.count > suffix.count else { return nil }
+        let feedURLString = String(key.dropLast(suffix.count))
+EOF
+    snippet NEW <<'EOF'
+        guard let separator = key.range(of: "::") else { return nil }
+        let feedURLString = String(key[key.startIndex..<separator.lowerBound])
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U08)
+    snippet OLD <<'EOF'
+        return RecurrenceMaterialIdentity.canonicalIdentifier(feedURLString)
+EOF
+    snippet NEW <<'EOF'
+        return feedURLString.isEmpty ? nil : feedURLString
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U09)
+    snippet OLD <<'EOF'
+            return .refusedNoShowIdentity
+EOF
+    snippet NEW <<'EOF'
+            return .persisted(podcastId: "")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U10)
+    snippet OLD <<'EOF'
+            refusedShowSkipModeWriteCount += 1
+EOF
+    snippet NEW <<'EOF'
+            _ = refusedShowSkipModeWriteCount
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U11)
+    snippet OLD <<'EOF'
+            logger.error(
+                "setShowSkipMode: REFUSED \(mode.rawValue, privacy: .public) — the session has no show to attach it to; nothing was written"
+            )
+EOF
+    snippet NEW <<'EOF'
+            logger.error(
+                "setShowSkipMode: REFUSED \(mode.rawValue, privacy: .public) — the session has no show to attach it to; nothing was written"
+            )
+            await orchestrator.setActiveSkipMode(mode)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U12)
+    snippet OLD <<'EOF'
+        guard currentPodcastId == nil else { return }
+        let recovered = await skipOrchestrator.activeShowIdentity()
+EOF
+    snippet NEW <<'EOF'
+        let recovered = await skipOrchestrator.activeShowIdentity()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U13)
+    snippet OLD <<'EOF'
+        guard isCurrentPlayRequest(generation: generation, episodeId: episodeId),
+              let recovered else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard let recovered else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U16)
+    snippet OLD <<'EOF'
+    func adoptRecoveredShowIdentity(
+        generation: UInt64,
+        episodeId: String
+    ) async {
+EOF
+    snippet NEW <<'EOF'
+    func adoptRecoveredShowIdentity(
+        generation: UInt64,
+        episodeId: String
+    ) async {
+        if true { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U14)
+    snippet OLD <<'EOF'
+            if outcome == .refusedNoShowIdentity {
+                self.activeSkipMode = previousMode
+                self.skipModeResolution = previousResolution
+            }
+EOF
+    snippet NEW <<'EOF'
+            if outcome == .refusedNoShowIdentity {
+                _ = (previousMode, previousResolution)
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U15)
+    snippet OLD <<'EOF'
+            let stream = await orchestrator.skipModeStream()
+            for await snapshot in stream {
+EOF
+    snippet NEW <<'EOF'
+            let stream = await orchestrator.skipModeStream()
+            for await snapshot in AsyncStream<SkipModeSnapshot>.makeStream().stream {
+                _ = stream
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U18)
+    snippet OLD <<'EOF'
+        let suffix = "::\(feedItemGUID)"
+        guard key.hasSuffix(suffix), key.count > suffix.count else { return nil }
+        let feedURLString = String(key.dropLast(suffix.count))
+EOF
+    snippet NEW <<'EOF'
+        guard let separator = key.range(of: "::", options: .backwards) else {
+            return nil
+        }
+        let feedURLString = String(key[key.startIndex..<separator.lowerBound])
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  U17)
+    snippet OLD <<'EOF'
+                code: .skipModeWriteRefusedNoShowIdentity,
+EOF
+    snippet NEW <<'EOF'
+                code: .skipModeShowIdentityUnresolved,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -3235,6 +3573,8 @@ rec_file()   {
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;
+    RT)    printf '%s' "$RT" ;;
+    MODEL) printf '%s' "$MODEL" ;;
     *)     printf '%s' "" ;;
   esac
 }
