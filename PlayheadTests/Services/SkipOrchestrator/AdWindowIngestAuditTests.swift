@@ -21,22 +21,26 @@
 // ships — the channel playhead-djl0 (#317) established and playhead-v7q6
 // (#316) settled as THE audit trail.
 //
-// THE CAUSE THE INSTRUMENTATION FOUND, pinned by
-// `theFieldPreRollIsDroppedByTheInventoryFilterAsTooEarly` below: the pre-roll
-// is rejected by playhead-xr3t's `InventorySanityFilter` as `.tooEarly`,
-// because rule (b) rejects any span starting inside the first three seconds of
-// the episode — which is every pre-roll. That test characterises TODAY'S
-// production behaviour; it is not an endorsement of it. Whether an ad span
-// abutting the episode edge should be treated as invalid is a policy question
-// for Dan (see the follow-up bead), and flipping it changes AUTO-SKIP
-// admission for every detector, not only the banner.
+// THE CAUSE THE INSTRUMENTATION FOUND: the pre-roll was rejected by
+// playhead-xr3t's `InventorySanityFilter` as `.tooEarly`, because rule (b)
+// rejected any span STARTING inside the first three seconds of the episode —
+// which is every pre-roll.
 //
-// NOTE ON THE FILTER'S CONSTRUCTION IN TESTS. `SkipOrchestrator.init` defaults
-// `inventoryFilter` to `InventorySanityFilter(isEnabled: false)`; production
-// passes `.production()`, which is ON. That divergence is exactly why djl0's
-// own reproduction of this field case emitted the banner and passed. Every
-// test below that means to reproduce PRODUCTION says `isEnabled: true`
-// explicitly.
+// FIXED BY playhead-b6r2, and the tests below now pin the fix rather than the
+// defect. Rule (b) reads the span's INNER edge at both ends, so a pre-roll
+// passes, a post-roll passes, and a head/tail artifact lying wholly inside the
+// margin band is still rejected. `theProductionFilterDropsNoFieldWindow` is
+// the measurement: with the filter configured exactly as production configures
+// it, zero of the four field windows are lost, where one used to be.
+//
+// NOTE ON THE FILTER'S CONSTRUCTION IN TESTS. `SkipOrchestrator.init` used to
+// default `inventoryFilter` to `InventorySanityFilter(isEnabled: false)` while
+// production passed `.production()`, which is ON — the divergence that let
+// djl0's own reproduction of this field case emit the banner and pass.
+// playhead-b6r2 bound the init default to
+// `InventorySanityFilter.productionDefaultConfiguration`, so the two no longer
+// drift. The tests below still pass `isEnabled:` explicitly, because a suite
+// that means to reproduce a configuration should say which one.
 
 import Foundation
 import Testing
@@ -125,6 +129,22 @@ private enum IngestFixture {
         dayZeroWindow(id: postRoll.id, start: postRoll.start, end: postRoll.end),
     ]
 
+    /// A span the inventory filter genuinely rejects: 2.0 s lying wholly
+    /// inside the head margin, so rule (a) (which passes exactly 2.0 s)
+    /// provably did not make the call and the reason reads `.tooEarly`.
+    ///
+    /// playhead-b6r2 needs this because the pre-roll no longer serves as the
+    /// suite's example of an inventory-sanity drop. Three tests below assert
+    /// that the census can NAME that drop; using a row the filter accepts
+    /// would have turned each of them green-and-vacuous.
+    static let headArtifact = (id: "artifact-head", start: 0.0, end: 2.0)
+
+    static var headArtifactWindow: AdWindow {
+        dayZeroWindow(
+            id: headArtifact.id, start: headArtifact.start, end: headArtifact.end
+        )
+    }
+
     static func persist(_ windows: [AdWindow], in store: AnalysisStore) async throws {
         try await store.upsertHotPathAdWindows(
             windows, existingIDs: [], retiredIDs: []
@@ -201,17 +221,21 @@ struct AdWindowIngestFieldCaseTests {
 
     private typealias Fx = IngestFixture
 
-    /// THE ANSWER. With the filter configured as PRODUCTION configures it, the
-    /// pre-roll the listener was inside is rejected by the inventory sanity
-    /// filter as `.tooEarly` — it starts at 0.0 s and rule (b) rejects any span
-    /// starting inside the first three seconds.
+    /// THE ANSWER, AND THEN THE FIX. This asserted that the pre-roll the
+    /// listener was inside is rejected as `.tooEarly` — the cause isp5's
+    /// instrumentation found. playhead-b6r2 corrected rule (b) to read the
+    /// span's inner edge, so the same delivery now ARMS it, and this test
+    /// asserts the corrected outcome. The geometry, the configuration and the
+    /// vacuity control are untouched; only the expected disposition moved.
     ///
-    /// The mid-roll assertion is the VACUITY CONTROL. Without it a delivery
-    /// that dropped everything — or never ran at all — would satisfy the
-    /// pre-roll expectation just as well, which is precisely the ambiguity this
-    /// bead exists to remove.
-    @Test("the field pre-roll is dropped by the inventory filter as tooEarly")
-    func theFieldPreRollIsDroppedByTheInventoryFilterAsTooEarly() async throws {
+    /// The mid-roll assertion is the VACUITY CONTROL and is now doing more
+    /// work than before: with the pre-roll also expected to arm, an
+    /// orchestrator whose filter was accidentally OFF would satisfy the first
+    /// expectation. What separates the two is
+    /// `theProductionFilterDropsNoFieldWindow`'s companion below, which
+    /// proves the filter is still rejecting in the same configuration.
+    @Test("the field pre-roll is armed by the inventory filter, not dropped")
+    func theFieldPreRollIsArmedNotDropped() async throws {
         let store = try await makeTestStore()
         let orchestrator = try await Fx.makeOrchestrator(
             store: store, inventoryFilterEnabled: true
@@ -222,20 +246,25 @@ struct AdWindowIngestFieldCaseTests {
         let preRoll = await orchestrator.lastAdWindowIngestOutcome(
             forWindowId: Fx.preRoll.id
         )
-        #expect(preRoll?.outcome == .droppedInventorySanity)
-        #expect(preRoll?.detail == InventorySanityRejectionReason.tooEarly.rawValue)
+        #expect(preRoll?.outcome == .armedSuggest)
 
         let midRoll = await orchestrator.lastAdWindowIngestOutcome(
             forWindowId: Fx.midRollA.id
         )
         #expect(midRoll?.outcome == .armedSuggest,
-                "vacuity control: the delivery ran and the filter is not rejecting everything")
+                "vacuity control: the delivery ran and reached the same tier")
     }
 
     /// The same session, read the way a device pull reads it: one durable row,
     /// naming the door, the count forwarded, and the per-cause census with the
     /// rejection REASON attached. Nothing here consults the orchestrator's
     /// in-memory state — this is the half that survives to a support ticket.
+    /// playhead-b6r2 kept every structural claim here — one row per delivery,
+    /// the forwarded count, the REASON rendered alongside the outcome — and
+    /// moved which row carries the rejection. The field four no longer supply
+    /// one, so the delivery gains an explicit head artifact; without it the
+    /// "the reason is in the row" claim would have had nothing to demonstrate
+    /// on and would have been deleted rather than preserved.
     @Test("the delivery leaves ONE durable census row that names the cause")
     func theDeliveryLeavesADurableCensusRow() async throws {
         let (logger, directory) = makeScopedInvariantLogger()
@@ -244,7 +273,10 @@ struct AdWindowIngestFieldCaseTests {
         let orchestrator = try await Fx.makeOrchestrator(
             store: store, inventoryFilterEnabled: true, invariantLogger: logger
         )
-        try await Fx.runFieldDelivery(orchestrator, store: store)
+        try await Fx.runFieldDelivery(
+            orchestrator, store: store,
+            windows: Fx.fieldWindows + [Fx.headArtifactWindow]
+        )
 
         let rows = try drainDescriptions(
             logger, code: .adWindowIngestCensus, sentinel: "isp5-field"
@@ -255,11 +287,13 @@ struct AdWindowIngestFieldCaseTests {
         #expect(ingestRows.count == 1,
                 "exactly one row per delivery — got \(ingestRows)")
         let row = try #require(ingestRows.first)
-        #expect(row.contains("forwarded=4"))
+        #expect(row.contains("forwarded=5"))
         #expect(row.contains(
             "\(AdWindowIngestOutcome.droppedInventorySanity.rawValue):"
                 + "\(InventorySanityRejectionReason.tooEarly.rawValue)=1"
         ), "the REASON is in the row, not only the outcome — got \(row)")
+        #expect(row.contains("\(AdWindowIngestOutcome.armedSuggest.rawValue)=4"),
+                "playhead-b6r2: the four field slots armed alongside it — got \(row)")
     }
 
     /// The two stories the field evidence could not tell apart. Same asset,
@@ -274,14 +308,19 @@ struct AdWindowIngestFieldCaseTests {
             try? FileManager.default.removeItem(at: missedDir)
         }
 
-        // A. the ingest ran, and the filter dropped the pre-roll.
+        // A. the ingest ran, and the filter dropped the row.
+        //
+        // playhead-b6r2: was `[Fx.fieldWindows[0]]`, the pre-roll, which the
+        // corrected rule (b) admits. The claim under test is that a delivery
+        // which RAN and dropped renders differently from one that never ran,
+        // so arm A only has to be a genuine drop — the head artifact is one.
         let ranStore = try await makeTestStore()
         let ran = try await Fx.makeOrchestrator(
             store: ranStore, inventoryFilterEnabled: true,
             invariantLogger: ranLogger
         )
         try await Fx.runFieldDelivery(
-            ran, store: ranStore, windows: [Fx.fieldWindows[0]]
+            ran, store: ranStore, windows: [Fx.headArtifactWindow]
         )
 
         // B. the ingest fired for an episode that is not the one playing.
@@ -354,19 +393,47 @@ struct AdWindowIngestOutcomeCountTests {
         #expect(await orchestrator.adWindowIngestOutcomeCount(.droppedUserReverted) == 0)
     }
 
-    /// Turning the production filter on is the ONLY difference between this
-    /// and `armedSuggestIsItsOwnCountedOutcome`, and it moves exactly one row
-    /// from armed to dropped. This is the measurement of the field defect's
-    /// reach: one window per episode, always the pre-roll.
-    @Test("the production filter moves exactly the pre-roll from armed to dropped")
-    func theProductionFilterMovesExactlyThePreRoll() async throws {
+    /// THE BEAD'S VERIFICATION NUMBER. Turning the production filter on is the
+    /// ONLY difference between this and `armedSuggestIsItsOwnCountedOutcome`.
+    /// It used to move exactly one row from armed to dropped — the pre-roll,
+    /// every episode — and that was the measurement of the field defect's
+    /// reach. playhead-b6r2 says the figure must be zero, and this is where it
+    /// is read.
+    ///
+    /// The `== 4` is not redundant with the zero: a filter that had been
+    /// switched off entirely would also report zero drops, and the whole point
+    /// of this bead is that a guard turned off in the observation surface is
+    /// indistinguishable from a guard that works. The companion below carries
+    /// the other half of that separation.
+    @Test("the production filter drops none of the four field windows")
+    func theProductionFilterDropsNoFieldWindow() async throws {
         let store = try await makeTestStore()
         let orchestrator = try await Fx.makeOrchestrator(
             store: store, inventoryFilterEnabled: true
         )
         try await Fx.runFieldDelivery(orchestrator, store: store)
-        #expect(await orchestrator.adWindowIngestOutcomeCount(.armedSuggest) == 3)
-        #expect(await orchestrator.adWindowIngestOutcomeCount(.droppedInventorySanity) == 1)
+        #expect(await orchestrator.adWindowIngestOutcomeCount(.armedSuggest) == 4)
+        #expect(await orchestrator.adWindowIngestOutcomeCount(.droppedInventorySanity) == 0)
+    }
+
+    /// The other half: in the SAME configuration, the filter still rejects.
+    /// Without this, every "zero inventory-sanity drops" assertion in this
+    /// file would be satisfied by a filter that had quietly stopped running.
+    @Test("the production filter still rejects a head artifact in the same delivery")
+    func theProductionFilterStillRejects() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = try await Fx.makeOrchestrator(
+            store: store, inventoryFilterEnabled: true
+        )
+        try await Fx.runFieldDelivery(
+            orchestrator, store: store,
+            windows: Fx.fieldWindows + [Fx.headArtifactWindow]
+        )
+        let artifact = await orchestrator.lastAdWindowIngestOutcome(
+            forWindowId: Fx.headArtifact.id
+        )
+        #expect(artifact?.outcome == .droppedInventorySanity)
+        #expect(artifact?.detail == InventorySanityRejectionReason.tooEarly.rawValue)
     }
 
     /// A gate that BLOCKS and a gate that asks are different names. Both leave
@@ -500,6 +567,13 @@ struct AdWindowIngestDoorOutcomeTests {
     /// Both doors run the SAME admission rule, so both must be auditable. The
     /// cross-launch preload's row is what makes an episode-start loss visible
     /// without a mid-session mint ever happening.
+    ///
+    /// playhead-b6r2: the second expectation used to read
+    /// `droppedInventorySanity=1` and was captioned "the preload loses the
+    /// pre-roll for the same reason the ingest does". The shared-rule claim is
+    /// the point and survives intact — it is now demonstrated in the other
+    /// direction, on a delivery carrying both a row the filter admits and one
+    /// it rejects, so the row still has to name the drop.
     @Test("the cross-launch preload writes its own census row")
     func theCrossLaunchPreloadWritesItsOwnRow() async throws {
         let (logger, directory) = makeScopedInvariantLogger()
@@ -508,7 +582,9 @@ struct AdWindowIngestDoorOutcomeTests {
         let orchestrator = try await Fx.makeOrchestrator(
             store: store, inventoryFilterEnabled: true, invariantLogger: logger
         )
-        try await Fx.persist(Fx.fieldWindows, in: store)
+        try await Fx.persist(
+            Fx.fieldWindows + [Fx.headArtifactWindow], in: store
+        )
         await orchestrator.beginEpisode(
             analysisAssetId: Fx.assetId,
             episodeId: Fx.episodeId,
@@ -518,10 +594,13 @@ struct AdWindowIngestDoorOutcomeTests {
         let rows = try drainDescriptions(
             logger, code: .adWindowIngestCensus, sentinel: "isp5-preload"
         ).filter { $0.contains("door=\(AdWindowIngestDoor.crossLaunchPreload.rawValue)") }
-        #expect(try #require(rows.first).contains("forwarded=4"))
+        #expect(try #require(rows.first).contains("forwarded=5"))
+        #expect(try #require(rows.first).contains(
+            "\(AdWindowIngestOutcome.armedSuggest.rawValue)=4"
+        ), "the preload arms the pre-roll for the same reason the ingest does — got \(rows)")
         #expect(try #require(rows.first).contains(
             "\(AdWindowIngestOutcome.droppedInventorySanity.rawValue)=1"
-        ), "the preload loses the pre-roll for the same reason the ingest does — got \(rows)")
+        ), "and enforces the same rule — got \(rows)")
     }
 }
 
@@ -536,13 +615,21 @@ struct AdWindowIngestLifetimeTests {
     /// djl0's precedent, applied: the per-window stamp describes the CURRENT
     /// episode and must not outlive it, while the per-cause tally is a
     /// build-level measurement and must.
+    /// playhead-b6r2: the delivery gains the head artifact so the surviving
+    /// count is still a `droppedInventorySanity` one. The claim — stamps are
+    /// per-episode, tallies are per-process — is unchanged, but reading it off
+    /// a cause that is now always zero would have made the second expectation
+    /// true for the wrong reason.
     @Test("endEpisode clears the per-window stamps and keeps the counts")
     func endEpisodeClearsStampsAndKeepsCounts() async throws {
         let store = try await makeTestStore()
         let orchestrator = try await Fx.makeOrchestrator(
             store: store, inventoryFilterEnabled: true
         )
-        try await Fx.runFieldDelivery(orchestrator, store: store)
+        try await Fx.runFieldDelivery(
+            orchestrator, store: store,
+            windows: Fx.fieldWindows + [Fx.headArtifactWindow]
+        )
         #expect(await orchestrator.lastAdWindowIngestOutcome(
             forWindowId: Fx.preRoll.id
         ) != nil, "control: the stamp was there before endEpisode")

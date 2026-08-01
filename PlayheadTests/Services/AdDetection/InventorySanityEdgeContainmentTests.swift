@@ -306,10 +306,13 @@ struct FieldEdgeWindowsArmTests {
         #expect(postRoll?.outcome == .armedSuggest)
     }
 
-    /// The whole delivery, counted. Four in, four armed, nothing lost to the
-    /// filter — the number the bead says must become zero.
-    @Test("the production filter drops none of the four field windows")
-    func theProductionFilterDropsNoFieldWindow() async throws {
+    /// The whole delivery, counted, WITH THE DURATION KNOWN — which is what
+    /// makes this distinct from `AdWindowIngestOutcomeCountTests`' version of
+    /// the same count. There the asset row has no duration, so the tail rule
+    /// is dormant and only the pre-roll was ever at risk; here both edge rules
+    /// are armed and both edge-anchored slots have to survive.
+    @Test("with the duration known, the production filter drops no field window")
+    func theProductionFilterDropsNoFieldWindowWithDurationKnown() async throws {
         let store = try await makeTestStore()
         let orchestrator = try await Fx.makeOrchestrator(
             store: store,
