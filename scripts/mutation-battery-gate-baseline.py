@@ -275,6 +275,38 @@ MUTATIONS = [
         [W + "test_accept_baseline_REFUSES_a_selective_run"],
     ),
     (
+        "R25", GB,
+        "--accept-baseline records a run that executed ZERO tests, deleting "
+        "every entry as unreachable — the file destroyed by its own maintenance "
+        "command (measured live: a sim erase sends xcodebuild to the clone "
+        "helper, which cannot find simctl, and it reports TEST FAILED after "
+        "nothing ran)",
+        "    if not run.ran:\n        raise CannotEvaluate(",
+        "    if False:\n        raise CannotEvaluate(",
+        # SURVIVED first time against
+        # test_merge_REFUSES_a_run_that_executed_no_tests_at_all: with a
+        # populated baseline R26's too-few-reached guard refuses anyway, so the
+        # rail was masked. Point it at the case only this guard can catch — the
+        # first ever accept, when there is no baseline to compare against.
+        [M + "test_merge_REFUSES_an_empty_run_even_with_NO_baseline_to_compare"],
+    ),
+    (
+        "R26", GB,
+        "--accept-baseline records a run that reached almost none of the "
+        "baseline, silently dropping the rest",
+        "        if reached * 2 < len(existing):",
+        "        if False:",
+        [M + "test_merge_REFUSES_a_run_that_reached_too_little_of_the_baseline"],
+    ),
+    (
+        "R27", GB,
+        "a run with zero failures is called GREEN even when it executed nothing "
+        "— zero failures is not zero problems",
+        "        if self.ok and self.total_failures == 0:",
+        "        if self.total_failures == 0:",
+        [V + "test_a_run_that_executed_NOTHING_is_never_called_GREEN"],
+    ),
+    (
         "R99", GB,
         "VACUITY CONTROL: a cosmetic wording change that must SURVIVE. If this "
         "is killed, the rails redden on any edit and every KILLED above is void",

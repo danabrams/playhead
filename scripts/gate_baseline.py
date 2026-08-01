@@ -139,6 +139,10 @@ TIER_LOAD_SENSITIVE = "load-sensitive"
 # So: be slow to promote, and let the file earn it.
 MIN_RUNS_FOR_DETERMINISTIC = 3
 
+# How many names to print per category before collapsing to a count. A verdict
+# nobody reads is a verdict nobody acts on.
+_MAX_LISTED = 10
+
 FRAMEWORK_SWIFT_TESTING = "swift-testing"
 FRAMEWORK_XCTEST = "xctest"
 
@@ -347,6 +351,27 @@ def merge(baseline, run, plan):
             "the log has no terminal verdict — it is a fragment, not a run"
         )
 
+    # A run can carry a terminal verdict and still have executed NOTHING.
+    # Measured: erasing the simulator made xcodebuild reach for the clone
+    # helper, which resolves `simctl` through the GLOBAL xcode-select
+    # (CommandLineTools, no simctl); it printed `** TEST FAILED **` after zero
+    # tests. Accepting that would silently DELETE every entry as unreachable and
+    # call the empty result a baseline — the file destroyed by the very command
+    # meant to maintain it.
+    if not run.ran:
+        raise CannotEvaluate(
+            "the run recorded no test results at all — it did not exercise the plan"
+        )
+    existing = set(baseline.get("tests", {})) if baseline.get("plan") == plan else set()
+    if existing:
+        reached = len(existing & run.ran)
+        if reached * 2 < len(existing):
+            raise CannotEvaluate(
+                "the run reached only %d of the %d recorded tests — too few to be a "
+                "run of this plan, and accepting it would drop the rest"
+                % (reached, len(existing))
+            )
+
     if baseline.get("plan") != plan:
         # A different plan is a different population. Carrying entries across
         # would name tests the new plan never runs, which reads as ABSENT
@@ -411,6 +436,7 @@ class Verdict(object):
         self.known_failures = []
         self.runs_observed = 0
         self.total_failures = 0
+        self.baseline_size = 0
 
     @property
     def ok(self):
@@ -442,7 +468,10 @@ class Verdict(object):
             len(self.new_failures),
             "NEW" if self.new_failures else "new",
         )
-        if self.total_failures == 0 and not self.new_failures:
+        # GREEN is reserved for "nothing failed AND nothing else is wrong". A run
+        # that executed no tests has zero failures too, and calling that GREEN is
+        # how a broken run reads as a clean sweep.
+        if self.ok and self.total_failures == 0:
             out.append("gate-baseline: GREEN (%s)" % headline)
         else:
             out.append("gate-baseline: RED (%s)" % headline)
@@ -453,8 +482,18 @@ class Verdict(object):
             out.append("  FAILS DIFFERENTLY %s — %s" % (key, self.kind_detail.get(key, "")))
         for key in self.deterministic_passed:
             out.append("  NOW PASSES       %s  (recorded as failing every run)" % key)
-        for key in self.absent:
+        if self.absent:
+            out.append(
+                "  DID NOT RUN — %d of %d recorded tests were never reached. If that "
+                "is most of them, the run did not exercise the plan (a wedged "
+                "simulator or a failed install reports `** TEST FAILED **` after "
+                "zero tests)." % (len(self.absent), self.baseline_size)
+            )
+        for key in self.absent[:_MAX_LISTED]:
             out.append("  DID NOT RUN      %s  (renamed, deleted or newly skipped)" % key)
+        if len(self.absent) > _MAX_LISTED:
+            out.append("  DID NOT RUN      … and %d more"
+                       % (len(self.absent) - _MAX_LISTED))
         if self.baseline_fiction:
             out.append(
                 "  BASELINE IS FICTION — the run had zero failures while %d are "
@@ -491,6 +530,7 @@ def verdict(baseline, run, plan=None):
     result = Verdict()
     result.runs_observed = baseline.get("runs_observed", 0)
     result.total_failures = len(run.failures)
+    result.baseline_size = len(baseline.get("tests", {}))
 
     if plan is not None and baseline.get("plan") != plan:
         result.cannot_evaluate = (

@@ -391,6 +391,26 @@ class VerdictTests(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertEqual(["swift-testing::always red"], v.kind_changed)
 
+    def test_a_run_that_executed_NOTHING_is_never_called_GREEN(self):
+        # Live on 2026-08-01: `** TEST FAILED **` after zero tests (the sim erase
+        # sent xcodebuild to the clone helper, which cannot find simctl). Zero
+        # failures is not zero problems, and GREEN on that reads as a clean sweep.
+        base = baseline({"swift-testing::a": (2, ["timeout"]),
+                         "swift-testing::b": (2, ["timeout"])}, runs=2)
+        run = gb.parse_run("error: unable to find utility \"simctl\"\n** TEST FAILED **\n")
+        v = gb.verdict(base, run)
+        self.assertFalse(v.ok)
+        self.assertNotIn("GREEN", v.render())
+        self.assertIn("did not exercise the plan", v.render())
+
+    def test_a_long_absent_list_is_summarised_not_dumped(self):
+        tests = {"swift-testing::t%02d" % i: (2, ["timeout"]) for i in range(40)}
+        run = gb.parse_run("** TEST FAILED **\n" + st_fail_timeout("t00"))
+        v = gb.verdict(baseline(tests, runs=2), run)
+        rendered = v.render()
+        self.assertIn("and 29 more", rendered)
+        self.assertIn("39 of 40", rendered)
+
     def test_a_baseline_member_that_did_not_RUN_fails_the_gate(self):
         # A name nobody can reach is how djl0's rails "survived". A baseline
         # entry that never ran is not evidence of anything.
@@ -531,10 +551,61 @@ class MergeTests(unittest.TestCase):
         self.assertIn("swift-testing::x", merged2["tests"])
 
     def test_merge_DROPS_a_baseline_member_that_no_longer_exists(self):
-        base = baseline({"swift-testing::renamed away": (2, ["timeout"])}, runs=2)
-        merged = gb.merge(base, gb.parse_run(log(st_pass("something"))),
-                          plan="PlayheadFastTests")
+        # Realistic shape: most of the baseline is reached and ONE entry is not.
+        # A fixture where nothing is reached is indistinguishable from a run that
+        # never happened, and is refused outright — see the test below.
+        base = baseline(
+            {
+                "swift-testing::renamed away": (2, ["timeout"]),
+                "swift-testing::still here": (2, ["timeout"]),
+                "swift-testing::also here": (2, ["timeout"]),
+            },
+            runs=2,
+        )
+        run = gb.parse_run(
+            log(st_fail_timeout("still here"), st_fail_timeout("also here"))
+        )
+        merged = gb.merge(base, run, plan="PlayheadFastTests")
         self.assertNotIn("swift-testing::renamed away", merged["tests"])
+        self.assertIn("swift-testing::still here", merged["tests"])
+
+    def test_merge_REFUSES_a_run_that_executed_no_tests_at_all(self):
+        # Measured live: erasing the simulator made xcodebuild reach for the
+        # clone helper, which resolves `simctl` via the GLOBAL xcode-select
+        # (CommandLineTools, no simctl). It printed `** TEST FAILED **` after
+        # ZERO tests. Accepting that deletes every entry as unreachable and calls
+        # the empty result a baseline — the file destroyed by the command meant
+        # to maintain it.
+        base = baseline({"swift-testing::x": (2, ["timeout"])}, runs=2)
+        empty = gb.parse_run(
+            'error: unable to find utility "simctl", not a developer tool\n'
+            "** TEST FAILED **\n"
+        )
+        self.assertTrue(empty.complete)
+        with self.assertRaises(gb.CannotEvaluate):
+            gb.merge(base, empty, plan="PlayheadFastTests")
+
+    def test_merge_REFUSES_an_empty_run_even_with_NO_baseline_to_compare(self):
+        # Isolates the zero-results guard. With a populated baseline the
+        # too-few-reached guard would refuse anyway, so only the FIRST ever
+        # --accept-baseline exercises this one — and that is exactly when a
+        # garbage run would be enshrined as the definition of known-broken.
+        empty = gb.parse_run("** TEST FAILED **\n")
+        with self.assertRaises(gb.CannotEvaluate):
+            gb.merge(gb.empty_baseline("PlayheadFastTests"), empty,
+                     plan="PlayheadFastTests")
+
+    def test_merge_REFUSES_a_run_that_reached_too_little_of_the_baseline(self):
+        base = baseline(
+            {"swift-testing::a": (2, ["timeout"]),
+             "swift-testing::b": (2, ["timeout"]),
+             "swift-testing::c": (2, ["timeout"]),
+             "swift-testing::d": (2, ["timeout"])},
+            runs=2,
+        )
+        run = gb.parse_run(log(st_fail_timeout("a")))  # 1 of 4
+        with self.assertRaises(gb.CannotEvaluate):
+            gb.merge(base, run, plan="PlayheadFastTests")
 
     def test_merge_unions_kinds_rather_than_replacing_them(self):
         base = baseline({"swift-testing::x": (1, ["timeout"])}, runs=1)
