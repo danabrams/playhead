@@ -209,6 +209,15 @@ actor BackfillJobRunner {
             permissiveDecodingFailureCount += 1
         case .permissiveContextOverflow:
             permissiveContextOverflowCount += 1
+        case .rateLimited:
+            // playhead-kvs8: charged to nothing, exactly as in
+            // `PermissiveFailureCounts.increment(reason:)` — these three
+            // counters are evidence about the permissive model's judgment, and
+            // a daemon throttle is evidence about the daemon's queue depth.
+            // Folding it into any of them would make the model look worse the
+            // busier the device is. The `.rateLimited` status on the persisted
+            // row is what carries the event.
+            break
         }
     }
 

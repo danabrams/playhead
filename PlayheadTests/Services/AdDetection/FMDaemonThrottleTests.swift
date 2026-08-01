@@ -68,16 +68,14 @@ struct FMDaemonThrottleClassificationTests {
         #expect(FMDaemonThrottle.isThrottle(TestFMRuntimeFailure.rateLimited.error))
     }
 
+    #if canImport(FoundationModels)
     @available(iOS 26.0, *)
     @Test("concurrentRequests is a throttle too — it is the daemon refusing load, not the model failing")
-    func concurrentRequestsIsAThrottle() throws {
-        #if canImport(FoundationModels)
+    func concurrentRequestsIsAThrottle() {
         let context = LanguageModelSession.GenerationError.Context(debugDescription: "kvs8")
         #expect(FMDaemonThrottle.isThrottle(LanguageModelSession.GenerationError.concurrentRequests(context)))
-        #else
-        throw XCTSkip("FoundationModels unavailable")
-        #endif
     }
+    #endif
 
     @available(iOS 26.0, *)
     @Test("a refusal, a guardrail block, a context overflow, a deadline and a cancellation are NOT throttles")
