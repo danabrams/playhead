@@ -123,9 +123,21 @@ KIND_UNKNOWN = "unknown"
 TIER_DETERMINISTIC = "deterministic"
 TIER_LOAD_SENSITIVE = "load-sensitive"
 
-# One observation cannot distinguish "fails every time" from "was starved once",
-# so a tier is only promoted to deterministic once there are two to compare.
-MIN_RUNS_FOR_DETERMINISTIC = 2
+# How many observations an entry must fail in a row before its PASSING is
+# allowed to fail the gate.
+#
+# MEASURED, not guessed. Two full runs on identical code, same quiet box,
+# nothing else running: 32 failures and 28 failures, 19 in common, union 41 —
+# a Jaccard of 0.46. Under that much churn "failed twice" is weak evidence of
+# "fails every time", and every entry wrongly promoted becomes a NOW PASSES
+# gate failure on some later quiet run.
+#
+# The asymmetry decides it. A false pass-direction alarm costs a gate run, a
+# refresh commit, and a little more of the trust this bead exists to restore —
+# and a gate people stop believing is the exact thing being fixed. A missed one
+# costs a stale name that is still printed as a removal candidate every run.
+# So: be slow to promote, and let the file earn it.
+MIN_RUNS_FOR_DETERMINISTIC = 3
 
 FRAMEWORK_SWIFT_TESTING = "swift-testing"
 FRAMEWORK_XCTEST = "xctest"

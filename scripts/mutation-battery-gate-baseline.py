@@ -136,11 +136,20 @@ MUTATIONS = [
     ),
     (
         "R09", GB,
-        "one observation is enough to mint a DETERMINISTIC entry, so a test "
-        "starved once becomes one whose passing fails the gate forever",
-        "MIN_RUNS_FOR_DETERMINISTIC = 2",
+        "the promotion threshold is lowered, so a test starved once or twice "
+        "becomes one whose passing fails the gate",
+        "MIN_RUNS_FOR_DETERMINISTIC = 3",
         "MIN_RUNS_FOR_DETERMINISTIC = 1",
-        [K + "test_a_single_observation_can_never_be_deterministic"],
+        [K + "test_a_single_observation_can_never_be_deterministic",
+         M + "test_two_observations_are_NOT_enough_to_promote"],
+    ),
+    (
+        "R09b", GB,
+        "the threshold drops from 3 to 2 — the value the measured 0.46 Jaccard "
+        "between two runs says is not enough evidence",
+        "MIN_RUNS_FOR_DETERMINISTIC = 3",
+        "MIN_RUNS_FOR_DETERMINISTIC = 2",
+        [M + "test_two_observations_are_NOT_enough_to_promote"],
     ),
     (
         "R10", GB,

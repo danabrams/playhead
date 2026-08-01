@@ -488,10 +488,21 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(["timeout"], entry["kinds"])
 
     def test_merge_promotes_a_consistently_failing_test_to_deterministic(self):
-        base = baseline({"swift-testing::x": (1, ["timeout"])}, runs=1)
+        base = baseline({"swift-testing::x": (2, ["timeout"])}, runs=2)
         run = gb.parse_run(log(st_fail_timeout("x")))
         merged = gb.merge(base, run, plan="PlayheadFastTests")
         self.assertEqual(gb.TIER_DETERMINISTIC, gb.tier_of(merged["tests"]["swift-testing::x"]))
+
+    def test_two_observations_are_NOT_enough_to_promote(self):
+        # Measured Jaccard between two full runs on identical code is 0.46, so
+        # "failed twice" is weak evidence. Promoting there would turn ordinary
+        # churn into gate failures.
+        base = baseline({"swift-testing::x": (1, ["timeout"])}, runs=1)
+        merged = gb.merge(base, gb.parse_run(log(st_fail_timeout("x"))),
+                          plan="PlayheadFastTests")
+        entry = merged["tests"]["swift-testing::x"]
+        self.assertEqual(2, entry["seen_runs"])
+        self.assertEqual(gb.TIER_LOAD_SENSITIVE, gb.tier_of(entry))
 
     def test_merge_demotes_a_member_that_passed_this_run(self):
         base = baseline({"swift-testing::x": (2, ["timeout"])}, runs=2)
