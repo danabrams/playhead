@@ -114,6 +114,24 @@
 #   faults below were repaired). Batches 1-47 were NOT re-run and carry the
 #   verdicts above. Recount: the array now holds 96 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-01 (playhead-eks2). Batches 53-61 only, added by
+#   this bead: L01-L09, 9 entries, 9 batches (one each — see the note above
+#   L01). FINAL 9 KILLED / 0 SURVIVED / 0 ERROR, 10 builds, ~23m wall clock.
+#   Batches 1-52 were NOT re-run and carry the verdicts above. Recount: the
+#   array now holds 105 live entries.
+#
+#   One thing that run learned, and it is the reason two of these were then
+#   re-run BY HAND rather than trusted: a KILL only proves SOME expectation in
+#   the named test failed, and a suite that also asserts the mutated field
+#   directly can report a kill without ever exercising the behaviour the rail
+#   is about. L04 (gate markOnly -> eligible) and L05 (anchors unanchored ->
+#   rediffByteExact) both trip a metadata assertion in the eks2 suite, so each
+#   was re-applied alone and its ISSUE LIST read: L04 also failed
+#   `trespassing.isEmpty` (a real skip cue was pushed over a continuation span)
+#   and L05 also failed `pushedCues.isEmpty` / `promoted.wasSkipped == false`
+#   (a tap really did cut audio). The two safety claims are load-bearing, not
+#   restatements of the literal.
+#
 #   Two things that run learned:
 #     • K10 SURVIVED for real, and the survivor was a genuine coverage hole.
 #       `an UNKNOWN publish date sorts LAST` asserted the ORDER OF A
