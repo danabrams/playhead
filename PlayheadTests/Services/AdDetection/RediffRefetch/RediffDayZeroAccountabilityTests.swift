@@ -650,7 +650,7 @@ struct RediffDayZeroTriggerIdempotencyTests {
             service: service,
             enabled: true,
             kWayFetchCount: 2,
-            reachabilityProvider: { .wifi },
+            transportProvider: { .testWifi },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { _ in prior },
@@ -659,7 +659,9 @@ struct RediffDayZeroTriggerIdempotencyTests {
             },
             // playhead-96ot: no orchestrator in this suite — the delivery is
             // asserted by DayZeroMarkDeliveryTests, so opt OUT explicitly.
-            mintedMarkDelivery: { _ in }
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
     }
 
@@ -754,7 +756,7 @@ struct RediffDayZeroTriggerIdempotencyTests {
         )
         let trigger = DayZeroRediffTrigger(
             service: service, enabled: true, kWayFetchCount: 2,
-            reachabilityProvider: { .cellular },
+            transportProvider: { .testCellularNotAllowed },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
             attemptRecordProvider: { assetId in
@@ -762,7 +764,9 @@ struct RediffDayZeroTriggerIdempotencyTests {
                 return nil
             },
             suppressionRecorder: { assetId, reason, at in spy.recorded.append((assetId, reason, at)) },
-            mintedMarkDelivery: { _ in }
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
         )
 
         _ = await fire(trigger, at: 1)

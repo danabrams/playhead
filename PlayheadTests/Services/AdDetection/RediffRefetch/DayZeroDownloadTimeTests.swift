@@ -406,8 +406,11 @@ struct DayZeroReadinessWaitTests {
     func cancellationIsItsOwnOutcome() async {
         let task = Task {
             await DayZeroReadinessWait.run(
-                maxAttempts: 1_000_000, pollNanos: 1, sleep: { _ in await Task.yield() }
-            ) { DayZeroReadinessProbe<Int>.awaitingPinnedFile }
+                maxAttempts: 1_000_000,
+                pollNanos: 1,
+                sleep: { _ in await Task.yield() },
+                probe: { DayZeroReadinessProbe<Int>.awaitingPinnedFile }
+            )
         }
         task.cancel()
         let result = await task.value
