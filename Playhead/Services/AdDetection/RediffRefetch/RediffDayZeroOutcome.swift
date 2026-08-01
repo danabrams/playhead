@@ -87,6 +87,41 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
     /// one episode; without this guard they each spend a full k-way fetch.
     case alreadyInFlight = "already_in_flight"
 
+    // MARK: Gate refusals (playhead-4dqe — FREE, and formerly SILENT)
+    //
+    // Until playhead-4dqe the transport/power gate refused with a bare
+    // `return SweepSummary()`. On a device where day-0 never ran, "the network
+    // was wrong", "the phone was unplugged", "the flag is off" and "the wiring
+    // was dropped" all looked exactly alike — from inside the app and from a
+    // database pull. These cases make each refusal nameable. They cost no bytes
+    // and are all retryable: the very next play on a different network, on a
+    // charger, or after the budget window rolls, can succeed.
+
+    /// No reachable network path at all.
+    case deniedNoNetwork = "denied_no_network"
+
+    /// iOS Low Data Mode is active on the current path. Refused on BOTH
+    /// transports and regardless of the user's cellular setting — Low Data Mode
+    /// is the user's OS-level instruction and an in-app toggle is not consent to
+    /// override it.
+    case deniedByLowDataMode = "denied_by_low_data_mode"
+
+    /// The path is cellular (or an "expensive" metered path such as a personal
+    /// hotspot) and the user has not turned on cellular preparation. The
+    /// shipping default is WiFi-only, so this is the EXPECTED refusal for a
+    /// user who has never visited the setting — not a defect.
+    case deniedByCellularSetting = "denied_by_cellular_setting"
+
+    /// Unplugged, with no deep-scan opt-in and no explicit
+    /// "Download & Analyze" tap.
+    case deniedByPower = "denied_by_power"
+
+    /// The rolling 24 h day-0 byte budget (`RediffDayZeroDailyBudget`) has no
+    /// room for a full k-way attempt. Costs zero bytes by construction — this
+    /// is the check that stops the newly-permitted cellular transport from
+    /// having no ceiling at all.
+    case deniedByDailyBudget = "denied_by_daily_budget"
+
     // MARK: Fetch
 
     /// The k-way B-copy fetch threw. Formerly indistinguishable from every
@@ -137,7 +172,8 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
         switch self {
         case .minterUnavailable, .assetRowMissing, .assetFetchFailed,
              .aSideNotAnchored, .aSideReadFailed, .suppressedByBackoff,
-             .alreadyInFlight:
+             .alreadyInFlight, .deniedNoNetwork, .deniedByLowDataMode,
+             .deniedByCellularSetting, .deniedByPower, .deniedByDailyBudget:
             return false
         case .fetchFailed, .tooFewBCopies, .noAcceptedByteDiff, .noDivergentSlot,
              .allSlotsAlreadyCovered, .persistFailed, .marked:
@@ -161,8 +197,31 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
              .aSideNotAnchored, .aSideReadFailed, .suppressedByBackoff,
              .alreadyInFlight, .fetchFailed, .tooFewBCopies,
              .noAcceptedByteDiff, .noDivergentSlot, .allSlotsAlreadyCovered,
-             .persistFailed:
+             .persistFailed, .deniedNoNetwork, .deniedByLowDataMode,
+             .deniedByCellularSetting, .deniedByPower, .deniedByDailyBudget:
             return true
+        }
+    }
+}
+
+// MARK: - Gate refusal → exit (playhead-4dqe)
+
+extension DayZeroTransportDecision {
+    /// The exit a refusal RECORDS, or `nil` when there is nothing to record.
+    ///
+    /// `.allow` records nothing (the attempt's own outcome does). `.denyDisabled`
+    /// records nothing either, and that one is deliberate: `triggerIfEligible`
+    /// short-circuits on the inert flag BEFORE this decision is ever computed,
+    /// so a row here would be unreachable — and an unreachable branch whose doc
+    /// comment claims otherwise is a defect this arc has already been bitten by.
+    /// The flag-off build stays byte-identical, writing nothing.
+    var recordedExit: RediffDayZeroExit? {
+        switch self {
+        case .allow, .denyDisabled: return nil
+        case .denyUnreachable: return .deniedNoNetwork
+        case .denyLowDataMode: return .deniedByLowDataMode
+        case .denyCellularNotAllowed: return .deniedByCellularSetting
+        case .denyPower: return .deniedByPower
         }
     }
 }
