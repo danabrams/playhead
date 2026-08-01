@@ -337,6 +337,47 @@ struct SkipOrchestratorMidSessionIngestTests {
                 "an unanchored mark-only span never enters the auto-skip map")
         #expect(pushedCues.isEmpty, "presence, not extent — nothing is skipped")
     }
+
+    /// The REAL device shape: qs0d measured TWO `dayZeroRediffByteExact` windows
+    /// on episode DE0784D8, and a multi-break fetch routinely produces a mix of
+    /// strict and 9s6q segment-recovered slots in ONE mint. One delivery, two
+    /// rows, two different verdicts.
+    ///
+    /// Pinned together because the failure worth fearing is CROSS-CONTAMINATION
+    /// — a merged cue that swallows the recovered span's audio, or a strict span
+    /// demoted by its neighbour. Either would be invisible in the single-row
+    /// tests above.
+    @Test("one delivery skips the strict slot and merely marks the recovered one")
+    func mixedDeliverySkipsOnlyTheStrictSlot() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = try await Fx.makeAutoOrchestrator(store: store)
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: Fx.assetId,
+            episodeId: Fx.episodeId,
+            podcastId: Fx.podcastId
+        )
+        try await Fx.persist([
+            Fx.makeStrictDayZeroWindow(id: "day0-strict", start: 60, end: 120),
+            Fx.makeRecoveredDayZeroWindow(id: "day0-recovered", start: 200, end: 260),
+        ], in: store)
+
+        let delivered = await orchestrator.ingestPersistedAdWindows(
+            analysisAssetId: Fx.assetId
+        )
+
+        #expect(delivered == 2, "both rows are forwarded")
+        #expect(await orchestrator.activeWindowIDs() == ["day0-strict"],
+                "only the byte-exact slot enters the auto-skip map")
+        #expect(await orchestrator.activeSuggestWindowIDs() == ["day0-recovered"],
+                "the recovered slot is a suggestion, not a skip")
+        #expect(pushedCues.count == 1,
+                "exactly ONE span is skippable — the recovered span's audio is not swallowed")
+        let cue = try #require(pushedCues.first)
+        #expect(Fx.cueStart(cue) == 60.50)
+        #expect(Fx.cueEnd(cue) == 118.25)
+    }
 }
 
 // MARK: - 2. Mid-session delivery vs playhead-d3g0's arming
@@ -366,7 +407,7 @@ struct MidSessionIngestSuggestArmingTests {
     /// implementation would look correct on the banner count while being wrong
     /// about where the emission came from — the assertion is therefore ordered
     /// against a sentinel rather than counted.
-    @Test("mid-session ingest ARMS a suggestion; the next playhead observation presents it")
+    @Test("mid-session ingest ARMS a suggestion and the next observation presents it")
     func ingestArmsAndTheNextObservationEmits() async throws {
         let store = try await makeTestStore()
         let orchestrator = try await Fx.makeAutoOrchestrator(store: store)

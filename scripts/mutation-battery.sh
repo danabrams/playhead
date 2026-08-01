@@ -367,7 +367,7 @@ T_D3G0_EXACT_REPLAY="An exact producer replay after retirement re-arms rather th
 T_96OT_INACTIVE="ingest for an asset that is NOT the one playing delivers nothing"
 T_96OT_NOEPISODE="ingest with no active episode delivers nothing"
 T_96OT_VETOED="a user-vetoed row is not resurrected by the mid-session door"
-T_96OT_ARMS="mid-session ingest ARMS a suggestion; the next playhead observation presents it"
+T_96OT_ARMS="mid-session ingest ARMS a suggestion and the next observation presents it"
 T_96OT_UNMARKED="an UNMARKED day-0 run delivers nothing"
 T_96OT_COVERED="a run whose slots were already covered delivers nothing"
 T_96OT_ONCE="a marked day-0 run delivers its asset id EXACTLY once"
@@ -1987,6 +1987,30 @@ sys.stdout.writelines(name + "\n" for name in seen)
 ' "$1"
 }
 
+# Every test that RAN in this attempt, by display name. Companion to
+# `extract_failures`, and the input to the "expected test never ran" check
+# below: an expectation that matches NOTHING in the run is a harness fault
+# (typo, renamed test, suite missing from FOCUSED_SUITES, or a ';' inside a
+# display name colliding with the record separator) — and without this it is
+# indistinguishable from a genuine SURVIVED, which is the failure direction
+# that reads as a coverage hole and sends the next person to write a test that
+# already exists. Measured: playhead-96ot's E04 reported SURVIVED with its
+# expected test visibly failing three lines above, one bead after playhead-d3g0
+# documented the same collision.
+extract_ran() {
+  python3 -c '
+import re, sys
+pat_named = re.compile(r"^\W*◇ Test \"(.+?)\" started")
+pat_plain = re.compile(r"^\W*◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
+seen = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    m = pat_named.match(line) or pat_plain.match(line)
+    if m and m.group(1) not in seen:
+        seen.append(m.group(1))
+sys.stdout.writelines(name + "\n" for name in seen)
+' "$1"
+}
+
 run_focused() {
   local log="$1"
   scripts/fast-gate.sh "${FOCUSED_SUITES[@]}" >"$log" 2>&1
@@ -2110,6 +2134,35 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     KEEP_WORK=1
     exit 2
   fi
+  # Every expectation must NAME A TEST THAT ACTUALLY RAN. Checked here, on the
+  # one build that is already being spent, so a mis-typed or mis-split
+  # expectation costs zero mutation builds instead of printing SURVIVED.
+  extract_ran "$BASE_LOG.last" >"$WORK/baseline-ran.txt"
+  UNKNOWN=""
+  for rec in "${SELECTED[@]}"; do
+    exp="$(rec_expect "$rec")"
+    OLDIFS="$IFS"; IFS=';'
+    for want in $exp; do
+      IFS="$OLDIFS"
+      grep -Fxq "$want" "$WORK/baseline-ran.txt" || \
+        UNKNOWN="${UNKNOWN}    $(rec_name "$rec") expects: ${want}
+"
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  done
+  if [ -n "$UNKNOWN" ]; then
+    echo "mutation-battery: an expectation names a test that never ran." >&2
+    printf '%s' "$UNKNOWN" >&2
+    cat >&2 <<'MSG'
+Causes, in order of how often they happen: the display name contains a ';'
+(the MUTATIONS record separator splits it into fragments that match nothing);
+the test was renamed; the suite is missing from FOCUSED_SUITES; a typo.
+Every one of them would otherwise print SURVIVED against a working rail.
+MSG
+    KEEP_WORK=1
+    exit 2
+  fi
   echo "  baseline green"
   echo
 fi
@@ -2172,6 +2225,8 @@ for b in "${BATCH_IDS[@]}"; do
   fi
 
   FAILED_LIST="$WORK/failed-$b.txt"
+  RAN_LIST="$WORK/ran-$b.txt"
+  extract_ran "$LOG.last" >"$RAN_LIST"
   extract_failures "$LOG.last" >"$FAILED_LIST"
   echo "  observed failures:"
   if [ -s "$FAILED_LIST" ]; then
@@ -2184,16 +2239,24 @@ for b in "${BATCH_IDS[@]}"; do
     name="$(rec_name "$rec")"
     expect="$(rec_expect "$rec")"
     missing=""
+    never_ran=""
     OLDIFS="$IFS"; IFS=';'
     for want in $expect; do
       IFS="$OLDIFS"
-      if ! grep -Fxq "$want" "$FAILED_LIST"; then
+      if ! grep -Fxq "$want" "$RAN_LIST"; then
+        # Not a survivor — the harness never asked the question. Kept separate
+        # from `missing` so the two are never conflated in the report.
+        never_ran="${never_ran}${never_ran:+ | }${want}"
+      elif ! grep -Fxq "$want" "$FAILED_LIST"; then
         missing="${missing}${missing:+ | }${want}"
       fi
       IFS=';'
     done
     IFS="$OLDIFS"
-    if [ -z "$missing" ]; then
+    if [ -n "$never_ran" ]; then
+      echo "$name|ERROR|expected test never ran (';' in the name? renamed? suite not in FOCUSED_SUITES?): $never_ran" >>"$RESULTS"
+      FATAL=1
+    elif [ -z "$missing" ]; then
       echo "$name|KILLED|" >>"$RESULTS"
     else
       echo "$name|SURVIVED|$missing" >>"$RESULTS"
