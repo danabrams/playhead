@@ -101,6 +101,23 @@ struct InventorySanityFilter: Sendable, Equatable {
         InventorySanityFilter(isEnabled: settings.enabled)
     }
 
+    /// The configuration production runs on a fresh install — i.e. what
+    /// `.production()` resolves to when no value has been persisted, which is
+    /// the state a wipe-and-reinstall leaves the device in.
+    ///
+    /// playhead-b6r2: this exists so `SkipOrchestrator.init`'s default and the
+    /// field's configuration are THE SAME EXPRESSION rather than two literals
+    /// that agreed until they didn't. The old init default was
+    /// `InventorySanityFilter(isEnabled: false)` against a production default
+    /// of ON, and that divergence is why playhead-djl0's reproduction of the
+    /// 2026-08-01 field case asserted the banner IS emitted and passed: the
+    /// guard under investigation was switched off in every observation surface
+    /// and live in the field. A future change to `defaultEnabled` now moves
+    /// both sides at once.
+    static let productionDefaultConfiguration = InventorySanityFilter(
+        isEnabled: LightweightInventoryChecksSettings.defaultEnabled
+    )
+
     // MARK: - Evaluation
 
     /// Evaluate a single candidate span.
