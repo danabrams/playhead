@@ -1879,11 +1879,34 @@ struct SkipOrchestratorSuggestTierTests {
             "No duplicate auto-skip banner should follow suggest Yes; got \(autoSkippedBanners.count)")
 
         // The exact explicit-feedback span must not enter the invariant audit
-        // log either. With no unrelated event in this fixture, no session file
-        // should be created at all.
+        // log either.
+        //
+        // playhead-isp5: this used to assert `currentSessionFileURL == nil` —
+        // "with no unrelated event in this fixture, no session file should be
+        // created at all". That premise no longer holds: `beginEpisode`'s
+        // cross-launch preload now writes one routine `ad_window_ingest_census`
+        // row per episode start, so a file exists in every fixture. The proxy
+        // was never the claim; the claim is that no AUTO-SKIP event carries
+        // this span. Assert that directly, which is also strictly stronger than
+        // file-absence was — it survives any future routine event.
         invariantLogger.flushForTesting()
+        let auditedSpanStarts: [Int] = {
+            guard let url = invariantLogger.currentSessionFileURL,
+                  let data = try? Data(contentsOf: url) else { return [] }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return String(decoding: data, as: UTF8.self)
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .compactMap {
+                    try? decoder.decode(
+                        SurfaceStateTransitionEntry.self, from: Data($0.utf8)
+                    )
+                }
+                .filter { $0.eventType == .autoSkipFired }
+                .compactMap(\.windowStartMs)
+        }()
         #expect(
-            invariantLogger.currentSessionFileURL == nil,
+            !auditedSpanStarts.contains(Int(markOnly.startTime * 1_000)),
             "Suggest Yes must not create an exact-span audit event"
         )
     }

@@ -593,6 +593,29 @@ actor SkipOrchestrator {
     /// `SkipModeResolution.isLookupFailure`).
     private var skipModeResolutionFailureCounts: [SkipModeResolution: Int] = [:]
 
+    /// playhead-isp5: how many windows have hit each ingest disposition, this
+    /// process. A process-lifetime tally like `skipModeResolutionFailureCounts`
+    /// above and for the same reason — a per-episode counter answers "did this
+    /// episode lose anything?" but not "does this build lose PRE-ROLLS", which
+    /// is the shape the field defect actually had.
+    ///
+    /// Written by every `receiveAdWindows` caller, not just the two persisted
+    /// doors: a drop cause is not a different fact because a different producer
+    /// supplied the row. Per-DELIVERY attribution is the census's job.
+    private var adWindowIngestOutcomeCounts: [AdWindowIngestOutcome: Int] = [:]
+
+    /// playhead-isp5: the most recent terminal disposition of each window id,
+    /// with its sub-cause where one exists. Per-EPISODE (cleared alongside
+    /// every other per-episode collection) because it exists only so a door can
+    /// read back where the rows IT forwarded ended up, after
+    /// `receiveAdWindows` returns.
+    ///
+    /// Keyed by window id rather than accumulated into a per-call buffer
+    /// because `receiveAdWindows` suspends on the catalog actor: a buffer would
+    /// silently absorb an interleaved producer's rows and misattribute them.
+    private var lastIngestOutcomeByWindowId:
+        [String: (outcome: AdWindowIngestOutcome, detail: String?)] = [:]
+
     /// playhead-usn1: continuation-backed stream of `SkipModeSnapshot`.
     ///
     /// The mode and its cause are only correct AFTER `beginEpisode` has resolved
@@ -1826,6 +1849,10 @@ actor SkipOrchestrator {
         // playhead-98co: per-episode edge-padding state.
         edgeAnchorsByWindowId.removeAll()
         userInitiatedSkipWindowIds.removeAll()
+        // playhead-isp5: per-episode ingest stamps. The per-cause COUNTS
+        // deliberately survive — they are a process-lifetime tally, matching
+        // djl0's `skipModeResolutionFailureCounts`.
+        lastIngestOutcomeByWindowId.removeAll()
         // A direct episode switch does not call `endEpisode`. Publish the
         // cleared state synchronously so the transport and UI cannot retain
         // the prior episode's skip cues or segment markers while hydration
@@ -1926,7 +1953,8 @@ actor SkipOrchestrator {
         // mid-session ingest shares verbatim.
         _ = await forwardPersistedAdWindows(
             analysisAssetId: analysisAssetId,
-            lifecycleGeneration: lifecycleGeneration
+            lifecycleGeneration: lifecycleGeneration,
+            door: .crossLaunchPreload
         )
         guard episodeLifecycleGeneration == lifecycleGeneration else {
             return
@@ -1991,6 +2019,116 @@ actor SkipOrchestrator {
         logger.error(
             "beginEpisode: skip mode is \(self.activeSkipMode.rawValue, privacy: .public) because \(resolution.rawValue, privacy: .public) — this is NOT a deliberate shadow"
         )
+    }
+
+    // MARK: - playhead-isp5: the ingest audit trail
+
+    /// Stamp one window's terminal disposition: bump the process counter and
+    /// remember it so the door that forwarded the row can read it back.
+    ///
+    /// Deliberately called at EVERY terminal branch of `receiveAdWindows`,
+    /// including the successful ones. A taxonomy that names only the failures
+    /// cannot distinguish "dropped for a reason we forgot to name" from
+    /// "delivered", which is exactly the ambiguity that kept this bead open.
+    private func noteIngestOutcome(
+        _ outcome: AdWindowIngestOutcome,
+        windowId: String,
+        detail: String? = nil
+    ) {
+        adWindowIngestOutcomeCounts[outcome, default: 0] += 1
+        lastIngestOutcomeByWindowId[windowId] = (outcome, detail)
+    }
+
+    /// Record a whole-call outcome for a delivery that never reached
+    /// `receiveAdWindows`, and write its audit row.
+    ///
+    /// - Parameter durable: pass `false` for the ONE outcome that has nothing
+    ///   to account for — a preload whose store read returned no rows at all.
+    ///   An episode with no persisted windows cannot have lost one, so the row
+    ///   would carry no information, and `beginEpisode` runs on every episode
+    ///   start: writing there would bootstrap a diagnostics session file for
+    ///   every episode ever opened (and, in the test suite, for every
+    ///   orchestrator ever constructed) to say nothing. The COUNT is still
+    ///   kept — it is free, and it keeps the counter API's partition complete.
+    private func noteIngestDoorOutcome(
+        _ outcome: AdWindowIngestOutcome,
+        door: AdWindowIngestDoor,
+        analysisAssetId: String,
+        detail: String? = nil,
+        durable: Bool = true
+    ) {
+        adWindowIngestOutcomeCounts[outcome, default: 0] += 1
+        guard durable else { return }
+        recordIngestCensus(
+            AdWindowIngestCensus(
+                door: door,
+                analysisAssetId: analysisAssetId,
+                forwarded: 0,
+                counts: [outcome: 1],
+                details: detail.map { ["\(outcome.rawValue):\($0)": 1] } ?? [:]
+            )
+        )
+    }
+
+    /// Read back where each of `windowIds` ended up and write the delivery's
+    /// audit row.
+    ///
+    /// An id with no stamp is counted as ``AdWindowIngestOutcome/droppedNoActiveEpisode``
+    /// only when that is what happened; any other gap would be a missing
+    /// instrumentation site, so it is left OUT of the counts and shows up as
+    /// `forwarded > sum(counts)` in the row — visible, rather than silently
+    /// attributed to a cause that did not occur.
+    private func recordIngestCensus(
+        door: AdWindowIngestDoor,
+        analysisAssetId: String,
+        forwardedWindowIds: [String]
+    ) {
+        var counts: [AdWindowIngestOutcome: Int] = [:]
+        var details: [String: Int] = [:]
+        for id in forwardedWindowIds {
+            guard let stamp = lastIngestOutcomeByWindowId[id] else { continue }
+            counts[stamp.outcome, default: 0] += 1
+            if let detail = stamp.detail {
+                details["\(stamp.outcome.rawValue):\(detail)", default: 0] += 1
+            }
+        }
+        recordIngestCensus(
+            AdWindowIngestCensus(
+                door: door,
+                analysisAssetId: analysisAssetId,
+                forwarded: forwardedWindowIds.count,
+                counts: counts,
+                details: details
+            )
+        )
+    }
+
+    /// The single write site. The row goes to the JSON Lines session file the
+    /// diagnostics bundle ships (playhead-v7q6: the durable row IS the audit
+    /// trail), and a mirrored `os_log` line stays for live Console debugging —
+    /// the log is the convenience, the row is the evidence.
+    private func recordIngestCensus(_ census: AdWindowIngestCensus) {
+        invariantLogger.invariantViolated(
+            code: .adWindowIngestCensus,
+            description: census.auditDescription
+        )
+        logger.info(
+            "ad window ingest: \(census.auditDescription, privacy: .public)"
+        )
+    }
+
+    /// playhead-isp5: how many windows have hit `outcome` this process.
+    func adWindowIngestOutcomeCount(_ outcome: AdWindowIngestOutcome) -> Int {
+        adWindowIngestOutcomeCounts[outcome] ?? 0
+    }
+
+    /// playhead-isp5: the terminal disposition the most recent delivery
+    /// recorded for `windowId`, and its sub-cause where one exists. `nil` once
+    /// the episode ends, or for an id no delivery has stamped.
+    func lastAdWindowIngestOutcome(
+        forWindowId windowId: String
+    ) -> (outcome: AdWindowIngestOutcome, detail: String?)? {
+        lastIngestOutcomeByWindowId[windowId]
     }
 
     /// The rows `beginEpisode`'s cross-launch preload and the playhead-96ot
@@ -2059,26 +2197,59 @@ actor SkipOrchestrator {
     @discardableResult
     private func forwardPersistedAdWindows(
         analysisAssetId: String,
-        lifecycleGeneration: UInt64
+        lifecycleGeneration: UInt64,
+        door: AdWindowIngestDoor
     ) async -> Int {
         let preWindows: [AdWindow]
         do {
             preWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
         } catch {
             logger.warning("Failed to load preload ad_windows: \(error.localizedDescription)")
+            noteIngestDoorOutcome(
+                .doorDroppedStoreReadFailed,
+                door: door,
+                analysisAssetId: analysisAssetId
+            )
             return 0
         }
         guard episodeLifecycleGeneration == lifecycleGeneration else {
+            noteIngestDoorOutcome(
+                .doorDroppedEpisodeReplaced,
+                door: door,
+                analysisAssetId: analysisAssetId
+            )
             return 0
         }
         let eligible = Self.preloadAdmissibleWindows(preWindows)
-        guard !eligible.isEmpty else { return 0 }
+        guard !eligible.isEmpty else {
+            noteIngestDoorOutcome(
+                .doorDroppedNoAdmissibleRows,
+                door: door,
+                analysisAssetId: analysisAssetId,
+                detail: "read=\(preWindows.count)",
+                // "the store had nothing" is not news; "the store had rows and
+                // the admission rule took all of them" is exactly the news this
+                // audit exists for.
+                durable: !preWindows.isEmpty
+            )
+            return 0
+        }
         let appliedRawValue = SkipDecisionState.applied.rawValue
         for window in eligible where window.decisionState == appliedRawValue {
             // Cycle-27 T-3 production-writer site (1 of 4): preload pre-population.
             banneredWindowIds.insert(window.id)
         }
+        // playhead-isp5: the ids are captured BEFORE the call so the census
+        // reads back exactly what THIS door forwarded, and cannot pick up rows
+        // an interleaved producer pushed while `receiveAdWindows` was suspended
+        // on the catalog actor.
+        let forwardedWindowIds = eligible.map(\.id)
         await receiveAdWindows(eligible)
+        recordIngestCensus(
+            door: door,
+            analysisAssetId: analysisAssetId,
+            forwardedWindowIds: forwardedWindowIds
+        )
         return eligible.count
     }
 
@@ -2113,11 +2284,22 @@ actor SkipOrchestrator {
             logger.debug(
                 "ingestPersistedAdWindows: dropping mismatched asset \(analysisAssetId, privacy: .public) (active=\(self.activeAssetId ?? "nil", privacy: .public))"
             )
+            // playhead-isp5: this branch is why the bead stayed open. An
+            // `os_log` line is not evidence a device pull can retrieve, so
+            // "the ingest dropped it" and "the ingest never fired" were
+            // indistinguishable after the fact. Now it is a durable row.
+            noteIngestDoorOutcome(
+                .doorDroppedNotPlaying,
+                door: .midSessionIngest,
+                analysisAssetId: analysisAssetId,
+                detail: "active=\(activeAssetId ?? "nil")"
+            )
             return 0
         }
         return await forwardPersistedAdWindows(
             analysisAssetId: analysisAssetId,
-            lifecycleGeneration: episodeLifecycleGeneration
+            lifecycleGeneration: episodeLifecycleGeneration,
+            door: .midSessionIngest
         )
     }
 
@@ -2174,6 +2356,9 @@ actor SkipOrchestrator {
         // exemption ids must not outlive the episode that produced them.
         edgeAnchorsByWindowId.removeAll()
         userInitiatedSkipWindowIds.removeAll()
+        // playhead-isp5: mirrors the `beginEpisode` clear. The per-cause
+        // COUNTS survive on purpose (process-lifetime tally).
+        lastIngestOutcomeByWindowId.removeAll()
         pushSkipCues()
         broadcastAppliedSegments()
     }
@@ -2381,11 +2566,22 @@ actor SkipOrchestrator {
     /// This is the primary event-stream entry point. Called whenever
     /// the detection pipeline produces or updates windows.
     func receiveAdWindows(_ adWindows: [AdWindow]) async {
-        guard let assetId = activeAssetId else { return }
+        guard let assetId = activeAssetId else {
+            // playhead-isp5: every terminal branch below is stamped, including
+            // this one — a delivery that arrived between episodes must be
+            // distinguishable from one that arrived and was filtered.
+            for adWindow in adWindows {
+                noteIngestOutcome(.droppedNoActiveEpisode, windowId: adWindow.id)
+            }
+            return
+        }
         let producerGeneration = nextProducerMutationGeneration()
 
         for adWindow in adWindows {
-            guard adWindow.analysisAssetId == assetId else { continue }
+            guard adWindow.analysisAssetId == assetId else {
+                noteIngestOutcome(.droppedForeignAsset, windowId: adWindow.id)
+                continue
+            }
             if isTerminalProducerRevision(adWindow) {
                 // A known stale replay is not a newer producer mutation. In
                 // particular, it must not supersede genuine same-ID material
@@ -2393,12 +2589,18 @@ actor SkipOrchestrator {
                 // terminal material still claims below and performs the
                 // conservative ID-wide disarm.
                 retireNonRevertedWindowStateIfMatching(adWindow)
+                noteIngestOutcome(
+                    .droppedTerminalProducerReplay, windowId: adWindow.id
+                )
                 continue
             }
             guard claimProducerMutation(
                 windowId: adWindow.id,
                 generation: producerGeneration
             ) else {
+                noteIngestOutcome(
+                    .droppedStaleProducerRevision, windowId: adWindow.id
+                )
                 continue
             }
             guard Self.hasValidRuntimeWindowMaterial(
@@ -2414,6 +2616,7 @@ actor SkipOrchestrator {
                 logger.warning(
                     "AdWindow \(adWindow.id, privacy: .public) has invalid runtime material — automatic admission refused"
                 )
+                noteIngestOutcome(.droppedInvalidMaterial, windowId: adWindow.id)
                 continue
             }
             guard let incomingState = SkipDecisionState(
@@ -2424,6 +2627,9 @@ actor SkipOrchestrator {
                 )
                 logger.warning(
                     "AdWindow \(adWindow.id, privacy: .public) has malformed decisionState — automatic admission refused"
+                )
+                noteIngestOutcome(
+                    .droppedMalformedDecisionState, windowId: adWindow.id
                 )
                 continue
             }
@@ -2461,6 +2667,9 @@ actor SkipOrchestrator {
                     windowId: adWindow.id,
                     generation: producerGeneration
                 ) else {
+                    noteIngestOutcome(
+                        .droppedStaleProducerRevision, windowId: adWindow.id
+                    )
                     continue
                 }
                 // The catalog actor hop is an episode-lifecycle suspension
@@ -2470,6 +2679,9 @@ actor SkipOrchestrator {
                         == expectedEpisodeGeneration,
                       activeAssetId == assetId,
                       activePodcastId == expectedShowId else {
+                    noteIngestOutcome(
+                        .droppedEpisodeReplaced, windowId: adWindow.id
+                    )
                     return
                 }
                 catalogProvenanceMustFailClosed = !hasCurrentAuthority
@@ -2480,6 +2692,9 @@ actor SkipOrchestrator {
             if provisionallyResolvingSuggestWindowIds.contains(adWindow.id) {
                 bufferedSuggestProducerUpdates[adWindow.id] =
                     .adWindow(adWindow)
+                noteIngestOutcome(
+                    .bufferedProvisionalResolution, windowId: adWindow.id
+                )
                 continue
             }
 
@@ -2490,6 +2705,9 @@ actor SkipOrchestrator {
             if hasTerminalSuggestResolution(adWindow.id) {
                 logger.debug(
                     "AdWindow \(adWindow.id, privacy: .public) ignored — suggestion already resolved by the user"
+                )
+                noteIngestOutcome(
+                    .droppedUserResolvedSuggestion, windowId: adWindow.id
                 )
                 continue
             }
@@ -2503,6 +2721,7 @@ actor SkipOrchestrator {
             if existingState == .reverted
                 || revertedProducerWindowIds.contains(adWindow.id) {
                 retireSuggestedWindowIfPresent(windowId: adWindow.id)
+                noteIngestOutcome(.droppedUserReverted, windowId: adWindow.id)
                 continue
             }
 
@@ -2528,6 +2747,11 @@ actor SkipOrchestrator {
                 } else {
                     _ = retireNonRevertedWindowStateIfMatching(adWindow)
                 }
+                noteIngestOutcome(
+                    .droppedProducerTerminalState,
+                    windowId: adWindow.id,
+                    detail: incomingState.rawValue
+                )
                 continue
             }
 
@@ -2542,6 +2766,9 @@ actor SkipOrchestrator {
                 )
                 logger.warning(
                     "AdWindow \(adWindow.id, privacy: .public) has malformed eligibilityGate — automatic admission refused"
+                )
+                noteIngestOutcome(
+                    .droppedMalformedEligibilityGate, windowId: adWindow.id
                 )
                 continue
             }
@@ -2575,6 +2802,15 @@ actor SkipOrchestrator {
                     )
                     retireAllNonRevertedWindowStateIfPresent(
                         windowId: adWindow.id
+                    )
+                    // playhead-isp5: the REASON is part of the outcome. Four
+                    // rejection reasons share this branch and they are four
+                    // unrelated defects — `tooEarly` on a pre-roll is not the
+                    // same news as `overlapsDeclaredChapter`.
+                    noteIngestOutcome(
+                        .droppedInventorySanity,
+                        windowId: adWindow.id,
+                        detail: reason.rawValue
                     )
                     continue
                 }
@@ -2661,8 +2897,23 @@ actor SkipOrchestrator {
                         "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — surfacing as suggest tier"
                     )
                 }
-                if !banneredWindowIds.contains(adWindow.id) {
+                if banneredWindowIds.contains(adWindow.id) {
+                    noteIngestOutcome(
+                        .droppedAlreadyBannered, windowId: adWindow.id
+                    )
+                } else {
                     registerSuggestedWindow(adWindow)
+                    // playhead-isp5: `registerSuggestedWindow` DECLINES to arm
+                    // an unchanged revision whose token the user already saw.
+                    // Read the arming set rather than assuming the call armed —
+                    // an outcome that reports what it hoped for is the same
+                    // class of defect this bead exists to remove.
+                    noteIngestOutcome(
+                        armedSuggestWindowIds.contains(adWindow.id)
+                            ? .armedSuggest
+                            : .suggestReplayNotRearmed,
+                        windowId: adWindow.id
+                    )
                 }
                 continue
             }
@@ -2690,6 +2941,9 @@ actor SkipOrchestrator {
                     // branch above.
                     retireSuggestedWindowIfPresent(
                         windowId: adWindow.id
+                    )
+                    noteIngestOutcome(
+                        .retainedAppliedReceipt, windowId: adWindow.id
                     )
                     continue
                 }
@@ -2733,6 +2987,11 @@ actor SkipOrchestrator {
                 retireAllNonRevertedWindowStateIfPresent(
                     windowId: adWindow.id
                 )
+                noteIngestOutcome(
+                    .droppedBlockedGate,
+                    windowId: adWindow.id,
+                    detail: decoded.rawValue
+                )
                 continue
             }
 
@@ -2763,6 +3022,7 @@ actor SkipOrchestrator {
                 cueActive: false
             )
             windows[adWindow.id] = managed
+            noteIngestOutcome(.admittedManaged, windowId: adWindow.id)
 
             // playhead-hdgk: stamp the per-edge anchor tier persisted on the
             // row into `edgeAnchorsByWindowId` at the SAME moment the window

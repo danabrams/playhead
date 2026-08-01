@@ -434,6 +434,22 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         case skipModeWriteRefusedNoShowIdentity =
             "skip_mode_write_refused_no_show_identity"
 
+        /// playhead-isp5: one accounting of a persisted-ad-window delivery —
+        /// which door, how many rows were forwarded, and the terminal
+        /// disposition of each. Deliberately written for HEALTHY deliveries as
+        /// well as lossy ones: the 2026-08-01 field case could not be settled
+        /// precisely because "the ingest never ran" and "the ingest ran and
+        /// every row was dropped" left the same evidence, and only a row that
+        /// is always present can tell them apart. The body is
+        /// ``AdWindowIngestCensus/auditDescription``.
+        ///
+        /// Not an invariant violation in the Phase-1.5 sense; it shares this
+        /// channel because the channel — the JSON Lines session file that the
+        /// device pull already reads — is the one playhead-v7q6 settled as THE
+        /// audit trail. Volume is one row per episode start plus one per
+        /// mid-session mint.
+        case adWindowIngestCensus = "ad_window_ingest_census"
+
         /// playhead-cthe Invariant A (part 1): `PlaybackReadiness
         /// == .complete` but the coverage record is nil OR its
         /// `isComplete` flag is false. "complete" must be backed by a
