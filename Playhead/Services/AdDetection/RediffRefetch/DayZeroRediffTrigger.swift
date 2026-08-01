@@ -215,7 +215,24 @@ struct DayZeroRediffTrigger: Sendable {
             localAudioURL: playedFileURL,
             attemptState: .initial
         )
-        return await service.runDayZeroRefetch(for: candidate, kWayFetchCount: kWayFetchCount)
+        let summary = await service.runDayZeroRefetch(
+            for: candidate, kWayFetchCount: kWayFetchCount
+        )
+
+        // playhead-96ot — DELIVER WHAT WE JUST MINTED, in this session.
+        //
+        // The mint has already persisted its rows by the time
+        // `runDayZeroRefetch` returns, so the delivery target's store read
+        // cannot miss them. Gated on the MARK count rather than
+        // `summary.rotatedCount`: a run that resolved the shared attempt state
+        // and a run that put new rows on disk are two different facts, and only
+        // the second is worth a re-read. An unmarked run — `noDivergentSlot`,
+        // `allSlotsAlreadyCovered`, a thrown fetch — persisted nothing, so
+        // re-reading would forward only rows the session already holds.
+        if summary.dayZeroMarkCount > 0 {
+            await mintedMarkDelivery(analysisAssetId)
+        }
+        return summary
     }
 
     private typealias SweepSummary = RediffRefetchService.SweepSummary

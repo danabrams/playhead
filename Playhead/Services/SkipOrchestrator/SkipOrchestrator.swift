@@ -1798,92 +1798,149 @@ actor SkipOrchestrator {
             )
         }
 
-        // Bug 5 (skip-cues-deletion): pre-load directly from `ad_windows`,
-        // filtered to confirmed-confidence rows. Replaces the prior path
-        // that read from the now-deleted `skip_cues` table. The 0.7
-        // threshold mirrors the cue materializer's threshold so the
-        // preload set is byte-identical to what the cue table used to
-        // contain at the same point in time. We forward the persisted
-        // `AdWindow` rows directly to `receiveAdWindows` so the existing
-        // event-stream path applies its standard logic — eligibilityGate,
-        // banner state, decision-log dedup, etc. Forwarding the
-        // unmodified row preserves any auto-skip / markOnly precision
-        // gate stamped at write-time, which a synthesized "confirmed"
-        // shape would silently strip.
-        //
-        // Cycle-21 H-1: preload `ad_windows` and forward through
-        // `receiveAdWindows`. Filter excludes only `.suppressed`
-        // (terminal "no-skip" — replay wastes memory) and `.reverted`
-        // (user explicitly chose "Listen" — replay would risk pushing
-        // a cue the user rejected). `.candidate` and `.confirmed` are
-        // forwarded so the orchestrator can re-evaluate them.
-        // `.applied` is forwarded so a previously-skipped ad pushes its
-        // cue again on the next app launch — `evaluateAndPush`'s
-        // terminal-state branch (the `decisionState == .applied` arm)
-        // appends the row to `eligible` and `pushMergedCues` fires the
-        // skip cue. Without that forwarding, cross-launch auto-skip
-        // would silently regress: pre-pivot the `skip_cues` table re-
-        // cued every confidence-passing row at episode start; now the
-        // `ad_windows` rows must do the same job.
-        //
-        // Banner re-emission for the forwarded `.applied` rows is
-        // suppressed by pre-populating `banneredWindowIds` BEFORE the
-        // `receiveAdWindows` call. The terminal-state branch in
-        // `evaluateAndPush` only emits a banner when
-        // `!banneredWindowIds.contains(id)`; pre-populating the set
-        // turns the banner emission off for an already-skipped ad
-        // without affecting the cue push (the cue push happens via
-        // `eligible.append` regardless of the banner gate).
-        do {
-            let preWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
-            guard episodeLifecycleGeneration == lifecycleGeneration else {
-                return
-            }
-            // playhead-ynmk: the 0.7 floor is a DETECTOR-confidence filter, and
-            // a user-asserted row is not a detector claim. Before this bead both
-            // user gestures wrote `confidence = 1.0`, so the floor never
-            // excluded them; now that a banner confirmation carries the
-            // MEASURED value (0.40 in the field case), a row the user answered
-            // Yes to would silently drop out of cross-launch continuity because
-            // the detector was unsure — losing exactly the anchored population
-            // qs0d wants to keep skipping. Admitting the row is not admitting
-            // the skip: `paddedCueSpan` re-derives the extent on every push, so
-            // an unanchored asserted row still cues nothing.
-            let eligible = preWindows.filter {
-                ($0.confidence >= Self.preloadConfidenceThreshold
-                    || $0.userAssertion != nil)
-                    && $0.endTime > $0.startTime
-                    && Self.preloadEligibleDecisionStates.contains($0.decisionState)
-            }
-            if !eligible.isEmpty {
-                let appliedRawValue = SkipDecisionState.applied.rawValue
-                for window in eligible where window.decisionState == appliedRawValue {
-                    // Cycle-27 T-3 production-writer site (1 of 4): preload pre-population.
-                    banneredWindowIds.insert(window.id)
-                }
-                await receiveAdWindows(eligible)
-                guard episodeLifecycleGeneration == lifecycleGeneration else {
-                    return
-                }
-            }
-        } catch {
-            logger.warning("Failed to load preload ad_windows: \(error.localizedDescription)")
+        // Bug 5 (skip-cues-deletion): the cross-launch preload — read
+        // `ad_windows` directly and forward the admissible rows into
+        // `receiveAdWindows`. The mechanism, the admission rule and why
+        // `.applied` rows are pre-bannered all live on
+        // `forwardPersistedAdWindows` below, which playhead-96ot's
+        // mid-session ingest shares verbatim.
+        _ = await forwardPersistedAdWindows(
+            analysisAssetId: analysisAssetId,
+            lifecycleGeneration: lifecycleGeneration
+        )
+        guard episodeLifecycleGeneration == lifecycleGeneration else {
+            return
         }
 
         logger.info("Begin episode: asset=\(analysisAssetId)")
     }
 
-    /// playhead-96ot: re-read `ad_windows` for `analysisAssetId` and deliver
-    /// them MID-SESSION, through the same path `beginEpisode`'s cross-launch
-    /// preload uses.
+    /// The rows `beginEpisode`'s cross-launch preload and the playhead-96ot
+    /// mid-session ingest both admit.
     ///
-    /// RED STATE (playhead-96ot): deliberately inert. The behaviour lands in the
-    /// following commit; this stub exists only so the failing tests fail for a
-    /// BEHAVIOURAL reason rather than a compile error.
+    /// playhead-ynmk: the 0.7 floor is a DETECTOR-confidence filter, and a
+    /// user-asserted row is not a detector claim. Before that bead both user
+    /// gestures wrote `confidence = 1.0`, so the floor never excluded them; now
+    /// that a banner confirmation carries the MEASURED value (0.40 in the field
+    /// case), a row the user answered Yes to would silently drop out of
+    /// cross-launch continuity because the detector was unsure — losing exactly
+    /// the anchored population qs0d wants to keep skipping. Admitting the row is
+    /// not admitting the skip: `paddedCueSpan` re-derives the extent on every
+    /// push, so an unanchored asserted row still cues nothing.
+    private static func preloadAdmissibleWindows(_ rows: [AdWindow]) -> [AdWindow] {
+        rows.filter {
+            ($0.confidence >= preloadConfidenceThreshold
+                || $0.userAssertion != nil)
+                && $0.endTime > $0.startTime
+                && preloadEligibleDecisionStates.contains($0.decisionState)
+        }
+    }
+
+    /// Read `ad_windows` for `analysisAssetId` and forward the admissible rows
+    /// through `receiveAdWindows`. Returns how many rows were forwarded — 0 for
+    /// a store failure, an empty admissible set, or a lifecycle replacement
+    /// under the store read.
+    ///
+    /// ONE implementation, two callers. `beginEpisode` reaches it for the
+    /// cross-launch preload and `ingestPersistedAdWindows` for the playhead-96ot
+    /// mid-session delivery, so the admission rule cannot drift between the two
+    /// doors — a divergence here would be a silent veto bypass on one of them.
+    ///
+    /// Bug 5 (skip-cues-deletion): the rows are read directly from `ad_windows`,
+    /// which replaced the now-deleted `skip_cues` table. The 0.7 threshold in
+    /// `preloadAdmissibleWindows` mirrors the cue materializer's threshold so
+    /// the preload set is byte-identical to what the cue table used to contain
+    /// at the same point in time. The persisted `AdWindow` rows go to
+    /// `receiveAdWindows` UNMODIFIED so the existing event-stream path applies
+    /// its standard logic — eligibilityGate, banner state, decision-log dedup —
+    /// and so any auto-skip / markOnly precision gate stamped at write time
+    /// survives, which a synthesized "confirmed" shape would silently strip.
+    ///
+    /// Cycle-21 H-1: the filter excludes only `.suppressed` (terminal "no-skip"
+    /// — replay wastes memory) and `.reverted` (the user explicitly chose
+    /// "Listen" — replay would risk pushing a cue they rejected). `.candidate`
+    /// and `.confirmed` are forwarded so the orchestrator can re-evaluate them.
+    /// `.applied` is forwarded so a previously-skipped ad pushes its cue again
+    /// on the next app launch — `evaluateAndPush`'s terminal-state branch (the
+    /// `decisionState == .applied` arm) appends the row to `eligible` and
+    /// `pushMergedCues` fires the skip cue. Without that forwarding,
+    /// cross-launch auto-skip would silently regress: pre-pivot the `skip_cues`
+    /// table re-cued every confidence-passing row at episode start; now the
+    /// `ad_windows` rows must do the same job.
+    ///
+    /// Banner re-emission for the forwarded `.applied` rows is suppressed by
+    /// pre-populating `banneredWindowIds` BEFORE the `receiveAdWindows` call.
+    /// The terminal-state branch in `evaluateAndPush` only emits a banner when
+    /// `!banneredWindowIds.contains(id)`; pre-populating the set turns the
+    /// banner emission off for an already-skipped ad without affecting the cue
+    /// push (the cue push happens via `eligible.append` regardless of the banner
+    /// gate). Mid-session that pre-population is a no-op in the common case — an
+    /// ad applied in THIS session is already in the set — and it is the right
+    /// behaviour in the uncommon one: a durably-`.applied` row is an ad that was
+    /// already skipped, so re-announcing it would be stale.
+    @discardableResult
+    private func forwardPersistedAdWindows(
+        analysisAssetId: String,
+        lifecycleGeneration: UInt64
+    ) async -> Int {
+        let preWindows: [AdWindow]
+        do {
+            preWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+        } catch {
+            logger.warning("Failed to load preload ad_windows: \(error.localizedDescription)")
+            return 0
+        }
+        guard episodeLifecycleGeneration == lifecycleGeneration else {
+            return 0
+        }
+        let eligible = Self.preloadAdmissibleWindows(preWindows)
+        guard !eligible.isEmpty else { return 0 }
+        let appliedRawValue = SkipDecisionState.applied.rawValue
+        for window in eligible where window.decisionState == appliedRawValue {
+            // Cycle-27 T-3 production-writer site (1 of 4): preload pre-population.
+            banneredWindowIds.insert(window.id)
+        }
+        await receiveAdWindows(eligible)
+        return eligible.count
+    }
+
+    /// playhead-96ot: re-read `ad_windows` for `analysisAssetId` and deliver
+    /// them to the LIVE session, through the same door `beginEpisode`'s
+    /// cross-launch preload uses. Returns how many rows were forwarded.
+    ///
+    /// WHY THIS EXISTS. `AdDetectionService.mintByteExactDayZeroMarks` persists
+    /// its windows and returns; until this method, nothing handed them to the
+    /// orchestrator until the NEXT `beginEpisode`. Day-0 rediff fires ~19 s into
+    /// a FIRST listen — exactly when the ads it found are still AHEAD of the
+    /// playhead — and playhead-qs0d had just made those windows genuinely
+    /// auto-skippable. The user had to re-open the episode to get the skip the
+    /// mechanism had already earned.
+    ///
+    /// NO-OP UNLESS `analysisAssetId` IS PLAYING. The check is this actor's
+    /// `activeAssetId`, read inside the actor, so there is no window between
+    /// "is it current?" and "ingest it" for an episode switch to slip through.
+    /// A mint for some other episode is not lost — the rows are durable and the
+    /// next `beginEpisode` preloads them, which is exactly the pre-96ot path and
+    /// the right one for an episode nobody is listening to.
+    ///
+    /// DELIBERATELY NOT AN EMITTER. Ingest ARMS suggest-tier material and stops;
+    /// `updatePlayheadTime` presents it (playhead-d3g0). Emitting here would
+    /// reintroduce the hazard d3g0 avoided by not emitting at registration —
+    /// `currentPlayheadTime` is a stale 0 between `beginEpisode` and the first
+    /// position observation, so a synchronous emit would banner every span
+    /// containing 0:00 regardless of where the listener actually is.
     @discardableResult
     func ingestPersistedAdWindows(analysisAssetId: String) async -> Int {
-        _ = analysisAssetId
-        return 0
+        guard activeAssetId == analysisAssetId else {
+            logger.debug(
+                "ingestPersistedAdWindows: dropping mismatched asset \(analysisAssetId, privacy: .public) (active=\(self.activeAssetId ?? "nil", privacy: .public))"
+            )
+            return 0
+        }
+        return await forwardPersistedAdWindows(
+            analysisAssetId: analysisAssetId,
+            lifecycleGeneration: episodeLifecycleGeneration
+        )
     }
 
     /// End orchestration for the current episode.

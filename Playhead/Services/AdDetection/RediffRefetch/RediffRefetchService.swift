@@ -280,8 +280,6 @@ actor RediffRefetchService {
         /// and keying it off a counter that means something else is exactly the
         /// "trusting a number without asking what it measures" defect.
         /// Always `0` for the lagged sweep, which mints nothing.
-        ///
-        /// RED STATE (playhead-96ot): declared but never incremented.
         var dayZeroMarkCount = 0
         var totalBytes: Int { precheckBytes + fullFetchBytes }
     }
@@ -326,6 +324,11 @@ actor RediffRefetchService {
         let cost: RediffRefetchPolicy.BandwidthCost
         let rotated: Bool
         let failed: Bool
+        /// playhead-96ot: AdWindows the DAY-0 mint persisted, carried up so
+        /// `runDayZeroRefetch` can report it. Defaulted, so every lagged-sweep
+        /// construction below stays literally unchanged and reports 0 — the
+        /// lagged path has no minter and persists no windows.
+        var dayZeroMarkCount: Int = 0
     }
 
     /// Pre-check one candidate; full-fetch + fingerprint/consume + DELETE only
@@ -571,8 +574,12 @@ actor RediffRefetchService {
         summary.fullFetchBytes += result.cost.fullFetchBytes
         if result.rotated { summary.rotatedCount += 1 }
         if result.failed { summary.failedCount += 1 }
+        // playhead-96ot: how many AdWindow ROWS this run put on disk — the fact
+        // the in-session delivery is about. `rotatedCount` above is a different
+        // fact (the shared attempt state resolved) that happens to move with it.
+        summary.dayZeroMarkCount += result.dayZeroMarkCount
         logger.info(
-            "rediff DAY-0 refetch asset=\(candidate.assetId, privacy: .public) marked=\(summary.rotatedCount, privacy: .public) failed=\(summary.failedCount, privacy: .public) bytes=\(summary.totalBytes, privacy: .public)"
+            "rediff DAY-0 refetch asset=\(candidate.assetId, privacy: .public) marks=\(summary.dayZeroMarkCount, privacy: .public) resolved=\(summary.rotatedCount, privacy: .public) failed=\(summary.failedCount, privacy: .public) bytes=\(summary.totalBytes, privacy: .public)"
         )
         return summary
     }
@@ -646,7 +653,10 @@ actor RediffRefetchService {
                 let newState = RediffRefetchPolicy.markResolved(candidate.attemptState, at: sweepNow)
                 await recorder.recordOutcome(.dayZeroMarked(
                     assetId: candidate.assetId, cost: cost, mint: mint, newState: newState))
-                return CandidateResult(cost: cost, rotated: true, failed: false)
+                return CandidateResult(
+                    cost: cost, rotated: true, failed: false,
+                    dayZeroMarkCount: mint.markCount
+                )
             } else {
                 // POISONING FIX: no marks ⇒ bandwidth accounted, NO
                 // `rediff_refetch_state` advance (the asset stays a lagged
