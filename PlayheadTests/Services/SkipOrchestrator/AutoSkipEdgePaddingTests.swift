@@ -540,13 +540,23 @@ struct AutoSkipEdgePaddingWiringTests {
         }
     }
 
-    @Test("ON: accepted suggestion is exempt — the user's tap skips the exact span with NO anchors stamped")
-    func onAcceptedSuggestionExempt() async throws {
-        // The load-bearing case for the "userConfirmedSuggested" exemption:
-        // acceptSuggestedSkip promotes to a fresh UUID-keyed window that
-        // never gets edge anchors stamped. Without the boundaryState
-        // exemption, the flag-ON veto would silently demote the user's own
-        // "Skip" tap back to markOnly.
+    @Test("ON: an accepted suggestion is NOT exempt — an unanchored extent stays markOnly (playhead-ynmk)")
+    func onAcceptedSuggestionIsGovernedByTheExtentPolicy() async throws {
+        // playhead-ynmk INVERTED THIS TEST, deliberately. It used to assert
+        // that a tap on a suggest banner skipped the detector's exact span even
+        // with the policy ON, on the premise that "the user chose those edges
+        // deliberately" — the same premise the file header still states for
+        // user-initiated skips.
+        //
+        // That premise is false for a CONFIRMATION and was measured false in
+        // the field on 2026-07-31: three both-edges-unanchored spans were
+        // confirmed by one tap each and 210 s of SHOW was skipped, 0 of 3
+        // correct. The user answers "is this an ad?"; the DETECTOR draws the
+        // edges. So a confirmation is governed by this policy exactly like an
+        // auto-skip, and an unanchored start still yields no late-safe window.
+        //
+        // It stays true for `userMarked` (playhead-527u), where the user really
+        // did draw the edges — see `onUserMarkedExempt` and the ynmk suite.
         let store = try await makeTestStore()
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(episodeId: "asset-1")
@@ -588,11 +598,10 @@ struct AutoSkipEdgePaddingWiringTests {
 
         await orchestrator.acceptSuggestedSkip(windowId: "ad-suggested")
 
-        #expect(pushedCues.count == 1, "The accepted suggestion must skip despite padding ON and no anchors")
-        if let cue = pushedCues.first {
-            #expect(Self.cueStart(cue) == 400)
-            #expect(Self.cueEnd(cue) == 459) // exact span minus trailing cushion; no padding
-        }
+        #expect(
+            pushedCues.isEmpty,
+            "An accepted suggestion with no anchored edge has no late-safe window — markOnly"
+        )
     }
 
     @Test("ON: markOnly spans are untouched — suggest tier surfacing, no cue, no state change")

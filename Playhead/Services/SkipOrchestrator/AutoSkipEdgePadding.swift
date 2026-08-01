@@ -31,9 +31,21 @@
 //   • Degenerate spans whose width is consumed by the combined margins
 //     return nil (skip suppressed, span stays markOnly).
 //   • markOnly / suggest / banner spans never reach this policy — the
-//     orchestrator consults it only on the auto-skip path. User-initiated
-//     skips (user-marked spans, accepted suggestions, manual taps) are
-//     exempted by the caller: the user chose those edges deliberately.
+//     orchestrator consults it only on the auto-skip path. Skips whose EXTENT
+//     the user chose (a span marked in the transcript, a manual tap on an
+//     ordinary detection row) are exempted by the caller: those edges are the
+//     user's own.
+//
+//     playhead-ynmk narrowed that exemption. It used to include an ACCEPTED
+//     SUGGESTION, on the premise that a banner Yes chose the edges. It does
+//     not: the banner asks "is this an ad?", and the DETECTOR drew the span.
+//     Measured false in the field on 2026-07-31 — three both-edges-unanchored
+//     spans confirmed by one tap each, 0 of 3 correct, 210 s of SHOW skipped.
+//     A confirmation is now governed by this policy exactly like an auto-skip,
+//     and independently of the Gate-2 master switch (the same targeted
+//     activation shape qs0d used for byte-exact pairs, and safe for the same
+//     reason: this policy only ever shrinks or suppresses).
+//     `UserSpanAssertion.assertsExtent` is where the two cases are told apart.
 //   • CUSHION STACKING: the orchestrator's pre-existing pod-level trailing
 //     cushion (`SkipPolicyConfig.adTrailingCushionSeconds`, 1.0 s,
 //     playhead-vn7n.2) applies AFTER these margins, to each merged cue's
@@ -58,6 +70,63 @@
 // posture, not a shortcut; enabling auto-skip is a separate Gate-2 decision.
 
 import Foundation
+
+// MARK: - UserSpanAssertion
+
+/// What a USER asserted about a span, as distinct from what the DETECTOR
+/// measured about it (playhead-ynmk).
+///
+/// `AdWindow.confidence` is the measured quantity and a user gesture must never
+/// write it. Apply the standing check to the value a tap used to synthesise: a
+/// confirmation wrote `confidence = 1.0`, and a span of pure show content
+/// confirmed by mistake would read `1.00` just the same — so the number
+/// recorded that a tap happened, not that an ad exists. That is how 210 s of
+/// show came to be skipped on 2026-07-31 with the aggregator 0 of 3 correct,
+/// and it is the same defect class as pz32's checkmark.
+///
+/// The gesture is recorded instead in the `AdWindow.boundaryState` column,
+/// which has always carried it and which nothing reads as certainty. This enum
+/// is that column's user-owned half, typed.
+///
+/// The two cases are NOT interchangeable, and the difference is the bead.
+enum UserSpanAssertion: String, Sendable, Equatable, CaseIterable {
+    /// The user drew this span themselves in the transcript (playhead-527u).
+    /// Asserts PRESENCE **and** EXTENT — the edges are the user's own.
+    case userMarked
+    /// The user answered Yes to a suggest-tier banner. Asserts PRESENCE ONLY:
+    /// the question was "is this an ad?", the DETECTOR drew the edges, and the
+    /// user was never asked whether it is safe to cut from here to there.
+    case userConfirmedSuggested
+
+    /// Whether this assertion covers where the span BEGINS and ENDS.
+    ///
+    /// Only a span the user drew does. A confirmation's extent stays the
+    /// detector's, so it is governed by `AutoSkipEdgePadding` like any other
+    /// detector extent.
+    ///
+    /// This is the fidelity ladder (feedback_manual_marks_override_2026-07-29:
+    /// transcript marking > banner response > inferred listenRevert) expressed
+    /// as a capability rather than a rank. A confirmation still outranks an
+    /// inferred revert on PRESENCE — nothing here touches that. It simply never
+    /// outranked anything on EXTENT, because it never carried extent
+    /// information in the first place.
+    var assertsExtent: Bool {
+        switch self {
+        case .userMarked:
+            return true
+        case .userConfirmedSuggested:
+            return false
+        }
+    }
+}
+
+extension AdWindow {
+    /// The user gesture recorded on this row, if any — `nil` for every purely
+    /// detector-produced boundary state. See `UserSpanAssertion`.
+    var userAssertion: UserSpanAssertion? {
+        UserSpanAssertion(rawValue: boundaryState)
+    }
+}
 
 // MARK: - AutoSkipEdgeAnchor
 

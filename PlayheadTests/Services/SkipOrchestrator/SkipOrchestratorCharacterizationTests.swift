@@ -1202,7 +1202,14 @@ struct SkipOrchestratorSuggestTierTests {
         id: String = "ad-suggest-1",
         startTime: Double = 60,
         endTime: Double = 120,
-        evidenceSources: String? = nil
+        evidenceSources: String? = nil,
+        // playhead-ynmk: whether the span's EXTENT is byte-verified. A
+        // confirmation only skips when the derived per-edge policy has a
+        // late-safe window, so the tests here that observe the acceptance
+        // through `applied` / `wasSkipped` opt in explicitly. Default stays
+        // `.unanchored` so the field case is not hidden from this file.
+        startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
+        endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -1224,7 +1231,9 @@ struct SkipOrchestratorSuggestTierTests {
             wasSkipped: false,
             userDismissedBanner: false,
             evidenceSources: evidenceSources,
-            eligibilityGate: "markOnly"
+            eligibilityGate: "markOnly",
+            startEdgeAnchor: startEdgeAnchor.rawValue,
+            endEdgeAnchor: endEdgeAnchor.rawValue
         )
     }
 
@@ -1391,9 +1400,16 @@ struct SkipOrchestratorSuggestTierTests {
             podcastId: "podcast-1"
         )
 
+        // playhead-ynmk: byte-exact on both edges. This test's subject is the
+        // PROMOTION (one durable applied row, fresh id, evidence carried
+        // across, no detailed-log copy) — it needs a span the confirmation is
+        // permitted to skip. The unanchored outcome is a different contract and
+        // lives in `BannerConfirmationExtentGateTests`.
         let window = makeMarkOnlyAdWindow(
             id: "ad-suggest-accept",
-            evidenceSources: "classifier,catalog"
+            evidenceSources: "classifier,catalog",
+            startEdgeAnchor: .rediffByteExact,
+            endEdgeAnchor: .rediffByteExact
         )
         try await store.insertAdWindow(window)
         await orchestrator.receiveAdWindows([window])
@@ -1423,7 +1439,13 @@ struct SkipOrchestratorSuggestTierTests {
             "acceptSuggestedSkip must durably apply exactly one promoted window"
         )
         #expect(promoted.id != window.id)
-        #expect(promoted.confidence == 1.0)
+        // playhead-ynmk INVERTED this assertion. It used to require 1.0, which
+        // the tap synthesised: a span of pure show content confirmed by mistake
+        // would have read 1.00 too, so the number recorded that a tap happened,
+        // not that an ad exists. The DETECTOR's measured value survives the tap;
+        // the assertion itself lives in `boundaryState`.
+        #expect(promoted.confidence == window.confidence)
+        #expect(promoted.boundaryState == "userConfirmedSuggested")
         #expect(promoted.evidenceSources == window.evidenceSources)
 
         let decisionLog = await orchestrator.getDecisionLog()
@@ -1761,7 +1783,16 @@ struct SkipOrchestratorSuggestTierTests {
         }
 
         // 1. markOnly arrives → suggest banner emitted, suggestWindows populated.
-        let markOnly = makeMarkOnlyAdWindow(id: "ad-tap-flip", startTime: 30, endTime: 60)
+        // playhead-ynmk: byte-exact edges — this test's subject is the
+        // tap-then-flip race guard, which it observes through the single
+        // durable applied row, so the confirmation has to be skippable.
+        let markOnly = makeMarkOnlyAdWindow(
+            id: "ad-tap-flip",
+            startTime: 30,
+            endTime: 60,
+            startEdgeAnchor: .rediffByteExact,
+            endEdgeAnchor: .rediffByteExact
+        )
         try await store.insertAdWindow(markOnly)
         await orchestrator.receiveAdWindows([markOnly])
 

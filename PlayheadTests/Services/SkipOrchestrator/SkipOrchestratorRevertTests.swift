@@ -1193,7 +1193,14 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
             analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
         )
 
-        let suggestion = makeSkipTestMarkOnlyWindow(id: "sug-accept-race")
+        // playhead-ynmk: byte-exact edges. The positive control below reads the
+        // durable applied+skipped row to prove the gesture really committed, so
+        // the confirmation needs a late-safe extent to skip.
+        let suggestion = makeSkipTestMarkOnlyWindow(
+            id: "sug-accept-race",
+            startEdgeAnchor: .rediffByteExact,
+            endEdgeAnchor: .rediffByteExact
+        )
         try await store.insertAdWindow(suggestion)
         await orchestrator.receiveAdWindows([suggestion])
         #expect(
@@ -4599,7 +4606,16 @@ struct SkipOrchestratorRevertTests {
         confidence: Double = 0.55,
         decisionState: String = AdDecisionState.candidate.rawValue,
         eligibilityGate: String = SkipEligibilityGate.markOnly.rawValue,
-        catalogStoreMatchSimilarity: Double? = nil
+        catalogStoreMatchSimilarity: Double? = nil,
+        // playhead-ynmk: the per-edge anchor tier decides whether a CONFIRMED
+        // suggestion has a late-safe extent to skip. Default `.unanchored`
+        // (unchanged behaviour for every fixture that never accepts), so the
+        // handful of tests here that observe the acceptance transaction through
+        // "applied / wasSkipped / a cue fired" opt IN explicitly — see the
+        // `anchored:` call sites. Making the default anchored would have hidden
+        // the unanchored case from this whole file at a stroke.
+        startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
+        endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -4619,7 +4635,31 @@ struct SkipOrchestratorRevertTests {
             userDismissedBanner: false,
             evidenceSources: nil,
             eligibilityGate: eligibilityGate,
-            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity
+            catalogStoreMatchSimilarity: catalogStoreMatchSimilarity,
+            startEdgeAnchor: startEdgeAnchor.rawValue,
+            endEdgeAnchor: endEdgeAnchor.rawValue
+        )
+    }
+
+    /// A suggestion whose EXTENT is byte-verified on both edges, so confirming
+    /// it really does skip (playhead-qs0d's 2-of-2 population). Used by the
+    /// tests in this file whose subject is the acceptance TRANSACTION —
+    /// atomicity, retry-after-failure, stale-revision rejection, cross-episode
+    /// attribution — and which read "it landed" off `applied` / `wasSkipped` /
+    /// a pushed cue. playhead-ynmk made that outcome conditional on the extent,
+    /// so those fixtures have to state the extent they depend on. The
+    /// unanchored outcome is pinned in `BannerConfirmationExtentGateTests`.
+    private func makeAnchoredSuggestWindow(
+        id: String,
+        startTime: Double = 60,
+        endTime: Double = 120
+    ) -> AdWindow {
+        makeSuggestWindow(
+            id: id,
+            startTime: startTime,
+            endTime: endTime,
+            startEdgeAnchor: .rediffByteExact,
+            endEdgeAnchor: .rediffByteExact
         )
     }
 
@@ -5943,7 +5983,7 @@ struct SkipOrchestratorRevertTests {
 
         let stream = await orchestrator.bannerEventStream()
         let probe = BoundedStreamProbe(stream)
-        let suggest = makeSuggestWindow(id: "accept-shadow-window")
+        let suggest = makeAnchoredSuggestWindow(id: "accept-shadow-window")
         try await store.insertAdWindow(suggest)
         await orchestrator.receiveAdWindows([suggest])
         guard case let .present(item) = await probe.next() else {
@@ -5982,7 +6022,7 @@ struct SkipOrchestratorRevertTests {
                 == AdDecisionState.applied.rawValue)
         #expect(promotedRows.first?.wasSkipped == true)
 
-        let revisedMarkOnly = makeSuggestWindow(
+        let revisedMarkOnly = makeAnchoredSuggestWindow(
             id: suggest.id,
             startTime: 75,
             endTime: 135
@@ -6094,7 +6134,7 @@ struct SkipOrchestratorRevertTests {
         // The in-memory producer can deliver before its row becomes visible to
         // this store. That missing authoritative row forces the acceptance
         // transaction to fail deterministically.
-        let suggest = makeSuggestWindow(id: "accept-persistence-retry")
+        let suggest = makeAnchoredSuggestWindow(id: "accept-persistence-retry")
         await orchestrator.receiveAdWindows([suggest])
         let decisionCountBeforeFeedback =
             await orchestrator.getDecisionLog().count
@@ -6211,7 +6251,7 @@ struct SkipOrchestratorRevertTests {
             playbackLifecycleGeneration: 311
         )
 
-        let suggestion = makeSuggestWindow(
+        let suggestion = makeAnchoredSuggestWindow(
             id: "suggest-yes-during-replacement"
         )
         try await store.insertAdWindow(suggestion)
@@ -6285,12 +6325,12 @@ struct SkipOrchestratorRevertTests {
             episodeId: "episode-1"
         )
 
-        let original = makeSuggestWindow(
+        let original = makeAnchoredSuggestWindow(
             id: "yes-buffered-revision",
             startTime: 60,
             endTime: 120
         )
-        let latest = makeSuggestWindow(
+        let latest = makeAnchoredSuggestWindow(
             id: original.id,
             startTime: 70,
             endTime: 135
@@ -7111,7 +7151,7 @@ struct SkipOrchestratorRevertTests {
 
         let stream = await orchestrator.bannerItemStream()
         let probe = BoundedStreamProbe(stream)
-        let original = makeSuggestWindow(
+        let original = makeAnchoredSuggestWindow(
             id: "same-id-same-lifecycle",
             startTime: 60.12341,
             endTime: 75.9876
@@ -7123,7 +7163,7 @@ struct SkipOrchestratorRevertTests {
             oldItem.suggestionRevisionToken
         )
 
-        let revised = makeSuggestWindow(
+        let revised = makeAnchoredSuggestWindow(
             id: original.id,
             startTime: 60.1234,
             endTime: 75.9876
