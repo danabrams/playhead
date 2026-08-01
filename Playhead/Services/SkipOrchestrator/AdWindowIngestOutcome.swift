@@ -127,8 +127,12 @@ enum AdWindowIngestOutcome: String, Sendable, Hashable, CaseIterable {
     /// carries the rejection REASON (`tooShort` / `tooEarly` / `tooLate` /
     /// `overlapsDeclaredChapter`), because those four are four different bugs.
     ///
-    /// `tooEarly` in particular fires on any span starting inside the first
-    /// three seconds of the episode — which is every pre-roll.
+    /// `tooEarly` USED TO fire on any span starting inside the first three
+    /// seconds of the episode — which is every pre-roll — and `tooLate` on
+    /// any span ending inside the last three, which is every post-roll. That
+    /// is the defect this counter found and playhead-b6r2 fixed: both rules
+    /// now measure the span's INNER edge, so `tooEarly=N` on a pre-roll
+    /// reads zero and a non-zero value is news again.
     case droppedInventorySanity = "ingest_dropped_inventory_sanity"
 
     /// A recognised non-`.eligible` gate other than `.markOnly` (the blocked-*

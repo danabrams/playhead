@@ -897,17 +897,27 @@ actor SkipOrchestrator {
         repeatedAdCache: RepeatedAdCacheService? = nil,
         invariantLogger: SurfaceStatusInvariantLogger = SurfaceStatusInvariantLogger(),
         episodeIdHasher: (@Sendable (String) -> String)? = nil,
-        // playhead-xr3t (review): default to a disabled no-op filter so
-        // pre-existing test surface that constructs `SkipOrchestrator`
-        // — and never sets episode-duration / declared-chapter context
-        // — doesn't silently lose pre-roll/post-roll spans to the
-        // head-/tail-edge rules. Production wires the real settings-
-        // backed filter explicitly via `InventorySanityFilter
-        // .production()` (see `PlayheadRuntime`), preserving the bead's
-        // spec default ON for new builds. This avoids an implicit
-        // `UserDefaults.standard` dependency leaking into every test
-        // that didn't ask for one.
-        inventoryFilter: InventorySanityFilter = InventorySanityFilter(isEnabled: false)
+        // playhead-b6r2: the default is the configuration PRODUCTION runs on
+        // a fresh install, bound to it by construction rather than by two
+        // literals that agree until they don't.
+        //
+        // It used to be `InventorySanityFilter(isEnabled: false)`, and the
+        // xr3t review comment it carried named the hazard outright — "so
+        // pre-existing test surface ... doesn't silently lose pre-roll /
+        // post-roll spans to the head-/tail-edge rules". The review knew the
+        // edge rules ate pre-rolls and turned the guard off in the OBSERVATION
+        // surface while leaving it on in the field. Consequence: playhead-djl0
+        // reproduced the 2026-08-01 field case exactly — same asset, same four
+        // windows, same `start: 0, end: 45.1` — asserted the banner IS emitted,
+        // and PASSED, for eleven weeks, because its orchestrator's filter was
+        // off. Two investigations were lost to a hazard that had been routed
+        // around instead of fixed.
+        //
+        // Still no `UserDefaults` dependency: this reads
+        // `LightweightInventoryChecksSettings.defaultEnabled`, a constant, not
+        // `.load()`. A suite that wants the filter OFF passes one explicitly,
+        // which is a statement rather than an inheritance.
+        inventoryFilter: InventorySanityFilter = .productionDefaultConfiguration
     ) {
         self.store = store
         self.adCatalogStore = adCatalogStore

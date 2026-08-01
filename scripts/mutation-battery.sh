@@ -144,6 +144,32 @@
 #   mutation fault). Batches 1-55 and 59-60 were NOT re-run and carry the
 #   verdicts above. Recount: the array now holds 111 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-01 (playhead-b6r2). Batches 85-90 (B01-B07, 7 new
+#   entries) plus batch 81 — W01/W02, whose expectation this bead re-pointed.
+#   FINAL 9 KILLED / 0 SURVIVED / 0 ERROR, 8 builds, ~21m wall clock. Batches
+#   1-80 and 82-84 were NOT re-run and carry the verdicts above. Recount: the
+#   array now holds 152 live entries.
+#
+#   THE PRE-FLIGHT EARNED ITS KEEP. The first attempt refused to run: the
+#   focused set was already RED on two xr3t review-round tests
+#   (`managedAdWindowReplacementCannotBypassInventoryFilter` and its
+#   AdDecisionResult twin), both of which demonstrate "a same-ID geometry
+#   change re-runs inventory validation" by replacing a span with `[0, 60]`.
+#   That is a PRE-ROLL, which the corrected rule (b) admits. Without the
+#   baseline check, six mutations would have been credited KILLED off two
+#   failures that had nothing to do with them.
+#
+#   B01's issue list was READ, not trusted, and it says something the bead did
+#   not: restoring the old head rule reddens FOUR tests belonging to other
+#   beads — d3g0's `Pre-roll banners when the playhead is AT 0:00`, d3g0's
+#   field-batch test, djl0's no-show banner trace, and the shadow-mode markOnly
+#   banner. Those tests passed on main for eleven weeks while the field
+#   behaviour they describe was broken, because `SkipOrchestrator.init`
+#   defaulted the filter OFF. They are red under B01 only because this bead
+#   bound that default to production. That is the bead's option 3 measured
+#   rather than argued: the divergence, not the rule, is what made the loss
+#   invisible — flipping the default alone would have gone red in April.
+#
 #   L06 was RE-CUT rather than re-verified. Its edit (admit `.candidate`
 #   wholesale) used to be "the playhead-evc1 carve-out applied early"; since
 #   evc1 landed it is the WRONG carve — it admits the segment aggregator's
@@ -342,10 +368,14 @@ MODEL="Playhead/Models/Podcast.swift"
 # delivery, a reason that never renders — and those live in the value type, not
 # in the orchestrator that stamps it.
 INGO="Playhead/Services/SkipOrchestrator/AdWindowIngestOutcome.swift"
+# playhead-b6r2: the inventory sanity filter. A pure value type, which is why
+# the B rails split cleanly — the edge READING lives here and the DEFAULT that
+# decides whether tests ever see it lives in the orchestrator's init.
+INVF="Playhead/Services/AdDetection/InventorySanityFilter.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO"
+  "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
 )
 
 FOCUSED_SUITES=(
@@ -457,6 +487,22 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AdWindowIngestDoorOutcomeTests
   -only-testing:PlayheadTests/AdWindowIngestLifetimeTests
   -only-testing:PlayheadTests/AdWindowIngestTaxonomyTests
+  # playhead-b6r2: the inventory filter's edge reading (B01-B07). The isp5
+  # suites above stay in scope deliberately — the census is where the fix is
+  # MEASURED, so an edge-rule mutation that satisfied the filter's own unit
+  # tests while losing the window at the orchestrator boundary would otherwise
+  # go unseen. The xr3t contract suites are here because this bead rewrote
+  # them; a mutation that reverts the reading must redden the rewritten
+  # contract, not only the new tests.
+  -only-testing:PlayheadTests/InventorySanityInnerEdgeRuleTests
+  -only-testing:PlayheadTests/FieldEdgeWindowsArmTests
+  -only-testing:PlayheadTests/FieldPreRollBannerTests
+  -only-testing:PlayheadTests/InventoryFilterDefaultDivergenceTests
+  -only-testing:PlayheadTests/ImpossibleGeometryIsMaterialTests
+  -only-testing:PlayheadTests/InventorySanityFilterEdgeTests
+  -only-testing:PlayheadTests/InventorySanityFilterRejectionRateTests
+  -only-testing:PlayheadTests/InventorySanityFilterRollbackTests
+  -only-testing:PlayheadTests/SkipOrchestratorInventoryFilterIntegrationTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -754,7 +800,15 @@ T_USN1_ADOPT="the runtime adopts an identity only the orchestrator could recover
 
 # playhead-isp5 — the ingest audit trail (W01-W06).
 T_ISP5_NOTPLAYING="an ingest for an episode that is not playing is counted, not just logged"
-T_ISP5_TOOEARLY="the field pre-roll is dropped by the inventory filter as tooEarly"
+# playhead-b6r2 RE-POINTED this one. It used to name "the field pre-roll is
+# dropped by the inventory filter as tooEarly", which was the only test
+# asserting the drop's REASON — and that test now asserts the pre-roll ARMS,
+# because the drop was the defect. W02 (stamp the outcome without its reason)
+# would have SURVIVED silently against the renamed test. The detail assertion
+# moved to the head-artifact test, so the rail follows it. This is the
+# script's documented failure mode — an expectation naming a test that no
+# longer makes the claim — caught by reading the rename rather than by a run.
+T_ISP5_REASON="the production filter still rejects a head artifact in the same delivery"
 T_ISP5_LIFETIME="endEpisode clears the per-window stamps and keeps the counts"
 T_ISP5_DELIVERED="exactly three outcomes count as delivered"
 T_ISP5_ROW="the delivery leaves ONE durable census row that names the cause"
@@ -765,6 +819,23 @@ T_USN1_STALE="a superseded play request does not adopt"
 T_USN1_VMREVERT="a refused write restores the pill to what it said before the tap"
 T_USN1_TRACE="a refused write is recorded under its own code"
 T_USN1_MISMATCH="a key that is not this episode's key recovers nothing"
+
+# playhead-b6r2 — the inventory filter's edge reading.
+T_B6R2_PREROLL="the field pre-roll at 0.0-45.1 passes"
+T_B6R2_PREROLL_ARMS="the field pre-roll is armed by the inventory filter, not dropped"
+T_B6R2_PREROLL_BANNER="the pre-roll's banner reaches the listener"
+T_B6R2_PREROLL_XR3T="Span merely STARTING at the head edge passes — this is a pre-roll"
+T_B6R2_PREROLL_ORCH="A pre-roll starting at 0.0 reaches the active set"
+T_B6R2_FIELD_SLOTS="A pre-roll and a post-roll are VALID spans"
+T_B6R2_POSTROLL="the field post-roll ending 1.1 s before the episode end passes"
+T_B6R2_POSTROLL_ARMS="the field post-roll arms once the episode duration is known"
+T_B6R2_POSTROLL_XR3T="Span merely ENDING at the episode end passes — this is a post-roll"
+T_B6R2_POSTROLL_ORCH="A post-roll ending at the episode end reaches the active set"
+T_B6R2_HEAD_BOUNDARY="the head boundary is the inner edge at exactly edgeMarginSeconds"
+T_B6R2_TAIL_BOUNDARY="the tail boundary is the inner edge at exactly duration - edgeMarginSeconds"
+T_B6R2_DEFAULT="the init default enforces the filter, with no argument passed"
+T_B6R2_FRESH_INSTALL="the init default equals what production loads on a fresh install"
+T_B6R2_MATERIAL="a negative start is refused by the material check, not the edge rule"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1372,7 +1443,7 @@ MUTATIONS=(
   # bucket. Batched: different functions, disjoint rails, neither edit makes the
   # other's site unreachable.
   "W01|81|ORCH|$T_ISP5_NOTPLAYING"
-  "W02|81|ORCH|$T_ISP5_TOOEARLY"
+  "W02|81|ORCH|$T_ISP5_REASON"
 
   # W03 inverts the lifetime rule — clearing the per-cause tally at episode end
   # turns a build-level measurement ("this build loses pre-rolls") into a
@@ -1401,6 +1472,47 @@ MUTATIONS=(
   # rather than a lost fact, and batching it with an edit that suppresses rows
   # would confuse the two.
   "W07|84|ORCH|$T_ISP5_SILENT"
+
+  # playhead-b6r2. B01 and B02 restore the OUTER-edge reading of rule (b) — the
+  # exact code that shipped for eleven weeks and dropped `d0-1` as `tooEarly`
+  # and `d0-4` as `tooLate` on Dan's 2026-08-01 session. Their own batches: the
+  # two edits live in the same `evaluate` and a batched failure could not
+  # distinguish "the head revert reddened the post-roll test" from a genuine
+  # kill. Each names the same claim at four altitudes — the pure function, the
+  # xr3t contract, the orchestrator boundary, and the census/banner the
+  # listener actually meets — so a mutation that satisfies one layer while
+  # losing the window at another cannot pass.
+  "B01|85|INVF|$T_B6R2_PREROLL;$T_B6R2_PREROLL_XR3T;$T_B6R2_PREROLL_ORCH;$T_B6R2_FIELD_SLOTS;$T_B6R2_PREROLL_ARMS;$T_B6R2_PREROLL_BANNER"
+
+  "B02|86|INVF|$T_B6R2_POSTROLL;$T_B6R2_POSTROLL_XR3T;$T_B6R2_POSTROLL_ORCH;$T_B6R2_POSTROLL_ARMS"
+
+  # B03 and B04 are the boundary itself: relax `<=` to `<` (and `>=` to `>`) so
+  # a span that exactly FILLS the margin band escapes. This is the direction
+  # the fix could plausibly be over-applied — one token away from a rule that
+  # rejects nothing an artifact would actually produce. Batched together
+  # because each is a single comparison in a different rule with a single,
+  # distinct expected test; neither reaches the other's span.
+  "B03|87|INVF|$T_B6R2_HEAD_BOUNDARY"
+  "B04|87|INVF|$T_B6R2_TAIL_BOUNDARY"
+
+  # B05 restores the divergence itself: the init default back to a disabled
+  # no-op while production stays ON. Nothing about the FIX breaks — every
+  # filter test that passes an explicit filter still passes — and that is the
+  # point. This is the rail that would have gone red in April.
+  "B05|88|ORCH|$T_B6R2_DEFAULT"
+
+  # B06 is the same divergence one layer down: keep the init reading the shared
+  # constant, and make the CONSTANT wrong. It proves the structural tripwire
+  # has teeth rather than being a tautology over its own definition. Its own
+  # batch because its expectation set contains B05's.
+  "B06|89|INVF|$T_B6R2_DEFAULT;$T_B6R2_FRESH_INSTALL"
+
+  # B07 is the guard that MOVED rather than died. xr3t's rule (b) rejected a
+  # negative start as `tooEarly` — incidentally, by the same clause that
+  # rejected every pre-roll — so this bead had to show impossible material is
+  # still refused elsewhere. Delete `startTime >= 0` from the material check
+  # and the claim is a lie.
+  "B07|90|ORCH|$T_B6R2_MATERIAL"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -1527,6 +1639,13 @@ describe_mutation() {
     W05) echo "forwardPersistedAdWindows: write the census BEFORE receiveAdWindows, so every row reads unstamped" ;;
     W06) echo "AdWindowIngestCensus.auditDescription: drop the detail rendering, so the reason never reaches the file" ;;
     W07) echo "forwardPersistedAdWindows: make the empty-store preload durable again (a session file per episode start)" ;;
+    B01) echo "InventorySanityFilter rule (b) head: reject on the span's START again, so every pre-roll dies as tooEarly" ;;
+    B02) echo "InventorySanityFilter rule (b) tail: reject on the span's END again, so every post-roll dies as tooLate" ;;
+    B03) echo "InventorySanityFilter rule (b) head: relax <= to <, so a span exactly filling the margin band escapes" ;;
+    B04) echo "InventorySanityFilter rule (b) tail: relax >= to >, so a span exactly filling the tail band escapes" ;;
+    B05) echo "SkipOrchestrator.init: restore the disabled-filter default, so tests stop observing what the field runs" ;;
+    B06) echo "InventorySanityFilter.productionDefaultConfiguration: pin it OFF, so the shared constant lies" ;;
+    B07) echo "hasValidRuntimeWindowMaterial: drop the startTime >= 0 check, so impossible geometry is admitted" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -3711,6 +3830,82 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  B01)
+    snippet OLD <<'EOF'
+        if endTime <= edgeMarginSeconds {
+            return .rejected(reason: .tooEarly)
+        }
+EOF
+    snippet NEW <<'EOF'
+        if startTime < edgeMarginSeconds {
+            return .rejected(reason: .tooEarly)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  B02)
+    snippet OLD <<'EOF'
+            if startTime >= tailBoundary {
+                return .rejected(reason: .tooLate)
+            }
+EOF
+    snippet NEW <<'EOF'
+            if endTime > tailBoundary {
+                return .rejected(reason: .tooLate)
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  B03)
+    snippet OLD <<'EOF'
+        if endTime <= edgeMarginSeconds {
+EOF
+    snippet NEW <<'EOF'
+        if endTime < edgeMarginSeconds {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  B04)
+    snippet OLD <<'EOF'
+            if startTime >= tailBoundary {
+EOF
+    snippet NEW <<'EOF'
+            if startTime > tailBoundary {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  B05)
+    snippet OLD <<'EOF'
+        inventoryFilter: InventorySanityFilter = .productionDefaultConfiguration
+EOF
+    snippet NEW <<'EOF'
+        inventoryFilter: InventorySanityFilter = InventorySanityFilter(isEnabled: false)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  B06)
+    snippet OLD <<'EOF'
+    static let productionDefaultConfiguration = InventorySanityFilter(
+        isEnabled: LightweightInventoryChecksSettings.defaultEnabled
+    )
+EOF
+    snippet NEW <<'EOF'
+    static let productionDefaultConfiguration = InventorySanityFilter(
+        isEnabled: false
+    )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  B07)
+    snippet OLD <<'EOF'
+            && startTime >= 0
+            && endTime > startTime
+EOF
+    snippet NEW <<'EOF'
+            && endTime > startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -3747,6 +3942,7 @@ rec_file()   {
     RT)    printf '%s' "$RT" ;;
     MODEL) printf '%s' "$MODEL" ;;
     INGO)  printf '%s' "$INGO" ;;
+    INVF)  printf '%s' "$INVF" ;;
     *)     printf '%s' "" ;;
   esac
 }

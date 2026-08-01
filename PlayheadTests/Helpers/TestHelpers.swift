@@ -390,9 +390,18 @@ func makeTestAsset(id: String) -> AnalysisAsset {
 
 /// Shared factory for SkipOrchestrator tests. Used by both
 /// SkipOrchestratorCharacterizationTests and CorrectionSuppressionTests.
+/// - Parameter episodeDurationSec: playhead-b6r2 — the asset row's duration is
+///   what `beginEpisode` loads into the orchestrator's
+///   `activeEpisodeDuration`, which is the ONLY input that arms the inventory
+///   filter's tail-edge rule. Defaulting it to `nil` (the historical shape of
+///   this helper) leaves that rule dormant, which is why the tail half of the
+///   playhead-b6r2 defect was invisible to every suite built on this factory.
+///   Pass a duration to reproduce production, where `AnalysisCoordinator`
+///   pushes one before every `receiveAdWindows`.
 func makeSkipTestAnalysisAsset(
     id: String = "asset-1",
-    episodeId: String = "ep-1"
+    episodeId: String = "ep-1",
+    episodeDurationSec: Double? = nil
 ) -> AnalysisAsset {
     AnalysisAsset(
         id: id,
@@ -405,7 +414,8 @@ func makeSkipTestAnalysisAsset(
         confirmedAdCoverageEndTime: nil,
         analysisState: "new",
         analysisVersion: 1,
-        capabilitySnapshot: nil
+        capabilitySnapshot: nil,
+        episodeDurationSec: episodeDurationSec
     )
 }
 

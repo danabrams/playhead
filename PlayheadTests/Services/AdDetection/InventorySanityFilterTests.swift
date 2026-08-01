@@ -99,12 +99,23 @@ struct InventorySanityFilterDurationTests {
         #expect(result == .rejected(reason: .tooShort))
     }
 
-    @Test("Negative timestamps that satisfy duration floor and head-edge rules pass")
-    func negativeStartButLongSpanReachingEpisodeStartHandledSafely() {
-        // Review round 2 edge math: a span with a negative start that
-        // ends past the head-edge threshold trivially fails rule (b)
-        // (tooEarly, because startTime < edgeMarginSeconds). The
-        // filter must not crash and must reject as `.tooEarly`.
+    @Test("A negative start is not an edge-rule question — the filter passes it")
+    func negativeStartIsNotAnEdgeRuleQuestion() {
+        // REWRITTEN by playhead-b6r2. This asserted `.tooEarly` for
+        // `[-5, 30]`, which was true only incidentally: the old head rule
+        // tested `startTime < 3`, and -5 satisfies that the same way 0.0
+        // does — which is precisely why the rule also rejected every
+        // pre-roll. Under the inner-edge reading the span's inner edge is
+        // 30 s, well clear of the margin, so the edge rules have no
+        // opinion here and must say so.
+        //
+        // The guard did not die, it moved to where it belongs: a negative
+        // start is IMPOSSIBLE MATERIAL, and
+        // `SkipOrchestrator.hasValidRuntimeWindowMaterial` requires
+        // `startTime >= 0` at BOTH admission doors, before the filter is
+        // consulted at all. playhead-b6r2's
+        // `aNegativeStartIsRefusedAsMaterial` pins that end-to-end so this
+        // change cannot quietly admit impossible geometry.
         let filter = InventorySanityFilter(isEnabled: true)
         let result = filter.evaluate(
             startTime: -5,
@@ -112,7 +123,7 @@ struct InventorySanityFilterDurationTests {
             episodeDuration: 600,
             declaredChapters: []
         )
-        #expect(result == .rejected(reason: .tooEarly))
+        #expect(result == .passed)
     }
 
     @Test("NaN start endpoint is rejected as .tooShort")
@@ -131,24 +142,50 @@ struct InventorySanityFilterDurationTests {
 @Suite("InventorySanityFilter — rule (b) edge guards")
 struct InventorySanityFilterEdgeTests {
 
-    @Test("Span starting before 3 s is .tooEarly")
-    func earlySpanRejected() {
+    // REWRITTEN WHOLESALE by playhead-b6r2. Every test in this suite used
+    // to probe the span's OUTER edge (`startTime < 3` at the head,
+    // `endTime > duration - 3` at the tail). That is not what rule (b)
+    // was specified to do — the spec says spans IN the first / last 3 s —
+    // and the difference is not academic: a 45-second pre-roll starts at
+    // 0.0 and a 30-second post-roll ends at the episode end, so the outer-
+    // edge reading rejected 100 % of the population the rule was aimed at.
+    // The tests below now probe the INNER edge, which is the one that can
+    // cost the listener show. See the file header of
+    // `InventorySanityFilter.swift`.
+
+    @Test("Span lying wholly inside the first 3 s is .tooEarly")
+    func headBandSpanRejected() {
+        // WAS `[1.0, 30.0]` expecting `.tooEarly`. A 29-second span that
+        // merely begins near the episode start is the shape of every
+        // pre-roll; rejecting it is the defect, not the rule. The geometry
+        // moves to a span that is genuinely IN the first 3 s.
+        //
+        // The band is only 3 s wide and rule (a) claims anything under 2 s, so
+        // a span that exercises rule (b) here has to be 2.0–3.0 s long and
+        // start at or before 1.0. (The first cut of this test was
+        // `[1.0, 2.999]` and came back `.tooShort` by 1 ms — the reason this
+        // suite asserts the REASON and not merely "rejected".)
         let filter = InventorySanityFilter(isEnabled: true)
         let result = filter.evaluate(
-            startTime: 1.0,
-            endTime: 30.0,
+            startTime: 0.5,
+            endTime: 2.9,
             episodeDuration: 600,
             declaredChapters: []
         )
         #expect(result == .rejected(reason: .tooEarly))
     }
 
-    @Test("Span starting at exactly 3.0 s passes (boundary)")
-    func exactlyAtHeadEdgePasses() {
-        // Spec: "exactly at 3.0s edge" should pass.
+    @Test("Span merely STARTING at the head edge passes — this is a pre-roll")
+    func spanStartingAtTheHeadEdgePasses() {
+        // WAS "Span starting at exactly 3.0 s passes (boundary)", asserting
+        // `[3.0, 30.0] == .passed`. The assertion is unchanged and the
+        // reason is not: it used to pass because 3.0 is not < 3.0, an
+        // arithmetic accident one epsilon wide. It now passes because its
+        // inner edge is 30 s. The probe moves to 0.0 to say what actually
+        // matters — a span pinned to the episode start is not too early.
         let filter = InventorySanityFilter(isEnabled: true)
         let result = filter.evaluate(
-            startTime: 3.0,
+            startTime: 0.0,
             endTime: 30.0,
             episodeDuration: 600,
             declaredChapters: []
@@ -156,24 +193,31 @@ struct InventorySanityFilterEdgeTests {
         #expect(result == .passed)
     }
 
-    @Test("Span ending after duration - 3 s is .tooLate")
-    func lateSpanRejected() {
+    @Test("Span lying wholly inside the last 3 s is .tooLate")
+    func tailBandSpanRejected() {
+        // WAS `[500, 599]` in a 600 s episode expecting `.tooLate` — a
+        // 99-second span ending one second before the end, i.e. the shape
+        // of every post-roll. Same correction as the head, mirrored.
         let filter = InventorySanityFilter(isEnabled: true)
         let result = filter.evaluate(
-            startTime: 500,
-            endTime: 599,
+            startTime: 597.5,
+            endTime: 599.9,
             episodeDuration: 600,
             declaredChapters: []
         )
         #expect(result == .rejected(reason: .tooLate))
     }
 
-    @Test("Span ending at exactly duration - 3 s passes (boundary)")
-    func exactlyAtTailEdgePasses() {
+    @Test("Span merely ENDING at the episode end passes — this is a post-roll")
+    func spanEndingAtTheEpisodeEndPasses() {
+        // WAS "Span ending at exactly duration - 3 s passes", asserting
+        // `[500, 597.0] == .passed` — again true only because 597.0 is not
+        // > 597.0. The probe moves to a span that ends AT the episode end,
+        // which is the case the old rule got wrong.
         let filter = InventorySanityFilter(isEnabled: true)
         let result = filter.evaluate(
-            startTime: 500,
-            endTime: 597.0,
+            startTime: 540,
+            endTime: 600,
             episodeDuration: 600,
             declaredChapters: []
         )
@@ -182,11 +226,15 @@ struct InventorySanityFilterEdgeTests {
 
     @Test("Unknown duration disables only the tail-edge guard")
     func unknownDurationKeepsHeadEdge() {
+        // Geometry updated by playhead-b6r2 for the same reason as above:
+        // the old head probe `[1.0, 30.0]` is a pre-roll. The CLAIM — the
+        // head rule needs no denominator, the tail rule does — is unchanged
+        // and is the reason this test exists.
         let filter = InventorySanityFilter(isEnabled: true)
         // Head edge still rejects when duration is nil.
         let early = filter.evaluate(
-            startTime: 1.0,
-            endTime: 30.0,
+            startTime: 0.0,
+            endTime: 2.5,
             episodeDuration: nil,
             declaredChapters: []
         )
@@ -388,10 +436,18 @@ struct InventorySanityFilterRollbackTests {
             makeChapter(startTime: 0, endTime: 600, title: "Episode"),
         ]
         // Each of (a), (b)-head, (b)-tail, (c) would reject if enabled.
+        //
+        // playhead-b6r2 re-cut the two rule-(b) rows. They were
+        // `(0.5, 30.0)` and `(500.0, 599.0)` — a pre-roll and a post-roll,
+        // which the fixed rule (b) does NOT reject. Left as they were, this
+        // test would still have passed (a disabled filter passes
+        // everything) while quietly asserting nothing about two of the four
+        // rules it names. A rollback test whose inputs are not rejectable
+        // when the flag is ON is not a rollback test.
         let cases: [(Double, Double)] = [
             (60.0, 60.5),     // (a) duration < 2s
-            (0.5, 30.0),      // (b)-head start < 3s
-            (500.0, 599.0),   // (b)-tail end > 597s
+            (0.5, 2.9),       // (b)-head lies inside the first 3s
+            (598.0, 600.0),   // (b)-tail lies inside the last 3s
             (200.0, 220.0),   // (c) overlaps declared chapter
         ]
         for (start, end) in cases {
@@ -402,6 +458,37 @@ struct InventorySanityFilterRollbackTests {
                 declaredChapters: chapters
             )
             #expect(result == .passed, "Expected pass for [\(start), \(end)] when disabled")
+        }
+    }
+
+    /// The premise of `disabledFilterIsNoOp`, MEASURED rather than asserted
+    /// in a comment. playhead-b6r2 added this because that test's rule-(b)
+    /// rows had silently become un-rejectable: they were a pre-roll and a
+    /// post-roll, so the "would reject if enabled" claim in its comment was
+    /// false for half its cases and nothing said so. Every row now has to
+    /// earn its place in the corpus by being rejected with the flag ON.
+    @Test("Every row of the rollback corpus IS rejected when the flag is ON")
+    func rollbackCorpusRowsAreRejectableWhenEnabled() {
+        let filter = InventorySanityFilter(isEnabled: true)
+        let chapters = [
+            makeChapter(startTime: 0, endTime: 600, title: "Episode"),
+        ]
+        let expected: [(Double, Double, InventorySanityRejectionReason)] = [
+            (60.0, 60.5, .tooShort),
+            (0.5, 2.9, .tooEarly),
+            (598.0, 600.0, .tooLate),
+            (200.0, 220.0, .overlapsDeclaredChapter),
+        ]
+        for (start, end, reason) in expected {
+            #expect(
+                filter.evaluate(
+                    startTime: start,
+                    endTime: end,
+                    episodeDuration: 600,
+                    declaredChapters: chapters
+                ) == .rejected(reason: reason),
+                "[\(start), \(end)] must be rejected as .\(reason.rawValue)"
+            )
         }
     }
 
@@ -437,16 +524,33 @@ struct InventorySanityFilterRejectionRateTests {
             spans.append((start, start + badDuration))
         }
 
-        // Rule (b)-head: 20 spans starting in the first 3 s.
+        // Rule (b)-head: 20 spans lying wholly inside the first 3 s.
+        //
+        // playhead-b6r2 RE-CUT THIS CLASS, and it is the most important
+        // change in this file. It used to generate `(start, start + 30.0)`
+        // for starts of 0.0 .. 2.66 s — twenty 30-second spans pinned to the
+        // episode start. Those are PRE-ROLLS. The bead's acceptance bar was
+        // "rejects >= 98 % of synthetically invalid spans", and a fifth of
+        // the corpus proving that bar was the population the filter is
+        // supposed to serve. The rate could only be met by rejecting them.
+        // That is how a 98 % pass mark certified a rule that dropped every
+        // pre-roll in the field.
+        //
+        // Each span below is exactly 2.0 s long, so rule (a) (which passes
+        // exactly 2.0) provably did not make the call — a rejection here is
+        // attributable to rule (b).
         for i in 0..<20 {
-            let start = Double(i) * 0.14  // 0.0 .. 2.66 s
-            spans.append((start, start + 30.0))
+            let start = Double(i) * 0.04  // 0.0 .. 0.76 s
+            spans.append((start, start + 2.0))  // ends 2.0 .. 2.76 s
         }
 
-        // Rule (b)-tail: 20 spans ending in the last 3 s.
+        // Rule (b)-tail: 20 spans lying wholly inside the last 3 s. Re-cut
+        // for the same reason — these were twenty 30-second spans ending at
+        // the episode end, i.e. POST-ROLLS. Same 2.0 s width, same
+        // rule-attribution control.
         for i in 0..<20 {
-            let end = (episodeDuration - 2.99) + Double(i) * 0.15
-            spans.append((max(end - 30.0, 0), end))
+            let start = (episodeDuration - 2.9) + Double(i) * 0.04
+            spans.append((start, start + 2.0))
         }
 
         // Rule (c): 30 spans overlapping declared content chapters.
@@ -498,6 +602,38 @@ struct InventorySanityFilterRejectionRateTests {
             rate >= 0.98,
             "Rejection rate \(rate) on \(corpus.count) invalid spans must meet 98% bar"
         )
+    }
+
+    /// THE POPULATION THE ACCEPTANCE BAR NEVER CONTAINED (playhead-b6r2).
+    ///
+    /// xr3t's bar was "reject >= 98 % of synthetically invalid spans", and
+    /// the corpus proving it listed "spans in the first / last 3 s" as a
+    /// known-bad class while generating 30-second spans pinned to the
+    /// episode edges. Synthetic negatives only: no real pre-roll or
+    /// post-roll was ever put to the filter, so the premise that they are
+    /// invalid was never tested against the population it excludes. Every
+    /// ad slot below is a real one from the 2026-08-01 field session.
+    @Test("A pre-roll and a post-roll are VALID spans")
+    func edgeAnchoredAdSlotsAreValid() {
+        let filter = InventorySanityFilter(isEnabled: true)
+        let episodeDuration = 3_931.0
+        let fieldSlots: [(Double, Double)] = [
+            (0.0, 45.1),          // pre-roll, pinned to the episode start
+            (1_436.4, 1_508.1),
+            (3_194.5, 3_371.2),
+            (3_899.8, 3_929.9),   // post-roll, ending 1.1 s before the end
+        ]
+        for (start, end) in fieldSlots {
+            #expect(
+                filter.evaluate(
+                    startTime: start,
+                    endTime: end,
+                    episodeDuration: episodeDuration,
+                    declaredChapters: []
+                ) == .passed,
+                "field ad slot [\(start), \(end)] must survive"
+            )
+        }
     }
 
     @Test("Filter passes a corpus of clearly-valid spans")
@@ -630,14 +766,18 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
         #expect(!active.contains("ad-too-short"))
     }
 
-    @Test("Span starting in first 3 s is filtered out")
-    func earlySpanIsFiltered() async throws {
+    @Test("Span lying inside the first 3 s is filtered out")
+    func headBandSpanIsFiltered() async throws {
+        // playhead-b6r2: was `[0.5, 30]`. A 29.5-second span pinned near the
+        // episode start is a PRE-ROLL, and the assertion that the
+        // orchestrator drops it was the field defect written down as a
+        // contract. The geometry moves to a span genuinely inside the band.
         let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 600)
         let earlyWindow = makeSkipTestAdWindow(
             id: "ad-too-early",
             assetId: "asset-xr3t",
             startTime: 0.5,
-            endTime: 30,
+            endTime: 2.9,
             confidence: 0.85,
             decisionState: "confirmed"
         )
@@ -647,14 +787,20 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
         #expect(!active.contains("ad-too-early"))
     }
 
-    @Test("Span ending in last 3 s is filtered out when duration is known")
-    func lateSpanIsFiltered() async throws {
+    /// The half of the defect that no xr3t test could see. The suite's
+    /// orchestrator is built with a duration, so the tail rule IS armed
+    /// here — and `[540, 599]` (the old geometry, a 59-second post-roll)
+    /// was being asserted as correctly dropped. playhead-b6r2 splits the
+    /// case: the post-roll must now SURVIVE, and a genuine tail artifact
+    /// must still be filtered.
+    @Test("Span lying inside the last 3 s is filtered out when duration is known")
+    func tailBandSpanIsFiltered() async throws {
         let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 600)
         let lateWindow = makeSkipTestAdWindow(
             id: "ad-too-late",
             assetId: "asset-xr3t",
-            startTime: 540,
-            endTime: 599,
+            startTime: 597.5,
+            endTime: 599.9,
             confidence: 0.85,
             decisionState: "confirmed"
         )
@@ -662,6 +808,40 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
 
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-too-late"))
+    }
+
+    @Test("A post-roll ending at the episode end reaches the active set")
+    func postRollSurvivesAtTheOrchestratorBoundary() async throws {
+        let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 600)
+        let postRoll = makeSkipTestAdWindow(
+            id: "ad-postroll",
+            assetId: "asset-xr3t",
+            startTime: 540,
+            endTime: 600,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([postRoll])
+
+        let active = await orchestrator.activeWindowIDs()
+        #expect(active.contains("ad-postroll"))
+    }
+
+    @Test("A pre-roll starting at 0.0 reaches the active set")
+    func preRollSurvivesAtTheOrchestratorBoundary() async throws {
+        let (orchestrator, _) = try await makeOrchestrator(episodeDuration: 600)
+        let preRoll = makeSkipTestAdWindow(
+            id: "ad-preroll",
+            assetId: "asset-xr3t",
+            startTime: 0,
+            endTime: 45.1,
+            confidence: 0.85,
+            decisionState: "confirmed"
+        )
+        await orchestrator.receiveAdWindows([preRoll])
+
+        let active = await orchestrator.activeWindowIDs()
+        #expect(active.contains("ad-preroll"))
     }
 
     @Test("Chapter overlap filters the span — and requires the chapters push")
@@ -741,10 +921,14 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
         ]
         await orchestrator.setDeclaredChapters(chapters, analysisAssetId: "asset-xr3t")
 
+        // playhead-b6r2: `ad-early` and `ad-late` re-cut from `[0.5, 30]` and
+        // `[540, 599]` — a pre-roll and a post-roll, which the fixed rule (b)
+        // does not reject. Left alone the test would still pass and would
+        // stop distinguishing the flag's two states for half its rows.
         let windows = [
             makeSkipTestAdWindow(id: "ad-short", assetId: "asset-xr3t", startTime: 60, endTime: 61),
-            makeSkipTestAdWindow(id: "ad-early", assetId: "asset-xr3t", startTime: 0.5, endTime: 30),
-            makeSkipTestAdWindow(id: "ad-late", assetId: "asset-xr3t", startTime: 540, endTime: 599),
+            makeSkipTestAdWindow(id: "ad-early", assetId: "asset-xr3t", startTime: 0.5, endTime: 2.9),
+            makeSkipTestAdWindow(id: "ad-late", assetId: "asset-xr3t", startTime: 597.5, endTime: 599.9),
             makeSkipTestAdWindow(id: "ad-chapter", assetId: "asset-xr3t", startTime: 200, endTime: 220),
         ]
         await orchestrator.receiveAdWindows(windows)
@@ -944,11 +1128,15 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
         // `setEpisodeDuration` lands the rule must run retroactively.
         let (orchestrator, _) = try await makeOrchestrator(episodeDuration: nil)
 
+        // playhead-b6r2: re-cut from `[540, 599]`, a post-roll. The CLAIM —
+        // a duration arriving mid-episode arms the dormant tail rule
+        // retroactively — is unchanged and is why this test exists; only
+        // the span had to become one the tail rule legitimately rejects.
         let lateSpan = makeSkipTestAdWindow(
             id: "ad-late-arriving-tail",
             assetId: "asset-xr3t",
-            startTime: 540,
-            endTime: 599,
+            startTime: 597.5,
+            endTime: 599.9,
             confidence: 0.85,
             decisionState: "confirmed"
         )
@@ -972,10 +1160,14 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
             filterEnabled: false
         )
 
+        // playhead-b6r2: `ad-early` / `ad-late` re-cut for the same reason as
+        // in `disabledFilterPassesEverything` — the old geometry was a
+        // pre-roll and a post-roll, which rule (b) no longer rejects, so
+        // those two rows would have stopped distinguishing ON from OFF.
         let windows = [
             makeSkipTestAdWindow(id: "ad-short", assetId: "asset-xr3t", startTime: 60, endTime: 61),
-            makeSkipTestAdWindow(id: "ad-early", assetId: "asset-xr3t", startTime: 0.5, endTime: 30),
-            makeSkipTestAdWindow(id: "ad-late", assetId: "asset-xr3t", startTime: 540, endTime: 599),
+            makeSkipTestAdWindow(id: "ad-early", assetId: "asset-xr3t", startTime: 0.5, endTime: 2.9),
+            makeSkipTestAdWindow(id: "ad-late", assetId: "asset-xr3t", startTime: 597.5, endTime: 599.9),
             makeSkipTestAdWindow(id: "ad-chapter", assetId: "asset-xr3t", startTime: 200, endTime: 220),
         ]
         await orchestrator.receiveAdWindows(windows)
