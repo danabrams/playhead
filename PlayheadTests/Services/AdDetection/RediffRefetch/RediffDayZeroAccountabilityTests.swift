@@ -656,7 +656,10 @@ struct RediffDayZeroTriggerIdempotencyTests {
             attemptRecordProvider: { _ in prior },
             suppressionRecorder: { assetId, reason, at in
                 spy.recorded.append((assetId, reason, at))
-            }
+            },
+            // playhead-96ot: no orchestrator in this suite — the delivery is
+            // asserted by DayZeroMarkDeliveryTests, so opt OUT explicitly.
+            mintedMarkDelivery: { _ in }
         )
     }
 
@@ -758,7 +761,8 @@ struct RediffDayZeroTriggerIdempotencyTests {
                 reads.recorded.append((assetId, .marked, 0))
                 return nil
             },
-            suppressionRecorder: { assetId, reason, at in spy.recorded.append((assetId, reason, at)) }
+            suppressionRecorder: { assetId, reason, at in spy.recorded.append((assetId, reason, at)) },
+            mintedMarkDelivery: { _ in }
         )
 
         _ = await fire(trigger, at: 1)

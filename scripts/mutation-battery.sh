@@ -179,7 +179,12 @@ CTRL="Playhead/Services/AdDetection/PerShowThresholdControllerStore.swift"
 # only thing standing between "confirming this MARKS" and a button that
 # promises a skip it cannot perform, so it is mutable here.
 VIEW="Playhead/Views/Components/AdBannerView.swift"
-MUTABLE_FILES=("$ORCH" "$STORE" "$CTRL" "$VIEW")
+# playhead-96ot: the two rediff-side halves of the in-session delivery. The
+# orchestrator owns the door; these own the DECISION to knock on it, and that
+# decision is what was missing for the whole life of the day-0 path.
+TRIG="Playhead/Services/AdDetection/RediffRefetch/DayZeroRediffTrigger.swift"
+RSVC="Playhead/Services/AdDetection/RediffRefetch/RediffRefetchService.swift"
+MUTABLE_FILES=("$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC")
 
 FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
@@ -201,6 +206,14 @@ FOCUSED_SUITES=(
   # would have let a mutation that re-skips 150 s of show be judged solely on
   # d3g0's own card-side assertion.
   -only-testing:PlayheadTests/BannerConfirmationExtentGateTests
+  # playhead-96ot: the in-session delivery of a day-0 mint (E01-E09). The two
+  # d3g0 suites above stay in scope deliberately — the new door feeds
+  # `receiveAdWindows`, which is where d3g0 ARMS, so a delivery mutation that
+  # broke the entry gate would otherwise be judged only by its own suite.
+  -only-testing:PlayheadTests/SkipOrchestratorMidSessionIngestTests
+  -only-testing:PlayheadTests/MidSessionIngestSuggestArmingTests
+  -only-testing:PlayheadTests/DayZeroTriggerMarkDeliveryTests
+  -only-testing:PlayheadTests/DayZeroFirstListenInSessionSkipTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -350,6 +363,17 @@ T_D3G0_EXACT_REPLAY="An exact producer replay after retirement re-arms rather th
 # says yes) or merely unpinned is a COVERAGE decision for a human. The
 # behavioural rails themselves — the four `SkipOrchestratorRevertLifecycle`
 # race tests — are unchanged and pass; see the merge commit.
+# playhead-96ot — a day-0 mint must reach the session that minted it.
+T_96OT_INACTIVE="ingest for an asset that is NOT the one playing delivers nothing"
+T_96OT_NOEPISODE="ingest with no active episode delivers nothing"
+T_96OT_VETOED="a user-vetoed row is not resurrected by the mid-session door"
+T_96OT_ARMS="mid-session ingest ARMS a suggestion and the next observation presents it"
+T_96OT_UNMARKED="an UNMARKED day-0 run delivers nothing"
+T_96OT_COVERED="a run whose slots were already covered delivers nothing"
+T_96OT_ONCE="a marked day-0 run delivers its asset id EXACTLY once"
+T_96OT_MARKCOUNT="a marked day-0 run reports its MARK count, distinct from rotatedCount"
+T_96OT_FIRSTLISTEN="a first-listen day-0 mint produces a skip cue WITHOUT relaunching the episode"
+
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
@@ -528,6 +552,37 @@ MUTATIONS=(
   "D11|30|ORCH|$T_D3G0_REPLAY_EVENTS"
   "D12|31|ORCH|$T_D3G0_SAME_TICK_ORDER"
   "D14|33|ORCH|$T_D3G0_EXACT_REPLAY"
+
+  # playhead-96ot — THE DELIVERY. Three links in one chain, mutated at each
+  # link: the mint reports how many rows it wrote (E09), the summary carries
+  # that number rather than a neighbouring one (E08), and the trigger acts on
+  # it (E05/E06/E07). Then the door itself: the asset guard (E01), the shared
+  # admission rule (E02), and the promise NOT to emit at registration (E04).
+  #
+  # E01 and E02 share a batch — disjoint victims, and E02 edits
+  # `preloadAdmissibleWindows` while E01 edits `ingestPersistedAdWindows`, so
+  # neither can destroy the other's anchor. E04 also edits
+  # `ingestPersistedAdWindows`, so it gets its own batch on the M08/M13 rule
+  # (same function, overlapping blast radius) even though its victim is
+  # distinct.
+  "E01|34|ORCH|$T_96OT_INACTIVE;$T_96OT_NOEPISODE"
+  "E02|34|ORCH|$T_96OT_VETOED"
+
+  "E04|35|ORCH|$T_96OT_ARMS"
+
+  # E05/E06/E07 all rewrite the same six-line delivery block in
+  # `triggerIfEligible`, so a batch each is forced by anchor collision, not
+  # only by crediting. E06 and E07 additionally name overlapping victims.
+  "E05|36|TRIG|$T_96OT_UNMARKED;$T_96OT_COVERED"
+  "E06|37|TRIG|$T_96OT_ONCE;$T_96OT_FIRSTLISTEN"
+  "E07|38|TRIG|$T_96OT_ONCE"
+
+  # E08 (the summary accumulates `rotated` instead of the mark count) and E09
+  # (the mint's count never leaves `fetchMintAndRecord`) are the two ways to
+  # break the number the delivery reads. They share a victim, so they cannot
+  # share a batch.
+  "E08|39|RSVC|$T_96OT_MARKCOUNT"
+  "E09|40|RSVC|$T_96OT_MARKCOUNT;$T_96OT_ONCE;$T_96OT_FIRSTLISTEN"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -612,6 +667,18 @@ describe_mutation() {
     D11) echo "EVENT-stream replay: drop the armed filter (D05's twin, a duplicated guard)" ;;
     D12) echo "same-tick emission: drop the ordering, so two spans banner in Set order" ;;
     D14) echo "registerSuggestedWindow: drop the re-arm on an exact replay after retirement" ;;
+    E01) echo "ingestPersistedAdWindows: drop the active-asset guard, so a mint for another episode is 'delivered'" ;;
+    E02) echo "the shared admission rule: admit every decision state, resurrecting a user's veto through the new door" ;;
+    E04) echo "ingestPersistedAdWindows: emit at registration (d3g0's stale-playhead hazard, through the new door)" ;;
+    E05) echo "triggerIfEligible: deliver on EVERY day-0 run, marked or not" ;;
+    E06) echo "triggerIfEligible: never deliver (the playhead-96ot defect, restored verbatim)" ;;
+    E07) echo "triggerIfEligible: deliver twice per marked run" ;;
+    # NOTE: no backticks. These descriptions are inside a double-quoted `echo`,
+    # so a backtick opens a command substitution — the first draft of this line
+    # printed "accumulate  into the MARK count" plus a "rotated: command not
+    # found" to stderr. Same class of defect as the ';' in a d3g0 test name.
+    E08) echo "runDayZeroRefetch: accumulate the ROTATED flag into the MARK count (the neighbouring number)" ;;
+    E09) echo "fetchMintAndRecord: report 0 marks on the marked branch, so nothing propagates" ;;
     O05) echo "denyAutoSkippedBanner: restore the outright refusal, so a banner No naming another show loses its receipt" ;;
     *)   echo "(no description)" ;;
   esac
@@ -1685,6 +1752,113 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  E01)
+    snippet OLD <<'EOF'
+    func ingestPersistedAdWindows(analysisAssetId: String) async -> Int {
+        guard activeAssetId == analysisAssetId else {
+            logger.debug(
+                "ingestPersistedAdWindows: dropping mismatched asset \(analysisAssetId, privacy: .public) (active=\(self.activeAssetId ?? "nil", privacy: .public))"
+            )
+            return 0
+        }
+        return await forwardPersistedAdWindows(
+EOF
+    snippet NEW <<'EOF'
+    func ingestPersistedAdWindows(analysisAssetId: String) async -> Int {
+        return await forwardPersistedAdWindows(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E02)
+    snippet OLD <<'EOF'
+                || $0.userAssertion != nil)
+                && $0.endTime > $0.startTime
+                && preloadEligibleDecisionStates.contains($0.decisionState)
+EOF
+    snippet NEW <<'EOF'
+                || $0.userAssertion != nil)
+                && $0.endTime > $0.startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E04)
+    snippet OLD <<'EOF'
+        return await forwardPersistedAdWindows(
+            analysisAssetId: analysisAssetId,
+            lifecycleGeneration: episodeLifecycleGeneration
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+        let forwarded = await forwardPersistedAdWindows(
+            analysisAssetId: analysisAssetId,
+            lifecycleGeneration: episodeLifecycleGeneration
+        )
+        emitSuggestBannersOnPlayheadEntry(at: currentPlayheadTime)
+        return forwarded
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E05)
+    snippet OLD <<'EOF'
+        if summary.dayZeroMarkCount > 0 {
+            await mintedMarkDelivery(analysisAssetId)
+        }
+EOF
+    snippet NEW <<'EOF'
+        await mintedMarkDelivery(analysisAssetId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E06)
+    snippet OLD <<'EOF'
+        if summary.dayZeroMarkCount > 0 {
+            await mintedMarkDelivery(analysisAssetId)
+        }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E07)
+    snippet OLD <<'EOF'
+        if summary.dayZeroMarkCount > 0 {
+            await mintedMarkDelivery(analysisAssetId)
+        }
+EOF
+    snippet NEW <<'EOF'
+        if summary.dayZeroMarkCount > 0 {
+            await mintedMarkDelivery(analysisAssetId)
+            await mintedMarkDelivery(analysisAssetId)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E08)
+    snippet OLD <<'EOF'
+        summary.dayZeroMarkCount += result.dayZeroMarkCount
+EOF
+    snippet NEW <<'EOF'
+        summary.dayZeroMarkCount += result.rotated ? 1 : 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E09)
+    snippet OLD <<'EOF'
+                return CandidateResult(
+                    cost: cost, rotated: true, failed: false,
+                    dayZeroMarkCount: mint.markCount
+                )
+EOF
+    snippet NEW <<'EOF'
+                return CandidateResult(
+                    cost: cost, rotated: true, failed: false,
+                    dayZeroMarkCount: 0
+                )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -1702,6 +1876,8 @@ rec_file()   {
     STORE) printf '%s' "$STORE" ;;
     CTRL)  printf '%s' "$CTRL" ;;
     VIEW)  printf '%s' "$VIEW" ;;
+    TRIG)  printf '%s' "$TRIG" ;;
+    RSVC)  printf '%s' "$RSVC" ;;
     *)     printf '%s' "" ;;
   esac
 }
@@ -1807,6 +1983,30 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         seen.append(m.group(1))
 # Deliberately not `print("\n".join(...))`: on an empty list that emits a bare
 # newline, which reads downstream as one nameless failure.
+sys.stdout.writelines(name + "\n" for name in seen)
+' "$1"
+}
+
+# Every test that RAN in this attempt, by display name. Companion to
+# `extract_failures`, and the input to the "expected test never ran" check
+# below: an expectation that matches NOTHING in the run is a harness fault
+# (typo, renamed test, suite missing from FOCUSED_SUITES, or a ';' inside a
+# display name colliding with the record separator) — and without this it is
+# indistinguishable from a genuine SURVIVED, which is the failure direction
+# that reads as a coverage hole and sends the next person to write a test that
+# already exists. Measured: playhead-96ot's E04 reported SURVIVED with its
+# expected test visibly failing three lines above, one bead after playhead-d3g0
+# documented the same collision.
+extract_ran() {
+  python3 -c '
+import re, sys
+pat_named = re.compile(r"^\W*◇ Test \"(.+?)\" started")
+pat_plain = re.compile(r"^\W*◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
+seen = []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    m = pat_named.match(line) or pat_plain.match(line)
+    if m and m.group(1) not in seen:
+        seen.append(m.group(1))
 sys.stdout.writelines(name + "\n" for name in seen)
 ' "$1"
 }
@@ -1934,6 +2134,35 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     KEEP_WORK=1
     exit 2
   fi
+  # Every expectation must NAME A TEST THAT ACTUALLY RAN. Checked here, on the
+  # one build that is already being spent, so a mis-typed or mis-split
+  # expectation costs zero mutation builds instead of printing SURVIVED.
+  extract_ran "$BASE_LOG.last" >"$WORK/baseline-ran.txt"
+  UNKNOWN=""
+  for rec in "${SELECTED[@]}"; do
+    exp="$(rec_expect "$rec")"
+    OLDIFS="$IFS"; IFS=';'
+    for want in $exp; do
+      IFS="$OLDIFS"
+      grep -Fxq "$want" "$WORK/baseline-ran.txt" || \
+        UNKNOWN="${UNKNOWN}    $(rec_name "$rec") expects: ${want}
+"
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  done
+  if [ -n "$UNKNOWN" ]; then
+    echo "mutation-battery: an expectation names a test that never ran." >&2
+    printf '%s' "$UNKNOWN" >&2
+    cat >&2 <<'MSG'
+Causes, in order of how often they happen: the display name contains a ';'
+(the MUTATIONS record separator splits it into fragments that match nothing);
+the test was renamed; the suite is missing from FOCUSED_SUITES; a typo.
+Every one of them would otherwise print SURVIVED against a working rail.
+MSG
+    KEEP_WORK=1
+    exit 2
+  fi
   echo "  baseline green"
   echo
 fi
@@ -1996,6 +2225,8 @@ for b in "${BATCH_IDS[@]}"; do
   fi
 
   FAILED_LIST="$WORK/failed-$b.txt"
+  RAN_LIST="$WORK/ran-$b.txt"
+  extract_ran "$LOG.last" >"$RAN_LIST"
   extract_failures "$LOG.last" >"$FAILED_LIST"
   echo "  observed failures:"
   if [ -s "$FAILED_LIST" ]; then
@@ -2008,16 +2239,24 @@ for b in "${BATCH_IDS[@]}"; do
     name="$(rec_name "$rec")"
     expect="$(rec_expect "$rec")"
     missing=""
+    never_ran=""
     OLDIFS="$IFS"; IFS=';'
     for want in $expect; do
       IFS="$OLDIFS"
-      if ! grep -Fxq "$want" "$FAILED_LIST"; then
+      if ! grep -Fxq "$want" "$RAN_LIST"; then
+        # Not a survivor — the harness never asked the question. Kept separate
+        # from `missing` so the two are never conflated in the report.
+        never_ran="${never_ran}${never_ran:+ | }${want}"
+      elif ! grep -Fxq "$want" "$FAILED_LIST"; then
         missing="${missing}${missing:+ | }${want}"
       fi
       IFS=';'
     done
     IFS="$OLDIFS"
-    if [ -z "$missing" ]; then
+    if [ -n "$never_ran" ]; then
+      echo "$name|ERROR|expected test never ran (';' in the name? renamed? suite not in FOCUSED_SUITES?): $never_ran" >>"$RESULTS"
+      FATAL=1
+    elif [ -z "$missing" ]; then
       echo "$name|KILLED|" >>"$RESULTS"
     else
       echo "$name|SURVIVED|$missing" >>"$RESULTS"
