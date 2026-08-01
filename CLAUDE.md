@@ -76,6 +76,8 @@ Four things worth knowing before you argue with it:
 - **A baseline member that did not RUN fails the gate.** Renamed, deleted or newly skipped, a name nobody can reach is not evidence. This is what makes step 2 of the bead (PerfGate-ing a family) show up as a gate failure demanding a refresh, rather than silently shrinking coverage.
 - **Selective runs are exempt.** `-only-testing:`/`-skip-testing:` (how `mutation-battery.sh` drives the gate) is a different population, so the check is skipped and the raw xcodebuild exit code passes through untouched.
 
+**Expect the file to grow for a run or two before it settles, and do not read that as regressions.** The recorded set is the UNION of what has been observed, and with a 0.46 Jaccard each new run surfaces flakes the earlier ones missed. Capture–recapture on the first two runs (32 and 28 failures, 19 shared) estimates the true population at **~47**; 41 are recorded after two observations. So the next `--accept-baseline` or two will legitimately add a handful of names, and the gate will report them as NEW until they are recorded. That is the mechanism working — a newly-observed flake is indistinguishable from a regression until it has been seen, which is exactly why it is reported rather than absorbed. Once the union saturates, `RED (N known / 0 new)` is the steady state. The third accepted observation is also what arms the pass-direction check.
+
 Rails: `scripts/mutation-battery-gate-baseline.py` (R series; the D/E/J/K/L/Q series stay in `mutation-battery.sh`, which is structurally a Swift battery). Unit tests: `python3 -m unittest scripts.tests.test_gate_baseline` — about a second, no build.
 
 **Phase-close verification only (final gate before closing an epic):**

@@ -31,10 +31,10 @@ The design that survives that has three parts.
 
 1. TIERS DERIVED FROM MEASUREMENT, NOT TASTE. Every entry carries how many
    observations it was seen in and how many it failed in. `failed == seen` with
-   at least two observations makes it DETERMINISTIC; anything else is
+   at least MIN_RUNS_FOR_DETERMINISTIC observations makes it DETERMINISTIC; anything else is
    LOAD-SENSITIVE. Nobody hand-labels a test flaky — the file records counts and
-   the tier falls out. One observation can never mint a deterministic entry,
-   because one run cannot tell "always fails" from "starved once".
+   the tier falls out. The threshold is three observations, not two, because the
+   measured run-to-run Jaccard is 0.46 — see MIN_RUNS_FOR_DETERMINISTIC.
 
 2. DAN'S PASS-DIRECTION ARM APPLIES WHERE IT IS SOUND. A DETERMINISTIC member
    that passes fails the gate: that entry claimed to fail every time and did
@@ -66,6 +66,19 @@ Three further arms close the ways a failure could hide without being seen:
     fragment: 930 XCTest cases started, 900 reported, no terminal marker.
   * FICTION — zero failures against a non-empty baseline. Against a measured
     floor of dozens that is categorical, not quiet.
+
+THE FILE CONVERGES; IT DOES NOT ARRIVE COMPLETE
+-----------------------------------------------
+The recorded set is the UNION of what has been observed, and with a measured
+run-to-run Jaccard of 0.46 each new run surfaces flakes the earlier ones missed.
+Capture-recapture on the first two full runs (32 and 28 failures, 19 shared)
+puts the true population near 47; 41 are recorded after two observations. So the
+next accept or two will legitimately add a handful of names.
+
+That is not a defect to engineer around. A newly-observed flake is
+indistinguishable from a regression until it has been seen at least once, and
+absorbing unrecognised names on the theory that they are probably flakes is the
+exact hole this module exists to close. Report, record, move on.
 
 KNOWN RESIDUE, WRITTEN DOWN RATHER THAN GLOSSED
 -----------------------------------------------
