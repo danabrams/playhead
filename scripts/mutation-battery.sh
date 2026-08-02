@@ -2637,7 +2637,19 @@ MUTATIONS=(
 
   # Per-detector resolution made inert: every class answers with the show mode.
   # Compiles, ships, and is the scalar again.
-  "I18|192|TRUST|$T_GARD_FIELD_ROW;$T_GARD_STORED_WINS;$T_GARD_NEW_SHOW"
+  #
+  # EXPECTATION CORRECTED after the first I run: it also named the new-show
+  # rail, which this edit cannot reach — a show with NO profile row exits
+  # `resolveDetectorModes` one branch earlier, through `seededModes(from: nil)`.
+  # That branch gets its own mutation (I21) rather than being credited to this
+  # one by association.
+  "I18|192|TRUST|$T_GARD_FIELD_ROW;$T_GARD_STORED_WINS"
+
+  # The FIRST-LISTEN branch, which is the one that matters most for the exempt
+  # class: day-0 byte-exact rediff is the only signal an unheard show has, and
+  # an empty map sends it to the show mode, which is `.shadow` by definition
+  # there. Separate from I18 because it is a separate `return`.
+  "I21|194|TRUST|$T_GARD_NEW_SHOW"
 
   # A lookup FAILURE grants the exempt class auto. "Exempt from the show's
   # history" widened into "runs when persistence is broken" — playhead-djl0's
@@ -2873,6 +2885,7 @@ describe_mutation() {
     I17) echo "gard: an inferred revert weighs as much as an explicit one" ;;
     I18) echo "gard: per-detector resolution is inert — every class answers with the show mode" ;;
     I19) echo "gard: a lookup FAILURE grants the exempt class auto" ;;
+    I21) echo "gard: a show with NO profile row gets an empty per-detector map — first listen sends the exempt class to shadow" ;;
     I20) echo "gard: a session override never reaches the per-detector map — the stale episode map governs" ;;
     *)   echo "(no description)" ;;
   esac
@@ -6393,6 +6406,9 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # BOTH sites, because they are one defect with two carriers and the first I
+  # run proved each survives the other: removing it only from the veto path
+  # leaves `creditIsNotShared` green, and vice versa.
   I14)
     snippet OLD <<'EOF'
         if !strongestTierByDetector.isEmpty {
@@ -6401,7 +6417,10 @@ EOF
 EOF
     snippet NEW <<'EOF'
 EOF
-    patch "$file" "$OLD" "$NEW" ;;
+    patch "$file" "$OLD" "$NEW"
+    patch "$file" \
+      "        var ledger = Self.materialized(profile.detectorTrustLedger, from: profile)" \
+      "        var ledger = profile.detectorTrustLedger" ;;
 
   I15)
     snippet OLD <<'EOF'
@@ -6440,6 +6459,12 @@ EOF
             byDetector[detector] = showMode
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  I21)
+    patch "$file" \
+      "        var modes: [SkipDetectorClass: SkipMode] = [:]" \
+      "        var modes: [SkipDetectorClass: SkipMode] = [:]
+        if !modes.isEmpty || true { return modes }" ;;
 
   I19)
     snippet OLD <<'EOF'

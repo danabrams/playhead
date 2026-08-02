@@ -765,9 +765,23 @@ struct ManualModeEscapabilityTests {
         let profile = try #require(
             await store.fetchProfile(podcastId: gardPodcastId)
         )
+        #expect(profile.recentFalseSkipSignals == 0)
+
+        // The claim stated as BEHAVIOUR, because the counters are only
+        // interesting for what they do next. One ordinary unanchored veto
+        // weighs 0.5. Against a cleared ledger that leaves the class in `auto`;
+        // against the three stale signals it would be 3.5 and the override the
+        // listener just gave would be undone by their first correction.
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(detector: .fusion, tier: .none)
+            ]
+        )
+        let after = await sut.resolveDetectorModes(podcastId: gardPodcastId)
         #expect(
-            profile.recentFalseSkipSignals == 0,
-            "without this, the very next veto demotes the show the user just restored"
+            after.mode(for: .fusion) == .auto,
+            "one veto must not undo an explicit user instruction"
         )
     }
 
