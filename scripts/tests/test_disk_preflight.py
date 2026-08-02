@@ -275,6 +275,165 @@ class ReclaimOptInTests(unittest.TestCase):
         self.assertIn("REFUSING TO START", err)
 
 
+class FastGateWiringTests(unittest.TestCase):
+    """scripts/fast-gate.sh, driven for real against a stubbed xcodebuild.
+
+    The verdict above is pure and cheap to test; what actually protects the box
+    is the SHELL composition — that a refusal stops the run BEFORE xcodebuild is
+    ever invoked, and that the override reaches it. Same harness shape as
+    test_gate_baseline.FastGateWiringTests.
+    """
+
+    def _skeleton(self, tmp):
+        tmp = pathlib.Path(tmp)
+        (tmp / "scripts").mkdir()
+        for name in ("fast-gate.sh", "gate_baseline.py", "disk_preflight.py"):
+            (tmp / "scripts" / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+        (tmp / "scripts" / "fast-gate.sh").chmod(0o755)
+        # A stub cleaner: the real one hardcodes the repo root and would sweep
+        # the developer's actual worktrees from inside a unit test.
+        (tmp / "scripts" / "disk-cleanup.sh").write_text(
+            "#!/bin/sh\necho '[DRY] done (dry_run=1)'\n")
+        (tmp / "scripts" / "disk-cleanup.sh").chmod(0o755)
+        # A scheme that already names the plan, so the xcodegen bootstrap —
+        # which needs the gitignored model — never triggers.
+        scheme = tmp / "Playhead.xcodeproj" / "xcshareddata" / "xcschemes"
+        scheme.mkdir(parents=True)
+        (scheme / "Playhead.xcscheme").write_text("PlayheadFastTests.xctestplan\n")
+
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        stub = bindir / "xcodebuild"
+        # Records that it ran AND with what arguments, then reports a clean run
+        # so nothing downstream mistakes the stub for the thing under test.
+        stub.write_text(
+            "#!/bin/sh\n"
+            "printf '%%s\\n' \"$@\" > %s\n"
+            "echo '** TEST SUCCEEDED **'\n"
+            "echo 'Test run with 1 test passed after 0.1 seconds.'\n"
+            "exit 0\n" % (tmp / "xcodebuild-argv.txt"))
+        stub.chmod(0o755)
+        return tmp, bindir
+
+    def _run(self, tmp, bindir, args, extra_env=None):
+        import os
+        import subprocess
+
+        env = dict(os.environ)
+        env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
+        env["PLAYHEAD_SKIP_LINT"] = "1"
+        env["PLAYHEAD_SKIP_BASELINE"] = "1"
+        env.pop("PLAYHEAD_SKIP_DISK_PREFLIGHT", None)
+        env.pop("PLAYHEAD_DISK_MIN_GIB", None)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["bash", str(tmp / "scripts" / "fast-gate.sh")] + args,
+            cwd=str(tmp), env=env, capture_output=True, text=True)
+
+    def _ran_xcodebuild(self, tmp):
+        return (tmp / "xcodebuild-argv.txt").exists()
+
+    def test_a_short_disk_stops_the_run_BEFORE_xcodebuild(self):
+        # The whole bead. Not "fails afterwards" — never starts.
+        import tempfile as _t
+        with _t.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(d)
+            proc = self._run(tmp, bindir, [], {"PLAYHEAD_DISK_MIN_GIB": "99999"})
+            self.assertEqual(28, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn("REFUSING TO START", proc.stderr)
+            self.assertFalse(self._ran_xcodebuild(tmp))
+
+    def test_the_override_lets_it_through(self):
+        import tempfile as _t
+        with _t.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(d)
+            proc = self._run(tmp, bindir, [], {"PLAYHEAD_DISK_MIN_GIB": "99999",
+                                               "PLAYHEAD_SKIP_DISK_PREFLIGHT": "1"})
+            self.assertNotIn("REFUSING", proc.stderr)
+            self.assertTrue(self._ran_xcodebuild(tmp))
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+
+    def test_a_normal_run_passes_through_and_says_so_in_one_line(self):
+        import tempfile as _t
+        with _t.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(d)
+            proc = self._run(tmp, bindir, [], {"PLAYHEAD_DISK_MIN_GIB": "0.001"})
+            self.assertIn("disk preflight OK", proc.stdout)
+            self.assertTrue(self._ran_xcodebuild(tmp))
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+
+    def test_reclaim_disk_is_consumed_and_never_forwarded_to_xcodebuild(self):
+        # A stray --reclaim-disk on the xcodebuild command line is an immediate
+        # hard error, i.e. this flag would break every run that used it.
+        import tempfile as _t
+        with _t.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(d)
+            proc = self._run(tmp, bindir, ["--reclaim-disk"],
+                             {"PLAYHEAD_DISK_MIN_GIB": "0.001"})
+            self.assertTrue(self._ran_xcodebuild(tmp))
+            argv = (tmp / "xcodebuild-argv.txt").read_text()
+            self.assertNotIn("--reclaim-disk", argv)
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+
+
+class CleanerWiringTests(unittest.TestCase):
+    """scripts/disk-cleanup.sh, read as text.
+
+    Every assertion here is a defect that has already cost this project hours.
+    They are textual because the alternative is a test that deletes things.
+    """
+
+    def setUp(self):
+        self.src = (ROOT / "scripts" / "disk-cleanup.sh").read_text(encoding="utf-8")
+        # Comments are allowed to SAY "pgrep -f" — the header explains why it is
+        # banned. Only executable lines are policed.
+        self.code = "\n".join(ln for ln in self.src.splitlines()
+                              if not ln.lstrip().startswith("#"))
+
+    def test_pgrep_is_exact_match_never_full_argv(self):
+        # `pgrep -f xcodebuild` self-matches ANY shell whose argv contains the
+        # string — including this script and the agent running it. On
+        # 2026-08-01 an -f pattern killed a healthy gate and then raised a
+        # phantom second-build alarm in monitoring.
+        self.assertIn("pgrep -x xcodebuild", self.code)
+        self.assertNotIn("pgrep -f", self.code)
+
+    def test_a_live_build_is_resolved_by_cwd_and_skipped(self):
+        self.assertIn("lsof -a -p", self.src)
+        self.assertIn("SKIP (live build)", self.src)
+
+    def test_permissions_are_repaired_before_rm_and_with_read(self):
+        # 0o300 dirs (write+exec, no READ) stop `rm -rf` dead. u+w does not fix
+        # them — that is the bug that stranded 15 GiB.
+        self.assertIn("chmod -R u+rwx", self.src)
+        self.assertNotIn("chmod -R u+w ", self.src)
+
+    def test_the_chmod_precedes_the_rm(self):
+        self.assertLess(self.src.index("chmod -R u+rwx"),
+                        self.src.index("rm -rf -- "))
+
+    def test_removal_is_fenced_to_the_three_safe_prefixes(self):
+        self.assertIn("REFUSE (outside safe prefixes)", self.src)
+        self.assertIn("/private/tmp/playhead-", self.src)
+        self.assertIn(".worktrees/", self.src)
+
+    def test_the_coresim_trash_root_must_look_like_a_real_TMPDIR(self):
+        # An unset or hostile TMPDIR must not turn `$TRASH_ROOT/Deleting-*`
+        # into `/Deleting-*` or, worse, a bare glob at the filesystem root.
+        self.assertIn("/var/folders/*", self.src)
+        self.assertIn("/nonexistent", self.src)
+
+    def test_the_newest_xcresult_is_kept(self):
+        # It is the one you open after a failure. Pruning it would trade a disk
+        # problem for a diagnosis problem.
+        self.assertIn("xcresult-superseded", self.src)
+        self.assertIn("ls -dt", self.src)
+
+    def test_symlinks_are_still_refused(self):
+        self.assertIn("SKIP (symlink)", self.src)
+
+
 class DefaultThresholdTests(unittest.TestCase):
     def test_the_default_is_stated_in_gib_and_is_plausible(self):
         # Not a taste assertion — a tripwire. The number is derived from a
