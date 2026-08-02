@@ -71,6 +71,22 @@ struct MigrationLadderTests {
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
 
+        // playhead-hx6n (V42): the three attribution columns + their indexes.
+        // Pinned here as well as in `SemanticScanRunAttributionTests` because
+        // this is the test that notices a ladder REORDERING — a rung that stops
+        // running leaves the columns absent on an upgraded DB while every
+        // fresh-install test stays green, since `createTables()` builds the
+        // final shape unconditionally.
+        for column in ["createdAt", "scenePhase", "runCorrelationId"] {
+            #expect(try probeColumnExists(
+                in: dir,
+                table: "semantic_scan_results",
+                column: column
+            ))
+        }
+        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_createdAt"))
+        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_correlation"))
+
         // V7 sponsor knowledge tables (Phase 8).
         #expect(try probeTableExists(in: dir, table: "sponsor_knowledge_entries"))
         #expect(try probeTableExists(in: dir, table: "knowledge_candidate_events"))
@@ -120,6 +136,9 @@ struct MigrationLadderTests {
         // migrate().
         #expect(try probeColumnExists(in: dir, table: "evidence_events", column: "runMode"))
         #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runMode"))
+        // playhead-hx6n: the V42 rung must run for a DB that entered the ladder
+        // at v1, not only for a fresh install.
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "scenePhase"))
         #expect(try probeTableExists(in: dir, table: "podcast_planner_state"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "evidenceSources"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "eligibilityGate"))
