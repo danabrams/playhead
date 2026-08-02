@@ -46,10 +46,11 @@
 //
 //     Σ delivered  −  Σ retired  =  what the listener could actually have seen
 //
-// `delivered=` and `retired=` are both rendered on the row and both derive
-// from the classifiers below (`AdWindowIngestOutcome.isDelivered` /
-// `.isRetraction`), so a future retraction cause joins the subtraction without
-// the reader having to know its name. Two rules keep the balance honest:
+// Both terms are rendered on the row — `delivered=` always, `retired=` when it
+// is non-zero — and both derive from the classifiers below
+// (`AdWindowIngestOutcome.isDelivered` / `.isRetraction`), so a future
+// retraction cause joins the subtraction without the reader having to know its
+// name. Two rules keep the balance honest:
 //
 //   * A retraction row is written ONLY when something was actually retired.
 //     An outcome that fires on every delivery is exactly as useless as one

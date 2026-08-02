@@ -2088,6 +2088,17 @@ actor SkipOrchestrator {
     /// instrumentation site, so it is left OUT of the counts and shows up as
     /// `forwarded > sum(counts)` in the row — visible, rather than silently
     /// attributed to a cause that did not occur.
+    ///
+    /// playhead-9v09, stated because it is a KNOWN and deliberately unclosed
+    /// interleaving: `receiveAdWindows` suspends on the catalog actor, and this
+    /// actor is reentrant, so a `setEpisodeDuration` arriving inside that
+    /// suspension can run the retroactive sweep and re-stamp a row this
+    /// delivery already armed. The delivery's row then reads
+    /// `ingest_retired_reapplied_inventory_filter` where it would have read
+    /// `ingest_armed_suggest`, and the sweep writes its own row as well. That
+    /// is over-attribution, not silence — the outcome is named in both rows and
+    /// the process COUNTER is bumped exactly once, by the sweep — so it is
+    /// left visible rather than engineered around.
     private func recordIngestCensus(
         door: AdWindowIngestDoor,
         analysisAssetId: String,
