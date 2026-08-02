@@ -146,7 +146,13 @@ struct SpanExtentSupport: Sendable, Equatable, Hashable {
         geometryWasRewritten: Bool = false
     ) -> SpanExtentSupport {
         guard !geometryWasRewritten else { return .unanchored }
-        let rediffOwnsWidth = anchorProvenance.contains(.rediffSlot)
+        // playhead-6qvf: the SHARED definition, not a second spelling of it.
+        // This line used to inline `contains(.rediffSlot)`, which meant the
+        // "byte-exact rediff has one definition" claim on
+        // `DecodedSpan.carriesRediffByteExactWidth` was two expressions that
+        // happened to agree — and a change to the predicate left the extent
+        // tier, hence auto-skip admission, untouched.
+        let rediffOwnsWidth = anchorProvenance.carriesRediffByteExactWidth
         return SpanExtentSupport(
             startAnchor: AutoSkipEdgeAnchor.derive(
                 rediffByteExact: rediffOwnsWidth,

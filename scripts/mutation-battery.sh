@@ -5640,31 +5640,22 @@ EOF
       "            widthProvenance = .rediffSlotChroma
         } else {" ;;
 
+  # EDIT re-cut after the first G run: G04 SURVIVED two of its four expectations
+  # because `SpanExtentSupport.derive` inlined its own `contains(.rediffSlot)`
+  # rather than sharing the predicate, so widening the span property left the
+  # extent tier untouched. The two spellings were unified into
+  # `[AnchorRef].carriesRediffByteExactWidth`; this mutation now hits the ONE
+  # definition, which is why its expected set spans predicate, extent and
+  # consumer.
   G04)
-    snippet OLD <<'EOF'
-    var carriesRediffByteExactWidth: Bool {
-        anchorProvenance.contains(.rediffSlot)
-    }
-EOF
-    snippet NEW <<'EOF'
-    var carriesRediffByteExactWidth: Bool {
-        anchorProvenance.contains(.rediffSlot) || anchorProvenance.contains(.rediffSlotChroma)
-    }
-EOF
-    patch "$file" "$OLD" "$NEW" ;;
+    patch "$file" \
+      "    var carriesRediffByteExactWidth: Bool { contains(.rediffSlot) }" \
+      "    var carriesRediffByteExactWidth: Bool { contains(.rediffSlot) || contains(.rediffSlotChroma) }" ;;
 
   G05)
-    snippet OLD <<'EOF'
-    var carriesRediffChromaWidth: Bool {
-        anchorProvenance.contains(.rediffSlotChroma)
-    }
-EOF
-    snippet NEW <<'EOF'
-    var carriesRediffChromaWidth: Bool {
-        anchorProvenance.contains(.rediffSlot)
-    }
-EOF
-    patch "$file" "$OLD" "$NEW" ;;
+    patch "$file" \
+      "    var carriesRediffChromaWidth: Bool { contains(.rediffSlotChroma) }" \
+      "    var carriesRediffChromaWidth: Bool { contains(.rediffSlot) }" ;;
 
   G06)
     patch "$file" \
@@ -5673,7 +5664,7 @@ EOF
 
   G07)
     patch "$file" \
-      "        let rediffOwnsWidth = anchorProvenance.contains(.rediffSlot)" \
+      "        let rediffOwnsWidth = anchorProvenance.carriesRediffByteExactWidth" \
       "        let rediffOwnsWidth = anchorProvenance.contains { \$0.isWidthOwnership }" ;;
 
   G08)

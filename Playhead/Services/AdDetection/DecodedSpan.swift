@@ -74,7 +74,7 @@ struct DecodedSpan: Sendable, Codable, Equatable, Identifiable {
     /// "every staged B gate-rejects", not the absent-B-URL, unresolvable-A-side
     /// (playhead-b8hj) or unreadable-bytes triggers.
     var carriesRediffByteExactWidth: Bool {
-        anchorProvenance.contains(.rediffSlot)
+        anchorProvenance.carriesRediffByteExactWidth
     }
 
     /// playhead-6qvf: True when the CHROMA arm of the rediff width oracle owns
@@ -91,7 +91,7 @@ struct DecodedSpan: Sendable, Codable, Equatable, Identifiable {
     /// — but the two are read independently and neither implies the other's
     /// negation, so do not write one in terms of the other.
     var carriesRediffChromaWidth: Bool {
-        anchorProvenance.contains(.rediffSlotChroma)
+        anchorProvenance.carriesRediffChromaWidth
     }
 
     /// Compute the stable id from its components.
@@ -100,6 +100,32 @@ struct DecodedSpan: Sendable, Codable, Equatable, Identifiable {
         let hash = SHA256.hash(data: Data(input.utf8))
         return hash.prefix(16).map { String(format: "%02x", $0) }.joined()
     }
+}
+
+// MARK: - Rediff width provenance (the ONE definition)
+
+/// playhead-6qvf: the single definition of each rediff width claim, on the
+/// provenance ARRAY rather than on `DecodedSpan`, because the two consumers do
+/// not agree on what they hold.
+///
+/// `DecodedSpan.carriesRediffByteExactWidth` has always documented itself as
+/// reading "the SAME `.contains(.rediffSlot)` that `SpanExtentSupport.derive`
+/// uses … so the 'byte-exact rediff' concept has one definition". It was two
+/// expressions that happened to agree: `derive` takes a bare `[AnchorRef]` (it
+/// runs after the finalizer, where no `DecodedSpan` is in hand) and so could
+/// not call the span's property. The mutation battery found the gap — widening
+/// the span predicate to accept the chroma marker left the extent tier, and
+/// therefore auto-skip ADMISSION, completely unmoved.
+///
+/// Both spellings now route here, so the doc comment is a fact rather than an
+/// intention: one edit changes the answer everywhere, and a mutation of it is
+/// visible at every consumer.
+extension [AnchorRef] {
+    /// The BYTE-run differ owns this width. See `AnchorRef.rediffSlot`.
+    var carriesRediffByteExactWidth: Bool { contains(.rediffSlot) }
+
+    /// The ~1 s CHROMA differ owns this width. See `AnchorRef.rediffSlotChroma`.
+    var carriesRediffChromaWidth: Bool { contains(.rediffSlotChroma) }
 }
 
 // MARK: - DecoderConstants
