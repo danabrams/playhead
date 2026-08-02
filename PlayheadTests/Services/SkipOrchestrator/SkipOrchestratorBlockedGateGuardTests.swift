@@ -210,6 +210,37 @@ struct SkipOrchestratorBlockedGateGuardTests {
             appliedOrConfirmed.isEmpty,
             "[\(gateRaw)] blocked-gate window must NOT produce applied/confirmed decisions; got \(appliedOrConfirmed)"
         )
+
+        // 6. playhead-avbn: the window was DROPPED, and dropped FOR THIS REASON.
+        //
+        // Steps 1-5 are all statements about what did not happen, and since
+        // playhead-d3g0 that is no longer enough. A suggest banner is now ARMED
+        // at delivery and EMITTED only when the playhead ENTERS the span, so a
+        // regression that routed a blocked gate to the suggest tier arms a
+        // banner while emitting nothing inside this test's 100 ms window —
+        // every assertion above stays green and the span banners in the field
+        // the moment playback reaches it. Found by the A11 mutation, which
+        // survived the five assertions above.
+        //
+        // playhead-isp5's census row is the positive witness: it names the
+        // terminal disposition and its cause, so "dropped at the blocked-gate
+        // guard" and "armed as a suggestion" are no longer the same observation.
+        let ingest = await orchestrator.lastAdWindowIngestOutcome(forWindowId: windowId)
+        #expect(
+            ingest?.outcome == .droppedBlockedGate,
+            "[\(gateRaw)] blocked-gate window must record `droppedBlockedGate`; got \(String(describing: ingest?.outcome))"
+        )
+        // The detail carries the DECODED case, so a row written under the
+        // pre-rename raw value is attributed to the gate that blocked it rather
+        // than to the string it happened to be stored as.
+        #expect(
+            ingest?.detail == decoded.rawValue,
+            "[\(gateRaw)] the census must name the decoded gate `\(decoded.rawValue)`; got \(String(describing: ingest?.detail))"
+        )
+        #expect(
+            await orchestrator.adWindowIngestOutcomeCount(.armedSuggest) == 0,
+            "[\(gateRaw)] blocked-gate window must NOT arm a suggestion — an armed banner fires when the playhead enters the span, long after this test's observation window"
+        )
     }
 
     @Test(
