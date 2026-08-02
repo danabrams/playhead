@@ -168,6 +168,20 @@ final class TestScratchReaper: @unchecked Sendable {
         return entries.contains { $0.url == url }
     }
 
+    /// Whether `url` carries a LIVE owner, and so will be reclaimed mid-run.
+    ///
+    /// Distinct from ``isTracked(_:)`` on purpose. Tracked-but-unowned is the
+    /// state a bare `makeTempDir` leaves behind, and it is reclaimed only at
+    /// process exit — so a factory that forgot to adopt still reads as tracked,
+    /// and an assertion phrased on tracking alone cannot tell "bounded" from
+    /// "exactly as broken as before".
+    func isOwned(_ url: URL) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries.last(where: { $0.url == url }) else { return false }
+        return entry.isOwned && entry.owner != nil
+    }
+
     /// Remove a directory tree even when a test has deliberately made part of it
     /// unreadable.
     ///

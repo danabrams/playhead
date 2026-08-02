@@ -148,6 +148,7 @@ struct TestScratchReaperTests {
         #expect(FileManager.default.fileExists(atPath: dir.path))
         #expect(reaper.stats.reclaimed == 0)
         #expect(reaper.isTracked(dir))
+        #expect(!reaper.isOwned(dir), "nothing owns it, so nothing can prove it idle")
     }
 
     // MARK: - Automatic sweeping
@@ -263,8 +264,10 @@ struct TestScratchReaperTests {
     func storeFactoryAttachesOwnership() async throws {
         let (store, dir) = try await makeTestStoreWithDirectory()
         #expect(
-            TestScratchReaper.shared.isTracked(dir),
-            "an unregistered store directory can never be reclaimed mid-run"
+            TestScratchReaper.shared.isOwned(dir),
+            """
+            a store directory that is merely TRACKED is reclaimed only at             process exit — which is the whole defect. Ownership is what bounds             the peak.
+            """
         )
         #expect(
             dir.lastPathComponent.hasPrefix("PlayheadTestStore-"),
@@ -284,7 +287,10 @@ struct TestScratchReaperTests {
     func makeTempDirAcceptsAnOwner() throws {
         let owner = Owner()
         let dir = try makeTempDir(prefix: "cgka-owned", ownedBy: owner)
-        #expect(TestScratchReaper.shared.isTracked(dir))
+        #expect(
+            TestScratchReaper.shared.isOwned(dir),
+            "ownedBy: that only registers is indistinguishable from not passing it at all"
+        )
         #expect(FileManager.default.fileExists(atPath: dir.path))
         withExtendedLifetime(owner) {}
     }
