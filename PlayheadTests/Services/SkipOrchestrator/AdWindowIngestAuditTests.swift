@@ -1109,7 +1109,6 @@ struct AdWindowIngestTaxonomyTests {
         )
         #expect(delivery.retiredCount == 0)
         #expect(!delivery.auditDescription.contains("retired="),
-                "a delivery row cannot honestly claim retired=0 — got "
-                    + delivery.auditDescription)
+                "a delivery row cannot honestly claim retired=0 — got \(delivery.auditDescription)")
     }
 }
