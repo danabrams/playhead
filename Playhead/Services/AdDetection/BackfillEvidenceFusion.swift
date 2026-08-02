@@ -1067,13 +1067,15 @@ struct DecisionMapper: Sendable {
         //     downstream. This exemption only declines to demote HERE; it never
         //     promotes and never overrides the unanchored-edge block.
         //
-        // NARROWNESS CAVEAT, inherited not introduced: the CHROMA differ
-        // fallback (`RediffSlotOwnership.gateAndDiff`, taken when the byte
-        // differ yields nothing) also stamps `.rediffSlot`, and its ~1 s
-        // chroma-alignment slots are not byte-exact. Separating the two needs a
-        // distinct `AnchorRef` case — a persistence change — and the same
-        // predicate already governs the four shipped exemptions listed above,
-        // so it is tracked separately rather than forked here.
+        // NARROWNESS CAVEAT, inherited not introduced (playhead-6qvf): the
+        // CHROMA differ fallback (`RediffSlotOwnership.gateAndDiff`, taken when
+        // the byte differ yields nothing) also stamps `.rediffSlot`, and its
+        // ~1 s chroma-alignment slots are not byte-exact. Separating the two
+        // needs a distinct `AnchorRef` case — a persisted-provenance change —
+        // and the same predicate already governs the four shipped exemptions
+        // listed above, so forking it for one of five consumers would be worse
+        // than the status quo: the five would then disagree about what
+        // "byte-exact" means. Tracked as playhead-6qvf, not forked here.
         if config.certaintyTieredEnabled,
            gate == .eligible,
            !span.carriesRediffByteExactWidth,
