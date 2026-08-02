@@ -563,6 +563,9 @@ ACT="Playhead/Services/AdDetection/RediffRefetch/RediffActivation.swift"
 # carries the mark literals and the seed predicate.
 ADSVC="Playhead/Services/AdDetection/AdDetectionService.swift"
 PODC="Playhead/Services/AdDetection/AdPodContinuation.swift"
+# playhead-mptr: the artifact-backed shard skip (K2 series). MPTRIDX owns the
+# merge/overlap/skip policy; the two SQL rails live in STORE.
+MPTRIDX="Playhead/Services/TranscriptEngine/FastTranscriptCoverageIndex.swift"
 # playhead-kvs8: the FM daemon throttle (Q01-Q08). THROT is the single
 # definition + the named causes; RUNNER carries the defer branch that replaced
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
@@ -1408,6 +1411,20 @@ T_GARD_STRONGEST_TIER="A duplicate class in one gesture is charged ONCE, at its 
 T_GARD_WEAK_HALVED="An inferred revert weighs half an explicit one (the fidelity ladder)"
 T_GARD_DOOR_OPENS="THE DOOR OPENS: correct observations walk the device row back to auto"
 T_GARD_DECAY_ONE="Each correct observation decays exactly one unit of false-signal evidence"
+
+# playhead-mptr (K2 series): the artifact-backed shard skip. The whole point is
+# that a skip needs TWO independent facts — a watermark that reached past the
+# shard AND a persisted chunk that backs it — so the two rails are asserted
+# separately and in both directions.
+T_MPTR_WATERMARK_RAIL="A chunk under a watermark that has NOT reached the shard end is not skippable"
+T_MPTR_ARTIFACT_RAIL="THE H3/0sro RAIL: a watermark with no chunk behind it skips nothing"
+T_MPTR_TOUCHING_MERGE="Exactly abutting ASR segments merge into one covered interval"
+T_MPTR_DEGENERATE_DROPPED="A zero-width chunk covers no time and cannot authorise a skip"
+T_MPTR_HALF_OPEN_END="Touching a covered interval's END is not overlapping it"
+T_MPTR_HALF_OPEN_START="Touching a covered interval's START is not overlapping it"
+T_MPTR_PASS_FILTER="A final-pass chunk is not fast-pass coverage"
+T_MPTR_SQL_DEGENERATE="The store drops degenerate rows before they can back a skip"
+T_MPTR_WATERMARK_INCLUSIVE="A shard ending exactly AT the watermark is covered"
 T_GARD_CREDIT_NOT_SHARED="Credit goes to the observed detector only"
 T_GARD_OVERRIDE_CLEARS="An explicit user override clears the stale evidence against every detector"
 T_GARD_BANNER_CREDITS="A confirmed banner IS a correct observation, credited to the detector that drew the span"
@@ -2691,6 +2708,18 @@ MUTATIONS=(
   # history" widened into "runs when persistence is broken" — playhead-djl0's
   # rule that every failure lands non-actioning.
   "I19|193|TRUST|$T_GARD_LOOKUP_FAILURE"
+
+  # playhead-mptr — K2 series, the artifact-backed shard skip. Four batches;
+  # K201 and K208 patch the SAME guard line and so can never share one.
+  "K201|200|MPTRIDX|$T_MPTR_WATERMARK_RAIL"
+  "K203|200|MPTRIDX|$T_MPTR_TOUCHING_MERGE"
+  "K209|200|MPTRIDX|$T_MPTR_HALF_OPEN_START"
+  "K202|201|MPTRIDX|$T_MPTR_ARTIFACT_RAIL"
+  "K204|201|MPTRIDX|$T_MPTR_DEGENERATE_DROPPED"
+  "K205|202|MPTRIDX|$T_MPTR_HALF_OPEN_END"
+  "K206|202|STORE|$T_MPTR_PASS_FILTER"
+  "K207|203|STORE|$T_MPTR_SQL_DEGENERATE"
+  "K208|203|MPTRIDX|$T_MPTR_WATERMARK_INCLUSIVE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6542,6 +6571,51 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  K201)
+    patch "$file" \
+      "        guard let watermark, watermark.isFinite, watermark >= shardEnd else {" \
+      "        guard let watermark, watermark.isFinite, watermark >= 0 else {" ;;
+
+  K202)
+    patch "$file" \
+      "        return overlaps(start: shardStart, end: shardEnd)" \
+      "        return true" ;;
+
+  K203)
+    patch "$file" \
+      "            if var last = merged.last, range.start <= last.end {" \
+      "            if var last = merged.last, range.start < last.end {" ;;
+
+  K204)
+    patch "$file" \
+      "            .filter { \$0.start.isFinite && \$0.end.isFinite && \$0.end > \$0.start }" \
+      "            .filter { \$0.start.isFinite && \$0.end.isFinite && \$0.end >= \$0.start }" ;;
+
+  K205)
+    patch "$file" \
+      "        if candidate >= 0, intervals[candidate].end > start {" \
+      "        if candidate >= 0, intervals[candidate].end >= start {" ;;
+
+  K206)
+    patch "$file" \
+      "              AND pass = 'fast'" \
+      "              AND pass IS NOT NULL" ;;
+
+  K207)
+    patch "$file" \
+      "              AND endTime > startTime" \
+      "              AND endTime >= startTime" ;;
+
+  K208)
+    patch "$file" \
+      "        guard let watermark, watermark.isFinite, watermark >= shardEnd else {" \
+      "        guard let watermark, watermark.isFinite, watermark > shardEnd else {" ;;
+
+  K209)
+    patch "$file" \
+      "        return next < intervals.count && intervals[next].start < end" \
+      "        return next < intervals.count && intervals[next].start <= end" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -6572,6 +6646,7 @@ rec_file()   {
     ADSVC) printf '%s' "$ADSVC" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
+    MPTRIDX) printf '%s' "$MPTRIDX" ;;
     THROT) printf '%s' "$THROT" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;

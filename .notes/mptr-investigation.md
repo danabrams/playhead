@@ -95,3 +95,73 @@ what "stuck at 68.7%, five attempts, zero progress" is.
 The bead's watch item 2 ("why the same offset five times?") is answered: not five measurements
 landing on one offset, but one stuck watermark re-read five times, stuck because every attempt
 spends its whole budget re-reading audio it already has.
+
+## Step 4 — the roundness, answered
+
+`AnalysisAudioService.defaultShardDuration = 30.0` (`Playhead/Services/AnalysisAudio/AnalysisAudio.swift:498`).
+
+The watermark tracks SHARD ENDS, not chunk ends, for the whole of a pass —
+`TranscriptEngineService.updateCoverage(endTime: shard.startTime + shard.duration)` — and is
+reconciled to `MAX(chunk.endTime)` only at `.completed`, which this asset never reached.
+
+So every intermediate watermark on this asset is a multiple of 30, and
+
+    2700 = 90 x 30
+
+is simply the 90th shard boundary. **The round number IS a configured quantity — but the
+quantity is the shard grid (30 s), not a 45-minute cap.** The orchestrator's prior was sound
+reasoning that pointed at the wrong constant; there is no 2700 s bound, and I searched for one
+explicitly (Step 1).
+
+The episode is 3929.9 s = 131 shards. 90 of them sat behind the watermark. The loop re-ran ASR
+over all 90 before it could reach shard 91, inside a 300 s stage budget — i.e. it needed to
+sustain better than 9x realtime just to arrive at new audio. On a thermally-throttled phone it
+never did.
+
+## Watch item 1 — y8f3's capRetry: MINTS CORRECTLY, BUT COULD NOT HAVE HELPED
+
+Verified by construction (no field artifact available — see "Evidence" below).
+
+`AnalysisWorkScheduler.capOutRetryDecision` would mint for this row:
+  - `isAttemptCapTerminal`: state `superseded` + `lastErrorCode` prefix `maxAttemptsReached` — the
+    field row is exactly `maxAttemptsReached:transcription`. PASSES.
+  - `nextOrdinal`: no `capRetry:*` key on disk yet -> 1. PASSES.
+  - cooldown: `capOutRetryCooldownSeconds = 3600`. PASSES after 1 h, as the bead expects.
+  - `outstandingTranscriptTarget(2700, tiers: [90, 300, 900], episodeDurationSec: 3929.9)`:
+    `coverageTierLadder` appends the episode duration, so the ladder is
+    [90, 300, 900, 3929.9] and the next rung above 2700 is 3929.9. PASSES.
+  -> `.mint(workKey: "<base>:capRetry:1", ordinal: 1, desiredCoverageSec: 3929.9)`.
+
+Note the decision reads the ASSET watermark, not the job column — y8f3 already handles the trap
+where `updateJobProgress` leaves the job row at 0.0. So **y8f3 has no gap of the kind the bead
+feared.**
+
+**But the retry was futile, and that is the important half.** A `capRetry:1` runs the same
+transcription loop against the same 2700 s of existing coverage and hits the same 300 s wall
+before reaching new audio. It would have capped out again at the same watermark. This is exactly
+the bead's own escape-hatch condition — "if the capRetry also dies at 2700.000, retrying is not
+the answer at all". y8f3 is a SCHEDULING remedy; the defect is a COMPUTE-BUDGET one. Retrying
+harder cannot fix a pass that spends its entire budget re-reading what it already has.
+
+The fix in this bead is what makes y8f3's retry able to make progress: with the covered prefix
+skipped, a `capRetry:1` targeting 3929.9 s reaches new audio immediately.
+
+## Watch item 3 — se2h's SpeechModelLoadJournal
+
+`SpeechModelLoadJournal.recordFailure` is called from exactly one place:
+`TranscriptEngine.prepareFastModel()`'s catch arm, and ONLY when the load actually threw and the
+task was not cancelled.
+
+For this failure the journal is expected to be EMPTY, and its emptiness is informative rather
+than a wiring bug: every non-ready `prepareFastModel` outcome
+(`.failed`/`.loadInFlight`/`.budgetExhausted`) makes `runTranscriptionLoop` emit
+`speech_engine_not_ready`, which the runner would have observed as a `.failed` event — and that
+would have classified as `engine_reported`, NOT `engine_silent_timeout`.
+`Observation.classify(failure: nil, sawCompleted: false) == .engineSilentTimeout` requires
+`failure == nil`, i.e. the engine reported NOTHING.
+
+So the field row's own classification RULES OUT the model-load path. The engine did not restart
+and did not fail to load; it was busy. `staleInFlightLoadThreshold = 120 s` is below the runner's
+300 s cap, so even a wedged load supersedes itself and reports inside the budget. That is a
+second, independent reason the diagnosis lands on the re-transcription cost rather than on the
+speech stack.
