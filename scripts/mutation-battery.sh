@@ -4419,10 +4419,15 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   Z08)
+    # Anchored on the RETURN as well as the adopt: the bare adopt line occurs
+    # twice in this file (the controller-store factory is the other), and the
+    # patcher refuses an anchor that is not unique.
     snippet OLD <<'EOF'
     TestScratchReaper.shared.adopt(dir, owner: store)
+    return (store, dir)
 EOF
     snippet NEW <<'EOF'
+    return (store, dir)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
