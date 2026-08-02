@@ -1038,6 +1038,93 @@ struct BackfillJobRunnerTests {
         #expect(noAdWindow.windowEndTime <= 90)
     }
 
+    @available(iOS 26.0, *)
+    @Test("playhead-avbn: a passB row reports the MEASURED transcript quality, never a hardcoded good")
+    func refinementRowReportsMeasuredTranscriptQuality() async throws {
+        // `makeRefinementScanResult` used to assert `transcriptQuality: .good`
+        // on every pass-B row it wrote. Measured on the surviving device pulls,
+        // 100 % of pass-B rows read `good` while pass-A on the SAME assets read
+        // `degraded` 8 times in 11 — the column carried no information.
+        //
+        // It is not cosmetic: `FMSuppressionWindow.votingWindows` bands a window
+        // `transcriptQuality == .good ? .moderate : .weak` and
+        // `FMSuppressionGuard` counts only `.moderate`+, so the hardcode
+        // promoted every pass-B row to a full vote regardless of the transcript
+        // under it.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+
+        // A deliberately bad transcript: no sentence punctuation, heavy
+        // repetition. Every line is written the same way so any window the
+        // runner chooses aggregates to the same level.
+        let degradedLine =
+            "um um so like uh you know um so like uh you know um so like uh you know um so like uh"
+        let segments = makeFMSegments(
+            analysisAssetId: "asset-runner",
+            transcriptVersion: "tx-runner-v1",
+            lines: [
+                (0, 30, degradedLine),
+                (30, 60, degradedLine),
+                (60, 90, degradedLine)
+            ]
+        )
+
+        // The rail proves nothing unless the fixture is genuinely not `.good` —
+        // assert that first, so a future tweak to the estimator's thresholds
+        // fails HERE with a clear message instead of silently turning the real
+        // assertion into a tautology.
+        let measured = TranscriptQualityEstimator.assess(segments: segments).map(\.quality)
+        #expect(
+            measured.allSatisfy { $0 != .good },
+            "fixture regression: the degraded transcript now assesses as good (\(measured)), so this test can no longer distinguish a measured value from the old hardcode"
+        )
+
+        let inputs = BackfillJobRunner.AssetInputs(
+            analysisAssetId: "asset-runner",
+            podcastId: "podcast-runner",
+            segments: segments,
+            evidenceCatalog: EvidenceCatalogBuilder.build(
+                atoms: segments.flatMap(\.atoms),
+                analysisAssetId: "asset-runner",
+                transcriptVersion: "tx-runner-v1"
+            ),
+            transcriptVersion: "tx-runner-v1",
+            plannerContext: CoveragePlannerContext(
+                observedEpisodeCount: 0,
+                stableRecall: false,
+                isFirstEpisodeAfterCohortInvalidation: false,
+                recallDegrading: false,
+                sponsorDriftDetected: false,
+                auditMissDetected: false,
+                episodesSinceLastFullRescan: 0,
+                periodicFullRescanIntervalEpisodes: 10
+            )
+        )
+
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(
+                    disposition: .containsAd,
+                    support: CoarseSupportSchema(supportLineRefs: [0], certainty: .strong)
+                )
+            ],
+            refinementResponses: [
+                RefinementWindowSchema(spans: [])
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
+        let passB = scans.filter { $0.scanPass == "passB" && $0.status == .success }
+        #expect(!passB.isEmpty, "the fixture must produce at least one successful passB row")
+        #expect(
+            passB.allSatisfy { $0.transcriptQuality != .good },
+            "a passB row over a degraded transcript still claims good — the hardcode is back"
+        )
+    }
+
     @Test("admission throttling defers the job and records the reason")
     func thermalThrottleIsDeferred() async throws {
         let store = try await makeTestStore()
