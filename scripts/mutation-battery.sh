@@ -1508,7 +1508,11 @@ T_9V09_THREE_DELIVERED="exactly three outcomes count as delivered"
 
 # playhead-hx6n — scan-row run attribution (T series).
 T_HX6N_NIL_BUCKET="NEGATIVE: a nil scene phase buckets as unattributed, never as a phase"
-T_HX6N_UNKNOWN_BUCKET="NEGATIVE: a recorded `.unknown` phase buckets as unattributed"
+# SINGLE-quoted: the display name contains backticks, and in a double-quoted
+# bash string those are command substitution — the shell ran `.unknown` at load
+# time, printed "command not found", and substituted the empty string, leaving
+# an expectation that could never match a real test name.
+T_HX6N_UNKNOWN_BUCKET='NEGATIVE: a recorded `.unknown` phase buckets as unattributed'
 T_HX6N_MIXED_CORPUS="NEGATIVE: unattributed rows are counted apart and never poison the foreground ratio"
 T_HX6N_ALL_UNATTRIBUTED="NEGATIVE: an all-unattributed corpus yields no foreground measurement at all"
 T_HX6N_V41_SURVIVES="V42: a v41 row survives the migration and stays unattributed forever"
@@ -6953,6 +6957,7 @@ rec_file()   {
     RSLOT) printf '%s' "$RSLOT" ;;
     DETCLS) printf '%s' "$DETCLS" ;;
     DETLED) printf '%s' "$DETLED" ;;
+    SPLIT) printf '%s' "$SPLIT" ;;
     *)     printf '%s' "" ;;
   esac
 }
