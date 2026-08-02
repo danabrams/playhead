@@ -192,3 +192,21 @@ available on this box are stale (newest 2026-07-22, pre-V42 by construction) and
 cannot contain a single attributed row. `SemanticScanRunAttributionTests` builds
 the three-table fixture, writes the rows, and runs the join and the split for
 real. No field numbers are quoted here because none were measured.
+
+## What is pinned, and where
+
+| claim | test |
+| --- | --- |
+| V42 shape lands on a fresh install and on the v1-seeded ladder | `MigrationLadderTests`, `SemanticScanRunAttributionTests` |
+| a v41 row survives the migration and still reads NULL (no backfill) | `v41RowSurvivesMigrationAndStaysUnattributed` |
+| the scan → job → BGTask-run join resolves, and a foreground scan LEFT-JOINs to no run | `scanRowJoinsToJobAndRun` |
+| the store stamps a clock and invents nothing else | `storeStampsClockButNeverInventsAPhase` |
+| **a nil phase is never read as a phase** | `nilScenePhaseIsUnattributed`, `unattributedRowsNeverBecomeForeground`, `allUnattributedCorpusYieldsNoForegroundMeasurement` |
+| the production write path actually stamps, and the id it stamps joins | `SemanticScanAttributionWireInTests` |
+| this document's SQL computes what the shipped consumer computes | `sqlAndSwiftSplitsAgree` |
+
+The mutation battery's **T series** (`scripts/mutation-battery.sh`, entries
+T01–T15, batches 210–216) is the certification: fifteen edits that each
+reproduce a real way this could be silently undone — `?? .active` on the read
+line, a store that invents a phase at the write, a seam that stops stamping, a
+zero denominator reported as `1.0` — and the rail each one has to trip.

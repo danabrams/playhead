@@ -680,13 +680,24 @@ ATOMEV="Playhead/Services/AdDetection/AtomEvidence.swift"
 # over the pure types structurally cannot see any of them.
 DETCLS="Playhead/Services/TrustScoring/SkipDetectorClass.swift"
 DETLED="Playhead/Services/TrustScoring/DetectorTrustLedger.swift"
+# playhead-hx6n: SCAN-ROW RUN ATTRIBUTION (T series). Three files, because the
+# claim is a chain from the write to the read to the arithmetic and each link
+# fails silently and separately. SPLIT is the CONSUMER — `bucket(for:)` is one
+# line, and defaulting a nil phase to `.foreground` there still produces
+# perfectly-shaped numbers that are simply wrong. STORE holds both halves of
+# persistence: the write that must NOT invent a phase, and the read that must
+# NOT default a NULL to one (a `?? .active` on the read line quietly re-attributes
+# the entire pre-V42 corpus). RUNNER holds the single attribution seam, which is
+# the only thing that can put a real value in the columns at all — a battery
+# over the pure types structurally cannot see a seam that never fires.
+SPLIT="Playhead/Services/AdDetection/SemanticScanThroughputSplit.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
-  "$DETCLS" "$DETLED"
+  "$DETCLS" "$DETLED" "$SPLIT"
 )
 
 FOCUSED_SUITES=(
@@ -913,6 +924,17 @@ FOCUSED_SUITES=(
   # mutation is invisible to a pure test by construction.
   -only-testing:PlayheadTests/AdWindowIngestRetroactiveRetirementTests
   -only-testing:PlayheadTests/AdWindowIngestTaxonomyTests
+  # playhead-hx6n: scan-row run attribution (T01-T15). Three suites, ~1.5s
+  # combined. The pure/persistence suite owns the schema, the join and the
+  # unknown-stays-unknown arithmetic; the wire-in suite is the ONLY thing that
+  # can see whether the production write path stamps anything at all (every
+  # other assertion in the series is satisfied by hand-built rows and would stay
+  # green while the device wrote NULLs forever); and the migration ladder is the
+  # only thing that notices a rung that stops climbing, because `createTables()`
+  # builds the final shape unconditionally and masks it everywhere else.
+  -only-testing:PlayheadTests/SemanticScanRunAttributionTests
+  -only-testing:PlayheadTests/SemanticScanAttributionWireInTests
+  -only-testing:PlayheadTests/MigrationLadderTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1483,6 +1505,21 @@ T_9V09_ONE_RETRACTION="exactly one outcome is a retraction"
 T_9V09_NOT_BOTH="a retraction is neither a delivery nor a door outcome"
 T_9V09_RENDER="a retraction row renders retired= and a delivery row does not"
 T_9V09_THREE_DELIVERED="exactly three outcomes count as delivered"
+
+# playhead-hx6n — scan-row run attribution (T series).
+T_HX6N_NIL_BUCKET="NEGATIVE: a nil scene phase buckets as unattributed, never as a phase"
+T_HX6N_UNKNOWN_BUCKET="NEGATIVE: a recorded `.unknown` phase buckets as unattributed"
+T_HX6N_MIXED_CORPUS="NEGATIVE: unattributed rows are counted apart and never poison the foreground ratio"
+T_HX6N_ALL_UNATTRIBUTED="NEGATIVE: an all-unattributed corpus yields no foreground measurement at all"
+T_HX6N_V41_SURVIVES="V42: a v41 row survives the migration and stays unattributed forever"
+T_HX6N_STORE_STAMPS="V42: the store stamps createdAt when a writer supplies none — and stamps nothing else"
+T_HX6N_EMPTY_CORPUS="an empty corpus reports nil, not zero and not one"
+T_HX6N_INELIGIBLE="throughput excludes no-work sentinels, failures and zero-width windows"
+T_HX6N_SQL_AGREES="the SQL split and the Swift split agree on one fixture"
+T_HX6N_RUNNER_STAMPS="every row the runner persists carries attribution, and the id resolves to a real job"
+T_HX6N_FOREGROUND_RUN="a foreground run lands on the foreground side of the same split"
+T_HX6N_BROKEN_PROVIDER="a provider that breaks the vocabulary yields unattributed rows, not guessed ones"
+T_HX6N_LADDER_RAIL="Cycle 4 H1 RAIL: the isolated ladder does NOT run createTables()"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -2751,6 +2788,40 @@ MUTATIONS=(
   "K206|202|STORE|$T_MPTR_PASS_FILTER"
   "K207|203|STORE|$T_MPTR_SQL_DEGENERATE"
   "K208|203|MPTRIDX|$T_MPTR_WATERMARK_INCLUSIVE"
+
+  # playhead-hx6n — SCAN-ROW RUN ATTRIBUTION. Fifteen entries, batches 210-216.
+  #
+  # WHAT SETS THE BATCH FLOOR HERE, since it is not the expectation lists. Four
+  # of these mutations do not merely redden their own rail — they redden
+  # `T_HX6N_SQL_AGREES` as a SIDE EFFECT, because the documented SQL and the
+  # shipped Swift consumer are cross-checked on one fixture and any change to
+  # the bucketing arithmetic moves both sides. Batching is therefore done on
+  # each mutation's TOTAL blast radius, not on the tests it is declared to kill:
+  # a batch-mate whose side effect reddens another's expected test would be
+  # scored a false KILL, which is worse than an extra build. Seven batches is
+  # what that constraint permits; four are pairs, two are triples, and T15 runs
+  # alone because every other sqlAgrees mutation was already spoken for.
+  "T01|210|SPLIT|$T_HX6N_NIL_BUCKET;$T_HX6N_MIXED_CORPUS;$T_HX6N_ALL_UNATTRIBUTED;$T_HX6N_V41_SURVIVES"
+  "T10|210|RUNNER|$T_HX6N_BROKEN_PROVIDER"
+
+  "T02|211|SPLIT|$T_HX6N_UNKNOWN_BUCKET;$T_HX6N_SQL_AGREES"
+  "T05|211|STORE|$T_HX6N_STORE_STAMPS"
+
+  "T03|212|STORE|$T_HX6N_V41_SURVIVES;$T_HX6N_STORE_STAMPS"
+  "T13|212|SPLIT|$T_HX6N_EMPTY_CORPUS;$T_HX6N_ALL_UNATTRIBUTED"
+
+  "T04|213|STORE|$T_HX6N_STORE_STAMPS"
+  "T14|213|SPLIT|$T_HX6N_EMPTY_CORPUS"
+  "T09|213|RUNNER|$T_HX6N_RUNNER_STAMPS;$T_HX6N_FOREGROUND_RUN"
+
+  "T06|214|STORE|$T_HX6N_V41_SURVIVES"
+  "T11|214|SPLIT|$T_HX6N_INELIGIBLE;$T_HX6N_SQL_AGREES"
+  "T08|214|RUNNER|$T_HX6N_RUNNER_STAMPS"
+
+  "T07|215|STORE|$T_HX6N_LADDER_RAIL"
+  "T12|215|STORE|$T_HX6N_SQL_AGREES"
+
+  "T15|216|STORE|$T_HX6N_SQL_AGREES"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3024,6 +3095,185 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-hx6n: scan-row run attribution (T series) ----
+
+  # T01 — THE one-line mutation the whole bead reduces to: read a nil scene
+  # phase as `.foreground`. Nothing crashes, every number still prints, and the
+  # entire pre-V42 corpus silently becomes a foreground measurement.
+  T01)
+    snippet OLD <<'EOF'
+        guard let scenePhase else { return .unattributed }
+EOF
+    snippet NEW <<'EOF'
+        guard let scenePhase else { return .foreground }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T02 — `.unknown` is a RECORDED non-answer; calling it foreground invents an
+  # attribution the row explicitly declines to make.
+  T02)
+    snippet OLD <<'EOF'
+        case .unknown:           return .unattributed
+EOF
+    snippet NEW <<'EOF'
+        case .unknown:           return .foreground
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T03 — the same defect one layer lower, on the READ. A `?? .active` here is
+  # far more plausible-looking than T01 (it reads like defensive coding) and is
+  # invisible to any test that only checks in-memory rows.
+  T03)
+    snippet OLD <<'EOF'
+        let scenePhase = optionalText(stmt, 23).flatMap(ScanScenePhase.init(rawValue:))
+EOF
+    snippet NEW <<'EOF'
+        let scenePhase = ScanScenePhase(rawValue: optionalText(stmt, 23) ?? ScanScenePhase.active.rawValue)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T04 — the store invents a phase at the WRITE. It cannot know one, so this
+  # manufactures attribution rather than recording it.
+  T04)
+    snippet OLD <<'EOF'
+        bind(stmt, 24, result.scenePhase?.rawValue)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 24, result.scenePhase?.rawValue ?? ScanScenePhase.active.rawValue)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T05 — drop the createdAt backstop. Post-V42 rows written by a caller with no
+  # clock become indistinguishable on disk from pre-V42 rows, and the
+  # attributable corpus quietly shrinks with nothing to notice.
+  T05)
+    snippet OLD <<'EOF'
+        bind(stmt, 23, result.createdAt ?? now)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 23, result.createdAt)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T06 — read a NULL createdAt through `sqlite3_column_double`, which returns
+  # 0.0. Every pre-V42 row then claims 1970 and sorts as the oldest thing in the
+  # database — a fabricated timestamp that a stall-timeline reconstruction would
+  # trust completely.
+  T06)
+    snippet OLD <<'EOF'
+            createdAt: optionalDouble(stmt, 22),
+EOF
+    snippet NEW <<'EOF'
+            createdAt: sqlite3_column_double(stmt, 22),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T07 — the V42 rung stops stamping head. On a fresh install `createTables()`
+  # masks it completely; only the isolated ladder can see the version stall.
+  T07)
+    snippet OLD <<'EOF'
+        try setSchemaVersion(42)
+EOF
+    snippet NEW <<'EOF'
+        try setSchemaVersion(41)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T08 — the seam stops stamping the join key. The columns still exist and the
+  # rows still land; the join simply resolves to nothing, which is exactly as
+  # useless as having no column.
+  T08)
+    snippet OLD <<'EOF'
+            runCorrelationId: jobId
+EOF
+    snippet NEW <<'EOF'
+            runCorrelationId: nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T09 — the seam stops stamping the phase. Every production row reads as
+  # unattributed, indistinguishable from a pre-V42 row, and the bead ships as a
+  # schema change that measures nothing.
+  T09)
+    snippet OLD <<'EOF'
+            scenePhase: phase,
+EOF
+    snippet NEW <<'EOF'
+            scenePhase: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T10 — the seam guesses when the provider breaks its vocabulary contract. A
+  # broken contract is precisely when a guess is least defensible.
+  T10)
+    snippet OLD <<'EOF'
+        let phase = ScanScenePhase(rawValue: phaseRaw)
+EOF
+    snippet NEW <<'EOF'
+        let phase = ScanScenePhase(rawValue: phaseRaw) ?? .active
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T11 — the Swift consumer admits no-work sentinels. A sentinel spans a range
+  # it never examined, so its ~zero latency over a whole-episode window reports
+  # a model of spectacular speed that never ran (playhead-pz32).
+  T11)
+    snippet OLD <<'EOF'
+            && !row.isNoWorkSentinel
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T12 — the same admission on the SQL side. This is the one that makes the
+  # documented query answer a different question from the shipped consumer while
+  # both keep returning plausible numbers.
+  T12)
+    snippet OLD <<'EOF'
+              AND (errorContext IS NULL OR errorContext NOT LIKE 'noWork:%')
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T13 — a zero denominator reports 1.0 instead of nil. A ratio of exactly 1.0
+  # reads as "realtime" and is the single most dangerous value this type can
+  # produce; see feedback_ask_what_the_quantity_measures_2026-07-29.
+  T13)
+    snippet OLD <<'EOF'
+        guard audioSeconds > 0 else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard audioSeconds > 0 else { return 1 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T14 — an empty corpus claims to be fully attributed. This is the number a
+  # reader consults BEFORE believing the split, so a confident 1.0 here is what
+  # makes every other number in the report look trustworthy.
+  T14)
+    snippet OLD <<'EOF'
+        guard totalScanCount > 0 else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard totalScanCount > 0 else { return 1 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # T15 — the SQL side OVERWRITES the unattributed bucket instead of summing
+  # into it. `GROUP BY scenePhase` yields the NULL group and the 'unknown' group
+  # separately, and both belong in the same bucket; an assignment silently drops
+  # whichever arrives first.
+  T15)
+    snippet OLD <<'EOF'
+            case .unattributed: split.unattributed.merge(group)
+EOF
+    snippet NEW <<'EOF'
+            case .unattributed: split.unattributed = group
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
 
   M01)
     snippet OLD <<'EOF'
