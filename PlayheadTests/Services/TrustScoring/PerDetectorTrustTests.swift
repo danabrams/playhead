@@ -977,6 +977,19 @@ struct PerDetectorSkipGateTests {
             )
         )
 
+        // The trust write at this seam is fire-and-forget (`Task { … }`), so
+        // reading straight through races it. This suite passed alone and went
+        // red under the mutation battery's focused set, which is exactly the
+        // load the poll exists for.
+        let landed = await pollUntil(timeout: .seconds(10)) {
+            guard let profile = try? await trustStore.fetchProfile(
+                podcastId: gardPodcastId
+            ) else { return false }
+            return profile.detectorTrustLedger
+                .entries[SkipDetectorClass.segmentAggregated.rawValue] != nil
+        }
+        #expect(landed, "the attributed veto never reached the profile")
+
         let profile = try #require(
             await trustStore.fetchProfile(podcastId: gardPodcastId)
         )
