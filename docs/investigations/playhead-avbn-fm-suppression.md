@@ -71,11 +71,17 @@ twelve days stale, and predating playhead-isp5 (the census) entirely.
 
 Consequences, stated exactly:
 
-* **`ingest_dropped_blocked_gate:cappedByFMSuppression` is NOT measurable.** The
-  census row is written by `SurfaceStatusInvariants.adWindowIngestCensus` into the
-  diagnostics JSON-Lines session file; no surviving artifact on this box contains it
-  (`grep -rl ad_window_ingest_census` over every pull: no hits). The device numbers
-  the bead asks for cannot be produced without a new pull.
+* **`ingest_dropped_blocked_gate:cappedByFMSuppression` is NOT measurable, for two
+  independent reasons.** The census row is written by
+  `SurfaceStatusInvariants.adWindowIngestCensus` through
+  `SurfaceStatusInvariantLogger` into a `surface-status-<ts>-<id>.jsonl` session
+  file — and (a) every surviving pull predates playhead-isp5, so no build that
+  wrote the row had shipped, and (b) **no pull contains the diagnostics directory
+  at all**: `find … -name 'surface-status*'` over the whole pull tree returns
+  nothing, and the only JSON-Lines files captured are `decision-log`,
+  `bg-task-log`, `asset-lifecycle-log` and `transcript-shadow-gate`. The device
+  numbers the bead asks for cannot be produced without a new pull that includes
+  the diagnostics bundle.
 * **Half 1 proxy, observed:** `select eligibilityGate, count(*) from ad_windows` over
   all seven pulls yields only `NULL` / `autoSkip` / `eligible` / `markOnly`.
   **Zero `cappedByFMSuppression` rows.** This is a weak zero: those DBs contain
@@ -121,3 +127,25 @@ their own tier, rather than arriving as a banner for a span FM vetoed.
 Naming note: the bead suggested `suppressedByFMConsensus`. `blockedByFMConsensus` is
 used instead because every other severity-≥2 case in the enum is `blockedBy*`, and
 the entire point of the rename is that the name must predict the behavior.
+
+### Consequences of moving the severity 1 → 2, checked rather than assumed
+
+Every reader of `SkipEligibilityGate.severity` compares against
+`markOnly.severity` or `blockedByPolicy.severity` with a strict `<` or `>`, so the
+move is inert everywhere except the two places it is supposed to bite:
+
+* `SpanFinalizer.capEligibility` / the merge fold — an FM-consensus block now
+  DEMOTES a `.markOnly` span instead of tying with it. That is the intended
+  meaning: a block outranks a banner-only mark.
+* `runBackfill`'s creator-chapter demotion (`severity < blockedByPolicy.severity`)
+  no longer re-labels an FM-consensus span as `.blockedByPolicy`. Both gates block,
+  so the terminal outcome is identical; only the recorded cause changes, and the
+  FM-consensus cause is the more informative of the two.
+
+The self-promo demotion (`severity < markOnly.severity`) and
+`BackfillEvidenceFusion`'s `markOnly.severity > gate.severity` admit only
+`.eligible` and are untouched.
+
+The persisted column is free text — no `CHECK` constraint anywhere in
+`Playhead/Persistence` mentions `eligibilityGate` — so the raw-value rename needs
+no migration beyond the decode alias.
