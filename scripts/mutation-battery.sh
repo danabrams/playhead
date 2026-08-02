@@ -154,6 +154,23 @@
 #   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
 #   array now holds 182 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-sik9). Batches 140-144 (C01-C10, 10 new
+#   entries), 5 batches. FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 5 builds
+#   (1 baseline inside batch 140, then 141-144 with PLAYHEAD_MB_SKIP_BASELINE=1
+#   — `--batch` is not repeatable, so this was a loop, not one invocation, and
+#   no batch was re-run). Batches 1-134 were NOT re-run and carry the verdicts
+#   below. The array now holds 219 live entries.
+#
+#   Nothing survived on the first pass, which is worth one sentence of
+#   suspicion rather than celebration: five of the ten (C01-C05) mutate the
+#   SAME `if`, so a positive-only test set would have let at least C03 and C04
+#   through. They were killed by the `stillGuarded` table, which is the part of
+#   the bead that exists for exactly that reason. The one thing this battery
+#   deliberately does NOT claim: the CUE-surface pair builds its `AdWindow` at
+#   the orchestrator's door, so no fusion-side mutation can reach it — those
+#   two tests are an end-of-chain witness, not a rail, and are listed in no
+#   expectation.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-avbn). Batches 130-134 (A01-A11, 11 new
 #   entries), 5 batches. FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 7 builds
 #   (1 baseline + 5 batches + 1 re-run of batch 133). Batches 1-125 were NOT
