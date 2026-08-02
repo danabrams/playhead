@@ -41,6 +41,11 @@ struct AnchorRefRediffSlotTests {
         .userCorrection(correctionId: "c1", reportedTime: 12.0),
         .classifierSeed(regionId: "r3", score: 0.8),
         .spliceSlot,
+        // playhead-6qvf: the OTHER rediff arm. It is the most important entry
+        // in this list — `.rediffSlot` and `.rediffSlotChroma` are both bare
+        // rediff markers, and if they ever compared equal the byte/chroma
+        // certainty split would collapse back into one class silently.
+        .rediffSlotChroma,
     ]
 
     // MARK: - Equatable (default:false trap)
