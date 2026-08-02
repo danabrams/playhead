@@ -2135,6 +2135,12 @@ actor SkipOrchestrator {
     /// playhead-isp5: the terminal disposition the most recent delivery
     /// recorded for `windowId`, and its sub-cause where one exists. `nil` once
     /// the episode ends, or for an id no delivery has stamped.
+    ///
+    /// playhead-9v09: a retroactive retirement OVERWRITES the delivery's stamp,
+    /// so an id that was armed and then swept back reads
+    /// `.retiredReapplyInventoryFilter` here, not `.armedSuggest`. That is the
+    /// answer the "where did window X go?" question wants; the fact that it was
+    /// armed first is not lost, it is on the delivery's census row.
     func lastAdWindowIngestOutcome(
         forWindowId windowId: String
     ) -> (outcome: AdWindowIngestOutcome, detail: String?)? {
@@ -2508,13 +2514,30 @@ actor SkipOrchestrator {
     ///     before it ever became user-visible, do so now."
     ///   * `.candidate` / `.confirmed` / `.suppressed` — re-evaluate
     ///     freely; nothing user-visible has happened.
+    ///
+    /// playhead-9v09: EVERY retirement this pass performs is stamped
+    /// `.retiredReapplyInventoryFilter` with the filter's rejection reason,
+    /// counted for the process lifetime, and summarised into one
+    /// `ad_window_ingest_census` row under
+    /// `AdWindowIngestDoor.retroactiveInventorySweep`. Before that, a span the
+    /// cross-launch preload armed and this pass took back left the census
+    /// reading `ingest_armed_suggest = 1` with no counter-evidence anywhere —
+    /// a silent retraction path in the instrument the mid-roll program is
+    /// verified through, able to certify a fix that did not hold. The row is
+    /// written ONLY when at least one window was actually retired: a sweep
+    /// that changes nothing must say nothing, or the outcome fires on every
+    /// duration update and stops being evidence.
     private func reapplyInventoryFilterToManagedWindows() {
         guard inventoryFilter.isEnabled,
               !windows.isEmpty || !suggestWindows.isEmpty
         else {
             return
         }
-        var idsToRetire: [String] = []
+        // playhead-9v09: the REASON travels with the id, because the census row
+        // has to carry it — `tooLate` and `overlapsDeclaredChapter` are two
+        // different bugs here for exactly the reason they are two different
+        // bugs on the ingest path (`droppedInventorySanity`).
+        var rejectionReasonsById: [String: InventorySanityRejectionReason] = [:]
         for (id, managed) in windows {
             switch managed.decisionState {
             case .reverted:
@@ -2540,32 +2563,72 @@ actor SkipOrchestrator {
                 logger.info(
                     "AdWindow \(id, privacy: .public) retroactively rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
                 )
-                idsToRetire.append(id)
+                rejectionReasonsById[id] = reason
             }
         }
 
-        let suggestionIDsToRetire = suggestWindows.compactMap {
-            id, suggested -> String? in
+        for (id, suggested) in suggestWindows {
             let verdict = inventoryFilter.evaluate(
                 startTime: suggested.startTime,
                 endTime: suggested.endTime,
                 episodeDuration: activeEpisodeDuration,
                 declaredChapters: activeDeclaredChapters
             )
-            guard case let .rejected(reason) = verdict else {
-                return nil
-            }
+            guard case let .rejected(reason) = verdict else { continue }
             logger.info(
                 "Suggested AdWindow \(id, privacy: .public) retroactively rejected by inventory sanity filter: \(reason.rawValue, privacy: .public)"
             )
-            return id
+            // The managed verdict wins when both representations exist: it is
+            // the one the `.applied` / `.reverted` guards above consulted, so
+            // reporting the suggestion's reason instead could describe a
+            // retirement that was decided on other grounds.
+            if rejectionReasonsById[id] == nil {
+                rejectionReasonsById[id] = reason
+            }
         }
 
-        let allIDsToRetire =
-            Set(idsToRetire).union(suggestionIDsToRetire)
-        guard !allIDsToRetire.isEmpty else { return }
-        for id in allIDsToRetire {
-            retireAllNonRevertedWindowStateIfPresent(windowId: id)
+        guard !rejectionReasonsById.isEmpty else { return }
+        // Sorted so the retirement events, and the audit row they produce, do
+        // not depend on dictionary iteration order.
+        var counts: [AdWindowIngestOutcome: Int] = [:]
+        var details: [String: Int] = [:]
+        var retiredCount = 0
+        for id in rejectionReasonsById.keys.sorted() {
+            // Every id here was read out of a live collection and cleared the
+            // `.reverted` guard, so the removal succeeds; honouring the return
+            // value anyway keeps the counter meaning "windows the listener
+            // actually lost" rather than "windows we asked about".
+            guard retireAllNonRevertedWindowStateIfPresent(windowId: id) else {
+                continue
+            }
+            let reason = rejectionReasonsById[id]
+            noteIngestOutcome(
+                .retiredReapplyInventoryFilter,
+                windowId: id,
+                detail: reason?.rawValue
+            )
+            retiredCount += 1
+            counts[.retiredReapplyInventoryFilter, default: 0] += 1
+            if let reason {
+                let key = "\(AdWindowIngestOutcome.retiredReapplyInventoryFilter.rawValue)"
+                    + ":\(reason.rawValue)"
+                details[key, default: 0] += 1
+            }
+        }
+        if retiredCount > 0 {
+            recordIngestCensus(
+                AdWindowIngestCensus(
+                    door: .retroactiveInventorySweep,
+                    // `activeAssetId` is non-nil whenever a window is managed,
+                    // but the fallback is spelled rather than assumed: a row
+                    // that says "nil" is evidence, a row that never got written
+                    // is the defect this bead closes.
+                    analysisAssetId: activeAssetId ?? "nil",
+                    forwarded: retiredCount,
+                    counts: counts,
+                    details: details
+                )
+            )
         }
         evaluateAndPush()
     }
