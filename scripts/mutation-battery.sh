@@ -695,6 +695,10 @@ FOCUSED_SUITES=(
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
   -only-testing:PlayheadTests/TestScratchReaperTests
+  # playhead-mptr: the artifact-backed ordering rails (K2 series). Both suites
+  # are pure value-type / small-store tests, well under a second.
+  -only-testing:PlayheadTests/FastTranscriptCoverageIndexTests
+  -only-testing:PlayheadTests/FastTranscriptCoveredRangesStoreTests
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertLifecycleRaceTests
