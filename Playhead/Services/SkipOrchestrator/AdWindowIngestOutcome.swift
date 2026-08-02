@@ -26,19 +26,65 @@
 // become a different fact because a different producer supplied the row. The
 // per-DELIVERY attribution comes from the census, which reads back only the
 // ids the door itself forwarded.
+//
+// THE CENSUS IS A BALANCE, NOT A TALLY OF ARRIVALS (playhead-9v09)
+// ----------------------------------------------------------------
+// isp5 named every way a window can arrive, and stopped there. But arriving is
+// not the same as staying: `reapplyInventoryFilterToManagedWindows` retires
+// already-admitted windows when `setDeclaredChapters` / `setEpisodeDuration`
+// deliver a context the filter did not have at admission time, and that
+// ordering is the ordinary one — the cross-launch PRELOAD runs before either
+// setter, and `AnalysisCoordinator` calls `setEpisodeDuration` immediately
+// before `receiveAdWindows` on the hot path. Until this bead that retirement
+// stamped nothing, so a span armed at 0 s and retracted at 0.2 s left the
+// census reading `ingest_armed_suggest = 1` with no counter-evidence anywhere.
+// The audit trail said armed; the listener saw nothing; both were true.
+//
+// That is a silent retraction path in the instrument the whole mid-roll
+// program is now verified through, which means it could certify a fix that did
+// not hold. So the rows must be read as a SUBTRACTION, over a whole session:
+//
+//     Σ delivered  −  Σ retired  =  what the listener could actually have seen
+//
+// Both terms are rendered on the row — `delivered=` always, `retired=` when it
+// is non-zero — and both derive from the classifiers below
+// (`AdWindowIngestOutcome.isDelivered` / `.isRetraction`), so a future
+// retraction cause joins the subtraction without the reader having to know its
+// name. Two rules keep the balance honest:
+//
+//   * A retraction row is written ONLY when something was actually retired.
+//     An outcome that fires on every delivery is exactly as useless as one
+//     that never fires, so `retired=` is absent — not zero — on the rows that
+//     have nothing to say about it. A DELIVERY row cannot honestly claim
+//     `retired=0`: a sweep 200 ms later may still retract what it just armed.
+//   * Retraction is not double-counted against the delivery. The delivery row
+//     records where the window LANDED; the sweep row records that it was
+//     later taken away. Both facts are true and the pair is the evidence.
 
 import Foundation
 
-/// Which door a persisted-window delivery came through. Both doors run the
-/// same admission rule (`forwardPersistedAdWindows`); they differ only in when
-/// they fire, and the census records which one so a field log can tell an
-/// episode-start preload apart from a mid-session day-0 mint.
+/// Which entry point a census row accounts for.
+///
+/// The two `*Preload` / `*Ingest` cases are DELIVERY doors: both run the same
+/// admission rule (`forwardPersistedAdWindows`) and differ only in when they
+/// fire, so a field log can tell an episode-start preload apart from a
+/// mid-session day-0 mint. The sweep case is not a delivery at all — see its
+/// doc — but it writes the same row, to the same audit code, in the same
+/// vocabulary, because two vocabularies for one instrument is how the
+/// instrument stops being readable.
 enum AdWindowIngestDoor: String, Sendable, Hashable, CaseIterable {
     /// `beginEpisode`'s cross-launch preload — fires once per episode start.
     case crossLaunchPreload = "cross_launch_preload"
     /// playhead-96ot's `ingestPersistedAdWindows` — fires when a mint lands
     /// during playback.
     case midSessionIngest = "mid_session_ingest"
+    /// playhead-9v09: `reapplyInventoryFilterToManagedWindows` — the
+    /// RETROACTIVE pass that re-evaluates already-admitted windows after
+    /// `setDeclaredChapters` / `setEpisodeDuration` deliver the context the
+    /// inventory filter was missing at admission time. It forwards nothing;
+    /// it takes back. Its row accounts only for the windows it retired, and is
+    /// written only when it retired at least one.
+    case retroactiveInventorySweep = "retroactive_inventory_sweep"
 }
 
 /// One terminal disposition of a persisted ad window, named.
@@ -154,6 +200,22 @@ enum AdWindowIngestOutcome: String, Sendable, Hashable, CaseIterable {
     /// update is buffered rather than lost.
     case bufferedProvisionalResolution = "ingest_buffered_provisional_resolution"
 
+    // MARK: - Per-window outcomes: the window was RETRACTED after admission
+
+    /// playhead-9v09: the window had already been admitted — armed, or managed
+    /// — and `reapplyInventoryFilterToManagedWindows` then took it back,
+    /// because `setDeclaredChapters` / `setEpisodeDuration` handed the
+    /// inventory filter a context it did not have at admission time and the
+    /// span no longer passes.
+    ///
+    /// This is the only outcome that CONTRADICTS an earlier one rather than
+    /// concluding a delivery, and it is what makes the census a balance rather
+    /// than a tally of arrivals (see the file header). It carries the filter's
+    /// rejection REASON as its detail, for the same reason
+    /// `droppedInventorySanity` does: `tooShort` / `tooEarly` / `tooLate` /
+    /// `overlapsDeclaredChapter` are four different bugs.
+    case retiredReapplyInventoryFilter = "ingest_retired_reapplied_inventory_filter"
+
     // MARK: - Classification
 
     /// True for the outcomes where the window ended up somewhere a listener
@@ -172,7 +234,8 @@ enum AdWindowIngestOutcome: String, Sendable, Hashable, CaseIterable {
              .droppedUserResolvedSuggestion, .droppedUserReverted,
              .droppedProducerTerminalState, .droppedInventorySanity,
              .droppedBlockedGate, .droppedAlreadyBannered,
-             .suggestReplayNotRearmed, .bufferedProvisionalResolution:
+             .suggestReplayNotRearmed, .bufferedProvisionalResolution,
+             .retiredReapplyInventoryFilter:
             return false
         }
     }
@@ -192,6 +255,33 @@ enum AdWindowIngestOutcome: String, Sendable, Hashable, CaseIterable {
              .droppedUserResolvedSuggestion, .droppedUserReverted,
              .droppedProducerTerminalState, .droppedInventorySanity,
              .droppedBlockedGate, .droppedAlreadyBannered,
+             .suggestReplayNotRearmed, .bufferedProvisionalResolution,
+             .retiredReapplyInventoryFilter:
+            return false
+        }
+    }
+
+    /// playhead-9v09: true for the outcomes that TAKE BACK a window that had
+    /// already been admitted, rather than concluding its delivery.
+    ///
+    /// This is the subtrahend of the census balance in the file header. A
+    /// retraction is never `isDelivered` (it is the negation of one) and never
+    /// `isDoorOutcome` (it names one window, not a whole call) — both pinned by
+    /// `AdWindowIngestTaxonomyTests`.
+    var isRetraction: Bool {
+        switch self {
+        case .retiredReapplyInventoryFilter:
+            return true
+        case .admittedManaged, .armedSuggest, .retainedAppliedReceipt,
+             .doorDroppedNotPlaying, .doorDroppedStoreReadFailed,
+             .doorDroppedEpisodeReplaced, .doorDroppedNoAdmissibleRows,
+             .droppedNoActiveEpisode, .droppedForeignAsset,
+             .droppedStaleProducerRevision, .droppedTerminalProducerReplay,
+             .droppedEpisodeReplaced, .droppedInvalidMaterial,
+             .droppedMalformedDecisionState, .droppedMalformedEligibilityGate,
+             .droppedUserResolvedSuggestion, .droppedUserReverted,
+             .droppedProducerTerminalState, .droppedInventorySanity,
+             .droppedBlockedGate, .droppedAlreadyBannered,
              .suggestReplayNotRearmed, .bufferedProvisionalResolution:
             return false
         }
@@ -202,16 +292,29 @@ enum AdWindowIngestOutcome: String, Sendable, Hashable, CaseIterable {
 /// where each row ended up. Rendered into the `ad_window_ingest_census` audit
 /// row as stable `key=value` pairs so a device pull can be grepped rather than
 /// parsed.
+///
+/// playhead-9v09 added a second kind of row to the same format: a RETRACTION
+/// row, written by `AdWindowIngestDoor.retroactiveInventorySweep`, accounting
+/// for windows that were admitted earlier and have now been taken back. Summed
+/// over a session, `Σ delivered − Σ retired` is what the listener could
+/// actually have seen; see this file's header for why that subtraction, and
+/// not the delivery rows alone, is the readable number.
 struct AdWindowIngestCensus: Sendable, Hashable {
 
-    /// Which door produced this delivery.
+    /// Which entry point produced this row.
     let door: AdWindowIngestDoor
 
-    /// The asset the delivery was for. A UUID, never user content.
+    /// The asset the row is about. A UUID, never user content.
     let analysisAssetId: String
 
-    /// How many rows the door handed to `receiveAdWindows`. Zero when a door
-    /// outcome short-circuited the call.
+    /// How many windows this row accounts for.
+    ///
+    /// For a delivery door that is how many rows were handed to
+    /// `receiveAdWindows` (zero when a door outcome short-circuited the call).
+    /// For `retroactiveInventorySweep` — which forwards nothing — it is how
+    /// many already-admitted windows the sweep retired, so `forwarded` and the
+    /// summed `counts` still agree and a gap between them still means a
+    /// missing instrumentation site rather than a new kind of row.
     let forwarded: Int
 
     /// Terminal disposition counts, keyed by outcome.
@@ -227,8 +330,23 @@ struct AdWindowIngestCensus: Sendable, Hashable {
         counts.reduce(0) { $0 + ($1.key.isDelivered ? $1.value : 0) }
     }
 
+    /// playhead-9v09: how many already-admitted windows this row takes back —
+    /// the subtrahend of the census balance. Derived from
+    /// `AdWindowIngestOutcome.isRetraction`, so a future retraction cause is
+    /// counted here the day it is added.
+    var retiredCount: Int {
+        counts.reduce(0) { $0 + ($1.key.isRetraction ? $1.value : 0) }
+    }
+
     /// The audit row's body. Sorted by raw value so two identical deliveries
     /// render byte-identically and a diff between sessions is meaningful.
+    ///
+    /// `retired=` is rendered only when it is non-zero, and that asymmetry with
+    /// `delivered=` is deliberate: a delivery row is written the instant the
+    /// delivery concludes, and a sweep milliseconds later can still retract
+    /// what it just armed. `retired=0` on a delivery row would therefore be a
+    /// claim the row is in no position to make — precisely the kind of
+    /// confident silence this instrument exists to remove.
     var auditDescription: String {
         var parts = [
             "door=\(door.rawValue)",
@@ -236,6 +354,9 @@ struct AdWindowIngestCensus: Sendable, Hashable {
             "forwarded=\(forwarded)",
             "delivered=\(deliveredCount)",
         ]
+        if retiredCount > 0 {
+            parts.append("retired=\(retiredCount)")
+        }
         for (outcome, count) in counts.sorted(by: {
             $0.key.rawValue < $1.key.rawValue
         }) where count > 0 {
