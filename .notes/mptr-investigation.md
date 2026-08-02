@@ -165,3 +165,45 @@ and did not fail to load; it was busy. `staleInFlightLoadThreshold = 120 s` is b
 300 s cap, so even a wedged load supersedes itself and reports inside the budget. That is a
 second, independent reason the diagnosis lands on the re-transcription cost rather than on the
 speech stack.
+
+## Step 5 — two consequences of the fix worth stating plainly
+
+### (a) It hollowed out an existing regression test, and that was caught by reading, not by the gate
+
+`TranscriptEngineFailureEventTests.dedupOnlyRerunWithOneBadShardStillCompletes` runs the real
+loop twice over one store: pass 1 transcribes two shards, pass 2 re-runs them with a recognizer
+that throws on the second. It pins "a run whose only work was dedup is not a total failure".
+
+Under mptr, pass 1 satisfies BOTH skip conditions for BOTH shards, so pass 2 would skip
+everything — `FailAfterFirstRecognizer` never called, no failure, `.completed` emitted. **The
+test stays green and proves nothing.** The gate cannot catch this: a vacuous pass is still a
+pass.
+
+Fixed by rewinding the watermark between the passes (`resetFastTranscriptCoverage`, the one
+sanctioned rewind). That keeps the chunks and removes the skip's licence, so both shards run and
+shard 0 still dedups through the production fingerprint path. The test's original claim survives
+intact.
+
+### (b) The total-failure gate's verdict changes in one shape, and the new answer is the honest one
+
+The gate is `!shardFailures.isEmpty && chunksInsertedThisRun == 0 && shardsCompletedThisRun == 0`.
+A skipped shard increments NEITHER tally — deliberately, because those tallies are documented as
+"THIS RUN's own progress" and a shard skipped is a shard an EARLIER run carried.
+
+So: a re-run that skips 90 covered shards and fails the one new shard it reached now reports a
+total failure, where before the 90 dedup-completions would have masked it as `.completed`.
+
+That is the better answer. `.completed` is what tells the runner "coverage is durable", and a run
+that reached exactly one new shard and failed it has produced nothing durable. Masking that is
+the same class of lie playhead-8ysk removed. A run that skips everything and fails nothing still
+emits `.completed`, because `shardFailures` is empty — a fully-transcribed episode re-run is
+unaffected.
+
+## Scope NOT taken (deliberate)
+
+The `drainLoop`'s appended-shard arm calls `transcribeShard` without the skip. Left alone on
+purpose: that is the PLAYBACK lane (streaming decoder appending as it decodes), not the analysis
+lane, and it is not under the 300 s stage cap that produced this bug. `AnalysisJobRunner` is an
+explicit batch caller — it calls `finishAppending` immediately, so its append queue is always
+empty and the field defect cannot arrive through that arm. Extending the skip there would change
+a second lane's behaviour without a fixture for it.
