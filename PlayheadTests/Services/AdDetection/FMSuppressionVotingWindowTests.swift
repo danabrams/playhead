@@ -289,4 +289,43 @@ struct FMSuppressionVotingWindowTests {
         #expect(Self.votes(rows).count == 1)
         #expect(!Self.triggers(rows))
     }
+
+    // MARK: - Wire-in
+
+    @Test("applyFMSuppression builds its windows through votingWindows, not inline")
+    func applyFMSuppressionDelegatesToVotingWindows() throws {
+        // A correct rule that the only caller does not use is the one defect
+        // every test above is structurally blind to: `applyFMSuppression` is
+        // private on an actor and its own inline `compactMap` is what shipped
+        // the bug. This is the rail on the WIRE.
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/AdDetection/AdDetectionService.swift"
+        )
+        let body = try #require(
+            SwiftSourceInspector.firstBody(
+                in: source,
+                after: "private func applyFMSuppression("
+            ),
+            "`applyFMSuppression` was renamed or removed — re-point this canary."
+        )
+        let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
+
+        #expect(
+            stripped.contains("FMSuppressionWindow.votingWindows"),
+            """
+            `applyFMSuppression` no longer builds its windows through \
+            `FMSuppressionWindow.votingWindows`. Every rail in this suite tests \
+            that function; if the call site stops using it, they all keep \
+            passing while the manufactured-absence defect returns.
+            """
+        )
+        #expect(
+            !stripped.contains("FMSuppressionWindow("),
+            """
+            `applyFMSuppression` constructs an `FMSuppressionWindow` directly \
+            again. That is how the pre-avbn code admitted every overlapping \
+            row — the admission rule has exactly one home.
+            """
+        )
+    }
 }
