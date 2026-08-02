@@ -165,7 +165,7 @@ struct FastTranscriptCoverageIndexTests {
         )
     }
 
-    @Test("a shard ending exactly at the watermark counts; one second past does not")
+    @Test("a shard ending exactly at the watermark counts, one second past does not")
     func watermarkBoundaryIsInclusiveAtTheShardEnd() {
         let index = FastTranscriptCoverageIndex(chunkRanges: [(0, 3000)])
         #expect(index.isShardAlreadyTranscribed(shardStart: 2680, shardEnd: 2700, watermark: 2700))
