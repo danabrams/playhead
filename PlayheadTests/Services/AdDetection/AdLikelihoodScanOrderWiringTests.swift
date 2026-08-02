@@ -59,10 +59,38 @@ struct AdLikelihoodScanOrderWiringTests {
         )
     }
 
-    /// The segment index the seam points at — the one that must be attempted
-    /// first once seeding is wired.
+    /// The segment index the seam falls inside.
     private var seamSegmentIndex: Int {
         Int(Self.seamTime / Self.segmentWidth)
+    }
+
+    /// Every segment the seam's NEIGHBOURHOOD touches, derived from the policy's
+    /// own radius rather than hard-coded.
+    ///
+    /// This is the unit these tests must assert against, and getting it wrong is
+    /// how they shipped red. A point seam at 2,828 s opens [2,738, 2,918], which
+    /// at 75 s per window covers segments 36, 37 AND 38 — all scoring identically,
+    /// because the score is per-neighbourhood, not per-distance. The documented
+    /// contract then breaks that tie to the EARLIEST window (`order`'s rule 4:
+    /// "equal scores break by earlier `start`, then by original index"), which is
+    /// what makes the sweep a pure function of its inputs. So the first attempt is
+    /// segment 36, not the seam's own 37.
+    ///
+    /// These tests originally asserted `first == seamSegmentIndex`. That is a
+    /// claim the policy never made, and it was never caught because the file was
+    /// missing from `project.pbxproj` and had never been compiled. What the bead
+    /// actually needs — and what is asserted below — is that the sweep OPENS
+    /// inside the seeded neighbourhood instead of at segment 0, and reaches the
+    /// pod-bearing segment within the neighbourhood's own width.
+    private var seamNeighbourhoodSegmentIndices: [Int] {
+        let radius = AdLikelihoodScanOrder.defaultNeighbourhoodRadiusSeconds
+        let lo = Self.seamTime - radius
+        let hi = Self.seamTime + radius
+        return (0..<Self.segmentCount).filter { index in
+            let start = Double(index) * Self.segmentWidth
+            let end = start + Self.segmentWidth
+            return lo < end && hi > start
+        }
     }
 
     private func seamSeed(strength: Double = 0.62) -> AdLikelihoodSeed {
@@ -100,7 +128,22 @@ struct AdLikelihoodScanOrderWiringTests {
         )
 
         #expect(plans.count == Self.segmentCount)
-        #expect(plans.first?.lineRefs == [seamSegmentIndex])
+        // The sweep OPENS in the seeded neighbourhood rather than at segment 0.
+        #expect(plans.first?.lineRefs.count == 1, "fixture must be one segment per window")
+        let firstRef = plans.first?.lineRefs.first
+        #expect(
+            firstRef.map(seamNeighbourhoodSegmentIndices.contains) == true,
+            "expected the first attempt inside \(seamNeighbourhoodSegmentIndices), got \(firstRef.map(String.init) ?? "none")"
+        )
+        // Non-vacuity: episode order would open at 0, which is not in that set.
+        #expect(firstRef != 0)
+        // And the seam's OWN segment — the one carrying the pod edge — is reached
+        // within the neighbourhood's width, not 37 windows in.
+        let seamPosition = plans.firstIndex { $0.lineRefs == [seamSegmentIndex] }
+        #expect(
+            (seamPosition ?? .max) < seamNeighbourhoodSegmentIndices.count,
+            "expected segment \(seamSegmentIndex) within the first \(seamNeighbourhoodSegmentIndices.count) attempts, got \(seamPosition.map(String.init) ?? "never")"
+        )
     }
 
     /// The reordering must not disturb the identity `windowIndex` carries.
@@ -119,7 +162,10 @@ struct AdLikelihoodScanOrderWiringTests {
             seeds: [seamSeed()]
         )
 
-        #expect(plans.first?.windowIndex == seamSegmentIndex)
+        #expect(
+            plans.first.map { seamNeighbourhoodSegmentIndices.contains($0.windowIndex) } == true,
+            "the promoted head must still carry its EPISODE index, not a renumbered one"
+        )
         // And it is still a complete 0..<n set — promotion permutes, it does
         // not renumber and it does not drop.
         #expect(Set(plans.map(\.windowIndex)) == Set(0..<Self.segmentCount))
@@ -159,7 +205,16 @@ struct AdLikelihoodScanOrderWiringTests {
 
         #expect(output.plans.count == Self.segmentCount, "fixture must be one segment per window")
         let submitted = await runtime.snapshotSubmittedCoarseLineRefs()
-        #expect(submitted.first == [seamSegmentIndex])
+        let firstRef = submitted.first?.first
+        #expect(
+            firstRef.map(seamNeighbourhoodSegmentIndices.contains) == true,
+            "expected the first FM call inside \(seamNeighbourhoodSegmentIndices), got \(firstRef.map(String.init) ?? "none")"
+        )
+        #expect(firstRef != 0)
+        // The pod-bearing segment is reached in the neighbourhood's own width
+        // rather than ~37 FM calls in. That number IS the bead.
+        let seamPosition = submitted.firstIndex(of: [seamSegmentIndex])
+        #expect((seamPosition ?? .max) < seamNeighbourhoodSegmentIndices.count)
     }
 
     /// The control that gives the test above its meaning, and the BEFORE
@@ -292,7 +347,13 @@ struct AdLikelihoodScanOrderWiringTests {
         )
 
         let submitted = await runtime.snapshotSubmittedCoarseLineRefs()
-        #expect(submitted.first == [seamSegmentIndex])
+        let firstRef = submitted.first?.first
+        #expect(
+            firstRef.map(seamNeighbourhoodSegmentIndices.contains) == true,
+            "flag ON must open the sweep in the seam neighbourhood \(seamNeighbourhoodSegmentIndices), got \(firstRef.map(String.init) ?? "none")"
+        )
+        // Non-vacuity, and the exact contrast with the OFF arm below.
+        #expect(firstRef != 0)
     }
 
     /// The flag's OFF arm. This is the rollback guarantee: an identical run with
