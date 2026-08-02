@@ -977,6 +977,23 @@ actor TrustScoringService {
         }
         var ledger = profile.detectorTrustLedger
         var detectorDemotions: [DetectorDemotion] = []
+        // MATERIALIZE FIRST, then charge. Every class's entry is pinned from
+        // the PRE-veto profile before anything is written.
+        //
+        // Without this the fix is half a fix, and the half it misses is the
+        // one the bead is about. The seed is a lazy read off the legacy
+        // scalar, and the legacy scalar still demotes on every gesture — so an
+        // aggregator veto would demote the SHOW, and the next read of any
+        // class with no stored entry would inherit that demotion through the
+        // seed. Blame would still be shared; it would just take one more hop.
+        // Materializing forks the ledger from the scalar at the first
+        // attributed gesture, after which each class moves only on its own
+        // evidence. An UNATTRIBUTED veto deliberately does not fork: a gesture
+        // that names no detector is not evidence about any of them, and the
+        // pre-gard show-wide behaviour is the honest answer.
+        if !strongestTierByDetector.isEmpty {
+            ledger = Self.materialized(ledger, from: profile)
+        }
         // Stable order so the emitted log and any test assertion are
         // deterministic regardless of dictionary iteration order.
         for detector in SkipDetectorClass.allCases {
@@ -1047,8 +1064,11 @@ actor TrustScoringService {
             recentFalseSignals: newFalseSignals
         )
 
-        // --- The detector's own entry.
-        var ledger = profile.detectorTrustLedger
+        // --- The detector's own entry. Materialize first, for the reason
+        // spelled out in `applyFalseSkipSignal`: the legacy scalar this
+        // observation also moves must not leak into the classes that earned
+        // nothing.
+        var ledger = Self.materialized(profile.detectorTrustLedger, from: profile)
         let entry = ledger.entry(for: detector, seededFrom: profile)
         let entryObservations = entry.observationCount + 1
         let entryTrust = min(1.0, entry.trustScore + config.correctObservationBonus)
@@ -1080,6 +1100,24 @@ actor TrustScoringService {
             detectorTrustJSON: ledger.encoded()
         )
         return (merged, entryMode)
+    }
+
+    /// Pin every class's entry from the supplied profile, leaving any entry
+    /// that is already stored — and any key this binary does not recognise —
+    /// exactly as it is.
+    private static func materialized(
+        _ ledger: DetectorTrustLedger,
+        from profile: PodcastProfile
+    ) -> DetectorTrustLedger {
+        var materialized = ledger
+        for detector in SkipDetectorClass.allCases
+        where ledger.entries[detector.rawValue] == nil {
+            materialized.set(
+                DetectorTrustLedger.seed(for: detector, from: profile),
+                for: detector
+            )
+        }
+        return materialized
     }
 
     /// Rebuild a `PodcastProfile` changing only the trust-owned columns.
