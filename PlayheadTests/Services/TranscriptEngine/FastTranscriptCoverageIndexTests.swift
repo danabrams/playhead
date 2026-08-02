@@ -181,11 +181,20 @@ struct FastTranscriptCoverageIndexTests {
     @Test("the D9B513CD shape: the covered prefix is skipped and the tail is not")
     func fieldShapeSkipsThePrefixAndKeepsTheTail() {
         // 3929.9 s episode, watermark stuck at 2700.000, dense speech behind it.
-        // Shards are 20 s, so 0–2700 is 135 shards of already-bought ASR that the
-        // loop used to re-run inside a 300 s budget — never reaching 2700+.
+        //
+        // The watermark tracks SHARD ends (`updateCoverage` is called with
+        // `shard.startTime + shard.duration`) and is reconciled to the chunk
+        // MAX only at `.completed`, which this asset never reached. Shards are
+        // `AnalysisAudioService.defaultShardDuration` = 30 s, so 2700 is not a
+        // 45-minute cap — there is no such constant in the tree — it is exactly
+        // the 90th shard boundary, 90 x 30. That is the whole of the roundness.
+        //
+        // Those 90 shards are already-bought ASR the loop used to re-run inside
+        // a 300 s stage budget, so it needed better than 9x realtime just to
+        // ARRIVE at shard 91. It never did, five times running.
         let episodeDuration = 3929.9
         let watermark = 2700.0
-        let shardDuration = 20.0
+        let shardDuration = AnalysisAudioService.defaultShardDuration
         let index = FastTranscriptCoverageIndex(
             chunkRanges: stride(from: 0.0, to: watermark, by: 5.0).map { (start: $0, end: $0 + 4.5) }
         )
@@ -203,13 +212,14 @@ struct FastTranscriptCoverageIndexTests {
             start += shardDuration
         }
 
-        // Every shard wholly inside the covered prefix is skipped...
-        #expect(skipped == 135)
-        // ...and every shard at or past the watermark still runs, which is the
-        // audio the episode was stranded without.
-        #expect(transcribed == 62)
+        // Every shard wholly inside the covered prefix is skipped — 2700 / 30.
+        #expect(skipped == 90)
+        // ...and every shard at or past the watermark still runs: 131 shards in
+        // the episode, so 41 remain. That is the last third of the show, the
+        // audio the episode was permanently stranded without.
+        #expect(transcribed == 41)
         #expect(
-            index.isShardAlreadyTranscribed(shardStart: 2700, shardEnd: 2720, watermark: watermark) == false
+            index.isShardAlreadyTranscribed(shardStart: 2700, shardEnd: 2730, watermark: watermark) == false
         )
     }
 
