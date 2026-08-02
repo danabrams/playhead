@@ -371,40 +371,82 @@ struct UnanchoredExtentAutoSkipGateTests {
         }
         #expect(swept >= 10, "the sweep must actually cover the sign-off interval (covered \(swept) edges)")
 
-        // Reason 2 — a SECOND, independent demotion that survives even the
-        // STRONGEST hypothetical anchoring (both edges byte-exact): the span
-        // ends 3537.95, i.e. 37.93 s from the episode end, inside the 90 s
-        // post-roll guard. Run through the real `DecisionMapper` rather than a
-        // restatement of the rule.
+        // Reason 2 — the post-roll guard, which ALSO reaches this span: it ends
+        // 3537.95, i.e. 37.93 s from the episode end, inside the 90 s window.
         //
-        // HONEST SCOPE: the post-roll guard is armed by
-        // `certaintyTieredEnabled`, which production still ships OFF (it is
-        // Dan's Gate-2 decision). So this second reason is latent today, not
-        // live. Reason 1 above — the extent gate — is the one that holds under
-        // the SHIPPED config, and it holds unconditionally.
-        let outro = Self.span(
+        // playhead-sik9 CHANGED THE SIGN OF THIS SECOND REASON, and it is worth
+        // being blunt rather than quietly rewriting the assertion. This block
+        // used to claim the guard demotes a post-roll "even with byte-exact
+        // edges". Dan overturned that on 2026-08-01 ("we do need a rediff
+        // exemption"): the original reasoning — post-rolls matter least, a
+        // wrong skip clips the close — is sound for an UNCERTAIN detector and
+        // is the certainty tiering INVERTED when applied to a span whose width
+        // the byte differ proved. So the byte-anchored arm below now asserts
+        // `.eligible`.
+        //
+        // WHAT THAT DOES NOT COST THIS BEAD. Every one of the four REPLAYED
+        // THEMOVE windows was `.unanchored` on both edges — that is the
+        // fixture's central fact and the whole reason playhead-2350 exists. The
+        // byte-anchored span here is HYPOTHETICAL and always was ("what if the
+        // strongest possible anchoring applied?"). Reason 1 above is what
+        // actually protects the replayed geometry, it is unconditional, and it
+        // is untouched. The unanchored arm at the end re-proves that on this
+        // exact outro span.
+        //
+        // HONEST SCOPE, unchanged: the post-roll guard is armed by
+        // `certaintyTieredEnabled`, which production still ships OFF (Dan's
+        // Gate-2 decision, playhead-nqey). Reason 2 is latent either way.
+        let anchoredOutro = Self.span(
             id: "span-outro-hypothetically-anchored",
             start: 3493.02,
             end: 3537.95,
             provenance: [.rediffSlot]
         )
+        let outroLedger: [EvidenceLedgerEntry] = [
+            EvidenceLedgerEntry(source: .lexical, weight: 0.20, detail: .lexical(matchedCategories: ["sponsor"])),
+            EvidenceLedgerEntry(source: .acoustic, weight: 0.20, detail: .acoustic(breakStrength: 0.9))
+        ]
         let mapped = DecisionMapper(
-            span: outro,
-            ledger: [
-                EvidenceLedgerEntry(source: .lexical, weight: 0.20, detail: .lexical(matchedCategories: ["sponsor"])),
-                EvidenceLedgerEntry(source: .acoustic, weight: 0.20, detail: .acoustic(breakStrength: 0.9))
-            ],
+            span: anchoredOutro,
+            ledger: outroLedger,
             config: FusionWeightConfig(certaintyTieredEnabled: true),
             episodeDuration: Self.episodeDuration
         ).map()
-        #expect(mapped.eligibilityGate == .markOnly,
-                "even byte-exact edges cannot auto-skip a post-roll span: the wraj post-roll guard demotes it")
+        #expect(mapped.eligibilityGate == .eligible,
+                "playhead-sik9: a byte-anchored post-roll is EXEMPT from the guard — divergence IS the ad")
         let gated = mapped.withExtentSupport(
             SpanExtentSupport(startAnchor: .rediffByteExact, endAnchor: .rediffByteExact),
             blockingUnanchoredAutoSkip: true
         )
-        #expect(gated.eligibilityGate == .markOnly,
-                "the extent gate must not promote the post-roll demotion back to eligible")
+        #expect(gated.eligibilityGate == .eligible,
+                "both edges byte-exact, so the extent gate has nothing to block either")
+
+        // The arm that matters for THIS bead's fixture: the SAME outro span
+        // with the provenance the replay ACTUALLY recorded. Both reasons still
+        // fire, and the second one now carries its own weight rather than being
+        // subsumed by a blanket rule.
+        let replayedOutro = Self.span(
+            id: "span-outro-as-replayed",
+            start: 3493.02,
+            end: 3537.95,
+            provenance: [.evidenceCatalog(entry: Self.sponsorEntry(ordinal: 1180, time: 3493.02))]
+        )
+        let replayedMapped = DecisionMapper(
+            span: replayedOutro,
+            ledger: outroLedger,
+            config: FusionWeightConfig(certaintyTieredEnabled: true),
+            episodeDuration: Self.episodeDuration
+        ).map()
+        #expect(replayedMapped.eligibilityGate == .markOnly,
+                "the replayed outro is unanchored, so the post-roll guard still demotes it")
+        let replayedGated = replayedMapped.withExtentSupport(
+            SpanExtentSupport.derive(anchorProvenance: replayedOutro.anchorProvenance, stingerTrace: nil),
+            blockingUnanchoredAutoSkip: true
+        )
+        #expect(replayedGated.eligibilityGate == .markOnly,
+                "and the extent gate demotes it independently — the reason that holds under the SHIPPED config")
+        #expect(Self.promotedPolicyAction(for: replayedGated) == .detectOnly,
+                "the replayed outro must never reach autoSkipEligible")
     }
 
     // MARK: - (5) MEASUREMENT — recorded, never a gate (bead criterion 4)
