@@ -4500,22 +4500,21 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # Two sites. `neighbourhoods` drops a zero-score seed and `order` drops a
-  # zero-score plan; relaxing only one leaves the other standing and the
-  # mutation inert, which would report a rail this battery does not have.
+  # RE-CUT. The first version relaxed both `guard score > 0` sites to `>= 0`,
+  # and it SURVIVED — measured, and the measurement was right. Relaxing them
+  # admits EVERY window at score 0, not just the inert seed's neighbourhood, so
+  # the whole episode ties, the tie-break resolves to episode order and the
+  # output is the identity permutation. The mutant was indistinguishable from
+  # the linear sweep it was supposed to have broken, so it reproduced no defect.
+  #
+  # A floor on the score is the honest version of "an inert seed is treated as a
+  # real pointer": it promotes that seed's neighbourhood and nothing else.
   X09)
     snippet OLD <<'EOF'
-            guard score > 0 else { return nil }
+            let score = weight(for: seed.kind) * seed.strength
 EOF
     snippet NEW <<'EOF'
-            guard score >= 0 else { return nil }
-EOF
-    patch "$file" "$OLD" "$NEW" || return $?
-    snippet OLD <<'EOF'
-            guard score > 0 else { continue }
-EOF
-    snippet NEW <<'EOF'
-            guard score >= 0 else { continue }
+            let score = max(weight(for: seed.kind) * seed.strength, 0.01)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

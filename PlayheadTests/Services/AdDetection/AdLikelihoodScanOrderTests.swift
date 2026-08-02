@@ -277,6 +277,20 @@ struct AdLikelihoodScanOrderTests {
         #expect(promotedAudio <= 600)
         #expect(ordered.prefix(10).map(\.index) == Array(1...10))
         #expect(ordered.count == windows.count)
+        // The cap's OWN observable, and the only assertion here that can see it.
+        // Element 10 is where the promoted prefix stops and the filler starts, so
+        // it must be the filler's first element — window 0, which scored lower
+        // (it overlaps two seams, not three) and so was never promoted.
+        //
+        // Every assertion above passes with the cap DELETED: uncapped, all sixty
+        // windows are promoted in descending-score order, which for this fixture
+        // is 1...58 then 0 then 59 — so `prefix(10)` is still `1...10`, the audio
+        // is still 600 s, and the count is still 60. Mutation X07 proved exactly
+        // that by surviving them. Uncapped, element 10 is window 11.
+        #expect(
+            ordered[10].index == 0,
+            "the promoted prefix must STOP at the budget and hand over to the filler"
+        )
     }
 
     @Test("lxkq: a single window wider than the whole budget is still promoted")
