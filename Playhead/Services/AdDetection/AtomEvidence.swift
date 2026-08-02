@@ -193,10 +193,17 @@ extension AnchorRef: Equatable {
             // and `anchorProvenance.contains(.rediffSlot)`.
             return true
         case (.rediffSlotChroma, .rediffSlotChroma):
-            // Bare case (playhead-6qvf): the SAME default:false trap, and here
-            // it would be worse than a nuisance — `.rediffSlotChroma != itself`
-            // would make `isWidthOwnership`'s `contains` proxies miss a
-            // chroma-owned span, letting the projector clobber it. REQUIRED.
+            // Bare case (playhead-6qvf): the SAME default:false trap. REQUIRED,
+            // and the mutation battery (G09) is what established which
+            // consequence is real — an earlier version of this comment named
+            // the wrong one.
+            //
+            // `isWidthOwnership`'s proxies are SAFE from it: they spell the test
+            // `contains(where: { $0.isWidthOwnership })`, a predicate closure
+            // that never invokes `==`. What breaks is every `contains(_:)` by
+            // VALUE — `[AnchorRef].carriesRediffChromaWidth` returns false for a
+            // span that plainly carries the marker, and `DecodedSpan`'s own
+            // synthesized equality stops matching a span against itself.
             return true
         default:
             return false

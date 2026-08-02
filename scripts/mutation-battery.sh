@@ -2316,8 +2316,15 @@ MUTATIONS=(
 
   # G09 is the default:false trap that `.spliceSlot` and `.rediffSlot` each have
   # a comment about. With the arm gone, `.rediffSlotChroma != .rediffSlotChroma`
-  # and every `contains` proxy silently misses a chroma-owned span.
-  "G09|168|ADSVC_ATOM|$T_6QVF_ROUNDTRIP;$T_6QVF_OWNS_WIDTH;$T_6QVF_NEQ_SIBLINGS"
+  # and every `contains(_:)` BY VALUE silently misses a chroma-owned span — in
+  # the pure predicate and all the way out at the service boundary.
+  #
+  # Expected set corrected after the first run: it named `isWidthOwnership` and
+  # the `!=` sweep, neither of which this mutation can reach. `isWidthOwnership`
+  # is a predicate closure, and the sweep asserts `.rediffSlot != <other>`, which
+  # a broken chroma-vs-chroma comparison leaves true. The battery is what
+  # established that, and the source comment on the arm was corrected to match.
+  "G09|168|ADSVC_ATOM|$T_6QVF_ROUNDTRIP;$T_6QVF_PRED_CHROMA;$T_6QVF_E2E_CHROMA"
 
   # G10 is the CONSUMER half of the "all six move together" constraint: re-grant
   # the host-read floor exemption to any width oracle. It is the mutation the
@@ -5681,10 +5688,17 @@ EOF
   G09)
     snippet OLD <<'EOF'
         case (.rediffSlotChroma, .rediffSlotChroma):
-            // Bare case (playhead-6qvf): the SAME default:false trap, and here
-            // it would be worse than a nuisance — `.rediffSlotChroma != itself`
-            // would make `isWidthOwnership`'s `contains` proxies miss a
-            // chroma-owned span, letting the projector clobber it. REQUIRED.
+            // Bare case (playhead-6qvf): the SAME default:false trap. REQUIRED,
+            // and the mutation battery (G09) is what established which
+            // consequence is real — an earlier version of this comment named
+            // the wrong one.
+            //
+            // `isWidthOwnership`'s proxies are SAFE from it: they spell the test
+            // `contains(where: { $0.isWidthOwnership })`, a predicate closure
+            // that never invokes `==`. What breaks is every `contains(_:)` by
+            // VALUE — `[AnchorRef].carriesRediffChromaWidth` returns false for a
+            // span that plainly carries the marker, and `DecodedSpan`'s own
+            // synthesized equality stops matching a span against itself.
             return true
         default:
 EOF
