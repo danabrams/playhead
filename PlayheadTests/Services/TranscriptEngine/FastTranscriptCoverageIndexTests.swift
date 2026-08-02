@@ -1,18 +1,23 @@
 // FastTranscriptCoverageIndexTests.swift
-// playhead-mptr — the skip decision that stops a partly-transcribed episode
-// from re-paying for ASR it already bought.
+// playhead-mptr — the ordering that stops a partly-transcribed episode from
+// spending its whole budget re-reading audio it already has.
 //
 // The field shape these tests are held to: a 3929.9 s episode whose transcript
 // watermark sat at exactly 2700.000 s across FIVE consecutive attempts, each
-// journaled `engine_silent_timeout` with `chunks_persisted = 0`. The runner
-// caps the transcription stage at a flat 300 s, and the loop re-transcribed the
+// journaled `engine_silent_timeout` with `chunks_persisted = 0`. The runner caps
+// the transcription stage at a flat 300 s, and the loop re-transcribed the
 // covered 0–2700 s prefix before it could reach anything new, so the cap always
-// won first and the watermark could never advance. The two properties that
-// matter are therefore:
+// won first and the watermark could never advance. 2700 is not a configured
+// bound — no such constant exists — it is 90 x 30, the 90th shard boundary.
 //
-//   1. the covered prefix is SKIPPED, so the budget reaches new audio, and
-//   2. nothing is skipped on the strength of the watermark alone — review
-//      playhead-rfu-aac H3's counterexamples must still take the full pass.
+// Three properties matter:
+//
+//   1. the unread tail is ordered FIRST, so the budget reaches new audio;
+//   2. NOTHING is dropped — this is a reordering, so `transcribeShard`'s
+//      duplicate-fingerprint `speakerId` / `avgConfidence` upgrades still run on
+//      the covered shards; and
+//   3. a shard counts as already-transcribed only on ARTIFACT evidence — review
+//      playhead-rfu-aac H3's counterexamples sort as uncovered and go first.
 
 import Foundation
 import Testing
@@ -124,34 +129,34 @@ struct FastTranscriptCoverageIndexTests {
         #expect(index.overlaps(start: 49_960, end: 49_990) == false)
     }
 
-    // MARK: - The skip decision
+    // MARK: - The already-transcribed classification
 
-    @Test("a shard fully backed by chunks under a reaching watermark is skipped")
-    func backedShardUnderReachingWatermarkIsSkipped() {
+    @Test("a shard fully backed by chunks under a reaching watermark counts as transcribed")
+    func backedShardUnderReachingWatermarkCountsAsTranscribed() {
         let index = FastTranscriptCoverageIndex(chunkRanges: [(0, 2700)])
         #expect(index.isShardAlreadyTranscribed(shardStart: 100, shardEnd: 120, watermark: 2700))
     }
 
     @Test("H3 counterexample: watermark reaches past the shard but NO chunk backs it")
-    func watermarkWithoutChunksDoesNotAuthoriseASkip() {
+    func watermarkWithoutChunksIsNotEvidence() {
         // The behind-playhead shard review playhead-rfu-aac H3 is about: it sits
-        // under the watermark and was never transcribed. It must still run.
+        // under the watermark and was never transcribed. It must sort as uncovered.
         let index = FastTranscriptCoverageIndex(chunkRanges: [(0, 100), (500, 2700)])
         #expect(
             index.isShardAlreadyTranscribed(shardStart: 200, shardEnd: 220, watermark: 2700) == false
         )
     }
 
-    @Test("playhead-0sro shape: a watermark that outlived its chunks skips nothing")
-    func watermarkOutlivingItsChunksSkipsNothing() {
+    @Test("playhead-0sro shape: a watermark that outlived its chunks is not evidence")
+    func watermarkOutlivingItsChunksIsNotEvidence() {
         let index = FastTranscriptCoverageIndex.empty
         #expect(
             index.isShardAlreadyTranscribed(shardStart: 0, shardEnd: 20, watermark: 2700) == false
         )
     }
 
-    @Test("a shard past the watermark is never skipped, even where chunks exist")
-    func shardPastWatermarkIsNeverSkipped() {
+    @Test("a shard past the watermark never counts as transcribed, even where chunks exist")
+    func shardPastWatermarkNeverCountsAsTranscribed() {
         // A chunk can extend past the watermark (the watermark tracks SHARD ends
         // and is reconciled only at completion). Coverage alone is not licence.
         let index = FastTranscriptCoverageIndex(chunkRanges: [(0, 2750)])
@@ -160,7 +165,7 @@ struct FastTranscriptCoverageIndexTests {
         )
     }
 
-    @Test("a shard ending exactly at the watermark is skipped; one second past is not")
+    @Test("a shard ending exactly at the watermark counts; one second past does not")
     func watermarkBoundaryIsInclusiveAtTheShardEnd() {
         let index = FastTranscriptCoverageIndex(chunkRanges: [(0, 3000)])
         #expect(index.isShardAlreadyTranscribed(shardStart: 2680, shardEnd: 2700, watermark: 2700))
@@ -169,8 +174,8 @@ struct FastTranscriptCoverageIndexTests {
         )
     }
 
-    @Test("a nil or non-finite watermark is never a licence to skip")
-    func absentWatermarkIsNeverALicenceToSkip() {
+    @Test("a nil or non-finite watermark is never evidence")
+    func absentWatermarkIsNeverEvidence() {
         let index = FastTranscriptCoverageIndex(chunkRanges: [(0, 3000)])
         #expect(index.isShardAlreadyTranscribed(shardStart: 0, shardEnd: 20, watermark: nil) == false)
         #expect(index.isShardAlreadyTranscribed(shardStart: 0, shardEnd: 20, watermark: .nan) == false)
@@ -178,8 +183,8 @@ struct FastTranscriptCoverageIndexTests {
 
     // MARK: - The field regression
 
-    @Test("the D9B513CD shape: the covered prefix is skipped and the tail is not")
-    func fieldShapeSkipsThePrefixAndKeepsTheTail() {
+    @Test("the D9B513CD shape: the unread tail is ordered ahead of the covered prefix")
+    func fieldShapeOrdersTheUnreadTailFirst() {
         // 3929.9 s episode, watermark stuck at 2700.000, dense speech behind it.
         //
         // The watermark tracks SHARD ends (`updateCoverage` is called with
@@ -199,32 +204,49 @@ struct FastTranscriptCoverageIndexTests {
             chunkRanges: stride(from: 0.0, to: watermark, by: 5.0).map { (start: $0, end: $0 + 4.5) }
         )
 
-        var skipped = 0
-        var transcribed = 0
+        var shards: [AnalysisShard] = []
         var start = 0.0
+        var shardId = 0
         while start < episodeDuration {
             let end = min(start + shardDuration, episodeDuration)
-            if index.isShardAlreadyTranscribed(shardStart: start, shardEnd: end, watermark: watermark) {
-                skipped += 1
-            } else {
-                transcribed += 1
-            }
+            shards.append(
+                AnalysisShard(
+                    id: shardId,
+                    episodeID: "D9B513CD",
+                    startTime: start,
+                    duration: end - start,
+                    samples: []
+                )
+            )
+            shardId += 1
             start += shardDuration
         }
+        #expect(shards.count == 131)
 
-        // Every shard wholly inside the covered prefix is skipped — 2700 / 30.
-        #expect(skipped == 90)
-        // ...and every shard at or past the watermark still runs: 131 shards in
-        // the episode, so 41 remain. That is the last third of the show, the
-        // audio the episode was permanently stranded without.
-        #expect(transcribed == 41)
-        #expect(
-            index.isShardAlreadyTranscribed(shardStart: 2700, shardEnd: 2730, watermark: watermark) == false
-        )
+        let ordered = index.orderingUncoveredFirst(shards, watermark: watermark)
+
+        // NOTHING IS DROPPED — this is a reordering, not a filter. Every shard
+        // still runs, so the duplicate-fingerprint metadata upgrades survive.
+        #expect(ordered.count == shards.count)
+        #expect(Set(ordered.map(\.id)) == Set(shards.map(\.id)))
+
+        // The 41 shards at or past the watermark — the last third of the show,
+        // the audio the episode was permanently stranded without — now come
+        // FIRST, so the 300 s stage budget reaches them.
+        let leading = ordered.prefix(41)
+        #expect(leading.allSatisfy { $0.startTime >= 2700 })
+        #expect(ordered.first?.startTime == 2700)
+
+        // ...and the 90 already-covered shards (2700 / 30) follow, still in
+        // ascending order, still transcribed if the budget allows.
+        let trailing = ordered.dropFirst(41)
+        #expect(trailing.count == 90)
+        #expect(trailing.allSatisfy { $0.startTime + $0.duration <= 2700 })
+        #expect(trailing.map(\.startTime) == stride(from: 0.0, to: 2700.0, by: 30.0).map { $0 })
     }
 
-    @Test("a fully transcribed episode skips every shard")
-    func fullyTranscribedEpisodeSkipsEverything() {
+    @Test("a fully transcribed episode classifies every shard as transcribed")
+    func fullyTranscribedEpisodeClassifiesEverything() {
         let duration = 3929.9
         let index = FastTranscriptCoverageIndex(chunkRanges: [(0, duration)])
         var start = 0.0
@@ -235,8 +257,8 @@ struct FastTranscriptCoverageIndexTests {
         }
     }
 
-    @Test("a virgin asset skips nothing")
-    func virginAssetSkipsNothing() {
+    @Test("a virgin asset has no transcribed shards")
+    func virginAssetHasNoTranscribedShards() {
         let index = FastTranscriptCoverageIndex(chunkRanges: [])
         #expect(index.isShardAlreadyTranscribed(shardStart: 0, shardEnd: 20, watermark: 0) == false)
         #expect(index.isShardAlreadyTranscribed(shardStart: 0, shardEnd: 20, watermark: nil) == false)

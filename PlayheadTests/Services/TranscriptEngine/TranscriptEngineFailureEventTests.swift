@@ -724,24 +724,6 @@ struct TranscriptEngineFailureEventTests {
         let afterPass1 = try await store.fetchTranscriptChunks(assetId: "asset-dedup").count
         #expect(afterPass1 == 2, "pass 1 must actually persist, or pass 2 has nothing to dedup")
 
-        // playhead-mptr: DEFEAT THE ARTIFACT-BACKED SKIP, DELIBERATELY.
-        //
-        // mptr taught the loop to skip a shard whose range is BOTH under the
-        // watermark and backed by a persisted chunk, so that a re-run stops
-        // re-paying for ASR it already bought. Pass 1 satisfies both conditions
-        // for both shards, which would make pass 2 skip everything — including
-        // the shard that is supposed to throw. The test would still go green,
-        // and it would be proving nothing at all: `FailAfterFirstRecognizer`
-        // would never be called.
-        //
-        // Rewinding the watermark (the one sanctioned rewind, playhead-0sro)
-        // leaves the CHUNKS in place while removing the skip's licence, so pass
-        // 2 runs both shards for real and shard 0 dedups through the production
-        // fingerprint path — which is the thing this test was written to pin.
-        // Without this line mptr silently hollows out an existing regression
-        // test rather than being caught by it.
-        try await store.resetFastTranscriptCoverage(id: "asset-dedup")
-
         // Pass 2: a fresh engine over the same store. Shard 0 produces the
         // byte-identical segment pass 1 already stored, so it dedups and
         // inserts nothing; shard 1 throws.

@@ -1095,26 +1095,27 @@ actor TranscriptEngineService {
 
         // playhead-mptr: LOAD WHAT THE PERSISTED CHUNKS ACTUALLY BACK, ONCE.
         //
-        // Until this landed, the loop below handed EVERY shard to
-        // `transcribeShard`, which ran the full ASR pass and deduplicated by
-        // fingerprint only afterwards. That dedup saves a row insert; it does
-        // not save the transcription. Re-running an asset that already held 45
-        // minutes of transcript therefore paid for 45 minutes of ASR before
-        // reaching one second of new audio — and `AnalysisJobRunner` caps this
-        // whole stage at a flat 300 s (an unconditional `Task.sleep`, not an
-        // inactivity watchdog). Past a certain amount of coverage the cap
-        // always wins first: the run persists zero chunks, the watermark cannot
-        // advance, and the next run faces exactly the same wall. The ceiling is
-        // SELF-REINFORCING — every second of coverage earned makes the next run
-        // more expensive — so an episode that crosses it is stranded forever,
-        // which is what left a field episode at 68.7 % across five consecutive
-        // attempts, each journaled `engine_silent_timeout` with
-        // `chunks_persisted = 0`.
+        // The loop below used to walk shards in playhead-proximity order alone,
+        // which on a re-run means starting over from the beginning of the
+        // episode. `transcribeShard` runs the full ASR pass and deduplicates by
+        // fingerprint only afterwards — the dedup saves a row insert, not the
+        // transcription — so a re-run of an asset already holding 45 minutes of
+        // transcript paid for 45 minutes of ASR before reaching one second of
+        // new audio. `AnalysisJobRunner` caps this whole stage at a flat 300 s
+        // (an unconditional `Task.sleep`, not an inactivity watchdog), so past
+        // a certain amount of coverage the cap always won first: zero chunks
+        // persisted, watermark frozen, and the next run facing the same wall.
+        //
+        // SELF-REINFORCING, which is what makes it a ceiling rather than a
+        // slowdown: every second of coverage earned makes the next run more
+        // expensive, so an episode that crosses the line is stranded forever.
+        // A field episode sat at 68.7 % across five consecutive attempts, each
+        // journaled `engine_silent_timeout` with `chunks_persisted = 0`.
         //
         // Two reads, both indexed, both once per run rather than per shard.
         // On failure the index is empty and the watermark nil, so every shard
-        // takes the full path — the pre-mptr behavior, which is the safe
-        // direction to fail in.
+        // sorts as uncovered and the order is exactly the pre-mptr order —
+        // the safe direction to fail in.
         var coverageIndex = FastTranscriptCoverageIndex.empty
         var coverageWatermark: Double?
         do {
@@ -1128,41 +1129,42 @@ actor TranscriptEngineService {
                 Transcribing every shard.
                 """)
         }
-        var shardsSkippedAsAlreadyTranscribed = 0
-
-        // Prioritize shards by proximity to the playhead.
-        let prioritized = prioritizeShards(shards)
+        // Prioritize shards by proximity to the playhead, then float the audio
+        // nothing backs yet to the front.
+        //
+        // playhead-mptr: NOTHING IS SKIPPED — every shard still runs, and the
+        // duplicate-fingerprint arm of `transcribeShard` still performs its
+        // `speakerId` / `avgConfidence` upgrades on the covered ones. Only the
+        // ORDER changes, so the stage's 300 s budget is spent on unread audio
+        // before it is spent on audio we already hold.
+        //
+        // The artifact test is what makes this safe in the direction review
+        // playhead-rfu-aac H3 cared about. H3 removed a watermark-only filter
+        // because `fastTranscriptCoverageEndTime` is a high-water REACH, not a
+        // promise every second below it was transcribed — behind-playhead shards
+        // can sit under it having never run, and playhead-0sro documents the
+        // watermark outliving its chunks entirely. Those shards have no chunk to
+        // point at, so they sort as UNCOVERED and run first, which is stronger
+        // than the pre-mptr behaviour rather than weaker. And because this is a
+        // reordering, a wrong answer in either direction costs latency, never
+        // coverage.
+        let prioritized = coverageIndex.orderingUncoveredFirst(
+            prioritizeShards(shards),
+            watermark: coverageWatermark
+        )
+        let uncoveredShardCount = prioritized.prefix {
+            !coverageIndex.isShardAlreadyTranscribed(
+                shardStart: $0.startTime,
+                shardEnd: $0.startTime + $0.duration,
+                watermark: coverageWatermark
+            )
+        }.count
 
         for shard in prioritized {
             guard !Task.isCancelled else {
                 logger.info("Transcription cancelled")
                 reportInterruption(.cancelled)
                 return
-            }
-
-            // playhead-mptr: skip only what the ARTIFACTS back.
-            //
-            // Review playhead-rfu-aac H3 removed the old watermark-only filter
-            // for a reason that still stands: `fastTranscriptCoverageEndTime`
-            // is a high-water REACH, not a promise that every second below it
-            // was transcribed. Shards behind the playhead can sit under the
-            // watermark having never run, and playhead-0sro documents the crash
-            // shape where the watermark outlives the chunks entirely.
-            //
-            // So the skip is not decided by the watermark. It requires the
-            // watermark to have reached past this shard AND a persisted
-            // `pass = 'fast'` chunk to actually overlap it. H3's
-            // counterexamples fail the second condition and keep their full
-            // ASR pass; so does a silent shard, which produced no chunk. What
-            // is skipped is only audio we can point at rows for.
-            let shardEndTime = shard.startTime + shard.duration
-            if coverageIndex.isShardAlreadyTranscribed(
-                shardStart: shard.startTime,
-                shardEnd: shardEndTime,
-                watermark: coverageWatermark
-            ) {
-                shardsSkippedAsAlreadyTranscribed += 1
-                continue
             }
 
             do {
@@ -1405,14 +1407,14 @@ actor TranscriptEngineService {
             return
         }
 
-        // playhead-mptr: the skip count is the diagnostic that says whether the
-        // 300 s stage budget was spent on new audio or on audio we already had.
-        // A run reporting a large skip count and a small elapsed time is the
-        // fix working; a run reporting zero skips on a partly-transcribed asset
-        // means the artifact check declined to fire and the stall can recur.
+        // playhead-mptr: the uncovered count is the diagnostic that says where
+        // the 300 s stage budget went. `uncovered` shards ran FIRST, so on a
+        // run that the cap cuts short they are the ones that got read. A
+        // partly-transcribed asset reporting `uncovered: 0` means the artifact
+        // test declined to fire and the stall can recur.
         logger.info("""
             Transcription loop complete for asset \(analysisAssetId) in \(loopElapsed) \
-            [shards skipped as already transcribed: \(shardsSkippedAsAlreadyTranscribed)]
+            [shards: \(prioritized.count), uncovered-first: \(uncoveredShardCount)]
             """)
         emitEvent(.completed(analysisAssetId: analysisAssetId))
     }

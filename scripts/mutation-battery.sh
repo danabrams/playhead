@@ -1425,6 +1425,7 @@ T_MPTR_HALF_OPEN_START="Touching a covered interval's START is not overlapping i
 T_MPTR_PASS_FILTER="A final-pass chunk is not fast-pass coverage"
 T_MPTR_SQL_DEGENERATE="The store drops degenerate rows before they can back a skip"
 T_MPTR_WATERMARK_INCLUSIVE="A shard ending exactly AT the watermark is covered"
+T_MPTR_UNCOVERED_FIRST="THE BEAD: unread audio is ordered AHEAD of audio we already hold"
 T_GARD_CREDIT_NOT_SHARED="Credit goes to the observed detector only"
 T_GARD_OVERRIDE_CLEARS="An explicit user override clears the stale evidence against every detector"
 T_GARD_BANNER_CREDITS="A confirmed banner IS a correct observation, credited to the detector that drew the span"
@@ -2717,6 +2718,7 @@ MUTATIONS=(
   "K202|201|MPTRIDX|$T_MPTR_ARTIFACT_RAIL"
   "K204|201|MPTRIDX|$T_MPTR_DEGENERATE_DROPPED"
   "K205|202|MPTRIDX|$T_MPTR_HALF_OPEN_END"
+  "K210|202|MPTRIDX|$T_MPTR_UNCOVERED_FIRST"
   "K206|202|STORE|$T_MPTR_PASS_FILTER"
   "K207|203|STORE|$T_MPTR_SQL_DEGENERATE"
   "K208|203|MPTRIDX|$T_MPTR_WATERMARK_INCLUSIVE"
@@ -6615,6 +6617,11 @@ EOF
     patch "$file" \
       "        return next < intervals.count && intervals[next].start < end" \
       "        return next < intervals.count && intervals[next].start <= end" ;;
+
+  K210)
+    patch "$file" \
+      "        return uncovered + covered" \
+      "        return covered + uncovered" ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
