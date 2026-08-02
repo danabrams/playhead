@@ -2302,7 +2302,10 @@ actor BackfillJobRunner {
         // logged and swallowed, and the service-side Step 18c recomputes the
         // same marks from the same rows (content-addressed ids, nothing churns).
         // Hard-gated: OFF short-circuits before any read/compose/write.
-        if semanticSweepMarkEnabled {
+        // The same mode gate as the service's Step 18c, for the same reason,
+        // and this runner is exactly where that contract is asserted ("shadow
+        // mode never inserts AdWindows"). `.full` is production.
+        if semanticSweepMarkEnabled, mode.canProposeNewRegions {
             do {
                 try await composeSemanticSweepMarks(
                     analysisAssetId: inputs.analysisAssetId

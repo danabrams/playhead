@@ -114,7 +114,8 @@ struct SemanticSweepWireInTests {
 
     private func makeService(
         store: AnalysisStore,
-        semanticSweepMarkEnabled: Bool
+        semanticSweepMarkEnabled: Bool,
+        fmBackfillMode: FMBackfillMode
     ) -> AdDetectionService {
         let config = AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -122,7 +123,14 @@ struct SemanticSweepWireInTests {
             suppressionThreshold: 0.25,
             hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1",
-            fmBackfillMode: .off,
+            // `.proposalOnly` is the default arm rather than `.off`: Step 18c is
+            // gated on `canProposeNewRegions`, and this mode grants exactly that
+            // while leaving `contributesToExistingCandidateLedger` FALSE — so the
+            // verdict still reaches fusion as nothing, which is the state it died
+            // in. `runShadowFMPhase` returns `.skipped` immediately (no runner
+            // factory is injected here), so no FM runs and both arms stay
+            // deterministic.
+            fmBackfillMode: fmBackfillMode,
             semanticSweepMarkEnabled: semanticSweepMarkEnabled
         )
         return AdDetectionService(
@@ -133,13 +141,17 @@ struct SemanticSweepWireInTests {
         )
     }
 
-    private func runArm(semanticSweepMarkEnabled: Bool) async throws -> [AdWindow] {
+    private func runArm(
+        semanticSweepMarkEnabled: Bool,
+        fmBackfillMode: FMBackfillMode = .proposalOnly
+    ) async throws -> [AdWindow] {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: Self.assetId))
         try await store.insertSemanticScanResult(makeScanRow())
         let service = makeService(
             store: store,
-            semanticSweepMarkEnabled: semanticSweepMarkEnabled
+            semanticSweepMarkEnabled: semanticSweepMarkEnabled,
+            fmBackfillMode: fmBackfillMode
         )
         try await service.runBackfill(
             chunks: makeChunks(assetId: Self.assetId),
@@ -222,6 +234,21 @@ struct SemanticSweepWireInTests {
 
     /// ADDITIVE ONLY, end to end. Every non-sweep row is byte-identical across
     /// the arms, so nothing the rest of the pipeline decided was perturbed.
+    /// THE SHADOW CONTRACT at the service site. `ApprovedCohortRegistry`
+    /// collapses any unapproved prompt / schema / scan-plan / locale / appBuild
+    /// cohort to `.shadow`, and PlayheadRuntime's bootstrap calls that "exactly
+    /// the protection the registry was designed to provide". A banner composed
+    /// from an unapproved cohort's verdicts would defeat it, so the compose is
+    /// gated on `canProposeNewRegions` and NOT on the feature flag alone.
+    @Test("shadow mode composes nothing at the service site")
+    func shadowModeComposesNothingAtTheService() async throws {
+        let windows = try await runArm(
+            semanticSweepMarkEnabled: true, fmBackfillMode: .shadow
+        )
+
+        #expect(sweepRows(windows).isEmpty)
+    }
+
     @Test("no existing row changes between the two arms")
     func theSweepIsPurelyAdditive() async throws {
         let off = try await runArm(semanticSweepMarkEnabled: false)
@@ -240,7 +267,11 @@ struct SemanticSweepWireInTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: Self.assetId))
         try await store.insertSemanticScanResult(makeScanRow())
-        let service = makeService(store: store, semanticSweepMarkEnabled: true)
+        let service = makeService(
+            store: store,
+            semanticSweepMarkEnabled: true,
+            fmBackfillMode: .proposalOnly
+        )
         let chunks = makeChunks(assetId: Self.assetId)
 
         try await service.runBackfill(
@@ -360,7 +391,10 @@ struct SemanticSweepRunnerTailTests {
         )
     }
 
-    private func runArm(semanticSweepMarkEnabled: Bool) async throws -> [AdWindow] {
+    private func runArm(
+        semanticSweepMarkEnabled: Bool,
+        mode: FMBackfillMode = .full
+    ) async throws -> [AdWindow] {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         try await store.insertSemanticScanResult(makePriorVerdictRow())
@@ -370,7 +404,7 @@ struct SemanticSweepRunnerTailTests {
             admissionController: AdmissionController(),
             classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
             coveragePlanner: CoveragePlanner(),
-            mode: .shadow,
+            mode: mode,
             capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
             batteryLevelProvider: { 1.0 },
             scanCohortJSON: makeTestScanCohortJSON(),
@@ -401,6 +435,17 @@ struct SemanticSweepRunnerTailTests {
     @Test("flag OFF: a job run composes nothing")
     func theRunnerTailIsInertWhenOff() async throws {
         let rows = try await runArm(semanticSweepMarkEnabled: false)
+
+        #expect(rows.isEmpty)
+    }
+
+    /// THE SHADOW CONTRACT at the runner site — the one this file's neighbour
+    /// `BackfillJobRunnerTests` states outright ("shadow mode never inserts
+    /// AdWindows"). It held only accidentally before this gate: `TestFMRuntime`
+    /// defaults to `.noAds`, so no fixture there produced a verdict to compose.
+    @Test("shadow mode composes nothing at the runner tail")
+    func shadowModeComposesNothingAtTheRunnerTail() async throws {
+        let rows = try await runArm(semanticSweepMarkEnabled: true, mode: .shadow)
 
         #expect(rows.isEmpty)
     }

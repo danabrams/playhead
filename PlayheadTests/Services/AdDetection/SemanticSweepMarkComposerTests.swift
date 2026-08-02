@@ -450,13 +450,22 @@ struct SemanticSweepExtentPolicyTests {
     /// An anchor far from either edge is a boundary belonging to something else
     /// — clipping to it would invent extent, which is the failure playhead-2350
     /// documented. Bound the reach.
+    ///
+    /// TWO anchors, one per edge, and that is the whole point of the shape.
+    /// The first version of this test used a SINGLE mid-window anchor, and
+    /// mutation rail Y12 (radius 20 s -> 1000 s) SURVIVED against it: one
+    /// interior anchor is a candidate for BOTH edges, so an unbounded radius
+    /// collapsed the extent to a point, the min-duration guard refused the clip,
+    /// and the mark came back unchanged. The assertion was green for a reason
+    /// that had nothing to do with the radius. With an anchor in each half the
+    /// clip is well-formed, so only the radius can prevent it.
     @Test("an anchor beyond the clip radius does not move an edge")
     func aDistantAnchorDoesNotClip() {
-        let marks = Fx.compose(rows: [Fx.row(id: "a", start: 508, end: 599)],
-                               anchors: [560])
+        let marks = Fx.compose(rows: [Fx.row(id: "a", start: 100, end: 380)],
+                               anchors: [150, 330])
 
-        #expect(marks.first?.startTime == 508)
-        #expect(marks.first?.endTime == 599)
+        #expect(marks.first?.startTime == 100)
+        #expect(marks.first?.endTime == 380)
     }
 
     /// A clip must never destroy the mark it is refining.
@@ -489,6 +498,38 @@ struct SemanticSweepExtentPolicyTests {
         ])
 
         #expect(edges == [100, 140, 300])
+    }
+
+    /// THE WIDTH CEILING. The coarse lane really does return `containsAd` over
+    /// enormous windows — `SpanExtentSupport`'s header records 17.04-1183.62 s
+    /// on the THEMOVE replay. A nineteen-minute banner claims show, not an ad,
+    /// and carries no usable extent. Dropping it is the honest answer; recovering
+    /// it is a TARGETING problem (playhead-lxkq), not a surfacing one.
+    @Test("a verdict wider than the mark ceiling produces nothing")
+    func anOverWideVerdictProducesNothing() {
+        let marks = Fx.compose(rows: [Fx.row(id: "a", start: 100, end: 500)])
+
+        #expect(marks.isEmpty)
+    }
+
+    /// The ceiling is enforced on the MERGE too, and the two do different jobs.
+    /// Without it a run of adjacent coarse windows fuses into one over-wide
+    /// extent that the width filter then drops WHOLE — losing every verdict in
+    /// the run. Stopping the merge keeps them, as marks that each stay inside
+    /// the bound.
+    @Test("the merge stops rather than growing past the mark ceiling")
+    func theMergeStopsAtTheCeiling() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "a", start: 0, end: 95),
+            Fx.row(id: "b", start: 95, end: 190),
+            Fx.row(id: "c", start: 190, end: 285),
+            Fx.row(id: "d", start: 285, end: 380),
+        ]).sorted { $0.startTime < $1.startTime }
+
+        #expect(marks.count == 2, "every verdict survives, none over the bound")
+        #expect(marks.allSatisfy {
+            $0.endTime - $0.startTime <= SemanticSweepMarkComposer.maximumMarkDurationSeconds
+        })
     }
 
     /// A degenerate row carries no extent. Emitting it would put a zero-width

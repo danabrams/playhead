@@ -372,10 +372,15 @@ INGO="Playhead/Services/SkipOrchestrator/AdWindowIngestOutcome.swift"
 # the B rails split cleanly — the edge READING lives here and the DEFAULT that
 # decides whether tests ever see it lives in the orchestrator's init.
 INVF="Playhead/Services/AdDetection/InventorySanityFilter.swift"
+# playhead-y3ya: the semantic-sweep mark composer. A PURE type — the whole
+# extent policy is in it — so every Y rail but the wire-in ones is a one-line
+# edit to a stage whose claim has its own named test.
+SWEEP="Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$SWEEP"
 )
 
 FOCUSED_SUITES=(
@@ -503,6 +508,20 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/InventorySanityFilterRejectionRateTests
   -only-testing:PlayheadTests/InventorySanityFilterRollbackTests
   -only-testing:PlayheadTests/SkipOrchestratorInventoryFilterIntegrationTests
+  # playhead-y3ya: the semantic-sweep mark producer (Y01-Y12). The isp5 census
+  # suites above stay in scope deliberately — `ingest_armed_suggest` is where
+  # this fix is MEASURED, so a composer mutation that satisfied the pure
+  # policy tests while losing the window at the door would otherwise go
+  # unseen. The WIRE-IN suite is listed because a correct composer that is
+  # never called is the one defect no pure test can see.
+  -only-testing:PlayheadTests/SemanticSweepFieldCaseTests
+  -only-testing:PlayheadTests/SemanticSweepDeclinedVerdictTests
+  -only-testing:PlayheadTests/SemanticSweepExtentPolicyTests
+  -only-testing:PlayheadTests/SemanticSweepAdditiveOnlyTests
+  -only-testing:PlayheadTests/SemanticSweepArmsSuggestTests
+  -only-testing:PlayheadTests/SemanticSweepDeclinedSurfacesNothingTests
+  -only-testing:PlayheadTests/SemanticSweepWireInTests
+  -only-testing:PlayheadTests/SemanticSweepRunnerTailTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -836,6 +855,32 @@ T_B6R2_TAIL_BOUNDARY="the tail boundary is the inner edge at exactly duration - 
 T_B6R2_DEFAULT="the init default enforces the filter, with no argument passed"
 T_B6R2_FRESH_INSTALL="the init default equals what production loads on a fresh install"
 T_B6R2_MATERIAL="a negative start is refused by the material check, not the edge rule"
+
+# playhead-y3ya — a semantic containsAd verdict has standing on its own.
+T_Y3YA_FIELD="both DE0784D8 verdicts produce a candidate"
+T_Y3YA_MARKONLY="every emitted mark is markOnly"
+T_Y3YA_UNANCHORED="every emitted mark is unanchored on both edges"
+T_Y3YA_PRELOAD="a mark clears the cross-launch preload confidence floor"
+T_Y3YA_UNCERTAIN="an uncertain verdict produces nothing"
+T_Y3YA_UNEXAMINED="a containsAd row whose scan never examined the window produces nothing"
+T_Y3YA_SENTINEL="a no-work sentinel row produces nothing"
+T_Y3YA_PASSB_DECLINED="a declined passB refinement leaves the coarse presence verdict standing"
+T_Y3YA_ORPHAN_PASSB="a passB verdict with no coarse parent stands on its own"
+T_Y3YA_NO_GATE="no anchor anywhere still emits the mark"
+T_Y3YA_CLIP_UNANCHORED="a clipped mark still records both edges as unanchored"
+T_Y3YA_MERGE_BOUND="verdicts separated by more than the merge gap stay separate"
+T_Y3YA_CLIP_RADIUS="an anchor beyond the clip radius does not move an edge"
+T_Y3YA_VETO="a verdict overlapping a user-reverted window produces nothing"
+T_Y3YA_ARMS="both field verdicts arm the suggest tier"
+T_Y3YA_ARMS_COUNT="the ingest census counts two armed suggestions"
+T_Y3YA_NOT_MANAGED="a sweep mark never enters the managed auto-skip set"
+T_Y3YA_RELAUNCH="a sweep mark also arms through the cross-launch preload"
+T_Y3YA_WIRE="flag ON: the verdict is persisted as a sweep row"
+T_Y3YA_TAIL="flag ON: a job run composes the persisted verdict into a mark"
+T_Y3YA_SHADOW_SVC="shadow mode composes nothing at the service site"
+T_Y3YA_SHADOW_RUN="shadow mode composes nothing at the runner tail"
+T_Y3YA_CEILING="a verdict wider than the mark ceiling produces nothing"
+T_Y3YA_MERGE_CEILING="the merge stops rather than growing past the mark ceiling"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1513,6 +1558,103 @@ MUTATIONS=(
   # still refused elsewhere. Delete `startTime >= 0` from the material check
   # and the claim is a lie.
   "B07|90|ORCH|$T_B6R2_MATERIAL"
+
+  # playhead-y3ya. Batch ids 91-99, verified fresh against the whole array
+  # before use (61 carries a duplicate L09 that ERRORs a rerun, 62-67 are shared
+  # by evc1 and kvs8, isp5 took 81-84 and b6r2 85-90).
+  #
+  # Y01 admits `uncertain` alongside `containsAd`. It is the global threshold
+  # lowering this bead is FORBIDDEN to do, wearing the smallest possible
+  # disguise — one `||`. Y02 deletes the examined check, so a cancelled row
+  # votes on whatever its disposition column happens to hold; the field sweep
+  # ended `2581-2676 | abstain | cancelled`, so this is not hypothetical.
+  # Batched: adjacent but distinct guards, disjoint rails, neither edit makes
+  # the other's anchor unreachable.
+  "Y01|91|SWEEP|$T_Y3YA_UNCERTAIN"
+  "Y02|91|SWEEP|$T_Y3YA_UNEXAMINED"
+
+  # Y03 is the pz32 defect at one remove: read `row.status.didExamineWindow`
+  # instead of the row-level predicate, which drops the no-work-sentinel
+  # exclusion. `.noAds` IS an examined status, so a sentinel spanning the whole
+  # attempted range mints one enormous mark over an episode nothing scanned.
+  # Its own batch because it rewrites the same line Y02 deletes.
+  "Y03|92|SWEEP|$T_Y3YA_SENTINEL"
+
+  # Y04 is THE BUG, rebuilt one layer down: drop a coarse verdict that no pass-B
+  # refinement narrowed. That is "presence needs a seed to attach to" restated
+  # inside the composer, and it is the tempting shape because it reads like
+  # prudence. Own batch — its blast radius is every field-case test, so a
+  # batched partner would be credited off it.
+  "Y04|93|SWEEP|$T_Y3YA_FIELD;$T_Y3YA_PASSB_DECLINED;$T_Y3YA_WIRE"
+
+  # Y05 drops a pass-B verdict that lies inside no coarse containsAd window —
+  # the same "must have a host" rule as Y04, applied to the other direction.
+  "Y05|94|SWEEP|$T_Y3YA_ORPHAN_PASSB"
+
+  # Y06 IS THE INVERSION THE BEAD NAMES. Require an anchor before emitting, so
+  # a hard boundary GATES eligibility instead of CLIPPING geometry. It is one
+  # clause, it looks conservative, and it reproduces exactly the reasoning that
+  # discarded both field verdicts. Own batch: it empties the composer, so every
+  # other rail in a shared batch would have nothing to fail on.
+  "Y06|95|SWEEP|$T_Y3YA_NO_GATE;$T_Y3YA_FIELD;$T_Y3YA_ARMS"
+
+  # Y07 stamps `.eligible` instead of the hard-coded `markOnly`, which is the
+  # one edit that turns a coarse FM guess into a silent skip. Named at three
+  # altitudes — the pure literal, the census count, and the managed-set count —
+  # so a mutation cannot satisfy the composer while losing the tier at the door.
+  # Y08 claims `.stingerSnapped` on both edges, i.e. lets a CLIP become an
+  # anchor CLAIM; that is what would hand playhead-2350's gate a boundary an FM
+  # window merely happened to sit near. Batched: different lines in `makeMark`,
+  # disjoint rails, neither reaches the other's assertion.
+  "Y07|96|SWEEP|$T_Y3YA_MARKONLY;$T_Y3YA_ARMS_COUNT;$T_Y3YA_NOT_MANAGED"
+  "Y08|96|SWEEP|$T_Y3YA_UNANCHORED;$T_Y3YA_CLIP_UNANCHORED"
+
+  # Y09 narrows the dedupe to VISIBLE decision states — which is precisely what
+  # `SpecialistMarkComposer` does, so it is the mistake a reader copies. It
+  # resurfaces a span the listener already vetoed. Y10 drops the mark
+  # confidence below `preloadAdmissibleWindows`' 0.70 floor, which loses the
+  # window at BOTH doors while every pure-composer test stays green. Batched:
+  # one constant and one filter, disjoint rails.
+  "Y09|97|SWEEP|$T_Y3YA_VETO"
+  "Y10|97|SWEEP|$T_Y3YA_PRELOAD;$T_Y3YA_RELAUNCH"
+
+  # Y11 and Y12 unbound the two radii. An unbounded merge claims the show
+  # between two real breaks; an unbounded clip snaps an edge to a boundary
+  # belonging to something else, which is inventing extent — the failure
+  # playhead-2350 documented. Batched: distinct constants, and each rail's
+  # fixture is inert under the other edit (the merge fixture passes no anchors,
+  # the clip fixture has one row).
+  "Y11|98|SWEEP|$T_Y3YA_MERGE_BOUND"
+  "Y12|98|SWEEP|$T_Y3YA_CLIP_RADIUS"
+
+  # Y13 and Y14 are the two WIRES, and they are the defect a pure-composer
+  # battery structurally cannot see: a correct composer that is never called.
+  # Y13 inverts Step 18c's flag read; Y14 inverts the runner tail's. Separate
+  # batches because each is the other's control — a single flag inversion must
+  # redden ONE site, and a batched pair could not show that the two sites are
+  # independently wired.
+  "Y13|99|ADSVC|$T_Y3YA_WIRE"
+  "Y14|100|RUNNER|$T_Y3YA_TAIL"
+
+  # Y15 and Y16 delete the MODE gate at each site, leaving the feature flag
+  # standing. `ApprovedCohortRegistry` collapses an unapproved prompt / schema /
+  # scan-plan / locale / appBuild cohort to `.shadow` — PlayheadRuntime's
+  # bootstrap calls that "exactly the protection the registry was designed to
+  # provide" — so a composer that reads only the flag would put an UNAPPROVED
+  # cohort's verdicts in front of the listener. Batched: different files,
+  # different rails, and each gate is the other's independent site.
+  "Y15|101|ADSVC|$T_Y3YA_SHADOW_SVC"
+  "Y16|101|RUNNER|$T_Y3YA_SHADOW_RUN"
+
+  # Y17 drops the mark-WIDTH ceiling, so a coarse verdict spanning nineteen
+  # minutes (SpanExtentSupport's header records FM windows of 17.04-1183.62 s)
+  # becomes a banner claiming show. Y18 drops the ceiling from the MERGE only,
+  # which is the subtler half: the width filter still catches the fused extent,
+  # but it drops it WHOLE, so every verdict in a run of adjacent windows is lost
+  # instead of surviving as several bounded marks. Batched: one is a filter and
+  # one a merge condition, with distinct fixtures.
+  "Y17|102|SWEEP|$T_Y3YA_CEILING"
+  "Y18|102|SWEEP|$T_Y3YA_MERGE_CEILING"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3906,6 +4048,190 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ── playhead-y3ya: the semantic-sweep mark composer ──────────────────────
+
+  Y01)
+    snippet OLD <<'EOF'
+        guard row.disposition == .containsAd else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard row.disposition == .containsAd
+            || row.disposition == .uncertain else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y02)
+    snippet OLD <<'EOF'
+        guard row.didExamineWindow else { return false }
+        guard row.windowStartTime.isFinite, row.windowEndTime.isFinite else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard row.windowStartTime.isFinite, row.windowEndTime.isFinite else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y03)
+    snippet OLD <<'EOF'
+        guard row.didExamineWindow else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard row.status.didExamineWindow else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y04)
+    snippet OLD <<'EOF'
+            result.append(contentsOf: narrowed.isEmpty ? [window] : narrowed)
+EOF
+    snippet NEW <<'EOF'
+            result.append(contentsOf: narrowed)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y05)
+    snippet OLD <<'EOF'
+        for (index, refinement) in refinements.enumerated()
+        where !claimedRefinements.contains(index) {
+            result.append(refinement)
+        }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y06)
+    snippet OLD <<'EOF'
+        guard !presence.isEmpty else { return [] }
+EOF
+    snippet NEW <<'EOF'
+        guard !presence.isEmpty, !anchors.isEmpty else { return [] }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y07)
+    snippet OLD <<'EOF'
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+EOF
+    snippet NEW <<'EOF'
+            eligibilityGate: SkipEligibilityGate.eligible.rawValue,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y08)
+    snippet OLD <<'EOF'
+            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+EOF
+    snippet NEW <<'EOF'
+            startEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y09)
+    snippet OLD <<'EOF'
+        let blocking = existingWindows
+            .filter { $0.detectorVersion != detectorVersion }
+            .map { (start: $0.startTime, end: $0.endTime) }
+EOF
+    snippet NEW <<'EOF'
+        let blocking = existingWindows
+            .filter {
+                $0.detectorVersion != detectorVersion
+                    && SpecialistMarkComposer.visibleDecisionStates
+                        .contains($0.decisionState)
+            }
+            .map { (start: $0.startTime, end: $0.endTime) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y10)
+    snippet OLD <<'EOF'
+    static let markConfidence = 0.70
+EOF
+    snippet NEW <<'EOF'
+    static let markConfidence = 0.50
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y11)
+    snippet OLD <<'EOF'
+    static let mergeGapSeconds = 2.0
+EOF
+    snippet NEW <<'EOF'
+    static let mergeGapSeconds = 1_000.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y12)
+    snippet OLD <<'EOF'
+    static let anchorClipRadiusSeconds = 20.0
+EOF
+    snippet NEW <<'EOF'
+    static let anchorClipRadiusSeconds = 1_000.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y13)
+    snippet OLD <<'EOF'
+        if config.semanticSweepMarkEnabled,
+           effectiveFMBackfillMode.canProposeNewRegions,
+EOF
+    snippet NEW <<'EOF'
+        if !config.semanticSweepMarkEnabled,
+           effectiveFMBackfillMode.canProposeNewRegions,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y14)
+    snippet OLD <<'EOF'
+        if semanticSweepMarkEnabled, mode.canProposeNewRegions {
+EOF
+    snippet NEW <<'EOF'
+        if !semanticSweepMarkEnabled, mode.canProposeNewRegions {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y15)
+    snippet OLD <<'EOF'
+        if config.semanticSweepMarkEnabled,
+           effectiveFMBackfillMode.canProposeNewRegions,
+EOF
+    snippet NEW <<'EOF'
+        if config.semanticSweepMarkEnabled,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y16)
+    snippet OLD <<'EOF'
+        if semanticSweepMarkEnabled, mode.canProposeNewRegions {
+EOF
+    snippet NEW <<'EOF'
+        if semanticSweepMarkEnabled {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y17)
+    snippet OLD <<'EOF'
+            .filter { $0.duration <= maximumMarkDurationSeconds }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Y18)
+    snippet OLD <<'EOF'
+            if var last = result.last,
+               extent.start <= last.end + mergeGapSeconds,
+               max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
+EOF
+    snippet NEW <<'EOF'
+            if var last = result.last,
+               extent.start <= last.end + mergeGapSeconds {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -3943,6 +4269,7 @@ rec_file()   {
     MODEL) printf '%s' "$MODEL" ;;
     INGO)  printf '%s' "$INGO" ;;
     INVF)  printf '%s' "$INVF" ;;
+    SWEEP) printf '%s' "$SWEEP" ;;
     *)     printf '%s' "" ;;
   esac
 }

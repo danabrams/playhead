@@ -6589,7 +6589,21 @@ actor AdDetectionService {
         // is a recall lever running after all the real work; a throwing store
         // read is logged and swallowed, and the next run recomputes the same
         // marks from the same inputs (content-addressed ids, so nothing churns).
-        if config.semanticSweepMarkEnabled, !semanticScanResults.isEmpty {
+        // GATED ON THE EFFECTIVE FM MODE, not on the feature flag alone.
+        // `ApprovedCohortRegistry` collapses an unapproved prompt / schema /
+        // scan-plan / normalization / locale / appBuild cohort to `.shadow`, and
+        // PlayheadRuntime's bootstrap calls that "exactly the protection the
+        // registry was designed to provide". A banner composed from an
+        // UNAPPROVED cohort's verdicts would defeat it — the whole point of
+        // shadow is that its output is observed, never acted on.
+        // `canProposeNewRegions` is the semantically exact predicate: a sweep
+        // mark IS a new region proposed by FM, and `.rescoreOnly` means
+        // "rescore what exists, propose nothing". Production is `.full`. This
+        // also gives that capability bit its first production consumer — it had
+        // none, which is part of why the sweep lane could never surface.
+        if config.semanticSweepMarkEnabled,
+           effectiveFMBackfillMode.canProposeNewRegions,
+           !semanticScanResults.isEmpty {
             do {
                 let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
                 let sweepMarks = SemanticSweepMarkComposer.compose(

@@ -153,6 +153,25 @@ enum SemanticSweepMarkComposer {
     /// on.
     static let minimumMarkDurationSeconds = 2.0
 
+    /// Marks WIDER than this are not emitted either, and the merge refuses to
+    /// grow past it.
+    ///
+    /// The coarse lane can return `containsAd` over enormous windows —
+    /// `SpanExtentSupport`'s own header records FM windows of 17.04–1183.62 s
+    /// on the THEMOVE replay. A verdict spanning nineteen minutes carries
+    /// essentially NO extent information, and a banner over it claims show, not
+    /// an ad. It is also nearly all show by construction, which is Dan's
+    /// "inner edges eat the show" applied to a whole window. Dropping it is the
+    /// honest answer: presence with no usable extent is a TARGETING problem
+    /// (playhead-lxkq re-aims the budget at narrow likely slots), not something
+    /// to put in front of a listener.
+    ///
+    /// The number is a POLICY bound, not a measurement, and it is stated as one.
+    /// Its comparator is `quorumGateForFMConsensus`'s 180 s ceiling for AUTO-SKIP
+    /// admission; a banner earns more latitude than a cut, so this is 300 s.
+    /// Both field verdicts — 91 s and 127 s — clear it with wide margin.
+    static let maximumMarkDurationSeconds = 300.0
+
     /// How far from an edge a proven boundary may sit and still clip it. An
     /// anchor further away than this belongs to something else, and snapping to
     /// it would INVENT extent — the failure playhead-2350 documented.
@@ -209,7 +228,11 @@ enum SemanticSweepMarkComposer {
         let merged = mergeExtents(presence)
 
         // Stage 4: clip to a proven edge when one is in reach.
-        let clipped = merged.map { clip($0, toAnchors: anchors) }
+        let clipped = merged
+            .map { clip($0, toAnchors: anchors) }
+            // The width ceiling is applied AFTER the clip, so a proven edge that
+            // brings an over-wide verdict back under it rescues the mark.
+            .filter { $0.duration <= maximumMarkDurationSeconds }
 
         // Stage 5: dedupe. A PRIOR SWEEP MARK IS DELIBERATELY EXCLUDED — it
         // must not self-suppress, or the second run over unchanged inputs would
@@ -288,14 +311,23 @@ enum SemanticSweepMarkComposer {
     // MARK: - Stage 3: merge
 
     /// Sort by start and sweep-merge extents whose start is within
-    /// `mergeGapSeconds` of the running extent's end.
+    /// `mergeGapSeconds` of the running extent's end — and never past
+    /// `maximumMarkDurationSeconds`.
+    ///
+    /// The ceiling is enforced HERE as well as on the result, and the two do
+    /// different jobs: without it, a run of adjacent coarse windows fuses into
+    /// one over-wide extent that the width filter then drops WHOLE, losing every
+    /// verdict in the run. Stopping the merge instead keeps them, as several
+    /// marks that each stay inside the bound.
     static func mergeExtents(_ extents: [Extent]) -> [Extent] {
         let sorted = extents.sorted {
             $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end
         }
         var result: [Extent] = []
         for extent in sorted {
-            if var last = result.last, extent.start <= last.end + mergeGapSeconds {
+            if var last = result.last,
+               extent.start <= last.end + mergeGapSeconds,
+               max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
                 last.end = max(last.end, extent.end)
                 result[result.count - 1] = last
             } else {
