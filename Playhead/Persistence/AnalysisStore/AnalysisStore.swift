@@ -6338,7 +6338,21 @@ actor AnalysisStore {
     /// `migrateOnlyForTesting()`, since the table lives only in
     /// `createTables()` — still reaches v42.
     private func migrateSemanticScanAttributionV42IfNeeded() throws {
-        guard (try schemaVersion() ?? 1) < 42 else { return }
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 42 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39, exactly as V40 and V41 do not.
+        // V39 is allowed to fail without throwing: it rolls back to its
+        // savepoint and leaves `schema_version` at 38 so the next launch
+        // retries. A plain `< 42` guard here stamps 42 onto a database that
+        // never built the unique asset-identity index or the merged-child-row
+        // dedupe — and because those rungs are gated on the version, they could
+        // then NEVER be retried.
+        //
+        // This is not hypothetical: the first cut of this rung had the plain
+        // guard, and `relaunched.schemaVersion() == 38` went red in both V39
+        // containment suites in about 0.05 s. Every rung added after V39 has to
+        // repeat this guard; the ladder does not enforce it structurally.
+        guard observed >= 41 else { return }
         if try tableExists("semantic_scan_results") {
             try addColumnIfNeeded(
                 table: "semantic_scan_results",

@@ -87,7 +87,13 @@ struct SemanticScanPersistenceTests {
             latencyMs: 42,
             prewarmHit: true,
             scanCohortJSON: try makeScanCohortJSON(),
-            transcriptVersion: "tx-v1"
+            transcriptVersion: "tx-v1",
+            // playhead-hx6n: pinned so this round-trip stays an EQUALITY test.
+            // `insertSemanticScanResult` stamps its own clock into `createdAt`
+            // when a caller supplies none, so a nil here would make the fetched
+            // row legitimately differ from the constructed one and the assertion
+            // would be measuring the clock rather than the persistence.
+            createdAt: 1700000001.0
         )
 
         try await store.insertSemanticScanResult(result)
@@ -130,7 +136,13 @@ struct SemanticScanPersistenceTests {
             latencyMs: 12,
             prewarmHit: false,
             scanCohortJSON: try makeScanCohortJSON(),
-            transcriptVersion: "tx-v1"
+            transcriptVersion: "tx-v1",
+            // playhead-hx6n: pinned so this round-trip stays an EQUALITY test.
+            // `insertSemanticScanResult` stamps its own clock into `createdAt`
+            // when a caller supplies none, so a nil here would make the fetched
+            // row legitimately differ from the constructed one and the assertion
+            // would be measuring the clock rather than the persistence.
+            createdAt: 1700000002.0
         )
 
         try await store.insertSemanticScanResult(result)
@@ -164,7 +176,13 @@ struct SemanticScanPersistenceTests {
             latencyMs: 19,
             prewarmHit: false,
             scanCohortJSON: try makeScanCohortJSON(),
-            transcriptVersion: "tx-v1"
+            transcriptVersion: "tx-v1",
+            // playhead-hx6n: pinned so this round-trip stays an EQUALITY test.
+            // `insertSemanticScanResult` stamps its own clock into `createdAt`
+            // when a caller supplies none, so a nil here would make the fetched
+            // row legitimately differ from the constructed one and the assertion
+            // would be measuring the clock rather than the persistence.
+            createdAt: 1700000003.0
         )
 
         try await store.insertSemanticScanResult(result)
@@ -267,7 +285,13 @@ struct SemanticScanPersistenceTests {
             latencyMs: 30,
             prewarmHit: true,
             scanCohortJSON: originalCohortJSON,
-            transcriptVersion: "tx-v1"
+            transcriptVersion: "tx-v1",
+            // playhead-hx6n: pinned so this round-trip stays an EQUALITY test.
+            // `insertSemanticScanResult` stamps its own clock into `createdAt`
+            // when a caller supplies none, so a nil here would make the fetched
+            // row legitimately differ from the constructed one and the assertion
+            // would be measuring the clock rather than the persistence.
+            createdAt: 1700000004.0
         )
         let newer = SemanticScanResult(
             id: "scan-newer",
@@ -288,7 +312,13 @@ struct SemanticScanPersistenceTests {
             latencyMs: 28,
             prewarmHit: false,
             scanCohortJSON: newerCohortJSON,
-            transcriptVersion: "tx-v1"
+            transcriptVersion: "tx-v1",
+            // playhead-hx6n: pinned so this round-trip stays an EQUALITY test.
+            // `insertSemanticScanResult` stamps its own clock into `createdAt`
+            // when a caller supplies none, so a nil here would make the fetched
+            // row legitimately differ from the constructed one and the assertion
+            // would be measuring the clock rather than the persistence.
+            createdAt: 1700000005.0
         )
 
         try await store.insertSemanticScanResult(original)
