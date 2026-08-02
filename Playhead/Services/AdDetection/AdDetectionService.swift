@@ -838,6 +838,28 @@ struct AdDetectionConfig: Sendable {
     /// untouched and is only ever an INPUT to this composer's dedupe.
     let semanticSweepMarkEnabled: Bool
 
+    /// playhead-lxkq: order the FM coarse sweep by AD-LIKELIHOOD rather than by
+    /// episode position.
+    ///
+    /// **The measurement.** On episode DE0784D8 FM's 42 `semantic_scan_results`
+    /// rows cover 0-2676 s, linearly, front to back, ending
+    /// `2581-2676 | abstain | cancelled`. Dan's missed pod is at 2838-2954 s.
+    /// It had ~fifteen hours of download-to-play headroom and spent all of it
+    /// on the first 48% of the episode. At 2.4x slower than realtime, ten
+    /// 3-minute neighbourhoods fit an overnight gap in ~72 minutes; a 3.7-hour
+    /// linear sweep does not. The budget was never the problem; the order was.
+    ///
+    /// **This is a scheduling change, not a detection change.** The seeds are
+    /// pointers, never verdicts — the acoustic seam that fired at 2828-2836 on
+    /// that episode carried 6.7e-6 confidence, which is a terrible answer and
+    /// an excellent pointer (`feedback_lexical_as_attention`). No threshold,
+    /// fusion weight or gate moves; the same windows are scanned, in a
+    /// different order, and `AdLikelihoodScanOrder.order` is a permutation so
+    /// nothing can be starved.
+    ///
+    /// Ships ON. OFF restores the pre-lxkq front-to-back sweep exactly.
+    let adLikelihoodScanOrderEnabled: Bool
+
     /// playhead-hvk0: require a full rescan to have MEASURABLY read its episode
     /// before its recall sample may certify the `targetedWithAudit` policy for
     /// the show.
@@ -1000,7 +1022,8 @@ struct AdDetectionConfig: Sendable {
         preRollStartClampSeconds: Double = 20.0,
         podContinuationEnabled: Bool = true,
         semanticSweepMarkEnabled: Bool = true,
-        plannerPromotionRequiresMeasuredCoverage: Bool = false
+        plannerPromotionRequiresMeasuredCoverage: Bool = false,
+        adLikelihoodScanOrderEnabled: Bool = true
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
         // is the SOLE production width setter (contract 2026-07-07) and the
@@ -1079,6 +1102,7 @@ struct AdDetectionConfig: Sendable {
         self.podContinuationEnabled = podContinuationEnabled
         self.semanticSweepMarkEnabled = semanticSweepMarkEnabled
         self.plannerPromotionRequiresMeasuredCoverage = plannerPromotionRequiresMeasuredCoverage
+        self.adLikelihoodScanOrderEnabled = adLikelihoodScanOrderEnabled
     }
 
     static let `default` = AdDetectionConfig(
@@ -1144,7 +1168,8 @@ struct AdDetectionConfig: Sendable {
         preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
         podContinuationEnabled: true,  // playhead-eks2: flipped ON 2026-08-01 (Dan) — the corpus A/B the xsdz.65 close gated on measures 0.0 newly-claimed seconds outside a byte-confirmed DAI slot at the shipping arm, and the output is mark-only/candidate/unanchored, so the worst case is a wrong BANNER (playhead-2350 + ynmk both hold, pinned by AdPodContinuationFlipTests)
         semanticSweepMarkEnabled: true,  // playhead-y3ya: ships ON. A semantic containsAd verdict fusion could not attach becomes a MARK-ONLY candidate; OFF restores the pre-y3ya silent drop. Marks are markOnly/candidate/unanchored by construction, so 2350 and ynmk both hold and the worst case is a wrong BANNER (pinned by SemanticSweepArmsSuggestTests)
-        plannerPromotionRequiresMeasuredCoverage: false  // playhead-hvk0: the read-evidence promotion gate ships OFF and fully inert. The mechanism is correct and mutation-tested, but at the shared 0.98 floor NO episode on the 2026-07-29 device pull qualifies (max measured adScanFraction 0.943), so flipping it retires `targetedWithAudit` entirely and buys a full-episode plan on every episode at a MEASURED 12-45 min of FM wall-clock each, 92% of it spent on calls that fail and yield no coverage. Retiring a policy at that price is Dan's decision under CLAUDE.md Decision Authority — see the field doc.
+        plannerPromotionRequiresMeasuredCoverage: false,  // playhead-hvk0: the read-evidence promotion gate ships OFF and fully inert. The mechanism is correct and mutation-tested, but at the shared 0.98 floor NO episode on the 2026-07-29 device pull qualifies (max measured adScanFraction 0.943), so flipping it retires `targetedWithAudit` entirely and buys a full-episode plan on every episode at a MEASURED 12-45 min of FM wall-clock each, 92% of it spent on calls that fail and yield no coverage. Retiring a policy at that price is Dan's decision under CLAUDE.md Decision Authority — see the field doc.
+        adLikelihoodScanOrderEnabled: true  // playhead-lxkq: ships ON. Orders the FM coarse sweep by ad-likelihood instead of episode position. A SCHEDULING change only — `AdLikelihoodScanOrder.order` is a permutation, so the same windows are scanned and none can be starved; with no usable seed it is the identity and the sweep is the pre-lxkq linear one. Measured motivation: DE0784D8 swept 0-2676s linearly in ~15h and never reached the pod at 2838-2954, while the acoustic seam channel had already fired at 2828-2836.
     )
 
     /// playhead-fqc8: Pure helper that returns the active auto-skip

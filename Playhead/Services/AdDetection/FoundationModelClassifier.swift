@@ -1674,6 +1674,7 @@ struct FoundationModelClassifier: Sendable {
     func coarsePassA(
         segments: [AdTranscriptSegment],
         locale: Locale = .current,
+        seeds: [AdLikelihoodSeed] = [],
         onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil
     ) async throws -> FMCoarseScanOutput {
         try await coarsePassA(
@@ -1681,6 +1682,7 @@ struct FoundationModelClassifier: Sendable {
             locale: locale,
             sensitiveRouter: nil,
             permissiveClassifier: nil,
+            seeds: seeds,
             onProgress: onProgress
         )
     }
@@ -1713,6 +1715,7 @@ struct FoundationModelClassifier: Sendable {
         locale: Locale = .current,
         sensitiveRouter: SensitiveWindowRouter?,
         permissiveClassifier: PermissiveAdClassifier?,
+        seeds: [AdLikelihoodSeed] = [],
         onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil
     ) async throws -> FMCoarseScanOutput {
         let ticker = FMProgressTicker()
@@ -1734,6 +1737,7 @@ struct FoundationModelClassifier: Sendable {
                 locale: locale,
                 sensitiveRouter: sensitiveRouter,
                 permissiveClassifier: permissiveClassifier,
+                seeds: seeds,
                 progress: progress
             )
         }
@@ -1751,6 +1755,7 @@ struct FoundationModelClassifier: Sendable {
         locale: Locale,
         sensitiveRouter: SensitiveWindowRouter?,
         permissiveClassifier: PermissiveAdClassifier?,
+        seeds: [AdLikelihoodSeed] = [],
         progress: @escaping @Sendable (_ completedUnits: Int) async -> Void
     ) async throws -> FMCoarseScanOutput {
         let clock = ContinuousClock()
@@ -1766,7 +1771,18 @@ struct FoundationModelClassifier: Sendable {
         }
 
         let budget = try await promptBudget()
-        let plans = try await planPassA(segments: segments, budget: budget)
+        // playhead-lxkq: `plans` is now the ATTEMPT order, which is episode
+        // order only when no seed was usable. `planOrderedPlans` below restores
+        // the episode-ordered view for the returned output, so the reordering
+        // is observable ONLY as which FM call happens first.
+        let plans = try await planPassA(segments: segments, budget: budget, seeds: seeds)
+        // playhead-lxkq: the plan list REPORTED to the caller, always in episode
+        // order. `BackfillJobRunner` reads it as the coverage denominator and
+        // takes `unattemptedPlans.first` as "where the pass stopped"; both of
+        // those questions are about the EPISODE, not about attempt sequence.
+        // `windowIndex` is assigned during packing, so sorting on it is an exact
+        // inverse of the promotion — and a no-op when no seed was usable.
+        let reportedPlans = AdLikelihoodScanOrder.restoreOrder(plans) { $0.windowIndex }
 
         // playhead-qk44: the planning prologue is a unit of work, and it is
         // the one the no-progress bound most needs to see. Availability
@@ -1982,7 +1998,7 @@ struct FoundationModelClassifier: Sendable {
                             prewarmHit: prewarmHit,
                             failedWindows: failedWindows,
                             permissiveFailureCounts: permissiveCounts,
-                            plans: plans
+                            plans: reportedPlans
                         )
                     }
                 }
@@ -2000,7 +2016,7 @@ struct FoundationModelClassifier: Sendable {
                     prewarmHit: prewarmHit,
                     failedWindows: failedWindows,
                     permissiveFailureCounts: permissiveCounts,
-                    plans: plans
+                    plans: reportedPlans
                 )
             }
 
@@ -2096,7 +2112,7 @@ struct FoundationModelClassifier: Sendable {
                                 prewarmHit: prewarmHit,
                                 failedWindows: failedWindows,
                                 permissiveFailureCounts: permissiveCounts,
-                                plans: plans
+                                plans: reportedPlans
                             )
                         }
                         logger.error(
@@ -2272,7 +2288,7 @@ struct FoundationModelClassifier: Sendable {
                                     prewarmHit: prewarmHit,
                                     failedWindows: failedWindows,
                                     permissiveFailureCounts: permissiveCounts,
-                                    plans: plans
+                                    plans: reportedPlans
                                 )
                             }
                         } else if !recovery.recovered.isEmpty {
@@ -2309,7 +2325,7 @@ struct FoundationModelClassifier: Sendable {
                             prewarmHit: prewarmHit,
                             failedWindows: failedWindows,
                             permissiveFailureCounts: permissiveCounts,
-                            plans: plans
+                            plans: reportedPlans
                         )
                     }
                     logger.error(
@@ -2336,7 +2352,7 @@ struct FoundationModelClassifier: Sendable {
                     prewarmHit: prewarmHit,
                     failedWindows: failedWindows,
                     permissiveFailureCounts: permissiveCounts,
-                    plans: plans
+                    plans: reportedPlans
                 )
             }
         }
@@ -2359,7 +2375,7 @@ struct FoundationModelClassifier: Sendable {
             prewarmHit: prewarmHit,
             failedWindows: failedWindows,
             permissiveFailureCounts: permissiveCounts,
-            plans: plans
+            plans: reportedPlans
         )
     }
 
@@ -2733,9 +2749,27 @@ struct FoundationModelClassifier: Sendable {
         }
     }
 
+    /// Pack `segments` into token-budgeted coarse windows.
+    ///
+    /// playhead-lxkq: the returned array is the order the pass will ATTEMPT the
+    /// windows in, which is no longer necessarily episode order. `seeds` are
+    /// measured pointers (acoustic seams, evidence anchors, lexical cue
+    /// clusters); when any are usable, windows intersecting a seed
+    /// neighbourhood are moved to the front. An empty `seeds` list — the
+    /// default, and every pre-lxkq caller — returns the plans in episode order,
+    /// element for element.
+    ///
+    /// PACKING IS UNAFFECTED. Windows are still packed from time-contiguous
+    /// runs of segments and `windowIndex` is still assigned during packing, so
+    /// every prompt is byte-identical and `windowIndex` still identifies a plan
+    /// by its EPISODE position regardless of when it is attempted. That is what
+    /// keeps `CoarseWindowFailure.planWindowIndex`, the honest coverage cursor
+    /// and every other structural attribution downstream indifferent to this
+    /// reordering.
     func planPassA(
         segments: [AdTranscriptSegment],
-        budget explicitBudget: Int? = nil
+        budget explicitBudget: Int? = nil,
+        seeds: [AdLikelihoodSeed] = []
     ) async throws -> [CoarsePassWindowPlan] {
         let ordered = segments.sorted { lhs, rhs in
             if lhs.segmentIndex == rhs.segmentIndex {
@@ -2813,7 +2847,11 @@ struct FoundationModelClassifier: Sendable {
             lowerBound = upperBound + 1
         }
 
-        return plans
+        // playhead-lxkq: the ONLY thing this changes is which FM call happens
+        // first. `order` is a permutation — no plan is dropped, and with no
+        // usable seeds it is the identity, so the pre-lxkq linear sweep is the
+        // fallback rather than a special case.
+        return AdLikelihoodScanOrder.order(plans, seeds: seeds) { ($0.startTime, $0.endTime) }
     }
 
     /// Plan the localized extent attempts (passB zoom windows) for a coarse

@@ -1016,7 +1016,13 @@ final class PlayheadRuntime {
                 // `adDetectionConfig` as the two specialist keys above, so the
                 // runner's planner-state observation and the service read one value.
                 plannerPromotionRequiresMeasuredCoverage:
-                    adDetectionConfig.plannerPromotionRequiresMeasuredCoverage
+                    adDetectionConfig.plannerPromotionRequiresMeasuredCoverage,
+                // playhead-lxkq: same hoisted-config discipline. The runner is
+                // the only reader — the sweep ORDER is decided where the coarse
+                // pass is dispatched, not in the service — but it must come
+                // from the same `adDetectionConfig` instance so a rollback is
+                // one value, not two.
+                adLikelihoodScanOrderEnabled: adDetectionConfig.adLikelihoodScanOrderEnabled
             )
         }
         // bd-3bz (Phase 4) / H7 (cycle 2): when the shadow phase bails on
