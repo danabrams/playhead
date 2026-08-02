@@ -176,6 +176,11 @@ struct AdLikelihoodScanOrderTests {
         let promotedCount = 7
         let filler = Array(ordered.dropFirst(promotedCount)).map(\.index)
         #expect(filler == filler.sorted())
+        // Non-vacuity: the filler must actually be the REMAINDER, not the whole
+        // episode. Under the linear sweep `dropFirst(7)` starts at window 7 and
+        // still contains every promoted index.
+        #expect(filler.first == 0)
+        #expect(!filler.contains(45))
     }
 
     @Test("lxkq: an episode whose only seed is unusable falls back to the linear sweep")
@@ -242,8 +247,11 @@ struct AdLikelihoodScanOrderTests {
             AdLikelihoodSeed(startTime: 600, endTime: 600, kind: .acousticSeam, strength: 0.5),
         ]
         let ordered = AdLikelihoodScanOrder.order(windows, seeds: seeds, span: Self.span)
-        let firstStart = ordered.first?.start ?? -1
-        #expect(firstStart < 700, "equal scores must prefer the earlier window, got \(firstStart)")
+        // Window 8 ([480, 540)) is the earliest window in the 600 s
+        // neighbourhood. The exact index matters: the linear sweep's first
+        // window is 0, so a range assertion here would pass without any
+        // reordering at all.
+        #expect(ordered.first?.index == 8, "expected window 8, got \(ordered.first?.index ?? -1)")
     }
 
     // MARK: - Bounded promotion
