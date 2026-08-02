@@ -31,15 +31,36 @@ final class TestTempDirTracker: @unchecked Sendable {
 // bounds the peak DURING the run; these two remain because an ABNORMAL exit is
 // precisely when the reaper does not get to finish, and a wipe-on-first-use is
 // the only thing that then reclaims the wreckage. Do not remove either.
+//
+// Both now go through `TestScratchReaper.forceRemove`, which repairs
+// permissions before giving up, and that is NOT a tidiness change — a plain
+// `removeItem` here silently reclaimed NOTHING whenever a previous abnormal
+// exit left a 0o300 directory behind, which is the state this suite creates by
+// design (DownloadManagerTests' `complete/`, restored in a `defer` that an
+// abnormal exit skips). MEASURED 2026-08-02 on this box: `$TMPDIR/Deleting-*`,
+// the staging area CoreSimulator moves a device's data into before deleting it
+// asynchronously, had accumulated 15 GiB — and every single one of the
+// directories still there was stuck on exactly one unreadable
+// `PlayheadTestScratch/…/complete`. `simctl erase` had appeared to work and had
+// freed nothing. Clearing them took the volume from 9.0 GiB to 25.4 GiB free.
+/// The process-boundary wipe, named so it can be tested. A global initialiser
+/// and an `atexit` block are both unreachable from a test, so the one property
+/// that matters here — that the wipe survives a directory the suite chmodded
+/// unreadable — would otherwise be unpinned at exactly the two call sites where
+/// its failure is silent and permanent.
+func wipeTestScratchRoot(at url: URL) {
+    TestScratchReaper.forceRemove(url)
+}
+
 private nonisolated(unsafe) var _scratchRoot: URL = {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
-    try? FileManager.default.removeItem(at: root)
+    wipeTestScratchRoot(at: root)
     try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     atexit {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
-        try? FileManager.default.removeItem(at: url)
+        wipeTestScratchRoot(at: url)
     }
     return root
 }()

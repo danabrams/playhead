@@ -942,6 +942,7 @@ T_CGKA_CONCURRENT="concurrent registration and sweeping keeps the ledger consist
 T_CGKA_STORE_ADOPT="makeTestStoreWithDirectory hands its directory to the shared reaper"
 T_CGKA_REGISTERS="makeTempDir registers every directory it hands out"
 T_CGKA_OWNEDBY="makeTempDir(ownedBy:) attaches the owner it was given"
+T_CGKA_WIPE="the process-boundary wipe removes a root the suite left unreadable"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1743,6 +1744,7 @@ MUTATIONS=(
   "Z08|123|SCRATCHH|$T_CGKA_STORE_ADOPT"
 
   "Z10|124|SCRATCHH|$T_CGKA_OWNEDBY"
+  "Z12|124|SCRATCHH|$T_CGKA_WIPE"
 
   "Z11|125|SCRATCH|$T_CGKA_RECLAIM;$T_CGKA_DEFER"
 )
@@ -1889,6 +1891,7 @@ describe_mutation() {
     Z09) echo "makeTempDir: do not register a directory that has no owner" ;;
     Z10) echo "makeTempDir: ignore ownedBy: and merely register" ;;
     Z11) echo "adopt: no-op when the URL was never registered" ;;
+    Z12) echo "wipeTestScratchRoot: plain removeItem again, so an unreadable leftover survives forever" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -4461,6 +4464,19 @@ EOF
 EOF
     snippet NEW <<'EOF'
         }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z12)
+    snippet OLD <<'EOF'
+func wipeTestScratchRoot(at url: URL) {
+    TestScratchReaper.forceRemove(url)
+}
+EOF
+    snippet NEW <<'EOF'
+func wipeTestScratchRoot(at url: URL) {
+    try? FileManager.default.removeItem(at: url)
+}
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

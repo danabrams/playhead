@@ -218,6 +218,41 @@ struct TestScratchReaperTests {
         #expect(!FileManager.default.fileExists(atPath: victim.path))
     }
 
+    /// The process-boundary wipe is the backstop for an ABNORMAL exit — and an
+    /// abnormal exit is exactly what leaves an unreadable directory behind, so a
+    /// wipe that cannot remove one reclaims NOTHING in the only case it exists
+    /// for.
+    ///
+    /// MEASURED on this box 2026-08-02, which is why this rail is here rather
+    /// than assumed: `$TMPDIR/Deleting-*` — where CoreSimulator stages a
+    /// device's data before deleting it asynchronously — had accumulated 15 GiB,
+    /// and every directory still stuck there was blocked by exactly one
+    /// unreadable `PlayheadTestScratch/…/complete`. `simctl erase` had reported
+    /// success and freed nothing.
+    @Test("the process-boundary wipe removes a root the suite left unreadable")
+    func scratchRootWipeSurvivesUnreadableLeftovers() throws {
+        let root = try makeIsolatedRoot()
+        defer { TestScratchReaper.forceRemove(root) }
+        let leftover = try makeChild(root, "PlayheadTests-abandoned")
+        let locked = try makeChild(leftover, "complete")
+        try "payload".write(
+            to: locked.appendingPathComponent("file.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o300], ofItemAtPath: locked.path
+        )
+        #expect(
+            (try? FileManager.default.contentsOfDirectory(atPath: locked.path)) == nil,
+            "0o300 must really be unreadable, or this test proves nothing"
+        )
+
+        wipeTestScratchRoot(at: root)
+
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
     @Test("removing a directory that is already gone is not an error")
     func removalOfAMissingDirectoryIsSilent() throws {
         let root = try makeIsolatedRoot()
