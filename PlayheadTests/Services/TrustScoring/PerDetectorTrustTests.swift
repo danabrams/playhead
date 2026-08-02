@@ -945,6 +945,54 @@ struct PerDetectorSkipGateTests {
         )
     }
 
+    @Test("A veto is attributed to the detector that DREW the span, through the real orchestrator seam")
+    func revertAttributesToTheDrawingDetector() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustStore = try await makeTestStore()
+        try await trustStore.upsertProfile(
+            gardProfile(
+                mode: SkipMode.auto.rawValue, trustScore: 0.9,
+                observations: 10, falseSignals: 0
+            )
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            trustService: TrustScoringService(store: trustStore),
+            correctionStore: PersistentUserCorrectionStore(store: store)
+        )
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: gardPodcastId
+        )
+
+        let window = aggregatorWindow(id: "gard-revert", confidence: 0.95)
+        try await store.insertAdWindow(window)
+        await orchestrator.receiveAdWindows([window])
+        #expect(
+            await orchestrator.revertWindow(
+                windowId: "gard-revert", podcastId: gardPodcastId
+            )
+        )
+
+        let profile = try #require(
+            await trustStore.fetchProfile(podcastId: gardPodcastId)
+        )
+        let ledger = profile.detectorTrustLedger
+        #expect(
+            ledger.entries[SkipDetectorClass.segmentAggregated.rawValue]?
+                .falseSkipWeight == DetectorVetoWeight.weight(for: .none),
+            "the aggregator drew this span and its edges were unanchored"
+        )
+        #expect(
+            ledger.entries[SkipDetectorClass.rediffByteExact.rawValue]?
+                .falseSkipWeight == 0,
+            "nothing about an aggregator miss is evidence against a byte differ"
+        )
+    }
+
     @Test("An unresolved show identity still fires nothing (playhead-djl0 holds)")
     func unresolvedIdentityIsNonActioning() async throws {
         let orchestrator = try await Self.makeFieldOrchestrator()
