@@ -14,7 +14,7 @@ import Foundation
 ///
 /// A gate block prevents action but does NOT clamp the score — `skipConfidence`
 /// remains an honest estimate regardless of the gate value.
-enum SkipEligibilityGate: String, Sendable, Codable, Equatable {
+enum SkipEligibilityGate: String, Sendable, Codable, Equatable, CaseIterable {
     /// Decision is actionable; all quorum and policy requirements are met.
     case eligible
     /// FM-only or weak corroboration: evidence quorum not satisfied.
@@ -25,8 +25,61 @@ enum SkipEligibilityGate: String, Sendable, Codable, Equatable {
     case markOnly
     /// User previously vetoed this span or region.
     case blockedByUserCorrection
-    /// FM noAds consensus suppression: no strong proposal survived, capped to mark-only.
-    case cappedByFMSuppression
+    /// An FM `noAds` consensus covered this span and nothing strong survived it:
+    /// the model was asked whether there is an ad here, said no twice at
+    /// `.moderate`+ certainty, and no URL/promo-code/sponsor anchor, catalog
+    /// entry, fingerprint match, rediff confirmation or FM `containsAd` entry
+    /// contradicted it (see ``FMSuppressionGuard`` / ``FMSuppressionApplicator``).
+    /// **Blocked — no auto-skip and no banner.**
+    ///
+    /// playhead-avbn: this case was `cappedByFMSuppression`, documented "capped
+    /// to mark-only" and carrying `severity == 1` alongside ``markOnly`` — while
+    /// ``SkipOrchestrator`` routed only ``markOnly`` to the suggest tier and
+    /// DROPPED this one at playhead-bq70's blocked-gate guard. The name and the
+    /// severity promised a banner the surface never emitted.
+    ///
+    /// Resolved in the direction of the behaviour rather than the name. The
+    /// population is by construction the weakest span the pipeline can produce
+    /// — the guard already declines to fire when a strong anchor, catalog entry
+    /// or fingerprint is present, and the cap additionally requires that no
+    /// strong proposal survived — so it is a span the model actively voted down
+    /// with nothing corroborating it, and a banner over it is a banner for
+    /// something we have positive reason to think is not an ad. The reach that
+    /// the old name appeared to promise is recovered upstream instead, by
+    /// playhead-avbn's other half: with pass-B refinements and no-work sentinels
+    /// no longer manufacturing the `noAds` consensus, spans that never deserved
+    /// the cap keep their honest ``eligible`` / ``markOnly`` gate and reach the
+    /// user through their own tier.
+    ///
+    /// Named `blockedBy*` to match every other severity-≥2 case: the point of
+    /// the rename is that the name must predict the behaviour.
+    case blockedByFMConsensus
+
+    /// playhead-avbn: the raw value ``blockedByFMConsensus`` was persisted under
+    /// before the rename. `ad_windows.eligibilityGate` rows written by earlier
+    /// builds still carry it, and ``SkipOrchestrator`` fails a gate it cannot
+    /// decode CLOSED (`droppedMalformedEligibilityGate`) — so without the alias
+    /// the terminal outcome would be unchanged but the census would attribute
+    /// every legacy row to a decode fault instead of to the FM consensus that
+    /// actually blocked it. The audit trail is the product here; keep it exact.
+    static let legacyFMConsensusRawValue = "cappedByFMSuppression"
+
+    /// Accepts the canonical raw value of every case, plus
+    /// ``legacyFMConsensusRawValue``. Derived from ``allCases`` rather than a
+    /// hand-written switch so a future case cannot be added without also being
+    /// decodable. Also backs the synthesized `Codable` conformance, which
+    /// routes `init(from:)` through this initializer.
+    init?(rawValue: String) {
+        if let canonical = Self.allCases.first(where: { $0.rawValue == rawValue }) {
+            self = canonical
+            return
+        }
+        if rawValue == Self.legacyFMConsensusRawValue {
+            self = .blockedByFMConsensus
+            return
+        }
+        return nil
+    }
 
     /// Restriction severity for ordering: higher means more restrictive.
     /// Used by SpanFinalizer.capEligibility to allow demotions but prevent promotions.
@@ -38,7 +91,11 @@ enum SkipEligibilityGate: String, Sendable, Codable, Equatable {
         case .blockedByEvidenceQuorum: return 2
         case .blockedByPolicy: return 2
         case .blockedByUserCorrection: return 3
-        case .cappedByFMSuppression: return 1
+        // playhead-avbn: 2, with the other blocked cases — it was 1, which said
+        // "no more restrictive than markOnly" and therefore could not demote a
+        // markOnly span. A real FM veto outranks a chapter-overlap or self-promo
+        // mark, and a gate that blocks must sort with the gates that block.
+        case .blockedByFMConsensus: return 2
         }
     }
 }

@@ -59,7 +59,7 @@ final class SkipOrchestratorBlockedGateGuardSourceCanaryTests: XCTestCase {
             `result.eligibilityGate == .eligible` filter in \
             `receiveAdDecisionResults`. Without it, fusion-stamped windows \
             (`blockedByPolicy`, `blockedByEvidenceQuorum`, \
-            `blockedByUserCorrection`, `cappedByFMSuppression`) silently \
+            `blockedByUserCorrection`, `blockedByFMConsensus`) silently \
             re-enter the auto-skip path on all three callers (cross-launch \
             preload, hot-path push, final-pass backfill push). Restore the \
             guard OR update this canary if the precision contract has \

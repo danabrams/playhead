@@ -374,22 +374,49 @@ struct SpanFinalizerTests {
         #expect(result[0].decision.skipConfidence == 0.95)
     }
 
-    @Test("Merge with equal severity keeps the first writer: markOnly + cappedByFMSuppression → markOnly")
+    @Test("Merge with equal severity keeps the first writer: blockedByEvidenceQuorum + blockedByPolicy → blockedByEvidenceQuorum")
     func mergeEqualSeverityKeepsFirstWriter() {
         // playhead-wraj R3 review: pins the documented equal-severity
         // convention (matching capEligibility): equal severity never
         // overwrites, so the earlier span's label survives — and, critically,
         // an equal-severity merge can never resolve to .eligible.
+        //
+        // playhead-avbn: the pair used to be `.markOnly` + `.cappedByFMSuppression`,
+        // which stopped being an equal-severity pair when that gate was renamed
+        // `.blockedByFMConsensus` and moved to severity 2. Restated over the two
+        // gates that are still genuinely equal so the CONVENTION stays pinned;
+        // the markOnly/FM-consensus pair now has its own demotion test below.
         let candidates = [
             makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.6,
-                          eligibilityGate: .markOnly, ordinalBase: 100),
+                          eligibilityGate: .blockedByEvidenceQuorum, ordinalBase: 100),
             makeCandidate(startTime: 32, endTime: 50, skipConfidence: 0.8,
-                          eligibilityGate: .cappedByFMSuppression, ordinalBase: 300),
+                          eligibilityGate: .blockedByPolicy, ordinalBase: 300),
         ]
         let result = makeFinalizer().finalize(candidates)
 
         #expect(result.count == 1)
-        #expect(result[0].decision.eligibilityGate == .markOnly)
+        #expect(result[0].decision.eligibilityGate == .blockedByEvidenceQuorum)
+        #expect(result[0].decision.skipConfidence == 0.8)
+    }
+
+    @Test("playhead-avbn: merging markOnly with blockedByFMConsensus demotes to blockedByFMConsensus")
+    func mergeMarkOnlyWithFMConsensusDemotes() {
+        // The behaviour change the rename encodes. `.blockedByFMConsensus` is
+        // severity 2, so it now DEMOTES a mark-only span instead of losing to it
+        // as a same-severity second writer. That is the point: an FM noAds
+        // consensus that nothing strong survived is a block, and a block must
+        // outrank a banner-only mark rather than tie with it.
+        let candidates = [
+            makeCandidate(startTime: 10, endTime: 30, skipConfidence: 0.6,
+                          eligibilityGate: .markOnly, ordinalBase: 100),
+            makeCandidate(startTime: 32, endTime: 50, skipConfidence: 0.8,
+                          eligibilityGate: .blockedByFMConsensus, ordinalBase: 300),
+        ]
+        let result = makeFinalizer().finalize(candidates)
+
+        #expect(result.count == 1)
+        #expect(result[0].decision.eligibilityGate == .blockedByFMConsensus)
+        // Scores never follow the gate.
         #expect(result[0].decision.skipConfidence == 0.8)
     }
 
@@ -704,8 +731,8 @@ struct SpanFinalizerTests {
 
     @Test("capEligibility with equal severity: first writer wins")
     func equalSeverityFirstWriterWins() {
-        // A span already at .markOnly (severity 1) should not change to
-        // .cappedByFMSuppression (also severity 1) — first writer wins.
+        // A span already at .markOnly (severity 1) is not moved by a
+        // subsequent cap of the SAME severity — first writer wins.
         let chapters = [ChapterMarker(startTime: 15, endTime: 35, isContent: true)]
         let candidates = [
             makeCandidate(startTime: 10, endTime: 40, ordinalBase: 100),
@@ -713,7 +740,7 @@ struct SpanFinalizerTests {
         let result = makeFinalizer(chapters: chapters).finalize(candidates)
 
         // Chapter penalty fires first → .markOnly. The subsequent capEligibility
-        // calls (if any) should not overwrite it with .cappedByFMSuppression.
+        // calls (if any) carry no higher severity, so none of them overwrites it.
         #expect(result[0].decision.eligibilityGate == .markOnly)
     }
 

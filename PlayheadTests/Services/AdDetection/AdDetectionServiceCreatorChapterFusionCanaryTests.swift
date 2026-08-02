@@ -23,7 +23,7 @@
 // A future regression that, e.g., moves the flag-snapshot inside the
 // loop (perf regression — re-reads UserDefaults per span via
 // `preAnalysisConfig`), or replaces the severity guard with `==
-// .eligible` (would lose the `.cappedByFMSuppression` upgrade), would
+// .eligible` (would lose the `.blockedByFMConsensus` upgrade), would
 // not break any behavioral test that doesn't exercise the precise
 // shape. The canaries below catch each such regression directly.
 //

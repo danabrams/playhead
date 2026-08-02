@@ -287,7 +287,7 @@ struct UnanchoredExtentAutoSkipGateTests {
         // unanchored extent — the gate is a demoter, never a promoter.
         let nonEligible: [SkipEligibilityGate] = [
             .markOnly, .blockedByEvidenceQuorum, .blockedByPolicy,
-            .blockedByUserCorrection, .cappedByFMSuppression
+            .blockedByUserCorrection, .blockedByFMConsensus
         ]
         for gate in nonEligible {
             for support in [anchored, SpanExtentSupport.unanchored] {

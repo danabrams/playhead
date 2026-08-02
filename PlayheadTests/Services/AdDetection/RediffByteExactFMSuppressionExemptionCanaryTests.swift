@@ -8,7 +8,7 @@
 // The lagged sweep already stamps `.rediffByteExact` anchors correctly
 // (`.rediffSlot` width ownership → `SpanExtentSupport.derive` → the persisted
 // edge columns), so the ONE thing standing between a byte-verified DAI
-// divergence and auto-skip on that path is `.cappedByFMSuppression`: an FM
+// divergence and auto-skip on that path is `.blockedByFMConsensus`: an FM
 // noAds consensus overriding the gate. That is precisely backwards — the byte
 // differ observed that the origin served different bytes over this exact
 // region; a language model's opinion that "there is no ad here" does not
@@ -16,10 +16,10 @@
 //
 // WHY A SOURCE CANARY AND NOT A BEHAVIOURAL TEST. FoundationModels is
 // unavailable on the simulator, so no test running in the gate can drive a span
-// to `.cappedByFMSuppression` at all — the same constraint
+// to `.blockedByFMConsensus` at all — the same constraint
 // `AdDetectionServiceSelfPromoSuppressionCanaryTests` documents ("FM is
 // unavailable on the simulator, so there is no behavioural test that can drive
-// a span to `.cappedByFMSuppression`; this canary is the only guard against
+// a span to `.blockedByFMConsensus`; this canary is the only guard against
 // that regression"). This file follows that established precedent rather than
 // inventing a fake FM seam. The exemption PREDICATE itself
 // (`DecodedSpan.carriesRediffByteExactWidth`, incl. its splice-agnosticism) is

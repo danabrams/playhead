@@ -284,6 +284,20 @@ struct SemanticScanCoverage: Sendable, Equatable {
     /// answering "how much audio was read".
     static let coverageScanPass = "passA"
 
+    /// playhead-avbn: the pass whose ``disposition`` is a PRESENCE VERDICT — the
+    /// answer to "is there an ad in this window". Deliberately defined AS
+    /// ``coverageScanPass`` rather than repeating the literal, because they are
+    /// the same fact seen from two sides: `passA` is the pass that screens a
+    /// window and says yes or no, which is exactly why it is also the pass
+    /// coverage counts.
+    ///
+    /// `passB` is refinement. It runs only inside windows `passA` already called
+    /// `containsAd` and it is asked WHERE the edges are, so its `.noAds` means
+    /// "found no edges", not "there is no ad". Any consumer reading a
+    /// `disposition` as evidence of ABSENCE must filter to this pass —
+    /// see ``AdDetectionService.applyFMSuppression``.
+    static let presenceScanPass = coverageScanPass
+
     /// Compute coverage for one scan pass.
     ///
     /// - Parameters:

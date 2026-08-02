@@ -92,13 +92,21 @@ struct SkipOrchestratorBlockedGateGuardTests {
     /// without updating this suite is the only blind spot — and the
     /// source canary catches the asymmetric-guard regression
     /// independently.
+    ///
+    /// playhead-avbn: the list also carries the PRE-RENAME raw value of
+    /// `.blockedByFMConsensus`, because rows written by earlier builds still
+    /// hold it in `ad_windows.eligibilityGate`. It must keep decoding to the
+    /// same blocked case — if the alias were dropped, the row would fail the
+    /// gate decode instead and be attributed to a decode fault rather than to
+    /// the FM consensus that actually blocked it.
     @Test(
         "blocked eligibilityGate values do NOT enter active managed-window set",
         arguments: [
             "blockedByEvidenceQuorum",
             "blockedByPolicy",
             "blockedByUserCorrection",
-            "cappedByFMSuppression"
+            "blockedByFMConsensus",
+            SkipEligibilityGate.legacyFMConsensusRawValue
         ]
     )
     func blockedGateValuesAreDroppedInReceiveAdWindows(gateRaw: String) async throws {

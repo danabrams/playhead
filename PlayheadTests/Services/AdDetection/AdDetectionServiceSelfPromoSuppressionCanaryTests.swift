@@ -16,12 +16,12 @@
 //     (severity 1), so the ONLY gate it can demote is `.eligible`
 //     (severity 0). A regression to `< blockedByPolicy.severity`
 //     (severity 2) would let the suppressor STOMP an equal-severity
-//     `.cappedByFMSuppression` (severity 1) span down to `.markOnly` —
+//     `.blockedByFMConsensus` (severity 2) span down to `.markOnly` —
 //     which routes DIFFERENTLY in `SkipOrchestrator` (`.markOnly` →
-//     suggest banner; `.cappedByFMSuppression` → dropped), so an
+//     suggest banner; `.blockedByFMConsensus` → dropped), so an
 //     FM-suppressed span would silently resurface as a banner. FM is
 //     unavailable on the simulator, so there is no behavioural test that
-//     can drive a span to `.cappedByFMSuppression`; this canary is the
+//     can drive a span to `.blockedByFMConsensus`; this canary is the
 //     only guard against that regression.
 //   • The demotion target MUST be `.markOnly` (never a harder or weaker
 //     gate, never the opposite-direction `.eligible`).
@@ -47,7 +47,8 @@ final class AdDetectionServiceSelfPromoSuppressionCanaryTests: XCTestCase {
     /// on `decision.eligibilityGate.severity <
     /// SkipEligibilityGate.markOnly.severity` so the demotion can ONLY
     /// relax a fully-`.eligible` (severity 0) span — never an
-    /// equal-severity `.markOnly` / `.cappedByFMSuppression` (severity 1)
+    /// equal-or-higher `.markOnly` (severity 1) / `.blockedByFMConsensus`
+    /// (severity 2)
     /// nor any harder block (severity >= 2), and never a promotion.
     func testRunBackfillGuardsSelfPromoDemotionWithMarkOnlySeverity() throws {
         let body = try Self.runBackfillImplementationBody()
@@ -69,7 +70,7 @@ final class AdDetectionServiceSelfPromoSuppressionCanaryTests: XCTestCase {
             SkipEligibilityGate.markOnly.severity`. Without EXACTLY this \
             bound the demotion can reach an equal-severity gate: \
             `< blockedByPolicy.severity` would stomp a \
-            `.cappedByFMSuppression` span down to `.markOnly` (which \
+            `.blockedByFMConsensus` span down to `.markOnly` (which \
             routes to a suggest banner instead of staying dropped). \
             Restore the `< markOnly.severity` guard or update this canary \
             if the gate taxonomy moved (and re-verify the equal-severity \

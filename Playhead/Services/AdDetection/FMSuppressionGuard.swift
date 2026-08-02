@@ -121,6 +121,56 @@ struct FMSuppressionWindow: Sendable {
     let band: CertaintyBand
 }
 
+extension FMSuppressionWindow {
+
+    /// playhead-avbn: THE admission rule for a suppression vote, stated once.
+    ///
+    /// `FMSuppressionGuard` treats a `.noAds` window as evidence that there is no
+    /// ad over the span — it fires on two of them and `FMSuppressionApplicator`
+    /// then downweights every non-strong ledger entry by 0.3x. A row may only
+    /// carry that meaning if it ANSWERED THE PRESENCE QUESTION, and two of the
+    /// pipeline's `.noAds` writers do not:
+    ///
+    ///   • **pass B is refinement.** It runs only inside windows the coarse pass
+    ///     already called `containsAd`, and it is asked WHERE the edges are.
+    ///     `BackfillJobRunner.makeRefinementScanResult` persists
+    ///     `spans.isEmpty ? .noAds : .containsAd`, so a refiner that merely
+    ///     failed to localize records a vote CONTRADICTING the coarse pass that
+    ///     spawned it. Two such windows were enough, on their own, to suppress
+    ///     the lexical and acoustic detectors that DID find something — a
+    ///     failure to find edges read as evidence there is nothing to find.
+    ///   • **the no-work sentinel** (`makeNoWorkSentinelScanResult`) carries
+    ///     `.noAds` across the WHOLE attempted range while meaning that zero FM
+    ///     calls were made. playhead-pz32 established that it must never count as
+    ///     examined audio and gave every consumer ``SemanticScanResult/didExamineWindow``
+    ///     to say so; this rule is that predicate finally reaching the guard.
+    ///
+    /// Genuine FM failures are already inert: `makeFailureScanResult` records
+    /// `.abstain`, which is not `.noAds`.
+    ///
+    /// The overlap test is strict (`overlapEnd > overlapStart`), so a row that
+    /// merely abuts the span does not vote.
+    static func votingWindows(
+        spanStartTime: Double,
+        spanEndTime: Double,
+        scanResults: [SemanticScanResult]
+    ) -> [FMSuppressionWindow] {
+        scanResults.compactMap { result in
+            guard result.scanPass == SemanticScanResult.presenceScanPass else { return nil }
+            guard result.didExamineWindow else { return nil }
+
+            let overlapStart = max(spanStartTime, result.windowStartTime)
+            let overlapEnd = min(spanEndTime, result.windowEndTime)
+            guard overlapEnd > overlapStart else { return nil }
+
+            return FMSuppressionWindow(
+                disposition: result.disposition,
+                band: result.transcriptQuality == .good ? .moderate : .weak
+            )
+        }
+    }
+}
+
 // MARK: - CertaintyBand extension
 
 extension CertaintyBand {
