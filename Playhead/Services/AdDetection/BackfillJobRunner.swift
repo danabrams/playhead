@@ -176,6 +176,35 @@ actor BackfillJobRunner {
     /// are never clobbered.
     private let semanticSweepMarkEnabled: Bool
 
+    /// playhead-lxkq: master flag for ordering the coarse sweep by
+    /// AD-LIKELIHOOD rather than by episode position (mirrors
+    /// `AdDetectionConfig.adLikelihoodScanOrderEnabled`).
+    ///
+    /// WHY THIS EXISTS AT ALL, measured. On episode DE0784D8 FM's 42
+    /// `semantic_scan_results` rows cover 0-2676 s front to back; Dan's missed
+    /// pod was at 2838-2954 s. It had ~fifteen hours of download-to-play
+    /// headroom and spent the whole budget on the first 48% of the episode in
+    /// episode order. At 2.4x slower than realtime, ten 3-minute
+    /// neighbourhoods cost ~72 minutes; the 3.7-hour linear sweep does not fit
+    /// an overnight gap. The budget was never the problem; the order was.
+    ///
+    /// WHY THE TARGETED PHASE COULD NOT HAVE FIXED THIS. `CoveragePlanner`
+    /// only emits `.scanLikelyAdSlots` under `targetedWithAudit`, which
+    /// requires `observedEpisodeCount >= 5` AND `stableRecall`. Both come from
+    /// `PodcastPlannerState`, which only advances via
+    /// `recordPodcastEpisodeObservation` — and FM has partially scanned
+    /// exactly ONE episode ever on that device. Cold start is not a phase this
+    /// show is passing through, it is where it lives, and cold start plans
+    /// `[.fullEpisodeScan]` unconditionally. So the fix belongs on the
+    /// full-coverage path, not behind a promotion gate the field never reaches.
+    ///
+    /// `false` is byte-identical to pre-lxkq: no seeds are computed, no seeds
+    /// are passed, `planPassA` returns episode order element for element.
+    /// Default `false` here so every test/caller constructing a runner directly
+    /// keeps its current behaviour; production opts in through
+    /// `AdDetectionConfig.default`.
+    private let adLikelihoodScanOrderEnabled: Bool
+
     /// playhead-hvk0: master flag for the promotion gate that requires a full
     /// rescan to have MEASURABLY read its episode before its recall sample may
     /// certify the `targetedWithAudit` policy (mirrors
@@ -372,7 +401,8 @@ actor BackfillJobRunner {
         specialistScanEnabled: Bool = false,
         specialistMarkComposeEnabled: Bool = false,
         semanticSweepMarkEnabled: Bool = true,
-        plannerPromotionRequiresMeasuredCoverage: Bool = false
+        plannerPromotionRequiresMeasuredCoverage: Bool = false,
+        adLikelihoodScanOrderEnabled: Bool = false
     ) {
         self.store = store
         self.admissionController = admissionController
@@ -391,6 +421,7 @@ actor BackfillJobRunner {
         self.specialistMarkComposeEnabled = specialistMarkComposeEnabled
         self.semanticSweepMarkEnabled = semanticSweepMarkEnabled
         self.plannerPromotionRequiresMeasuredCoverage = plannerPromotionRequiresMeasuredCoverage
+        self.adLikelihoodScanOrderEnabled = adLikelihoodScanOrderEnabled
     }
 
     // MARK: - Entry Point
@@ -1760,6 +1791,12 @@ actor BackfillJobRunner {
             try? await leaseStore.markBackfillJobRunning(jobId: leaseJobId)
         }
 
+        // playhead-lxkq: measured pointers at where to look FIRST. Empty on
+        // every path except a flag-on `.fullEpisodeScan`, and empty there too
+        // whenever no channel fired — in which case `planPassA` returns episode
+        // order element for element and the sweep is exactly what it was.
+        let scanOrderSeeds = adLikelihoodScanOrderSeeds(for: job, inputs: inputs)
+
         let coarse: FMCoarseScanOutput
         if #available(iOS 26.0, *),
            let router = sensitiveRouter,
@@ -1768,11 +1805,13 @@ actor BackfillJobRunner {
                 segments: inputs.segments,
                 sensitiveRouter: router,
                 permissiveClassifier: classifierBox.classifier,
+                seeds: scanOrderSeeds,
                 onProgress: onCoarseProgress
             )
         } else {
             coarse = try await classifier.coarsePassA(
                 segments: inputs.segments,
+                seeds: scanOrderSeeds,
                 onProgress: onCoarseProgress
             )
         }
@@ -3446,6 +3485,48 @@ actor BackfillJobRunner {
     /// entirely (wasEmpty). The caller must NOT dispatch FM work on a
     /// nil result and must NOT contribute to the recall sample numerator
     /// for that phase.
+    /// playhead-lxkq: build the ad-likelihood seed list for one job.
+    ///
+    /// SCOPED TO `.fullEpisodeScan` ON PURPOSE. Every other phase has already
+    /// been NARROWED by `TargetedWindowNarrower` to the anchors it cares about,
+    /// so its window list is short and ordering it buys nothing. The
+    /// full-episode sweep is the one that runs for hours in episode order, and
+    /// — per `CoveragePlanner.plan(for:)` — it is what a cold-start show gets
+    /// on every single episode. That is the population this bead is about.
+    ///
+    /// EVERY CHANNEL HERE IS ALREADY COMPUTED TODAY. `acousticBreaks` is
+    /// detected in `AdDetectionService.runShadowFMPhase` and threaded through
+    /// `AssetInputs`, then never read on this path (`narrowedInputs` returns
+    /// `rootInputs` unexamined for `.fullEpisodeScan`). The evidence catalog is
+    /// built for the FM prompt. The lexical candidates are the same stream
+    /// `.scanLikelyAdSlots` seeds itself from. Nothing new is detected; a
+    /// signal that was being discarded is read.
+    ///
+    /// The lexical scan is the only real cost — pure in-memory regex over the
+    /// transcript, the same pass the targeted phase pays, against a coarse pass
+    /// that costs 12-45 minutes of FM wall clock.
+    private func adLikelihoodScanOrderSeeds(
+        for job: BackfillJob,
+        inputs: AssetInputs
+    ) -> [AdLikelihoodSeed] {
+        guard adLikelihoodScanOrderEnabled, job.phase == .fullEpisodeScan else { return [] }
+        let narrowerInputs = TargetedWindowNarrower.Inputs(
+            analysisAssetId: inputs.analysisAssetId,
+            podcastId: inputs.podcastId,
+            transcriptVersion: inputs.transcriptVersion,
+            segments: inputs.segments,
+            evidenceCatalog: inputs.evidenceCatalog,
+            auditWindowSampleRate: coveragePlanner.auditWindowSampleRate,
+            episodesSinceLastFullRescan: inputs.plannerContext.episodesSinceLastFullRescan,
+            acousticBreaks: inputs.acousticBreaks
+        )
+        return AdLikelihoodScanOrder.seeds(
+            acousticBreaks: inputs.acousticBreaks,
+            evidenceCatalog: inputs.evidenceCatalog,
+            lexicalCandidates: TargetedWindowNarrower.lexicalCandidates(inputs: narrowerInputs)
+        )
+    }
+
     private func narrowedInputs(
         for job: BackfillJob,
         plan: CoveragePlan,

@@ -219,8 +219,11 @@ struct AdLikelihoodScanOrderTests {
             seeds: agreeing + [lone],
             span: Self.span
         )
-        let firstStart = ordered.first?.start ?? -1
-        #expect(firstStart < 1_400, "expected the two-signal 1,200 s region first, got \(firstStart)")
+        // Window 18 ([1080, 1140)) is the earliest window intersecting BOTH
+        // neighbourhoods. Asserting the exact index (rather than a range) is
+        // what stops the linear sweep — whose first window is 0 — from
+        // satisfying this test by accident.
+        #expect(ordered.first?.index == 18, "expected window 18, got \(ordered.first?.index ?? -1)")
     }
 
     @Test("lxkq: an acoustic seam outranks a lexical cue of equal strength")

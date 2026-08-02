@@ -410,14 +410,26 @@ enum TargetedWindowNarrower {
         return catalogRefs.union(preAnchorRefs)
     }
 
-    private static func lexicalCandidateLineRefs(inputs: Inputs) -> Set<Int> {
+    /// The lexical candidates the `.scanLikelyAdSlots` phase seeds itself from.
+    ///
+    /// playhead-lxkq: extracted from `lexicalCandidateLineRefs` (which now calls
+    /// it) so the full-coverage path can use the SAME candidate stream as a
+    /// scan-ORDER pointer. The targeted phase turns these into line refs and
+    /// narrows the scan to them; on a cold-start show the targeted phase never
+    /// runs, so the identical signal was being computed nowhere and the sweep
+    /// went front-to-back. Nothing about the candidate stream changes here —
+    /// same chunks, same scanner, same asset id — only who is allowed to read
+    /// it.
+    static func lexicalCandidates(inputs: Inputs) -> [LexicalCandidate] {
         let chunks = narrowerChunks(orderedSegments: orderedSegments(inputs.segments), inputs: inputs)
-
-        let scanner = LexicalScanner()
-        let candidates = scanner.scan(
+        return LexicalScanner().scan(
             chunks: chunks,
             analysisAssetId: inputs.analysisAssetId
         )
+    }
+
+    private static func lexicalCandidateLineRefs(inputs: Inputs) -> Set<Int> {
+        let candidates = lexicalCandidates(inputs: inputs)
         return Set(
             candidates.flatMap { candidate in
                 inputs.segments.compactMap { segment in
