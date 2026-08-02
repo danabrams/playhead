@@ -27,15 +27,17 @@ nowhere in `semantic_scan_results`. There is no join.
 
 ### The finding that made this cheap
 
-Every one of the four `SemanticScanResult` factories in `BackfillJobRunner`
-**already takes `jobId: String`**:
+Every one of the **seven** `SemanticScanResult` factories in `BackfillJobRunner`
+**already takes `jobId: String`** — counted, not estimated; an earlier draft of
+this note said four and missed `makeRefinementFailureScanResult` and the two
+`makeCoarseFailureScanResult` overloads:
 
-| factory | line (pre-change) |
-| --- | --- |
-| `makeNoWorkSentinelScanResult` | 2386 |
-| `makeScanResult` | 3674 |
-| `makeRefinementScanResult` | ~3760 |
-| `makeFailureScanResult` | 3853 |
+* `makeNoWorkSentinelScanResult`
+* `makeScanResult`
+* `makeRefinementScanResult`
+* `makeFailureScanResult`
+* `makeRefinementFailureScanResult`
+* `makeCoarseFailureScanResult` (both overloads)
 
 and every one of them already passes it — as `reuseScope: jobId`, which feeds
 `semanticScanReuseKeyHash` and is then **discarded**. The join key was in hand at
