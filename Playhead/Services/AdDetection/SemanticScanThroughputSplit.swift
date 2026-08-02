@@ -78,6 +78,16 @@ struct ScanThroughputBucket: Sendable, Equatable {
         self.audioSeconds += audioSeconds
         self.wallSeconds += wallSeconds
     }
+
+    /// Fold a pre-aggregated group in. Used by the SQL side, where SQLite has
+    /// already done the `GROUP BY` and hands back one row per phase — including
+    /// the `NULL` phase group, and the `.unknown` group, which both have to land
+    /// in the same `.unattributed` bucket without being summed twice.
+    mutating func merge(_ other: ScanThroughputBucket) {
+        scanCount += other.scanCount
+        audioSeconds += other.audioSeconds
+        wallSeconds += other.wallSeconds
+    }
 }
 
 /// playhead-hx6n: FM scan throughput split by the scene phase the scan

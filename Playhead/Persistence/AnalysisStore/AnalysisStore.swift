@@ -1599,7 +1599,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 41
+    nonisolated static let currentSchemaVersion = 42
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2432,6 +2432,10 @@ actor AnalysisStore {
             // playhead-4dqe: the per-EPISODE day-0 kickoff ledger + the rolling
             // day-0 byte window.
             try migrateRediffDayZeroKickoffsV41IfNeeded()
+            // playhead-hx6n: `semantic_scan_results` learns when it was written,
+            // in which scene phase, and under which run. Additive-only, three
+            // nullable columns, no backfill.
+            try migrateSemanticScanAttributionV42IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2776,6 +2780,9 @@ actor AnalysisStore {
         // playhead-4dqe (v41): both halves guard on `tableExists`, so a seeded
         // fixture without `rediff_bandwidth_ledger` still reaches v41.
         try migrateRediffDayZeroKickoffsV41IfNeeded()
+        // playhead-hx6n (v42): guarded on `tableExists`, so a seeded fixture
+        // without `semantic_scan_results` still reaches v42.
+        try migrateSemanticScanAttributionV42IfNeeded()
     }
     #endif
 
@@ -6281,6 +6288,79 @@ actor AnalysisStore {
         try setSchemaVersion(41)
     }
 
+    // MARK: - V42: scan rows record when, in which phase, under which run (playhead-hx6n)
+    //
+    // `semantic_scan_results` persisted 22 columns and not one of them was a
+    // clock, a scene phase, or a run id. `background_task_runs` has had
+    // `scenePhase` + `startedAt`/`finishedAt` since v24, but its `runId` appears
+    // nowhere in the scan table, so there was no join. The cost of that has been
+    // paid twice: playhead-kvs8 could not re-split the measured 2.4×
+    // slower-than-realtime FM figure by foreground versus background, and the
+    // 2026-07-31/08-01 stall investigation could only date a 23-minute silent
+    // `running` window through `backfill_jobs.updatedAt` because the scan rows
+    // themselves were undateable.
+    //
+    // THREE COLUMNS, ALL NULLABLE, NO BACKFILL.
+    //   * `createdAt`        REAL — UNIX seconds at the write.
+    //   * `scenePhase`       TEXT — `BGTaskTelemetryScenePhase`'s vocabulary,
+    //                               verbatim: active / inactive / background /
+    //                               unknown. Same strings `background_task_runs`
+    //                               already stores, because they come from the
+    //                               same helper (playhead-9v09: reuse the
+    //                               vocabulary, do not invent a second one).
+    //   * `runCorrelationId` TEXT — the `backfill_jobs.jobId`.
+    //
+    // WHY NO DEFAULTS, stated plainly: a `DEFAULT 0` on `createdAt` would make
+    // every historical row claim 1970 and a `DEFAULT 'active'` on `scenePhase`
+    // would attribute the entire pre-V42 corpus to the foreground. Either one
+    // reproduces the exact defect the bead exists to end — a number nobody can
+    // attribute, wearing a confident face. Rows written before this migration
+    // are genuinely unattributable; they read NULL and every consumer treats
+    // NULL as unknown rather than bucketing it.
+    //
+    // WHAT AN OLDER BINARY SEES (the playhead-6qvf question). Nothing. Both the
+    // reader (`semanticScanResultColumns`) and the writer
+    // (`insertSemanticScanResult`) name their columns explicitly and bind by a
+    // fixed index, and the three new columns are appended at the END of the
+    // table, so no existing index shifts. An older binary's SELECT is unaffected
+    // by columns it does not mention, and its INSERT succeeds because all three
+    // are nullable — landing a row with NULL attribution, which is exactly and
+    // honestly what that row is. There is no field in which an older binary can
+    // produce a WRONG attribution; the only outcomes are "absent" and "correct".
+    // (`_meta.schema_version` reads 42, above an older binary's head; `migrate()`
+    // already logs that and continues, and every rung short-circuits on `<`.)
+
+    /// V42 migration — the three attribution columns + their indexes.
+    ///
+    /// Idempotent (`addColumnIfNeeded` + `CREATE INDEX IF NOT EXISTS`) and
+    /// guarded on `tableExists`, so a seeded fixture without
+    /// `semantic_scan_results` — which is every fixture driven through
+    /// `migrateOnlyForTesting()`, since the table lives only in
+    /// `createTables()` — still reaches v42.
+    private func migrateSemanticScanAttributionV42IfNeeded() throws {
+        guard (try schemaVersion() ?? 1) < 42 else { return }
+        if try tableExists("semantic_scan_results") {
+            try addColumnIfNeeded(
+                table: "semantic_scan_results",
+                column: "createdAt",
+                definition: "REAL"
+            )
+            try addColumnIfNeeded(
+                table: "semantic_scan_results",
+                column: "scenePhase",
+                definition: "TEXT"
+            )
+            try addColumnIfNeeded(
+                table: "semantic_scan_results",
+                column: "runCorrelationId",
+                definition: "TEXT"
+            )
+            try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_createdAt ON semantic_scan_results(createdAt DESC)")
+            try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation ON semantic_scan_results(runCorrelationId)")
+        }
+        try setSchemaVersion(42)
+    }
+
     /// Fold ONE settled day-0 kickoff into its episode's row.
     ///
     /// The counters accumulate in SQL rather than in Swift so two writers can
@@ -8379,6 +8459,9 @@ actor AnalysisStore {
                 reuseKeyHash TEXT NOT NULL,
                 runMode TEXT NOT NULL DEFAULT 'shadow',
                 jobPhase TEXT NOT NULL DEFAULT 'shadow',
+                createdAt REAL,
+                scenePhase TEXT,
+                runCorrelationId TEXT,
                 UNIQUE(reuseKeyHash)
             )
             """)
@@ -8399,7 +8482,36 @@ actor AnalysisStore {
             column: "jobPhase",
             definition: "TEXT NOT NULL DEFAULT 'shadow'"
         )
+        // playhead-hx6n (V42): when / in which scene phase / under which run.
+        //
+        // All three are NULLABLE WITH NO DEFAULT, and that is the entire point
+        // of the bead. `DEFAULT 0` on `createdAt` would make every pre-V42 row
+        // claim 1970; `DEFAULT 'active'` on `scenePhase` would manufacture the
+        // confident, unattributable number two investigations already died on.
+        // Pre-migration rows read NULL, forever, and no consumer may read a
+        // NULL phase as a phase — see `SemanticScanThroughputSplit.bucket(for:)`.
+        //
+        // Declared here as well as in `migrateSemanticScanAttributionV42IfNeeded`
+        // so a fresh install and an upgrade converge on the same shape; both
+        // helpers are idempotent.
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "createdAt",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "scenePhase",
+            definition: "TEXT"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "runCorrelationId",
+            definition: "TEXT"
+        )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_createdAt ON semantic_scan_results(createdAt DESC)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation ON semantic_scan_results(runCorrelationId)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_runMode ON semantic_scan_results(analysisAssetId, runMode)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_jobPhase ON semantic_scan_results(analysisAssetId, jobPhase)")
         // M1/L3: dropped `idx_semantic_scan_results_reuse` and
@@ -16214,16 +16326,24 @@ actor AnalysisStore {
     /// 2  windowFirstAtomOrdinal    11 attemptCount         19 reuseKeyHash
     /// 3  windowLastAtomOrdinal     12 errorContext         20 runMode (Rev3-M5)
     /// 4  windowStartTime           13 inputTokenCount      21 jobPhase (Rev3-M6)
-    /// 5  windowEndTime             14 outputTokenCount
-    /// 6  scanPass                  15 latencyMs
-    /// 7  transcriptQuality         16 prewarmHit
+    /// 5  windowEndTime             14 outputTokenCount     22 createdAt (V42)
+    /// 6  scanPass                  15 latencyMs            23 scenePhase (V42)
+    /// 7  transcriptQuality         16 prewarmHit           24 runCorrelationId (V42)
     /// 8  disposition
+    ///
+    /// playhead-hx6n: the three V42 columns are APPENDED, never interleaved.
+    /// `readSemanticScanResult` binds by positional index, so inserting a column
+    /// anywhere but the tail silently re-points every field after it — and the
+    /// resulting rows are structurally valid, so nothing throws. Tail-only is
+    /// also what makes an older binary safe: its shorter list still resolves to
+    /// the same indices.
     private static let semanticScanResultColumns = """
         id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
         windowStartTime, windowEndTime, scanPass, transcriptQuality,
         disposition, spansJSON, status, attemptCount, errorContext,
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-        scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase
+        scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
+        createdAt, scenePhase, runCorrelationId
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -16365,7 +16485,25 @@ actor AnalysisStore {
         }
     }
 
-    func insertSemanticScanResult(_ result: SemanticScanResult) throws {
+    /// - Parameter now: the clock used to stamp `createdAt` when the caller's
+    ///   row does not carry one. playhead-hx6n: this is a BACKSTOP, not the
+    ///   primary source — `BackfillJobRunner` stamps its own (injected) clock at
+    ///   the attribution seam, and this only fires for a writer that supplied
+    ///   none. Its purpose is to make the NULL state mean ONE thing: a row with
+    ///   a NULL `createdAt` predates V42, full stop. Without the backstop, "a
+    ///   post-V42 writer forgot" and "written before V42" would be
+    ///   indistinguishable on disk, and the corpus would quietly stop being
+    ///   attributable again.
+    ///
+    ///   Note that `INSERT OR REPLACE` means a replaced row takes the REPLACING
+    ///   write's timestamp, not the original insert's. That is the intended
+    ///   reading: the row on disk is the one that was written last, and the H-1
+    ///   guard above already prevents the only replacement that would lose a
+    ///   measurement (a refusal overwriting a cached success).
+    func insertSemanticScanResult(
+        _ result: SemanticScanResult,
+        now: Double = Date().timeIntervalSince1970
+    ) throws {
         try validateScanCohortJSON(result.scanCohortJSON)
         try Self.validateSemanticScanWindowGeometry(result)
 
@@ -16450,8 +16588,9 @@ actor AnalysisStore {
              windowStartTime, windowEndTime, scanPass, transcriptQuality,
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
-             scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
+             createdAt, scenePhase, runCorrelationId)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -16477,6 +16616,15 @@ actor AnalysisStore {
         bind(stmt, 20, reuseKeyHash)
         bind(stmt, 21, result.runMode.rawValue)
         bind(stmt, 22, result.jobPhase)
+        // playhead-hx6n. `createdAt` falls back to the store's clock (see the
+        // backstop note above). `scenePhase` and `runCorrelationId` do NOT fall
+        // back to anything: the store has no way to know either, and a store
+        // that guessed would be manufacturing the attribution rather than
+        // recording it. A caller with nothing to say writes NULL, which is the
+        // truth.
+        bind(stmt, 23, result.createdAt ?? now)
+        bind(stmt, 24, result.scenePhase?.rawValue)
+        bind(stmt, 25, result.runCorrelationId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -16485,7 +16633,8 @@ actor AnalysisStore {
     @discardableResult
     func recordSemanticScanResult(
         _ result: SemanticScanResult,
-        evidenceEvents: [EvidenceEvent]
+        evidenceEvents: [EvidenceEvent],
+        now: Double = Date().timeIntervalSince1970
     ) throws -> [String] {
         try validateScanCohortJSON(result.scanCohortJSON)
         for event in evidenceEvents {
@@ -16525,7 +16674,7 @@ actor AnalysisStore {
 
             var persistedEvidenceEventIds: [String] = []
             var seenEvidenceEventIds: Set<String> = []
-            try insertSemanticScanResult(result)
+            try insertSemanticScanResult(result, now: now)
             for event in evidenceEvents {
                 if let persistedId = try insertEvidenceEvent(
                     event,
@@ -16624,6 +16773,74 @@ actor AnalysisStore {
             results.append(try readSemanticScanResult(stmt))
         }
         return results
+    }
+
+    // MARK: - playhead-hx6n: the measurement kvs8 could not make
+
+    /// FM scan throughput split by the scene phase the scan completed in.
+    ///
+    /// This is the query playhead-kvs8 was asked for and could not run: it was
+    /// sent to re-split the measured 2.4× slower-than-realtime FM figure by
+    /// foreground versus background and reported "cannot be determined from
+    /// device data", because `semantic_scan_results` recorded nothing that could
+    /// attribute a row to a phase. Schema V42 records it at write time; this is
+    /// the read side.
+    ///
+    /// The SQL is deliberately the same shape as the one documented in
+    /// `docs/investigations/playhead-hx6n-scan-attribution.md` for hand-analysis
+    /// of a device pull, and `SemanticScanRunAttributionTests` requires this and
+    /// ``SemanticScanThroughputSplit/compute(rows:)`` to agree on one shared
+    /// fixture — so the documented query cannot drift away from the consumer.
+    ///
+    /// Three properties are load-bearing:
+    ///
+    /// * **`scenePhase IS NULL` gets its own bucket.** It is not folded into
+    ///   `active`, and the row is not dropped. Pre-V42 rows are unattributable,
+    ///   and a reader has to be able to see how much of the corpus that is
+    ///   before believing the split at all.
+    /// * **An unrecognised phase string also lands in `.unattributed`,** via the
+    ///   same `ScanScenePhase(rawValue:)` leniency the row reader uses.
+    /// * **`noWork:` sentinels are excluded** (playhead-pz32). A sentinel spans
+    ///   a range it never examined, so its ~zero latency over a whole-episode
+    ///   window would report a spectacularly fast model that never ran.
+    func fetchSemanticScanThroughputSplit() throws -> SemanticScanThroughputSplit {
+        let sql = """
+            SELECT scenePhase,
+                   COUNT(*),
+                   SUM(windowEndTime - windowStartTime),
+                   SUM(latencyMs) / 1000.0
+            FROM semantic_scan_results
+            WHERE status = 'success'
+              AND latencyMs IS NOT NULL
+              AND windowEndTime > windowStartTime
+              AND (errorContext IS NULL OR errorContext NOT LIKE 'noWork:%')
+            GROUP BY scenePhase
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var split = SemanticScanThroughputSplit()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let phase = optionalText(stmt, 0).flatMap(ScanScenePhase.init(rawValue:))
+            let count = Int(sqlite3_column_int(stmt, 1))
+            let audioSeconds = sqlite3_column_double(stmt, 2)
+            let wallSeconds = sqlite3_column_double(stmt, 3)
+            let group = ScanThroughputBucket(
+                scanCount: count,
+                audioSeconds: audioSeconds,
+                wallSeconds: wallSeconds
+            )
+            switch SemanticScanThroughputSplit.bucket(for: phase) {
+            case .foreground:   split.foreground.merge(group)
+            case .background:   split.background.merge(group)
+            case .unattributed: split.unattributed.merge(group)
+            }
+            if let phase {
+                var existing = split.byScenePhase[phase] ?? ScanThroughputBucket()
+                existing.merge(group)
+                split.byScenePhase[phase] = existing
+            }
+        }
+        return split
     }
 
     /// C6/H-4: look up a reusable successful scan by computing the
@@ -16890,6 +17107,21 @@ actor AnalysisStore {
         let runModeRaw = optionalText(stmt, 20) ?? SemanticScanPhase.shadow.rawValue
         let runMode = SemanticScanPhase(rawValue: runModeRaw) ?? .shadow
 
+        // playhead-hx6n: column 23 is `scenePhase`. NO `?? .active`, NO
+        // `?? .unknown` — a NULL decodes to `nil` and stays `nil` all the way to
+        // `SemanticScanThroughputSplit`, which reports it as `.unattributed`.
+        // This is the read half of the bead's whole point: the moment a default
+        // appears on this line, every pre-V42 row starts asserting a phase it
+        // never had, and the resulting split looks perfectly healthy.
+        //
+        // An UNRECOGNISED string (a phase a newer binary invented) also decodes
+        // to `nil` rather than throwing. That is the safe direction — an
+        // unrecognised phase is by definition not attributable to foreground or
+        // background, so reporting it as unattributed is exactly right, and it
+        // matches the leniency `fetchSemanticScanStatuses` already documents:
+        // one cosmetic field must never abort a whole-asset read.
+        let scenePhase = optionalText(stmt, 23).flatMap(ScanScenePhase.init(rawValue:))
+
         return SemanticScanResult(
             id: try requireText(stmt, 0),
             analysisAssetId: try requireText(stmt, 1),
@@ -16912,7 +17144,14 @@ actor AnalysisStore {
             transcriptVersion: try requireText(stmt, 18),
             // column 19 = reuseKeyHash (not persisted back onto the struct)
             runMode: runMode,
-            jobPhase: optionalText(stmt, 21) ?? "shadow"
+            jobPhase: optionalText(stmt, 21) ?? "shadow",
+            // playhead-hx6n (V42). `createdAt` is `optionalDouble`, not
+            // `sqlite3_column_double`: the latter returns 0.0 for a NULL, which
+            // would date every pre-V42 row to 1970 and make it sort as the
+            // oldest thing in the database.
+            createdAt: optionalDouble(stmt, 22),
+            scenePhase: scenePhase,
+            runCorrelationId: optionalText(stmt, 24)
         )
     }
 

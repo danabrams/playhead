@@ -114,6 +114,17 @@ actor BackfillJobRunner {
     private let batteryLevelProvider: @Sendable () async -> Float
     private let scanCohortJSON: String
     private let clock: @Sendable () -> Date
+    /// playhead-hx6n: the app state at the moment a scan row is handed to the
+    /// store, in `BGTaskTelemetryScenePhase`'s vocabulary — the SAME helper
+    /// `background_task_runs.scenePhase` is written from, so the two tables can
+    /// be split by the same words (playhead-9v09: reuse the vocabulary, do not
+    /// invent a second one).
+    ///
+    /// Injected rather than called directly so the phase is deterministic under
+    /// test and so the default's `MainActor` hop is not baked into the flow. The
+    /// default is the real reader; production behavior is unchanged for every
+    /// existing call site because the parameter is defaulted.
+    private let scenePhaseProvider: @Sendable () async -> String
     private let logger = Logger(subsystem: "com.playhead", category: "BackfillJobRunner")
 
     /// bd-1en Phase 1: optional router that decides whether each
@@ -394,6 +405,9 @@ actor BackfillJobRunner {
         batteryLevelProvider: @escaping @Sendable () async -> Float,
         scanCohortJSON: String,
         clock: @escaping @Sendable () -> Date = { Date() },
+        scenePhaseProvider: @escaping @Sendable () async -> String = {
+            await BGTaskTelemetryScenePhase.current()
+        },
         sensitiveRouter: SensitiveWindowRouter? = nil,
         permissiveClassifier: PermissiveClassifierBox? = nil,
         narrowingConfig: NarrowingConfig = .default,
@@ -413,6 +427,7 @@ actor BackfillJobRunner {
         self.batteryLevelProvider = batteryLevelProvider
         self.scanCohortJSON = scanCohortJSON
         self.clock = clock
+        self.scenePhaseProvider = scenePhaseProvider
         self.sensitiveRouter = sensitiveRouter
         self.permissiveClassifierBox = permissiveClassifier
         self.narrowingConfig = narrowingConfig
@@ -790,7 +805,7 @@ actor BackfillJobRunner {
                         runMode: h13RunMode,
                         reason: "phaseProducedNoAnchors"
                     )
-                    try await store.insertSemanticScanResult(sentinel)
+                    try await store.insertSemanticScanResult(await attributed(sentinel, jobId: job.jobId))
                     scanResultIds.append(sentinel.id)
                     let h13JobCounters = OperationalMetrics.Counters(
                         persistedScanResultCount: 1
@@ -1746,7 +1761,7 @@ actor BackfillJobRunner {
                 runMode: runMode,
                 reason: "emptySegments"
             )
-            try await store.insertSemanticScanResult(sentinel)
+            try await store.insertSemanticScanResult(await attributed(sentinel, jobId: job.jobId))
             scanResultIds.append(sentinel.id)
             counters.persistedScanResultCount += 1
             return (
@@ -1892,7 +1907,7 @@ actor BackfillJobRunner {
                 status: .success,
                 runMode: runMode
             )
-            try await store.insertSemanticScanResult(result)
+            try await store.insertSemanticScanResult(await attributed(result, jobId: job.jobId))
             scanResultIds.append(result.id)
             counters.persistedScanResultCount += 1
             passARows.append(result)
@@ -2016,7 +2031,7 @@ actor BackfillJobRunner {
                     latencyMs: failure.latencyMillis ?? coarse.latencyMillis,
                     runMode: runMode
                 ) {
-                    try await store.insertSemanticScanResult(failureResult)
+                    try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
                     scanResultIds.append(failureResult.id)
                     counters.persistedScanResultCount += 1
                     passARows.append(failureResult)
@@ -2058,7 +2073,7 @@ actor BackfillJobRunner {
                             latencyMs: 0,
                             runMode: runMode
                        ) {
-                try await store.insertSemanticScanResult(failureResult)
+                try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
                 scanResultIds.append(failureResult.id)
                 counters.persistedScanResultCount += 1
                 passARows.append(failureResult)
@@ -2074,7 +2089,7 @@ actor BackfillJobRunner {
                     latencyMs: coarse.latencyMillis,
                     runMode: runMode
                   ) {
-            try await store.insertSemanticScanResult(failureResult)
+            try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
             scanResultIds.append(failureResult.id)
             counters.persistedScanResultCount += 1
             passARows.append(failureResult)
@@ -2160,7 +2175,7 @@ actor BackfillJobRunner {
                     // `BEGIN IMMEDIATE … COMMIT` with rollback on failure, so
                     // a crash mid-write cannot leave orphan scan rows.
                     let persistedEventIds = try await store.recordSemanticScanResult(
-                        result,
+                        await attributed(result, jobId: job.jobId),
                         evidenceEvents: events
                     )
                     scanResultIds.append(result.id)
@@ -2189,7 +2204,7 @@ actor BackfillJobRunner {
                             latencyMs: refinement.latencyMillis,
                             runMode: runMode
                         ) {
-                            try await store.insertSemanticScanResult(failureResult)
+                            try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
                             scanResultIds.append(failureResult.id)
                             counters.persistedScanResultCount += 1
                         }
@@ -2206,7 +2221,7 @@ actor BackfillJobRunner {
                             latencyMs: refinement.latencyMillis,
                             runMode: runMode
                        ) {
-                        try await store.insertSemanticScanResult(failureResult)
+                        try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
                         scanResultIds.append(failureResult.id)
                         counters.persistedScanResultCount += 1
                     }
@@ -2223,7 +2238,7 @@ actor BackfillJobRunner {
                         latencyMs: refinement.latencyMillis,
                         runMode: runMode
                     ) {
-                        try await store.insertSemanticScanResult(failureResult)
+                        try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
                         scanResultIds.append(failureResult.id)
                         counters.persistedScanResultCount += 1
                     }
@@ -2293,7 +2308,7 @@ actor BackfillJobRunner {
                 runMode: runMode,
                 reason: "noWorkPersistedByPasses"
             )
-            try await store.insertSemanticScanResult(sentinel)
+            try await store.insertSemanticScanResult(await attributed(sentinel, jobId: job.jobId))
             scanResultIds.append(sentinel.id)
             counters.persistedScanResultCount += 1
             logger.error(
@@ -2384,6 +2399,44 @@ actor BackfillJobRunner {
     // because no work was performed". `errorContext` carries the
     // structured reason so operators can distinguish empty-segments from
     // the defensive backstop.
+    /// playhead-hx6n: stamp run attribution onto a scan row, at the instant it
+    /// is handed to the store.
+    ///
+    /// **This is the only place attribution is applied, and the timing is the
+    /// point.** `scenePhase` claims to be the phase AT COMPLETION. A backfill
+    /// job runs for minutes and can cross a foreground/background boundary
+    /// mid-run, so reading the phase once when the job starts would attribute
+    /// every row it produces to whichever side it happened to begin on — which
+    /// is precisely the misattribution the measurement exists to avoid. Reading
+    /// it here costs one `MainActor` hop per persisted row, against FM windows
+    /// measured in seconds.
+    ///
+    /// `runCorrelationId` is the `backfill_jobs.jobId`, which every
+    /// `SemanticScanResult` factory in this file already receives and already
+    /// passes as `reuseScope` — where it was folded into `reuseKeyHash` and then
+    /// discarded. The join key was in hand at every write site all along; this
+    /// stores it instead of hashing it away.
+    ///
+    /// `createdAt` comes from the injected `clock`, so a test that pins the
+    /// clock gets a byte-reproducible row.
+    private func attributed(
+        _ result: SemanticScanResult,
+        jobId: String
+    ) async -> SemanticScanResult {
+        let phaseRaw = await scenePhaseProvider()
+        // An unrecognised string decodes to `nil`, i.e. UNATTRIBUTED — never to
+        // a phase. The provider is contractually one of
+        // active/inactive/background/unknown, so this only fires if that
+        // contract is broken, and when it is the honest answer is "we do not
+        // know", not a guess.
+        let phase = ScanScenePhase(rawValue: phaseRaw)
+        return result.attributed(
+            createdAt: clock().timeIntervalSince1970,
+            scenePhase: phase,
+            runCorrelationId: jobId
+        )
+    }
+
     private func makeNoWorkSentinelScanResult(
         inputs: AssetInputs,
         jobId: String,
@@ -2672,7 +2725,7 @@ actor BackfillJobRunner {
                         latencyMs: expansionRefinement.latencyMillis,
                         runMode: runMode
                     ) {
-                        try await store.insertSemanticScanResult(failureResult)
+                        try await store.insertSemanticScanResult(await attributed(failureResult, jobId: jobId))
                         results.scanResultIds.append(failureResult.id)
                         results.counters.persistedScanResultCount += 1
                     }
@@ -2736,7 +2789,7 @@ actor BackfillJobRunner {
                     runMode: runMode
                 )
                 let persistedEventIds = try await store.recordSemanticScanResult(
-                    mergedScanResult,
+                    await attributed(mergedScanResult, jobId: jobId),
                     evidenceEvents: mergedEvents
                 )
                 results.scanResultIds.append(mergedScanResult.id)
