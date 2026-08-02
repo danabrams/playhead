@@ -5337,6 +5337,10 @@ rec_file()   {
     SCRATCHH) printf '%s' "$SCRATCHH" ;;
     FMSUP) printf '%s' "$FMSUP" ;;
     GATE)  printf '%s' "$GATE" ;;
+    FUSION) printf '%s' "$FUSION" ;;
+    DSPAN) printf '%s' "$DSPAN" ;;
+    EXTENT) printf '%s' "$EXTENT" ;;
+    RSLOT) printf '%s' "$RSLOT" ;;
     *)     printf '%s' "" ;;
   esac
 }
