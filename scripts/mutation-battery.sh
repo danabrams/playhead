@@ -2816,7 +2816,20 @@ MUTATIONS=(
 
   "T04|213|STORE|$T_HX6N_STORE_STAMPS"
   "T14|213|SPLIT|$T_HX6N_EMPTY_CORPUS"
-  "T09|213|RUNNER|$T_HX6N_RUNNER_STAMPS;$T_HX6N_FOREGROUND_RUN"
+
+  # T09 gets a batch of its own, MEASURED not assumed. It first shared 213 with
+  # T04 and came back SURVIVED — falsely. T09 makes the runner stamp a nil
+  # phase; T04 makes the store rewrite a nil phase to `.active` at the write.
+  # Together they persist exactly the `.active` that
+  # `T_HX6N_FOREGROUND_RUN` asserts, so one of T09's two expected tests stayed
+  # green and the battery scored it a survivor. `T_HX6N_RUNNER_STAMPS` did fail,
+  # which is what makes this diagnosable rather than mysterious.
+  #
+  # The lesson generalises past this entry: batching has to consider whether a
+  # batch-mate can REPAIR another mutation's damage, not only whether it can
+  # cause the same failure. A rescue is invisible to a disjoint-expectations
+  # check, and it manufactures a coverage hole that does not exist.
+  "T09|217|RUNNER|$T_HX6N_RUNNER_STAMPS;$T_HX6N_FOREGROUND_RUN"
 
   "T06|214|STORE|$T_HX6N_V41_SURVIVES"
   "T11|214|SPLIT|$T_HX6N_INELIGIBLE;$T_HX6N_SQL_AGREES"
@@ -2858,6 +2871,21 @@ MUTATIONS=(
 # One-line description per mutation, for the report.
 describe_mutation() {
   case "$1" in
+    T01) echo "SemanticScanThroughputSplit.bucket(for:): a nil scene phase becomes .foreground" ;;
+    T02) echo "ScanScenePhase.attributionBucket: a recorded .unknown becomes .foreground" ;;
+    T03) echo "readSemanticScanResult: a NULL scenePhase column defaults to .active on the READ" ;;
+    T04) echo "insertSemanticScanResult: the store invents .active for a caller that supplied no phase" ;;
+    T05) echo "insertSemanticScanResult: drop the createdAt backstop clock" ;;
+    T06) echo "readSemanticScanResult: read a NULL createdAt through sqlite3_column_double (1970)" ;;
+    T07) echo "V42 rung stamps 41 instead of 42 — the ladder stops climbing to head" ;;
+    T08) echo "BackfillJobRunner.attributed: stop stamping runCorrelationId" ;;
+    T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
+    T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
+    T11) echo "SemanticScanThroughputSplit.isEligible: admit no-work sentinels as throughput" ;;
+    T12) echo "fetchSemanticScanThroughputSplit: SQL admits no-work sentinels as throughput" ;;
+    T13) echo "ScanThroughputBucket.realtimeRatio: a zero denominator reports 1.0 instead of nil" ;;
+    T14) echo "SemanticScanThroughputSplit.attributedFraction: an empty corpus reports 1.0" ;;
+    T15) echo "fetchSemanticScanThroughputSplit: OVERWRITE the unattributed bucket instead of summing" ;;
     M01) echo "revertByTimeRange: delete the MANAGED loop's in-loop lifecycle guard" ;;
     M02) echo "revertByTimeRange: delete the SUGGEST loop's in-loop lifecycle guard" ;;
     M03) echo "revertByTimeRange: MANAGED in-loop guard 'break' -> 'return'" ;;
