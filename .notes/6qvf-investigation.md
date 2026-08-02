@@ -107,3 +107,75 @@ played copy vs a re-fetch; and 51 research episodes are not Dan's library.
 17.6% (Wilson 95% CI ≈ 9.5%–30.3%) of rediff-attempted episodes take the chroma
 arm. Per the bead's own decision rule this is "a live wrong-skip hazard", and the
 persisted-provenance change is justified.
+
+---
+
+## STEP 2 — the fix, and why this scope
+
+The measurement says COMMON, so the persisted-provenance change is warranted.
+
+### What changed
+
+`AnchorRef.rediffSlotChroma` — a new bare case, stable type string
+`"rediffSlotChroma"`. `computeRediffSlotPass` records WHICH differ arm ran
+(`RediffSlotPassComputation.widthProvenance`) and `applyRediffSlotOwnershipPass`
+stamps that instead of a literal `.rediffSlot`.
+
+`carriesRediffByteExactWidth` is UNCHANGED as an expression. It is merely now
+true. All six consumers move together, per the bead's hard constraint:
+wraj floor, qs0d FM-suppression cap, pzy2 creator-chapter, fl4j self-promo,
+sik9 post-roll, xsdz.62 `.rediffConfirmed` kind, and `SpanExtentSupport.derive`.
+
+Every one of those is a licence to SKIP or to decline a demotion, so
+under-granting costs a banner and over-granting costs show. The conservative
+answer is the correct one in all six.
+
+### What a chroma span gets now
+
+Width OWNERSHIP is unchanged (`isWidthOwnership == true`) — the Phase-5 projector
+clobber guard and the boundary-refine bypass still protect it, so the marks are
+still shown at chroma width. What it loses is EXTENT certainty: both edges
+resolve `.unanchored`, tier `.none`, and playhead-2350 keeps it mark-only.
+
+**Deliberately NOT promoted to `.corroborated`.** The bead suggests that tier,
+and it is the intuitive home for an independent acoustic re-observation. But
+`AutoSkipEdgePadding` has no MEASURED margin for a chroma edge; reusing
+`.stingerSnapped`'s 0.75 s/0.75 s would be the identical defect one tier down —
+a margin derived for a different instrument. Filed as a follow-up gated on
+measuring the chroma differ's per-edge error, not invented here.
+
+### What an OLDER binary sees
+
+`AnalysisStore` decodes `anchorProvenanceJSON` through `[LossyAnchorRef]` +
+`compactMap`. A binary predating this case throws on the unknown `type`, the
+element becomes `nil`, and it is DROPPED. The array still decodes; the span
+survives with its other provenance intact.
+
+The consequence, stated exactly: that span loses its width-ownership marker
+(so a fresh decode may re-mint it and the boundary refiners may re-refine it,
+returning it to status-quo width) and loses every certainty carve-out for that
+element. It UNDER-claims. That is the safe direction, and it is why the chroma
+arm got its own type string rather than `"rediffSlot"` plus a discriminating
+field: the latter would decode as BYTE-EXACT on an older binary — the one
+migration mistake an old binary cannot detect. Pinned by
+`olderBinarySeesTheElementDropped`.
+
+### One definition, now actually one
+
+The mutation battery found a hole the reading missed: `SpanExtentSupport.derive`
+inlined its own `contains(.rediffSlot)` rather than calling the span predicate,
+so widening the predicate left the extent tier — and therefore auto-skip
+ADMISSION — untouched. The span property's doc has always claimed the two read
+"the SAME `.contains(.rediffSlot)` … so the 'byte-exact rediff' concept has one
+definition"; it was two expressions that happened to agree. Both now route
+through `[AnchorRef].carriesRediffByteExactWidth`.
+
+### Verification
+
+- `scripts/lint.sh` (whole repo): clean.
+- Full `scripts/fast-gate.sh`: **RED (35 known / 17 NEW)**. All 17 NEW are the
+  documented 60 s time-limit family at 167–196 s; ZERO XCTest failures; no
+  failure under 167 s; none names any suite this bead touched. All seven
+  touched/added suites pass.
+- Mutation battery G01–G10 (batches 160–169) + re-cut F08 (batch 158):
+  **11 KILLED / 0 SURVIVED / 0 ERROR.**
