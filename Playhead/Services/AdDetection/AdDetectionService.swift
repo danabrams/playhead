@@ -686,7 +686,8 @@ struct AdDetectionConfig: Sendable {
     /// `.eligible` to `.markOnly` (banner, not auto-skip); rediff-anchored DAI
     /// spans are exempt and keep auto-skipping. (2) a span ending within
     /// `postRollGuardSeconds` of a KNOWN episode duration demotes to `.markOnly`
-    /// REGARDLESS of rediff anchoring or score. Both downgrades only ever touch
+    /// regardless of score — with the SAME byte-exact-rediff exemption since
+    /// playhead-sik9. Both downgrades only ever touch
     /// an already-`.eligible` gate and NEVER modify any score. Gated OFF by
     /// default: enablement is Dan's Gate-2 decision, verified by the 2026-07-19
     /// gate-delta measurement (32/32 windows predicted-vs-observed agree at
@@ -708,11 +709,17 @@ struct AdDetectionConfig: Sendable {
     /// `.markOnly` when `certaintyTieredSkipEnabled` is on. Post-roll ads are the
     /// least important to auto-skip (the user just jumps to the next episode) and
     /// a wrong skip near the end clips the host's closing content, so this
-    /// demotion applies REGARDLESS of rediff anchoring or `skipConfidence` — no
-    /// rediff exemption, unlike `hostReadConfidenceFloor`. Threaded verbatim into
+    /// demotion applies regardless of `skipConfidence`. Threaded verbatim into
     /// `FusionWeightConfig.postRollGuardSeconds`; inert when the episode duration
     /// is unknown (never guess the episode end) or `certaintyTieredSkipEnabled`
     /// is off. DEFAULT `90.0`.
+    ///
+    /// playhead-sik9 (Dan 2026-08-01): a span whose width is owned by the
+    /// byte-exact rediff oracle is EXEMPT — the same carve-out
+    /// `hostReadConfidenceFloor` already grants, extended here because a
+    /// byte-exact tail is the most certain signal in the system and blanket-
+    /// demoting it inverts the certainty tiering. Unanchored, acoustic
+    /// (`.spliceSlot`) and playhead-9s6q segment-recovered tails stay guarded.
     let postRollGuardSeconds: Double
 
     /// playhead-2350: SAFETY gate — a fusion span with an UNANCHORED start or end

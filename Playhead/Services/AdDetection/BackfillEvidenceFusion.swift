@@ -200,9 +200,10 @@ struct FusionWeightConfig: Sendable {
     /// must clear the floor to auto-skip. The same switch also arms the
     /// post-roll guard (`postRollGuardSeconds`, Dan 2026-07-19): an `.eligible`
     /// span ending within that window of a KNOWN episode duration is demoted to
-    /// `.markOnly` regardless of rediff anchoring or score. Both downgrades
-    /// NEVER promote (only an already-`.eligible` gate is touched) and NEVER
-    /// modify any score.
+    /// `.markOnly` regardless of score — but, since playhead-sik9, NOT
+    /// regardless of rediff anchoring: a byte-exact rediff-width span is exempt
+    /// there too. Both downgrades NEVER promote (only an already-`.eligible`
+    /// gate is touched) and NEVER modify any score.
     let certaintyTieredEnabled: Bool
 
     /// playhead-wraj: Minimum `skipConfidence` a NON-rediff (host-read) span
@@ -217,12 +218,22 @@ struct FusionWeightConfig: Sendable {
     /// `.markOnly` when `certaintyTieredEnabled` is on. Post-roll ads are the
     /// least important to auto-skip (the user just jumps to the next episode)
     /// and a wrong skip near the end clips the host's closing content, so the
-    /// demotion applies REGARDLESS of rediff anchoring or `skipConfidence` —
-    /// unlike `hostReadConfidenceFloor`, there is NO rediff exemption. The
-    /// guard fires when `episodeDuration - span.endTime <= postRollGuardSeconds`
-    /// and is INERT when the episode duration is unknown
-    /// (`DecisionMapper.episodeDuration == nil` — never guess the episode end)
-    /// or `certaintyTieredEnabled` is off. DEFAULT `90.0`.
+    /// demotion applies regardless of `skipConfidence`. The guard fires when
+    /// `episodeDuration - span.endTime <= postRollGuardSeconds` and is INERT
+    /// when the episode duration is unknown (`DecisionMapper.episodeDuration ==
+    /// nil` — never guess the episode end) or `certaintyTieredEnabled` is off.
+    /// DEFAULT `90.0`.
+    ///
+    /// playhead-sik9: it does NOT apply to a span whose width is owned by the
+    /// byte-exact rediff oracle (`DecodedSpan.carriesRediffByteExactWidth`) —
+    /// the SAME exemption `hostReadConfidenceFloor` grants, for the same
+    /// reason. Dan's reasoning holds for an uncertain detector; a byte-exact
+    /// rediff tail is not uncertain (the origin served different bytes over
+    /// exactly this range) and its INNER edge — a post-roll's start, the only
+    /// edge that can eat show — was set by the differ, so it cannot creep
+    /// backwards. An unanchored tail, an acoustic `.spliceSlot` tail and a
+    /// playhead-9s6q segment-recovered tail are all still guarded; see the
+    /// full carve-out list at the guard site in `DecisionMapper.map()`.
     let postRollGuardSeconds: Double
 
     /// playhead-xsdz.62: master switch for counting a BYTE-EXACT rediff slot as
@@ -1005,23 +1016,67 @@ struct DecisionMapper: Sendable {
 
         // playhead-wraj (post-roll guard, Dan 2026-07-19): a span whose end
         // lands within `postRollGuardSeconds` (default 90s) of the episode's
-        // total duration is demoted `.eligible → .markOnly` REGARDLESS of
-        // rediff anchoring or `skipConfidence` — post-roll ads are the least
-        // important to auto-skip (the user just jumps to the next episode) and
-        // a wrong skip near the end clips the host's closing content. Same
-        // additive, post-gate demotion contract as the floor above: gated on
-        // `certaintyTieredEnabled`, never promotes (only an already-`.eligible`
-        // gate is inspected), never modifies any score. SAFETY DEFAULT: when
-        // `episodeDuration` is `nil` (unknown) the guard does NOT fire — never
-        // guess the episode end; a non-positive value is treated as unknown
-        // too (the caller's `0 == unknown` sentinel, defense-in-depth).
-        // Garbage input stays inert: NaN and -inf fail the `> 0` check, and a
-        // +inf duration leaves the `<=` comparison false. Ordered
-        // independently of the floor and music-only demotions: all three only
-        // demote `.eligible → .markOnly`, and `.markOnly` is a fixed point,
-        // so they compose commutatively.
+        // total duration is demoted `.eligible → .markOnly` — post-roll ads are
+        // the least important to auto-skip (the user just jumps to the next
+        // episode) and a wrong skip near the end clips the host's closing
+        // content. Same additive, post-gate demotion contract as the floor
+        // above: gated on `certaintyTieredEnabled`, never promotes (only an
+        // already-`.eligible` gate is inspected), never modifies any score.
+        // SAFETY DEFAULT: when `episodeDuration` is `nil` (unknown) the guard
+        // does NOT fire — never guess the episode end; a non-positive value is
+        // treated as unknown too (the caller's `0 == unknown` sentinel,
+        // defense-in-depth). Garbage input stays inert: NaN and -inf fail the
+        // `> 0` check, and a +inf duration leaves the `<=` comparison false.
+        // Ordered independently of the floor and music-only demotions: all
+        // three only demote `.eligible → .markOnly`, and `.markOnly` is a fixed
+        // point, so they compose commutatively.
+        //
+        // playhead-sik9 (Dan 2026-08-01, "we do need a rediff exemption"): a
+        // span whose WIDTH is owned by the byte-exact rediff oracle is EXEMPT.
+        // Dan's reasoning above is sound for an UNCERTAIN detector; it inverts
+        // the certainty-tiered principle when applied to the most certain
+        // signal the system has. The origin literally served DIFFERENT BYTES
+        // over this range — divergence IS the ad — and the differ set both
+        // edges together, so the INNER edge (a post-roll's START, the only edge
+        // that can cost show; the outer edge is the episode end and is bounded
+        // by construction) cannot creep backwards into the host's close. This
+        // is the FIFTH member of the pzy2 exemption family and reuses its exact
+        // key, `carriesRediffByteExactWidth`, so "byte-exact rediff" keeps one
+        // definition across the floor above, the FM-suppression cap, the
+        // creator-chapter and self-promo suppressors, and here.
+        //
+        // What the exemption deliberately does NOT cover:
+        //   • An UNANCHORED tail. No `.rediffSlot` ⇒ the start is where a seed
+        //     landed, which is precisely the case Dan's original reasoning
+        //     describes. Still demoted.
+        //   • ACOUSTIC width. `.spliceSlot` is a width oracle too, but it is
+        //     acoustic, not byte-exact (measured recall 21%, playhead-xsdz.15
+        //     stays OFF). Splice-agnostic, exactly like every other pzy2
+        //     carve-out. Still demoted.
+        //   • playhead-9s6q SEGMENT-RECOVERED (non-monotonic) slots. These
+        //     cannot reach this branch at all: the lagged path calls
+        //     `gateAndDiffBytes(alignment:)` with the `false` default for
+        //     `recoverNonMonotonicSegments`, so a non-monotonic chain is
+        //     rejected wholesale and contributes no `.rediffSlot` provenance;
+        //     only the day-0 mint opts in, and it stamps those slots
+        //     `.unanchored` + `.markOnly` without ever consulting this mapper.
+        //   • A geometry-REWRITTEN rediff span. `.rediffSlot` survives a
+        //     finalizer trim/merge/split but the edge claims do not, so
+        //     `SpanExtentSupport.derive(geometryWasRewritten:)` resolves
+        //     `.unanchored` and playhead-2350's `withExtentSupport` demotes it
+        //     downstream. This exemption only declines to demote HERE; it never
+        //     promotes and never overrides the unanchored-edge block.
+        //
+        // NARROWNESS CAVEAT, inherited not introduced: the CHROMA differ
+        // fallback (`RediffSlotOwnership.gateAndDiff`, taken when the byte
+        // differ yields nothing) also stamps `.rediffSlot`, and its ~1 s
+        // chroma-alignment slots are not byte-exact. Separating the two needs a
+        // distinct `AnchorRef` case — a persistence change — and the same
+        // predicate already governs the four shipped exemptions listed above,
+        // so it is tracked separately rather than forked here.
         if config.certaintyTieredEnabled,
            gate == .eligible,
+           !span.carriesRediffByteExactWidth,
            let episodeDuration,
            episodeDuration > 0,
            episodeDuration - span.endTime <= config.postRollGuardSeconds {
