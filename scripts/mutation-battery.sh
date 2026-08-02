@@ -703,6 +703,15 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/PostRollGuardExemptionRespects2350Tests
   -only-testing:PlayheadTests/PostRollGuardExemptCueSurfacingTests
   -only-testing:PlayheadTests/BackfillEvidenceFusionTests
+  # playhead-nqey: the ENABLEMENT (F01-F09). The sik9 suites above stay in scope
+  # deliberately — they prove the guard's LOGIC against a config they build
+  # themselves, so they pass whether the flag ships ON or OFF; the two suites
+  # here are the only ones that read `AdDetectionConfig.default`. Both families
+  # are needed: a mutation to the shipped VALUE is invisible to sik9's suites,
+  # and a mutation to the guard's PREDICATE would be judged by nqey's four
+  # shapes alone.
+  -only-testing:PlayheadTests/CertaintyTieredSkipShipsOnTests
+  -only-testing:PlayheadTests/CertaintyTieredSkipFlagsWireInTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1148,6 +1157,25 @@ T_SIK9_CUE="an eligible byte-exact post-roll produces a skip cue that never prec
 T_SIK9_FUSION_BELOW="Post-roll guard: a byte-exact rediff span below the floor is EXEMPT (playhead-sik9)"
 T_SIK9_FUSION_AT="Post-roll guard: a byte-exact rediff span at/above the floor is EXEMPT (playhead-sik9)"
 T_SIK9_FUSION_SPLICE="Post-roll guard: an acoustic .spliceSlot span is NOT exempt (playhead-sik9)"
+T_SIK9_UNKNOWN="unknown episode duration keeps the guard inert for the guarded shape too"
+
+# playhead-nqey — the ENABLEMENT. These read `AdDetectionConfig.default`, which
+# is what makes them sensitive to the shipped VALUES and not merely to the
+# guard's mechanics (the distinction the sik9 names above cannot make).
+T_NQEY_SHIPPED_ON="the shipped AdDetectionConfig.default has the certainty-tiered gate ON at 0.9 / 90.0"
+T_NQEY_INIT_MATCHES="the AdDetectionConfig init default matches the shipped .default"
+T_NQEY_FLOOR_DEMOTES="NEWLY DEMOTED: a 0.70 non-rediff host-read span is eligible OFF and markOnly at the shipped default"
+T_NQEY_TAIL_DEMOTES="NEWLY DEMOTED: an unanchored tail inside the 90s window is eligible OFF and markOnly at the shipped default"
+T_NQEY_AT_FLOOR_KEPT="STILL ELIGIBLE: a non-rediff span AT the 0.9 floor keeps auto-skipping at the shipped default"
+T_NQEY_REDIFF_TAIL_KEPT="STILL ELIGIBLE: a rediff-anchored tail inside the 90s window is exempt at the shipped default"
+T_NQEY_REDIFF_FLOOR_KEPT="STILL ELIGIBLE: a rediff-anchored span below the 0.9 floor is exempt at the shipped default"
+T_NQEY_SUBSET="the shipped flip demotes a strict non-empty subset — neither inert nor total"
+T_NQEY_BARE_INERT="a bare FusionWeightConfig stays OFF — the flip does not leak to the hot path or the aggregator"
+T_NQEY_UNKNOWN_INERT="unknown episode duration keeps the shipped guard inert"
+T_NQEY_WIREIN_DEFAULT="AdDetectionConfig.default ships the certainty-tiered gate ON at the calibrated floor + guard"
+T_NQEY_WIREIN_BYTEID="Omitted wraj flags: runBackfill is byte-identical to explicit-default (true/0.9/90.0) flags"
+T_NQEY_WIREIN_OMITTED="AdDetectionConfig.init defaults the three certainty-tiered fields when omitted"
+T_NQEY_WIREIN_VERBATIM="AdDetectionConfig.init carries each certainty-tiered field through verbatim, one at a time"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -2105,6 +2133,65 @@ MUTATIONS=(
 
   "C05|144|FUSION|$T_SIK9_NO_PROMOTE"
   "C06|144|DSPAN|$T_SIK9_SPLICE;$T_SIK9_FUSION_SPLICE"
+
+  # playhead-nqey (F01-F09). The bead is an ENABLEMENT, so the battery attacks
+  # the enablement rather than the mechanism sik9 already covers.
+  #
+  # Five of the nine (F01-F05) mutate the SHIPPED VALUES in
+  # `AdDetectionConfig.default` and its init. Every one of them compiles, every
+  # one of them leaves the sik9 suites entirely green — those build their own
+  # `FusionWeightConfig(certaintyTieredEnabled: true)` and never ask what
+  # production sends — and every one of them silently returns the pipeline to a
+  # policy nobody chose. That gap is the whole reason
+  # `CertaintyTieredSkipShipsOnTests` exists, and F01-F05 are what prove it is
+  # closed rather than merely written.
+  #
+  # F01/F02 are the two ways to un-ship the flip (the static and the init
+  # default; they must not diverge, which is why F02 has its own expectation).
+  # F03/F04 disarm ONE HALF each by zeroing its parameter — the "inert"
+  # failure mode. F05 raises the floor above 1.0 — the "total" failure mode,
+  # where every host-read demotes and the gate stops being certainty-TIERED.
+  # F03/F04/F05 are the reason `flipIsNeitherInertNorTotal` asserts a strict
+  # non-empty subset instead of asserting only that something demoted.
+  #
+  # F06-F09 attack the SCOPE claims the PR makes in prose, so that the prose
+  # cannot drift from the code: F06 leaks the flip into the bare
+  # `FusionWeightConfig()` the hot path and the aggregator decision logs use;
+  # F07 turns the floor into `<=` so an AT-floor span demotes; F08 removes the
+  # rediff carve-out from the FLOOR branch (the guard keeps its own, so this is
+  # the half sik9 did not touch); F09 makes the guard guess an unknown episode
+  # end.
+  #
+  # BATCHING. F01-F05 all edit `AdDetectionConfig.default` (and F02 the init
+  # beside it), and they CANCEL in the obvious ways — F01 turns the switch off,
+  # which makes F03/F04/F05's parameter edits unobservable, fabricating three
+  # survivors in one build. Each takes its own batch. F06-F09 edit four
+  # distinct sites in BackfillEvidenceFusion.swift; they are also one per batch,
+  # F07/F08 because they both concern the floor branch and F06 because its blast
+  # radius is the widest in the series — arming the bare `FusionWeightConfig()`
+  # reddens much of `BackfillEvidenceFusionTests` as collateral, and a batchmate
+  # judged against that noise is a false KILL waiting to happen.
+  #
+  # NOT expected of any F entry: `PostRollGuardExemptCueSurfacingTests`. Same
+  # reason the C series gives — it builds its `AdWindow` at the orchestrator's
+  # door, so no config or fusion-side mutation reaches it.
+  "F01|150|ADSVC|$T_NQEY_SHIPPED_ON;$T_NQEY_FLOOR_DEMOTES;$T_NQEY_TAIL_DEMOTES;$T_NQEY_SUBSET;$T_NQEY_WIREIN_DEFAULT"
+
+  "F02|151|ADSVC|$T_NQEY_INIT_MATCHES;$T_NQEY_WIREIN_OMITTED;$T_NQEY_WIREIN_VERBATIM"
+
+  "F03|152|ADSVC|$T_NQEY_SHIPPED_ON;$T_NQEY_FLOOR_DEMOTES;$T_NQEY_SUBSET"
+
+  "F04|153|ADSVC|$T_NQEY_SHIPPED_ON;$T_NQEY_TAIL_DEMOTES;$T_NQEY_SUBSET"
+
+  "F05|154|ADSVC|$T_NQEY_SHIPPED_ON;$T_NQEY_AT_FLOOR_KEPT;$T_NQEY_SUBSET"
+
+  "F06|155|FUSION|$T_NQEY_BARE_INERT"
+
+  "F09|156|FUSION|$T_NQEY_UNKNOWN_INERT;$T_SIK9_UNKNOWN"
+
+  "F07|157|FUSION|$T_NQEY_AT_FLOOR_KEPT;$T_NQEY_SUBSET"
+
+  "F08|158|FUSION|$T_NQEY_REDIFF_FLOOR_KEPT;$T_SIK9_BELOW_FLOOR;$T_SIK9_FUSION_BELOW"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2287,6 +2374,15 @@ describe_mutation() {
     C08) echo "withExtentSupport: invert the blocking flag, so an unanchored edge no longer blocks auto-skip" ;;
     C09) echo "gateAndDiffBytes: default recoverNonMonotonicSegments to true, admitting 9s6q slots on the LAGGED path" ;;
     C10) echo "strictByteExactMask: mark every unioned slot strict, so a segment-recovered day-0 slot earns an anchor" ;;
+    F01) echo "un-ship the flip: AdDetectionConfig.default back to certaintyTieredSkipEnabled: false" ;;
+    F02) echo "diverge the init default from .default: certaintyTieredSkipEnabled: Bool = false" ;;
+    F03) echo "disarm the host-read half: shipped hostReadConfidenceFloor 0.9 -> 0.0 (nothing is below 0)" ;;
+    F04) echo "disarm the post-roll half: shipped postRollGuardSeconds 90.0 -> 0.0 (no tail is within 0s)" ;;
+    F05) echo "make the flip TOTAL: shipped hostReadConfidenceFloor 0.9 -> 2.0, above any skipConfidence" ;;
+    F06) echo "leak the flip: FusionWeightConfig's own init default certaintyTieredEnabled -> true" ;;
+    F07) echo "host-read floor: < becomes <=, so a span AT the calibrated floor demotes" ;;
+    F08) echo "host-read floor: drop the rediff carve-out, so a byte-exact span below the floor demotes" ;;
+    F09) echo "post-roll guard: guess the episode end — treat an unknown duration as span.endTime" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -5308,6 +5404,71 @@ EOF
     snippet NEW <<'EOF'
         _ = unionedPlayedSlots(strictPerBSideSlots, config: config)
         return unioned.map { _ in true }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # --- playhead-nqey: the enablement (F01-F09) --------------------------------
+  #
+  # F01-F05 anchor on the trailing `// playhead-...` comment rather than on the
+  # bare `field: value,` so the anchor cannot collide with the init default of
+  # the same name a few hundred lines above — which is exactly the collision F02
+  # exists to detect.
+
+  F01)
+    patch "$file" \
+      "certaintyTieredSkipEnabled: true,  // playhead-nqey" \
+      "certaintyTieredSkipEnabled: false,  // playhead-nqey" ;;
+
+  F02)
+    patch "$file" \
+      "certaintyTieredSkipEnabled: Bool = true," \
+      "certaintyTieredSkipEnabled: Bool = false," ;;
+
+  F03)
+    patch "$file" \
+      "hostReadConfidenceFloor: 0.9,  // playhead-wraj" \
+      "hostReadConfidenceFloor: 0.0,  // playhead-wraj" ;;
+
+  F04)
+    patch "$file" \
+      "postRollGuardSeconds: 90.0,  // playhead-wraj" \
+      "postRollGuardSeconds: 0.0,  // playhead-wraj" ;;
+
+  F05)
+    patch "$file" \
+      "hostReadConfidenceFloor: 0.9,  // playhead-wraj" \
+      "hostReadConfidenceFloor: 2.0,  // playhead-wraj" ;;
+
+  F06)
+    patch "$file" \
+      "        certaintyTieredEnabled: Bool = false," \
+      "        certaintyTieredEnabled: Bool = true," ;;
+
+  F07)
+    patch "$file" \
+      "           skipConfidence < config.hostReadConfidenceFloor {" \
+      "           skipConfidence <= config.hostReadConfidenceFloor {" ;;
+
+  F08)
+    snippet OLD <<'EOF'
+           !span.anchorProvenance.contains(where: { if case .rediffSlot = $0 { return true } else { return false } }),
+           skipConfidence < config.hostReadConfidenceFloor {
+EOF
+    snippet NEW <<'EOF'
+           skipConfidence < config.hostReadConfidenceFloor {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  F09)
+    snippet OLD <<'EOF'
+           !span.carriesRediffByteExactWidth,
+           let episodeDuration,
+           episodeDuration > 0,
+EOF
+    snippet NEW <<'EOF'
+           !span.carriesRediffByteExactWidth,
+           let episodeDuration = episodeDuration ?? span.endTime,
+           episodeDuration > 0,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

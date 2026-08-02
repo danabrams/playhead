@@ -136,7 +136,11 @@ struct CertaintyTieredSkipShipsOnTests {
 
     // MARK: - The flip itself
 
-    @Test("AdDetectionConfig.default ships the certainty-tiered gate ON at the calibrated floor + guard")
+    // NOTE the wording. It must NOT collide with the wire-in suite's own
+    // default-shipping test: `mutation-battery.sh` identifies an expected
+    // failure by its Swift Testing DISPLAY name, so two tests sharing a name
+    // across suites would make every expectation naming it ambiguous.
+    @Test("the shipped AdDetectionConfig.default has the certainty-tiered gate ON at 0.9 / 90.0")
     func shippedDefaultIsOn() {
         #expect(AdDetectionConfig.default.certaintyTieredSkipEnabled == true,
                 "playhead-nqey: the gate ships ON (Dan's Gate-2 decision, 2026-08-01, conditional on sik9 = #330)")
