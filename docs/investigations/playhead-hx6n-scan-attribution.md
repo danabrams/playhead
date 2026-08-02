@@ -69,6 +69,21 @@ migration are genuinely unattributable and read `NULL`.
 
 **No backfill.** Nothing scans the existing table and guesses.
 
+### The rung guard, and why it is not optional
+
+`migrateSemanticScanAttributionV42IfNeeded` carries `guard observed >= 41`, not
+just `guard observed < 42`. V39 is allowed to fail without throwing: it rolls
+back to its savepoint and leaves `schema_version` at 38 so the next launch
+retries. A plain `< 42` guard stamps 42 onto such a database — and because V39
+and V40 are themselves version-gated, they can then never run. A *contained,
+recoverable* failure becomes permanent.
+
+This is not hypothetical. The first cut of this rung had the plain guard and
+both V39 containment suites went red on `relaunched.schemaVersion() == 38` in
+about 0.05 s. Every rung added after V39 has to repeat the guard; the ladder
+does not enforce it structurally, so the next person adding V43 will have to
+remember too.
+
 ### The vocabulary is borrowed, not invented
 
 `scenePhase` reuses `BGTaskTelemetryScenePhase`'s strings **verbatim** —
