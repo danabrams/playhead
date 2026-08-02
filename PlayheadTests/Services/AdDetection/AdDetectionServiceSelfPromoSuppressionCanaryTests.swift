@@ -15,14 +15,22 @@
 //   • The guard MUST be `< SkipEligibilityGate.markOnly.severity`
 //     (severity 1), so the ONLY gate it can demote is `.eligible`
 //     (severity 0). A regression to `< blockedByPolicy.severity`
-//     (severity 2) would let the suppressor STOMP an equal-severity
-//     `.blockedByFMConsensus` (severity 2) span down to `.markOnly` —
-//     which routes DIFFERENTLY in `SkipOrchestrator` (`.markOnly` →
-//     suggest banner; `.blockedByFMConsensus` → dropped), so an
-//     FM-suppressed span would silently resurface as a banner. FM is
-//     unavailable on the simulator, so there is no behavioural test that
-//     can drive a span to `.blockedByFMConsensus`; this canary is the
-//     only guard against that regression.
+//     (severity 2) would widen the admitted set to every severity-1
+//     gate, letting a lexical self-promo clue REWRITE a gate that some
+//     other stage already set — the exact direction `capEligibility`'s
+//     equal-severity rule exists to forbid.
+//
+//     playhead-avbn: until this bead the concrete victim was named here —
+//     `.cappedByFMSuppression`, severity 1, which a widened guard would
+//     have stomped down to `.markOnly` and so resurfaced as a suggest
+//     banner after an FM noAds consensus had blocked it. That gate is now
+//     `.blockedByFMConsensus` at severity 2 and is out of reach of BOTH
+//     bounds, so the example no longer bites. The BOUND is unchanged and
+//     still pinned: `.markOnly` is a live severity-1 case today, and the
+//     taxonomy has grown a severity-1 case before. FM is unavailable on
+//     the simulator, so no behavioural test can drive a span to
+//     `.blockedByFMConsensus` in the first place — which is why the
+//     equal-severity invariant is canaried in source at all.
 //   • The demotion target MUST be `.markOnly` (never a harder or weaker
 //     gate, never the opposite-direction `.eligible`).
 //   • The suppression site MUST forward `proposalConfidence` /
@@ -47,9 +55,9 @@ final class AdDetectionServiceSelfPromoSuppressionCanaryTests: XCTestCase {
     /// on `decision.eligibilityGate.severity <
     /// SkipEligibilityGate.markOnly.severity` so the demotion can ONLY
     /// relax a fully-`.eligible` (severity 0) span — never an
-    /// equal-or-higher `.markOnly` (severity 1) / `.blockedByFMConsensus`
-    /// (severity 2)
-    /// nor any harder block (severity >= 2), and never a promotion.
+    /// equal-severity `.markOnly` (severity 1), never a harder block
+    /// (severity >= 2, which now includes `.blockedByFMConsensus`), and
+    /// never a promotion.
     func testRunBackfillGuardsSelfPromoDemotionWithMarkOnlySeverity() throws {
         let body = try Self.runBackfillImplementationBody()
         let stripped = SwiftSourceInspector.strippingCommentsAndStrings(body)
@@ -69,13 +77,12 @@ final class AdDetectionServiceSelfPromoSuppressionCanaryTests: XCTestCase {
             `decision.eligibilityGate.severity < \
             SkipEligibilityGate.markOnly.severity`. Without EXACTLY this \
             bound the demotion can reach an equal-severity gate: \
-            `< blockedByPolicy.severity` would stomp a \
-            `.blockedByFMConsensus` span down to `.markOnly` (which \
-            routes to a suggest banner instead of staying dropped). \
-            Restore the `< markOnly.severity` guard or update this canary \
-            if the gate taxonomy moved (and re-verify the equal-severity \
-            invariant elsewhere — no simulator test can, FM is \
-            unavailable there).
+            `< blockedByPolicy.severity` would admit every severity-1 \
+            gate, letting a lexical self-promo clue overwrite a label \
+            another stage already set. Restore the `< markOnly.severity` \
+            guard or update this canary if the gate taxonomy moved (and \
+            re-verify the equal-severity invariant elsewhere — no \
+            simulator test can, FM is unavailable there).
             """
         )
     }

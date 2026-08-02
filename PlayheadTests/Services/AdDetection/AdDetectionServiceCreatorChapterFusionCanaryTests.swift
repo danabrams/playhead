@@ -23,9 +23,16 @@
 // A future regression that, e.g., moves the flag-snapshot inside the
 // loop (perf regression — re-reads UserDefaults per span via
 // `preAnalysisConfig`), or replaces the severity guard with `==
-// .eligible` (would lose the `.blockedByFMConsensus` upgrade), would
-// not break any behavioral test that doesn't exercise the precise
-// shape. The canaries below catch each such regression directly.
+// .eligible` (would lose the `.markOnly` upgrade), would not break any
+// behavioral test that doesn't exercise the precise shape. The canaries
+// below catch each such regression directly.
+//
+// playhead-avbn: that parenthetical used to name `.cappedByFMSuppression`,
+// which was severity 1 and therefore inside the guard's `< blockedByPolicy`
+// window. It is now `.blockedByFMConsensus` at severity 2 — outside — so
+// `.markOnly` is the remaining case the severity guard admits that an
+// `== .eligible` guard would drop. The guard's SHAPE is unchanged and so is
+// this file's claim; only the example moved.
 //
 // XCTest so the canary is filterable from the test plan
 // (`xctestplan` silently ignores Swift Testing identifiers — see
