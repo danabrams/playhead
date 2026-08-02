@@ -362,14 +362,26 @@ enum AdLikelihoodScanOrder {
 
     /// Stable re-sort of `items` back into ascending `key` order.
     ///
-    /// The pass ATTEMPTS windows in promoted order but must REPORT them in plan
-    /// order: `BackfillJobRunner` reads `coarse.windows` to build refinement
-    /// plans and `coarse.plans` to walk the honest coverage cursor, and
+    /// The pass ATTEMPTS windows in promoted order but REPORTS `coarse.plans`
+    /// in episode order: `BackfillJobRunner` reads that list as its coverage
+    /// DENOMINATOR and takes `unattemptedPlans.first` as "where the pass
+    /// stopped", and both are questions about the EPISODE, not about attempt
+    /// sequence.
+    ///
+    /// `coarse.windows` is deliberately NOT normalised, and it is the one place
+    /// the reordering stays visible past `planPassA`. It is appended as windows
+    /// resolve, so it carries attempt order, and
     /// `FoundationModelClassifier.planAdaptiveZoom` emits one refinement plan
-    /// per coarse window in iteration order. Normalising here means the only
-    /// observable consequence of this whole bead is WHICH FM CALL HAPPENS
-    /// FIRST — every downstream list keeps the shape and sequence it had before
-    /// lxkq, so nothing downstream has to be re-reasoned about.
+    /// per coarse window in iteration order — so passB attempts the promoted
+    /// neighbourhoods first too. That is the intended direction (a pass that
+    /// runs out of budget mid-refinement should have refined the LIKELY slots),
+    /// and it is safe because every consumer of that list was checked and is
+    /// order-indifferent: `detectedAdLineRefs` is a set union,
+    /// `succeededPlanIndices` is a `Set`, `SemanticScanCoverage.compute` sorts
+    /// its own ranges before merging, and `recordRandomAuditEvents` both sorts
+    /// and is scoped to `.scanRandomAuditWindows`, a phase this bead never
+    /// seeds. Checked, not assumed — a future consumer of `coarse.windows` that
+    /// needs episode order must sort, not rely on it.
     ///
     /// Stability matters: one plan can produce several failure rows (a bounded
     /// permissive shrink recovers part of a window and leaves the rest a hole),
