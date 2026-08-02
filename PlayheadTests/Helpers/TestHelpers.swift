@@ -23,26 +23,71 @@ final class TestTempDirTracker: @unchecked Sendable {
 // existed). An atexit hook also removes the root on normal exit — Swift
 // does not run deinit for globals at process termination, so a tracker
 // class can't be used here.
+//
+// BOTH OF THESE ARE THE BACKSTOP, NOT THE BUDGET (playhead-cgka). They fire at
+// process boundaries and reclaim nothing while the suite runs, which made peak
+// disk the SUM of every test's scratch: a full gate consumed ~8 GiB of free
+// space and died on ENOSPC near the end of the suite. `TestScratchReaper`
+// bounds the peak DURING the run; these two remain because an ABNORMAL exit is
+// precisely when the reaper does not get to finish, and a wipe-on-first-use is
+// the only thing that then reclaims the wreckage. Do not remove either.
+//
+// Both now go through `TestScratchReaper.forceRemove`, which repairs
+// permissions before giving up, and that is NOT a tidiness change — a plain
+// `removeItem` here silently reclaimed NOTHING whenever a previous abnormal
+// exit left a 0o300 directory behind, which is the state this suite creates by
+// design (DownloadManagerTests' `complete/`, restored in a `defer` that an
+// abnormal exit skips). MEASURED 2026-08-02 on this box: `$TMPDIR/Deleting-*`,
+// the staging area CoreSimulator moves a device's data into before deleting it
+// asynchronously, had accumulated 15 GiB — and every single one of the
+// directories still there was stuck on exactly one unreadable
+// `PlayheadTestScratch/…/complete`. `simctl erase` had appeared to work and had
+// freed nothing. Clearing them took the volume from 9.0 GiB to 25.4 GiB free.
+/// The process-boundary wipe, named so it can be tested. A global initialiser
+/// and an `atexit` block are both unreachable from a test, so the one property
+/// that matters here — that the wipe survives a directory the suite chmodded
+/// unreadable — would otherwise be unpinned at exactly the two call sites where
+/// its failure is silent and permanent.
+func wipeTestScratchRoot(at url: URL) {
+    TestScratchReaper.forceRemove(url)
+}
+
 private nonisolated(unsafe) var _scratchRoot: URL = {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
-    try? FileManager.default.removeItem(at: root)
+    wipeTestScratchRoot(at: root)
     try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     atexit {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
-        try? FileManager.default.removeItem(at: url)
+        wipeTestScratchRoot(at: url)
     }
     return root
 }()
 
 /// Creates a uniquely-named temporary directory for test isolation.
-/// All such directories live under a shared scratch root that is wiped on
-/// the next test process startup and on normal exit.
-func makeTempDir(prefix: String = "PlayheadTests") throws -> URL {
+///
+/// The directory lives under a shared scratch root that is wiped on the next
+/// test process startup and on normal exit. Those two paths are the BACKSTOP,
+/// not the budget: they fire at process boundaries, so on their own peak disk
+/// is the SUM of every test's scratch rather than the max of any one, which is
+/// what made a full gate die with `NSPOSIXErrorDomain Code=28` (playhead-cgka).
+///
+/// - Parameter owner: bind the directory's lifetime to this object. Once it is
+///   deallocated — for an `AnalysisStore` that means its `deinit` has closed the
+///   SQLite handle — `TestScratchReaper` reclaims the bytes mid-run. Passing
+///   `nil` (the default, so all existing call sites keep compiling) keeps the
+///   old behaviour: nothing is reclaimed until the process ends. Prefer
+///   `makeTestStore*`, which attaches ownership for you.
+func makeTempDir(prefix: String = "PlayheadTests", ownedBy owner: AnyObject? = nil) throws -> URL {
     let url = _scratchRoot
         .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    if let owner {
+        TestScratchReaper.shared.adopt(url, owner: owner)
+    } else {
+        TestScratchReaper.shared.register(url)
+    }
     return url
 }
 
@@ -60,9 +105,18 @@ func makeTestStore() async throws -> AnalysisStore {
 /// `probeRowCount`). Used by tests that need to verify orphan-row
 /// contracts that the public store accessors hide behind JOINs.
 func makeTestStoreWithDirectory() async throws -> (AnalysisStore, URL) {
-    let dir = try makeTempDir(prefix: "PlayheadTests")
+    // playhead-cgka: the prefix is `PlayheadTestStore`, not the default
+    // `PlayheadTests`, so `scripts/scratch-sampler.sh --breakdown` can tell a
+    // store directory apart from a bare temp directory. They used to share the
+    // default prefix, which is why the first measurement could say "2,591 dirs
+    // at 732.6 KiB" but not which factory made them.
+    let dir = try makeTempDir(prefix: "PlayheadTestStore")
     let store = try AnalysisStore(directory: dir)
     try await store.migrate()
+    // Ownership is attached AFTER migrate() so a throw leaves the directory in
+    // the unowned-but-registered state rather than adopted by a half-built
+    // store — the backstop still reclaims it at process exit.
+    TestScratchReaper.shared.adopt(dir, owner: store)
     return (store, dir)
 }
 
@@ -494,7 +548,10 @@ let thresholdControllerBarrierShow = "i08e-controller-write-barrier"
 func makeTestControllerStore(
     prefix: String = "threshold-controller"
 ) throws -> PerShowThresholdControllerStore {
-    try PerShowThresholdControllerStore(directoryURL: try makeTempDir(prefix: prefix))
+    let dir = try makeTempDir(prefix: prefix)
+    let store = try PerShowThresholdControllerStore(directoryURL: dir)
+    TestScratchReaper.shared.adopt(dir, owner: store)
+    return store
 }
 
 /// Poll until the show's sampleCount reaches `expected`.

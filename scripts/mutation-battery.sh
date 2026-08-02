@@ -149,6 +149,25 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   170 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-cgka). Batches 120-125 (Z01-Z12, 12 new
+#   entries), 6 batches. FINAL 12 KILLED / 0 SURVIVED / 0 ERROR, 9 builds.
+#   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
+#   array now holds 182 live entries.
+#
+#   Composition, stated because it was not one invocation. First pass, batches
+#   120-125: 11 KILLED, 1 SURVIVED. Z02 — delete the orphan-mark reset in
+#   `adopt` — survived, and the survivor was RIGHT twice over. The sweep's
+#   live-owner branch cleared the same mark, so the edit changed no observable
+#   behaviour: an equivalent mutant. And the rail it was aimed at asked the
+#   wrong question — it asserted a re-adopted directory survives while its
+#   SECOND owner is alive, which the sweep guarantees by construction, since it
+#   can only doom an entry whose owner is already nil. What a stale mark
+#   actually destroys is the one-sweep DEFERRAL for the new owner. The
+#   redundant reset was deleted (it was unreachable: a weak reference that has
+#   gone nil never becomes non-nil again) and the rail re-cut to assert the
+#   deferral, with deliberately no sweep between the re-adoption and the second
+#   death. Batch 121 re-run: 3/3 KILLED.
+#
 #   Composition, stated because it was not one invocation. First pass, batches
 #   91-100 (Y01-Y14): 13 KILLED, 1 SURVIVED. Y12 — the clip-radius bound —
 #   survived, and the survivor was RIGHT: `aDistantAnchorDoesNotClip` used a
@@ -411,14 +430,27 @@ INVF="Playhead/Services/AdDetection/InventorySanityFilter.swift"
 # extent policy is in it — so every Y rail but the wire-in ones is a one-line
 # edit to a stage whose claim has its own named test.
 SWEEP="Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
+# playhead-cgka: the per-test scratch lifetime. The ONLY entries in this battery
+# whose mutable files are TEST sources, and deliberately so — the thing under
+# test IS the test harness. A reaper that reclaims nothing leaves the gate as
+# broken as it was and nothing goes red to say so; a reaper that reclaims too
+# eagerly deletes a live suite's database and surfaces as an unrelated flake
+# somewhere else entirely. Neither direction announces itself, which is exactly
+# the shape this battery exists for.
+SCRATCH="PlayheadTests/Helpers/TestScratch.swift"
+SCRATCHH="PlayheadTests/Helpers/TestHelpers.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
-  "$SWEEP"
+  "$SWEEP" "$SCRATCH" "$SCRATCHH"
 )
 
 FOCUSED_SUITES=(
+  # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
+  # costs nothing to carry in every batch and the alternative is a second
+  # focused set for one series.
+  -only-testing:PlayheadTests/TestScratchReaperTests
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertLifecycleRaceTests
@@ -916,6 +948,20 @@ T_Y3YA_SHADOW_SVC="shadow mode composes nothing at the service site"
 T_Y3YA_SHADOW_RUN="shadow mode composes nothing at the runner tail"
 T_Y3YA_CEILING="a verdict wider than the mark ceiling produces nothing"
 T_Y3YA_MERGE_CEILING="the merge stops rather than growing past the mark ceiling"
+
+# playhead-cgka — the per-test scratch lifetime.
+T_CGKA_RECLAIM="an owned directory is reclaimed once its owner is deallocated"
+T_CGKA_DEFER="the reclaim is deferred one sweep past the first nil observation"
+T_CGKA_READOPT="re-adopting a directory re-arms the deferral for its new owner"
+T_CGKA_UNOWNED="an unowned directory is never reclaimed by a sweep"
+T_CGKA_AUTOSWEEP="registration drives sweeps without a timer or a thread"
+T_CGKA_CLAMP="a non-positive sweep interval is clamped rather than trapping"
+T_CGKA_UNREADABLE="an unreadable 0o300 directory is still removed"
+T_CGKA_CONCURRENT="concurrent registration and sweeping keeps the ledger consistent"
+T_CGKA_STORE_ADOPT="makeTestStoreWithDirectory hands its directory to the shared reaper"
+T_CGKA_REGISTERS="makeTempDir registers every directory it hands out"
+T_CGKA_OWNEDBY="makeTempDir(ownedBy:) attaches the owner it was given"
+T_CGKA_WIPE="the process-boundary wipe removes a root the suite left unreadable"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1690,6 +1736,41 @@ MUTATIONS=(
   # one a merge condition, with distinct fixtures.
   "Y17|102|SWEEP|$T_Y3YA_CEILING"
   "Y18|102|SWEEP|$T_Y3YA_MERGE_CEILING"
+
+  # playhead-cgka — the per-test scratch lifetime. Batches 120+.
+  #
+  # The batching rule bites harder than usual here, because several of these
+  # mutations disable the reaper wholesale and so redden more rails than they
+  # are credited for. Z11 alone reddens RECLAIM, DEFER, AUTOSWEEP and OWNEDBY —
+  # which is why Z01 (also DEFER), Z07 (also AUTOSWEEP) and Z10 (also OWNEDBY)
+  # are each in a different batch from it. A kill credited to the wrong mutation
+  # is worse than an extra build.
+  "Z01|120|SCRATCH|$T_CGKA_DEFER"
+  "Z09|120|SCRATCHH|$T_CGKA_REGISTERS"
+
+  # Z02 SURVIVED when first run, correctly: the sweep's live-owner branch
+  # cleared the mark too, so deleting the reset in `adopt` changed no
+  # observable behaviour. That redundant path is gone and the rail now
+  # asserts the property that is actually at stake — the deferral being
+  # RE-ARMED for the new owner, not the file merely surviving.
+  "Z02|121|SCRATCH|$T_CGKA_READOPT"
+  "Z04|121|SCRATCH|$T_CGKA_UNREADABLE"
+  "Z06|121|SCRATCH|$T_CGKA_CLAMP"
+
+  # Z03 gets a batch to itself for BLAST RADIUS, not for expectation overlap:
+  # it makes the SHARED reaper delete unowned directories, i.e. every bare
+  # makeTempDir directory in every focused suite, mid-test. Anything sharing the
+  # batch would be judged against a run whose failures are mostly collateral.
+  "Z03|122|SCRATCH|$T_CGKA_UNOWNED;$T_CGKA_CONCURRENT"
+
+  "Z05|123|SCRATCH|$T_CGKA_UNREADABLE"
+  "Z07|123|SCRATCH|$T_CGKA_AUTOSWEEP"
+  "Z08|123|SCRATCHH|$T_CGKA_STORE_ADOPT"
+
+  "Z10|124|SCRATCHH|$T_CGKA_OWNEDBY"
+  "Z12|124|SCRATCHH|$T_CGKA_WIPE"
+
+  "Z11|125|SCRATCH|$T_CGKA_RECLAIM;$T_CGKA_DEFER"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -1823,6 +1904,18 @@ describe_mutation() {
     B05) echo "SkipOrchestrator.init: restore the disabled-filter default, so tests stop observing what the field runs" ;;
     B06) echo "InventorySanityFilter.productionDefaultConfiguration: pin it OFF, so the shared constant lies" ;;
     B07) echo "hasValidRuntimeWindowMaterial: drop the startTime >= 0 check, so impossible geometry is admitted" ;;
+    Z01) echo "sweep: reclaim on the FIRST nil owner instead of deferring one sweep" ;;
+    Z02) echo "adopt: keep the stale orphan mark, so the new owner gets no deferral" ;;
+    Z03) echo "sweep: reclaim UNOWNED entries too, with nothing proving them idle" ;;
+    Z04) echo "forceRemove: give up on the first failure instead of repairing permissions" ;;
+    Z05) echo "makeReadableAndWritable: chmod the top directory only, do not recurse" ;;
+    Z06) echo "init: drop the sweepEvery clamp, so 0 disables sweeping entirely" ;;
+    Z07) echo "register: never trigger a sweep" ;;
+    Z08) echo "makeTestStoreWithDirectory: register the directory but do not adopt it" ;;
+    Z09) echo "makeTempDir: do not register a directory that has no owner" ;;
+    Z10) echo "makeTempDir: ignore ownedBy: and merely register" ;;
+    Z11) echo "adopt: no-op when the URL was never registered" ;;
+    Z12) echo "wipeTestScratchRoot: plain removeItem again, so an unreadable leftover survives forever" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -4266,6 +4359,156 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ── playhead-cgka: the per-test scratch lifetime ─────────────────────────
+
+  Z01)
+    snippet OLD <<'EOF'
+            if let seen = entry.orphanedAtSweep, seen < now {
+                doomed.append(entry.url)
+                continue
+            }
+            if entry.orphanedAtSweep == nil { entry.orphanedAtSweep = now }
+            kept.append(entry)
+EOF
+    snippet NEW <<'EOF'
+            if entry.orphanedAtSweep == nil { entry.orphanedAtSweep = now }
+            doomed.append(entry.url)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z02)
+    snippet OLD <<'EOF'
+            entries[index].owner = owner
+            entries[index].isOwned = true
+            entries[index].orphanedAtSweep = nil
+EOF
+    snippet NEW <<'EOF'
+            entries[index].owner = owner
+            entries[index].isOwned = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z03)
+    snippet OLD <<'EOF'
+            guard entry.isOwned else { kept.append(entry); continue }
+EOF
+    snippet NEW <<'EOF'
+            guard entry.isOwned else { doomed.append(entry.url); continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z04)
+    snippet OLD <<'EOF'
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            makeReadableAndWritable(url)
+            try? fileManager.removeItem(at: url)
+        }
+EOF
+    snippet NEW <<'EOF'
+        try? fileManager.removeItem(at: url)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z05)
+    snippet OLD <<'EOF'
+        guard isDirectory.boolValue else { return }
+        let children = (try? fileManager.contentsOfDirectory(atPath: url.path)) ?? []
+        for child in children {
+            makeReadableAndWritable(url.appendingPathComponent(child))
+        }
+EOF
+    snippet NEW <<'EOF'
+        _ = isDirectory
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z06)
+    snippet OLD <<'EOF'
+        self.sweepEvery = max(1, sweepEvery)
+EOF
+    snippet NEW <<'EOF'
+        self.sweepEvery = sweepEvery == 0 ? 1_000_000 : sweepEvery
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z07)
+    snippet OLD <<'EOF'
+        let due = registered % sweepEvery == 0
+EOF
+    snippet NEW <<'EOF'
+        let due = registered % sweepEvery == 0 && sweepEvery < 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z08)
+    # Anchored on the RETURN as well as the adopt: the bare adopt line occurs
+    # twice in this file (the controller-store factory is the other), and the
+    # patcher refuses an anchor that is not unique.
+    snippet OLD <<'EOF'
+    TestScratchReaper.shared.adopt(dir, owner: store)
+    return (store, dir)
+EOF
+    snippet NEW <<'EOF'
+    return (store, dir)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z09)
+    snippet OLD <<'EOF'
+    if let owner {
+        TestScratchReaper.shared.adopt(url, owner: owner)
+    } else {
+        TestScratchReaper.shared.register(url)
+    }
+EOF
+    snippet NEW <<'EOF'
+    if let owner {
+        TestScratchReaper.shared.adopt(url, owner: owner)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z10)
+    snippet OLD <<'EOF'
+    if let owner {
+        TestScratchReaper.shared.adopt(url, owner: owner)
+    } else {
+        TestScratchReaper.shared.register(url)
+    }
+EOF
+    snippet NEW <<'EOF'
+    _ = owner
+    TestScratchReaper.shared.register(url)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z11)
+    snippet OLD <<'EOF'
+        } else {
+            entries.append(Entry(url: url, owner: owner, isOwned: true, orphanedAtSweep: nil))
+            registered += 1
+        }
+EOF
+    snippet NEW <<'EOF'
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  Z12)
+    snippet OLD <<'EOF'
+func wipeTestScratchRoot(at url: URL) {
+    TestScratchReaper.forceRemove(url)
+}
+EOF
+    snippet NEW <<'EOF'
+func wipeTestScratchRoot(at url: URL) {
+    try? FileManager.default.removeItem(at: url)
+}
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
@@ -4305,6 +4548,8 @@ rec_file()   {
     INGO)  printf '%s' "$INGO" ;;
     INVF)  printf '%s' "$INVF" ;;
     SWEEP) printf '%s' "$SWEEP" ;;
+    SCRATCH)  printf '%s' "$SCRATCH" ;;
+    SCRATCHH) printf '%s' "$SCRATCHH" ;;
     *)     printf '%s' "" ;;
   esac
 }
