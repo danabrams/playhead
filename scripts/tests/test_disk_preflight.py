@@ -469,10 +469,11 @@ class CleanerWiringTests(unittest.TestCase):
 
 class DefaultThresholdTests(unittest.TestCase):
     def test_the_default_is_stated_in_gib_and_is_plausible(self):
-        # Not a taste assertion — a tripwire. The number is derived from a
-        # measured drawdown recorded in the module docstring; if someone drops
-        # it to 2 or inflates it to 40 without re-measuring, the derivation
-        # comment and the constant have parted company.
+        # Not a taste assertion — a tripwire. Both numbers are derived from
+        # measured drawdowns recorded beside them; if someone drops one to 2 or
+        # inflates it to 40 without re-measuring, the derivation comment and the
+        # constant have parted company. Either direction is a defect: too low
+        # wedges, too high teaches people to set the override.
         self.assertGreaterEqual(dp.DEFAULT_MIN_GIB, 8.0)
         self.assertLessEqual(dp.DEFAULT_MIN_GIB, 20.0)
 

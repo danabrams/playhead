@@ -44,7 +44,7 @@ import sys
 GIB = 1024.0 ** 3
 
 # ---------------------------------------------------------------------------
-# THE NUMBER, AND WHERE IT COMES FROM
+# THE NUMBERS, AND WHERE THEY COME FROM
 # ---------------------------------------------------------------------------
 # Derivation (measured 2026-08-02 on this box, one full cold PlayheadFastTests
 # gate in a fresh worktree, sampling free space on /System/Volumes/Data every
@@ -59,14 +59,47 @@ GIB = 1024.0 ** 3
 # samples) and because a wedge at 100% is unrecoverable-in-place while a
 # refusal costs nothing.
 #
+# MEASURED 2026-08-02 with scripts/gate-disk-sample.sh at 5s, `df -k` on
+# /System/Volumes/Data, across two full PlayheadFastTests runs to a terminal
+# verdict. The quantity is the DRAWDOWN — free at start minus the minimum free
+# during the run — because a gate is a transient disk event and the end-state
+# delta understates it by more than half:
+#
+#   run 1  fresh worktree, build cache from empty, simulator already at 7.88 GiB
+#          start 15.07 -> min 3.58 -> end 11.39     DRAWDOWN 11.49 GiB
+#   run 2  build cache warm, simulator freshly erased to ~0
+#          start 19.08 -> min 6.93 -> end  8.86     DRAWDOWN 12.15 GiB
+#
+#   threshold = worst observed drawdown 12.15 + 1.35 = 13.50 GiB
+#
+# The margin is measured, not chosen: sampling at 5s cannot see a fall between
+# samples, and the largest single-interval fall observed was 1.27 GiB (1.20 in
+# run 1). 1.35 covers it. A wedge at zero is unrecoverable in place; a refusal
+# costs seconds.
+#
+# A COLD/WARM SPLIT WAS TRIED AND THE MEASUREMENT REJECTED IT. The obvious
+# refinement is a cheaper threshold when `.derivedData/Build` already exists,
+# since a fresh worktree has to create ~2.8 GiB of cache. Run 2 was the warm
+# case and drew down MORE, not less — the build-cache saving is swamped by
+# simulator state, which moves by ~8 GiB depending on whether the destination
+# was recently erased. Two variables, two runs, so neither was isolated. Do not
+# reintroduce the split without a design that holds the simulator constant.
+#
+# ALSO OBSERVED, and it matters if you re-measure: `df` Avail on APFS LAGS on
+# the way back up. Run 2's "end" reading of 8.86 GiB had settled to 16.00 GiB
+# about two minutes later. The MINIMUM is still the number to use — it is the
+# same metric by which this box "hit 100% capacity" — but do not compute what a
+# run keeps from a reading taken the moment it exits.
+#
 # Superseded numbers, kept so the trend is legible:
 #   * playhead-voez (2026-08-01, before #328): ~13 GB free finished, ~10 GB
-#     free wedged. CLAUDE.md rounded that to "~8 GB of headroom".
+#     free wedged. CLAUDE.md rounded that to "~8 GB of headroom", which both of
+#     today's runs say is well under what a full plan actually draws.
 #   * playhead-cgka (#328) then fixed the suite reclaiming scratch only at
 #     process boundaries; peak scratch went 331 -> 100 MiB.
-# Both predate the measurement this constant is set from. Do not restore an
-# older figure without re-measuring.
-DEFAULT_MIN_GIB = 12.0
+# Both predate the measurements above. Do not restore an older figure without
+# re-measuring — and say what you measured it from.
+DEFAULT_MIN_GIB = 13.5
 
 # Only these prefixes may ever be handed to the cleaner. Mirrors the rails in
 # CLAUDE.md; the cleaner enforces them again on its own side.
@@ -81,6 +114,8 @@ def free_bytes(path: str) -> int:
 
 def fmt_gib(n_bytes: float) -> str:
     return f"{n_bytes / GIB:.2f} GiB"
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +203,10 @@ def format_refusal(free_b: int, min_b: int, candidates, sim_id: str = "") -> str
         f"  free now : {fmt_gib(free_b)}",
         f"  required : {fmt_gib(min_b)}   (short by {fmt_gib(short)})",
         "",
+        "  A full plan was measured drawing 11.49 and 12.15 GiB below its",
+        "  starting free space, twice, on 2026-08-02. The requirement is the",
+        "  worse of those plus a margin, not a guess.",
+        "",
         "  A gate that runs out of room does NOT fail — it WEDGES. xcodebuild",
         "  stays alive with zero output and never exits, because it could not",
         "  write its result bundle. That is indistinguishable from a slow test",
@@ -223,7 +262,8 @@ def format_refusal(free_b: int, min_b: int, candidates, sim_id: str = "") -> str
 def main(argv=None, free_fn=free_bytes, runner=_run) -> int:
     ap = argparse.ArgumentParser(description="Refuse to start a gate below the disk headroom it needs.")
     ap.add_argument("--path", default=".", help="any path on the volume to check (default: cwd)")
-    ap.add_argument("--min-gib", type=float, default=DEFAULT_MIN_GIB)
+    ap.add_argument("--min-gib", type=float, default=DEFAULT_MIN_GIB,
+                    help="override the measured threshold (see the module header for its derivation)")
     ap.add_argument("--cleaner", default="scripts/disk-cleanup.sh")
     ap.add_argument("--sim-id", default="", help="destination simulator UDID, for the remedy text")
     ap.add_argument("--dest", default="", help="xcodebuild -destination, to resolve a UDID from name=")

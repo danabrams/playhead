@@ -78,7 +78,7 @@ Four things worth knowing before you argue with it:
 
 **Expect the file to grow for a run or two before it settles, and do not read that as regressions.** The recorded set is the UNION of what has been observed, and with a 0.46 Jaccard each new run surfaces flakes the earlier ones missed. Capture–recapture on the first two runs (32 and 28 failures, 19 shared) estimates the true population at **~47**; 41 are recorded after two observations. So the next `--accept-baseline` or two will legitimately add a handful of names, and the gate will report them as NEW until they are recorded. That is the mechanism working — a newly-observed flake is indistinguishable from a regression until it has been seen, which is exactly why it is reported rather than absorbed. Once the union saturates, `RED (N known / 0 new)` is the steady state. The third accepted observation is also what arms the pass-direction check.
 
-Rails: `scripts/mutation-battery-gate-baseline.py` (R series; the D/E/J/K/L/Q series stay in `mutation-battery.sh`, which is structurally a Swift battery). Unit tests: `python3 -m unittest scripts.tests.test_gate_baseline` — about a second, no build.
+Rails: `scripts/mutation-battery-gate-baseline.py` (R series) and `scripts/mutation-battery-disk-preflight.py` (P series, playhead-3nfa, reusing the R engine); the D/E/J/K/L/Q series stay in `mutation-battery.sh`, which is structurally a Swift battery. Unit tests: `python3 -m unittest scripts.tests.test_gate_baseline` — about a second, no build.
 
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
@@ -160,21 +160,38 @@ Two further traps this sequence exists to avoid (both hit on 2026-07-26):
 
 ### Safety rails
 
-- Before `rm -rf`: path must start with `/Users/dabrams/playhead/.worktrees/` or `/private/tmp/playhead-`, and must NOT appear in `git worktree list --porcelain`.
+- Before `rm -rf`: path must start with `/Users/dabrams/playhead/.worktrees/`, `/private/tmp/playhead-`, or `$TMPDIR/Deleting-` (CoreSimulator's own trash — see below), and must NOT appear in `git worktree list --porcelain`.
 - Never pass `--force` to `git worktree remove` without explicit user approval — the refusal is the safety net.
 - Echo what was removed so the transcript audits the session.
 
-### A full gate run needs ~8 GB of headroom, and leaves ~100 MB behind (playhead-voez)
+### The gate REFUSES to start below 13.5 GiB free (playhead-3nfa)
 
-Measured 2026-08-01 across three runs. Beyond the ~2.7 GB of `.derivedData` that CLAUDE.md already accounts for, one full-plan gate is a **transient** disk event: the destination simulator grows from ~3.7 GB to ~9 GB during the Swift Testing bulk and shrinks back afterwards. Starting a run with ~13 GB free finished; starting with ~10 GB free hit 100 % capacity and **wedged** — xcodebuild stayed alive with zero output for four minutes, having failed to write its result bundle. That presents as a hang, not as an error.
+**You no longer have to remember to check.** `scripts/fast-gate.sh` runs `scripts/disk_preflight.py` before lint, before the xcodegen bootstrap, before xcodebuild — and if the volume is short it prints a loud refusal naming the remedy and **exits 28** (POSIX `ENOSPC`, the error this would otherwise have hidden). Nothing is deleted; the refusal only *reports* what `scripts/disk-cleanup.sh` could reclaim.
 
-Two consequences:
+```bash
+scripts/fast-gate.sh                  # refuses under 13.5 GiB, exit 28
+scripts/fast-gate.sh --reclaim-disk   # run the cleaner ONCE, re-check, then proceed or refuse
+PLAYHEAD_DISK_MIN_GIB=9 scripts/fast-gate.sh    # a different threshold, deliberately
+```
 
-- **Check free space before a gate.** Under ~8 GB, reclaim first. The remedy for a wedge is the documented one: kill the run, then `xcrun simctl shutdown <udid>` and `xcrun simctl erase <udid>` (needs `DEVELOPER_DIR`), which returns the sim to ~0. **Never `rm` a booted sim's directory.**
-- **`.derivedData/Logs/Test/*.xcresult` is the one part that does not shrink back** — ~100 MB per run, accumulating forever. It is safe to delete (the build cache is `.derivedData/Build`, untouched), and it is inside the `.worktrees/` prefix the `rm -rf` rail already permits:
-  ```bash
-  rm -rf .worktrees/<slug>/.derivedData/Logs/Test/*.xcresult
-  ```
+This exists because the failure mode is not a failure. A gate that runs out of room **wedges**: xcodebuild stays alive with zero output and never exits, having failed to write its result bundle. No POSIX 28, no non-zero exit, nothing in the log — indistinguishable from a slow test run. This box hit 100 % capacity four times on 2026-08-01 and every one was caught by somebody happening to look.
+
+**Where 13.5 comes from — measured 2026-08-02, two full runs to a terminal verdict**, sampling `df -k` on `/System/Volumes/Data` every 5 s with `scripts/gate-disk-sample.sh`. The quantity is the **drawdown** (free at start minus the minimum during the run), because a gate is a transient event and the end-state delta understates it by more than half:
+
+| run | conditions | start | min | end | drawdown |
+|---|---|---|---|---|---|
+| 1 | fresh worktree, cache from empty, sim already at 7.88 GiB | 15.07 | **3.58** | 11.39 | **11.49 GiB** |
+| 2 | cache warm, sim freshly erased to ~0 | 19.08 | **6.93** | 8.86 | **12.15 GiB** |
+
+`13.5 = 12.15 (worst observed) + 1.35`, and the margin is measured too: the largest fall inside a single 5 s sampling gap was 1.27 GiB, so 1.35 covers what the sampler cannot see. **The old "~8 GB" figure was well under what a full plan actually draws** — do not restore it without re-measuring.
+
+Three things that will bite whoever re-measures:
+
+- **A cold/warm split was tried and the data rejected it.** The obvious refinement is a cheaper threshold when `.derivedData/Build` exists, since a fresh worktree must create ~2.8 GiB of cache. Run 2 was the warm one and drew down **more**. Simulator state moves by ~8 GiB depending on whether the destination was recently erased, and it swamps the cache saving. Two variables, two runs, neither isolated.
+- **`df` Avail on APFS lags on the way back up.** Run 2 read 8.86 GiB free the moment it exited and 16.00 GiB two minutes later. The *minimum* is still the number to use — it is the same metric by which this box "hit 100 % capacity" — but never compute what a run keeps from a reading taken at exit.
+- **The threshold applies to selective runs too** (`-only-testing:`, i.e. how `mutation-battery.sh` drives the gate). A selective run costs less, but how much less was not measured, so the conservative number governs. If that bites, `--reclaim-disk` or `PLAYHEAD_DISK_MIN_GIB` are the answers.
+
+`PLAYHEAD_SKIP_DISK_PREFLIGHT=1` bypasses the check entirely. It is deliberately **not** printed in the refusal, for the same reason as `PLAYHEAD_SKIP_BASELINE`: an override quoted in the failure message stops being an override and becomes the documented workaround.
 
 A wedged run is also the case the baseline check is built to survive: it printed `CANNOT EVALUATE — the log is incomplete` and passed xcodebuild's own exit through (143), rather than reading ~9,900 unfinished tests as a clean sweep.
 
@@ -204,3 +221,11 @@ scripts/disk-cleanup.sh             # actually clean
 ```
 
 It removes `.worktrees/<slug>/.derivedData` whose worktree is no longer registered, and stale `/private/tmp/playhead-*` dirs older than 3 days that are not active worktrees. Logs to `.logs/disk-cleanup.log`.
+
+**This is the only cleaner in the repo — extend it, don't write a second one.** `scripts/disk_preflight.py` measures and refuses but delegates every removal here, so there is one set of safety rails rather than two that drift. playhead-3nfa added two more classes and one guard:
+
+- **Superseded `.xcresult` bundles** (~93 MB each, measured). The most recent per worktree is always kept — it is what you open after a failure — and only strictly older ones go. `.derivedData/Build` is untouched.
+- **`$TMPDIR/Deleting-*`**, the stranded CoreSimulator trash. Every removal `chmod -R u+rwx` first; see the `simctl erase` section above for why `u+w` looks right and does nothing.
+- **A live-build guard.** Working directories of running `xcodebuild`/`swift-frontend` are resolved with `lsof -a -p <pid> -d cwd` and anything under them is skipped, so a sweep during a long run cannot destroy it. Resolution uses **`pgrep -x`, never `pgrep -f`** — `-f` matches the full argv and self-matches any shell whose command line merely contains the string, which on 2026-08-01 killed a healthy gate and then raised a phantom second-build alarm.
+
+Verify with `python3 -m unittest scripts.tests.test_disk_preflight` (47 tests, under a second, no build) and `scripts/mutation-battery-disk-preflight.py` (P series, 16 rails + a vacuity control).
