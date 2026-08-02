@@ -536,7 +536,7 @@ struct MergedChildRowDedupeV40MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 41)
+        #expect(AnalysisStore.currentSchemaVersion == 42)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }
@@ -839,17 +839,26 @@ struct MergedChildRowDedupeV40MigrationTests {
         try await bootstrap.migrate()
 
         let db = try openRaw(dir)
-        // A hypothetical v41 device: the index is gone because v41 replaced it
-        // with something else. V40 must not resurrect it, and must not re-stamp.
+        // A hypothetical FUTURE device: the index is gone because a later rung
+        // replaced it with something else. V40 must not resurrect it, and must
+        // not re-stamp.
+        //
+        // playhead-hx6n: this is `currentSchemaVersion + 1`, not the literal 41
+        // it used to be. The claim is "a database stamped NEWER THAN THIS
+        // BINARY", so the fixture has to move with head — pinned at 41 it stopped
+        // being a newer database the moment V42 landed, and the test then
+        // reported that V40 had downgraded a database when what really happened
+        // was that V42 legitimately climbed it.
+        let newerVersion = AnalysisStore.currentSchemaVersion + 1
         try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint")
-        try exec(db, "UPDATE _meta SET value = '41' WHERE key = 'schema_version'")
+        try exec(db, "UPDATE _meta SET value = '\(newerVersion)' WHERE key = 'schema_version'")
         sqlite3_close_v2(db)
 
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
 
-        #expect(try await store.schemaVersion() == 41,
+        #expect(try await store.schemaVersion() == newerVersion,
                 "V40 stamped its own version over a NEWER database")
         #expect(!(try probeIndexExists(in: dir, indexName: "idx_chunks_asset_pass_fingerprint")),
                 "V40 ran its body on a database that is past it")

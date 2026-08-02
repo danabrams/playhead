@@ -251,8 +251,15 @@ struct DayZeroDownloadTimeStoreTests {
         try await store.execForTesting(
             "ALTER TABLE rediff_bandwidth_ledger DROP COLUMN dayZeroBudgetSpentBytes"
         )
+        // playhead-hx6n: pinned to the LITERAL 40, not `currentSchemaVersion - 1`.
+        // "Pre-4dqe" is v40 — a fixed historical fact — and expressing it
+        // relative to head silently stopped meaning that the moment head moved
+        // past 41: the rewind then landed ON 41, V41's `observed < 41` guard
+        // declined to run, and the test asserted the absence of artifacts it had
+        // just prevented from being created. It went red on the V42 bump having
+        // been correct for exactly one schema version.
         try await store.execForTesting(
-            "UPDATE _meta SET value = '\(AnalysisStore.currentSchemaVersion - 1)' WHERE key = 'schema_version'"
+            "UPDATE _meta SET value = '40' WHERE key = 'schema_version'"
         )
     }
 
