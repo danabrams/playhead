@@ -1769,7 +1769,16 @@ MUTATIONS=(
   # fixture uses point seeds (ceiling-immune) and X03's uses a 3,000 s seed
   # (dropped whatever the scoring), so neither can be credited off the other.
   "X02|104|SCANORD|$T_LXKQ_AGREEMENT"
-  "X03|104|SCANORD|$T_LXKQ_WIDTH;$T_LXKQ_UNUSABLE"
+  # X03 names ONLY the width test. It first also named the linear-sweep fallback
+  # and SURVIVED on it — measured, and the measurement was right. With the
+  # ceiling gone, that fixture's 3,000 s seed opens ONE neighbourhood covering
+  # every window, so every window scores identically, the tie-break resolves to
+  # episode order, and the 1,800 s cap promotes the first thirty windows in that
+  # same order. The mutant's output is the identity permutation — indistinguishable
+  # from the linear sweep it is supposed to have broken. That is a mis-authored
+  # expectation, not a coverage hole: the ceiling's real consequence is caught by
+  # the width test, which failed as intended.
+  "X03|104|SCANORD|$T_LXKQ_WIDTH"
 
   # 105: the starvation mutant — promotion becomes a FILTER. This is the one
   # the bead's central claim is about, and its blast radius is every
