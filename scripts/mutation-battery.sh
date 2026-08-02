@@ -5459,6 +5459,11 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # NOTE the `Optional(...)` wrapper, which looks redundant and is not: `??`
+  # yields a NON-optional `Double`, and `if let x = <non-optional>` does not
+  # compile ("initializer for conditional binding must have Optional type").
+  # The first cut of this EDIT lost a build to that. The mutation must stay an
+  # optional binding because that is the shape of the line it replaces.
   F09)
     snippet OLD <<'EOF'
            !span.carriesRediffByteExactWidth,
@@ -5467,7 +5472,7 @@ EOF
 EOF
     snippet NEW <<'EOF'
            !span.carriesRediffByteExactWidth,
-           let episodeDuration = episodeDuration ?? span.endTime,
+           let episodeDuration = Optional(episodeDuration ?? span.endTime),
            episodeDuration > 0,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
