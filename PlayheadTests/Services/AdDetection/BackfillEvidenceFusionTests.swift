@@ -926,10 +926,20 @@ struct BackfillEvidenceFusionTests {
         #expect(abs(result.skipConfidence - 0.90) < 0.001)
     }
 
-    @Test("Post-roll guard: fires even for a rediff-anchored span below the floor (no rediff exemption)")
-    func postRollGuardOverridesRediffBypass() {
+    // playhead-sik9 (Dan 2026-08-01, "we do need a rediff exemption"): these two
+    // tests INVERTED. They previously pinned "no rediff exemption" — the guard
+    // firing on a byte-exact tail regardless of anchoring. On Dan's device that
+    // rule would have deleted his DE0784D8 post-roll (confidence 1.00, 2-of-2
+    // correct, 0.4 s boundary accuracy): the most certain signal in the system
+    // demoted on POSITION alone. The exemption's scope and its full list of
+    // still-guarded shapes live in `PostRollGuardByteAnchoredExemptionTests`.
+
+    @Test("Post-roll guard: a byte-exact rediff span below the floor is EXEMPT (playhead-sik9)")
+    func postRollGuardExemptsRediffBelowFloor() {
         // Identical inputs to certaintyTieredFlagOnRediffBypassesFloor — which
-        // proves .eligible without a duration — EXCEPT episodeDuration 100.0.
+        // proves .eligible without a duration — EXCEPT episodeDuration 100.0,
+        // which puts the span's 40.0 end 60 s from the episode end, inside the
+        // 90 s window. Both halves of wraj exempt a rediff-anchored span.
         let span = makeRediffSpan()
         let config = FusionWeightConfig(certaintyTieredEnabled: true)
         let mapper = DecisionMapper(
@@ -940,12 +950,13 @@ struct BackfillEvidenceFusionTests {
             episodeDuration: 100.0
         )
         let result = mapper.map()
-        #expect(result.eligibilityGate == .markOnly)
-        #expect(abs(result.skipConfidence - 0.70) < 0.001)
+        #expect(result.eligibilityGate == .eligible)
+        #expect(abs(result.skipConfidence - 0.70) < 0.001,
+                "declining to demote must not touch the presence score")
     }
 
-    @Test("Post-roll guard: fires even for a rediff-anchored span at/above the floor")
-    func postRollGuardOverridesRediffAtFloor() {
+    @Test("Post-roll guard: a byte-exact rediff span at/above the floor is EXEMPT (playhead-sik9)")
+    func postRollGuardExemptsRediffAtFloor() {
         let span = makeRediffSpan()
         let config = FusionWeightConfig(certaintyTieredEnabled: true)
         let mapper = DecisionMapper(
@@ -956,7 +967,24 @@ struct BackfillEvidenceFusionTests {
             episodeDuration: 100.0
         )
         let result = mapper.map()
-        #expect(result.eligibilityGate == .markOnly)
+        #expect(result.eligibilityGate == .eligible)
+    }
+
+    /// The exemption's boundary, asserted right next to it: an ACOUSTIC width
+    /// oracle (`.spliceSlot`) also owns both edges of its span but is not
+    /// byte-exact, so the guard still fires. Without this the pair above would
+    /// read as "any width oracle is exempt".
+    @Test("Post-roll guard: an acoustic .spliceSlot span is NOT exempt (playhead-sik9)")
+    func postRollGuardStillFiresForSpliceWidth() {
+        let span = makeSpan(anchorProvenance: [.spliceSlot])
+        let mapper = DecisionMapper(
+            span: span,
+            ledger: atFloorLedger(),
+            config: FusionWeightConfig(certaintyTieredEnabled: true),
+            transcriptQuality: .good,
+            episodeDuration: 100.0
+        )
+        #expect(mapper.map().eligibilityGate == .markOnly)
     }
 
     @Test("Post-roll guard: nil episode duration leaves the guard inert (never guess the episode end)")
