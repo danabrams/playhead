@@ -810,6 +810,34 @@ struct AdDetectionConfig: Sendable {
     /// downside below, not a corpus number.
     let podContinuationEnabled: Bool
 
+    /// playhead-y3ya: compose a MARK-ONLY candidate from a semantic `containsAd`
+    /// verdict that fusion could not attach to anything.
+    ///
+    /// **The field case.** 2026-08-01, episode DE0784D8. `semantic_scan_results`
+    /// records `containsAd` for 508–599 s and 1604–1731 s, and there is NO
+    /// `ad_window` anywhere near either. FM evidence reaches fusion only through
+    /// `buildFMLedgerEntries`, which decorates EXISTING `DecodedSpan`s — it can
+    /// never create one, and `RegionProposalBuilder` iterates `window.spans`, so
+    /// a coarse window with no refined spans proposes no region either. A
+    /// sweep-lane verdict with no narrow seed under it therefore contributed to
+    /// nothing. Presence without extent was discarded, which is the detection
+    /// portfolio's stated policy — any signal fires → banner — violated in the
+    /// semantic lane alone.
+    ///
+    /// **What flipping this OFF costs and restores.** OFF short-circuits BEFORE
+    /// any fetch/compose/write, so the backfill is byte-identical to pre-y3ya
+    /// (zero `ad_windows` writes, no banner) and the verdicts go back to being
+    /// silently dropped. It ships ON because the marks are `markOnly` +
+    /// `.candidate` + `.unanchored` on both edges by construction — so
+    /// playhead-2350's gate has nothing to demote and playhead-ynmk makes a
+    /// confirmation a MARK rather than a cut. The worst case is a wrong BANNER,
+    /// never lost show.
+    ///
+    /// This is deliberately NOT a threshold change. No fusion weight, gate or
+    /// promotion rule moves; the near-zero-confidence acoustic population is
+    /// untouched and is only ever an INPUT to this composer's dedupe.
+    let semanticSweepMarkEnabled: Bool
+
     /// playhead-hvk0: require a full rescan to have MEASURABLY read its episode
     /// before its recall sample may certify the `targetedWithAudit` policy for
     /// the show.
@@ -971,6 +999,7 @@ struct AdDetectionConfig: Sendable {
         unanchoredExtentBlocksAutoSkip: Bool = true,
         preRollStartClampSeconds: Double = 20.0,
         podContinuationEnabled: Bool = true,
+        semanticSweepMarkEnabled: Bool = true,
         plannerPromotionRequiresMeasuredCoverage: Bool = false
     ) {
         // Acoustic-splice and rediff are mutually-exclusive WIDTH setters: rediff
@@ -1048,6 +1077,7 @@ struct AdDetectionConfig: Sendable {
         self.unanchoredExtentBlocksAutoSkip = unanchoredExtentBlocksAutoSkip
         self.preRollStartClampSeconds = preRollStartClampSeconds
         self.podContinuationEnabled = podContinuationEnabled
+        self.semanticSweepMarkEnabled = semanticSweepMarkEnabled
         self.plannerPromotionRequiresMeasuredCoverage = plannerPromotionRequiresMeasuredCoverage
     }
 
@@ -1113,6 +1143,7 @@ struct AdDetectionConfig: Sendable {
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
         preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
         podContinuationEnabled: true,  // playhead-eks2: flipped ON 2026-08-01 (Dan) — the corpus A/B the xsdz.65 close gated on measures 0.0 newly-claimed seconds outside a byte-confirmed DAI slot at the shipping arm, and the output is mark-only/candidate/unanchored, so the worst case is a wrong BANNER (playhead-2350 + ynmk both hold, pinned by AdPodContinuationFlipTests)
+        semanticSweepMarkEnabled: true,  // playhead-y3ya: ships ON. A semantic containsAd verdict fusion could not attach becomes a MARK-ONLY candidate; OFF restores the pre-y3ya silent drop. Marks are markOnly/candidate/unanchored by construction, so 2350 and ynmk both hold and the worst case is a wrong BANNER (pinned by SemanticSweepArmsSuggestTests)
         plannerPromotionRequiresMeasuredCoverage: false  // playhead-hvk0: the read-evidence promotion gate ships OFF and fully inert. The mechanism is correct and mutation-tested, but at the shared 0.98 floor NO episode on the 2026-07-29 device pull qualifies (max measured adScanFraction 0.943), so flipping it retires `targetedWithAudit` entirely and buys a full-episode plan on every episode at a MEASURED 12-45 min of FM wall-clock each, 92% of it spent on calls that fail and yield no coverage. Retiring a policy at that price is Dan's decision under CLAUDE.md Decision Authority — see the field doc.
     )
 
@@ -6524,6 +6555,80 @@ actor AdDetectionService {
             } catch {
                 logger.warning(
                     "Backfill Step 18b [xsdz.65] skipped for asset \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        // ── Step 18c: semantic-sweep marks (playhead-y3ya) ────────────────────
+        // FM already found ads on Dan's episode and they never reached him.
+        // DE0784D8, 2026-08-01: `semantic_scan_results` carries `containsAd` for
+        // 508–599 s and 1604–1731 s, and there is NO `ad_window` anywhere near
+        // either. FM evidence enters fusion only through `buildFMLedgerEntries`,
+        // which DECORATES existing `DecodedSpan`s and cannot create one; a coarse
+        // window with no refined spans also proposes no region. So a sweep-lane
+        // verdict with no narrow seed under it contributed to nothing — presence
+        // without extent was discarded, in the one lane that did not honour the
+        // portfolio's any-signal-fires-→-banner policy.
+        //
+        // Placed LAST among the additive producers, after specialist compose
+        // (18) and pod continuation (18b), and that ordering is load-bearing:
+        // the composer refuses to emit over ANY existing window, so running it
+        // last means it fills only what every other producer left empty. That is
+        // also what makes "the surface was not re-flooded" provable rather than
+        // argued — the near-zero-confidence acoustic population is an INPUT to
+        // the dedupe and nothing else, and no threshold, weight or gate moves.
+        //
+        // The marks are `markOnly` + `.candidate` + `.unanchored` on both edges
+        // by construction, so playhead-2350's gate has nothing to demote and
+        // playhead-ynmk makes a confirmation a MARK rather than a cut. The
+        // worst case is a wrong banner, never lost show.
+        //
+        // Hard-gated on `semanticSweepMarkEnabled`: OFF short-circuits before any
+        // read/compose/write and the backfill is byte-identical to pre-y3ya.
+        // A FAILURE HERE MUST NEVER COST THE BACKFILL — same rule as 18b. This
+        // is a recall lever running after all the real work; a throwing store
+        // read is logged and swallowed, and the next run recomputes the same
+        // marks from the same inputs (content-addressed ids, so nothing churns).
+        // GATED ON THE EFFECTIVE FM MODE, not on the feature flag alone.
+        // `ApprovedCohortRegistry` collapses an unapproved prompt / schema /
+        // scan-plan / normalization / locale / appBuild cohort to `.shadow`, and
+        // PlayheadRuntime's bootstrap calls that "exactly the protection the
+        // registry was designed to provide". A banner composed from an
+        // UNAPPROVED cohort's verdicts would defeat it — the whole point of
+        // shadow is that its output is observed, never acted on.
+        // `canProposeNewRegions` is the semantically exact predicate: a sweep
+        // mark IS a new region proposed by FM, and `.rescoreOnly` means
+        // "rescore what exists, propose nothing". Production is `.full`. This
+        // also gives that capability bit its first production consumer — it had
+        // none, which is part of why the sweep lane could never surface.
+        if config.semanticSweepMarkEnabled,
+           effectiveFMBackfillMode.canProposeNewRegions,
+           !semanticScanResults.isEmpty {
+            do {
+                let existingWindows = try await store.fetchAdWindows(assetId: analysisAssetId)
+                let sweepMarks = SemanticSweepMarkComposer.compose(
+                    scanRows: semanticScanResults,
+                    existingWindows: existingWindows,
+                    analysisAssetId: analysisAssetId
+                )
+                let reconciledSweep = Self.reconcileVersionScopedMarkSets(
+                    newMarks: sweepMarks,
+                    existingWindows: existingWindows,
+                    detectorVersion: SemanticSweepMarkComposer.detectorVersion
+                )
+                if !reconciledSweep.windows.isEmpty
+                    || !reconciledSweep.retiredIDs.isEmpty {
+                    try await store.reconcileBackfillAdWindows(
+                        reconciledSweep.windows,
+                        retiredIDs: reconciledSweep.retiredIDs
+                    )
+                }
+                logger.info(
+                    "Backfill Step 18c [y3ya]: scanRows=\(semanticScanResults.count) composed=\(reconciledSweep.windows.count) retired=\(reconciledSweep.retiredIDs.count)"
+                )
+            } catch {
+                logger.warning(
+                    "Backfill Step 18c [y3ya] skipped for asset \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
                 )
             }
         }

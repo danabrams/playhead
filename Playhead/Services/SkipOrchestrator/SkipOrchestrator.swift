@@ -5976,7 +5976,13 @@ actor SkipOrchestrator {
         switch metadataSource {
         case SpecialistMarkComposer.metadataSource:
             return .specialist
-        case "foundationModels":
+        case "foundationModels",
+             // playhead-y3ya: a semantic-sweep mark IS a Foundation Model
+             // verdict — the coarse `containsAd` that fusion could not attach.
+             // It already resolved to `.foundationModel` through the default
+             // below; stated explicitly so the attribution is a decision rather
+             // than an inheritance.
+             SemanticSweepMarkComposer.metadataSource:
             return .foundationModel
         default:
             // Absent / "none" / "fallback" tags carry no distinct producer

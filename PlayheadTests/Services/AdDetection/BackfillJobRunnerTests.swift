@@ -197,7 +197,12 @@ struct BackfillJobRunnerTests {
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
         #expect(!scans.isEmpty)
         #expect(scans.allSatisfy { $0.scanPass == "passA" || $0.scanPass == "passB" })
-        // Shadow mode never inserts AdWindows -- that path is owned by lexical.
+        // Shadow mode never inserts AdWindows. Two independent reasons now,
+        // and the second is playhead-y3ya's: `TestFMRuntime` defaults to
+        // `.noAds`, so this fixture has no verdict to compose; AND the
+        // semantic-sweep compose is gated on `canProposeNewRegions`, which
+        // `.shadow` is not. The sibling `phase6ModesPersistWithoutAdWindowWrites`
+        // is where the gate itself is exercised against a `containsAd` fixture.
         let windows = try await store.fetchAdWindows(assetId: "asset-runner")
         #expect(windows.isEmpty)
     }
@@ -2115,7 +2120,25 @@ struct BackfillJobRunnerTests {
         }
     }
 
-    @Test("non-off Phase 6 modes still run FM without writing AdWindows directly")
+    /// playhead-y3ya RESTATED THIS CONTRACT, deliberately, and the restatement
+    /// is stronger than what it replaces.
+    ///
+    /// It used to read "no non-off mode writes AdWindows", full stop. That was
+    /// true only because a coarse `containsAd` verdict with no narrow seed under
+    /// it was DISCARDED — which is the defect y3ya exists to fix. FM's verdict
+    /// now becomes a mark in the modes that may propose a region, so the claim
+    /// worth keeping is not "no windows" but:
+    ///
+    ///   * `.shadow` / `.rescoreOnly` — still ZERO windows. Neither may propose,
+    ///     and `.shadow` in particular is the state `ApprovedCohortRegistry`
+    ///     collapses an unapproved cohort to, so surfacing its verdicts would
+    ///     defeat the registry's whole purpose. This half of the assertion is
+    ///     now LOAD-BEARING where it used to be incidental.
+    ///   * `.proposalOnly` / `.full` — the only rows written are
+    ///     `semantic-sweep-v1` MARK-ONLY candidates with both edges
+    ///     `.unanchored`. The FM scan path still writes no auto-skip material,
+    ///     which is what "without writing AdWindows directly" was protecting.
+    @Test("non-off Phase 6 modes write only mark-only sweep rows, and only when they may propose")
     func phase6ModesPersistWithoutAdWindowWrites() async throws {
         let modes: [FMBackfillMode] = [.shadow, .rescoreOnly, .proposalOnly, .full]
 
@@ -2148,7 +2171,27 @@ struct BackfillJobRunnerTests {
             #expect(!result.scanResultIds.isEmpty, "\(mode.rawValue) should persist FM output")
             #expect(await fmRuntime.coarseCallCount >= 1, "\(mode.rawValue) should run FM")
             let windows = try await store.fetchAdWindows(assetId: assetId)
-            #expect(windows.isEmpty, "\(mode.rawValue) must not write AdWindows directly")
+            if mode.canProposeNewRegions {
+                #expect(
+                    windows.allSatisfy {
+                        $0.detectorVersion == SemanticSweepMarkComposer.detectorVersion
+                            && $0.eligibilityGate == SkipEligibilityGate.markOnly.rawValue
+                            && $0.decisionState == AdDecisionState.candidate.rawValue
+                            && $0.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue
+                            && $0.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue
+                    },
+                    "\(mode.rawValue) may write ONLY mark-only sweep rows: \(windows.map(\.detectorVersion))"
+                )
+                #expect(
+                    !windows.isEmpty,
+                    "\(mode.rawValue) proposes, so the containsAd verdict must have composed"
+                )
+            } else {
+                #expect(
+                    windows.isEmpty,
+                    "\(mode.rawValue) may not propose, so it must write no AdWindows"
+                )
+            }
         }
     }
 

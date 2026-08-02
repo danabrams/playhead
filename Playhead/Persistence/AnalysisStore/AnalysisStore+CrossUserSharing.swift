@@ -380,7 +380,14 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                  // error. Both producers ship flag-off, which is the only reason
                  // this never bit.
                  SpecialistMarkComposer.boundaryState,
-                 AdPodContinuation.boundaryState:
+                 AdPodContinuation.boundaryState,
+                 // playhead-y3ya: a semantic-sweep mark is the same shape — an
+                 // additive MARK-ONLY guess derived from THIS device's FM run,
+                 // with a boundary state that is not an `AdBoundaryState` case.
+                 // Listed here for the ALL-or-nothing reason above, and it is
+                 // NOT covered by the flag-off caveat: this producer ships ON,
+                 // so an omission would abort snapshots in the field.
+                 SemanticSweepMarkComposer.boundaryState:
                 return true
             default:
                 return false
