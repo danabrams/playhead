@@ -1210,7 +1210,7 @@ T_6QVF_PRED_BYTE="a byte-owned span is unchanged — byte-exact true, chroma fal
 T_6QVF_PRED_INDEP="the two predicates are independent — a span carrying BOTH answers both true"
 T_6QVF_OWNS_WIDTH="chroma STILL owns width — isWidthOwnership is true"
 T_6QVF_UNANCHORED="a chroma-owned span derives UNANCHORED on both edges — tier .none, not .deterministic"
-T_6QVF_RAIL_SWEEP="RAIL — ONLY .rediffSlot derives the deterministic tier; every other anchor, alone, does not"
+T_6QVF_RAIL_SWEEP="RAIL — ONLY .rediffSlot derives the deterministic tier, and no other anchor alone does"
 T_6QVF_RAIL_MIXED="RAIL — a chroma span mixed with ordinary presence anchors still does not reach deterministic"
 T_6QVF_RAIL_LANE="RAIL — a chroma span's anchors do NOT open the qs0d targeted padding lane"
 T_6QVF_RAIL_MARGIN="RAIL — a chroma span has NO late-safe start margin, so it cannot be auto-skipped"
@@ -2277,7 +2277,13 @@ MUTATIONS=(
 
   "G02|161|ADSVC|$T_6QVF_E2E_CHROMA;$T_6QVF_E2E_REMOTE;$T_6QVF_OWNERSHIP_E2E"
 
-  "G03|162|ADSVC|$T_6QVF_E2E_BYTE;$T_6QVF_E2E_ANCHORS"
+  # Judged by the persisted-anchor test alone. The obvious companion —
+  # `byte-success: …` in the same suite — carries semicolons in its display
+  # name, which this script uses as its expected-test separator, so naming it
+  # here makes the mutation unevaluable rather than killed. The anchor test is
+  # the stronger claim anyway: it reads the tier off the persisted ad_windows
+  # row rather than off the in-memory span.
+  "G03|162|ADSVC|$T_6QVF_E2E_ANCHORS"
 
   # The predicate layer. G04 is the collapse restated as a one-line
   # "simplification"; G05 is the copy-paste that makes the chroma accessor
@@ -2285,7 +2291,11 @@ MUTATIONS=(
   # empty and the rails read as passing for the wrong reason).
   "G04|163|DSPAN|$T_6QVF_PRED_CHROMA;$T_6QVF_UNANCHORED;$T_6QVF_RAIL_SWEEP;$T_6QVF_FLOOR_CHROMA"
 
-  "G05|164|DSPAN|$T_6QVF_PRED_CHROMA;$T_6QVF_PRED_INDEP"
+  # Judged by the two SINGLE-marker tests. `predicatesAreIndependent` builds a
+  # span carrying BOTH markers, so under this mutation both properties still
+  # answer true and it stays green — it is a good test of a different claim and
+  # a useless expectation here.
+  "G05|164|DSPAN|$T_6QVF_PRED_CHROMA;$T_6QVF_PRED_BYTE"
 
   # Persistence. G06 is the UNSAFE direction specifically: encoding chroma under
   # the byte type string is the one migration mistake an older binary cannot

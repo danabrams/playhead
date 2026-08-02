@@ -134,7 +134,10 @@ struct RediffChromaWidthIsNotDeterministicTests {
                 "playhead-2350: a span with no anchored edge is a BANNER, never an auto-skip")
     }
 
-    @Test("RAIL — ONLY .rediffSlot derives the deterministic tier; every other anchor, alone, does not")
+    // NOTE the comma rather than a semicolon in the display name: the mutation
+    // battery splits a record's expected-test list on `;`, so a semicolon here
+    // makes the expectation unresolvable and the mutation unevaluable.
+    @Test("RAIL — ONLY .rediffSlot derives the deterministic tier, and no other anchor alone does")
     func onlyByteExactReachesDeterministic() {
         // The sweep, not the single case. A future width oracle added to
         // `isWidthOwnership` without a matching decision about extent would
