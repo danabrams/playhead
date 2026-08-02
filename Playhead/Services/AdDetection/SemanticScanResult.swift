@@ -23,6 +23,36 @@ enum SemanticScanPhase: String, Sendable, Hashable, CaseIterable {
     case targeted
 }
 
+/// playhead-hx6n: the app state a semantic scan row was written in.
+///
+/// **The vocabulary is BORROWED, NOT INVENTED** (playhead-9v09). These four
+/// raw values are byte-identical to the strings `BGTaskTelemetryScenePhase`
+/// produces and `background_task_runs.scenePhase` already stores, because they
+/// come from the same helper. That is what makes a phase split over
+/// `semantic_scan_results` directly comparable with one over
+/// `background_task_runs` instead of being a second, parallel vocabulary that
+/// happens to use similar words.
+///
+/// Two absences are deliberately kept distinct, and BOTH are unattributed:
+///
+///   * a `nil` `SemanticScanResult.scenePhase` — no binary ever recorded a
+///     phase for this row. Every row written before schema V42 is in this
+///     state, permanently and correctly: they are genuinely unattributable and
+///     nothing invents a value for them.
+///   * `.unknown` — a phase *was* recorded and the platform declined to name
+///     it (`@unknown default`, or a non-UIKit host).
+///
+/// They answer different questions ("is the writer wired up?" versus "is the
+/// platform answering?"), so they are not collapsed at rest. They collapse only
+/// at the point of ATTRIBUTION, in ``ScanAttributionBucket``, where both are
+/// `.unattributed` — see ``attributionBucket``.
+enum ScanScenePhase: String, Sendable, Hashable, CaseIterable {
+    case active
+    case inactive
+    case background
+    case unknown
+}
+
 struct SemanticScanResult: Sendable, Equatable {
     let id: String
     let analysisAssetId: String
@@ -72,6 +102,31 @@ struct SemanticScanResult: Sendable, Equatable {
     /// Model-generated explanation from `Refusal.explanation` at the time the permissive
     /// fallback was triggered. `nil` if explanation was unavailable or the fallback was not used.
     let permissiveFallbackReason: String?
+    /// playhead-hx6n (schema V42): UNIX seconds at which this row was written.
+    ///
+    /// `nil` means UNATTRIBUTED, and it means exactly one thing on disk: the row
+    /// predates V42. Post-V42 writes cannot leave it nil —
+    /// ``AnalysisStore/insertSemanticScanResult(_:now:)`` stamps its own clock
+    /// when the caller supplies none, so a NULL `createdAt` is an unambiguous
+    /// "written by a binary that did not record this", never "a writer forgot".
+    ///
+    /// It is NOT defaulted to 0 or to `Date()` on the struct. A default would
+    /// make every historical row claim a timestamp it does not have, which is
+    /// the precise defect this bead exists to end.
+    let createdAt: Double?
+    /// playhead-hx6n (schema V42): the app state this row was written in.
+    ///
+    /// `nil` is UNATTRIBUTED and stays unattributed. Nothing in this codebase
+    /// may read `nil` as `.active` — see ``ScanAttributionBucket`` and
+    /// ``SemanticScanThroughputSplit``.
+    let scenePhase: ScanScenePhase?
+    /// playhead-hx6n (schema V42): the `backfill_jobs.jobId` this row was
+    /// produced under — the join key `semantic_scan_results` never had.
+    ///
+    /// `nil` for rows written before V42 and for any writer with no job in
+    /// hand. A non-nil value that matches no job joins to nothing, which reads
+    /// as "no run" rather than as a wrong run.
+    let runCorrelationId: String?
 
     init(
         id: String,
@@ -98,7 +153,10 @@ struct SemanticScanResult: Sendable, Equatable {
         jobPhase: String = "shadow",
         refusalExplanation: String? = nil,
         usedPermissiveFallback: Bool = false,
-        permissiveFallbackReason: String? = nil
+        permissiveFallbackReason: String? = nil,
+        createdAt: Double? = nil,
+        scenePhase: ScanScenePhase? = nil,
+        runCorrelationId: String? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -125,6 +183,62 @@ struct SemanticScanResult: Sendable, Equatable {
         self.refusalExplanation = refusalExplanation
         self.usedPermissiveFallback = usedPermissiveFallback
         self.permissiveFallbackReason = permissiveFallbackReason
+        self.createdAt = createdAt
+        self.scenePhase = scenePhase
+        self.runCorrelationId = runCorrelationId
+    }
+
+    /// playhead-hx6n: the ONE seam that stamps run attribution onto a scan row.
+    ///
+    /// Every `SemanticScanResult` factory in `BackfillJobRunner` already had the
+    /// job id in hand — each one takes `jobId:` and passes it as `reuseScope`,
+    /// where it was hashed into `reuseKeyHash` and then discarded. Rather than
+    /// widen six factories, attribution is applied once, at the seam where the
+    /// row is handed to the store, which is also the moment that makes
+    /// `scenePhase` mean what it claims: the phase AT COMPLETION, not the phase
+    /// the job happened to start in. A backfill job runs for minutes and can
+    /// cross a phase boundary mid-run; stamping at job start would attribute
+    /// every one of its rows to whichever side it began on — the exact
+    /// misattribution the measurement is trying to avoid.
+    ///
+    /// Deliberately non-mutating and total: it returns a copy with the three
+    /// attribution fields replaced and everything else byte-identical, so it
+    /// cannot perturb geometry, status, or the reuse key.
+    func attributed(
+        createdAt: Double,
+        scenePhase: ScanScenePhase?,
+        runCorrelationId: String?
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: id,
+            analysisAssetId: analysisAssetId,
+            windowFirstAtomOrdinal: windowFirstAtomOrdinal,
+            windowLastAtomOrdinal: windowLastAtomOrdinal,
+            windowStartTime: windowStartTime,
+            windowEndTime: windowEndTime,
+            scanPass: scanPass,
+            transcriptQuality: transcriptQuality,
+            disposition: disposition,
+            spansJSON: spansJSON,
+            status: status,
+            attemptCount: attemptCount,
+            errorContext: errorContext,
+            inputTokenCount: inputTokenCount,
+            outputTokenCount: outputTokenCount,
+            latencyMs: latencyMs,
+            prewarmHit: prewarmHit,
+            scanCohortJSON: scanCohortJSON,
+            transcriptVersion: transcriptVersion,
+            reuseScope: reuseScope,
+            runMode: runMode,
+            jobPhase: jobPhase,
+            refusalExplanation: refusalExplanation,
+            usedPermissiveFallback: usedPermissiveFallback,
+            permissiveFallbackReason: permissiveFallbackReason,
+            createdAt: createdAt,
+            scenePhase: scenePhase,
+            runCorrelationId: runCorrelationId
+        )
     }
 
     /// playhead-avbn: the pass whose ``disposition`` is a PRESENCE VERDICT — the
