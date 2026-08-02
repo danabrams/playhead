@@ -246,3 +246,25 @@ This is strictly better than the skip, not merely safer:
 Step 5 is therefore superseded. It is kept above because the reasoning that produced it is what
 found the ordering answer — the tradeoff I talked myself into was the signal that the design was
 wrong.
+
+## Operational note — the playhead-cgka trap fired mid-bead
+
+Gate 2 stalled at the install/boot step with xcodebuild alive at 0 % CPU and no compiler
+processes. Disk was at **10 GiB** and the single booted simulator was **9.0 GB** — it had NOT
+shrunk back after gate 1, so the run was heading straight into the documented wedge.
+
+Killed by PID (never `pkill -f`), then:
+
+    xcrun simctl shutdown <udid>   # reported "current state: Shutdown" — already down
+    xcrun simctl erase <udid>      # device dir 9.0 GB -> 18 MB
+
+...and the erase freed only ~1 GiB, because CoreSimulator had *moved* the data to
+`$TMPDIR/Deleting-*` rather than deleting it (playhead-cgka). Clearing it took the volume from
+10 GiB to **19 GiB**:
+
+    chmod -R u+rwx "$TMPDIR"Deleting-*     # u+w is not enough; 0o300 lacks READ
+    rm -rf "$TMPDIR"Deleting-*
+
+Worth recording because the failure presented as a hung build, not as a disk error, and because
+the sim not shrinking back between two gates in one session is exactly how a box that looks like
+it has headroom arrives at 100 %.
