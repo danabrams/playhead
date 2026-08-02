@@ -24,9 +24,16 @@
 //       self-promo trigger on a NON-rediff span still demotes to `.markOnly`
 //       (the exemption does not leak).
 //
-// The rediff harness (deterministic noise PCM + synthetic A-side fingerprint
-// stream with an ad block spliced in) mirrors `RediffSlotOwnershipEndToEndTests`;
+// The rediff harness stages a synthetic A/B MP3 pair whose byte-divergent
+// region covers the fixture ad break, mirroring `RediffByteFirstEndToEndTests`;
 // the self-promo fixture mirrors `SelfPromoSuppressionWireInTests`.
+//
+// playhead-6qvf CHANGED THAT HARNESS, and the reason is worth recording. It used
+// to serve mono-16 kHz PCM plus a synthetic chroma A-side stream — which drives
+// the CHROMA differ, not the byte one. While both differ arms stamped
+// `.rediffSlot` that was undetectable: this suite proved a chroma-derived span
+// was exempt and called the result "byte-exact" throughout. The fixture now
+// drives the byte-run aligner, so the suite tests the exemption it names.
 
 import Foundation
 import Testing
@@ -168,10 +175,10 @@ struct RediffByteExactDemotionExemptionTests {
         )
     }
 
-    private static func asset(id: String) -> AnalysisAsset {
+    private static func asset(id: String, sourceURL: String = "file:///tmp/placeholder.m4a") -> AnalysisAsset {
         AnalysisAsset(
             id: id, episodeId: "ep-\(id)", assetFingerprint: "fp-\(id)",
-            weakFingerprint: nil, sourceURL: "file:///tmp/\(id).m4a",
+            weakFingerprint: nil, sourceURL: sourceURL,
             featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
             confirmedAdCoverageEndTime: nil, analysisState: "new",
             analysisVersion: 1, capabilitySnapshot: nil
@@ -214,57 +221,49 @@ struct RediffByteExactDemotionExemptionTests {
         }
     }
 
-    /// Deterministic SplitMix64 noise so the fixture is byte-stable across runs.
-    private struct Noise {
-        var state: UInt64
-        init(seed: UInt64) { state = seed }
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-    }
-
-    private static func noisePCM(seconds: Double, seed: UInt64) -> [Float] {
-        var rng = Noise(seed: seed)
-        let n = Int(seconds * 16_000)
-        return (0..<n).map { _ in Float(Int64(bitPattern: rng.next()) % 2_000_000) / 1_000_000.0 }
-    }
-
-    private struct FixedBSideProvider: RediffBSideProvider {
+    /// playhead-6qvf: a BYTE-side provider. This suite is about the BYTE-exact
+    /// exemption, so it must drive the byte-run aligner — the arm that actually
+    /// earns `.rediffSlot`.
+    ///
+    /// It used to serve mono-16 kHz PCM, which drives the CHROMA fallback. That
+    /// was invisible while both arms stamped `.rediffSlot`: the fixture was
+    /// exercising a ~1 s chroma alignment while the suite name, the file header
+    /// and every assertion said "byte-exact". Serving no PCM at all is
+    /// deliberate — if the byte pair ever stops aligning, the pass falls to
+    /// chroma, finds nothing, and the fixture precondition fails loudly instead
+    /// of quietly testing the other differ again.
+    private struct ByteBSideProvider: RediffBSideProvider {
         let assetId: String
-        let samples: [Float]
-        func refetchedBSideMono16kHz(assetId: String) async -> [Float]? {
-            assetId == self.assetId ? samples : nil
+        let fileURL: URL
+        func refetchedBSideMono16kHz(assetId: String) async -> [Float]? { nil }
+        func refetchedBSideFileURL(assetId: String) async -> URL? {
+            assetId == self.assetId ? fileURL : nil
         }
     }
 
-    /// Stored A-side stream = B's own content fingerprints with a distinct ad
-    /// block spliced in at the index mapping to `adStart`, so the differ recovers
-    /// a played slot at [adStart, adEnd].
-    private static func syntheticASide(
-        assetId: String, contentPCM: [Float]
-    ) -> EpisodeFingerprintRecord {
-        let secPerFp = ChromaFingerprinter.secondsPerFingerprint
-        let fpContent = EpisodeFingerprintCapture.fingerprints(mono16kHz: contentPCM)
-        let kIns = Int((adStart / secPerFp).rounded())
-        let adLen = Int(((adEnd - adStart) / secPerFp).rounded())
-        var rng = Noise(seed: 0xADD_5EED)
-        let adBlock = (0..<adLen).map { _ in UInt32(truncatingIfNeeded: rng.next()) | 0x8000_0000 }
-        precondition(kIns < fpContent.count, "content too short for the insertion index")
-        var aFps = Array(fpContent[0..<kIns])
-        aFps.append(contentsOf: adBlock)
-        aFps.append(contentsOf: fpContent[kIns...])
-        return EpisodeFingerprintRecord(
-            analysisAssetId: assetId,
-            algorithmVersion: ChromaFingerprinter.algorithmVersion,
-            secondsPerFingerprint: secPerFp,
-            fingerprints: aFps,
-            sourceAudioIdentity: "fp-\(assetId)",  // matches asset fingerprint
-            capturedAt: 0
-        )
+    /// A synthetic A/B MP3 pair whose byte-divergent region covers the fixture's
+    /// [100,160] ad chunk: A carries an ID3-separated distinct ad block, B is the
+    /// same content without it. Mirrors `RediffByteFirstEndToEndTests.BytePair`
+    /// (≈[95,165] s at 128 kbps / 26.122 ms per frame over 280 s of audio).
+    private struct BytePair {
+        let aURL: URL
+        let bURL: URL
+        static let adStartFrame = 3637   // ≈ 95.0 s
+        static let adFrames = 2680       // ≈ 70.0 s
+        static let contentFrames = 10719 // ≈ 280.0 s of played (A) audio
+
+        static func stage(in directory: URL, assetId: String) throws -> BytePair {
+            let c1 = SyntheticMP3.frames(count: adStartFrame, seed: 0xC0FFEE)
+            let c2 = SyntheticMP3.frames(count: contentFrames - adStartFrame - adFrames, seed: 0xFACADE)
+            let ad = SyntheticMP3.frames(count: adFrames, seed: 0xAD_B10C)
+            let aData = SyntheticMP3.file(c1 + [SyntheticMP3.id3v2(payloadBytes: 32)] + ad + c2)
+            let bData = SyntheticMP3.file(c1 + c2)
+            let aURL = directory.appendingPathComponent("\(assetId).mp3", isDirectory: false)
+            let bURL = directory.appendingPathComponent("\(assetId).fresh.mp3", isDirectory: false)
+            try aData.write(to: aURL)
+            try bData.write(to: bURL)
+            return BytePair(aURL: aURL, bURL: bURL)
+        }
     }
 
     /// A self-promo bank carrying the fixture's STRONG (`selfEvident`) phrase,
@@ -291,15 +290,21 @@ struct RediffByteExactDemotionExemptionTests {
         selfPromoEnabled: Bool
     ) async throws -> AdWindowResult {
         let store = try await makeTestStore()
-        try await store.insertAsset(asset(id: assetId))
-        try await store.insertFeatureWindows(features(assetId: assetId, count: 140))
 
+        // playhead-6qvf: stage the BYTE pair and point the asset row's
+        // `sourceURL` at the played (A) copy, so `computeByteAlignedPlayedSlots`
+        // resolves an A-side and the byte differ — not the chroma fallback —
+        // sets the width. `.rediffSlot` is the byte arm's marker now.
         var provider: RediffBSideProvider?
+        var sourceURL = "file:///tmp/\(assetId).m4a"
         if rediffOwnership {
-            let contentPCM = noisePCM(seconds: 180, seed: 7)
-            try await store.upsertEpisodeFingerprints(syntheticASide(assetId: assetId, contentPCM: contentPCM))
-            provider = FixedBSideProvider(assetId: assetId, samples: contentPCM)
+            let dir = try makeTempDir(prefix: "pzy2-byte-\(assetId)")
+            let pair = try BytePair.stage(in: dir, assetId: assetId)
+            sourceURL = pair.aURL.absoluteString
+            provider = ByteBSideProvider(assetId: assetId, fileURL: pair.bURL)
         }
+        try await store.insertAsset(asset(id: assetId, sourceURL: sourceURL))
+        try await store.insertFeatureWindows(features(assetId: assetId, count: 140))
 
         let config = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70,
