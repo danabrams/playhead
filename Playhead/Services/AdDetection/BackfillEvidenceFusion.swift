@@ -1001,15 +1001,24 @@ struct DecisionMapper: Sendable {
         // (the score-does-not-follow-the-gate invariant documented on
         // `DecisionResult` and `computeGate()`).
         //
-        // Policy: auto-SKIP high-certainty DAI whose WIDTH is owned by the rediff
-        // oracle (`.rediffSlot` in `anchorProvenance`) regardless of score; for
-        // host-read (non-rediff) spans, only stay auto-skip-`.eligible` when
-        // `skipConfidence` clears `hostReadConfidenceFloor`, else demote to
-        // `.markOnly` (banner). `skipConfidence` here IS `effectiveConfidence` —
-        // the exact field the floor (default 0.9) was calibrated against.
+        // Policy: auto-SKIP high-certainty DAI whose WIDTH is owned by the
+        // BYTE-EXACT rediff oracle (`.rediffSlot` in `anchorProvenance`)
+        // regardless of score; for host-read (non-rediff) spans, only stay
+        // auto-skip-`.eligible` when `skipConfidence` clears
+        // `hostReadConfidenceFloor`, else demote to `.markOnly` (banner).
+        // `skipConfidence` here IS `effectiveConfidence` — the exact field the
+        // floor (default 0.9) was calibrated against.
+        //
+        // playhead-6qvf: this reads the SHARED `carriesRediffByteExactWidth`
+        // rather than the hand-rolled `contains(where:)` pattern-match it used
+        // to inline. Same value, but a second spelling of "is this byte-exact?"
+        // is exactly how the two differ arms came to be told apart in one place
+        // and not another. One expression, six consumers. It also silently
+        // narrowed with the rest: `.rediffSlotChroma` now fails it, so a
+        // chroma-derived width must clear the floor like any host-read span.
         if config.certaintyTieredEnabled,
            gate == .eligible,
-           !span.anchorProvenance.contains(where: { if case .rediffSlot = $0 { return true } else { return false } }),
+           !span.carriesRediffByteExactWidth,
            skipConfidence < config.hostReadConfidenceFloor {
             gate = .markOnly
         }
@@ -1067,15 +1076,19 @@ struct DecisionMapper: Sendable {
         //     downstream. This exemption only declines to demote HERE; it never
         //     promotes and never overrides the unanchored-edge block.
         //
-        // NARROWNESS CAVEAT, inherited not introduced (playhead-6qvf): the
-        // CHROMA differ fallback (`RediffSlotOwnership.gateAndDiff`, taken when
-        // the byte differ yields nothing) also stamps `.rediffSlot`, and its
-        // ~1 s chroma-alignment slots are not byte-exact. Separating the two
-        // needs a distinct `AnchorRef` case — a persisted-provenance change —
-        // and the same predicate already governs the four shipped exemptions
-        // listed above, so forking it for one of five consumers would be worse
-        // than the status quo: the five would then disagree about what
-        // "byte-exact" means. Tracked as playhead-6qvf, not forked here.
+        //   • The rediff CHROMA arm. RESOLVED by playhead-6qvf, and it was the
+        //     caveat this comment used to carry: the chroma fallback
+        //     (`RediffSlotOwnership.gateAndDiff`, taken when the byte differ
+        //     yields nothing) also stamped `.rediffSlot`, so its ~1 s alignment
+        //     was exempt here and admitted to auto-skip as `deterministic`. It
+        //     now stamps `.rediffSlotChroma`, fails
+        //     `carriesRediffByteExactWidth`, and is guarded like any other tail.
+        //     The fix moved ALL SIX consumers of the predicate at once rather
+        //     than forking it here — five carve-outs meaning one thing by
+        //     "byte-exact" and a sixth meaning another would have been worse
+        //     than one honest-but-wrong definition. Measured 9/51 (17.6%) of
+        //     real corpus A/B pairs take the chroma arm, so this was live
+        //     exposure, not a theoretical one.
         if config.certaintyTieredEnabled,
            gate == .eligible,
            !span.carriesRediffByteExactWidth,
@@ -1241,9 +1254,12 @@ struct DecisionMapper: Sendable {
     /// catalog / classifier seed / user correction). Such a span is anchored
     /// ONLY by the sustained-music proposer — a targeting cue, not a verdict —
     /// so it must never auto-skip. The bare width markers (`.spliceSlot` /
-    /// `.rediffSlot`) are deliberately NOT treated as corroboration here: they
-    /// set WIDTH, not PRESENCE, so a music+slot span still has no presence
-    /// evidence beyond the music hint.
+    /// `.rediffSlot` / `.rediffSlotChroma`) are deliberately NOT treated as
+    /// corroboration here: they set WIDTH, not PRESENCE, so a music+slot span
+    /// still has no presence evidence beyond the music hint. playhead-6qvf's
+    /// chroma arm joins that list unchanged — the byte/chroma split is a
+    /// certainty distinction WITHIN width ownership and has no bearing on a
+    /// question about presence.
     private var isMusicOnlyProvenance: Bool {
         var hasMusic = false
         var hasCorroboratingPresence = false
@@ -1254,7 +1270,7 @@ struct DecisionMapper: Sendable {
             case .fmConsensus, .fmAcousticCorroborated, .evidenceCatalog,
                  .classifierSeed, .userCorrection:
                 hasCorroboratingPresence = true
-            case .spliceSlot, .rediffSlot:
+            case .spliceSlot, .rediffSlot, .rediffSlotChroma:
                 break
             }
         }

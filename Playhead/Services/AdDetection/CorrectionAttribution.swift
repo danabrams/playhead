@@ -904,10 +904,15 @@ enum CausalInference {
                 // like `.userCorrection`. It carries no causal-source signal, so
                 // it contributes to none of the counts below.
                 break
-            case .rediffSlot:
-                // Width-ownership marker (playhead-xsdz.29) — attribution-neutral,
-                // like `.spliceSlot`. It sets WIDTH, not PRESENCE, so it carries
-                // no causal-source signal and contributes to none of the counts.
+            case .rediffSlot, .rediffSlotChroma:
+                // Width-ownership markers (playhead-xsdz.29 byte arm,
+                // playhead-6qvf chroma arm) — attribution-neutral, like
+                // `.spliceSlot`. They set WIDTH, not PRESENCE, so they carry no
+                // causal-source signal and contribute to none of the counts.
+                // The two arms share this branch on purpose: attribution asks
+                // WHICH SIGNAL found the ad, and neither arm found it — the
+                // byte/chroma split is about how well the edges are known,
+                // which is a different question and is answered elsewhere.
                 break
             }
         }

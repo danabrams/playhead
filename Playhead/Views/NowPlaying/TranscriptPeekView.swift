@@ -806,7 +806,12 @@ private extension TranscriptPeekView {
             case .classifierSeed: return "classifier"
             case .sustainedMusicOffset: return "sustained music"
             case .spliceSlot: return "audio splice"
-            case .rediffSlot: return "re-download diff"
+            // playhead-6qvf: both rediff differ arms read the same to a user.
+            // The byte/chroma split is a CERTAINTY distinction that governs
+            // whether we may skip, not a different thing that happened, and
+            // "Peace of Mind, Not Metrics" says the popover should not narrate
+            // our internal confidence at them.
+            case .rediffSlot, .rediffSlotChroma: return "re-download diff"
             }
         }
         return descriptions.joined(separator: ", ")

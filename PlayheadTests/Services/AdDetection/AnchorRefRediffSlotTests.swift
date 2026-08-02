@@ -41,6 +41,11 @@ struct AnchorRefRediffSlotTests {
         .userCorrection(correctionId: "c1", reportedTime: 12.0),
         .classifierSeed(regionId: "r3", score: 0.8),
         .spliceSlot,
+        // playhead-6qvf: the OTHER rediff arm. It is the most important entry
+        // in this list — `.rediffSlot` and `.rediffSlotChroma` are both bare
+        // rediff markers, and if they ever compared equal the byte/chroma
+        // certainty split would collapse back into one class silently.
+        .rediffSlotChroma,
     ]
 
     // MARK: - Equatable (default:false trap)
@@ -66,13 +71,24 @@ struct AnchorRefRediffSlotTests {
 
     // MARK: - isWidthOwnership (the shared width-ownership proxy predicate)
 
-    @Test("isWidthOwnership is true for BOTH bare slot markers, false for every presence anchor")
+    @Test("isWidthOwnership is true for ALL THREE bare slot markers, false for every presence anchor")
     func isWidthOwnershipCoversBothMarkers() {
         #expect(AnchorRef.rediffSlot.isWidthOwnership)
         #expect(AnchorRef.spliceSlot.isWidthOwnership)
-        for other in Self.otherCases where other != .spliceSlot {
+        // playhead-6qvf: the chroma differ arm OWNS WIDTH too. Certainty was
+        // split from ownership, not folded into it — a chroma-owned span must
+        // still bypass the boundary refiners and survive the Phase-5 projector's
+        // clobber guard, both of which key on exactly this predicate.
+        #expect(AnchorRef.rediffSlotChroma.isWidthOwnership)
+        for other in Self.otherCases where !other.isWidthOwnership {
             #expect(!other.isWidthOwnership, "\(other) is a PRESENCE anchor, not a width marker")
         }
+        // …and the width markers really are the only three. Counted rather than
+        // asserted case-by-case so a new marker added to `otherCases` without a
+        // deliberate decision trips here.
+        let widthMarkers = Self.otherCases.filter(\.isWidthOwnership)
+        #expect(widthMarkers.count == 2,
+                "otherCases holds exactly .spliceSlot + .rediffSlotChroma as width markers, got \(widthMarkers)")
     }
 
     // MARK: - Codable

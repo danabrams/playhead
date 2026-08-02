@@ -243,6 +243,31 @@ struct CertaintyTieredSkipShipsOnTests {
                 "declining to demote must not touch the presence score")
     }
 
+    /// playhead-6qvf: the DISCRIMINATING negative for the floor carve-out —
+    /// the one an implementation keyed on "width ownership" rather than on
+    /// "byte-exact" gets wrong while passing every test above.
+    ///
+    /// `.rediffSlotChroma` is the rediff oracle's OTHER differ arm: the same
+    /// re-fetch, the same slot machinery, a ~1 s chroma-fingerprint alignment
+    /// instead of a byte-run one. It really does own the span's width. It has
+    /// no claim on the floor exemption, whose whole justification is that the
+    /// origin served different BYTES over exactly this range.
+    ///
+    /// Both directions are asserted together because the pair is the point: the
+    /// two spans differ ONLY in which differ arm set the width, and they must
+    /// land on opposite sides of the floor.
+    @Test("NOT EXEMPT: a rediff CHROMA span below the 0.9 floor demotes, where the byte arm is spared")
+    func rediffChromaBelowFloorIsNotExempt() {
+        let chroma = map(midEpisodeSpan(anchorProvenance: [.rediffSlotChroma]), ledger: belowFloorLedger())
+        #expect(chroma.eligibilityGate == .markOnly,
+                "a ~1 s chroma alignment is not the deterministic certainty the carve-out is for")
+        let byteExact = map(midEpisodeSpan(anchorProvenance: [.rediffSlot]), ledger: belowFloorLedger())
+        #expect(byteExact.eligibilityGate == .eligible,
+                "the discriminating positive — same ledger, same geometry, byte-derived width")
+        #expect(abs(chroma.skipConfidence - byteExact.skipConfidence) < 1e-12,
+                "only ACTIONABILITY differs; the presence score is identical")
+    }
+
     // MARK: - Neither inert nor total, asserted as one property
 
     /// The whole acceptance criterion in one arm: across a population of four

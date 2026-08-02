@@ -8,7 +8,9 @@
 //   • byte-fail→chroma:  a byte-gate rejection (disjoint bytes — the re-encode
 //                        CDN shape) falls back to the chroma path, which
 //                        behaves EXACTLY as pre-xsdz.57 (PCM fetched, stored
-//                        A-side diffed, same widening).
+//                        A-side diffed, same widening) — but since playhead-6qvf
+//                        stamps `.rediffSlotChroma`, so the same WIDTH no longer
+//                        carries the byte differ's CERTAINTY.
 //   • A-side unanchored: a non-file `sourceURL` disables the byte path even
 //                        with a staged B file — chroma fallback.
 //   • both-unavailable:  no byte URLs, no PCM → status quo (no .rediffSlot).
@@ -339,9 +341,20 @@ struct RediffByteFirstEndToEndTests {
             storedASide: aSide
         )
 
-        let rediffOwned = spans.filter { $0.anchorProvenance.contains(.rediffSlot) }
-        #expect(rediffOwned.count == 1, "the chroma fallback still width-owns the ad span")
-        let span = try #require(rediffOwned.first)
+        // playhead-6qvf: the chroma fallback still WIDTH-OWNS the ad span — but
+        // under `.rediffSlotChroma`, not `.rediffSlot`. This assertion used to
+        // read `.rediffSlot` and it was the defect in miniature: this very test
+        // drives the chroma arm and pinned it as byte-exact.
+        let chromaOwned = spans.filter { $0.carriesRediffChromaWidth }
+        #expect(chromaOwned.count == 1, "the chroma fallback still width-owns the ad span")
+        #expect(
+            spans.allSatisfy { !$0.carriesRediffByteExactWidth },
+            "NO span may claim byte-exact width on a run where the byte differ rejected"
+        )
+        let span = try #require(chromaOwned.first)
+        // Width ownership is unchanged — the projector clobber guard and the
+        // boundary-refine bypass must still see this span as slot-owned.
+        #expect(span.anchorProvenance.contains { $0.isWidthOwnership })
         // The CHROMA differ's slot (≈[100.04, 160.09]) — NOT a byte slot.
         #expect(span.startTime >= 99.5 && span.startTime <= 100.5, "start ≈ 100, got \(span.startTime)")
         #expect(span.endTime >= 159.5 && span.endTime <= 160.5, "end ≈ 160, got \(span.endTime)")
@@ -369,9 +382,15 @@ struct RediffByteFirstEndToEndTests {
             storedASide: aSide
         )
 
-        let rediffOwned = spans.filter { $0.anchorProvenance.contains(.rediffSlot) }
-        #expect(rediffOwned.count == 1)
-        let span = try #require(rediffOwned.first)
+        // playhead-6qvf: an UNRESOLVABLE A-side is a chroma-arm trigger, so the
+        // width is chroma-owned. This is the playhead-b8hj shape — the Data
+        // container UUID is rewritten on reinstall/restore — which makes it a
+        // production path, not a synthetic one.
+        let chromaOwned = spans.filter { $0.carriesRediffChromaWidth }
+        #expect(chromaOwned.count == 1)
+        #expect(spans.allSatisfy { !$0.carriesRediffByteExactWidth })
+        let span = try #require(chromaOwned.first)
+        #expect(span.anchorProvenance.contains { $0.isWidthOwnership })
         #expect(span.startTime >= 99.5 && span.startTime <= 100.5)
         #expect(span.endTime >= 159.5 && span.endTime <= 160.5)
         #expect(await provider.pcmCallCount >= 1)
@@ -396,7 +415,11 @@ struct RediffByteFirstEndToEndTests {
             storedASide: aSide
         )
         #expect(!spans.isEmpty, "the ad span still decodes")
-        for span in spans { #expect(!span.anchorProvenance.contains(.rediffSlot)) }
+        for span in spans {
+            #expect(!span.anchorProvenance.contains(.rediffSlot))
+            // playhead-6qvf: nor the chroma arm — no differ ran at all here.
+            #expect(!span.anchorProvenance.contains(.rediffSlotChroma))
+        }
         // The pass DID try the chroma fallback (PCM consulted, returned nil)
         // after the byte path found no B file.
         #expect(await provider.pcmCallCount >= 1)

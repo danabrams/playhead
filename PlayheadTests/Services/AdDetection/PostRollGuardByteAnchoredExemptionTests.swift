@@ -70,6 +70,14 @@ enum PostRollGuardTailShapes {
     static let stillGuarded: [(label: String, provenance: [AnchorRef])] = [
         ("unanchored start (classifier seed)", [.classifierSeed(regionId: "cs", score: 0.7)]),
         ("acoustic splice width", [.spliceSlot]),
+        // playhead-6qvf: the rediff CHROMA arm. It is a width oracle whose
+        // marker sits right next to `.rediffSlot` in `isWidthOwnership`, so an
+        // implementation that exempted "spans whose width some oracle owns"
+        // passes every other shape here and fails this one — the same trap
+        // `.spliceSlot` sets, one step closer. Its INNER edge came from a ~1 s
+        // fingerprint alignment, which is exactly the uncertainty Dan's
+        // post-roll reasoning is about.
+        ("rediff CHROMA width (~1 s alignment)", [.rediffSlotChroma]),
         ("catalog identity", [.evidenceCatalog(entry: EvidenceEntry(
             evidenceRef: 1,
             category: .url,

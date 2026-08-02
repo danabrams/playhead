@@ -149,6 +149,30 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   170 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-6qvf). Batches 160-169 (G01-G10, 10 new
+#   entries, one batch each) plus batch 158 — F08, whose EDIT this bead re-cut
+#   when it unified the host-read floor onto `carriesRediffByteExactWidth`.
+#   FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 16 builds. Batches 1-157 and 159
+#   were NOT re-run and carry the verdicts above. Recount: the array now holds
+#   180 live entries.
+#
+#   Three faults found and fixed during the run, recorded because two of them
+#   are traps any new series can hit:
+#     • G03/G04 ERRORed on "expected test never ran". Their expected names
+#       contained a SEMICOLON, which is this script's expected-test separator —
+#       the name was silently split into two names that match nothing. Renamed
+#       the test this bead owns; repointed G03 at a differently-named test in
+#       the same suite rather than renaming one it does not own.
+#     • G05 and G09 SURVIVED against expectations the mutation cannot REACH
+#       (a both-markers fixture; a predicate-closure `contains(where:)`), not
+#       against a coverage hole. Corrected the expectations — and G09's finding
+#       also corrected a false claim in the SOURCE comment on the Equatable arm.
+#     • G04's first EDIT survived at the extent tier and that WAS a real hole:
+#       `SpanExtentSupport.derive` inlined its own `contains(.rediffSlot)`
+#       instead of sharing the predicate, so widening the predicate left
+#       auto-skip ADMISSION untouched. Fixed in source (one shared
+#       `[AnchorRef].carriesRediffByteExactWidth`), not in the expectation.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-cgka). Batches 120-125 (Z01-Z12, 12 new
 #   entries), 6 batches. FINAL 12 KILLED / 0 SURVIVED / 0 ERROR, 9 builds.
 #   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
@@ -542,15 +566,31 @@ FUSION="Playhead/Services/AdDetection/BackfillEvidenceFusion.swift"
 DSPAN="Playhead/Services/AdDetection/DecodedSpan.swift"
 EXTENT="Playhead/Services/AdDetection/SpanExtentSupport.swift"
 RSLOT="Playhead/Services/AdDetection/RediffSlotOwnership.swift"
+# playhead-6qvf: `AnchorRef` itself — the enum whose byte/chroma split the G
+# series defends. Named ADSVC_ATOM rather than ATOM because the key is read out
+# of a `|`-delimited record and a two-letter key invites collisions.
+ATOMEV="Playhead/Services/AdDetection/AtomEvidence.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
-  "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT"
+  "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
 )
 
 FOCUSED_SUITES=(
+  # playhead-6qvf: the byte/chroma certainty split (G series). Four suites,
+  # because the claim spans four layers and no one of them can see the others:
+  # the pure invariants + the exhaustive "only .rediffSlot is deterministic"
+  # sweep; the AnchorRef plumbing (equality, Codable, isWidthOwnership); and the
+  # two service-level e2e harnesses that are the ONLY things able to observe
+  # which differ arm stamped which marker — byte-first drives the byte aligner,
+  # xsdz.29 drives the chroma fallback. The two live CONSUMERS (host-read floor,
+  # post-roll guard) are already in scope via the nqey/sik9 suites below.
+  -only-testing:PlayheadTests/RediffChromaWidthIsNotDeterministicTests
+  -only-testing:PlayheadTests/AnchorRefRediffSlotTests
+  -only-testing:PlayheadTests/RediffByteFirstEndToEndTests
+  -only-testing:PlayheadTests/RediffSlotOwnershipEndToEndTests
   # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
@@ -1181,6 +1221,35 @@ T_SIK9_FUSION_BELOW="Post-roll guard: a byte-exact rediff span below the floor i
 T_SIK9_FUSION_AT="Post-roll guard: a byte-exact rediff span at/above the floor is EXEMPT (playhead-sik9)"
 T_SIK9_FUSION_SPLICE="Post-roll guard: an acoustic .spliceSlot span is NOT exempt (playhead-sik9)"
 T_SIK9_UNKNOWN="unknown episode duration keeps the guard inert for the guarded shape too"
+
+# playhead-6qvf (G series): the byte/chroma certainty split. The rails divide
+# into (a) the STAMP SITE — only a behavioural run through `runBackfill` can see
+# which differ arm left which marker; (b) the PREDICATE and its persistence; (c)
+# the EXTENT tier and the padding lane; and (d) the two live CONSUMERS, whose
+# discriminating negatives are the ones an "any width oracle" implementation
+# fails. Each group is mutated separately because a single fix in the wrong
+# place would otherwise be credited with every kill.
+T_6QVF_PRED_CHROMA="a chroma-owned span FAILS carriesRediffByteExactWidth and PASSES carriesRediffChromaWidth"
+T_6QVF_PRED_BYTE="a byte-owned span is unchanged — byte-exact true, chroma false"
+T_6QVF_PRED_INDEP="the two predicates are independent — a span carrying BOTH answers both true"
+T_6QVF_OWNS_WIDTH="chroma STILL owns width — isWidthOwnership is true"
+T_6QVF_UNANCHORED="a chroma-owned span derives UNANCHORED on both edges — tier .none, not .deterministic"
+T_6QVF_RAIL_SWEEP="RAIL — ONLY .rediffSlot derives the deterministic tier, and no other anchor alone does"
+T_6QVF_RAIL_MIXED="RAIL — a chroma span mixed with ordinary presence anchors still does not reach deterministic"
+T_6QVF_RAIL_LANE="RAIL — a chroma span's anchors do NOT open the qs0d targeted padding lane"
+T_6QVF_RAIL_MARGIN="RAIL — a chroma span has NO late-safe start margin, so it cannot be auto-skipped"
+T_6QVF_TYPESTRING="chroma encodes a STABLE bare 'rediffSlotChroma' type string, distinct from 'rediffSlot'"
+T_6QVF_ROUNDTRIP="chroma round-trips, equals itself, and differs from every sibling (default:false trap closed)"
+T_6QVF_OLDBINARY="what an OLDER binary sees: an unknown bare type is DROPPED, never mistaken for a known one"
+T_6QVF_THREE_MARKERS="isWidthOwnership is true for ALL THREE bare slot markers, false for every presence anchor"
+T_6QVF_NEQ_SIBLINGS="rediffSlot != every other AnchorRef case (incl. the sibling spliceSlot)"
+T_6QVF_E2E_CHROMA="byte-fail (disjoint bytes, re-encode shape) falls back to chroma, which behaves exactly as pre-xsdz.57"
+T_6QVF_E2E_REMOTE="non-file A-side sourceURL disables the byte path even with a staged B file (chroma fallback)"
+T_6QVF_E2E_BYTE="byte-success: byte aligner sets width; chroma differ (PCM fetch) never invoked; no fingerprint stream needed"
+T_6QVF_E2E_ANCHORS="hdgk: a byte-rediff width-owned span persists 'rediffByteExact' on BOTH ad_windows edges through the REAL runBackfill wiring"
+T_6QVF_OWNERSHIP_E2E="flag ON + provider + aligned A/B: the ad span is widened to the rediff slot with .rediffSlotChroma"
+T_6QVF_FLOOR_CHROMA="NOT EXEMPT: a rediff CHROMA span below the 0.9 floor demotes, where the byte arm is spared"
+T_6QVF_POSTROLL_CHROMA="STILL GUARDED: a tail whose width is not byte-derived demotes to markOnly"
 
 # playhead-nqey — the ENABLEMENT. These read `AdDetectionConfig.default`, which
 # is what makes them sensitive to the shipped VALUES and not merely to the
@@ -2215,6 +2284,77 @@ MUTATIONS=(
   "F07|157|FUSION|$T_NQEY_AT_FLOOR_KEPT;$T_NQEY_SUBSET"
 
   "F08|158|FUSION|$T_NQEY_REDIFF_FLOOR_KEPT;$T_SIK9_BELOW_FLOOR;$T_SIK9_FUSION_BELOW"
+
+  # --- playhead-6qvf (G series): the byte/chroma certainty split -------------
+  #
+  # G01 and G02 are the two halves of the ACTUAL shipped defect, and they are in
+  # separate batches on purpose even though a naive reading says their expected
+  # sets differ. They do not really: either one alone restores "both differ arms
+  # stamp .rediffSlot", so batching them would let one fix be credited twice.
+  #
+  # G03 is the mirror — arms swapped — and exists because a rail that only
+  # checks "chroma is not byte-exact" is satisfied by a build where NOTHING is
+  # byte-exact. The byte arm has to be pinned in its own right or the whole
+  # rediff auto-skip lane could be silently retired and the G series would still
+  # come back green.
+  "G01|160|ADSVC|$T_6QVF_E2E_CHROMA;$T_6QVF_E2E_REMOTE;$T_6QVF_OWNERSHIP_E2E"
+
+  "G02|161|ADSVC|$T_6QVF_E2E_CHROMA;$T_6QVF_E2E_REMOTE;$T_6QVF_OWNERSHIP_E2E"
+
+  # Judged by the persisted-anchor test alone. The obvious companion —
+  # `byte-success: …` in the same suite — carries semicolons in its display
+  # name, which this script uses as its expected-test separator, so naming it
+  # here makes the mutation unevaluable rather than killed. The anchor test is
+  # the stronger claim anyway: it reads the tier off the persisted ad_windows
+  # row rather than off the in-memory span.
+  "G03|162|ADSVC|$T_6QVF_E2E_ANCHORS"
+
+  # The predicate layer. G04 is the collapse restated as a one-line
+  # "simplification"; G05 is the copy-paste that makes the chroma accessor
+  # report the byte marker (which would make every chroma diagnostic read as
+  # empty and the rails read as passing for the wrong reason).
+  "G04|163|DSPAN|$T_6QVF_PRED_CHROMA;$T_6QVF_UNANCHORED;$T_6QVF_RAIL_SWEEP;$T_6QVF_FLOOR_CHROMA"
+
+  # Judged by the two SINGLE-marker tests. `predicatesAreIndependent` builds a
+  # span carrying BOTH markers, so under this mutation both properties still
+  # answer true and it stays green — it is a good test of a different claim and
+  # a useless expectation here.
+  "G05|164|DSPAN|$T_6QVF_PRED_CHROMA;$T_6QVF_PRED_BYTE"
+
+  # Persistence. G06 is the UNSAFE direction specifically: encoding chroma under
+  # the byte type string is the one migration mistake an older binary cannot
+  # detect — it would decode the value as byte-exact rather than dropping it.
+  "G06|165|DSPAN|$T_6QVF_TYPESTRING;$T_6QVF_ROUNDTRIP"
+
+  # G07 is the extent tier, mutated at the derivation rather than at the
+  # predicate: `isWidthOwnership` is the plausible wrong key, and it is exactly
+  # the one that re-admits chroma to `deterministic` and to the qs0d padding
+  # lane.
+  "G07|166|EXTENT|$T_6QVF_RAIL_SWEEP;$T_6QVF_RAIL_MIXED;$T_6QVF_RAIL_LANE;$T_6QVF_RAIL_MARGIN;$T_6QVF_UNANCHORED"
+
+  # Ownership must SURVIVE the certainty split. G08 is the over-correction: drop
+  # chroma from `isWidthOwnership` and a chroma-owned span stops bypassing the
+  # boundary refiners and stops being protected from the Phase-5 projector's
+  # clobber guard — strictly worse than the bug being fixed.
+  "G08|167|ADSVC_ATOM|$T_6QVF_OWNS_WIDTH;$T_6QVF_THREE_MARKERS"
+
+  # G09 is the default:false trap that `.spliceSlot` and `.rediffSlot` each have
+  # a comment about. With the arm gone, `.rediffSlotChroma != .rediffSlotChroma`
+  # and every `contains(_:)` BY VALUE silently misses a chroma-owned span — in
+  # the pure predicate and all the way out at the service boundary.
+  #
+  # Expected set corrected after the first run: it named `isWidthOwnership` and
+  # the `!=` sweep, neither of which this mutation can reach. `isWidthOwnership`
+  # is a predicate closure, and the sweep asserts `.rediffSlot != <other>`, which
+  # a broken chroma-vs-chroma comparison leaves true. The battery is what
+  # established that, and the source comment on the arm was corrected to match.
+  "G09|168|ADSVC_ATOM|$T_6QVF_ROUNDTRIP;$T_6QVF_PRED_CHROMA;$T_6QVF_E2E_CHROMA"
+
+  # G10 is the CONSUMER half of the "all six move together" constraint: re-grant
+  # the host-read floor exemption to any width oracle. It is the mutation the
+  # bead's hard constraint exists to forbid, and the only test that sees it is
+  # the discriminating negative added by this bead.
+  "G10|169|FUSION|$T_6QVF_FLOOR_CHROMA"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2406,6 +2546,16 @@ describe_mutation() {
     F07) echo "host-read floor: < becomes <=, so a span AT the calibrated floor demotes" ;;
     F08) echo "host-read floor: drop the rediff carve-out, so a byte-exact span below the floor demotes" ;;
     F09) echo "post-roll guard: guess the episode end — treat an unknown duration as span.endTime" ;;
+    G01) echo "6qvf: the chroma differ arm stamps .rediffSlot again — THE shipped defect" ;;
+    G02) echo "6qvf: the rewrite site hardcodes .rediffSlot instead of the differ's provenance" ;;
+    G03) echo "6qvf: arms swapped — the BYTE differ stamps .rediffSlotChroma" ;;
+    G04) echo "6qvf: carriesRediffByteExactWidth widened to accept the chroma marker too" ;;
+    G05) echo "6qvf: carriesRediffChromaWidth reads the BYTE marker (copy-paste)" ;;
+    G06) echo "6qvf: chroma encodes under the 'rediffSlot' type string — the unsafe migration direction" ;;
+    G07) echo "6qvf: SpanExtentSupport.derive keys on isWidthOwnership, re-admitting chroma to deterministic" ;;
+    G08) echo "6qvf: drop .rediffSlotChroma from isWidthOwnership — chroma loses width ownership" ;;
+    G09) echo "6qvf: remove the (.rediffSlotChroma, .rediffSlotChroma) Equatable arm (default:false trap)" ;;
+    G10) echo "6qvf: the host-read floor re-grants its exemption to ANY width oracle" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -5472,9 +5622,13 @@ EOF
       "           skipConfidence < config.hostReadConfidenceFloor {" \
       "           skipConfidence <= config.hostReadConfidenceFloor {" ;;
 
+  # EDIT re-cut by playhead-6qvf: the floor site used to inline its own
+  # `contains(where: { if case .rediffSlot ... })` pattern-match. 6qvf unified it
+  # onto the shared `carriesRediffByteExactWidth` so all six consumers read ONE
+  # expression; the mutation is unchanged in meaning (drop the carve-out).
   F08)
     snippet OLD <<'EOF'
-           !span.anchorProvenance.contains(where: { if case .rediffSlot = $0 { return true } else { return false } }),
+           !span.carriesRediffByteExactWidth,
            skipConfidence < config.hostReadConfidenceFloor {
 EOF
     snippet NEW <<'EOF'
@@ -5497,6 +5651,94 @@ EOF
            !span.carriesRediffByteExactWidth,
            let episodeDuration = Optional(episodeDuration ?? span.endTime),
            episodeDuration > 0,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G01)
+    patch "$file" \
+      "            widthProvenance = .rediffSlotChroma" \
+      "            widthProvenance = .rediffSlot" ;;
+
+  G02)
+    patch "$file" \
+      "            provenance: computation.widthProvenance" \
+      "            provenance: .rediffSlot" ;;
+
+  G03)
+    patch "$file" \
+      "            widthProvenance = .rediffSlot
+        } else {" \
+      "            widthProvenance = .rediffSlotChroma
+        } else {" ;;
+
+  # EDIT re-cut after the first G run: G04 SURVIVED two of its four expectations
+  # because `SpanExtentSupport.derive` inlined its own `contains(.rediffSlot)`
+  # rather than sharing the predicate, so widening the span property left the
+  # extent tier untouched. The two spellings were unified into
+  # `[AnchorRef].carriesRediffByteExactWidth`; this mutation now hits the ONE
+  # definition, which is why its expected set spans predicate, extent and
+  # consumer.
+  G04)
+    patch "$file" \
+      "    var carriesRediffByteExactWidth: Bool { contains(.rediffSlot) }" \
+      "    var carriesRediffByteExactWidth: Bool { contains(.rediffSlot) || contains(.rediffSlotChroma) }" ;;
+
+  G05)
+    patch "$file" \
+      "    var carriesRediffChromaWidth: Bool { contains(.rediffSlotChroma) }" \
+      "    var carriesRediffChromaWidth: Bool { contains(.rediffSlot) }" ;;
+
+  G06)
+    patch "$file" \
+      'try container.encode("rediffSlotChroma", forKey: .type)' \
+      'try container.encode("rediffSlot", forKey: .type)' ;;
+
+  G07)
+    patch "$file" \
+      "        let rediffOwnsWidth = anchorProvenance.carriesRediffByteExactWidth" \
+      "        let rediffOwnsWidth = anchorProvenance.contains { \$0.isWidthOwnership }" ;;
+
+  G08)
+    patch "$file" \
+      "        case .spliceSlot, .rediffSlot, .rediffSlotChroma:
+            return true" \
+      "        case .spliceSlot, .rediffSlot:
+            return true
+        case .rediffSlotChroma:
+            return false" ;;
+
+  # The Equatable arm plus its comment go together: leaving the comment behind
+  # would read as a live claim about an arm that no longer exists.
+  G09)
+    snippet OLD <<'EOF'
+        case (.rediffSlotChroma, .rediffSlotChroma):
+            // Bare case (playhead-6qvf): the SAME default:false trap. REQUIRED,
+            // and the mutation battery (G09) is what established which
+            // consequence is real — an earlier version of this comment named
+            // the wrong one.
+            //
+            // `isWidthOwnership`'s proxies are SAFE from it: they spell the test
+            // `contains(where: { $0.isWidthOwnership })`, a predicate closure
+            // that never invokes `==`. What breaks is every `contains(_:)` by
+            // VALUE — `[AnchorRef].carriesRediffChromaWidth` returns false for a
+            // span that plainly carries the marker, and `DecodedSpan`'s own
+            // synthesized equality stops matching a span against itself.
+            return true
+        default:
+EOF
+    snippet NEW <<'EOF'
+        default:
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G10)
+    snippet OLD <<'EOF'
+           !span.carriesRediffByteExactWidth,
+           skipConfidence < config.hostReadConfidenceFloor {
+EOF
+    snippet NEW <<'EOF'
+           !span.anchorProvenance.contains(where: { $0.isWidthOwnership }),
+           skipConfidence < config.hostReadConfidenceFloor {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -5528,6 +5770,7 @@ rec_file()   {
     SEAMS) printf '%s' "$SEAMS" ;;
     ACT)   printf '%s' "$ACT" ;;
     ADSVC) printf '%s' "$ADSVC" ;;
+    ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
     THROT) printf '%s' "$THROT" ;;
     RUNNER) printf '%s' "$RUNNER" ;;

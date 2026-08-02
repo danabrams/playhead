@@ -2,11 +2,18 @@
 // playhead-xsdz.29: service-level coverage for the rediff width-oracle wiring in
 // `AdDetectionService.runBackfill` — the flag family, the `RediffBSideProvider`
 // seam, the store fetch (A-side fingerprints + current assetFingerprint), the
-// double-gate, and the `.rediffSlot` width rewrite / persistence. The pure
+// double-gate, and the rediff width rewrite / persistence. The pure
 // disposition/rewrite/shadow semantics are pinned by `RediffSlotOwnershipTests`;
 // this suite proves the GLUE and the flag-OFF / no-provider / gate-rejected
-// NO-OPs (byte-identity: no `.rediffSlot` ever appears unless a real signal
+// NO-OPs (byte-identity: no rediff marker ever appears unless a real signal
 // flows all the way through).
+//
+// playhead-6qvf: every fixture here feeds the pass a stored chroma fingerprint
+// stream and a PCM B-side, i.e. the CHROMA differ arm, so the marker under test
+// is `.rediffSlotChroma`. `.rediffSlot` is now the byte-run aligner's alone and
+// is covered by `RediffByteFirstEndToEndTests`. The negative cases assert that
+// NEITHER marker appears, which is stricter than the single-marker check they
+// carried before.
 //
 // The positive case is DETERMINISTIC: the stored A-side fingerprint stream is
 // synthesized as B's own content fingerprints with a distinct "ad" block spliced
@@ -26,6 +33,12 @@ struct RediffSlotOwnershipEndToEndTests {
     // [100,160] decodes to a presence span there.
     private static let adStart = 100.0
     private static let adEnd = 160.0
+
+    /// Either rediff width marker. The NO-OP assertions must reject BOTH, or a
+    /// regression that swapped the arms would read as a pass.
+    private let isRediffMarker: @Sendable (AnchorRef) -> Bool = {
+        $0 == .rediffSlot || $0 == .rediffSlotChroma
+    }
 
     private func asset(id: String) -> AnalysisAsset {
         AnalysisAsset(
@@ -194,7 +207,7 @@ struct RediffSlotOwnershipEndToEndTests {
         let spans = try await runAndFetch(
             assetId: "rediff-off", rediffOwnership: false, provider: nil)
         #expect(!spans.isEmpty, "the ad span still decodes")
-        for span in spans { #expect(!span.anchorProvenance.contains(.rediffSlot)) }
+        for span in spans { #expect(!span.anchorProvenance.contains(where: isRediffMarker)) }
     }
 
     @Test("flag ON but NO provider injected: no-op, no .rediffSlot (production case)")
@@ -202,7 +215,7 @@ struct RediffSlotOwnershipEndToEndTests {
         let spans = try await runAndFetch(
             assetId: "rediff-noprov", rediffOwnership: true, provider: nil)
         #expect(!spans.isEmpty)
-        for span in spans { #expect(!span.anchorProvenance.contains(.rediffSlot)) }
+        for span in spans { #expect(!span.anchorProvenance.contains(where: isRediffMarker)) }
     }
 
     @Test("flag ON + provider but NO stored A-side fingerprints: no-op, no .rediffSlot")
@@ -211,7 +224,7 @@ struct RediffSlotOwnershipEndToEndTests {
         let spans = try await runAndFetch(
             assetId: "rediff-noaside", rediffOwnership: true, provider: provider, storedASide: nil)
         #expect(!spans.isEmpty)
-        for span in spans { #expect(!span.anchorProvenance.contains(.rediffSlot)) }
+        for span in spans { #expect(!span.anchorProvenance.contains(where: isRediffMarker)) }
     }
 
     @Test("flag ON + provider + stored A-side but sourceAudioIdentity MISMATCH: gate rejects, no .rediffSlot")
@@ -227,14 +240,14 @@ struct RediffSlotOwnershipEndToEndTests {
             assetId: assetId, rediffOwnership: true, provider: provider, storedASide: aSide)
         #expect(!spans.isEmpty)
         for span in spans {
-            #expect(!span.anchorProvenance.contains(.rediffSlot),
+            #expect(!span.anchorProvenance.contains(where: isRediffMarker),
                     "a version-matching but audio-mismatched A-side must NOT set width")
         }
     }
 
     // MARK: - Positive integration: rediff width rewrite
 
-    @Test("flag ON + provider + aligned A/B: the ad span is widened to the rediff slot with .rediffSlot")
+    @Test("flag ON + provider + aligned A/B: the ad span is widened to the rediff slot with .rediffSlotChroma")
     func flagOnRediffWidthRewrite() async throws {
         let assetId = "rediff-on"
         let contentPCM = noisePCM(seconds: 180, seed: 7)
@@ -250,8 +263,15 @@ struct RediffSlotOwnershipEndToEndTests {
             assetId: assetId, rediffOwnership: true, provider: provider,
             storedASide: aSide, withFeatures: true)
 
-        let rediffOwned = spans.filter { $0.anchorProvenance.contains(.rediffSlot) }
+        // playhead-6qvf: this whole suite drives the CHROMA differ (a stored
+        // fingerprint stream + a PCM B-side; no byte-level inputs exist here),
+        // so the marker it must produce is `.rediffSlotChroma`. It asserted
+        // `.rediffSlot` before, which is exactly how the byte arm's certainty
+        // came to be claimed by a chroma-derived width.
+        let rediffOwned = spans.filter { $0.carriesRediffChromaWidth }
         #expect(rediffOwned.count == 1, "exactly the ad span is rediff-width-owned")
+        #expect(spans.allSatisfy { !$0.carriesRediffByteExactWidth },
+                "no byte differ ran here — nothing may claim byte-exact width")
         let span = try #require(rediffOwned.first)
         // The differ recovers the played slot at ~[100.04, 160.09]s (index-exact
         // by construction: A = content with the ad block spliced at index
@@ -280,7 +300,7 @@ struct RediffSlotOwnershipEndToEndTests {
             provider: provider, storedASide: aSide, shadowObserver: observer)
 
         // Shadow NEVER rewrites: no .rediffSlot persisted.
-        for span in spans { #expect(!span.anchorProvenance.contains(.rediffSlot)) }
+        for span in spans { #expect(!span.anchorProvenance.contains(where: isRediffMarker)) }
         // But the observer captured rediff-sourced rows, incl. one qualifying slot.
         let rows = await observer.rows(for: assetId)
         let recorded = try #require(rows)

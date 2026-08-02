@@ -486,7 +486,10 @@ struct AdDetectionConfig: Sendable {
     /// blocks a byte-exact-rediff-confirmed insertion. Adds NO score mass (the
     /// entry is weight-0) and NEVER sets a span's width (that stays the rediff
     /// ownership pass). Acoustic splice (`.spliceSlot`) is not byte-exact and
-    /// never emits this kind.
+    /// never emits this kind — and since playhead-6qvf neither is the rediff
+    /// CHROMA arm (`.rediffSlotChroma`), which is a ~1 s fingerprint alignment
+    /// rather than a byte-run one and so cannot claim the "deterministic kind"
+    /// this flag grants.
     ///
     /// Default OFF: this is an ELIGIBILITY-affecting change, so it ships OFF and
     /// flips after a corpus A/B — the same measurement-gated discipline as its
@@ -7417,6 +7420,18 @@ actor AdDetectionService {
         let candidates: [SpliceSlotCandidate]
         let diagnostics: [SpliceSlotDiagnostics]
         let result: SpliceSlotDispositionResult
+        /// playhead-6qvf: WHICH differ arm produced `result`'s slots —
+        /// `.rediffSlot` for the byte-run aligner, `.rediffSlotChroma` for the
+        /// ~1 s chroma-fingerprint fallback. Carried here rather than
+        /// re-derived at the rewrite site because this struct is the ONLY
+        /// place both arms have already converged: after this point the two are
+        /// indistinguishable, which is precisely how they came to share one
+        /// certainty class.
+        ///
+        /// The shadow pass reads it too, so a shadow row records the same arm
+        /// the flag-ON pass would have stamped (the `shadow == flag-ON`
+        /// identity the acoustic pass relies on).
+        let widthProvenance: AnchorRef
     }
 
     /// Compute the rediff slot pass, or `nil` when there is no rediff signal:
@@ -7435,6 +7450,13 @@ actor AdDetectionService {
     /// byte gate rejects (no runs / non-monotonic / re-encode CDN), the chroma
     /// path below runs EXACTLY as pre-xsdz.57. Either way the slots flow into
     /// the SAME candidates → resolveSpan (veto gate) → disposition machinery.
+    ///
+    /// playhead-6qvf: "the SAME machinery" is true of the GEOMETRY and must not
+    /// be true of the CERTAINTY. The arm taken is recorded in the returned
+    /// `widthProvenance` (`.rediffSlot` vs `.rediffSlotChroma`) and carried to
+    /// the stamp site, because this function is the last point at which the two
+    /// are distinguishable. Measured on the 51-pair corpus, the byte gate
+    /// rejects on 9/51 (17.6%) — this is a routine branch, not an edge case.
     private func computeRediffSlotPass(
         decodedSpans: [DecodedSpan],
         atoms: [TranscriptAtom],
@@ -7460,6 +7482,11 @@ actor AdDetectionService {
         }
 
         let playedSlots: [RediffSlotOwnership.PlayedSlot]
+        // playhead-6qvf: the differ arm, decided HERE and carried to the stamp
+        // site. These two branches are the entire difference between a
+        // sample-accurate width and a ~1 s one, and until 6qvf both left the
+        // same `.rediffSlot` mark behind.
+        let widthProvenance: AnchorRef
         if let byteSlots = await computeByteAlignedPlayedSlots(
             provider: provider,
             asset: asset,
@@ -7467,6 +7494,7 @@ actor AdDetectionService {
         ) {
             // ── BYTE PRIMARY (xsdz.57) ── the chroma differ is NOT invoked.
             playedSlots = byteSlots
+            widthProvenance = .rediffSlot
         } else {
             // ── CHROMA FALLBACK ── the pre-xsdz.57 path, unchanged.
             // Stored played-copy (A-side) fingerprint stream. The store's fetch
@@ -7497,6 +7525,14 @@ actor AdDetectionService {
                 return nil
             }
             playedSlots = acceptance.playedSlots
+            // playhead-6qvf: NOT `.rediffSlot`. `gateAndDiff` aligns chroma
+            // fingerprints at `ChromaFingerprinter.hopSize` granularity and its
+            // merged runs fold in noise gaps, so these edges carry no claim to
+            // the byte differ's measured error distribution.
+            widthProvenance = .rediffSlotChroma
+            logger.info(
+                "[6qvf] rediff width from the CHROMA fallback asset=\(analysisAssetId, privacy: .public) slots=\(playedSlots.count) — stamping .rediffSlotChroma (NOT byte-exact: no deterministic tier, no auto-skip admission, no certainty carve-outs)"
+            )
         }
 
         // playhead-xsdz.34 §5: the user-veto ranges (same set the acoustic pass
@@ -7568,7 +7604,8 @@ actor AdDetectionService {
         return RediffSlotPassComputation(
             candidates: candidates,
             diagnostics: bundle.diagnostics,
-            result: result
+            result: result,
+            widthProvenance: widthProvenance
         )
     }
 
@@ -7721,11 +7758,14 @@ actor AdDetectionService {
             showId: showId
         ) else { return decodedSpans }
 
+        // playhead-6qvf: the provenance is the DIFFER'S, not a constant. Both
+        // arms reach this one call, so a literal `.rediffSlot` here was the
+        // single line that collapsed two instruments into one certainty class.
         let rewrite = SpliceSlotRewriter.apply(
             decodedSpans: decodedSpans,
             dispositions: computation.result.dispositions,
             atomEvidence: atomEvidence,
-            provenance: .rediffSlot
+            provenance: computation.widthProvenance
         )
 
         let keptCount = computation.result.dispositions.filter {
@@ -7733,7 +7773,7 @@ actor AdDetectionService {
         }.count
         if keptCount > 0 || !rewrite.absorbedIds.isEmpty {
             logger.info(
-                "[xsdz.29] rediff slot pass asset=\(analysisAssetId, privacy: .public) spans=\(decodedSpans.count) kept=\(keptCount) absorbed=\(rewrite.absorbedIds.count) rounds=\(computation.result.fixpointRounds)"
+                "[xsdz.29] rediff slot pass asset=\(analysisAssetId, privacy: .public) spans=\(decodedSpans.count) kept=\(keptCount) absorbed=\(rewrite.absorbedIds.count) rounds=\(computation.result.fixpointRounds) provenance=\(computation.widthProvenance.provenanceKind, privacy: .public)"
             )
         }
 
