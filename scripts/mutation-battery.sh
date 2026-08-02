@@ -189,6 +189,42 @@
 #   change to a shared tool for one bead's convenience. No batch was re-run and
 #   no expectation was relaxed.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-gard). Batches 180-194 (I01-I21, 21 new
+#   entries), 15 batches. FINAL 21 KILLED / 0 SURVIVED / 0 ERROR, 22 builds
+#   (14 batches + baseline + 6 re-runs after the fixes below). Batches 1-179
+#   were NOT re-run and carry the verdicts above. Recount with `--list`.
+#
+#   THE PRE-FLIGHT EARNED ITS KEEP AGAIN. The first attempt refused: the new
+#   `revertAttributesToTheDrawingDetector` was RED under the focused set and
+#   GREEN alone — `revertWindow` issues its trust write in an unstructured
+#   `Task`, so the test raced it. Six mutations naming rails in that suite would
+#   have been credited KILLED off a flake.
+#
+#   Five survivors on the first pass, and every one was a real finding:
+#     • I02 — `migrationPreservesPosture` iterated `allCases where
+#       consultsShowTrust`, so a mutation making EVERY class exempt emptied the
+#       loop and the test passed describing nothing. The three classes are now
+#       NAMED. A test whose iteration set is derived from the predicate under
+#       test cannot fail when that predicate is wrong.
+#     • I20 — an EQUIVALENT MUTANT: dropping the exempt class from the session
+#       override's map is masked by `DetectorSkipModes.mode(for:)`'s fallback to
+#       `showMode`, which the override just set to the same value. EDIT re-cut
+#       to delete the assignment entirely (the stale `beginEpisode` map then
+#       governs, which is a real defect).
+#     • I15 — `userOverrideIsNotSilentlyUndone` read only the LEGACY counter and
+#       the modes, neither of which the ledger's weight touches. Restated as
+#       behaviour: one unanchored veto after an override must leave the class in
+#       `auto`.
+#     • I14 — materialization has TWO carriers (the veto path and the
+#       correct-observation path) and removing one leaves the other's rail
+#       green. The mutation now removes both.
+#     • I08 and I18 — expectations naming tests the edits cannot REACH. I08's
+#       demotion/escape rails are satisfied by the legacy triple when the ledger
+#       does not persist (correctly so); repointed at the three claims that need
+#       the ledger to hold state the scalar does not. I18's new-show rail exits
+#       `resolveDetectorModes` one branch earlier; split out as I21 rather than
+#       credited by association.
+#
 #   Every EDIT was `--dry-run` verified before any build was spent — ten
 #   anchors, ten "applied exactly once and the tree was restored". That is the
 #   cheap half of the F09 lesson recorded above and it caught nothing here; the
