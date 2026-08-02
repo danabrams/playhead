@@ -144,6 +144,41 @@
 #   mutation fault). Batches 1-55 and 59-60 were NOT re-run and carry the
 #   verdicts above. Recount: the array now holds 111 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-01 (playhead-y3ya). Batches 91-102 (Y01-Y18, 18 new
+#   entries), 12 batches. FINAL 18 KILLED / 0 SURVIVED / 0 ERROR. Batches 1-90
+#   were NOT re-run and carry the verdicts above. Recount: the array now holds
+#   170 live entries.
+#
+#   Composition, stated because it was not one invocation. First pass, batches
+#   91-100 (Y01-Y14): 13 KILLED, 1 SURVIVED. Y12 — the clip-radius bound —
+#   survived, and the survivor was RIGHT: `aDistantAnchorDoesNotClip` used a
+#   SINGLE mid-window anchor, which is a candidate for BOTH edges, so an
+#   unbounded radius collapsed the extent to a point, the min-duration guard
+#   refused the clip, and the mark came back unchanged. The assertion was green
+#   for a reason unrelated to the radius it names. The FIXTURE was re-cut (one
+#   anchor per half); the implementation was not touched. Second pass, batches
+#   98-102, re-ran Y11/Y12 plus the re-pointed Y13/Y14 and the new Y15-Y18:
+#   all KILLED.
+#
+#   Y13 and Y14 were RE-POINTED between the passes, not merely re-run: round 2
+#   added the `canProposeNewRegions` mode gate to both compose sites, so both
+#   `if` lines moved. Their claims are unchanged.
+#
+#   TWO ISSUE LISTS WERE READ RATHER THAN TRUSTED, per this file's standing
+#   warning that a KILL proves only that SOME expectation failed. Y04 (drop a
+#   coarse verdict no pass-B narrowed) and Y06 (require an anchor before
+#   emitting) each redden ~20 tests, which is why each has its own batch — a
+#   batched partner would have been credited off their blast radius. Their
+#   lists differ in exactly the right place: Y06 reddens `a passB refinement
+#   replaces the coarse window it lies inside` and Y04 does not, because Y04
+#   leaves the refinement path alone.
+#
+#   KNOWN GAP, deliberately not encoded: there is no rail on
+#   `AnalysisStore+CrossUserSharing.isLocalOnlyBoundaryState`. The registration
+#   IS pinned by `sweepMarksAreAKnownExportDisposition`, but that suite is not
+#   in FOCUSED_SUITES and adding the sharing suites to every batch is not worth
+#   the wall clock for one string in a switch.
+#
 #   PARTIAL RE-RUN 2026-08-01 (playhead-b6r2). Batches 85-90 (B01-B07, 7 new
 #   entries) plus batch 81 — W01/W02, whose expectation this bead re-pointed.
 #   FINAL 9 KILLED / 0 SURVIVED / 0 ERROR, 8 builds, ~21m wall clock. Batches
