@@ -178,6 +178,39 @@
 #   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
 #   array now holds 182 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-9v09). Batches 170-175 (H01-H10, 10 new
+#   entries), 6 batches. FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 7 builds,
+#   16m50s wall clock. Batches 1-169 were NOT re-run and carry the verdicts
+#   above. Recount with `--list`: the array now holds 248 live entries.
+#
+#   Not one invocation: batch 170 ran with the baseline (2 builds), then
+#   171-175 in a shell loop under `PLAYHEAD_MB_SKIP_BASELINE=1`, because
+#   `--batch` is not repeatable and editing that parser to make it so is a
+#   change to a shared tool for one bead's convenience. No batch was re-run and
+#   no expectation was relaxed.
+#
+#   Every EDIT was `--dry-run` verified before any build was spent — ten
+#   anchors, ten "applied exactly once and the tree was restored". That is the
+#   cheap half of the F09 lesson recorded above and it caught nothing here; the
+#   expensive half (a dry run proves the anchor matches, NOT that the result
+#   compiles) also came back clean, all six batches building first time.
+#
+#   TWO ISSUE LISTS WERE READ RATHER THAN TRUSTED, per this file's standing
+#   warning that a KILL proves only that SOME expectation failed. Both batched
+#   pairs put a wiring mutation next to a value-type one, and both value-type
+#   mutations have a blast radius that reaches the behavioural suite:
+#     • H06 (`retiredCount` keyed on `isDelivered`) additionally reddens isp5's
+#       golden-string test, because `armedSuggest` then counts as retired and
+#       `retired=3` appears in a row that must render byte-identically. That is
+#       a genuine consequence of the mutation, not of its batchmate H01 — H01
+#       deletes only the stamp and leaves every row assertion green, which is
+#       exactly the asymmetry that made the pair worth batching.
+#     • H08 and H09 each redden `a retraction row renders retired= …` for
+#       opposite reasons — H08 makes a DELIVERY row carry `retired=1`, H09 makes
+#       the SWEEP row carry `delivered=2`. Their batchmates H03 and H04 are both
+#       reason-carrying mutations whose expectations name the reason itself, so
+#       neither could have been credited off the other's failure.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-sik9). Batches 140-144 (C01-C10, 10 new
 #   entries), 5 batches. FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 5 builds
 #   (1 baseline inside batch 140, then 141-144 with PLAYHEAD_MB_SKIP_BASELINE=1
