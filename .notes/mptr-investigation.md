@@ -207,3 +207,42 @@ lane, and it is not under the 300 s stage cap that produced this bug. `AnalysisJ
 explicit batch caller — it calls `finishAppending` immediately, so its append queue is always
 empty and the field defect cannot arrive through that arm. Extending the skip there would change
 a second lane's behaviour without a fixture for it.
+
+## Step 6 — THE SKIP WAS WRONG, AND THE GATE PROVED IT
+
+Gate 1 on the skip version: **`RED (0 known / 2 NEW)`**, and both NEW failures were the same
+thing —
+
+    swift-testing::duplicate fingerprint can upgrade missing speakerId and avgConfidence
+                   and re-emit chunk
+    swift-testing::a second row for one (asset, pass, fingerprint) is refused, and the
+                   survivor still takes the speakerId upgrade
+
+They also crashed the host (`Fatal error: Index out of range` on `chunks[0]`), which is why the
+run reported `DID NOT RUN — 41 of 41 recorded tests were never reached`. The 41 is a consequence
+of the crash, not a separate defect.
+
+**What they prove.** `transcribeShard`'s duplicate-fingerprint arm is not dead weight: it
+backfills `speakerId` and `avgConfidence` onto rows that lacked them and re-emits the upgraded
+chunk. That arm is FED BY re-running the ASR. A shard that is skipped can never be enriched — so
+the "deliberate tradeoff" I wrote into the first version was not a tradeoff at all, it was a
+silent capability deletion, and it had tests.
+
+**The rework.** Order, do not filter. `orderingUncoveredFirst` is a stable partition: shards no
+artifact backs sort first, already-backed shards follow, each group keeping the playhead-proximity
+order `prioritizeShards` produced. Everything still runs; every upgrade still happens.
+
+This is strictly better than the skip, not merely safer:
+
+- the 300 s cap is spent on unread audio, which is the entire point;
+- covered shards still get their upgrades with whatever budget remains;
+- a wrong answer from the artifact test now costs LATENCY, never COVERAGE — so H3's
+  counterexamples do not even need to be right for safety, only for speed. (They still sort as
+  uncovered and run first, which is stronger than pre-mptr, not weaker.)
+- and the two consequences recorded in Step 5 both EVAPORATE: the dedup-heavy re-run fixture
+  needs no watermark rewind (both shards run again, as it always assumed), and the total-failure
+  gate's tallies are untouched because covered shards still complete.
+
+Step 5 is therefore superseded. It is kept above because the reasoning that produced it is what
+found the ordering answer — the tradeoff I talked myself into was the signal that the design was
+wrong.
