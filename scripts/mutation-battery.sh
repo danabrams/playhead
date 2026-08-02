@@ -2864,7 +2864,7 @@ describe_mutation() {
     I17) echo "gard: an inferred revert weighs as much as an explicit one" ;;
     I18) echo "gard: per-detector resolution is inert — every class answers with the show mode" ;;
     I19) echo "gard: a lookup FAILURE grants the exempt class auto" ;;
-    I20) echo "gard: a session override governs only the show-trust-consulting classes" ;;
+    I20) echo "gard: a session override never reaches the per-detector map — the stale episode map governs" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -6449,20 +6449,26 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # EDIT RE-CUT after the first I run. The original dropped the exempt class
+  # from the override's map — an EQUIVALENT MUTANT, because
+  # `DetectorSkipModes.mode(for:)` falls back to `showMode`, which the override
+  # has just set to the same value. It is not a defect and no test should have
+  # caught it. What IS a defect is the override never reaching the per-detector
+  # map at all: the stale map from `beginEpisode` then governs, and a class
+  # seeded `.auto` keeps skipping after the listener asked for shadow.
   I20)
     snippet OLD <<'EOF'
+        activeDetectorSkipModes = DetectorSkipModes(
+            showMode: mode,
+            resolution: .sessionOverride,
             byDetector: Dictionary(
                 uniqueKeysWithValues: SkipDetectorClass.allCases.map {
                     ($0, mode)
                 }
             )
+        )
 EOF
     snippet NEW <<'EOF'
-            byDetector: Dictionary(
-                uniqueKeysWithValues: SkipDetectorClass.allCases
-                    .filter(\.consultsShowTrust)
-                    .map { ($0, mode) }
-            )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

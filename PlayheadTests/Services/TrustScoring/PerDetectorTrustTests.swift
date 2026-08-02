@@ -249,7 +249,13 @@ struct DetectorTrustLedgerTests {
         let ledger = profile.detectorTrustLedger
         #expect(ledger.entries.isEmpty, "A pre-gard row carries no ledger")
 
-        for detector in SkipDetectorClass.allCases where detector.consultsShowTrust {
+        // The three classes are NAMED, not filtered by `consultsShowTrust`.
+        // The mutation battery caught the filtered form: a mutation that makes
+        // every class exempt empties the loop and the test passes describing
+        // nothing. `what would this read if the thing never happened?` —
+        // feedback_ask_what_the_quantity_measures_2026-07-29, applied to a
+        // test's own iteration set.
+        for detector in [SkipDetectorClass.segmentAggregated, .userAsserted, .fusion] {
             let entry = ledger.entry(for: detector, seededFrom: profile)
             #expect(entry.mode == SkipMode.manual.rawValue)
             #expect(entry.trustScore == 0.20)
