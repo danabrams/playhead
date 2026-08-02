@@ -143,8 +143,8 @@ DIFFERENT flag's suite — "with my flag off this fixture yields an eligible spa
 timeline; on a 120 s one it covers three quarters. On a real 45–90 minute
 episode the same 90 s is 2–3%. The corpus over-reports the guard by roughly an
 order of magnitude, and reporting "7 windows demoted" without that denominator
-would be exactly the defect
-[`feedback_ask_what_the_quantity_measures`](../) warns about.
+would be exactly the defect that keeps recurring here: a number quoted without
+saying what its denominator is.
 
 The fix is the one this repo already applies to `unanchoredExtentBlocksAutoSkip`
 in these same fixtures: pin `certaintyTieredSkipEnabled: false` where the suite

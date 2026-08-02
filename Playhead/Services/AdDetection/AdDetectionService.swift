@@ -1179,7 +1179,7 @@ struct AdDetectionConfig: Sendable {
         musicOffsetLexicalGateEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
         musicOffsetFMRecoveryEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
         certaintyTieredSkipEnabled: true,  // playhead-nqey: ships ON 2026-08-02 (Dan's Gate-2 decision, taken 2026-08-01 conditional on sik9 = #330). DEMOTIONS ONLY: the switch can move `.eligible → .markOnly` and nothing else, so ON is strictly more conservative than OFF — no new skip, no widened skip, no changed score. Sole consumer is DecisionMapper in runBackfill; day-0 rediff mints, hot-path and aggregator rows never reach it. (2026-07-19 gate-delta measurement 32/32 at T=0.9 + 90s post-roll.)
-        hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); armed since playhead-nqey
+        hostReadConfidenceFloor: 2.0,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); armed since playhead-nqey
         postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); armed since playhead-nqey, with sik9's byte-anchored-inner-edge exemption
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
         preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
