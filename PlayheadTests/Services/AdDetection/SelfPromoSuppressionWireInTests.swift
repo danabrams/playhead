@@ -141,6 +141,18 @@ struct SelfPromoSuppressionWireInTests {
             detectorVersion: "fl4j-test",
             fmBackfillMode: .off,
             selfPromoSuppressionEnabled: selfPromoEnabled,
+            // playhead-nqey: the certainty-tiered gate is held OFF across this
+            // suite, for the same reason the 2350 gate is (below) and with the
+            // same coverage note. This suite's episodes are 120 s long, so the
+            // shipped 90 s post-roll guard covers three quarters of the timeline
+            // and demotes every span in the fixture on POSITION — the eligible
+            // baseline the self-promo demotion is measured against collapses
+            // again, for a reason that again has nothing to do with the flag
+            // under test. (In the field a 90 s window is 2-3% of a 45-90 min
+            // episode; the reach here is an artifact of the fixture's geometry,
+            // not of the guard.) The certainty-tiered gate is covered by
+            // CertaintyTieredSkipShipsOnTests.
+            certaintyTieredSkipEnabled: false,
             // playhead-2350: the extent gate is held OFF across this suite. The
             // fixtures here are lexical-seeded — no rediff slot, no stinger
             // snap — so under the shipped default (ON) every span demotes to
@@ -231,8 +243,10 @@ struct SelfPromoSuppressionWireInTests {
             detectorVersion: "fl4j-test",
             fmBackfillMode: .off,
             selfPromoSuppressionEnabled: false,
-            // playhead-2350: matches `makeService`'s opt-out so the two arms of
-            // this byte-identity sweep differ ONLY in the self-promo flag.
+            // playhead-2350 / playhead-nqey: matches `makeService`'s two opt-outs
+            // so the two arms of this byte-identity sweep differ ONLY in the
+            // self-promo flag.
+            certaintyTieredSkipEnabled: false,
             unanchoredExtentBlocksAutoSkip: false
         )
         let serviceDefault = AdDetectionService(

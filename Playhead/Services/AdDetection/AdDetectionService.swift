@@ -688,10 +688,20 @@ struct AdDetectionConfig: Sendable {
     /// `postRollGuardSeconds` of a KNOWN episode duration demotes to `.markOnly`
     /// regardless of score — with the SAME byte-exact-rediff exemption since
     /// playhead-sik9. Both downgrades only ever touch
-    /// an already-`.eligible` gate and NEVER modify any score. Gated OFF by
-    /// default: enablement is Dan's Gate-2 decision, verified by the 2026-07-19
+    /// an already-`.eligible` gate and NEVER modify any score.
+    ///
+    /// playhead-nqey: **ships ON** (Dan's Gate-2 decision, taken 2026-08-01
+    /// conditional on sik9, which landed as #330). Verified by the 2026-07-19
     /// gate-delta measurement (32/32 windows predicted-vs-observed agree at
-    /// T=0.9 + 90s post-roll).
+    /// T=0.9 + 90s post-roll). Because the switch can only ever move
+    /// `.eligible → .markOnly`, ON is strictly more conservative than OFF: it
+    /// cannot create a skip, cannot widen one, and cannot change a score. OFF
+    /// restores the pre-nqey behavior exactly.
+    ///
+    /// SCOPE, so the flag is not read as broader than it is: the only consumer
+    /// is `DecisionMapper`, constructed once, in `runBackfill`
+    /// (Steps 12–14). Rows minted by `mintByteExactDayZeroMarks`, by the hot
+    /// path, or by the aggregator never consult that mapper and are untouched.
     let certaintyTieredSkipEnabled: Bool
 
     /// playhead-wraj: minimum `skipConfidence` a NON-rediff (host-read) span must
@@ -1022,7 +1032,7 @@ struct AdDetectionConfig: Sendable {
         sustainedMusicProposerEnabled: Bool = true,
         musicOffsetLexicalGateEnabled: Bool = true,
         musicOffsetFMRecoveryEnabled: Bool = true,
-        certaintyTieredSkipEnabled: Bool = false,
+        certaintyTieredSkipEnabled: Bool = true,
         hostReadConfidenceFloor: Double = 0.9,
         postRollGuardSeconds: Double = 90.0,
         unanchoredExtentBlocksAutoSkip: Bool = true,
@@ -1168,9 +1178,9 @@ struct AdDetectionConfig: Sendable {
         sustainedMusicProposerEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1) — certified config measured 47.5% cov / 91.7% true prec / 6.0% false-banner; markOnly-only
         musicOffsetLexicalGateEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
         musicOffsetFMRecoveryEnabled: true,  // playhead-lq6f: flipped ON 2026-07-19 (Ship Gate 1, same certified measurement as the proposer)
-        certaintyTieredSkipEnabled: false,  // playhead-wraj: certainty-tiered auto-skip gate ships OFF; enablement is Dan's Gate-2 decision (2026-07-19 gate-delta measurement 32/32 at T=0.9 + 90s post-roll)
-        hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); inert while certaintyTieredSkipEnabled is false
-        postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); inert while certaintyTieredSkipEnabled is false
+        certaintyTieredSkipEnabled: true,  // playhead-nqey: ships ON 2026-08-02 (Dan's Gate-2 decision, taken 2026-08-01 conditional on sik9 = #330). DEMOTIONS ONLY: the switch can move `.eligible → .markOnly` and nothing else, so ON is strictly more conservative than OFF — no new skip, no widened skip, no changed score. Sole consumer is DecisionMapper in runBackfill; day-0 rediff mints, hot-path and aggregator rows never reach it. (2026-07-19 gate-delta measurement 32/32 at T=0.9 + 90s post-roll.)
+        hostReadConfidenceFloor: 0.9,  // playhead-wraj: T=0.9 themove host-read calibration (2026-07-17); armed since playhead-nqey
+        postRollGuardSeconds: 90.0,  // playhead-wraj: post-roll guard window (Dan 2026-07-19); armed since playhead-nqey, with sik9's byte-anchored-inner-edge exemption
         unanchoredExtentBlocksAutoSkip: true,  // playhead-2350: SAFETY gate ships ON — a span with an invented (unanchored) start or end edge is banner-only, never auto-skip. Only ever demotes.
         preRollStartClampSeconds: 20.0,  // playhead-xsdz.66: pre-roll start-at-zero clamp ships ON — widened material is mark-only; 20s covers the cold-start miss, far below any mid-roll
         podContinuationEnabled: true,  // playhead-eks2: flipped ON 2026-08-01 (Dan) — the corpus A/B the xsdz.65 close gated on measures 0.0 newly-claimed seconds outside a byte-confirmed DAI slot at the shipping arm, and the output is mark-only/candidate/unanchored, so the worst case is a wrong BANNER (playhead-2350 + ynmk both hold, pinned by AdPodContinuationFlipTests)

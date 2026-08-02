@@ -703,9 +703,19 @@ struct FusionEligibilityGatePersistenceTests {
     ///   edges, so under the shipped default no such row exists and the test
     ///   would pass vacuously. The 2350 gate itself is covered by
     ///   `UnanchoredExtentAutoSkipGateTests`.
+    /// - Parameter certaintyTiered: playhead-nqey's certainty-tiered gate, the
+    ///   same shape and for the same reason. Defaults to the SHIPPED value; the
+    ///   same single caller opts out, because this suite's episodes are 90 s
+    ///   long and the shipped post-roll guard is 90 s wide, so with it on there
+    ///   is no `.eligible` row anywhere in the fixture and the round-trip test
+    ///   would again pass vacuously. That is fixture geometry, not a field
+    ///   prediction: in the field the same 90 s is 2-3% of an episode. The
+    ///   certainty-tiered gate itself is covered by
+    ///   `CertaintyTieredSkipShipsOnTests`.
     private func makeService(
         store: AnalysisStore,
-        blocksUnanchoredExtent: Bool = true
+        blocksUnanchoredExtent: Bool = true,
+        certaintyTiered: Bool = AdDetectionConfig.default.certaintyTieredSkipEnabled
     ) -> AdDetectionService {
         AdDetectionService(
             store: store,
@@ -718,6 +728,7 @@ struct FusionEligibilityGatePersistenceTests {
                 hotPathLookahead: 90.0,
                 detectorVersion: "ux6r-test-v1",
                 fmBackfillMode: .off,
+                certaintyTieredSkipEnabled: certaintyTiered,
                 unanchoredExtentBlocksAutoSkip: blocksUnanchoredExtent
             )
         )
@@ -790,9 +801,15 @@ struct FusionEligibilityGatePersistenceTests {
         do {
             let store = try await AnalysisStore.open(directory: dir)
             try await store.insertAsset(makeAsset(id: assetId))
-            // See `makeService` — this is the one caller that needs the 2350
-            // gate off, because an eligible row is the subject of the test.
-            let service = makeService(store: store, blocksUnanchoredExtent: false)
+            // See `makeService` — this is the one caller that needs both the
+            // 2350 gate and the nqey certainty-tiered gate off, because an
+            // eligible row is the subject of the test and this fixture's
+            // 90 s episode sits entirely inside the 90 s post-roll guard.
+            let service = makeService(
+                store: store,
+                blocksUnanchoredExtent: false,
+                certaintyTiered: false
+            )
             try await service.runBackfill(
                 chunks: makeAdChunks(assetId: assetId),
                 analysisAssetId: assetId,
