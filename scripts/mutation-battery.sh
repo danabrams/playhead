@@ -29,6 +29,31 @@
 # exception: if the source moved on and the mutation no longer reproduces the
 # defect it describes, rewrite the EDIT — never the expectation.)
 #
+# K2 SERIES STATUS — playhead-mptr, 2026-08-02
+#   The artifact-backed shard ORDERING (unread audio before audio we already
+#   hold). 10 entries K201-K210, 4 batches (200-203).
+#   FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 5 builds — batches 200, 201, 202,
+#   203, then K206 alone after its expectation string was corrected.
+#
+#   TWO THINGS THAT COST A BUILD EACH, WORTH KNOWING BEFORE ADDING A SERIES:
+#
+#   1. The 4th field is the EXACT `@Test` display name, matched verbatim against
+#      the observed failures — it is not a prose description. Every K2 entry
+#      first came back `expected test never ran` while the mutation had in fact
+#      killed its test perfectly. Check the name with `grep '@Test("'`, and note
+#      the field is SPLIT ON ';', so a test whose name contains a semicolon can
+#      never be matched (one K2 test was renamed for exactly this).
+#
+#   2. `--dry-run` DOES NOT RELIABLY RESTORE. Running batches 200-203 back to
+#      back in one shell loop left six mutations live on disk while every batch
+#      printed "the tree was restored"; batch 203 then reported phantom "anchor
+#      drift" because it was patching an already-mutated file. Real runs leave
+#      the tree dirty too. Nothing reached HEAD only because commits staged
+#      EXPLICIT PATHS — which is the same discipline the `git add -A` warning at
+#      the top of this file demands, and this is the second mechanism that makes
+#      it necessary. ALWAYS `git checkout -- .` and re-check `git status` between
+#      invocations, and never trust the restore message alone.
+#
 # THE R SERIES LIVES ELSEWHERE (playhead-voez)
 # --------------------------------------------
 # The rails for the gate baseline — `scripts/gate_baseline.py` and the baseline
@@ -563,6 +588,9 @@ ACT="Playhead/Services/AdDetection/RediffRefetch/RediffActivation.swift"
 # carries the mark literals and the seed predicate.
 ADSVC="Playhead/Services/AdDetection/AdDetectionService.swift"
 PODC="Playhead/Services/AdDetection/AdPodContinuation.swift"
+# playhead-mptr: the artifact-backed shard skip (K2 series). MPTRIDX owns the
+# merge/overlap/skip policy; the two SQL rails live in STORE.
+MPTRIDX="Playhead/Services/TranscriptEngine/FastTranscriptCoverageIndex.swift"
 # playhead-kvs8: the FM daemon throttle (Q01-Q08). THROT is the single
 # definition + the named causes; RUNNER carries the defer branch that replaced
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
@@ -692,6 +720,10 @@ FOCUSED_SUITES=(
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
   -only-testing:PlayheadTests/TestScratchReaperTests
+  # playhead-mptr: the artifact-backed ordering rails (K2 series). Both suites
+  # are pure value-type / small-store tests, well under a second.
+  -only-testing:PlayheadTests/FastTranscriptCoverageIndexTests
+  -only-testing:PlayheadTests/FastTranscriptCoveredRangesStoreTests
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertLifecycleRaceTests
@@ -1408,6 +1440,21 @@ T_GARD_STRONGEST_TIER="A duplicate class in one gesture is charged ONCE, at its 
 T_GARD_WEAK_HALVED="An inferred revert weighs half an explicit one (the fidelity ladder)"
 T_GARD_DOOR_OPENS="THE DOOR OPENS: correct observations walk the device row back to auto"
 T_GARD_DECAY_ONE="Each correct observation decays exactly one unit of false-signal evidence"
+
+# playhead-mptr (K2 series): the artifact-backed shard skip. The whole point is
+# that a skip needs TWO independent facts — a watermark that reached past the
+# shard AND a persisted chunk that backs it — so the two rails are asserted
+# separately and in both directions.
+T_MPTR_WATERMARK_RAIL="a shard past the watermark never counts as transcribed, even where chunks exist"
+T_MPTR_ARTIFACT_RAIL="H3 counterexample: watermark reaches past the shard but NO chunk backs it"
+T_MPTR_TOUCHING_MERGE="exactly touching ranges merge — ASR segments abut all the time"
+T_MPTR_DEGENERATE_DROPPED="degenerate and non-finite ranges are dropped, not merged"
+T_MPTR_HALF_OPEN_END="touching at a boundary is not an overlap — the ranges are half-open"
+T_MPTR_HALF_OPEN_START="touching at a boundary is not an overlap — the ranges are half-open"
+T_MPTR_PASS_FILTER="a final-pass chunk is not reported as fast coverage"
+T_MPTR_SQL_DEGENERATE="a degenerate chunk covers no time and is excluded"
+T_MPTR_WATERMARK_INCLUSIVE="a shard ending exactly at the watermark counts, one second past does not"
+T_MPTR_UNCOVERED_FIRST="the D9B513CD shape: the unread tail is ordered ahead of the covered prefix"
 T_GARD_CREDIT_NOT_SHARED="Credit goes to the observed detector only"
 T_GARD_OVERRIDE_CLEARS="An explicit user override clears the stale evidence against every detector"
 T_GARD_BANNER_CREDITS="A confirmed banner IS a correct observation, credited to the detector that drew the span"
@@ -2691,6 +2738,19 @@ MUTATIONS=(
   # history" widened into "runs when persistence is broken" — playhead-djl0's
   # rule that every failure lands non-actioning.
   "I19|193|TRUST|$T_GARD_LOOKUP_FAILURE"
+
+  # playhead-mptr — K2 series, the artifact-backed shard skip. Four batches;
+  # K201 and K208 patch the SAME guard line and so can never share one.
+  "K201|200|MPTRIDX|$T_MPTR_WATERMARK_RAIL"
+  "K203|200|MPTRIDX|$T_MPTR_TOUCHING_MERGE"
+  "K209|200|MPTRIDX|$T_MPTR_HALF_OPEN_START"
+  "K202|201|MPTRIDX|$T_MPTR_ARTIFACT_RAIL"
+  "K204|201|MPTRIDX|$T_MPTR_DEGENERATE_DROPPED"
+  "K205|202|MPTRIDX|$T_MPTR_HALF_OPEN_END"
+  "K210|202|MPTRIDX|$T_MPTR_UNCOVERED_FIRST"
+  "K206|202|STORE|$T_MPTR_PASS_FILTER"
+  "K207|203|STORE|$T_MPTR_SQL_DEGENERATE"
+  "K208|203|MPTRIDX|$T_MPTR_WATERMARK_INCLUSIVE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6542,6 +6602,56 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  K201)
+    patch "$file" \
+      "        guard let watermark, watermark.isFinite, watermark >= shardEnd else {" \
+      "        guard let watermark, watermark.isFinite, watermark >= 0 else {" ;;
+
+  K202)
+    patch "$file" \
+      "        return overlaps(start: shardStart, end: shardEnd)" \
+      "        return true" ;;
+
+  K203)
+    patch "$file" \
+      "            if var last = merged.last, range.start <= last.end {" \
+      "            if var last = merged.last, range.start < last.end {" ;;
+
+  K204)
+    patch "$file" \
+      "            .filter { \$0.start.isFinite && \$0.end.isFinite && \$0.end > \$0.start }" \
+      "            .filter { \$0.start.isFinite && \$0.end.isFinite && \$0.end >= \$0.start }" ;;
+
+  K205)
+    patch "$file" \
+      "        if candidate >= 0, intervals[candidate].end > start {" \
+      "        if candidate >= 0, intervals[candidate].end >= start {" ;;
+
+  K206)
+    patch "$file" \
+      "              AND pass = 'fast'" \
+      "              AND pass IS NOT NULL" ;;
+
+  K207)
+    patch "$file" \
+      "              AND endTime > startTime" \
+      "              AND endTime >= startTime" ;;
+
+  K208)
+    patch "$file" \
+      "        guard let watermark, watermark.isFinite, watermark >= shardEnd else {" \
+      "        guard let watermark, watermark.isFinite, watermark > shardEnd else {" ;;
+
+  K209)
+    patch "$file" \
+      "        return next < intervals.count && intervals[next].start < end" \
+      "        return next < intervals.count && intervals[next].start <= end" ;;
+
+  K210)
+    patch "$file" \
+      "        return uncovered + covered" \
+      "        return covered + uncovered" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -6572,6 +6682,7 @@ rec_file()   {
     ADSVC) printf '%s' "$ADSVC" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
+    MPTRIDX) printf '%s' "$MPTRIDX" ;;
     THROT) printf '%s' "$THROT" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;

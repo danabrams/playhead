@@ -10075,6 +10075,44 @@ actor AnalysisStore {
         return results
     }
 
+    /// playhead-mptr: the time ranges an asset's `pass = 'fast'` transcript
+    /// chunks actually back, ascending by start.
+    ///
+    /// Deliberately NOT `fetchTranscriptChunks(assetId:)`: the transcript
+    /// engine asks this once per run purely to decide which shards it can
+    /// skip, and it needs two REAL columns per row rather than the text of
+    /// every chunk in the episode. On a long episode that is the difference
+    /// between two doubles and several megabytes of transcript.
+    ///
+    /// Filters match ``reconcileFastTranscriptCoverage(id:)`` exactly —
+    /// `pass = 'fast'` and `endTime > startTime` — so the skip decision and
+    /// the watermark are computed from the same population. A degenerate row
+    /// covers no time and must not be able to authorise a skip.
+    ///
+    /// Uses `idx_chunks_time (analysisAssetId, startTime)`, so the ORDER BY
+    /// is served by the index rather than a sort.
+    func fetchFastTranscriptCoveredRanges(
+        assetId: String
+    ) throws -> [(start: Double, end: Double)] {
+        let sql = """
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND pass = 'fast'
+              AND endTime > startTime
+            ORDER BY startTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var results: [(start: Double, end: Double)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(
+                (start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1))
+            )
+        }
+        return results
+    }
+
     /// playhead-hygc.1.2: canonical pipeline-progress read model for
     /// Activity rows and the dogfood diagnostics snapshot.
     ///
