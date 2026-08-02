@@ -178,6 +178,22 @@ Two consequences:
 
 A wedged run is also the case the baseline check is built to survive: it printed `CANNOT EVALUATE — the log is incomplete` and passed xcodebuild's own exit through (143), rather than reading ~9,900 unfinished tests as a clean sweep.
 
+### `simctl erase` can report success and free nothing (playhead-cgka)
+
+**Measured 2026-08-02, and it is why this box kept arriving at ~8 GiB of headroom on a 228 GB disk.** `simctl erase` does not delete a device's data in place: CoreSimulator *moves* it to `$TMPDIR/Deleting-<uuid>/` and reaps it asynchronously. If that reap hits a directory it cannot read, it dies and the bytes stay forever — the erase still reports success, and `du` on the device directory still shows the space as freed.
+
+The test suite creates exactly such a directory by design: `DownloadManagerTests` chmods a `complete/` directory to `0o300` to prove a permission failure is handled, and restores it in a `defer` that an abnormal exit skips. Seven orphaned devices had accumulated **15 GiB**, every one of them stuck on a single unreadable `PlayheadTestScratch/…/complete`. Clearing them took the volume from 9.0 GiB to 25.4 GiB free.
+
+```bash
+du -sk "$TMPDIR"Deleting-* 2>/dev/null | sort -rn      # what is stranded
+chmod -R u+rwx "$TMPDIR"Deleting-*                     # u+w is NOT enough
+rm -rf "$TMPDIR"Deleting-*
+```
+
+**`chmod -R u+w` does not work here and looks like it should.** `0o300` is `-wx------`: write is already granted; READ is what an enumerator needs to walk the directory, so `rm -rf` fails with EACCES on precisely the directories that need repairing. It is `u+rwx` or nothing. (The suite's own wipe now goes through `TestScratchReaper.forceRemove`, which repairs permissions before giving up, so new instances should not accumulate — but devices stranded before that landed are still out there.)
+
+Check `$TMPDIR/Deleting-*` **before** concluding the box is out of disk. It is the largest single reservoir on this machine and it is invisible to every `du` of the worktree, the derivedData or the simulator.
+
 ### Orphan sweep script
 
 `scripts/disk-cleanup.sh` runs weekly via cron. Safe to run manually:
