@@ -149,6 +149,30 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   170 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-6qvf). Batches 160-169 (G01-G10, 10 new
+#   entries, one batch each) plus batch 158 — F08, whose EDIT this bead re-cut
+#   when it unified the host-read floor onto `carriesRediffByteExactWidth`.
+#   FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 16 builds. Batches 1-157 and 159
+#   were NOT re-run and carry the verdicts above. Recount: the array now holds
+#   180 live entries.
+#
+#   Three faults found and fixed during the run, recorded because two of them
+#   are traps any new series can hit:
+#     • G03/G04 ERRORed on "expected test never ran". Their expected names
+#       contained a SEMICOLON, which is this script's expected-test separator —
+#       the name was silently split into two names that match nothing. Renamed
+#       the test this bead owns; repointed G03 at a differently-named test in
+#       the same suite rather than renaming one it does not own.
+#     • G05 and G09 SURVIVED against expectations the mutation cannot REACH
+#       (a both-markers fixture; a predicate-closure `contains(where:)`), not
+#       against a coverage hole. Corrected the expectations — and G09's finding
+#       also corrected a false claim in the SOURCE comment on the Equatable arm.
+#     • G04's first EDIT survived at the extent tier and that WAS a real hole:
+#       `SpanExtentSupport.derive` inlined its own `contains(.rediffSlot)`
+#       instead of sharing the predicate, so widening the predicate left
+#       auto-skip ADMISSION untouched. Fixed in source (one shared
+#       `[AnchorRef].carriesRediffByteExactWidth`), not in the expectation.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-cgka). Batches 120-125 (Z01-Z12, 12 new
 #   entries), 6 batches. FINAL 12 KILLED / 0 SURVIVED / 0 ERROR, 9 builds.
 #   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
