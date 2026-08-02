@@ -62,6 +62,7 @@ struct SemanticScanAttributionWireInTests {
                 analysisAssetId: assetId,
                 transcriptVersion: transcriptVersion
             ),
+            transcriptVersion: transcriptVersion,
             plannerContext: CoveragePlannerContext(
                 observedEpisodeCount: 0,
                 stableRecall: false,
