@@ -933,7 +933,7 @@ T_Y3YA_MERGE_CEILING="the merge stops rather than growing past the mark ceiling"
 # playhead-cgka — the per-test scratch lifetime.
 T_CGKA_RECLAIM="an owned directory is reclaimed once its owner is deallocated"
 T_CGKA_DEFER="the reclaim is deferred one sweep past the first nil observation"
-T_CGKA_READOPT="re-adopting a directory clears its pending orphan mark"
+T_CGKA_READOPT="re-adopting a directory re-arms the deferral for its new owner"
 T_CGKA_UNOWNED="an unowned directory is never reclaimed by a sweep"
 T_CGKA_AUTOSWEEP="registration drives sweeps without a timer or a thread"
 T_CGKA_CLAMP="a non-positive sweep interval is clamped rather than trapping"
@@ -1729,6 +1729,11 @@ MUTATIONS=(
   "Z01|120|SCRATCH|$T_CGKA_DEFER"
   "Z09|120|SCRATCHH|$T_CGKA_REGISTERS"
 
+  # Z02 SURVIVED when first run, correctly: the sweep's live-owner branch
+  # cleared the mark too, so deleting the reset in `adopt` changed no
+  # observable behaviour. That redundant path is gone and the rail now
+  # asserts the property that is actually at stake — the deferral being
+  # RE-ARMED for the new owner, not the file merely surviving.
   "Z02|121|SCRATCH|$T_CGKA_READOPT"
   "Z04|121|SCRATCH|$T_CGKA_UNREADABLE"
   "Z06|121|SCRATCH|$T_CGKA_CLAMP"
@@ -1881,7 +1886,7 @@ describe_mutation() {
     B06) echo "InventorySanityFilter.productionDefaultConfiguration: pin it OFF, so the shared constant lies" ;;
     B07) echo "hasValidRuntimeWindowMaterial: drop the startTime >= 0 check, so impossible geometry is admitted" ;;
     Z01) echo "sweep: reclaim on the FIRST nil owner instead of deferring one sweep" ;;
-    Z02) echo "adopt: keep the pending orphan mark instead of clearing it on re-adoption" ;;
+    Z02) echo "adopt: keep the stale orphan mark, so the new owner gets no deferral" ;;
     Z03) echo "sweep: reclaim UNOWNED entries too, with nothing proving them idle" ;;
     Z04) echo "forceRemove: give up on the first failure instead of repairing permissions" ;;
     Z05) echo "makeReadableAndWritable: chmod the top directory only, do not recurse" ;;

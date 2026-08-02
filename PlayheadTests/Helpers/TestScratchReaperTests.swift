@@ -101,12 +101,23 @@ struct TestScratchReaperTests {
         withExtendedLifetime(owner) {}
     }
 
-    /// Re-adoption must clear the orphan mark. Without the reset, a directory
-    /// that lost one owner and gained another would be deleted underneath the
-    /// SECOND owner — the exact "removed while still in use" failure this design
-    /// exists to avoid.
-    @Test("re-adopting a directory clears its pending orphan mark")
-    func readoptionCancelsAPendingReclaim() throws {
+    /// Re-adoption must clear the orphan mark — and the failure that prevents is
+    /// NOT "deleted while the second owner is alive". A sweep can only doom an
+    /// entry whose owner is already nil, so a live owner is safe with or without
+    /// the reset. What a stale mark destroys is the ONE-SWEEP DEFERRAL: when the
+    /// second owner dies, `seen < now` is already true, so the directory is
+    /// reclaimed on the very sweep that first observes the death — reintroducing
+    /// exactly the deinit-in-flight race the deferral exists to remove.
+    ///
+    /// MEASURED, which is why the test is shaped like this: the first version
+    /// asserted only that the file survived while the second owner was alive,
+    /// and mutation Z02 SURVIVED against it. There is deliberately NO sweep
+    /// between the re-adoption and the second death — a sweep with a live owner
+    /// used to clear the mark as well, and that redundant second path is what
+    /// made the mutant equivalent. It has been removed; `adopt` is now the only
+    /// thing that re-arms the deferral, and this is what says so.
+    @Test("re-adopting a directory re-arms the deferral for its new owner")
+    func readoptionReArmsTheDeferral() throws {
         let root = try makeIsolatedRoot()
         defer { TestScratchReaper.forceRemove(root) }
         let reaper = TestScratchReaper(sweepEvery: 1_000_000)
@@ -115,18 +126,27 @@ struct TestScratchReaperTests {
             let first = Owner()
             reaper.adopt(dir, owner: first)
         }
-        reaper.sweep()  // marks it orphaned
+        #expect(reaper.sweep() == 0, "the first owner's death is marked, not acted on")
 
-        let second = Owner()
-        reaper.adopt(dir, owner: second)
-        reaper.sweep()
-        reaper.sweep()
+        do {
+            let second = Owner()
+            reaper.adopt(dir, owner: second)
+            #expect(
+                FileManager.default.fileExists(atPath: dir.path),
+                "a live second owner's directory must survive"
+            )
+        }
 
         #expect(
-            FileManager.default.fileExists(atPath: dir.path),
-            "the second owner is alive, so its directory must not be reclaimed"
+            reaper.sweep() == 0,
+            """
+            a stale orphan mark left by the FIRST owner makes this sweep reclaim \
+            immediately, which is the deinit race the deferral removes
+            """
         )
-        withExtendedLifetime(second) {}
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+        #expect(reaper.sweep() == 1, "the NEXT sweep is the one that reclaims")
+        #expect(!FileManager.default.fileExists(atPath: dir.path))
     }
 
     // MARK: - The unowned floor, stated so it cannot regress silently

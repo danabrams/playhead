@@ -128,11 +128,15 @@ final class TestScratchReaper: @unchecked Sendable {
         kept.reserveCapacity(entries.count)
         for var entry in entries {
             guard entry.isOwned else { kept.append(entry); continue }
-            if entry.owner != nil {
-                entry.orphanedAtSweep = nil
-                kept.append(entry)
-                continue
-            }
+            // No `orphanedAtSweep = nil` here. It looks like prudent
+            // defence-in-depth and is in fact unreachable — a `weak` reference
+            // that has gone nil never becomes non-nil again, so the only way a
+            // LIVE owner can carry an orphan mark is if `adopt` failed to clear
+            // it. Clearing it here does not repair that bug, it HIDES it:
+            // mutation Z02 (delete the reset in `adopt`) survived the whole
+            // battery against this line. One place re-arms the deferral, and it
+            // is `adopt`.
+            if entry.owner != nil { kept.append(entry); continue }
             if let seen = entry.orphanedAtSweep, seen < now {
                 doomed.append(entry.url)
                 continue
