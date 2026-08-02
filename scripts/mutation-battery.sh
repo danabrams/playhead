@@ -411,11 +411,18 @@ INVF="Playhead/Services/AdDetection/InventorySanityFilter.swift"
 # extent policy is in it — so every Y rail but the wire-in ones is a one-line
 # edit to a stage whose claim has its own named test.
 SWEEP="Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
+# playhead-lxkq: the ad-likelihood SCAN ORDER (X01-X14). SCANORD is the pure
+# permutation policy — every ranking, budget and degenerate-input claim is a
+# one-line edit there. The two WIRES live elsewhere and are the defect a pure
+# battery structurally cannot see: FMCLS holds the `planPassA` call and the
+# `restoreOrder` that keeps the REPORTED plan list in episode order, RUNNER the
+# seed derivation and its flag, ADSVC the shipped default.
+SCANORD="Playhead/Services/AdDetection/AdLikelihoodScanOrder.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
-  "$SWEEP"
+  "$SWEEP" "$SCANORD"
 )
 
 FOCUSED_SUITES=(
@@ -557,6 +564,14 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SemanticSweepDeclinedSurfacesNothingTests
   -only-testing:PlayheadTests/SemanticSweepWireInTests
   -only-testing:PlayheadTests/SemanticSweepRunnerTailTests
+  # playhead-lxkq: the ad-likelihood scan ORDER (X01-X14). The pure suite holds
+  # the permutation/ranking/budget claims; the wiring suite is listed because
+  # the whole bead is a scheduling change whose only observable consequence is
+  # WHICH FM CALL HAPPENS FIRST — a correct permutation that `planPassA` never
+  # calls, or a runner that never derives a seed, is exactly the defect the
+  # pure tests cannot see.
+  -only-testing:PlayheadTests/AdLikelihoodScanOrderTests
+  -only-testing:PlayheadTests/AdLikelihoodScanOrderWiringTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -916,6 +931,41 @@ T_Y3YA_SHADOW_SVC="shadow mode composes nothing at the service site"
 T_Y3YA_SHADOW_RUN="shadow mode composes nothing at the runner tail"
 T_Y3YA_CEILING="a verdict wider than the mark ceiling produces nothing"
 T_Y3YA_MERGE_CEILING="the merge stops rather than growing past the mark ceiling"
+
+# playhead-lxkq — the ad-likelihood scan order.
+T_LXKQ_POD="lxkq: the 2828 seam pulls the missed pod into the first four FM windows"
+T_LXKQ_BUDGET="lxkq: reaching the missed pod costs under fifteen minutes of FM budget, not two hours"
+T_LXKQ_PREFIX="lxkq: nothing from the first half of the episode jumps the seeded prefix"
+T_LXKQ_IDENTITY="lxkq: an episode with no seeds keeps the linear sweep exactly"
+T_LXKQ_NOT_IDENTITY="lxkq control: with seeds the order is NOT the identity"
+T_LXKQ_PERMUTATION="lxkq: seeding never starves a window — the result is a permutation"
+T_LXKQ_FILLER="lxkq: the un-promoted remainder stays in episode order"
+T_LXKQ_UNUSABLE="lxkq: an episode whose only seed is unusable falls back to the linear sweep"
+T_LXKQ_RANK="lxkq: the higher-scoring neighbourhood is attempted first"
+T_LXKQ_AGREEMENT="lxkq: two seeds agreeing on one region outrank a single stronger seed elsewhere"
+T_LXKQ_WEIGHTS="lxkq: an acoustic seam outranks a lexical cue of equal strength"
+T_LXKQ_TIES="lxkq: equal scores break to the earlier window, deterministically"
+T_LXKQ_CAP="lxkq: the promoted prefix never exceeds the audio budget"
+T_LXKQ_OVERSIZE="lxkq: a single window wider than the whole budget is still promoted"
+T_LXKQ_ZERO="lxkq: a zero-strength seed promotes nothing"
+T_LXKQ_NAN_SPAN="lxkq: a window with a non-finite span is never promoted but is never dropped either"
+T_LXKQ_CLAMP="lxkq: strength outside [0,1] is clamped rather than trusted"
+T_LXKQ_RADIUS="lxkq: a seam opens a three-minute neighbourhood around itself"
+T_LXKQ_WIDTH="lxkq: a seed wider than the width ceiling opens no neighbourhood at all"
+T_LXKQ_ANCHOR_POS="lxkq: an evidence anchor seeds its own position, not its episode-wide coverage span"
+T_LXKQ_RESTORE="lxkq: restoring plan order sorts by the plan key"
+T_LXKQ_RESTORE_STABLE="lxkq: restoring plan order is stable for rows sharing one plan"
+T_LXKQ_W_FIRST="lxkq wiring: planPassA attempts the seeded window first"
+T_LXKQ_W_EPISODE="lxkq wiring: planPassA returns episode order when no seed is supplied"
+T_LXKQ_W_INDEX="lxkq wiring: windowIndex still names the EPISODE position after promotion"
+T_LXKQ_W_CALL="lxkq wiring: the first FM call of the pass is the seeded neighbourhood"
+T_LXKQ_W_CONTROL="lxkq wiring control: unseeded, the same neighbourhood is 37 FM calls in"
+T_LXKQ_W_REPORTED="lxkq wiring: the REPORTED plan list is still in episode order"
+T_LXKQ_W_ONCE="lxkq wiring: every window is still attempted exactly once"
+T_LXKQ_W_RUNNER_ON="lxkq wiring: a runner with the flag ON scans the seam neighbourhood first"
+T_LXKQ_W_RUNNER_OFF="lxkq wiring: a runner with the flag OFF sweeps front to back"
+T_LXKQ_W_NO_SEAM="lxkq wiring: flag ON with no acoustic seam still sweeps front to back"
+T_LXKQ_W_SHIPPED="lxkq wiring: the shipped config has the scan order ON"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -1690,6 +1740,82 @@ MUTATIONS=(
   # one a merge condition, with distinct fixtures.
   "Y17|102|SWEEP|$T_Y3YA_CEILING"
   "Y18|102|SWEEP|$T_Y3YA_MERGE_CEILING"
+
+  # -------------------------------------------------------------------------
+  # playhead-lxkq — the ad-likelihood scan ORDER (X01-X16)
+  #
+  # The bead's whole safety argument is that `AdLikelihoodScanOrder.order` is a
+  # PERMUTATION: same windows, same prompts, different sequence. So the rails
+  # come in three shapes — the ones that break the RANKING (a wrong window goes
+  # first), the ones that break the PERMUTATION (a window is dropped, which is
+  # starvation), and the two WIRES, which are the defect a pure battery
+  # structurally cannot see: a correct permutation nothing calls.
+  #
+  # Batches are conservative here because the scoring is additive and global:
+  # almost any edit to `order` moves more than one window, so two edits in one
+  # batch can plausibly redden each other's victim. Where that was in doubt the
+  # mutation got its own batch.
+
+  # 103: three edits that cannot reach each other. X01 is the weights table,
+  # X11 the seed's own clamp, X12 the order-RESTORATION — three functions, three
+  # disjoint victims.
+  "X01|103|SCANORD|$T_LXKQ_WEIGHTS"
+  "X11|103|SCANORD|$T_LXKQ_CLAMP"
+  "X12|103|SCANORD|$T_LXKQ_RESTORE;$T_LXKQ_RESTORE_STABLE;$T_LXKQ_W_REPORTED"
+
+  # 104: X02 makes the score a MAX instead of a sum, so two independent signals
+  # agreeing on one region stop reinforcing. X03 drops the seed-width ceiling,
+  # so a recurring sponsor's episode-wide span names the whole episode. X02's
+  # fixture uses point seeds (ceiling-immune) and X03's uses a 3,000 s seed
+  # (dropped whatever the scoring), so neither can be credited off the other.
+  "X02|104|SCANORD|$T_LXKQ_AGREEMENT"
+  "X03|104|SCANORD|$T_LXKQ_WIDTH;$T_LXKQ_UNUSABLE"
+
+  # 105: the starvation mutant — promotion becomes a FILTER. This is the one
+  # the bead's central claim is about, and its blast radius is every
+  # count-preservation assertion in both suites, so it runs alone.
+  "X04|105|SCANORD|$T_LXKQ_PERMUTATION;$T_LXKQ_FILLER;$T_LXKQ_NAN_SPAN;$T_LXKQ_W_ONCE"
+
+  # 106: the tie-break inverted. Ties are what make the order a pure function of
+  # its inputs, and inverting the start term moves the first window in three
+  # separate fixtures — alone, because two of those victims are other X rails'.
+  "X05|106|SCANORD|$T_LXKQ_TIES;$T_LXKQ_CAP;$T_LXKQ_AGREEMENT"
+
+  # 107: X07 removes the promoted-prefix cap entirely; X10 seeds an evidence
+  # anchor from its episode-wide COVERAGE span instead of its own position.
+  # Different functions, different fixtures.
+  "X07|107|SCANORD|$T_LXKQ_CAP"
+  "X10|107|SCANORD|$T_LXKQ_ANCHOR_POS"
+
+  # 108: X08 deletes the "a non-empty seeded set always promotes at least one
+  # plan" carve-out, so a single 1,183 s device window is excluded by a 1,800 s
+  # budget it fits inside. Separate batch from X07 because both rewrite the same
+  # admission `if`. X09 relaxes BOTH zero-score guards (two sites — a
+  # half-applied mutation here would fabricate a rail).
+  "X08|108|SCANORD|$T_LXKQ_OVERSIZE"
+  "X09|108|SCANORD|$T_LXKQ_ZERO"
+
+  # 109: the neighbourhood collapses to the seed's own extent. The 2828-2836
+  # seam then no longer reaches the 2838-2954 pod that starts AFTER it, which is
+  # the exact geometry the field episode turned on.
+  "X06|109|SCANORD|$T_LXKQ_RADIUS;$T_LXKQ_PREFIX"
+
+  # 110: WIRE ONE. `planPassA` packs correctly and throws the ordering away.
+  # Every pure test in the suite still passes — that is the point of listing the
+  # wiring suite in FOCUSED_SUITES.
+  "X13|110|FMCLS|$T_LXKQ_W_FIRST;$T_LXKQ_W_CALL;$T_LXKQ_W_RUNNER_ON"
+
+  # 111: WIRE TWO. X14 scopes the runner's seed derivation to a phase a
+  # cold-start show never reaches, so the seeds are computed and never used —
+  # which is precisely the pre-lxkq defect (`AssetInputs.acousticBreaks` was
+  # threaded in and dropped by `narrowedInputs`). X16 flips the SHIPPED default,
+  # a different file and a different victim.
+  "X14|111|RUNNER|$T_LXKQ_W_RUNNER_ON"
+  "X16|111|ADSVC|$T_LXKQ_W_SHIPPED"
+
+  # 112: the flag stops being a flag. Same anchor as X14, so it cannot share
+  # 111 — and it is X14's control: OFF must restore the pre-lxkq sweep exactly.
+  "X15|112|RUNNER|$T_LXKQ_W_RUNNER_OFF"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -1823,6 +1949,22 @@ describe_mutation() {
     B05) echo "SkipOrchestrator.init: restore the disabled-filter default, so tests stop observing what the field runs" ;;
     B06) echo "InventorySanityFilter.productionDefaultConfiguration: pin it OFF, so the shared constant lies" ;;
     B07) echo "hasValidRuntimeWindowMaterial: drop the startTime >= 0 check, so impossible geometry is admitted" ;;
+    X01) echo "AdLikelihoodScanOrder.weight: flatten every channel to 1.0, so a lexical cue ranks like a seam" ;;
+    X02) echo "order: score by MAX instead of SUM, so independent signals agreeing on a region stop reinforcing" ;;
+    X03) echo "neighbourhoods: drop the seed-width ceiling, so an episode-wide sponsor span names the episode" ;;
+    X04) echo "order: drop the filler loop, so promotion becomes a FILTER and un-promoted windows are starved" ;;
+    X05) echo "order: invert the start tie-break, so equally-scored windows resolve to the LAST one" ;;
+    X06) echo "neighbourhoods: collapse the radius, so a seam no longer reaches the pod that starts after it" ;;
+    X07) echo "order: remove the promoted-prefix audio cap, so a cue-dense episode reorders wholesale" ;;
+    X08) echo "order: drop the always-promote-one carve-out, so an oversize seeded window is refused" ;;
+    X09) echo "neighbourhoods + order: relax both zero-score guards, so an inert seed reorders the sweep" ;;
+    X10) echo "seeds: build the evidence anchor from its episode-wide coverage span, not its own position" ;;
+    X11) echo "AdLikelihoodSeed.init: trust the caller's strength instead of clamping it to [0,1]" ;;
+    X12) echo "restoreOrder: return the items untouched, so the REPORTED plan list keeps attempt order" ;;
+    X13) echo "planPassA: return the packed plans directly, so the ordering is computed and thrown away" ;;
+    X14) echo "BackfillJobRunner: scope seed derivation to a phase cold start never reaches — the pre-lxkq defect" ;;
+    X15) echo "BackfillJobRunner: drop the feature flag from the seed guard, so OFF no longer restores the sweep" ;;
+    X16) echo "AdDetectionConfig.default: ship the scan order OFF" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -4266,6 +4408,189 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ── playhead-lxkq: the ad-likelihood scan order ──────────────────────────
+
+  X01)
+    snippet OLD <<'EOF'
+        case .evidenceAnchor: 0.8
+        case .lexicalCue: 0.6
+EOF
+    snippet NEW <<'EOF'
+        case .evidenceAnchor: 1.0
+        case .lexicalCue: 1.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X02)
+    snippet OLD <<'EOF'
+                score += neighbourhood.score
+EOF
+    snippet NEW <<'EOF'
+                score = max(score, neighbourhood.score)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X03)
+    snippet OLD <<'EOF'
+            guard hi - lo <= maxSeedWidthSeconds else { return nil }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X04)
+    snippet OLD <<'EOF'
+        for (index, plan) in plans.enumerated() where !promotedSet.contains(index) {
+            result.append(plan)
+        }
+        return result
+EOF
+    snippet NEW <<'EOF'
+        _ = promotedSet
+        return result
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X05)
+    snippet OLD <<'EOF'
+            if lhs.start != rhs.start { return lhs.start < rhs.start }
+EOF
+    snippet NEW <<'EOF'
+            if lhs.start != rhs.start { return lhs.start > rhs.start }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X06)
+    snippet OLD <<'EOF'
+            return Neighbourhood(lo: lo - radius, hi: hi + radius, score: score)
+EOF
+    snippet NEW <<'EOF'
+            _ = radius
+            return Neighbourhood(lo: lo, hi: hi, score: score)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X07)
+    snippet OLD <<'EOF'
+            if !promotedIndices.isEmpty,
+               promotedSeconds + duration > maxPromotedAudioSeconds {
+                break
+            }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X08)
+    snippet OLD <<'EOF'
+            if !promotedIndices.isEmpty,
+               promotedSeconds + duration > maxPromotedAudioSeconds {
+EOF
+    snippet NEW <<'EOF'
+            if promotedSeconds + duration > maxPromotedAudioSeconds {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # Two sites. `neighbourhoods` drops a zero-score seed and `order` drops a
+  # zero-score plan; relaxing only one leaves the other standing and the
+  # mutation inert, which would report a rail this battery does not have.
+  X09)
+    snippet OLD <<'EOF'
+            guard score > 0 else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard score >= 0 else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            guard score > 0 else { continue }
+EOF
+    snippet NEW <<'EOF'
+            guard score >= 0 else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X10)
+    snippet OLD <<'EOF'
+                startTime: entry.startTime,
+                endTime: entry.endTime,
+                kind: .evidenceAnchor,
+EOF
+    snippet NEW <<'EOF'
+                startTime: entry.firstTime,
+                endTime: entry.lastTime,
+                kind: .evidenceAnchor,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X11)
+    snippet OLD <<'EOF'
+        self.strength = strength.isFinite ? min(max(strength, 0), 1) : 0
+EOF
+    snippet NEW <<'EOF'
+        self.strength = strength
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X12)
+    snippet OLD <<'EOF'
+        items.enumerated()
+            .sorted { lhs, rhs in
+                let lhsKey = key(lhs.element)
+                let rhsKey = key(rhs.element)
+                if lhsKey != rhsKey { return lhsKey < rhsKey }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+EOF
+    snippet NEW <<'EOF'
+        _ = key
+        return items
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X13)
+    snippet OLD <<'EOF'
+        return AdLikelihoodScanOrder.order(plans, seeds: seeds) { ($0.startTime, $0.endTime) }
+EOF
+    snippet NEW <<'EOF'
+        _ = seeds
+        return plans
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X14)
+    snippet OLD <<'EOF'
+        guard adLikelihoodScanOrderEnabled, job.phase == .fullEpisodeScan else { return [] }
+EOF
+    snippet NEW <<'EOF'
+        guard adLikelihoodScanOrderEnabled, job.phase == .scanLikelyAdSlots else { return [] }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  X15)
+    snippet OLD <<'EOF'
+        guard adLikelihoodScanOrderEnabled, job.phase == .fullEpisodeScan else { return [] }
+EOF
+    snippet NEW <<'EOF'
+        guard job.phase == .fullEpisodeScan else { return [] }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # The stored property, not the `.default` literal. `AdDetectionConfig.default`
+  # passes the flag on one line whose trailing rationale comment runs past the
+  # newline, and this patcher's anchors are whole lines. Pinning the property
+  # instead is the stronger rail anyway: it fails the shipped-config test the
+  # same way AND catches a config that accepts the flag and drops it.
+  X16)
+    snippet OLD <<'EOF'
+        self.adLikelihoodScanOrderEnabled = adLikelihoodScanOrderEnabled
+EOF
+    snippet NEW <<'EOF'
+        self.adLikelihoodScanOrderEnabled = false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
@@ -4305,6 +4630,7 @@ rec_file()   {
     INGO)  printf '%s' "$INGO" ;;
     INVF)  printf '%s' "$INVF" ;;
     SWEEP) printf '%s' "$SWEEP" ;;
+    SCANORD) printf '%s' "$SCANORD" ;;
     *)     printf '%s' "" ;;
   esac
 }
