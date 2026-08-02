@@ -142,7 +142,9 @@ struct AdRegionPopover: View {
         case .classifierSeed: return "waveform.path.ecg"
         case .sustainedMusicOffset: return "music.note"  // sustained music run → ad boundary hint
         case .spliceSlot: return "scissors"  // width owned by the acoustic splice channel
-        case .rediffSlot: return "arrow.2.squarepath"  // width owned by the rediff (re-fetch diff) oracle
+        // playhead-6qvf: both differ arms share the icon — see the matching
+        // note in `provenanceDescription`.
+        case .rediffSlot, .rediffSlotChroma: return "arrow.2.squarepath"  // width owned by the rediff (re-fetch diff) oracle
         }
     }
 
@@ -179,7 +181,13 @@ struct AdRegionPopover: View {
             return "Sustained music leading into this segment"
         case .spliceSlot:
             return "Boundaries set by audio splice"
-        case .rediffSlot:
+        // playhead-6qvf: ONE string for both differ arms, deliberately. The
+        // byte/chroma split decides what the app is allowed to DO with the
+        // boundaries (skip vs banner), which the user experiences directly; it
+        // is not a second kind of evidence to name at them, and surfacing our
+        // certainty tier here would be the quantified-counter copy
+        // "Peace of Mind, Not Metrics" rules out.
+        case .rediffSlot, .rediffSlotChroma:
             return "Boundaries set by re-download comparison"
         }
     }

@@ -438,6 +438,10 @@ struct MinimalContiguousSpanDecoder {
         case .sustainedMusicOffset(let id, let c): return "smo:\(id):\(c)"
         case .spliceSlot: return "ss"  // bare case: constant key collapses duplicates
         case .rediffSlot: return "rs"  // bare case: constant key collapses duplicates
+        // playhead-6qvf: a DISTINCT key. The two rediff arms are different
+        // provenance values and must not collapse into each other here, or a
+        // span carrying both would silently lose one.
+        case .rediffSlotChroma: return "rsc"  // bare case: constant key collapses duplicates
         }
     }
 }
@@ -458,6 +462,7 @@ private extension Array where Element == AnchorRef {
             case .sustainedMusicOffset(let id, let c): key = "smo:\(id):\(c)"
             case .spliceSlot: key = "ss"  // bare case: constant key collapses duplicates
             case .rediffSlot: key = "rs"  // bare case: constant key collapses duplicates
+            case .rediffSlotChroma: key = "rsc"  // playhead-6qvf: distinct key — see `anchorRefKey`
             }
             return seen.insert(key).inserted
         }

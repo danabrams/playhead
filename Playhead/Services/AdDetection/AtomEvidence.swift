@@ -75,14 +75,55 @@ enum AnchorRef: Sendable {
     /// branch in `DecisionMapper.computeGate()` and counts toward no
     /// corroborating-evidence-kind quorum. The slot pass that appends it is the
     /// flag-OFF rediff ownership pass (playhead-xsdz.29).
+    ///
+    /// playhead-6qvf NARROWED THIS TO THE BYTE DIFFER. It is stamped ONLY when
+    /// `computeRediffSlotPass` took the BYTE-primary arm
+    /// (`RediffByteAligner` + `RediffSlotOwnership.gateAndDiffBytes`). The
+    /// ~1 s chroma-fingerprint fallback stamps `.rediffSlotChroma` instead. The
+    /// distinction is load-bearing: `DecodedSpan.carriesRediffByteExactWidth`
+    /// is `contains(.rediffSlot)` and is the single key behind five shipped
+    /// certainty carve-outs plus `SpanExtentSupport.derive`'s
+    /// `.rediffByteExact` → `.deterministic` tier, whose
+    /// `AutoSkipEdgePadding` margins (0.50 s / 0.75 s) were derived from
+    /// MEASURED BYTE-differ edge error and describe no other instrument.
     case rediffSlot
+    /// Rediff-slot ownership marker, CHROMA arm (playhead-6qvf): the rediff
+    /// width oracle owns this span's width, but the width came from the
+    /// ~1 s chroma-fingerprint differ (`RediffSlotOwnership.gateAndDiff`), NOT
+    /// the byte-run aligner. Bare case, exactly like its two siblings.
+    ///
+    /// WHY IT IS A SEPARATE CASE. Both differ arms used to stamp `.rediffSlot`,
+    /// so a chroma-derived width read as `deterministic` everywhere and was
+    /// admitted to auto-skip and padded from the byte differ's error budget —
+    /// two different instruments in one certainty class. Measured 2026-08-02
+    /// over the 51 real A/B pairs in `TestFixtures/Corpus/Audio`
+    /// (`scripts/l2f-6qvf-chroma-fallback-rate.py`): the byte gate rejects on
+    /// **9 of 51 pairs (17.6%)** — 8 non-monotonic chains, 1 re-encoding CDN —
+    /// and every one of those falls through to this arm. Not theoretical.
+    ///
+    /// IT STILL OWNS WIDTH (`isWidthOwnership == true`): the Phase-5 projector
+    /// clobber guard and the boundary-refine bypass must treat it exactly like
+    /// its siblings, or a chroma-owned span would be re-refined and re-minted.
+    /// What it does NOT carry is EXTENT certainty: it fails
+    /// `carriesRediffByteExactWidth`, so `SpanExtentSupport.derive` resolves
+    /// `.unanchored` on both edges and playhead-2350 keeps the span mark-only.
+    /// That is the conservative default, not a new judgement — there is no
+    /// measured per-edge error distribution for the chroma differ, and the
+    /// codebase's own note on the byte path records the alternative
+    /// ("0.02 s median end-edge error vs the chroma differ's multi-second edge
+    /// overshoots — the 88 s Mick Jagger incident",
+    /// `AdDetectionService.computeRediffSlotPass`). Promoting this arm to a
+    /// `.corroborated` tier needs that measurement first; it is filed, not
+    /// invented here.
+    case rediffSlotChroma
 }
 
 extension AnchorRef {
-    /// True for the BARE width-ownership markers (`.spliceSlot`, `.rediffSlot`):
-    /// a span carrying either has had its WIDTH set by a slot oracle (acoustic
-    /// splice or rediff), so the width-integrity proxies — the Phase-5 projector
-    /// clobber guard and the boundary-refine bypass — must treat both identically.
+    /// True for the BARE width-ownership markers (`.spliceSlot`, `.rediffSlot`,
+    /// `.rediffSlotChroma`): a span carrying any of them has had its WIDTH set
+    /// by a slot oracle (acoustic splice, or either rediff differ arm), so the
+    /// width-integrity proxies — the Phase-5 projector clobber guard and the
+    /// boundary-refine bypass — must treat all three identically.
     ///
     /// Introduced with `.rediffSlot` (playhead-xsdz.29) so a future width oracle
     /// cannot silently desync those `.contains(.spliceSlot)` proxies again: add
@@ -90,9 +131,15 @@ extension AnchorRef {
     /// `.audioForensics`-suppression site, which is DELIBERATELY splice-only —
     /// acoustic width is DERIVED FROM the audio-forensics seam (double-count),
     /// whereas rediff width comes from an independent fingerprint diff.
+    ///
+    /// playhead-6qvf: `.rediffSlotChroma` belongs here and this is exactly the
+    /// invariant that made adding it safe. Width OWNERSHIP and extent CERTAINTY
+    /// are different questions — the chroma differ really did set the width, so
+    /// its span must not be clobbered or re-refined; it simply does not earn
+    /// `carriesRediffByteExactWidth`, which is the certainty half.
     var isWidthOwnership: Bool {
         switch self {
-        case .spliceSlot, .rediffSlot:
+        case .spliceSlot, .rediffSlot, .rediffSlotChroma:
             return true
         case .fmConsensus, .evidenceCatalog, .fmAcousticCorroborated,
              .userCorrection, .classifierSeed, .sustainedMusicOffset:
@@ -144,6 +191,12 @@ extension AnchorRef: Equatable {
             // `.spliceSlot` — this arm is REQUIRED or `.rediffSlot` would
             // silently compare unequal to itself, breaking DecodedSpan equality
             // and `anchorProvenance.contains(.rediffSlot)`.
+            return true
+        case (.rediffSlotChroma, .rediffSlotChroma):
+            // Bare case (playhead-6qvf): the SAME default:false trap, and here
+            // it would be worse than a nuisance — `.rediffSlotChroma != itself`
+            // would make `isWidthOwnership`'s `contains` proxies miss a
+            // chroma-owned span, letting the projector clobber it. REQUIRED.
             return true
         default:
             return false

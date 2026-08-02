@@ -45,8 +45,53 @@ struct DecodedSpan: Sendable, Codable, Equatable, Identifiable {
     /// byte-exact, so a splice-owned span is NOT exempt (mirrors
     /// `SpanExtentSupport.derive`, which sets `.rediffByteExact` only for
     /// `.rediffSlot`). FM / lexical-only spans (no `.rediffSlot`) stay demotable.
+    ///
+    /// playhead-6qvf — WHAT THIS USED TO ANSWER, AND DID NOT. The expression is
+    /// unchanged; what changed is that it is now TRUE. `.rediffSlot` used to be
+    /// stamped by BOTH rediff differ arms — the byte-run aligner AND the ~1 s
+    /// chroma-fingerprint fallback — so this predicate returned `true` for a
+    /// chroma-derived width and every consumer read it as byte-exact. The
+    /// chroma arm now stamps `.rediffSlotChroma` and fails this test.
+    ///
+    /// The correction moves ALL SIX consumers together, deliberately: the
+    /// `hostReadConfidenceFloor` exemption (wraj), the FM-suppression cap
+    /// exemption (qs0d), the creator-chapter and self-promo suppression
+    /// exemptions (pzy2 / fl4j), the post-roll guard exemption (sik9), the
+    /// `.rediffConfirmed` fusion kind (xsdz.62), and
+    /// `SpanExtentSupport.derive`. Forking it for the sharpest consumer alone
+    /// would leave five carve-outs meaning one thing by "byte-exact" and the
+    /// sixth meaning another — strictly worse than one honest-but-wrong
+    /// definition. Every consumer now gets the conservative answer for a chroma
+    /// span, and that is the correct direction: each of them is a licence to
+    /// SKIP or to decline a demotion, so under-granting costs a banner while
+    /// over-granting costs show.
+    ///
+    /// The measurement behind the change (2026-08-02,
+    /// `scripts/l2f-6qvf-chroma-fallback-rate.py`): on the 51 real A/B pairs in
+    /// `TestFixtures/Corpus/Audio` the byte gate rejects **9 of 51 (17.6%)** —
+    /// 8 non-monotonic chains and 1 re-encoding CDN — and each of those episodes
+    /// falls through to the chroma arm. That is a LOWER bound: it counts only
+    /// "every staged B gate-rejects", not the absent-B-URL, unresolvable-A-side
+    /// (playhead-b8hj) or unreadable-bytes triggers.
     var carriesRediffByteExactWidth: Bool {
         anchorProvenance.contains(.rediffSlot)
+    }
+
+    /// playhead-6qvf: True when the CHROMA arm of the rediff width oracle owns
+    /// this span's width (`.rediffSlotChroma`) — a ~1 s fingerprint alignment,
+    /// not a byte-run one.
+    ///
+    /// This is a DIAGNOSTIC and RAIL surface, not a fifth certainty tier. No
+    /// decision path grants anything on it: a chroma-owned span takes the
+    /// conservative branch everywhere by failing
+    /// `carriesRediffByteExactWidth`, and this property exists so that fact can
+    /// be ASSERTED (see `RediffChromaWidthIsNotDeterministicTests`) and logged
+    /// rather than merely believed. Mutually exclusive with
+    /// `carriesRediffByteExactWidth` in practice — one differ arm runs per pass
+    /// — but the two are read independently and neither implies the other's
+    /// negation, so do not write one in terms of the other.
+    var carriesRediffChromaWidth: Bool {
+        anchorProvenance.contains(.rediffSlotChroma)
     }
 
     /// Compute the stable id from its components.
@@ -111,6 +156,15 @@ extension AnchorRef: Codable {
             // Bare case (playhead-xsdz.29): the stable "rediffSlot" type string
             // is the entire encoding — no associated values to decode.
             self = .rediffSlot
+        case "rediffSlotChroma":
+            // Bare case (playhead-6qvf): a DISTINCT stable type string, never a
+            // field added to "rediffSlot". A binary predating this case decodes
+            // the element through `LossyAnchorRef`, which yields `nil` and drops
+            // it — the span loses its width-ownership marker and its
+            // certainty carve-outs, which is the SAFE direction. Encoding chroma
+            // as `"rediffSlot"` plus a discriminating field would fail the other
+            // way: the old binary would read it as byte-exact.
+            self = .rediffSlotChroma
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown AnchorRef type: \(type)")
         }
@@ -148,6 +202,9 @@ extension AnchorRef: Codable {
         case .rediffSlot:
             // Bare case (playhead-xsdz.29): emit only the stable type string.
             try container.encode("rediffSlot", forKey: .type)
+        case .rediffSlotChroma:
+            // Bare case (playhead-6qvf): emit only the stable type string.
+            try container.encode("rediffSlotChroma", forKey: .type)
         }
     }
 }
@@ -171,6 +228,7 @@ extension AnchorRef {
         case .sustainedMusicOffset: return "sustainedMusicOffset"
         case .spliceSlot: return "spliceSlot"
         case .rediffSlot: return "rediffSlot"
+        case .rediffSlotChroma: return "rediffSlotChroma"
         }
     }
 }
