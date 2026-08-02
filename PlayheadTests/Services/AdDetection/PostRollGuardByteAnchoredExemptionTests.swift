@@ -311,12 +311,65 @@ struct PostRollGuardByteAnchoredExemptionTests {
 @Suite("Segment-recovered slots never reach the byte-anchored exemption (playhead-sik9)")
 struct PostRollGuardSegmentRecoveredReachabilityTests {
 
-    /// The LAGGED path — the only producer that stamps `.rediffSlot` on a
-    /// DECODED SPAN, and therefore the only way a span can reach
-    /// `DecisionMapper` carrying the exemption key. It calls
-    /// `gateAndDiffBytes(alignment:)` with no `recoverNonMonotonicSegments`
-    /// argument, so the `false` default applies and a non-monotonic alignment
-    /// is rejected WHOLESALE: no acceptance, no played slots, nothing to stamp.
+    /// A non-monotonic alignment carrying one recoverable tail slot at the
+    /// DE0784D8 post-roll geometry. Built directly rather than from bytes so
+    /// the two arms differ ONLY in the flag.
+    private func recoverableTailAlignment() -> RediffByteAligner.Alignment {
+        let tail = RediffByteAligner.Slot(
+            kind: .replaced,
+            aStartByte: Int(PostRollGuardFieldCase.postRollStart * 16000),
+            aEndByte: Int(PostRollGuardFieldCase.postRollEnd * 16000),
+            aStartSeconds: PostRollGuardFieldCase.postRollStart,
+            aEndSeconds: PostRollGuardFieldCase.postRollEnd,
+            aBytes: 960_000,
+            bBytes: 1,
+            leftFlankSeconds: 300,
+            rightFlankSeconds: 300
+        )
+        return RediffByteAligner.Alignment(
+            runsFound: 3,
+            chain: [RediffByteAligner.Run(aStart: 0, bStart: 0, bytes: 1_000_000)],
+            runsDroppedNonMonotonic: 1,   // → NOT monotonicClean
+            chainedBytes: 1_000_000,
+            chainedFractionB: 0.95,
+            slots: [],
+            aDurationSeconds: PostRollGuardFieldCase.episodeDuration,
+            bDurationSeconds: PostRollGuardFieldCase.episodeDuration,
+            segmentedSlots: [tail],
+            segmentedChainedFractionB: 0.95,
+            segmentedRunsChained: 2
+        )
+    }
+
+    /// THE RAIL. The same alignment is REJECTED by the lagged call and RECOVERED
+    /// by the day-0 opt-in, so the only thing separating the two certainties is
+    /// the argument — and `AdDetectionService.computeByteAlignedPlayedSlots`,
+    /// the only producer that stamps `.rediffSlot` on a DECODED SPAN, never
+    /// passes it. A recovered tail therefore cannot arrive at `DecisionMapper`
+    /// carrying the exemption key: there is no slot to stamp.
+    @Test("the lagged default REJECTS a tail slot the day-0 opt-in would recover")
+    func laggedDefaultRejectsWhatRecoveryAccepts() {
+        let alignment = recoverableTailAlignment()
+        #expect(!alignment.monotonicClean)
+
+        // EXACTLY the lagged call — default argument.
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+            == .rejectedNonMonotonic(dropped: 1),
+                "the lagged path must discard a non-monotonic fetch wholesale")
+
+        // The day-0 opt-in recovers the very same tail, which is what makes the
+        // rejection above a CHOICE rather than an absence of signal.
+        guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: alignment, recoverNonMonotonicSegments: true
+        ) else {
+            Issue.record("the day-0 opt-in must recover this tail — otherwise the contrast is vacuous")
+            return
+        }
+        #expect(acceptance.playedSlots.count == 1)
+    }
+
+    /// The same claim over REAL bytes, as a realism check on the fixture above:
+    /// a genuinely non-monotonic MP3 pair is rejected by the lagged default.
     @Test("the lagged byte path's default rejects a non-monotonic alignment wholesale")
     func laggedPathRejectsNonMonotonicUnderItsDefault() {
         // Swapped halves: the same bytes in the opposite order, which is the

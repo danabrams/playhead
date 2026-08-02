@@ -486,11 +486,28 @@ SCRATCHH="PlayheadTests/Helpers/TestHelpers.swift"
 # routing decision that makes the gate a block rather than a banner.
 FMSUP="Playhead/Services/AdDetection/FMSuppressionGuard.swift"
 GATE="Playhead/Services/AdDetection/EvidenceLedgerEntry.swift"
+# playhead-sik9: THE POST-ROLL GUARD'S BYTE-ANCHORED EXEMPTION (C01-C10).
+# FUSION is where the guard and its exemption live — a one-line predicate, which
+# is exactly why it needs a battery: every plausible mis-scoping (delete it,
+# invert it, widen it to any width oracle, widen it to any provenance, implement
+# it as a promotion) compiles and passes a positive-only test set. DSPAN holds
+# the shared `carriesRediffByteExactWidth` DEFINITION that four other shipped
+# carve-outs also key on, so a mutation there is a blast-radius test as much as
+# a rail. EXTENT and RSLOT are the two REACHABILITY claims the exemption's
+# narrowness rests on and that no test of the guard itself can see: that a
+# geometry-rewritten span loses its edge claim (so playhead-2350 still catches
+# it), and that the lagged byte path's default keeps every playhead-9s6q
+# segment-recovered region out of `.rediffSlot` provenance in the first place.
+FUSION="Playhead/Services/AdDetection/BackfillEvidenceFusion.swift"
+DSPAN="Playhead/Services/AdDetection/DecodedSpan.swift"
+EXTENT="Playhead/Services/AdDetection/SpanExtentSupport.swift"
+RSLOT="Playhead/Services/AdDetection/RediffSlotOwnership.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
+  "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT"
 )
 
 FOCUSED_SUITES=(
@@ -659,6 +676,16 @@ FOCUSED_SUITES=(
   # only rail lives in the runner suite. It is the most expensive line in this
   # list; it is here because the alternative is an unpinned producer.
   -only-testing:PlayheadTests/BackfillJobRunnerTests
+  # playhead-sik9: the post-roll guard's byte-anchored exemption (C01-C10). The
+  # first four are the bead's own suites. `BackfillEvidenceFusionTests` is
+  # listed because the two rails this bead INVERTED live there next to the rest
+  # of the guard's mechanics, and a mutation that quietly restored the old
+  # blanket demotion would otherwise be judged only by the new file.
+  -only-testing:PlayheadTests/PostRollGuardByteAnchoredExemptionTests
+  -only-testing:PlayheadTests/PostRollGuardSegmentRecoveredReachabilityTests
+  -only-testing:PlayheadTests/PostRollGuardExemptionRespects2350Tests
+  -only-testing:PlayheadTests/PostRollGuardExemptCueSurfacingTests
+  -only-testing:PlayheadTests/BackfillEvidenceFusionTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1085,6 +1112,25 @@ T_CGKA_STORE_ADOPT="makeTestStoreWithDirectory hands its directory to the shared
 T_CGKA_REGISTERS="makeTempDir registers every directory it hands out"
 T_CGKA_OWNEDBY="makeTempDir(ownedBy:) attaches the owner it was given"
 T_CGKA_WIPE="the process-boundary wipe removes a root the suite left unreadable"
+# playhead-sik9 — the post-roll guard's byte-anchored exemption.
+T_SIK9_BEAD="THE BEAD: the DE0784D8 byte-exact post-roll stays eligible with wraj ON"
+T_SIK9_BELOW_FLOOR="the byte-exact post-roll stays eligible even below the host-read floor"
+T_SIK9_SCORES="the exemption never modifies proposalConfidence or skipConfidence"
+T_SIK9_GUARDED="STILL GUARDED: a tail whose width is not byte-derived demotes to markOnly"
+T_SIK9_SPLICE="STILL GUARDED: acoustic .spliceSlot width is NOT byte-exact and stays demoted"
+T_SIK9_MIXED="rediff width plus other provenance is still exempt (the width owner decides)"
+T_SIK9_NO_PROMOTE="the exemption never PROMOTES a blocked rediff tail"
+T_SIK9_MUSIC="the exemption does not disarm the unconditional music-only demotion"
+T_SIK9_FLAG_OFF="flag OFF is byte-identical for both the exempt and the guarded shape"
+T_SIK9_LAGGED="the lagged default REJECTS a tail slot the day-0 opt-in would recover"
+T_SIK9_DAY0_STRICT="a day-0 slot no strict persona reproduced is classified non-strict"
+T_SIK9_REWRITE="a geometry-REWRITTEN rediff span derives unanchored edges despite .rediffSlot"
+T_SIK9_2350="and playhead-2350 demotes it downstream, so the exemption cannot leak a skip"
+T_SIK9_INTACT="an intact rediff span keeps both byte-exact edges and survives 2350"
+T_SIK9_CUE="an eligible byte-exact post-roll produces a skip cue that never precedes its inner edge"
+T_SIK9_FUSION_BELOW="Post-roll guard: a byte-exact rediff span below the floor is EXEMPT (playhead-sik9)"
+T_SIK9_FUSION_AT="Post-roll guard: a byte-exact rediff span at/above the floor is EXEMPT (playhead-sik9)"
+T_SIK9_FUSION_SPLICE="Post-roll guard: an acoustic .spliceSlot span is NOT exempt (playhead-sik9)"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -2006,6 +2052,42 @@ MUTATIONS=(
   "A11|133|ORCH|$T_AVBN_BLOCKED_DROPPED"
 
   "A05|134|FMSUP|$T_AVBN_COARSE_VOTES;$T_AVBN_COARSE_PAIR_TRIGGERS"
+
+  # playhead-sik9 (C01-C10). ONE predicate, five ways to get it wrong, and
+  # every one of them compiles. C01 deletes the exemption (the old blanket
+  # demotion — the thing that would delete Dan's post-roll); C02 inverts it;
+  # C03 widens it to any WIDTH oracle (`.spliceSlot` is the trap: it also sets
+  # both edges, it is just acoustic); C04 widens it to any provenance at all;
+  # C05 implements it as a PROMOTION rather than a declined demotion. Those
+  # five all touch the same `if`, so they interact when applied together and
+  # each takes its own batch — C01 and C05 in particular CANCEL (delete the
+  # exemption, then re-promote what it would have exempted), which would have
+  # fabricated two survivors in one build.
+  #
+  # C06 attacks the shared DEFINITION rather than this bead's use of it.
+  # C07/C08 are the composition claim: the exemption declines to demote at the
+  # guard, it must never outrank playhead-2350's unanchored-edge block. C09/C10
+  # are the two REACHABILITY facts that make the playhead-9s6q carve-out
+  # structural rather than a fixture accident.
+  # NOT expected of C01: the CUE-surface test. It builds its `AdWindow` directly
+  # at the orchestrator's door, so no mutation of the fusion predicate can reach
+  # it — it is an end-of-chain assertion that `.eligible` really becomes a skip,
+  # not a rail on the exemption. Said out loud because listing it here would
+  # have produced a fabricated kill.
+  "C01|140|FUSION|$T_SIK9_BEAD;$T_SIK9_BELOW_FLOOR;$T_SIK9_SCORES;$T_SIK9_FUSION_BELOW;$T_SIK9_FUSION_AT"
+  "C09|140|RSLOT|$T_SIK9_LAGGED"
+  "C10|140|RSLOT|$T_SIK9_DAY0_STRICT"
+
+  "C02|141|FUSION|$T_SIK9_GUARDED;$T_SIK9_SPLICE;$T_SIK9_FUSION_SPLICE"
+  "C07|141|EXTENT|$T_SIK9_REWRITE;$T_SIK9_2350"
+
+  "C03|142|FUSION|$T_SIK9_GUARDED;$T_SIK9_SPLICE;$T_SIK9_FUSION_SPLICE"
+  "C08|142|FUSION|$T_SIK9_2350"
+
+  "C04|143|FUSION|$T_SIK9_GUARDED"
+
+  "C05|144|FUSION|$T_SIK9_NO_PROMOTE"
+  "C06|144|DSPAN|$T_SIK9_SPLICE;$T_SIK9_FUSION_SPLICE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2178,6 +2260,16 @@ describe_mutation() {
     A09) echo "SkipEligibilityGate: widen the alias, so EVERY unknown raw value decodes to the FM-consensus block" ;;
     A10) echo "applyFMSuppression: build the windows inline again, bypassing the admission rule" ;;
     A11) echo "receiveAdWindows: route blockedByFMConsensus to the suggest tier (the surface the bead closed)" ;;
+    C01) echo "post-roll guard: DELETE the byte-anchored exemption — the old blanket demotion that would delete Dan's post-roll" ;;
+    C02) echo "post-roll guard: INVERT the exemption, so only byte-exact tails are demoted and everything else is exempt" ;;
+    C03) echo "post-roll guard: widen the exemption to ANY width oracle, so an acoustic .spliceSlot tail auto-skips" ;;
+    C04) echo "post-roll guard: widen the exemption to ANY provenance, so only a bare span is still guarded" ;;
+    C05) echo "post-roll guard: implement the exemption as a PROMOTION rather than a declined demotion" ;;
+    C06) echo "carriesRediffByteExactWidth: count acoustic .spliceSlot as byte-exact (the shared key four carve-outs read)" ;;
+    C07) echo "SpanExtentSupport.derive: keep the edge claim through a finalizer geometry rewrite" ;;
+    C08) echo "withExtentSupport: invert the blocking flag, so an unanchored edge no longer blocks auto-skip" ;;
+    C09) echo "gateAndDiffBytes: default recoverNonMonotonicSegments to true, admitting 9s6q slots on the LAGGED path" ;;
+    C10) echo "strictByteExactMask: mark every unioned slot strict, so a segment-recovered day-0 slot earns an anchor" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -5074,6 +5166,133 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+
+  # ---- playhead-sik9: the post-roll guard's byte-anchored exemption ----
+
+  C01)
+    snippet OLD <<'EOF'
+           gate == .eligible,
+           !span.carriesRediffByteExactWidth,
+           let episodeDuration,
+EOF
+    snippet NEW <<'EOF'
+           gate == .eligible,
+           let episodeDuration,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C02)
+    snippet OLD <<'EOF'
+           gate == .eligible,
+           !span.carriesRediffByteExactWidth,
+           let episodeDuration,
+EOF
+    snippet NEW <<'EOF'
+           gate == .eligible,
+           span.carriesRediffByteExactWidth,
+           let episodeDuration,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C03)
+    snippet OLD <<'EOF'
+           gate == .eligible,
+           !span.carriesRediffByteExactWidth,
+           let episodeDuration,
+EOF
+    snippet NEW <<'EOF'
+           gate == .eligible,
+           !(span.carriesRediffByteExactWidth || span.anchorProvenance.contains(.spliceSlot)),
+           let episodeDuration,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C04)
+    snippet OLD <<'EOF'
+           gate == .eligible,
+           !span.carriesRediffByteExactWidth,
+           let episodeDuration,
+EOF
+    snippet NEW <<'EOF'
+           gate == .eligible,
+           span.anchorProvenance.isEmpty,
+           let episodeDuration,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C05)
+    snippet OLD <<'EOF'
+           episodeDuration - span.endTime <= config.postRollGuardSeconds {
+            gate = .markOnly
+        }
+EOF
+    snippet NEW <<'EOF'
+           episodeDuration - span.endTime <= config.postRollGuardSeconds {
+            gate = .markOnly
+        }
+        if config.certaintyTieredEnabled, span.carriesRediffByteExactWidth {
+            gate = .eligible
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C06)
+    snippet OLD <<'EOF'
+    var carriesRediffByteExactWidth: Bool {
+        anchorProvenance.contains(.rediffSlot)
+    }
+EOF
+    snippet NEW <<'EOF'
+    var carriesRediffByteExactWidth: Bool {
+        anchorProvenance.contains(.rediffSlot) || anchorProvenance.contains(.spliceSlot)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C07)
+    snippet OLD <<'EOF'
+        guard !geometryWasRewritten else { return .unanchored }
+        let rediffOwnsWidth = anchorProvenance.contains(.rediffSlot)
+EOF
+    snippet NEW <<'EOF'
+        let rediffOwnsWidth = anchorProvenance.contains(.rediffSlot)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C08)
+    snippet OLD <<'EOF'
+        if blockingUnanchoredAutoSkip,
+           !support.isFullyAnchored,
+EOF
+    snippet NEW <<'EOF'
+        if !blockingUnanchoredAutoSkip,
+           !support.isFullyAnchored,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C09)
+    snippet OLD <<'EOF'
+        recoverNonMonotonicSegments: Bool = false
+EOF
+    snippet NEW <<'EOF'
+        recoverNonMonotonicSegments: Bool = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  C10)
+    snippet OLD <<'EOF'
+        let strictUnioned = unionedPlayedSlots(strictPerBSideSlots, config: config)
+        return unioned.map { slot in
+            strictUnioned.contains {
+                $0.startSeconds == slot.startSeconds && $0.endSeconds == slot.endSeconds
+            }
+        }
+EOF
+    snippet NEW <<'EOF'
+        _ = unionedPlayedSlots(strictPerBSideSlots, config: config)
+        return unioned.map { _ in true }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
