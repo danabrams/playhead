@@ -354,7 +354,7 @@ struct RediffByteFirstEndToEndTests {
         let span = try #require(chromaOwned.first)
         // Width ownership is unchanged — the projector clobber guard and the
         // boundary-refine bypass must still see this span as slot-owned.
-        #expect(span.anchorProvenance.contains(where: \.isWidthOwnership))
+        #expect(span.anchorProvenance.contains { $0.isWidthOwnership })
         // The CHROMA differ's slot (≈[100.04, 160.09]) — NOT a byte slot.
         #expect(span.startTime >= 99.5 && span.startTime <= 100.5, "start ≈ 100, got \(span.startTime)")
         #expect(span.endTime >= 159.5 && span.endTime <= 160.5, "end ≈ 160, got \(span.endTime)")
@@ -390,7 +390,7 @@ struct RediffByteFirstEndToEndTests {
         #expect(chromaOwned.count == 1)
         #expect(spans.allSatisfy { !$0.carriesRediffByteExactWidth })
         let span = try #require(chromaOwned.first)
-        #expect(span.anchorProvenance.contains(where: \.isWidthOwnership))
+        #expect(span.anchorProvenance.contains { $0.isWidthOwnership })
         #expect(span.startTime >= 99.5 && span.startTime <= 100.5)
         #expect(span.endTime >= 159.5 && span.endTime <= 160.5)
         #expect(await provider.pcmCallCount >= 1)

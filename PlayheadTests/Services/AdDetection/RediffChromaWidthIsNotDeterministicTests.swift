@@ -107,7 +107,7 @@ struct RediffChromaWidthIsNotDeterministicTests {
         // span that lost ownership would be re-refined and re-minted at seed
         // geometry — a strictly worse outcome than the bug being fixed.
         #expect(AnchorRef.rediffSlotChroma.isWidthOwnership)
-        #expect(span([.rediffSlotChroma]).anchorProvenance.contains(where: \.isWidthOwnership))
+        #expect(span([.rediffSlotChroma]).anchorProvenance.contains { $0.isWidthOwnership })
     }
 
     @Test("chroma is attribution-neutral, like its two sibling width markers")
@@ -261,7 +261,7 @@ struct RediffChromaWidthIsNotDeterministicTests {
         let downgraded = span(survivors.filter { $0 != .rediffSlot })
         #expect(!downgraded.carriesRediffByteExactWidth)
         #expect(!downgraded.carriesRediffChromaWidth)
-        #expect(!downgraded.anchorProvenance.contains(where: \.isWidthOwnership))
+        #expect(!downgraded.anchorProvenance.contains { $0.isWidthOwnership })
     }
 
     @Test("the provenance discriminator matches the Codable type string")
