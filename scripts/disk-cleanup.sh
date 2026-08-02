@@ -96,6 +96,12 @@ remove() {
   fi
   local size
   size="$(du -sh "$path" 2>/dev/null | awk '{print $1}')"
+  # `du` cannot descend a 0o300 directory, so the trees that ARE the problem
+  # report 0B — a number that means "I could not look", not "there is nothing
+  # here". Observed 2026-08-02: a stranded tree with 8 MiB in it measured 0B.
+  # Say unreadable rather than print a figure the reader would believe.
+  # (No parentheses in that word: scripts/disk_preflight.py parses this line.)
+  case "$size" in ""|0B|0) size="unreadable" ;; esac
   log "REMOVE ($reason, $size): $path"
   if [[ $DRY_RUN -eq 0 ]]; then
     # 0o300 directories (write+exec, NO read) stop `rm -rf` dead the same way

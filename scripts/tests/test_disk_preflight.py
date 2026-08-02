@@ -453,6 +453,19 @@ class CleanerWiringTests(unittest.TestCase):
     def test_symlinks_are_still_refused(self):
         self.assertIn("SKIP (symlink)", self.src)
 
+    def test_an_unmeasurable_size_is_reported_as_unreadable_not_as_zero(self):
+        # `du` cannot descend a 0o300 directory, so exactly the trees this sweep
+        # exists to clear measure 0B. Printing that is a number whose
+        # denominator nobody can name.
+        self.assertIn('size="unreadable"', self.code)
+
+    def test_the_unreadable_marker_stays_parseable_by_the_preflight(self):
+        # disk_preflight.parse_dry_run reads `(reason, size)` with `[^)]*` for
+        # the size, so a marker containing parentheses would silently drop the
+        # candidate out of the refusal's survey.
+        got = dp.parse_dry_run("[DRY] REMOVE (coresim-stranded, unreadable): /x")
+        self.assertEqual(got, [("coresim-stranded", "unreadable", "/x")])
+
 
 class DefaultThresholdTests(unittest.TestCase):
     def test_the_default_is_stated_in_gib_and_is_plausible(self):
