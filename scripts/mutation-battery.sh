@@ -149,6 +149,25 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   170 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-cgka). Batches 120-125 (Z01-Z12, 12 new
+#   entries), 6 batches. FINAL 12 KILLED / 0 SURVIVED / 0 ERROR, 9 builds.
+#   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
+#   array now holds 182 live entries.
+#
+#   Composition, stated because it was not one invocation. First pass, batches
+#   120-125: 11 KILLED, 1 SURVIVED. Z02 — delete the orphan-mark reset in
+#   `adopt` — survived, and the survivor was RIGHT twice over. The sweep's
+#   live-owner branch cleared the same mark, so the edit changed no observable
+#   behaviour: an equivalent mutant. And the rail it was aimed at asked the
+#   wrong question — it asserted a re-adopted directory survives while its
+#   SECOND owner is alive, which the sweep guarantees by construction, since it
+#   can only doom an entry whose owner is already nil. What a stale mark
+#   actually destroys is the one-sweep DEFERRAL for the new owner. The
+#   redundant reset was deleted (it was unreachable: a weak reference that has
+#   gone nil never becomes non-nil again) and the rail re-cut to assert the
+#   deferral, with deliberately no sweep between the re-adoption and the second
+#   death. Batch 121 re-run: 3/3 KILLED.
+#
 #   Composition, stated because it was not one invocation. First pass, batches
 #   91-100 (Y01-Y14): 13 KILLED, 1 SURVIVED. Y12 — the clip-radius bound —
 #   survived, and the survivor was RIGHT: `aDistantAnchorDoesNotClip` used a
