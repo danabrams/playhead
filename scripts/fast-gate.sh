@@ -133,7 +133,7 @@ fi
 # refusal text — same reasoning as PLAYHEAD_SKIP_BASELINE. An override printed
 # in the failure message stops being an override and becomes the workaround.
 if [ "${PLAYHEAD_SKIP_DISK_PREFLIGHT:-0}" != "1" ]; then
-  PREFLIGHT_ARGS=(--sim-id "$SIM_ID")
+  PREFLIGHT_ARGS=(--sim-id "$SIM_ID" --dest "$DEST")
   [ -n "${PLAYHEAD_DISK_MIN_GIB:-}" ] && PREFLIGHT_ARGS+=(--min-gib "$PLAYHEAD_DISK_MIN_GIB")
   [ "$RECLAIM_DISK" -eq 1 ] && PREFLIGHT_ARGS+=(--reclaim)
   if ! python3 scripts/disk_preflight.py "${PREFLIGHT_ARGS[@]}"; then

@@ -205,6 +205,39 @@ class SurveyTests(unittest.TestCase):
         self.assertEqual(dp.survey(cleaner, runner=lambda _c: (3, "boom")), [])
 
 
+class ResolveSimIdTests(unittest.TestCase):
+    LISTING = (
+        "== Devices ==\n"
+        "-- iOS 27.0 --\n"
+        "    iPhone 17 Pro (AAAAAAAA-1111-2222-3333-444444444444) (Shutdown)\n"
+        "    iPhone 17 (19B59D40-3826-4A31-AE37-70F59BA7C96E) (Shutdown)\n"
+    )
+
+    def runner(self, cmd):
+        return (0, self.LISTING) if cmd[:2] == ["xcrun", "simctl"] else (0, "")
+
+    def test_resolves_a_udid_from_a_name_destination(self):
+        got = dp.resolve_sim_id("platform=iOS Simulator,name=iPhone 17", self.runner)
+        self.assertEqual(got, "19B59D40-3826-4A31-AE37-70F59BA7C96E")
+
+    def test_does_not_match_a_longer_device_name_with_the_same_prefix(self):
+        # "iPhone 17" must not resolve to "iPhone 17 Pro" — erasing the wrong
+        # simulator is a worse outcome than printing a placeholder.
+        got = dp.resolve_sim_id("platform=iOS Simulator,name=iPhone 17 Pro", self.runner)
+        self.assertEqual(got, "AAAAAAAA-1111-2222-3333-444444444444")
+
+    def test_an_id_destination_needs_no_lookup(self):
+        self.assertEqual(dp.resolve_sim_id("platform=iOS Simulator,id=abc", self.runner), "")
+
+    def test_an_unknown_name_falls_back_to_the_placeholder(self):
+        self.assertEqual(dp.resolve_sim_id("name=iPhone 99", self.runner), "")
+
+    def test_simctl_failing_is_survivable(self):
+        # The global xcode-select on this box is CommandLineTools, which has no
+        # simctl. A refusal must still print.
+        self.assertEqual(dp.resolve_sim_id("name=iPhone 17", lambda _c: (72, "no simctl")), "")
+
+
 class ReclaimOptInTests(unittest.TestCase):
     def test_nothing_is_deleted_without_the_flag(self):
         # The load-bearing one. A preflight that quietly deletes on every run

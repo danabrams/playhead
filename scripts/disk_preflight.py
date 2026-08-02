@@ -122,6 +122,35 @@ def survey(cleaner: str, runner=_run) -> list[tuple[str, str, str]]:
     return parse_dry_run(out)
 
 
+_NAME_IN_DEST = re.compile(r"(?:^|,)\s*name=([^,]+)")
+
+
+def resolve_sim_id(dest: str, runner=_run) -> str:
+    """UDID of the destination simulator, so remedy 4 is copy-pasteable.
+
+    The usual PLAYHEAD_DEST names the device rather than its id, and a remedy
+    that says `simctl erase <udid>` makes the reader go and look it up at
+    exactly the moment they are already annoyed. Best-effort only: this is
+    called on the refusal path, never on the happy path, and any failure just
+    falls back to the placeholder.
+    """
+    m = _NAME_IN_DEST.search(dest or "")
+    if not m:
+        return ""
+    want = m.group(1).strip()
+    rc, out = runner(["xcrun", "simctl", "list", "devices"])
+    if rc != 0:
+        return ""
+    # `    iPhone 17 (19B59D40-...-...) (Shutdown)` — anchor on the exact name
+    # so "iPhone 17" does not match "iPhone 17 Pro".
+    pat = re.compile(r"^\s*" + re.escape(want) + r"\s+\(([0-9A-Fa-f-]{36})\)")
+    for line in out.splitlines():
+        hit = pat.match(line)
+        if hit:
+            return hit.group(1)
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # The refusal
 # ---------------------------------------------------------------------------
@@ -197,6 +226,7 @@ def main(argv=None, free_fn=free_bytes, runner=_run) -> int:
     ap.add_argument("--min-gib", type=float, default=DEFAULT_MIN_GIB)
     ap.add_argument("--cleaner", default="scripts/disk-cleanup.sh")
     ap.add_argument("--sim-id", default="", help="destination simulator UDID, for the remedy text")
+    ap.add_argument("--dest", default="", help="xcodebuild -destination, to resolve a UDID from name=")
     ap.add_argument("--reclaim", action="store_true",
                     help="run the cleaner ONCE when short, then re-check (explicit opt-in)")
     ap.add_argument("--quiet", action="store_true", help="print nothing when there is enough room")
@@ -224,7 +254,8 @@ def main(argv=None, free_fn=free_bytes, runner=_run) -> int:
             return 0
         print(f"fast-gate: still short after reclaim — {fmt_gib(free_b)} free.")
 
-    sys.stderr.write(format_refusal(free_b, min_b, survey(args.cleaner, runner), args.sim_id))
+    sim_id = args.sim_id or resolve_sim_id(args.dest, runner)
+    sys.stderr.write(format_refusal(free_b, min_b, survey(args.cleaner, runner), sim_id))
     sys.stderr.flush()
     return 1
 
