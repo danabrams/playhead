@@ -127,6 +127,57 @@ WHERE a.episodeDurationSec > 0
 ORDER BY ratio DESC;"
 
 echo
+echo "=== FM throughput by scene phase (playhead-hx6n) ==="
+if sqlite3 "$DB" "PRAGMA table_info(semantic_scan_results);" | grep -q '|scenePhase|'; then
+  # The measurement playhead-kvs8 was asked for and could not make: the
+  # 2.4x-slower-than-realtime figure split by the phase each scan COMPLETED in.
+  # ratio > 1 is slower than realtime.
+  #
+  # `unattributed` is a real row, not a rounding error. It is every scan written
+  # before schema V42 plus any whose phase the platform declined to name, and
+  # they are genuinely unattributable — no backfill can honestly repair them.
+  # READ IT FIRST: a split over a corpus that is 95% unattributed is not a
+  # foreground-versus-background finding, it is a report that the corpus
+  # predates the instrumentation.
+  #
+  # `noWork:` sentinels are excluded (playhead-pz32): a sentinel spans a range
+  # it never examined, so its ~zero latency over a whole-episode window would
+  # report a model of spectacular speed that never ran.
+  sqlite3 -header -column "$DB" "
+  SELECT CASE
+           WHEN scenePhase IN ('active','inactive') THEN 'foreground'
+           WHEN scenePhase = 'background'           THEN 'background'
+           ELSE 'unattributed'
+         END                                             AS phase,
+         count(*)                                        AS scans,
+         round(sum(windowEndTime - windowStartTime))      AS audioSec,
+         round(sum(latencyMs)/1000.0)                     AS wallSec,
+         round((sum(latencyMs)/1000.0)
+               / nullif(sum(windowEndTime - windowStartTime),0), 2) AS ratio
+  FROM semantic_scan_results
+  WHERE status='success'
+    AND latencyMs IS NOT NULL
+    AND windowEndTime > windowStartTime
+    AND (errorContext IS NULL OR errorContext NOT LIKE 'noWork:%')
+  GROUP BY phase
+  ORDER BY phase;"
+  echo
+  echo "  (raw scene phases, so the inactive-counts-as-foreground call stays auditable)"
+  sqlite3 -header -column "$DB" "
+  SELECT coalesce(scenePhase,'(null: pre-V42)') AS rawPhase, count(*) AS scans
+  FROM semantic_scan_results
+  WHERE status='success' AND latencyMs IS NOT NULL
+    AND windowEndTime > windowStartTime
+    AND (errorContext IS NULL OR errorContext NOT LIKE 'noWork:%')
+  GROUP BY rawPhase ORDER BY scans DESC;"
+else
+  echo "  This database predates schema V42 — semantic_scan_results has no"
+  echo "  scenePhase column, so NO row in it can be attributed to a phase."
+  echo "  That is the honest answer, not a script failure: the attribution has"
+  echo "  to be recorded at write time and this binary never recorded it."
+fi
+
+echo
 echo "=== windows surfaced with no evidence at all (playhead-8x59) ==="
 echo "Shard-quantized bounds plus empty evidence means no verifier ever ran."
 sqlite3 -header -column "$DB" "
