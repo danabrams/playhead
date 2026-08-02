@@ -154,6 +154,35 @@
 #   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
 #   array now holds 182 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-avbn). Batches 130-134 (A01-A11, 11 new
+#   entries), 5 batches. FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 7 builds
+#   (1 baseline + 5 batches + 1 re-run of batch 133). Batches 1-125 were NOT
+#   re-run and carry the verdicts above. Recount: the array now holds 209 live
+#   entries — the pre-avbn header said 182, which was already short by 16
+#   before this bead added 11; recounted here with `--list`, not carried over.
+#
+#   Composition, stated because it was not one invocation. First pass reported
+#   9 KILLED / 1 SURVIVED / 1 ERROR.
+#
+#   A11 — route `blockedByFMConsensus` to the suggest tier — SURVIVED, and the
+#   survivor was right. `blockedGateValuesAreDroppedInReceiveAdWindows` made
+#   five assertions and every one of them is about what did NOT happen. Since
+#   playhead-d3g0 a suggest banner is ARMED at delivery and EMITTED only when
+#   the playhead ENTERS the span, so routing a blocked gate to the suggest tier
+#   arms a banner and emits nothing inside the test 100 ms window: all five stay
+#   green while the span banners in the field the moment playback reaches it.
+#   The rail gained a POSITIVE witness — playhead-isp5 census row, which names
+#   the terminal disposition and its cause — plus an `armedSuggest` count of
+#   zero. Batch 133 re-run: 3/3 KILLED.
+#
+#   A04 reported ERROR ("expected test never ran") with its expected failure
+#   visibly listed two lines above. `extract_ran` matched the marker only at the
+#   START of a line, and this run interleaved `XCTestOutputBarrier` into the
+#   `◇ Test "…" started` line — word characters, so `^\W*` could not skip them.
+#   `extract_failures` had the identical exposure and got lucky. Both now scan
+#   for the marker anywhere in the line; see the note there for why that cannot
+#   manufacture a KILL.
+#
 #   Composition, stated because it was not one invocation. First pass, batches
 #   120-125: 11 KILLED, 1 SURVIVED. Z02 — delete the orphan-mark reset in
 #   `adopt` — survived, and the survivor was RIGHT twice over. The sweep's
@@ -446,11 +475,22 @@ SCANORD="Playhead/Services/AdDetection/AdLikelihoodScanOrder.swift"
 # the shape this battery exists for.
 SCRATCH="PlayheadTests/Helpers/TestScratch.swift"
 SCRATCHH="PlayheadTests/Helpers/TestHelpers.swift"
+# playhead-avbn: WHO MAY VOTE THAT THERE IS NO AD. FMSUP is the pure admission
+# rule — every A rail but the two wires is a one-line edit there. GATE is the
+# eligibility gate whose NAME and SEVERITY had to be brought into line with the
+# behaviour, and it is a separate file for the same reason INGO is: the rails
+# are about a value type's own arithmetic (a severity that must sort with the
+# blocked cases, an alias that must decode one way only), not about the service
+# that stamps it. The two WIRES are the defect a pure battery structurally
+# cannot see: ADSVC holds the only caller of the admission rule, ORCH the
+# routing decision that makes the gate a block rather than a banner.
+FMSUP="Playhead/Services/AdDetection/FMSuppressionGuard.swift"
+GATE="Playhead/Services/AdDetection/EvidenceLedgerEntry.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
-  "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH"
+  "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
 )
 
 FOCUSED_SUITES=(
@@ -604,6 +644,21 @@ FOCUSED_SUITES=(
   # pure tests cannot see.
   -only-testing:PlayheadTests/AdLikelihoodScanOrderTests
   -only-testing:PlayheadTests/AdLikelihoodScanOrderWiringTests
+  # playhead-avbn: who may vote that there is no ad (A01-A11). The first two
+  # suites are the pure admission rule and the gate value type — both are
+  # sub-second. SpanFinalizerTests is listed because the SEVERITY change is only
+  # observable in a merge, and the blocked-gate guard suite because the whole
+  # Half-1 decision is that this gate DROPS rather than banners: a mutation that
+  # routed it to the suggest tier would otherwise satisfy every value-type rail
+  # while re-opening the surface the bead closed.
+  -only-testing:PlayheadTests/FMSuppressionVotingWindowTests
+  -only-testing:PlayheadTests/BlockedByFMConsensusGateTests
+  -only-testing:PlayheadTests/SpanFinalizerTests
+  -only-testing:PlayheadTests/SkipOrchestratorBlockedGateGuardTests
+  # The pass-B row's MEASURED transcript quality is a persistence claim, so its
+  # only rail lives in the runner suite. It is the most expensive line in this
+  # list; it is here because the alternative is an unpinned producer.
+  -only-testing:PlayheadTests/BackfillJobRunnerTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -642,6 +697,25 @@ trap 'echo; echo "mutation-battery: interrupted — restoring sources" >&2; exit
 # ---------------------------------------------------------------------------
 # The battery.  NAME|BATCH|FILE_KEY|expected display names (';'-separated)
 # ---------------------------------------------------------------------------
+# playhead-avbn: the FM-suppression admission rule and the gate it feeds.
+T_AVBN_REFINE_EMPTY="a pass-B refinement that found no spans does NOT vote"
+T_AVBN_REFINE_TWO="two empty pass-B refinements cannot manufacture a noAds consensus"
+T_AVBN_REFINE_FOUND="a pass-B refinement that DID find spans does not vote either"
+T_AVBN_SENTINEL_ONE="a no-work sentinel does NOT vote"
+T_AVBN_SENTINEL_TWO="two no-work sentinels cannot manufacture a noAds consensus"
+T_AVBN_ABUTS="a row that merely abuts the span does not vote"
+T_AVBN_BAND="a degraded transcript bands weak, a good transcript bands moderate"
+T_AVBN_COARSE_VOTES="a coarse noAds row that examined its window votes"
+T_AVBN_COARSE_PAIR_TRIGGERS="two genuine coarse noAds windows still trigger suppression"
+T_AVBN_WIRE="applyFMSuppression builds its windows through votingWindows, not inline"
+T_AVBN_MEASURED_QUALITY="playhead-avbn: a passB row reports the MEASURED transcript quality, never a hardcoded good"
+T_AVBN_SEVERITY="blockedByFMConsensus sorts with the blocked cases, not with markOnly"
+T_AVBN_MERGE_DEMOTES="playhead-avbn: merging markOnly with blockedByFMConsensus demotes to blockedByFMConsensus"
+T_AVBN_LEGACY_DECODES="the pre-rename raw value still decodes to blockedByFMConsensus"
+T_AVBN_LEGACY_CODABLE="the pre-rename raw value decodes through Codable too"
+T_AVBN_LEGACY_REENCODE="re-encoding a legacy row writes the CANONICAL raw value, not the alias"
+T_AVBN_ALIAS_ONE_WAY="the alias is one-way: no OTHER unknown raw value decodes"
+T_AVBN_BLOCKED_DROPPED="blocked eligibilityGate values do NOT enter active managed-window set"
 T_LISTEN_RACE="A Listen revert whose episode is replaced mid-flight still calibrates the captured show"
 T_MANAGED_RACE="A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone"
 T_SUGGEST_RACE="A suggest-only revert whose episode is replaced mid-loop keeps its receipt and stops retiring banners"
@@ -1904,6 +1978,34 @@ MUTATIONS=(
   "Z12|124|SCRATCHH|$T_CGKA_WIPE"
 
   "Z11|125|SCRATCH|$T_CGKA_RECLAIM;$T_CGKA_DEFER"
+
+  # playhead-avbn (A01-A11). Two claims, and they are opposite in sign, which
+  # is why the negative controls matter as much as the rails: a `.noAds` scan
+  # row may only vote that there is no ad if it ANSWERED that question
+  # (A01/A02/A05), and the gate that records the resulting veto must be named
+  # and sorted as the block it actually is (A07/A08/A09/A11).
+  #
+  # A01 and A05 are the same guard mutated in opposite directions and each
+  # reddens most of the voting suite, so they are batched apart — a kill
+  # credited to the wrong direction would be worse than the extra build.
+  "A01|130|FMSUP|$T_AVBN_REFINE_EMPTY;$T_AVBN_REFINE_TWO;$T_AVBN_REFINE_FOUND"
+  "A06|130|RUNNER|$T_AVBN_MEASURED_QUALITY"
+  "A07|130|GATE|$T_AVBN_SEVERITY;$T_AVBN_MERGE_DEMOTES"
+
+  "A02|131|FMSUP|$T_AVBN_SENTINEL_ONE;$T_AVBN_SENTINEL_TWO"
+  "A08|131|GATE|$T_AVBN_LEGACY_DECODES;$T_AVBN_LEGACY_CODABLE;$T_AVBN_LEGACY_REENCODE"
+
+  "A03|132|FMSUP|$T_AVBN_ABUTS"
+  # A09 also reddens the orchestrator's malformed-gate rail (every unknown
+  # string would decode), which is collateral, not its claim — batched away
+  # from A11, whose claim IS an orchestrator gate rail.
+  "A09|132|GATE|$T_AVBN_ALIAS_ONE_WAY"
+
+  "A04|133|FMSUP|$T_AVBN_BAND"
+  "A10|133|ADSVC|$T_AVBN_WIRE"
+  "A11|133|ORCH|$T_AVBN_BLOCKED_DROPPED"
+
+  "A05|134|FMSUP|$T_AVBN_COARSE_VOTES;$T_AVBN_COARSE_PAIR_TRIGGERS"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2065,6 +2167,17 @@ describe_mutation() {
     Z10) echo "makeTempDir: ignore ownedBy: and merely register" ;;
     Z11) echo "adopt: no-op when the URL was never registered" ;;
     Z12) echo "wipeTestScratchRoot: plain removeItem again, so an unreadable leftover survives forever" ;;
+    A01) echo "votingWindows: drop the coarse-pass filter, so a pass-B refinement votes on presence again" ;;
+    A02) echo "votingWindows: drop the didExamineWindow filter, so a no-work sentinel votes there is no ad" ;;
+    A03) echo "votingWindows: overlap test '>' -> '>=', so a row that merely abuts the span votes" ;;
+    A04) echo "votingWindows: hardcode the band to .moderate, so a degraded transcript votes at full strength" ;;
+    A05) echo "votingWindows: invert the pass filter, so ONLY refinements vote and no coarse verdict does" ;;
+    A06) echo "makeRefinementScanResult: hardcode transcriptQuality .good again" ;;
+    A07) echo "SkipEligibilityGate: blockedByFMConsensus severity back to 1 (ties with markOnly)" ;;
+    A08) echo "SkipEligibilityGate: drop the legacy raw-value alias, orphaning every persisted row" ;;
+    A09) echo "SkipEligibilityGate: widen the alias, so EVERY unknown raw value decodes to the FM-consensus block" ;;
+    A10) echo "applyFMSuppression: build the windows inline again, bypassing the admission rule" ;;
+    A11) echo "receiveAdWindows: route blockedByFMConsensus to the suggest tier (the surface the bead closed)" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -4837,6 +4950,130 @@ func wipeTestScratchRoot(at url: URL) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  A01)
+    snippet OLD <<'EOF'
+            guard result.scanPass == SemanticScanResult.presenceScanPass else { return nil }
+            guard result.didExamineWindow else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard result.didExamineWindow else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A02)
+    snippet OLD <<'EOF'
+            guard result.scanPass == SemanticScanResult.presenceScanPass else { return nil }
+            guard result.didExamineWindow else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard result.scanPass == SemanticScanResult.presenceScanPass else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A03)
+    snippet OLD <<'EOF'
+            guard overlapEnd > overlapStart else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard overlapEnd >= overlapStart else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A04)
+    snippet OLD <<'EOF'
+                band: result.transcriptQuality == .good ? .moderate : .weak
+EOF
+    snippet NEW <<'EOF'
+                band: .moderate
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A05)
+    snippet OLD <<'EOF'
+            guard result.scanPass == SemanticScanResult.presenceScanPass else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard result.scanPass != SemanticScanResult.presenceScanPass else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A06)
+    snippet OLD <<'EOF'
+            transcriptQuality: aggregateTranscriptQuality(for: windowSegments),
+EOF
+    snippet NEW <<'EOF'
+            transcriptQuality: .good,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A07)
+    snippet OLD <<'EOF'
+        case .blockedByFMConsensus: return 2
+EOF
+    snippet NEW <<'EOF'
+        case .blockedByFMConsensus: return 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A08)
+    snippet OLD <<'EOF'
+        if rawValue == Self.legacyFMConsensusRawValue {
+            self = .blockedByFMConsensus
+            return
+        }
+        return nil
+EOF
+    snippet NEW <<'EOF'
+        return nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A09)
+    snippet OLD <<'EOF'
+        if rawValue == Self.legacyFMConsensusRawValue {
+            self = .blockedByFMConsensus
+            return
+        }
+        return nil
+EOF
+    snippet NEW <<'EOF'
+        self = .blockedByFMConsensus
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A10)
+    snippet OLD <<'EOF'
+        let overlappingWindows = FMSuppressionWindow.votingWindows(
+            spanStartTime: span.startTime,
+            spanEndTime: span.endTime,
+            scanResults: semanticScanResults
+        )
+EOF
+    snippet NEW <<'EOF'
+        let overlappingWindows: [FMSuppressionWindow] = semanticScanResults.compactMap { result in
+            let overlapStart = max(span.startTime, result.windowStartTime)
+            let overlapEnd = min(span.endTime, result.windowEndTime)
+            guard overlapEnd > overlapStart else { return nil }
+            return FMSuppressionWindow(
+                disposition: result.disposition,
+                band: result.transcriptQuality == .good ? .moderate : .weak
+            )
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  A11)
+    snippet OLD <<'EOF'
+            if decodedGate == .markOnly
+                || (
+EOF
+    snippet NEW <<'EOF'
+            if decodedGate == .markOnly
+                || decodedGate == .blockedByFMConsensus
+                || (
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
@@ -4879,6 +5116,8 @@ rec_file()   {
     SCANORD) printf '%s' "$SCANORD" ;;
     SCRATCH)  printf '%s' "$SCRATCH" ;;
     SCRATCHH) printf '%s' "$SCRATCHH" ;;
+    FMSUP) printf '%s' "$FMSUP" ;;
+    GATE)  printf '%s' "$GATE" ;;
     *)     printf '%s' "" ;;
   esac
 }
@@ -4975,11 +5214,17 @@ sys.stdout.writelines(lines[cut:])
 extract_failures() {
   python3 -c '
 import re, sys
-pat_named = re.compile(r"^\W*✘ Test \"(.+?)\" (?:failed|recorded an issue)")
-pat_plain = re.compile(r"^\W*✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) failed")
+# playhead-avbn: SEARCH, not match-from-start. xcodebuild interleaves its own
+# output into a line often enough to matter — an observed run prefixed
+# XCTestOutputBarrier onto a started-marker line, and those are WORD characters,
+# so the old ^\W* could not skip them. Widening cannot manufacture a KILL: the
+# anchor is the Swift Testing glyph plus the literal " Test \"", which nothing
+# else in the log emits.
+pat_named = re.compile(r"✘ Test \"(.+?)\" (?:failed|recorded an issue)")
+pat_plain = re.compile(r"✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) failed")
 seen = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    m = pat_named.match(line) or pat_plain.match(line)
+    m = pat_named.search(line) or pat_plain.search(line)
     if m and m.group(1) not in seen:
         seen.append(m.group(1))
 # Deliberately not `print("\n".join(...))`: on an empty list that emits a bare
@@ -5001,11 +5246,16 @@ sys.stdout.writelines(name + "\n" for name in seen)
 extract_ran() {
   python3 -c '
 import re, sys
-pat_named = re.compile(r"^\W*◇ Test \"(.+?)\" started")
-pat_plain = re.compile(r"^\W*◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
+# playhead-avbn: SEARCH, not match-from-start — see extract_failures. This is
+# the function the interleaving actually defeated, turning a real KILL into a
+# reported ERROR ("expected test never ran") with the failure printed two lines
+# above it. Widening here can only move a verdict ERROR -> KILLED/SURVIVED; the
+# KILL itself comes from extract_failures.
+pat_named = re.compile(r"◇ Test \"(.+?)\" started")
+pat_plain = re.compile(r"◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
 seen = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    m = pat_named.match(line) or pat_plain.match(line)
+    m = pat_named.search(line) or pat_plain.search(line)
     if m and m.group(1) not in seen:
         seen.append(m.group(1))
 sys.stdout.writelines(name + "\n" for name in seen)

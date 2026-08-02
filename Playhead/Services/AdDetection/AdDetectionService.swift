@@ -3101,7 +3101,7 @@ actor AdDetectionService {
             // `ad_windows` (confidence 1.0, `.confirmed` ⇒ preload-eligible) into
             // `receiveAdWindows`, whose gate filter drops ONLY recognised
             // NON-eligible cases (`.markOnly` → suggest tier; `.blocked*` /
-            // `.cappedByFMSuppression` → dropped). Both `nil` AND `.eligible`
+            // `.blockedByFMConsensus` → dropped). Both `nil` AND `.eligible`
             // fall THROUGH to the managed path, and `evaluateWindow` never re-
             // checks the gate — so in `.auto` mode a userMarked row auto-skips
             // regardless of gate. userMarked rows never traverse the stricter
@@ -5213,7 +5213,7 @@ actor AdDetectionService {
             //
             // playhead-qs0d: byte-exact rediff certainty is EXEMPT from the CAP,
             // the third member of the pzy2 exemption family (creator-chapter and
-            // self-promo are below). `.cappedByFMSuppression` is by its own
+            // self-promo are below). `.blockedByFMConsensus` is by its own
             // definition "FM noAds consensus suppression" — a NON-deterministic
             // model's opinion that there is no ad here. A span whose width the
             // rediff differ owns (`.rediffSlot`) is a byte-verified DAI
@@ -5246,7 +5246,7 @@ actor AdDetectionService {
                 decision = DecisionResult(
                     proposalConfidence: rawDecision.proposalConfidence,
                     skipConfidence: rawDecision.skipConfidence,
-                    eligibilityGate: .cappedByFMSuppression,
+                    eligibilityGate: .blockedByFMConsensus,
                     promotionTrack: rawDecision.promotionTrack
                 )
             } else {
@@ -5269,7 +5269,10 @@ actor AdDetectionService {
             // chapter signal cannot UNDO an existing block; the
             // demotion only fires when the current gate is structurally
             // weaker than `.blockedByPolicy` (severity < 2 — i.e.
-            // `.eligible`, `.markOnly`, or `.cappedByFMSuppression`).
+            // `.eligible` or `.markOnly`. playhead-avbn moved
+            // `.blockedByFMConsensus` to severity 2, so it is no longer
+            // demotable here — both gates block, so the terminal outcome is
+            // unchanged; only the recorded cause is.
             //
             // playhead-pzy2: byte-exact rediff certainty is EXEMPT — the
             // demotion-path mirror of the self-promo exemption below. A span whose
@@ -5321,8 +5324,9 @@ actor AdDetectionService {
             // fully-eligible span down to banner-only. It never overrides a
             // harder block (`.blockedBy*`, severity ≥ 2 — e.g. a user correction
             // or the creator-chapter demotion just above), never re-touches an
-            // equal-severity gate (`.markOnly` / `.cappedByFMSuppression`,
-            // severity 1), and never promotes.
+            // equal-severity gate (`.markOnly`, severity 1), and never
+            // promotes. (playhead-avbn: `.blockedByFMConsensus` moved to
+            // severity 2 and is now covered by the `.blockedBy*` clause above.)
             //
             // Flag-OFF (or the bundled bank failing to load) resolves
             // `selfPromoBank` to nil, so the `let` binding short-circuits before
@@ -8152,23 +8156,25 @@ actor AdDetectionService {
     ///
     /// Builds FMSuppressionWindow entries from overlapping scan results, evaluates
     /// the suppression guard, and applies downweighting if all guards pass.
+    ///
+    /// playhead-avbn: which rows may vote is decided by
+    /// ``FMSuppressionWindow/votingWindows(spanStartTime:spanEndTime:scanResults:)``,
+    /// which lives next to the guard that consumes the answer. This site used to
+    /// admit every scan row whose time range overlapped the span, with no filter
+    /// on pass, status or sentinel-ness — so rows meaning "I failed to find the
+    /// edges" or "no FM work was performed" could satisfy the 2-window `noAds`
+    /// quorum by themselves and downweight the detectors that DID find something.
     private func applyFMSuppression(
         span: DecodedSpan,
         ledger: [EvidenceLedgerEntry],
         semanticScanResults: [SemanticScanResult]
     ) -> FMSuppressionResult {
         // Build suppression windows from FM scan results overlapping this span.
-        let overlappingWindows: [FMSuppressionWindow] = semanticScanResults.compactMap { result in
-            let overlapStart = max(span.startTime, result.windowStartTime)
-            let overlapEnd = min(span.endTime, result.windowEndTime)
-            guard overlapEnd > overlapStart else { return nil }
-
-            let band: CertaintyBand = result.transcriptQuality == .good ? .moderate : .weak
-            return FMSuppressionWindow(
-                disposition: result.disposition,
-                band: band
-            )
-        }
+        let overlappingWindows = FMSuppressionWindow.votingWindows(
+            spanStartTime: span.startTime,
+            spanEndTime: span.endTime,
+            scanResults: semanticScanResults
+        )
 
         let guard_ = FMSuppressionGuard(
             overlappingFMResults: overlappingWindows,

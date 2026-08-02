@@ -574,22 +574,82 @@ struct CertaintyBandExtensionTests {
     }
 }
 
-// MARK: - SkipEligibilityGate: cappedByFMSuppression
+// MARK: - SkipEligibilityGate: blockedByFMConsensus
 
-@Suite("SkipEligibilityGate.cappedByFMSuppression")
-struct CappedByFMSuppressionGateTests {
+@Suite("SkipEligibilityGate.blockedByFMConsensus")
+struct BlockedByFMConsensusGateTests {
 
-    @Test("cappedByFMSuppression is Codable round-trippable")
+    @Test("blockedByFMConsensus is Codable round-trippable")
     func codableRoundTrip() throws {
-        let gate = SkipEligibilityGate.cappedByFMSuppression
+        let gate = SkipEligibilityGate.blockedByFMConsensus
         let data = try JSONEncoder().encode(gate)
         let decoded = try JSONDecoder().decode(SkipEligibilityGate.self, from: data)
         #expect(decoded == gate)
     }
 
-    @Test("cappedByFMSuppression rawValue is correct")
+    @Test("blockedByFMConsensus rawValue is correct")
     func rawValue() {
-        #expect(SkipEligibilityGate.cappedByFMSuppression.rawValue == "cappedByFMSuppression")
+        #expect(SkipEligibilityGate.blockedByFMConsensus.rawValue == "blockedByFMConsensus")
+    }
+
+    // MARK: - playhead-avbn: the rename must not orphan persisted rows
+
+    @Test("the pre-rename raw value still decodes to blockedByFMConsensus")
+    func legacyRawValueDecodes() {
+        #expect(SkipEligibilityGate.legacyFMConsensusRawValue == "cappedByFMSuppression")
+        #expect(
+            SkipEligibilityGate(rawValue: "cappedByFMSuppression")
+                == .blockedByFMConsensus
+        )
+    }
+
+    @Test("the pre-rename raw value decodes through Codable too")
+    func legacyRawValueDecodesThroughCodable() throws {
+        let data = Data(#""cappedByFMSuppression""#.utf8)
+        let decoded = try JSONDecoder().decode(SkipEligibilityGate.self, from: data)
+        #expect(decoded == .blockedByFMConsensus)
+    }
+
+    @Test("re-encoding a legacy row writes the CANONICAL raw value, not the alias")
+    func legacyRawValueReencodesCanonically() throws {
+        let decoded = try #require(
+            SkipEligibilityGate(rawValue: SkipEligibilityGate.legacyFMConsensusRawValue)
+        )
+        let data = try JSONEncoder().encode(decoded)
+        #expect(String(decoding: data, as: UTF8.self) == #""blockedByFMConsensus""#)
+    }
+
+    @Test("the alias is one-way: no OTHER unknown raw value decodes")
+    func aliasDoesNotAdmitUnknownValues() {
+        #expect(SkipEligibilityGate(rawValue: "cappedByFM") == nil)
+        #expect(SkipEligibilityGate(rawValue: "suppressedByFMConsensus") == nil)
+        #expect(SkipEligibilityGate(rawValue: "autoSkip") == nil)
+        #expect(SkipEligibilityGate(rawValue: "") == nil)
+    }
+
+    @Test("every canonical raw value round-trips through the custom initializer")
+    func everyCaseRoundTrips() {
+        for gate in SkipEligibilityGate.allCases {
+            #expect(SkipEligibilityGate(rawValue: gate.rawValue) == gate)
+        }
+    }
+
+    // MARK: - playhead-avbn: the severity must agree with the behaviour
+
+    @Test("blockedByFMConsensus sorts with the blocked cases, not with markOnly")
+    func severitySortsWithBlockedCases() {
+        #expect(
+            SkipEligibilityGate.blockedByFMConsensus.severity
+                == SkipEligibilityGate.blockedByPolicy.severity
+        )
+        #expect(
+            SkipEligibilityGate.blockedByFMConsensus.severity
+                > SkipEligibilityGate.markOnly.severity
+        )
+        #expect(
+            SkipEligibilityGate.blockedByFMConsensus.severity
+                < SkipEligibilityGate.blockedByUserCorrection.severity
+        )
     }
 
     // MARK: - classificationTrust preservation

@@ -108,7 +108,7 @@ struct BackfillEvidenceFusionTests {
             .blockedByPolicy,
             .markOnly,
             .blockedByUserCorrection,
-            .cappedByFMSuppression
+            .blockedByFMConsensus
         ]
         #expect(cases.count == 6)
 

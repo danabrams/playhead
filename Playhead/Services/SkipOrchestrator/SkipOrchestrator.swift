@@ -2857,7 +2857,7 @@ actor SkipOrchestrator {
             // `SkipEligibilityGate` raw value and therefore decodes
             // to nil). Fusion stamps — the full `SkipEligibilityGate`
             // raw-value space, including `.eligible`, the blocked-*
-            // cases, and `.cappedByFMSuppression` — originate only in
+            // cases, and `.blockedByFMConsensus` — originate only in
             // `AdDetectionService.runBackfill` via
             // `buildFusionAdWindow`, which writes
             // `decision.eligibilityGate.rawValue` directly. Those
@@ -2974,7 +2974,7 @@ actor SkipOrchestrator {
             // `AdDetectionService.runBackfill` via `buildFusionAdWindow` write the
             // full `SkipEligibilityGate.rawValue` space — including the blocked
             // cases (`.blockedByEvidenceQuorum`, `.blockedByPolicy`,
-            // `.blockedByUserCorrection`, `.cappedByFMSuppression`). These rows
+            // `.blockedByUserCorrection`, `.blockedByFMConsensus`). These rows
             // surface to all three `receiveAdWindows` callers (cross-launch
             // preload, hot-path post-classify push, final-pass backfill push) —
             // see the producer-note block above. Without this guard a

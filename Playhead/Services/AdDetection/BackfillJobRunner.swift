@@ -3807,7 +3807,27 @@ actor BackfillJobRunner {
             windowStartTime: startTime,
             windowEndTime: endTime,
             scanPass: "passB",
-            transcriptQuality: .good,
+            // playhead-avbn: the MEASURED quality of the lines this window
+            // actually contained, never a hardcoded `.good`.
+            //
+            // Every other writer on this type derives the column
+            // (`makeScanResult` forwards the coarse pass's own reading;
+            // `makeFailureScanResult` and the no-work sentinel take it from
+            // `attemptedRange`); passB alone asserted it. The result was a
+            // column carrying no information: measured on the surviving device
+            // pulls, 100% of passB rows read `good` while passA on the SAME
+            // assets read `degraded` for 8 of its 11 rows.
+            //
+            // It is not cosmetic, because a consumer derives certainty from it.
+            // `AdDetectionService.applyFMSuppression` bands a window
+            // `transcriptQuality == .good ? .moderate : .weak`, and
+            // `FMSuppressionGuard` counts only `.moderate`+ — so the hardcode
+            // promoted every passB row to a full vote regardless of how bad the
+            // transcript under it was. (That call site now declines passB rows
+            // outright, since a refinement is not a presence verdict at any
+            // certainty; this keeps the ROW honest for every future reader,
+            // rather than relying on one consumer to compensate.)
+            transcriptQuality: aggregateTranscriptQuality(for: windowSegments),
             disposition: windowOutput.spans.isEmpty ? .noAds : .containsAd,
             spansJSON: encodeRefinedSpans(windowOutput.spans),
             status: status,
