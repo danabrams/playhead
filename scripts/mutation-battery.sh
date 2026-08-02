@@ -189,6 +189,42 @@
 #   change to a shared tool for one bead's convenience. No batch was re-run and
 #   no expectation was relaxed.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-gard). Batches 180-194 (I01-I21, 21 new
+#   entries), 15 batches. FINAL 21 KILLED / 0 SURVIVED / 0 ERROR, 22 builds
+#   (14 batches + baseline + 6 re-runs after the fixes below). Batches 1-179
+#   were NOT re-run and carry the verdicts above. Recount with `--list`.
+#
+#   THE PRE-FLIGHT EARNED ITS KEEP AGAIN. The first attempt refused: the new
+#   `revertAttributesToTheDrawingDetector` was RED under the focused set and
+#   GREEN alone — `revertWindow` issues its trust write in an unstructured
+#   `Task`, so the test raced it. Six mutations naming rails in that suite would
+#   have been credited KILLED off a flake.
+#
+#   Five survivors on the first pass, and every one was a real finding:
+#     • I02 — `migrationPreservesPosture` iterated `allCases where
+#       consultsShowTrust`, so a mutation making EVERY class exempt emptied the
+#       loop and the test passed describing nothing. The three classes are now
+#       NAMED. A test whose iteration set is derived from the predicate under
+#       test cannot fail when that predicate is wrong.
+#     • I20 — an EQUIVALENT MUTANT: dropping the exempt class from the session
+#       override's map is masked by `DetectorSkipModes.mode(for:)`'s fallback to
+#       `showMode`, which the override just set to the same value. EDIT re-cut
+#       to delete the assignment entirely (the stale `beginEpisode` map then
+#       governs, which is a real defect).
+#     • I15 — `userOverrideIsNotSilentlyUndone` read only the LEGACY counter and
+#       the modes, neither of which the ledger's weight touches. Restated as
+#       behaviour: one unanchored veto after an override must leave the class in
+#       `auto`.
+#     • I14 — materialization has TWO carriers (the veto path and the
+#       correct-observation path) and removing one leaves the other's rail
+#       green. The mutation now removes both.
+#     • I08 and I18 — expectations naming tests the edits cannot REACH. I08's
+#       demotion/escape rails are satisfied by the legacy triple when the ledger
+#       does not persist (correctly so); repointed at the three claims that need
+#       the ledger to hold state the scalar does not. I18's new-show rail exits
+#       `resolveDetectorModes` one branch earlier; split out as I21 rather than
+#       credited by association.
+#
 #   Every EDIT was `--dry-run` verified before any build was spent — ten
 #   anchors, ten "applied exactly once and the tree was restored". That is the
 #   cheap half of the F09 lesson recorded above and it caught nothing here; the
@@ -603,15 +639,43 @@ RSLOT="Playhead/Services/AdDetection/RediffSlotOwnership.swift"
 # series defends. Named ADSVC_ATOM rather than ATOM because the key is read out
 # of a `|`-delimited record and a two-letter key invites collisions.
 ATOMEV="Playhead/Services/AdDetection/AtomEvidence.swift"
+# playhead-gard: PER-DETECTOR TRUST (I series). Four files because the claim is
+# a chain and each link fails silently on its own. DETCLS is the pure
+# classifier — "which detector drew this span, and does the show's history
+# govern it" — where every mis-scoping of the exemption is a one-line edit that
+# compiles. DETLED is the persisted state and, critically, the MIGRATION: the
+# seed function is the only thing standing between an upgrading user and a
+# silent posture change, and no behavioural test of a fresh store can see it.
+# TRUST holds the weighting and the promotion/demotion arithmetic. ORCH is the
+# WIRE — the gate that reads a mode, the four veto sites that name a detector,
+# and the banner-confirm site that is the ONLY escape from `manual`; a battery
+# over the pure types structurally cannot see any of them.
+DETCLS="Playhead/Services/TrustScoring/SkipDetectorClass.swift"
+DETLED="Playhead/Services/TrustScoring/DetectorTrustLedger.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
+  "$DETCLS" "$DETLED"
 )
 
 FOCUSED_SUITES=(
+  # playhead-gard: the per-detector trust rails (I series). Seven suites,
+  # because the claim spans the whole chain and no one layer can observe
+  # another: classification and the exemption's scope; the persisted ledger and
+  # its MIGRATION seed; the veto weighting; per-detector resolution; the
+  # demotion that must still happen; the escape from `manual`; and the
+  # orchestrator wiring that is the only thing able to see a gate reading the
+  # wrong mode.
+  -only-testing:PlayheadTests/SkipDetectorClassTests
+  -only-testing:PlayheadTests/DetectorVetoWeightTests
+  -only-testing:PlayheadTests/DetectorTrustLedgerTests
+  -only-testing:PlayheadTests/DetectorModeResolutionTests
+  -only-testing:PlayheadTests/PerDetectorDemotionTests
+  -only-testing:PlayheadTests/ManualModeEscapabilityTests
+  -only-testing:PlayheadTests/PerDetectorSkipGateTests
   # playhead-6qvf: the byte/chroma certainty split (G series). Four suites,
   # because the claim spans four layers and no one of them can see the others:
   # the pure invariants + the exhaustive "only .rediffSlot is deterministic"
@@ -1310,6 +1374,48 @@ T_NQEY_WIREIN_DEFAULT="AdDetectionConfig.default ships the certainty-tiered gate
 T_NQEY_WIREIN_BYTEID="Omitted wraj flags: runBackfill is byte-identical to explicit-default (true/0.9/90.0) flags"
 T_NQEY_WIREIN_OMITTED="AdDetectionConfig.init defaults the three certainty-tiered fields when omitted"
 T_NQEY_WIREIN_VERBATIM="AdDetectionConfig.init carries each certainty-tiered field through verbatim, one at a time"
+
+# playhead-gard (I series): TRUST IS PER DETECTOR CLASS. The rails divide into
+# (a) CLASSIFICATION — which detector drew a span, and which single class is
+# exempt from the show's history; (b) the MIGRATION seed, the only thing
+# between an upgrading user and a silent posture change; (c) the veto WEIGHT,
+# keyed on the tier system 6qvf sharpened rather than a parallel scale; (d) the
+# DEMOTION that must still happen, because per-detector trust that never
+# demotes is as broken as one global scalar; (e) the ESCAPE from `manual`,
+# which had no production caller at all before this bead; and (f) the WIRING —
+# the gate, the veto attribution and the banner-confirm credit — which no test
+# of the pure types can see.
+T_GARD_EXEMPT_SINGULAR="Exactly one class is exempt from the show's trust history"
+T_GARD_ONE_EDGE="ONE byte-exact edge is not the deterministic class — a span is worth its weaker edge"
+T_GARD_STINGER="A stinger-snapped pair is corroborated, not deterministic — it is not the rediff class"
+T_GARD_UNKNOWN_BOUNDARY="An unrecognised boundary state falls to fusion, never to a weaker gate"
+T_GARD_ROW_CLASSIFY="AdWindow classifies from its own persisted columns"
+T_GARD_WEIGHT_ORDER="Weights are ordered by the certainty of what was skipped"
+T_GARD_FIELD_ARITHMETIC="Three unanchored vetoes weigh 1.5 — under the demotion threshold of 2"
+T_GARD_MIGRATION_KEEPS="A pre-gard row seeds every show-governed class from the legacy scalar"
+T_GARD_MIGRATION_FREES="The exempt class seeds CLEAN — it does not inherit other detectors' mistakes"
+T_GARD_ROUNDTRIP="The column survives a store round-trip"
+T_GARD_FIELD_ROW="THE BEAD: the device row still auto-skips byte-exact rediff while the aggregator stays manual"
+T_GARD_STORED_WINS="A stored per-detector entry beats the legacy seed"
+T_GARD_LOOKUP_FAILURE="A profile READ failure lands every class on shadow, exemption included"
+T_GARD_NEW_SHOW="A show with no profile is the deliberate new-show default, and the exempt class still resolves"
+T_GARD_DEMOTION_HAPPENS="THE NEGATIVE: per-detector trust that never demotes is as broken as one scalar"
+T_GARD_BLAME_NOT_SHARED="The blamed detector is demoted and the others are NOT"
+T_GARD_EXEMPT_DEMOTABLE="The EXEMPT class is exempt from the show's history, not from its own"
+T_GARD_WEIGHTED_STAYS="THE FIELD CASE: three unanchored aggregator vetoes no longer demote"
+T_GARD_LEGACY_ONCE="The LEGACY triple moves exactly once per gesture, however many classes were blamed"
+T_GARD_STRONGEST_TIER="A duplicate class in one gesture is charged ONCE, at its strongest tier"
+T_GARD_WEAK_HALVED="An inferred revert weighs half an explicit one (the fidelity ladder)"
+T_GARD_DOOR_OPENS="THE DOOR OPENS: correct observations walk the device row back to auto"
+T_GARD_DECAY_ONE="Each correct observation decays exactly one unit of false-signal evidence"
+T_GARD_CREDIT_NOT_SHARED="Credit goes to the observed detector only"
+T_GARD_OVERRIDE_CLEARS="An explicit user override clears the stale evidence against every detector"
+T_GARD_BANNER_CREDITS="A confirmed banner IS a correct observation, credited to the detector that drew the span"
+T_GARD_CALL_SITE="The banner-confirm path calls recordCorrectObservation in PRODUCTION source"
+T_GARD_REDIFF_SKIPS="THE ACCEPTANCE: the demoted show auto-skips byte-exact rediff"
+T_GARD_AGG_BLOCKED="…and the aggregator that earned the demotion still does NOT skip"
+T_GARD_SESSION_OVERRIDE="A session override governs EVERY detector, exemption included"
+T_GARD_REVERT_ATTRIB="A veto is attributed to the detector that DREW the span, through the real orchestrator seam"
 
 # playhead-9v09 (H series): the census's SILENT RETRACTION PATH. The rails
 # divide into (a) the two WRITES the retroactive sweep now performs — the
@@ -2470,6 +2576,121 @@ MUTATIONS=(
   # the existing "a gap means a missing instrumentation site" reading of the
   # census silently stops holding for the new row shape.
   "H10|175|ORCH|$T_9V09_BOTH;$T_9V09_AGGREGATE"
+  # ---- playhead-gard (I series): trust is per detector class ---------------
+  #
+  # Batching note. A batch pairs at most one PURE-TYPE mutation with one WIRING
+  # mutation, and only where neither can redden the other's tests. Six of the
+  # twenty run alone because their blast radius covers the acceptance suite —
+  # anything that changes what `.rediffByteExact` seeds to, or whether the
+  # ledger persists at all, reddens the orchestrator rails too, and a false
+  # KILL is worse than an extra build.
+
+  # THE DECISION, deleted. If the exempt class consults the show's history
+  # again, Dan's three aggregator vetoes gate the byte differ once more — the
+  # defect exactly as it shipped.
+  "I01|180|DETCLS|$T_GARD_EXEMPT_SINGULAR;$T_GARD_FIELD_ROW;$T_GARD_MIGRATION_FREES"
+
+  # The opposite mis-scoping: nobody consults show trust. Every show-governed
+  # class would seed clean and an upgrading user would silently GAIN auto-skip
+  # on three detectors — the migration failure this bead is obliged to state.
+  "I02|181|DETCLS|$T_GARD_EXEMPT_SINGULAR;$T_GARD_MIGRATION_KEEPS"
+
+  # A veto blames nobody. The gesture still moves the show scalar, so every
+  # pre-gard assertion stays green and only the attribution rail sees it.
+  "I13|181|ORCH|$T_GARD_REVERT_ATTRIB"
+
+  # Deterministic on EITHER edge. A span with an invented end would be treated
+  # as byte-exact — the playhead-2350 lesson ("a span is only as well-bounded
+  # as its weaker edge") re-broken one layer up.
+  "I03|182|DETCLS|$T_GARD_ONE_EDGE"
+
+  # The escape from `manual`, unwired. This is the shipped state before gard:
+  # the ladder is intact and nothing climbs it.
+  "I12|182|ORCH|$T_GARD_CALL_SITE;$T_GARD_BANNER_CREDITS"
+
+  # The conservative fallback inverted: an unrecognised producer is admitted to
+  # the exempt class. A future boundary state nobody has taught this enum about
+  # would skip on a show that trusts nothing.
+  "I04|183|DETCLS|$T_GARD_UNKNOWN_BOUNDARY;$T_GARD_STINGER;$T_GARD_ROW_CLASSIFY"
+
+  # A live instruction that governs only some detectors — "exempt from the
+  # show's history" widened into "exempt from the user".
+  "I20|183|ORCH|$T_GARD_SESSION_OVERRIDE"
+
+  # The weighting removed: every veto weighs 1 again, and the field case
+  # demotes on the third junk span exactly as it did.
+  "I05|184|DETLED|$T_GARD_WEIGHT_ORDER;$T_GARD_FIELD_ARITHMETIC;$T_GARD_WEIGHTED_STAYS;$T_GARD_LEGACY_ONCE"
+
+  # THE SHIPPED DEFECT, restored at the wire: one scalar gates every window.
+  "I11|184|ORCH|$T_GARD_REDIFF_SKIPS"
+
+  # The migration's exempt arm removed — the poisoned legacy scalar is
+  # inherited by the one class it is not evidence about.
+  "I06|185|DETLED|$T_GARD_MIGRATION_FREES;$T_GARD_FIELD_ROW;$T_GARD_NEW_SHOW;$T_GARD_REDIFF_SKIPS"
+
+  # The migration's other arm: every class seeds clean, so an upgrading user
+  # silently gains auto-skip on the detector that just cost them 210 s.
+  "I07|186|DETLED|$T_GARD_MIGRATION_KEEPS;$T_GARD_FIELD_ROW;$T_GARD_AGG_BLOCKED"
+
+  # The ledger never persists. Per-detector state exists in memory for one
+  # transaction and is gone — indistinguishable from working, for one call.
+  #
+  # EXPECTATION CORRECTED after the first I run, which is what established what
+  # this mutation can actually reach. It originally named the demotion and the
+  # escape; both SURVIVE it, and correctly so. With no persisted ledger every
+  # class re-seeds from the LEGACY triple on each read, and the legacy triple
+  # demotes and escapes on exactly the same thresholds — so a single-detector
+  # story still reads right. What the mutation cannot fake is anything that
+  # requires the ledger to hold state the scalar does not: a round-trip, blame
+  # that is NOT shared, and the per-class weights after one gesture.
+  "I08|187|DETLED|$T_GARD_ROUNDTRIP;$T_GARD_BLAME_NOT_SHARED;$T_GARD_LEGACY_ONCE"
+
+  # THE NEGATIVE the bead's third acceptance exists for: per-detector trust
+  # that never demotes anything. Every positive rail stays green.
+  "I09|188|TRUST|$T_GARD_DEMOTION_HAPPENS;$T_GARD_EXEMPT_DEMOTABLE;$T_GARD_WEIGHTED_STAYS"
+
+  # THE ONE-WAY DOOR, restored. A correct observation stops decaying the
+  # false-signal evidence, so `recentFalseSkipSignals` never reaches 0 and no
+  # show can ever leave `manual` — the shipped behaviour this bead measured.
+  "I10|189|TRUST|$T_GARD_DOOR_OPENS;$T_GARD_DECAY_ONE"
+
+  # An explicit user instruction that leaves the stale counters standing, so
+  # the very next veto undoes it.
+  "I15|189|TRUST|$T_GARD_OVERRIDE_CLEARS"
+
+  # Materialization removed. The subtle half: the seed is a lazy read off a
+  # legacy scalar that this same gesture demotes, so blame leaks back into
+  # every unwritten class one hop later.
+  "I14|190|TRUST|$T_GARD_BLAME_NOT_SHARED;$T_GARD_CREDIT_NOT_SHARED"
+
+  # Dedup keeps the WEAKEST tier, so one junk span in a range veto launders a
+  # real miss down to its own weight.
+  "I16|191|TRUST|$T_GARD_STRONGEST_TIER"
+
+  # An inferred revert weighs as much as an explicit one — the fidelity ladder
+  # flattened.
+  "I17|191|TRUST|$T_GARD_WEAK_HALVED"
+
+  # Per-detector resolution made inert: every class answers with the show mode.
+  # Compiles, ships, and is the scalar again.
+  #
+  # EXPECTATION CORRECTED after the first I run: it also named the new-show
+  # rail, which this edit cannot reach — a show with NO profile row exits
+  # `resolveDetectorModes` one branch earlier, through `seededModes(from: nil)`.
+  # That branch gets its own mutation (I21) rather than being credited to this
+  # one by association.
+  "I18|192|TRUST|$T_GARD_FIELD_ROW;$T_GARD_STORED_WINS"
+
+  # The FIRST-LISTEN branch, which is the one that matters most for the exempt
+  # class: day-0 byte-exact rediff is the only signal an unheard show has, and
+  # an empty map sends it to the show mode, which is `.shadow` by definition
+  # there. Separate from I18 because it is a separate `return`.
+  "I21|194|TRUST|$T_GARD_NEW_SHOW"
+
+  # A lookup FAILURE grants the exempt class auto. "Exempt from the show's
+  # history" widened into "runs when persistence is broken" — playhead-djl0's
+  # rule that every failure lands non-actioning.
+  "I19|193|TRUST|$T_GARD_LOOKUP_FAILURE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2681,6 +2902,27 @@ describe_mutation() {
     H08) echo "9v09: armedSuggest is classified a retraction — the balance eats its own numerator" ;;
     H09) echo "9v09: the retirement is classified DELIVERED, inflating every delivered= figure" ;;
     H10) echo "9v09: the sweep row reports forwarded=0 while its counts say otherwise" ;;
+    I01) echo "gard: byte-exact rediff consults the show trust history again — the shipped defect" ;;
+    I02) echo "gard: NO class consults show trust — every show silently gains auto on upgrade" ;;
+    I03) echo "gard: deterministic on EITHER edge, so an invented end reads as byte-exact" ;;
+    I04) echo "gard: an unrecognised boundary state is admitted to the exempt class" ;;
+    I05) echo "gard: every veto weighs 1 again — the certainty weighting deleted" ;;
+    I06) echo "gard: the exempt class inherits the poisoned legacy scalar on migration" ;;
+    I07) echo "gard: EVERY class seeds clean on migration — an upgrading user gains auto-skip" ;;
+    I08) echo "gard: the per-detector ledger never persists" ;;
+    I09) echo "gard: per-detector demotion is inert — trust that never demotes anything" ;;
+    I10) echo "gard: a correct observation stops decaying the counter — the one-way door returns" ;;
+    I11) echo "gard: the skip gate reads the show scalar again, not the detector's mode" ;;
+    I12) echo "gard: the banner confirm records no correct observation — the escape unwired" ;;
+    I13) echo "gard: a veto blames nobody — the show scalar still moves, attribution is lost" ;;
+    I14) echo "gard: no materialization, so blame leaks back through the seed one hop later" ;;
+    I15) echo "gard: a user override leaves the stale counters, so the next veto undoes it" ;;
+    I16) echo "gard: a multi-class veto takes the WEAKEST tier, laundering a real miss" ;;
+    I17) echo "gard: an inferred revert weighs as much as an explicit one" ;;
+    I18) echo "gard: per-detector resolution is inert — every class answers with the show mode" ;;
+    I19) echo "gard: a lookup FAILURE grants the exempt class auto" ;;
+    I21) echo "gard: a show with NO profile row gets an empty per-detector map — first listen sends the exempt class to shadow" ;;
+    I20) echo "gard: a session override never reaches the per-detector map — the stale episode map governs" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -6010,6 +6252,296 @@ EOF
       "                    forwarded: retiredCount," \
       "                    forwarded: 0," ;;
 
+  # ---- playhead-gard (I series) --------------------------------------------
+
+  I01)
+    snippet OLD <<'EOF'
+        case .rediffByteExact:
+            return false
+        case .segmentAggregated, .userAsserted, .fusion:
+            return true
+EOF
+    snippet NEW <<'EOF'
+        case .rediffByteExact:
+            return true
+        case .segmentAggregated, .userAsserted, .fusion:
+            return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I02)
+    snippet OLD <<'EOF'
+        case .rediffByteExact:
+            return false
+        case .segmentAggregated, .userAsserted, .fusion:
+            return true
+EOF
+    snippet NEW <<'EOF'
+        case .rediffByteExact:
+            return false
+        case .segmentAggregated, .userAsserted, .fusion:
+            return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I03)
+    patch "$file" \
+      "        if support.tier == .deterministic {" \
+      "        if support.startTier == .deterministic || support.endTier == .deterministic {" ;;
+
+  I04)
+    snippet OLD <<'EOF'
+        if AdBoundaryState(rawValue: boundaryState) == .segmentAggregated {
+            return .segmentAggregated
+        }
+        return .fusion
+EOF
+    snippet NEW <<'EOF'
+        if AdBoundaryState(rawValue: boundaryState) == .segmentAggregated {
+            return .segmentAggregated
+        }
+        return .rediffByteExact
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I05)
+    snippet OLD <<'EOF'
+        case .none: return 0.5
+        case .corroborated: return 1.0
+        case .deterministic: return 1.5
+EOF
+    snippet NEW <<'EOF'
+        case .none: return 1.0
+        case .corroborated: return 1.0
+        case .deterministic: return 1.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I06)
+    snippet OLD <<'EOF'
+        guard detector.consultsShowTrust else {
+            return DetectorTrustEntry(
+                trustScore: 0.5,
+                mode: SkipDetectorClass.showIndependentSeedMode.rawValue,
+                falseSkipWeight: 0,
+                observationCount: 0
+            )
+        }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I07)
+    snippet OLD <<'EOF'
+        return DetectorTrustEntry(
+            trustScore: profile.skipTrustScore,
+            mode: profile.mode,
+            falseSkipWeight: Double(profile.recentFalseSkipSignals),
+            observationCount: profile.observationCount
+        )
+EOF
+    snippet NEW <<'EOF'
+        return DetectorTrustEntry(
+            trustScore: 0.5,
+            mode: SkipDetectorClass.showIndependentSeedMode.rawValue,
+            falseSkipWeight: 0,
+            observationCount: 0
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I08)
+    snippet OLD <<'EOF'
+        guard !entries.isEmpty else { return nil }
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return String(data: data, encoding: .utf8)
+EOF
+    snippet NEW <<'EOF'
+        guard !entries.isEmpty else { return nil }
+        return nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I09)
+    snippet OLD <<'EOF'
+        switch currentMode {
+        case .auto:
+            if falseSkipWeight >= Double(config.autoToManualFalseSignals) {
+                return .manual
+            }
+        case .manual:
+            if falseSkipWeight >= Double(config.manualToShadowFalseSignals) {
+                return .shadow
+            }
+        case .shadow:
+            break
+        }
+        return currentMode
+EOF
+    snippet NEW <<'EOF'
+        _ = config
+        _ = falseSkipWeight
+        return currentMode
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I10)
+    snippet OLD <<'EOF'
+        let newFalseSignals = max(0, profile.recentFalseSkipSignals - 1)
+EOF
+    snippet NEW <<'EOF'
+        let newFalseSignals = profile.recentFalseSkipSignals
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I11)
+    patch "$file" \
+      "        let windowSkipMode = skipMode(for: managed.adWindow)" \
+      "        let windowSkipMode = activeSkipMode" ;;
+
+  I12)
+    snippet OLD <<'EOF'
+            if let handler = correctObservationHandlerForTesting {
+                let detector = detectorClass(for: suggested)
+                Task {
+                    await handler(podcastId, detector)
+                }
+            } else if let trustService {
+                let detector = detectorClass(for: suggested)
+                Task {
+                    await trustService.recordCorrectObservation(
+                        podcastId: podcastId,
+                        detector: detector
+                    )
+                }
+            }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I13)
+    snippet OLD <<'EOF'
+                let attributions = [
+                    vetoAttribution(for: requestedManaged.adWindow)
+                ]
+                Task {
+                    await trustService.recordFalseSkipSignal(
+                        podcastId: sourceShowId,
+                        attributions: attributions
+                    )
+                }
+EOF
+    snippet NEW <<'EOF'
+                Task {
+                    await trustService.recordFalseSkipSignal(
+                        podcastId: sourceShowId
+                    )
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # BOTH sites, because they are one defect with two carriers and the first I
+  # run proved each survives the other: removing it only from the veto path
+  # leaves `creditIsNotShared` green, and vice versa.
+  I14)
+    snippet OLD <<'EOF'
+        if !strongestTierByDetector.isEmpty {
+            ledger = Self.materialized(ledger, from: profile)
+        }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW"
+    patch "$file" \
+      "        var ledger = Self.materialized(profile.detectorTrustLedger, from: profile)" \
+      "        var ledger = profile.detectorTrustLedger" ;;
+
+  I15)
+    snippet OLD <<'EOF'
+                                mode: mode.rawValue,
+                                falseSkipWeight: 0,
+                                observationCount: entry.observationCount
+EOF
+    snippet NEW <<'EOF'
+                                mode: mode.rawValue,
+                                falseSkipWeight: entry.falseSkipWeight,
+                                observationCount: entry.observationCount
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I16)
+    snippet OLD <<'EOF'
+            if existing == nil || attribution.tier > (existing ?? .none) {
+EOF
+    snippet NEW <<'EOF'
+            if existing == nil || attribution.tier < (existing ?? .none) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I17)
+    patch "$file" \
+      "                * (weak ? 0.5 : 1.0)" \
+      "                * 1.0" ;;
+
+  I18)
+    snippet OLD <<'EOF'
+            byDetector[detector] = ledger
+                .entry(for: detector, seededFrom: profile)
+                .skipMode
+EOF
+    snippet NEW <<'EOF'
+            byDetector[detector] = showMode
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  I21)
+    patch "$file" \
+      "        var modes: [SkipDetectorClass: SkipMode] = [:]" \
+      "        var modes: [SkipDetectorClass: SkipMode] = [:]
+        if !modes.isEmpty || true { return modes }" ;;
+
+  I19)
+    snippet OLD <<'EOF'
+            return DetectorSkipModes(
+                showMode: .shadow,
+                resolution: .unrecognizedTrustProfileMode,
+                byDetector: [:]
+            )
+EOF
+    snippet NEW <<'EOF'
+            return DetectorSkipModes(
+                showMode: .shadow,
+                resolution: .unrecognizedTrustProfileMode,
+                byDetector: [.rediffByteExact: .auto]
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EDIT RE-CUT after the first I run. The original dropped the exempt class
+  # from the override's map — an EQUIVALENT MUTANT, because
+  # `DetectorSkipModes.mode(for:)` falls back to `showMode`, which the override
+  # has just set to the same value. It is not a defect and no test should have
+  # caught it. What IS a defect is the override never reaching the per-detector
+  # map at all: the stale map from `beginEpisode` then governs, and a class
+  # seeded `.auto` keeps skipping after the listener asked for shadow.
+  I20)
+    snippet OLD <<'EOF'
+        activeDetectorSkipModes = DetectorSkipModes(
+            showMode: mode,
+            resolution: .sessionOverride,
+            byDetector: Dictionary(
+                uniqueKeysWithValues: SkipDetectorClass.allCases.map {
+                    ($0, mode)
+                }
+            )
+        )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -6058,6 +6590,8 @@ rec_file()   {
     DSPAN) printf '%s' "$DSPAN" ;;
     EXTENT) printf '%s' "$EXTENT" ;;
     RSLOT) printf '%s' "$RSLOT" ;;
+    DETCLS) printf '%s' "$DETCLS" ;;
+    DETLED) printf '%s' "$DETLED" ;;
     *)     printf '%s' "" ;;
   esac
 }

@@ -197,6 +197,83 @@ struct Demotion: Sendable {
     let to: SkipMode
 }
 
+// MARK: - Per-detector attribution (playhead-gard)
+
+/// WHICH detector a veto is evidence against, and HOW CERTAIN the thing it
+/// retracted was.
+///
+/// Both halves are required and both come from columns already persisted on
+/// the `ad_windows` row. Sending a veto without them is the pre-gard behaviour
+/// — "the show was wrong" — which is exactly what a `segmentAggregated` miss
+/// must stop meaning about a byte differ.
+struct DetectorVetoAttribution: Sendable, Hashable {
+    let detector: SkipDetectorClass
+    /// The extent certainty of the SPAN THAT WAS SKIPPED, not of the detector
+    /// in general. `SpanExtentSupport.tier` — the weaker of the two edges.
+    let tier: ExtentAnchorTier
+
+    init(detector: SkipDetectorClass, tier: ExtentAnchorTier) {
+        self.detector = detector
+        self.tier = tier
+    }
+}
+
+/// A per-detector mode transition, paired with the class it belongs to.
+struct DetectorDemotion: Sendable {
+    let detector: SkipDetectorClass
+    let from: SkipMode
+    let to: SkipMode
+}
+
+/// Everything a single trust write changed, captured for logging on the far
+/// side of the `AnalysisStore` actor hop.
+struct TrustSignalOutcome: Sendable {
+    /// Transition of the legacy per-show `mode`. Unchanged semantics.
+    let showDemotion: Demotion?
+    /// Transitions of the per-detector ledger entries this write touched.
+    let detectorDemotions: [DetectorDemotion]
+
+    static let none = TrustSignalOutcome(showDemotion: nil, detectorDemotions: [])
+}
+
+/// The per-detector skip modes for one show, resolved together.
+///
+/// Resolved ONCE per episode rather than once per window: the ledger is a
+/// single row read, and four classes is the whole enum. Handing the
+/// orchestrator a complete map removes any chance of a window being evaluated
+/// against a stale or absent per-detector answer.
+struct DetectorSkipModes: Sendable, Equatable {
+    /// The legacy per-show mode. Still what the Now Playing pill and the
+    /// Settings control display, and still what an older binary reads.
+    let showMode: SkipMode
+    let resolution: SkipModeResolution
+    private let byDetector: [SkipDetectorClass: SkipMode]
+
+    init(
+        showMode: SkipMode,
+        resolution: SkipModeResolution,
+        byDetector: [SkipDetectorClass: SkipMode]
+    ) {
+        self.showMode = showMode
+        self.resolution = resolution
+        self.byDetector = byDetector
+    }
+
+    /// The mode governing one detector class. Falls back to the show mode for
+    /// a class this map does not carry — the conservative direction, since the
+    /// show mode is what governed every class before this bead.
+    func mode(for detector: SkipDetectorClass) -> SkipMode {
+        byDetector[detector] ?? showMode
+    }
+
+    /// The pre-episode value, matching `SkipModeSnapshot.noActiveEpisode`.
+    static let noActiveEpisode = DetectorSkipModes(
+        showMode: .shadow,
+        resolution: .noActiveEpisode,
+        byDetector: [:]
+    )
+}
+
 enum TrustScoringSignalPrivacy: Sendable, Equatable {
     case standard
     case explicitBannerFeedback
@@ -273,6 +350,98 @@ actor TrustScoringService {
         return (mode, .showTrustProfile)
     }
 
+    /// playhead-gard: `resolveMode` with the PER-DETECTOR verdicts attached.
+    ///
+    /// One profile read produces the show mode (unchanged — the pill and an
+    /// older binary both still read it) and every detector class's own mode
+    /// from the ledger. A class with no ledger entry resolves through
+    /// `DetectorTrustLedger.seed`, which for the three show-governed classes IS
+    /// the legacy scalar — so an upgrading user's shows keep their posture, and
+    /// the only class whose answer changes is `.rediffByteExact`.
+    ///
+    /// A failed read or an undecodable `mode` produces `.shadow` for every
+    /// class, including `.rediffByteExact`. That is deliberate and it is the
+    /// one place the exemption yields: `consultsShowTrust == false` means "the
+    /// show's HISTORY does not govern this class", not "this class runs when
+    /// persistence is broken". playhead-djl0's rule stands — every lookup
+    /// failure lands on the non-actioning default.
+    func resolveDetectorModes(podcastId: String) async -> DetectorSkipModes {
+        let profile: PodcastProfile?
+        do {
+            profile = try await store.fetchProfile(podcastId: podcastId)
+        } catch {
+            logger.warning("Failed to fetch profile for \(podcastId): \(error.localizedDescription)")
+            return DetectorSkipModes(
+                showMode: .shadow,
+                resolution: .trustProfileUnreadable,
+                byDetector: [:]
+            )
+        }
+        guard let profile else {
+            // A show nobody has listened to has no ledger and no legacy
+            // scalar. `.newShowDefault` is a DELIBERATE posture, not a
+            // failure, so the per-detector seeds apply exactly as they would
+            // on a profile row that carried the same values.
+            return DetectorSkipModes(
+                showMode: .shadow,
+                resolution: .newShowDefault,
+                byDetector: Self.seededModes(from: nil)
+            )
+        }
+        guard let showMode = SkipMode(rawValue: profile.mode) else {
+            logger.warning(
+                "Profile for \(podcastId) carries unrecognized mode '\(profile.mode)'"
+            )
+            return DetectorSkipModes(
+                showMode: .shadow,
+                resolution: .unrecognizedTrustProfileMode,
+                byDetector: [:]
+            )
+        }
+        let ledger = profile.detectorTrustLedger
+        var byDetector: [SkipDetectorClass: SkipMode] = [:]
+        for detector in SkipDetectorClass.allCases {
+            byDetector[detector] = ledger
+                .entry(for: detector, seededFrom: profile)
+                .skipMode
+        }
+        return DetectorSkipModes(
+            showMode: showMode,
+            resolution: .showTrustProfile,
+            byDetector: byDetector
+        )
+    }
+
+    /// The per-detector modes for a show with NO profile row.
+    ///
+    /// `.rediffByteExact` reaches its show-independent seed here too: a first
+    /// listen is precisely when the day-0 byte-exact mint (playhead-qs0d) is
+    /// the only signal that exists, and making it wait for a trust ladder that
+    /// measures a different instrument is the defect this bead removes.
+    private static func seededModes(
+        from profile: PodcastProfile?
+    ) -> [SkipDetectorClass: SkipMode] {
+        let reference = profile ?? PodcastProfile(
+            podcastId: "",
+            sponsorLexicon: nil,
+            normalizedAdSlotPriors: nil,
+            repeatedCTAFragments: nil,
+            jingleFingerprints: nil,
+            implicitFalsePositiveCount: 0,
+            skipTrustScore: 0.2,
+            observationCount: 0,
+            mode: SkipMode.shadow.rawValue,
+            recentFalseSkipSignals: 0
+        )
+        var modes: [SkipDetectorClass: SkipMode] = [:]
+        for detector in SkipDetectorClass.allCases {
+            modes[detector] = DetectorTrustLedger
+                .seed(for: detector, from: reference)
+                .skipMode
+        }
+        return modes
+    }
+
     // MARK: - Observation Recording
 
     /// Record a successful observation (episode processed, no false signals).
@@ -345,7 +514,10 @@ actor TrustScoringService {
                         // upsertProfile, but matched here for parity with
                         // the established traitProfileJSON / adDurationStatsJSON
                         // patterns.
-                        networkId: profile.networkId
+                        networkId: profile.networkId,
+                        // playhead-gard: explicit carry-forward of the
+                        // per-detector ledger, same reasoning again.
+                        detectorTrustJSON: profile.detectorTrustJSON
                     )
                 }
             )
@@ -366,8 +538,20 @@ actor TrustScoringService {
 
     /// Record a false-skip signal (user tapped "Listen" or rewound after skip).
     /// Decrements trust and may trigger demotion.
+    ///
+    /// playhead-gard: `attributions` names WHICH detector classes the retracted
+    /// span(s) came from and how certain each was. The legacy per-show triple
+    /// moves EXACTLY as it did before — once per gesture, penalty 0.10, counter
+    /// +1 — so a downgraded binary reads a row it fully understands. The
+    /// per-detector ledger is updated alongside, one entry per distinct class,
+    /// weighted by `DetectorVetoWeight`.
+    ///
+    /// An EMPTY `attributions` is the pre-gard shape and remains legal: the
+    /// show scalar moves and no detector is blamed. Used by callers that
+    /// genuinely have no window in hand.
     func recordFalseSkipSignal(
         podcastId: String,
+        attributions: [DetectorVetoAttribution] = [],
         privacy: TrustScoringSignalPrivacy = .standard
     ) async {
         // skeptical-review-cycle-1: atomic update inside AnalysisStore.
@@ -381,44 +565,17 @@ actor TrustScoringService {
         // `(merged-profile, demoted?)` pair, but Swift 6 strict
         // concurrency now sees clean data flow.
         let config = self.config
-        let outcome: (profile: PodcastProfile, captured: Demotion?)?
+        let outcome: (profile: PodcastProfile, captured: TrustSignalOutcome)?
         do {
             outcome = try await store.updateProfileIfExistsCapturing(
                 podcastId: podcastId,
                 update: { profile in
-                    let newFalseSignals = profile.recentFalseSkipSignals + 1
-                    let newTrust = max(0, profile.skipTrustScore - config.falseSignalPenalty)
-                    let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
-                    let newMode = Self.evaluateDemotion(
+                    Self.applyFalseSkipSignal(
                         config: config,
-                        currentMode: currentMode,
-                        trustScore: newTrust,
-                        recentFalseSignals: newFalseSignals
+                        profile: profile,
+                        attributions: attributions,
+                        weak: false
                     )
-                    let demotion: Demotion? = (newMode != currentMode)
-                        ? Demotion(from: currentMode, to: newMode)
-                        : nil
-                    let merged = PodcastProfile(
-                        podcastId: profile.podcastId,
-                        sponsorLexicon: profile.sponsorLexicon,
-                        normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
-                        repeatedCTAFragments: profile.repeatedCTAFragments,
-                        jingleFingerprints: profile.jingleFingerprints,
-                        implicitFalsePositiveCount: profile.implicitFalsePositiveCount + 1,
-                        skipTrustScore: newTrust,
-                        observationCount: profile.observationCount,
-                        mode: newMode.rawValue,
-                        recentFalseSkipSignals: newFalseSignals,
-                        traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title,
-                        // playhead-084j: see explanatory comment in
-                        // `recordSuccessfulObservation` above.
-                        adDurationStatsJSON: profile.adDurationStatsJSON,
-                        // playhead-spxs: see explanatory comment in
-                        // `recordSuccessfulObservation` above.
-                        networkId: profile.networkId
-                    )
-                    return (merged, demotion)
                 }
             )
         } catch {
@@ -436,11 +593,12 @@ actor TrustScoringService {
         guard privacy != .explicitBannerFeedback else { return }
         signalLogObserver?(.standardSuccess)
         let result = outcome.profile
-        if let demoted = outcome.captured {
+        if let demoted = outcome.captured.showDemotion {
             logger.info("Demoted \(podcastId): \(demoted.from.rawValue) -> \(demoted.to.rawValue) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
         } else {
             logger.info("False signal for \(podcastId): trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
         }
+        logDetectorDemotions(outcome.captured.detectorDemotions, podcastId: podcastId)
     }
 
     /// playhead-q45f: weaker false-skip variant for listen-rewinds.
@@ -453,46 +611,29 @@ actor TrustScoringService {
     /// only mutated `recentFalseSkipSignals` and skipped the state
     /// machine. The `Demotion`-capturing tuple shape is identical so
     /// `nonisolated(unsafe)` is unnecessary here too.
-    func recordWeakFalseSkipSignal(podcastId: String) async {
+    ///
+    /// playhead-gard: takes the same `attributions` as its strong sibling and
+    /// applies HALF the tier weight to each. That is the fidelity ladder
+    /// (`feedback_manual_marks_override_2026-07-29`: transcript marking >
+    /// banner response > inferred listenRevert) expressed on the same scale —
+    /// an INFERRED revert is worth half an explicit one, exactly as the trust
+    /// decrement has been since q45f.
+    func recordWeakFalseSkipSignal(
+        podcastId: String,
+        attributions: [DetectorVetoAttribution] = []
+    ) async {
         let config = self.config
-        let outcome: (profile: PodcastProfile, captured: Demotion?)?
+        let outcome: (profile: PodcastProfile, captured: TrustSignalOutcome)?
         do {
             outcome = try await store.updateProfileIfExistsCapturing(
                 podcastId: podcastId,
                 update: { profile in
-                    let newFalseSignals = profile.recentFalseSkipSignals + 1
-                    let newTrust = max(0, profile.skipTrustScore - config.weakFalseSignalPenalty)
-                    let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
-                    let newMode = Self.evaluateDemotion(
+                    Self.applyFalseSkipSignal(
                         config: config,
-                        currentMode: currentMode,
-                        trustScore: newTrust,
-                        recentFalseSignals: newFalseSignals
+                        profile: profile,
+                        attributions: attributions,
+                        weak: true
                     )
-                    let demotion: Demotion? = (newMode != currentMode)
-                        ? Demotion(from: currentMode, to: newMode)
-                        : nil
-                    let merged = PodcastProfile(
-                        podcastId: profile.podcastId,
-                        sponsorLexicon: profile.sponsorLexicon,
-                        normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
-                        repeatedCTAFragments: profile.repeatedCTAFragments,
-                        jingleFingerprints: profile.jingleFingerprints,
-                        implicitFalsePositiveCount: profile.implicitFalsePositiveCount + 1,
-                        skipTrustScore: newTrust,
-                        observationCount: profile.observationCount,
-                        mode: newMode.rawValue,
-                        recentFalseSkipSignals: newFalseSignals,
-                        traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title,
-                        // playhead-084j: see explanatory comment in
-                        // `recordSuccessfulObservation` above.
-                        adDurationStatsJSON: profile.adDurationStatsJSON,
-                        // playhead-spxs: see explanatory comment in
-                        // `recordSuccessfulObservation` above.
-                        networkId: profile.networkId
-                    )
-                    return (merged, demotion)
                 }
             )
         } catch {
@@ -521,11 +662,12 @@ actor TrustScoringService {
             return
         }
         let result = outcome.profile
-        if let demoted = outcome.captured {
+        if let demoted = outcome.captured.showDemotion {
             logger.info("Weak-demoted \(podcastId): \(demoted.from.rawValue) -> \(demoted.to.rawValue) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
         } else {
             logger.info("Weak false signal for \(podcastId): trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
         }
+        logDetectorDemotions(outcome.captured.detectorDemotions, podcastId: podcastId)
     }
 
     // MARK: - User Override
@@ -553,25 +695,38 @@ actor TrustScoringService {
                     )
                 },
                 update: { profile in
-                    PodcastProfile(
-                        podcastId: profile.podcastId,
-                        sponsorLexicon: profile.sponsorLexicon,
-                        normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
-                        repeatedCTAFragments: profile.repeatedCTAFragments,
-                        jingleFingerprints: profile.jingleFingerprints,
-                        implicitFalsePositiveCount: profile.implicitFalsePositiveCount,
+                    // playhead-gard: an EXPLICIT user instruction overrides
+                    // EVERY detector, and clears the stale evidence against
+                    // them. `feedback_manual_marks_override_2026-07-29` — "a
+                    // manually marked span should override anything else" —
+                    // applied to the mode: without the reset, a user who
+                    // restores `auto` on a show carrying 3 recorded signals is
+                    // demoted again by the very next veto, which is the
+                    // override being silently undone.
+                    var ledger = profile.detectorTrustLedger
+                    for detector in SkipDetectorClass.allCases {
+                        let entry = ledger.entry(
+                            for: detector, seededFrom: profile
+                        )
+                        ledger.set(
+                            DetectorTrustEntry(
+                                trustScore: entry.trustScore,
+                                mode: mode.rawValue,
+                                falseSkipWeight: 0,
+                                observationCount: entry.observationCount
+                            ),
+                            for: detector
+                        )
+                    }
+                    return Self.rebuild(
+                        profile,
+                        implicitFalsePositiveCount:
+                            profile.implicitFalsePositiveCount,
                         skipTrustScore: profile.skipTrustScore,
                         observationCount: profile.observationCount,
                         mode: mode.rawValue,
-                        recentFalseSkipSignals: profile.recentFalseSkipSignals,
-                        traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title,
-                        // playhead-084j: see explanatory comment in
-                        // `recordSuccessfulObservation` above.
-                        adDurationStatsJSON: profile.adDurationStatsJSON,
-                        // playhead-spxs: see explanatory comment in
-                        // `recordSuccessfulObservation` above.
-                        networkId: profile.networkId
+                        recentFalseSkipSignals: 0,
+                        detectorTrustJSON: ledger.encoded()
                     )
                 }
             )
@@ -628,7 +783,12 @@ actor TrustScoringService {
                         adDurationStatsJSON: profile.adDurationStatsJSON,
                         // playhead-spxs: see explanatory comment in
                         // `recordSuccessfulObservation` above.
-                        networkId: profile.networkId
+                        networkId: profile.networkId,
+                        // playhead-gard: explicit carry-forward of the
+                        // per-detector ledger. COALESCE-protected in
+                        // `upsertProfile` like its two neighbours, matched here
+                        // for the same belt-and-suspenders reason.
+                        detectorTrustJSON: profile.detectorTrustJSON
                     )
                 }
             )
@@ -688,13 +848,313 @@ actor TrustScoringService {
                         adDurationStatsJSON: profile.adDurationStatsJSON,
                         // playhead-spxs: see explanatory comment in
                         // `recordSuccessfulObservation` above.
-                        networkId: profile.networkId
+                        networkId: profile.networkId,
+                        // playhead-gard: explicit carry-forward of the
+                        // per-detector ledger. COALESCE-protected in
+                        // `upsertProfile` like its two neighbours, matched here
+                        // for the same belt-and-suspenders reason.
+                        detectorTrustJSON: profile.detectorTrustJSON
                     )
                 }
             )
         } catch {
             logger.warning("Failed to mutate profile for false-signal decay on \(podcastId): \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Per-Detector Trust (playhead-gard)
+
+    /// Record a CORRECT observation for one detector class on one show.
+    ///
+    /// **This is the way out of `manual`, and before this bead there wasn't
+    /// one.** Measured, not reasoned: `recordSuccessfulObservation` and
+    /// `decayFalseSignals` — the only two methods that raise trust or lower the
+    /// false-signal counter — have ZERO production callers. `evaluatePromotion`
+    /// therefore never ran in the shipped app, `recentFalseSkipSignals` never
+    /// decayed, and leaving `manual` requires it to be 0. Every production path
+    /// moved trust DOWN. A show the user vetoed twice was `manual` forever.
+    ///
+    /// The bead asked whether a CONFIRMED BANNER counts as a correct
+    /// observation. It did not: `SkipOrchestrator.acceptSuggestedSkip` routed
+    /// the tap to `recordFalseNegativeSignal`, which subtracts 0.10 from trust
+    /// and touches neither the counter nor the mode. That is a true statement
+    /// about the SKIP SURFACE — the span was mark-only, so the surface did miss
+    /// — and the wrong lesson about the DETECTOR, which asked "is this an ad?"
+    /// and was told yes.
+    ///
+    /// So the banner Yes now ALSO lands here, attributed to the class that drew
+    /// the span. It:
+    ///   * adds `correctObservationBonus` to that class's trust (and the
+    ///     show's), capped at 1.0,
+    ///   * DECAYS one unit of weighted false-signal evidence (floor 0) — the
+    ///     job `decayFalseSignals` was written for and never wired to do,
+    ///   * counts an observation, and
+    ///   * runs `evaluatePromotion`.
+    ///
+    /// Both representations move together so the pill and the policy cannot
+    /// disagree. No lazy-create: a show with no profile row has never been
+    /// observed and stubbing one would invent priors.
+    func recordCorrectObservation(
+        podcastId: String,
+        detector: SkipDetectorClass
+    ) async {
+        let config = self.config
+        let outcome: (profile: PodcastProfile, captured: SkipMode)?
+        do {
+            outcome = try await store.updateProfileIfExistsCapturing(
+                podcastId: podcastId,
+                update: { profile in
+                    Self.applyCorrectObservation(
+                        config: config,
+                        profile: profile,
+                        detector: detector
+                    )
+                }
+            )
+        } catch {
+            logger.warning("Failed to mutate profile for \(podcastId) after correct observation: \(error.localizedDescription)")
+            return
+        }
+        guard let outcome else {
+            logger.warning("No profile found for podcast \(podcastId) during correct-observation recording; trust mutation skipped")
+            return
+        }
+        let result = outcome.profile
+        logger.info("Correct observation \(podcastId) detector=\(detector.rawValue): detectorMode=\(outcome.captured.rawValue) showMode=\(result.mode) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
+    }
+
+    private func logDetectorDemotions(
+        _ demotions: [DetectorDemotion],
+        podcastId: String
+    ) {
+        for demotion in demotions {
+            logger.info("Detector demoted \(podcastId)/\(demotion.detector.rawValue): \(demotion.from.rawValue) -> \(demotion.to.rawValue)")
+        }
+    }
+
+    /// The whole false-skip write as ONE pure transform, so the legacy triple
+    /// and the per-detector ledger cannot drift and cannot be applied a
+    /// different number of times.
+    ///
+    /// Runs inside the `AnalysisStore` actor turn. No awaits, no actor state.
+    fileprivate static func applyFalseSkipSignal(
+        config: TrustScoringConfig,
+        profile: PodcastProfile,
+        attributions: [DetectorVetoAttribution],
+        weak: Bool
+    ) -> (PodcastProfile, TrustSignalOutcome) {
+        // --- The legacy per-show triple. Byte-for-byte the pre-gard rule:
+        // one increment per gesture, one penalty, one demotion evaluation.
+        // A downgraded binary reads exactly what it wrote before.
+        let penalty = weak
+            ? config.weakFalseSignalPenalty
+            : config.falseSignalPenalty
+        let newFalseSignals = profile.recentFalseSkipSignals + 1
+        let newTrust = max(0, profile.skipTrustScore - penalty)
+        let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
+        let newMode = evaluateDemotion(
+            config: config,
+            currentMode: currentMode,
+            trustScore: newTrust,
+            recentFalseSignals: newFalseSignals
+        )
+        let showDemotion: Demotion? = (newMode != currentMode)
+            ? Demotion(from: currentMode, to: newMode)
+            : nil
+
+        // --- The per-detector ledger. One entry per DISTINCT class named by
+        // the gesture, each weighted by the certainty of what it retracted.
+        // Deduped keeping the STRONGEST tier: a gesture that retracted both a
+        // deterministic and an unanchored span of the same class is evidence
+        // at the deterministic level, and taking the weaker one would let a
+        // junk span launder a real miss.
+        var strongestTierByDetector: [SkipDetectorClass: ExtentAnchorTier] = [:]
+        for attribution in attributions {
+            let existing = strongestTierByDetector[attribution.detector]
+            if existing == nil || attribution.tier > (existing ?? .none) {
+                strongestTierByDetector[attribution.detector] = attribution.tier
+            }
+        }
+        var ledger = profile.detectorTrustLedger
+        var detectorDemotions: [DetectorDemotion] = []
+        // MATERIALIZE FIRST, then charge. Every class's entry is pinned from
+        // the PRE-veto profile before anything is written.
+        //
+        // Without this the fix is half a fix, and the half it misses is the
+        // one the bead is about. The seed is a lazy read off the legacy
+        // scalar, and the legacy scalar still demotes on every gesture — so an
+        // aggregator veto would demote the SHOW, and the next read of any
+        // class with no stored entry would inherit that demotion through the
+        // seed. Blame would still be shared; it would just take one more hop.
+        // Materializing forks the ledger from the scalar at the first
+        // attributed gesture, after which each class moves only on its own
+        // evidence. An UNATTRIBUTED veto deliberately does not fork: a gesture
+        // that names no detector is not evidence about any of them, and the
+        // pre-gard show-wide behaviour is the honest answer.
+        if !strongestTierByDetector.isEmpty {
+            ledger = Self.materialized(ledger, from: profile)
+        }
+        // Stable order so the emitted log and any test assertion are
+        // deterministic regardless of dictionary iteration order.
+        for detector in SkipDetectorClass.allCases {
+            guard let tier = strongestTierByDetector[detector] else { continue }
+            let entry = ledger.entry(for: detector, seededFrom: profile)
+            let weight = DetectorVetoWeight.weight(for: tier)
+                * (weak ? 0.5 : 1.0)
+            let entryMode = entry.skipMode
+            let newWeight = entry.falseSkipWeight + weight
+            let updatedMode = evaluateDemotion(
+                config: config,
+                currentMode: entryMode,
+                falseSkipWeight: newWeight
+            )
+            ledger.set(
+                DetectorTrustEntry(
+                    trustScore: max(0, entry.trustScore - penalty),
+                    mode: updatedMode.rawValue,
+                    falseSkipWeight: newWeight,
+                    observationCount: entry.observationCount
+                ),
+                for: detector
+            )
+            if updatedMode != entryMode {
+                detectorDemotions.append(
+                    DetectorDemotion(
+                        detector: detector, from: entryMode, to: updatedMode
+                    )
+                )
+            }
+        }
+
+        let merged = rebuild(
+            profile,
+            implicitFalsePositiveCount: profile.implicitFalsePositiveCount + 1,
+            skipTrustScore: newTrust,
+            observationCount: profile.observationCount,
+            mode: newMode.rawValue,
+            recentFalseSkipSignals: newFalseSignals,
+            detectorTrustJSON: ledger.encoded()
+        )
+        return (
+            merged,
+            TrustSignalOutcome(
+                showDemotion: showDemotion,
+                detectorDemotions: detectorDemotions
+            )
+        )
+    }
+
+    /// The correct-observation write, as one pure transform. Captures the
+    /// detector's resulting mode so the caller can log it.
+    fileprivate static func applyCorrectObservation(
+        config: TrustScoringConfig,
+        profile: PodcastProfile,
+        detector: SkipDetectorClass
+    ) -> (PodcastProfile, SkipMode) {
+        // --- Legacy triple: bonus, ONE unit of decay, promotion.
+        let newObservations = profile.observationCount + 1
+        let newTrust = min(1.0, profile.skipTrustScore + config.correctObservationBonus)
+        let newFalseSignals = max(0, profile.recentFalseSkipSignals - 1)
+        let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
+        let newMode = evaluatePromotion(
+            config: config,
+            currentMode: currentMode,
+            trustScore: newTrust,
+            observations: newObservations,
+            recentFalseSignals: newFalseSignals
+        )
+
+        // --- The detector's own entry. Materialize first, for the reason
+        // spelled out in `applyFalseSkipSignal`: the legacy scalar this
+        // observation also moves must not leak into the classes that earned
+        // nothing.
+        var ledger = Self.materialized(profile.detectorTrustLedger, from: profile)
+        let entry = ledger.entry(for: detector, seededFrom: profile)
+        let entryObservations = entry.observationCount + 1
+        let entryTrust = min(1.0, entry.trustScore + config.correctObservationBonus)
+        let entryWeight = max(0, entry.falseSkipWeight - 1.0)
+        let entryMode = evaluatePromotion(
+            config: config,
+            currentMode: entry.skipMode,
+            trustScore: entryTrust,
+            observations: entryObservations,
+            falseSkipWeight: entryWeight
+        )
+        ledger.set(
+            DetectorTrustEntry(
+                trustScore: entryTrust,
+                mode: entryMode.rawValue,
+                falseSkipWeight: entryWeight,
+                observationCount: entryObservations
+            ),
+            for: detector
+        )
+
+        let merged = rebuild(
+            profile,
+            implicitFalsePositiveCount: profile.implicitFalsePositiveCount,
+            skipTrustScore: newTrust,
+            observationCount: newObservations,
+            mode: newMode.rawValue,
+            recentFalseSkipSignals: newFalseSignals,
+            detectorTrustJSON: ledger.encoded()
+        )
+        return (merged, entryMode)
+    }
+
+    /// Pin every class's entry from the supplied profile, leaving any entry
+    /// that is already stored — and any key this binary does not recognise —
+    /// exactly as it is.
+    private static func materialized(
+        _ ledger: DetectorTrustLedger,
+        from profile: PodcastProfile
+    ) -> DetectorTrustLedger {
+        var materialized = ledger
+        for detector in SkipDetectorClass.allCases
+        where ledger.entries[detector.rawValue] == nil {
+            materialized.set(
+                DetectorTrustLedger.seed(for: detector, from: profile),
+                for: detector
+            )
+        }
+        return materialized
+    }
+
+    /// Rebuild a `PodcastProfile` changing only the trust-owned columns.
+    ///
+    /// Every non-trust column is carried forward EXPLICITLY. `upsertProfile`
+    /// writes `traitProfileJSON` without COALESCE, so a constructor that
+    /// defaults it to `nil` silently nils the persisted trait profile — the
+    /// cycle-15-M-2 / cycle-17-M-1 defect. One rebuild site instead of five
+    /// copies is how that stops being a per-call-site discipline.
+    private static func rebuild(
+        _ profile: PodcastProfile,
+        implicitFalsePositiveCount: Int,
+        skipTrustScore: Double,
+        observationCount: Int,
+        mode: String,
+        recentFalseSkipSignals: Int,
+        detectorTrustJSON: String?
+    ) -> PodcastProfile {
+        PodcastProfile(
+            podcastId: profile.podcastId,
+            sponsorLexicon: profile.sponsorLexicon,
+            normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
+            repeatedCTAFragments: profile.repeatedCTAFragments,
+            jingleFingerprints: profile.jingleFingerprints,
+            implicitFalsePositiveCount: implicitFalsePositiveCount,
+            skipTrustScore: skipTrustScore,
+            observationCount: observationCount,
+            mode: mode,
+            recentFalseSkipSignals: recentFalseSkipSignals,
+            traitProfileJSON: profile.traitProfileJSON,
+            title: profile.title,
+            adDurationStatsJSON: profile.adDurationStatsJSON,
+            networkId: profile.networkId,
+            daiStitchNetwork: profile.daiStitchNetwork,
+            daiExpected: profile.daiExpected,
+            detectorTrustJSON: detectorTrustJSON
+        )
     }
 
     // MARK: - Promotion / Demotion Logic
@@ -756,6 +1216,69 @@ actor TrustScoringService {
             }
         case .shadow:
             break // Already at min.
+        }
+        return currentMode
+    }
+
+    // MARK: Weighted siblings (playhead-gard)
+
+    /// `evaluatePromotion` over a WEIGHTED false-signal accumulator.
+    ///
+    /// Identical policy, identical thresholds; only the counter's type changes.
+    /// The integer version is retained verbatim for the legacy per-show triple
+    /// so a downgraded binary sees a column it wrote itself.
+    fileprivate static func evaluatePromotion(
+        config: TrustScoringConfig,
+        currentMode: SkipMode,
+        trustScore: Double,
+        observations: Int,
+        falseSkipWeight: Double
+    ) -> SkipMode {
+        switch currentMode {
+        case .shadow:
+            if observations >= config.shadowToManualObservations
+                && trustScore >= config.shadowToManualTrustScore {
+                return .manual
+            }
+        case .manual:
+            if observations >= config.manualToAutoObservations
+                && trustScore >= config.manualToAutoTrustScore
+                && falseSkipWeight <= 0 {
+                return .auto
+            }
+        case .auto:
+            break
+        }
+        return currentMode
+    }
+
+    /// `evaluateDemotion` over a WEIGHTED false-signal accumulator.
+    ///
+    /// The thresholds are the SAME numbers (`autoToManualFalseSignals` = 2,
+    /// `manualToShadowFalseSignals` = 4) — what changes is what one veto
+    /// contributes, per `DetectorVetoWeight`. Dan's three vetoes of unanchored
+    /// 0.40-confidence aggregator spans weigh 1.5, under the threshold of 2, so
+    /// the class stays in `auto`. A fourth crosses it.
+    ///
+    /// No `trustScore` parameter, deliberately: the integer sibling accepts one
+    /// and never reads it. Carrying a dead argument into a new function would
+    /// invite a future reader to wire it up and change the policy by accident.
+    fileprivate static func evaluateDemotion(
+        config: TrustScoringConfig,
+        currentMode: SkipMode,
+        falseSkipWeight: Double
+    ) -> SkipMode {
+        switch currentMode {
+        case .auto:
+            if falseSkipWeight >= Double(config.autoToManualFalseSignals) {
+                return .manual
+            }
+        case .manual:
+            if falseSkipWeight >= Double(config.manualToShadowFalseSignals) {
+                return .shadow
+            }
+        case .shadow:
+            break
         }
         return currentMode
     }

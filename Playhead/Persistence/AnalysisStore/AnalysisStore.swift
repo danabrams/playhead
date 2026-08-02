@@ -1109,6 +1109,22 @@ struct PodcastProfile: Sendable {
     /// known DAI-stitch host appeared in the redirect chain). `nil` until
     /// classified; set together with `daiStitchNetwork`.
     let daiExpected: Bool?
+    /// playhead-gard: JSON-encoded `DetectorTrustLedger` — per-DETECTOR-CLASS
+    /// trust state for this show, replacing the single `skipTrustScore` /
+    /// `mode` / `recentFalseSkipSignals` triple as the policy input.
+    ///
+    /// `nil` on every pre-gard row and on any show that has not yet diverged
+    /// from the legacy scalar. NULL is not a gap: `DetectorTrustLedger.seed`
+    /// derives each show-governed class's state from the legacy columns, so an
+    /// untouched row keeps exactly the posture it had.
+    ///
+    /// The legacy columns are STILL WRITTEN, unchanged, by every path that
+    /// wrote them before. A binary that predates this column never selects it
+    /// and reads the legacy scalar — the safe-degradation half of the
+    /// playhead-6qvf pattern. Carries COALESCE-preserve semantics in
+    /// `upsertProfile` so a profile rebuild that does not know the ledger
+    /// (priors update, title write) cannot clobber it.
+    let detectorTrustJSON: String?
 
     init(
         podcastId: String,
@@ -1126,7 +1142,8 @@ struct PodcastProfile: Sendable {
         adDurationStatsJSON: String? = nil,
         networkId: String? = nil,
         daiStitchNetwork: String? = nil,
-        daiExpected: Bool? = nil
+        daiExpected: Bool? = nil,
+        detectorTrustJSON: String? = nil
     ) {
         self.podcastId = podcastId
         self.sponsorLexicon = sponsorLexicon
@@ -1144,6 +1161,14 @@ struct PodcastProfile: Sendable {
         self.networkId = networkId
         self.daiStitchNetwork = daiStitchNetwork
         self.daiExpected = daiExpected
+        self.detectorTrustJSON = detectorTrustJSON
+    }
+
+    /// playhead-gard: the decoded per-detector ledger. An absent or corrupt
+    /// column yields an EMPTY ledger, under which every class falls back to the
+    /// legacy-scalar seed — history is lost, posture is not.
+    var detectorTrustLedger: DetectorTrustLedger {
+        DetectorTrustLedger.decode(detectorTrustJSON)
     }
 
     /// Convenience: decode the stored trait profile, falling back to
@@ -2234,6 +2259,30 @@ actor AnalysisStore {
                 column: "daiExpected",
                 definition: "INTEGER"
             )
+            // playhead-gard: `detectorTrustJSON` on podcast_profiles.
+            // JSON-encoded `DetectorTrustLedger` — per-detector-class trust
+            // state, so a 0.40-confidence aggregator's vetoes stop gating the
+            // byte-exact rediff differ.
+            //
+            // MIGRATION SEMANTICS, stated because a persisted policy input is
+            // exactly where a silent posture change would hide. The column is
+            // NULL on every existing row and nothing backfills it. NULL means
+            // "no class has diverged from the legacy scalar yet", and
+            // `DetectorTrustLedger.seed` resolves each show-governed class to
+            // the legacy `mode` / `skipTrustScore` / `recentFalseSkipSignals`
+            // verbatim — so an upgrading user's shows keep the mode they had.
+            // The ONE deliberate exception is `.rediffByteExact`, which seeds
+            // clean instead of inheriting other detectors' mistakes; that is
+            // the bead. The legacy columns keep being written by every path
+            // that wrote them, so a DOWNGRADE reads a row it fully understands.
+            //
+            // NOT a drift note: unlike its five neighbours, this one IS
+            // mirrored in `migrateOnlyForTesting()`. See the comment there.
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "detectorTrustJSON",
+                definition: "TEXT"
+            )
             // playhead-7mq: model/policy/feature-schema version columns on
             // the six tables whose row validity depends on model, policy,
             // or feature-schema versions. Foundation for B4 fast
@@ -2486,6 +2535,22 @@ actor AnalysisStore {
         // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
         // follow the versioned ladder steps. Without these, the isolated-
         // ladder test seam cannot catch regressions in column additions.
+        //
+        // playhead-gard: `detectorTrustJSON` is MIRRORED here rather than
+        // added to `PriorHierarchyWireUpTests.migrateLadderDriftMatchesDocumentation`'s
+        // documented-drift allow-list. That canary offers both remedies and
+        // names mirroring the preferred one, because it closes the ghost-test
+        // risk instead of recording it: a ladder-only test that drives
+        // `fetchProfile` would otherwise bind a column the seam never created.
+        // The five pre-existing drifting columns stay drifting — moving them
+        // is not this bead's change to make.
+        if try tableExists("podcast_profiles") {
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "detectorTrustJSON",
+                definition: "TEXT"
+            )
+        }
         if try tableExists("semantic_scan_results") {
             try addColumnIfNeeded(
                 table: "semantic_scan_results",
@@ -12368,8 +12433,8 @@ actor AnalysisStore {
             (podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
              jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
              observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-             title, adDurationStatsJSON, networkId)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             title, adDurationStatsJSON, networkId, detectorTrustJSON)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(podcastId) DO UPDATE SET
                 sponsorLexicon = excluded.sponsorLexicon,
                 normalizedAdSlotPriors = excluded.normalizedAdSlotPriors,
@@ -12389,6 +12454,10 @@ actor AnalysisStore {
                 networkId = COALESCE(
                     excluded.networkId,
                     podcast_profiles.networkId
+                ),
+                detectorTrustJSON = COALESCE(
+                    excluded.detectorTrustJSON,
+                    podcast_profiles.detectorTrustJSON
                 )
             """
         let stmt = try prepare(sql)
@@ -12407,6 +12476,10 @@ actor AnalysisStore {
         bind(stmt, 12, profile.title)
         bind(stmt, 13, profile.adDurationStatsJSON)
         bind(stmt, 14, profile.networkId)
+        // playhead-gard: COALESCE-protected above, so a rebuild that does not
+        // know the ledger (priors update, title write, any pre-gard-shaped
+        // caller) writes NULL and preserves what is stored.
+        bind(stmt, 15, profile.detectorTrustJSON)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -12487,7 +12560,8 @@ actor AnalysisStore {
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected
+                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected,
+                   detectorTrustJSON
             FROM podcast_profiles WHERE podcastId = ?
             """
         let stmt = try prepare(sql)
@@ -12510,7 +12584,10 @@ actor AnalysisStore {
             adDurationStatsJSON: optionalText(stmt, 12),
             networkId: optionalText(stmt, 13),
             daiStitchNetwork: optionalText(stmt, 14),
-            daiExpected: optionalInt(stmt, 15).map { $0 != 0 }
+            daiExpected: optionalInt(stmt, 15).map { $0 != 0 },
+            // playhead-gard: index 16 — append-only, same rule as every
+            // additive column above.
+            detectorTrustJSON: optionalText(stmt, 16)
         )
     }
 
@@ -12539,7 +12616,8 @@ actor AnalysisStore {
             SELECT podcastId, sponsorLexicon, normalizedAdSlotPriors, repeatedCTAFragments,
                    jingleFingerprints, implicitFalsePositiveCount, skipTrustScore,
                    observationCount, mode, recentFalseSkipSignals, traitProfileJSON,
-                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected
+                   title, adDurationStatsJSON, networkId, daiStitchNetwork, daiExpected,
+                   detectorTrustJSON
             FROM podcast_profiles WHERE networkId = ?
             """
         let stmt = try prepare(sql)
@@ -12564,7 +12642,8 @@ actor AnalysisStore {
                     adDurationStatsJSON: optionalText(stmt, 12),
                     networkId: optionalText(stmt, 13),
                     daiStitchNetwork: optionalText(stmt, 14),
-                    daiExpected: optionalInt(stmt, 15).map { $0 != 0 }
+                    daiExpected: optionalInt(stmt, 15).map { $0 != 0 },
+                    detectorTrustJSON: optionalText(stmt, 16)
                 )
             )
         }

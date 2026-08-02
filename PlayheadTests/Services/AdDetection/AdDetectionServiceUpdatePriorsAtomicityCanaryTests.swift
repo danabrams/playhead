@@ -928,18 +928,38 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             underlying closures are still being scanned.
             """
         )
+        // playhead-gard MOVED THIS FLOOR FROM 6 TO 3, and here is where the
+        // other three went. gard routed `recordFalseSkipSignal`,
+        // `recordWeakFalseSkipSignal`, `setUserOverride` and the new
+        // `recordCorrectObservation` through ONE private
+        // `TrustScoringService.rebuild(_:...)`, so their update closures no
+        // longer contain a `PodcastProfile(...)` constructor to scan.
+        //
+        // This is not coverage lost, it is coverage relocated — and
+        // concentrated. Seven copies of a column list are seven chances to
+        // forget one, which is the mistake cycles 15-M-2 and 17-M-1 each
+        // caught after the fact. `assertSharedRebuildCarriesColumn` pins the
+        // single site all four now share, and
+        // `testEachTrustScoringMutationMethodCarriesNetworkIdForward` proves
+        // each method reaches it. Do not lower this floor further without the
+        // same accounting: name where each missing constructor went.
         XCTAssertGreaterThanOrEqual(
-            profileConstructingClosureCount, 6,
+            profileConstructingClosureCount, 3,
             """
-            playhead-q45f floor: expected at least 6 `profile in` \
-            closures that construct `PodcastProfile(...)` (q45f added \
-            `recordWeakFalseSkipSignal`). Found \
-            \(profileConstructingClosureCount). The whole-file networkId \
-            scan has gone blind to its targets in TrustScoringService; \
-            either restore the constructors OR move this floor down with \
-            an explanation of where the mutation entry points have moved.
+            playhead-gard floor: expected at least 3 `profile in` \
+            closures that construct `PodcastProfile(...)` directly \
+            (recordSuccessfulObservation, recordFalseNegativeSignal, \
+            decayFalseSignals). Found \(profileConstructingClosureCount). \
+            The whole-file networkId scan has gone blind to its targets in \
+            TrustScoringService; either restore the constructors OR move \
+            this floor down with an explanation of where the mutation \
+            entry points have moved.
             """
         )
+        try Self.assertSharedRebuildCarriesColumn("networkId", in: stripped)
+        try Self.assertSharedRebuildCarriesColumn("traitProfileJSON", in: stripped)
+        try Self.assertSharedRebuildCarriesColumn("adDurationStatsJSON", in: stripped)
+        try Self.assertSharedRebuildCarriesColumn("detectorTrustJSON", in: stripped)
     }
 
     /// playhead-spxs cycle-2 M-2: per-method canary for the TrustScoring
@@ -1006,11 +1026,21 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             "setUserOverride",
             "recordFalseNegativeSignal",
             "decayFalseSignals",
+            // playhead-gard: a 7th profile-mutating entry point. It is the
+            // CORRECT-observation recorder — the escape from `manual` — and
+            // it delegates its column list to the shared `rebuild`.
+            "recordCorrectObservation",
         ]
 
         let networkCarryRegex = try NSRegularExpression(
             pattern: Self.networkIdCarryForwardPattern
         )
+        // playhead-gard: delegation to the shared rebuild is the other way
+        // to satisfy this contract. Pinned once, below.
+        let delegationRegex = try NSRegularExpression(
+            pattern: Self.trustRebuildDelegationPattern
+        )
+        try Self.assertSharedRebuildCarriesColumn("networkId", in: stripped)
         let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
         let updateLabelRegex = try NSRegularExpression(pattern: Self.updateLabelPattern)
         let nsAll = NSRange(stripped.startIndex..., in: stripped)
@@ -1079,12 +1109,17 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
             let methodSlice = String(stripped[updateRange.upperBound..<methodEnd])
             let sliceRange = NSRange(methodSlice.startIndex..., in: methodSlice)
 
-            XCTAssertNotNil(
-                networkCarryRegex.firstMatch(in: methodSlice, range: sliceRange),
+            let carries =
+                networkCarryRegex.firstMatch(in: methodSlice, range: sliceRange) != nil
+                || delegationRegex.firstMatch(in: methodSlice, range: sliceRange) != nil
+            XCTAssertTrue(
+                carries,
                 """
                 playhead-spxs cycle-2 M-2: TrustScoringService.\(methodName) \
                 does NOT carry `<ident>.networkId` forward into its \
-                `update:` closure's `PodcastProfile(...)` constructor. \
+                `update:` closure's `PodcastProfile(...)` constructor, and \
+                does not delegate to the shared `Self.rebuild` \
+                (playhead-gard) that would carry it. \
                 Each of the 5 mutation methods reconstructs the full \
                 profile from the update-closure parameter; missing the \
                 carry-forward in any one of them silently nils the \
@@ -2275,6 +2310,79 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// `mutateProfile(... update: { ... })` and trailing-closure form
     /// `} update: { ... }` — have whitespace then `{` after the colon.
     fileprivate static let updateLabelPattern: String = #"\bupdate\s*:\s*\{"#
+
+    /// playhead-gard: the SHARED rebuild helper an update closure may
+    /// delegate to instead of naming every column itself.
+    ///
+    /// gard routed four of the seven mutation entry points through one
+    /// private `TrustScoringService.rebuild(_:...)` (and the two pure
+    /// transforms that call it, `applyFalseSkipSignal` /
+    /// `applyCorrectObservation`). That is STRICTLY STRONGER than the
+    /// pre-gard shape this canary was written against: seven copies of a
+    /// column list is seven chances to forget one, and the whole reason
+    /// this file exists is that cycles 15-M-2 and 17-M-1 each forgot one.
+    /// A single carry-forward site can be pinned once — which
+    /// `assertSharedRebuildCarriesColumn` below does — and then delegation
+    /// is a valid way to satisfy the contract.
+    ///
+    /// Delegation is accepted ONLY to these three names. A closure that
+    /// hands off to some other helper is not covered by that pin and must
+    /// still name the column itself.
+    fileprivate static let trustRebuildDelegationPattern: String =
+        #"\bSelf\s*\.\s*(?:rebuild|applyFalseSkipSignal|applyCorrectObservation)\s*\("#
+
+    /// Assert the one shared rebuild site carries `column` forward.
+    ///
+    /// This is what makes delegation safe. Sliced from `func rebuild(` to
+    /// the next `func`, so a carry-forward anywhere else in the file
+    /// cannot satisfy it.
+    fileprivate static func assertSharedRebuildCarriesColumn(
+        _ column: String,
+        in stripped: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let rebuildRegex = try NSRegularExpression(
+            pattern: #"\bprivate\s+static\s+func\s+rebuild\s*\("#
+        )
+        let nextFuncRegex = try NSRegularExpression(pattern: #"\bfunc\s+\w+\s*\("#)
+        let nsAll = NSRange(stripped.startIndex..., in: stripped)
+        guard let match = rebuildRegex.firstMatch(in: stripped, range: nsAll),
+              let range = Range(match.range, in: stripped) else {
+            XCTFail(
+                """
+                playhead-gard: `private static func rebuild(` is gone from \
+                TrustScoringService.swift. Every mutation method that \
+                delegates to it is now unpinned for `\(column)`. Either \
+                restore the helper, or restore per-method carry-forwards \
+                and drop `trustRebuildDelegationPattern` from the canaries.
+                """,
+                file: file, line: line
+            )
+            return
+        }
+        let rest = NSRange(range.upperBound..<stripped.endIndex, in: stripped)
+        let end: String.Index
+        if let next = nextFuncRegex.firstMatch(in: stripped, range: rest),
+           let nextRange = Range(next.range, in: stripped) {
+            end = nextRange.lowerBound
+        } else {
+            end = stripped.endIndex
+        }
+        let body = String(stripped[range.upperBound..<end])
+        XCTAssertTrue(
+            body.contains("\(column):"),
+            """
+            playhead-gard: the shared `TrustScoringService.rebuild` does \
+            NOT carry `\(column)` forward. Four mutation entry points \
+            delegate their whole column list to this one function, so a \
+            column missing HERE is a column missing in all four at once — \
+            exactly the clobber shape cycles 15-M-2 and 17-M-1 closed \
+            one call site at a time.
+            """,
+            file: file, line: line
+        )
+    }
 
     /// Cycle-23 L-4: word-boundary anchored "is this a `PodcastProfile`
     /// constructor invocation?" probe. Replaces a bare
