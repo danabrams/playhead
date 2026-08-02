@@ -98,7 +98,71 @@ is precisely what has changed since.
 Both gaps are answered instead by an executable differential against
 `DecisionMapper` itself — see `CertaintyTieredSkipShipsOnTests`.
 
-## 4. A known over-broad predicate that this flip inherits (playhead-6qvf)
+## 4. What the flip actually demotes — MEASURED, by running it
+
+Two measurements, both executed rather than reasoned about.
+
+### 4a. Four shapes at the shipped parameters (`CertaintyTieredSkipShipsOnTests`)
+
+Each shape is mapped twice — once with `certaintyTieredEnabled: false`, once
+with the config `runBackfill` builds from `AdDetectionConfig.default` — so the
+DELTA is the observable, not the post-state. Result: **2 of 4 demote.**
+
+| shape                                          | OFF        | ON (shipped) | why |
+|------------------------------------------------|------------|--------------|-----|
+| non-rediff host-read, skipConfidence 0.70, mid-episode | `.eligible` | **`.markOnly`** | below the 0.9 floor |
+| unanchored tail, 30 s from the end, at 0.90     | `.eligible` | **`.markOnly`** | inside the 90 s guard |
+| non-rediff, skipConfidence 0.90, mid-episode    | `.eligible` | `.eligible`  | `0.9 < 0.9` is false |
+| rediff-anchored tail, 30 s from the end, at 0.90 | `.eligible` | `.eligible`  | sik9 exemption |
+
+No shape's gate moved towards MORE actionable and no shape's `skipConfidence`
+moved at all — asserted for every shape, not just the four named outcomes.
+
+**So the host-read floor is NOT inert.** The bead argued it was, on the grounds
+that FM verdicts did not surface; y3ya (#326) and avbn (#329) changed that, and
+in any case the floor acts on `skipConfidence`, which any non-rediff span has.
+What the floor was never able to act on before this flip is simply everything —
+the switch was off.
+
+### 4b. The whole test corpus: 7 spans, all post-roll, all fixture geometry
+
+The first full gate on the flip surfaced **7 real failures** (plus 8 unrelated
+load-sensitive timeouts). Every one is a *control* assertion belonging to a
+DIFFERENT flag's suite — "with my flag off this fixture yields an eligible span"
+— and every one was demoted by the **post-roll guard**, not the floor:
+
+| suite | fixture episode length |
+|-------|------------------------|
+| `SelfPromoSuppressionWireInTests` (4 tests) | 120 s |
+| `BackfillOrchestratorWiringTests` | 90 s |
+| `FusionEligibilityGatePersistenceTests` | 90 s |
+| `UnanchoredExtentAutoSkipGateTests` | short (`wireInEpisodeDuration`) |
+
+**Read that number carefully — it is fixture geometry, not field reach.** On a
+90 s synthetic episode the shipped 90 s post-roll guard covers the ENTIRE
+timeline; on a 120 s one it covers three quarters. On a real 45–90 minute
+episode the same 90 s is 2–3%. The corpus over-reports the guard by roughly an
+order of magnitude, and reporting "7 windows demoted" without that denominator
+would be exactly the defect
+[`feedback_ask_what_the_quantity_measures`](../) warns about.
+
+The fix is the one this repo already applies to `unanchoredExtentBlocksAutoSkip`
+in these same fixtures: pin `certaintyTieredSkipEnabled: false` where the suite
+is measuring something else, so the flag under test stays the sole observable.
+`BackfillOrchestratorWiringTests` carries a coverage note saying its step-17
+wiring is therefore unpinned under the shipped config; the anchored (rediff-owned)
+fixture that note already asks for would close both opt-outs at once, since such
+a span is exempt from this guard as well as anchored for 2350.
+
+### 4c. What is still NOT measured, and why
+
+**The field rate of either half.** That needs a device pull taken after y3ya,
+avbn, lxkq and this flip, and the newest `analysis.sqlite` on this box is a
+2026-07-21 snapshot. The two arms above are executable evidence that each half
+acts on a real span shape; they are not a frequency estimate, and no frequency
+estimate is offered.
+
+## 5. A known over-broad predicate that this flip inherits (playhead-6qvf)
 
 `DecodedSpan.carriesRediffByteExactWidth` is `anchorProvenance.contains(.rediffSlot)`,
 and `.rediffSlot` is stamped by BOTH the byte-primary differ and the ~1 s

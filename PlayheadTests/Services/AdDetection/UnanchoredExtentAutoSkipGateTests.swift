@@ -543,6 +543,15 @@ struct UnanchoredExtentAutoSkipGateTests {
             hotPathLookahead: 90.0,
             detectorVersion: "test-detection-v1",
             fmBackfillMode: .off,
+            // playhead-nqey: the certainty-tiered gate is held OFF across this
+            // suite so the 2350 extent gate stays the sole observable. This
+            // suite's `wireInEpisodeDuration` is short enough that the shipped
+            // 90 s post-roll guard reaches the fixture's span, which would empty
+            // the control arm's eligible set for a reason that has nothing to do
+            // with edge anchoring — and the control arm exists precisely to
+            // prove the fixture CAN be eligible. The certainty-tiered gate is
+            // covered by CertaintyTieredSkipShipsOnTests.
+            certaintyTieredSkipEnabled: false,
             unanchoredExtentBlocksAutoSkip: blocking
         )
     }

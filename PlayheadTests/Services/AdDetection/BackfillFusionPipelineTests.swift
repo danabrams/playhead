@@ -564,6 +564,16 @@ struct BackfillOrchestratorWiringTests {
             // SHIPPED config. Pinning it there needs an anchored fixture (a
             // rediff-owned span), which this harness cannot mint — worth a
             // follow-up rather than a weaker assertion here.
+            //
+            // playhead-nqey: the certainty-tiered gate is held OFF for the SAME
+            // reason and it is the same coverage note. This test's episode is
+            // 90 s and the shipped post-roll guard is 90 s wide, so every span
+            // in the fixture is demoted on POSITION, the step-17 hard filter
+            // drops it, and the decision log is empty again. Note that the
+            // anchored fixture the note above already asks for would fix BOTH
+            // opt-outs at once: a rediff-owned span is exempt from this guard
+            // (playhead-sik9) as well as anchored for 2350.
+            certaintyTieredSkipEnabled: false,
             unanchoredExtentBlocksAutoSkip: false
         )
         let service = AdDetectionService(
