@@ -171,6 +171,29 @@
 #   two tests are an end-of-chain witness, not a rail, and are listed in no
 #   expectation.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-nqey). Batches 150-158 (F01-F09, 9 new
+#   entries), 9 batches — one per mutation, because F01-F05 all edit
+#   `AdDetectionConfig.default` and cancel each other, and F06's blast radius
+#   (arming the bare `FusionWeightConfig()`) would make any batchmate's verdict
+#   noise. FINAL 9 KILLED / 0 SURVIVED / 0 ERROR. Batches 1-144 were NOT re-run
+#   and carry the verdicts above. Recount with `--list`: the array now holds 228
+#   live entries.
+#
+#   Composition, stated because it was not one invocation and because two of the
+#   builds were faults of mine, not of the battery:
+#     • First pass reported 8 KILLED / 1 ERROR. F09's EDIT wrote
+#       `let x = episodeDuration ?? span.endTime`, which does not compile — `??`
+#       yields a non-optional and `if let` needs an Optional. Re-cut with
+#       `Optional(...)` and re-run alone: KILLED. `--dry-run` would NOT have
+#       caught this; it proves the ANCHOR matches, not that the result builds.
+#     • Batch 154 was run twice. The first attempt was killed mid-flight after a
+#       `git add -A` in another window swept the live F05 mutant into a commit.
+#       That is worth a line here rather than in a commit message alone, because
+#       the failure is silent: the battery restores with `git checkout --`, so
+#       once a mutant reaches HEAD the restore succeeds INTO the mutated state
+#       and `git status` reads clean. Repaired in 35fd529c and re-run from a
+#       verified-clean tree; the interrupted verdict was discarded, not reported.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-avbn). Batches 130-134 (A01-A11, 11 new
 #   entries), 5 batches. FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 7 builds
 #   (1 baseline + 5 batches + 1 re-run of batch 133). Batches 1-125 were NOT
