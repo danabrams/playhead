@@ -154,6 +154,35 @@
 #   Batches 1-102 were NOT re-run and carry the verdicts above. Recount: the
 #   array now holds 182 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-avbn). Batches 130-134 (A01-A11, 11 new
+#   entries), 5 batches. FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 7 builds
+#   (1 baseline + 5 batches + 1 re-run of batch 133). Batches 1-125 were NOT
+#   re-run and carry the verdicts above. Recount: the array now holds 209 live
+#   entries — the pre-avbn header said 182, which was already short by 16
+#   before this bead added 11; recounted here with `--list`, not carried over.
+#
+#   Composition, stated because it was not one invocation. First pass reported
+#   9 KILLED / 1 SURVIVED / 1 ERROR.
+#
+#   A11 — route `blockedByFMConsensus` to the suggest tier — SURVIVED, and the
+#   survivor was right. `blockedGateValuesAreDroppedInReceiveAdWindows` made
+#   five assertions and every one of them is about what did NOT happen. Since
+#   playhead-d3g0 a suggest banner is ARMED at delivery and EMITTED only when
+#   the playhead ENTERS the span, so routing a blocked gate to the suggest tier
+#   arms a banner and emits nothing inside the test 100 ms window: all five stay
+#   green while the span banners in the field the moment playback reaches it.
+#   The rail gained a POSITIVE witness — playhead-isp5 census row, which names
+#   the terminal disposition and its cause — plus an `armedSuggest` count of
+#   zero. Batch 133 re-run: 3/3 KILLED.
+#
+#   A04 reported ERROR ("expected test never ran") with its expected failure
+#   visibly listed two lines above. `extract_ran` matched the marker only at the
+#   START of a line, and this run interleaved `XCTestOutputBarrier` into the
+#   `◇ Test "…" started` line — word characters, so `^\W*` could not skip them.
+#   `extract_failures` had the identical exposure and got lucky. Both now scan
+#   for the marker anywhere in the line; see the note there for why that cannot
+#   manufacture a KILL.
+#
 #   Composition, stated because it was not one invocation. First pass, batches
 #   120-125: 11 KILLED, 1 SURVIVED. Z02 — delete the orphan-mark reset in
 #   `adopt` — survived, and the survivor was RIGHT twice over. The sweep's
@@ -5185,11 +5214,17 @@ sys.stdout.writelines(lines[cut:])
 extract_failures() {
   python3 -c '
 import re, sys
-pat_named = re.compile(r"^\W*✘ Test \"(.+?)\" (?:failed|recorded an issue)")
-pat_plain = re.compile(r"^\W*✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) failed")
+# playhead-avbn: SEARCH, not match-from-start. xcodebuild interleaves its own
+# output into a line often enough to matter — an observed run prefixed
+# XCTestOutputBarrier onto a started-marker line, and those are WORD characters,
+# so the old ^\W* could not skip them. Widening cannot manufacture a KILL: the
+# anchor is the Swift Testing glyph plus the literal " Test \"", which nothing
+# else in the log emits.
+pat_named = re.compile(r"✘ Test \"(.+?)\" (?:failed|recorded an issue)")
+pat_plain = re.compile(r"✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) failed")
 seen = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    m = pat_named.match(line) or pat_plain.match(line)
+    m = pat_named.search(line) or pat_plain.search(line)
     if m and m.group(1) not in seen:
         seen.append(m.group(1))
 # Deliberately not `print("\n".join(...))`: on an empty list that emits a bare
@@ -5211,11 +5246,16 @@ sys.stdout.writelines(name + "\n" for name in seen)
 extract_ran() {
   python3 -c '
 import re, sys
-pat_named = re.compile(r"^\W*◇ Test \"(.+?)\" started")
-pat_plain = re.compile(r"^\W*◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
+# playhead-avbn: SEARCH, not match-from-start — see extract_failures. This is
+# the function the interleaving actually defeated, turning a real KILL into a
+# reported ERROR ("expected test never ran") with the failure printed two lines
+# above it. Widening here can only move a verdict ERROR -> KILLED/SURVIVED; the
+# KILL itself comes from extract_failures.
+pat_named = re.compile(r"◇ Test \"(.+?)\" started")
+pat_plain = re.compile(r"◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
 seen = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    m = pat_named.match(line) or pat_plain.match(line)
+    m = pat_named.search(line) or pat_plain.search(line)
     if m and m.group(1) not in seen:
         seen.append(m.group(1))
 sys.stdout.writelines(name + "\n" for name in seen)
