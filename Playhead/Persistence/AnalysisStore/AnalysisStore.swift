@@ -2276,9 +2276,8 @@ actor AnalysisStore {
             // the bead. The legacy columns keep being written by every path
             // that wrote them, so a DOWNGRADE reads a row it fully understands.
             //
-            // Drift note (mirrors the spxs / xsdz.71 notes above):
-            // `migrateOnlyForTesting()` does NOT replay this
-            // `addColumnIfNeeded` call.
+            // NOT a drift note: unlike its five neighbours, this one IS
+            // mirrored in `migrateOnlyForTesting()`. See the comment there.
             try addColumnIfNeeded(
                 table: "podcast_profiles",
                 column: "detectorTrustJSON",
@@ -2536,6 +2535,22 @@ actor AnalysisStore {
         // H1 fix: mirror the addColumnIfNeeded calls from migrate() that
         // follow the versioned ladder steps. Without these, the isolated-
         // ladder test seam cannot catch regressions in column additions.
+        //
+        // playhead-gard: `detectorTrustJSON` is MIRRORED here rather than
+        // added to `PriorHierarchyWireUpTests.migrateLadderDriftMatchesDocumentation`'s
+        // documented-drift allow-list. That canary offers both remedies and
+        // names mirroring the preferred one, because it closes the ghost-test
+        // risk instead of recording it: a ladder-only test that drives
+        // `fetchProfile` would otherwise bind a column the seam never created.
+        // The five pre-existing drifting columns stay drifting — moving them
+        // is not this bead's change to make.
+        if try tableExists("podcast_profiles") {
+            try addColumnIfNeeded(
+                table: "podcast_profiles",
+                column: "detectorTrustJSON",
+                definition: "TEXT"
+            )
+        }
         if try tableExists("semantic_scan_results") {
             try addColumnIfNeeded(
                 table: "semantic_scan_results",
