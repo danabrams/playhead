@@ -328,6 +328,11 @@ actor SkipOrchestrator {
     /// Production leaves this nil and uses `trustService`.
     private var falseNegativeSignalHandlerForTesting:
         (@Sendable (String) async -> Void)?
+    /// playhead-gard: test override for the per-detector CORRECT-observation
+    /// write — the escape from `manual`. Production leaves this nil and uses
+    /// `trustService`.
+    private var correctObservationHandlerForTesting:
+        (@Sendable (String, SkipDetectorClass) async -> Void)?
     private var feedbackPersistenceBarrierForTesting:
         (@Sendable () async -> Void)?
     /// Test-only suspension point for the fire-and-forget durable applied
@@ -584,6 +589,21 @@ actor SkipOrchestrator {
     /// counted, recorded and shown. Nothing in the skip policy reads it: the
     /// policy input is still `activeSkipMode` and only `activeSkipMode`.
     private var activeSkipModeResolution: SkipModeResolution = .noActiveEpisode
+
+    /// playhead-gard: the PER-DETECTOR skip modes for this episode.
+    ///
+    /// `activeSkipMode` above is still the show-level answer — it is what the
+    /// Now Playing pill renders, what `currentSkipMode()` returns, and what an
+    /// older binary reads out of `podcast_profiles.mode`. It is no longer the
+    /// SKIP POLICY INPUT. Every window is now evaluated against the mode of the
+    /// detector class that produced it, because a `segmentAggregated` window's
+    /// vetoes are not evidence about the byte-exact rediff differ.
+    ///
+    /// Resolved once per episode, in the same `beginEpisode` lookup that
+    /// resolves the show mode — one row read, four classes, no per-window
+    /// suspension. A class this map does not carry falls back to
+    /// `activeSkipMode`, which is what governed everything before this bead.
+    private var activeDetectorSkipModes: DetectorSkipModes = .noActiveEpisode
 
     /// playhead-djl0: how many episode starts have hit each lookup failure,
     /// this process. Per cause rather than one total, so "the trust service is
@@ -950,6 +970,12 @@ actor SkipOrchestrator {
         _ handler: (@Sendable (String) async -> Void)?
     ) {
         falseNegativeSignalHandlerForTesting = handler
+    }
+
+    func _setCorrectObservationHandlerForTesting(
+        _ handler: (@Sendable (String, SkipDetectorClass) async -> Void)?
+    ) {
+        correctObservationHandlerForTesting = handler
     }
 
     func _setSuggestPersistenceBarrierForTesting(
@@ -1831,6 +1857,11 @@ actor SkipOrchestrator {
         // episode's resolution in place would make the pill describe a show
         // that is no longer playing.
         activeSkipModeResolution = .noActiveEpisode
+        // playhead-gard: the per-detector map is cleared with it. An empty map
+        // falls back to `activeSkipMode`, which is `.shadow` here — so the
+        // pre-suspension default stays non-actioning for every class,
+        // including the show-trust-exempt one.
+        activeDetectorSkipModes = .noActiveEpisode
         // playhead-xr3t: clear per-episode inventory-filter context.
         // Episode duration is rehydrated from the persisted asset row
         // immediately below; declared chapters arrive later via
@@ -1913,17 +1944,25 @@ actor SkipOrchestrator {
         }
 
         if let podcastId = resolvedShowId, let trustService {
-            let resolved = await trustService.resolveMode(podcastId: podcastId)
+            // playhead-gard: one lookup, both answers. `resolveDetectorModes`
+            // returns the show mode (unchanged, for the pill and for an older
+            // binary) alongside each detector class's own verdict.
+            let resolved = await trustService.resolveDetectorModes(
+                podcastId: podcastId
+            )
             guard episodeLifecycleGeneration == lifecycleGeneration else {
                 return
             }
-            activeSkipMode = resolved.mode
+            activeSkipMode = resolved.showMode
+            activeDetectorSkipModes = resolved
             noteSkipModeResolution(resolved.resolution, episodeId: episodeId)
         } else if resolvedShowId != nil {
             activeSkipMode = .shadow
+            activeDetectorSkipModes = .noActiveEpisode
             noteSkipModeResolution(.trustServiceUnavailable, episodeId: episodeId)
         } else {
             activeSkipMode = .shadow
+            activeDetectorSkipModes = .noActiveEpisode
             noteSkipModeResolution(.unresolvedShowIdentity, episodeId: episodeId)
         }
         // playhead-usn1: the verdict reaches the surface HERE, not on the next
@@ -2355,6 +2394,7 @@ actor SkipOrchestrator {
         // The per-cause failure COUNTS deliberately survive — they are a
         // process-lifetime tally, not per-episode state.
         activeSkipModeResolution = .noActiveEpisode
+        activeDetectorSkipModes = .noActiveEpisode
         // playhead-usn1: publish the cleared pair so a mounted Now Playing
         // screen stops describing a show that is no longer playing.
         publishSkipMode()
@@ -4427,7 +4467,14 @@ actor SkipOrchestrator {
         }
 
         if let sourceShowId, let trustService {
-            await trustService.recordFalseSkipSignal(podcastId: sourceShowId)
+            // playhead-gard: blame the DETECTOR that drew this span, weighted
+            // by how certain its extent was.
+            await trustService.recordFalseSkipSignal(
+                podcastId: sourceShowId,
+                attributions: [
+                    vetoAttribution(for: requestedManaged.adWindow)
+                ]
+            )
         }
 
         // playhead-xsdz.9: a Listen revert is a CONFIRMED false positive —
@@ -4856,13 +4903,19 @@ actor SkipOrchestrator {
         // the same ACCEPT THE RECEIPT, REFUSE THE LEARNING split playhead-o4qr
         // made one axis over.
         if !exactTargets.isEmpty, let sourceShowId, let trustService {
+            // playhead-gard: a range veto can retract windows from several
+            // detector classes at once. Every class it touched is named; the
+            // per-show scalar still moves exactly once, as it always did.
+            let attributions = vetoAttributions(for: exactTargets)
             if revertedManagedAny {
                 await trustService.recordFalseSkipSignal(
-                    podcastId: sourceShowId
+                    podcastId: sourceShowId,
+                    attributions: attributions
                 )
             } else {
                 await trustService.recordWeakFalseSkipSignal(
-                    podcastId: sourceShowId
+                    podcastId: sourceShowId,
+                    attributions: attributions
                 )
             }
         }
@@ -5089,9 +5142,13 @@ actor SkipOrchestrator {
                     await handler(sourceShowId)
                 }
             } else if let trustService {
+                let attributions = [
+                    vetoAttribution(for: requestedManaged.adWindow)
+                ]
                 Task {
                     await trustService.recordFalseSkipSignal(
                         podcastId: sourceShowId,
+                        attributions: attributions,
                         privacy: .explicitBannerFeedback
                     )
                 }
@@ -5230,9 +5287,13 @@ actor SkipOrchestrator {
                     await handler(sourceShowId)
                 }
             } else if let trustService {
+                let attributions = [
+                    vetoAttribution(for: requestedManaged.adWindow)
+                ]
                 Task {
                     await trustService.recordFalseSkipSignal(
-                        podcastId: sourceShowId
+                        podcastId: sourceShowId,
+                        attributions: attributions
                     )
                 }
             }
@@ -5749,6 +5810,38 @@ actor SkipOrchestrator {
                     )
                 }
             }
+            // playhead-gard: THE SAME TAP IS ALSO A CORRECT OBSERVATION, and
+            // recording it is what makes `manual` escapable.
+            //
+            // The call above is a true statement about the SKIP SURFACE: this
+            // span was mark-only, so the surface did miss it. It was the only
+            // thing recorded, and it moves trust DOWN — so a user answering
+            // "yes, that was an ad" made the show LESS trusted, and the counter
+            // whose reaching zero is required to leave `manual` never moved at
+            // all. Measured on this tree: `recordSuccessfulObservation` and
+            // `decayFalseSignals` had ZERO production callers, so trust was a
+            // one-way ratchet and `manual` was a one-way door.
+            //
+            // The banner asked "is this an ad?" about a span the DETECTOR drew.
+            // A Yes affirms that detector's presence claim, so the credit goes
+            // to the class that drew it — not to the show globally, and not to
+            // `.userAsserted`, which is what the promoted row's `boundaryState`
+            // now says. `suggested` is the pre-promotion row and still carries
+            // the producer's own provenance.
+            if let handler = correctObservationHandlerForTesting {
+                let detector = detectorClass(for: suggested)
+                Task {
+                    await handler(podcastId, detector)
+                }
+            } else if let trustService {
+                let detector = detectorClass(for: suggested)
+                Task {
+                    await trustService.recordCorrectObservation(
+                        podcastId: podcastId,
+                        detector: detector
+                    )
+                }
+            }
         }
         recordThresholdControlMiss(podcastId: sourcePodcastId)
 
@@ -6121,7 +6214,8 @@ actor SkipOrchestrator {
         // delivered in shadow mode (e.g. test harness, dogfood
         // toggle) doesn't pollute the audit log with a real skip
         // event that never produced a real user-facing skip.
-        if activeSkipMode != .shadow && !isExplicitBannerFeedback {
+        // playhead-gard: mirrors the auto path, which is now per detector.
+        if skipMode(for: managed.adWindow) != .shadow && !isExplicitBannerFeedback {
             emitAutoSkipFiredAuditEvent(for: managed)
         }
 
@@ -6191,6 +6285,19 @@ actor SkipOrchestrator {
     /// Override the active skip mode for the current episode and re-evaluate pending windows.
     func setActiveSkipMode(_ mode: SkipMode) {
         activeSkipMode = mode
+        // playhead-gard: an explicit session choice governs EVERY detector,
+        // including the show-trust-exempt one. `.rediffByteExact` is exempt
+        // from the show's HISTORY, never from a live instruction — the whole
+        // point of the control is that what it says is what happens.
+        activeDetectorSkipModes = DetectorSkipModes(
+            showMode: mode,
+            resolution: .sessionOverride,
+            byDetector: Dictionary(
+                uniqueKeysWithValues: SkipDetectorClass.allCases.map {
+                    ($0, mode)
+                }
+            )
+        )
         // playhead-djl0: an explicit choice replaces whatever the lookup
         // concluded. Leaving a failure cause installed here would keep telling
         // the listener their show was unrecognized after they had answered the
@@ -6468,10 +6575,65 @@ actor SkipOrchestrator {
         )
     }
 
+    /// playhead-gard: which detector produced this window, using the runtime
+    /// anchor stamp when ingest recorded one.
+    ///
+    /// Prefers `resolvedEdgeAnchors` over the row's own columns for the same
+    /// reason `paddedCueSpan` does: ingest can know a provenance the persisted
+    /// row has not been rewritten with yet, and a window classified as
+    /// `.fusion` when it is really byte-exact would be gated by another
+    /// detector's history — the defect, one level down.
+    private func detectorClass(for window: AdWindow) -> SkipDetectorClass {
+        let anchors = resolvedEdgeAnchors(for: window)
+        return SkipDetectorClass.classify(
+            boundaryState: window.boundaryState,
+            startAnchor: anchors.start,
+            endAnchor: anchors.end
+        )
+    }
+
+    /// The skip mode governing this window's detector class.
+    private func skipMode(for window: AdWindow) -> SkipMode {
+        activeDetectorSkipModes.mode(for: detectorClass(for: window))
+    }
+
+    /// playhead-gard: what a veto of this window is evidence about — the
+    /// detector that drew it, and how certain that span's EXTENT was.
+    private func vetoAttribution(
+        for window: AdWindow
+    ) -> DetectorVetoAttribution {
+        let anchors = resolvedEdgeAnchors(for: window)
+        let support = SpanExtentSupport(
+            startAnchor: anchors.start,
+            endAnchor: anchors.end
+        )
+        return DetectorVetoAttribution(
+            detector: SkipDetectorClass.classify(
+                boundaryState: window.boundaryState,
+                startAnchor: anchors.start,
+                endAnchor: anchors.end
+            ),
+            tier: support.tier
+        )
+    }
+
+    /// Attributions for a gesture that retracted SEVERAL windows at once (the
+    /// time-range veto). Deduplication and tier selection happen inside
+    /// `TrustScoringService`; this only collects.
+    private func vetoAttributions(
+        for windows: [AdWindow]
+    ) -> [DetectorVetoAttribution] {
+        windows.map { vetoAttribution(for: $0) }
+    }
+
     /// Evaluate a single window against skip policy. Returns the decision.
     private func evaluateWindow(_ managed: inout ManagedWindow) -> SkipDecisionState {
         let confidence = managed.adWindow.confidence
         let span = managed.snappedEnd - managed.snappedStart
+        // playhead-gard: resolved once, read twice (candidate promotion and the
+        // trust gate). Two reads of a per-window policy value is how the two
+        // come to disagree.
+        let windowSkipMode = skipMode(for: managed.adWindow)
 
         // Late detection: if the playhead is already past this window, never skip.
         if managed.snappedEnd <= currentPlayheadTime {
@@ -6525,7 +6687,7 @@ actor SkipOrchestrator {
             // In auto mode (trusted show), promote candidates above the
             // enter threshold without waiting for backfill confirmation.
             // Otherwise, only override if confidence is very high.
-            if activeSkipMode == .auto && confidence >= config.enterThreshold {
+            if windowSkipMode == .auto && confidence >= config.enterThreshold {
                 // Promote to confirmed — fall through to trust mode gate.
                 managed.decisionState = .confirmed
             } else if confidence < config.shortSpanOverrideConfidence {
@@ -6535,7 +6697,15 @@ actor SkipOrchestrator {
 
         // Trust mode gate: shadow mode logs only; manual mode marks confirmed
         // but does not auto-skip (UI shows a manual "Skip Ad" button instead).
-        switch activeSkipMode {
+        //
+        // playhead-gard: the mode is THIS DETECTOR'S, not the show's. Before
+        // this bead a single scalar gated every window, so three vetoes of
+        // 0.40-confidence `segmentAggregated` spans (both edges unanchored, 0
+        // of 3 correct) demoted the show and suppressed byte-exact rediff on it
+        // — a deterministic signal that was 2 of 2 on the same corpus. A
+        // detector class's own error history governs its own eligibility, and
+        // nothing else's.
+        switch windowSkipMode {
         case .shadow:
             let decision = SkipDecisionState.confirmed
             logDecision(managed: managed, decision: decision, reason: "Shadow mode -- detection logged, no skip fired")

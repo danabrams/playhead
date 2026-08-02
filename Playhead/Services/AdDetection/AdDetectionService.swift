@@ -9832,6 +9832,21 @@ actor AdDetectionService {
         // always installs a real service before the first user tap.
         // Trust calibration is downstream of the durable receipt and must not
         // hold the UI's claimed Listen action open.
+        // playhead-gard: attribute the inferred revert to the DETECTOR that
+        // drew the rewound window, weighted by that span's extent certainty.
+        // Read from the persisted row's own columns — this seam has no
+        // orchestrator ingest stamp to consult.
+        let rewindAttribution = DetectorVetoAttribution(
+            detector: correctedWindow.detectorClass,
+            tier: SpanExtentSupport(
+                startAnchor: AutoSkipEdgeAnchor(
+                    rawValue: correctedWindow.startEdgeAnchor
+                ) ?? .unanchored,
+                endAnchor: AutoSkipEdgeAnchor(
+                    rawValue: correctedWindow.endEdgeAnchor
+                ) ?? .unanchored
+            ).tier
+        )
 #if DEBUG
         if let handler = listenRewindTrustHandlerForTesting {
             Task {
@@ -9840,7 +9855,8 @@ actor AdDetectionService {
         } else if let trustScoringService {
             Task {
                 await trustScoringService.recordWeakFalseSkipSignal(
-                    podcastId: podcastId
+                    podcastId: podcastId,
+                    attributions: [rewindAttribution]
                 )
             }
         }
@@ -9848,7 +9864,8 @@ actor AdDetectionService {
         if let trustScoringService {
             Task {
                 await trustScoringService.recordWeakFalseSkipSignal(
-                    podcastId: podcastId
+                    podcastId: podcastId,
+                    attributions: [rewindAttribution]
                 )
             }
         }
