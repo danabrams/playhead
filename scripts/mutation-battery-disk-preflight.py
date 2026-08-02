@@ -117,7 +117,7 @@ MUTATIONS = [
         "reclaim candidates parsed out of an error message",
         '    rc, out = runner([cleaner, "--dry-run"])\n    if rc != 0:',
         '    rc, out = runner([cleaner, "--dry-run"])\n    if False:',
-        [S + "test_a_cleaner_that_errors_yields_no_candidates_rather_than_garbage"],
+        [S + "test_a_cleaner_that_errored_is_not_believed_even_where_it_looks_parseable"],
     ),
     (
         "P09", DP,
@@ -125,8 +125,7 @@ MUTATIONS = [
         "reclaimable that the cleaner just refused to touch",
         r'_DRY_LINE = re.compile(r"^\[DRY\]\s+REMOVE\s+\(([^,]+),\s*([^)]*)\):\s*(.+)$")',
         r'_DRY_LINE = re.compile(r"^\[DRY\]\s+\w+\s+\(([^,]+),\s*([^)]*)\):\s*(.+)$")',
-        [S + "test_a_skip_line_is_not_a_removal",
-         S + "test_parses_the_cleaners_dry_run_lines"],
+        [S + "test_only_REMOVE_parses_even_when_another_verb_carries_the_same_payload"],
     ),
     (
         "P10", DP,

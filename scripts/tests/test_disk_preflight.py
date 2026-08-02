@@ -194,6 +194,15 @@ class SurveyTests(unittest.TestCase):
     def test_a_skip_line_is_not_a_removal(self):
         self.assertEqual(dp.parse_dry_run("[DRY] SKIP (live build): /x"), [])
 
+    def test_only_REMOVE_parses_even_when_another_verb_carries_the_same_payload(self):
+        # The VERB is the contract, not the shape. Today's SKIP lines happen to
+        # carry no size, so a parser that accepted any verb would look correct;
+        # the moment someone improves the cleaner to log "SKIP (live build,
+        # 2.7G): …" — an obvious improvement — every skipped path would start
+        # being advertised as reclaimable space in the refusal.
+        self.assertEqual(dp.parse_dry_run("[DRY] SKIP (live build, 2.7G): /x"), [])
+        self.assertEqual(dp.parse_dry_run("[DRY] REFUSE (outside safe, 1G): /x"), [])
+
     def test_no_output_means_no_candidates(self):
         self.assertEqual(dp.parse_dry_run(""), [])
 
@@ -203,6 +212,17 @@ class SurveyTests(unittest.TestCase):
     def test_a_cleaner_that_errors_yields_no_candidates_rather_than_garbage(self):
         cleaner = str(ROOT / "scripts" / "disk-cleanup.sh")
         self.assertEqual(dp.survey(cleaner, runner=lambda _c: (3, "boom")), [])
+
+    def test_a_cleaner_that_errored_is_not_believed_even_where_it_looks_parseable(self):
+        # A cleaner that dies partway has already printed REMOVE lines for the
+        # work it got through. Its exit code is the statement that the survey is
+        # incomplete, so a refusal must not quote a total built from it — that
+        # is a number whose denominator nobody can name.
+        cleaner = str(ROOT / "scripts" / "disk-cleanup.sh")
+        out = ("[DRY] REMOVE (worktree-unregistered, 2.7G): "
+               "/Users/dabrams/playhead/.worktrees/zz/.derivedData\n"
+               "du: fts_read: Permission denied\n")
+        self.assertEqual(dp.survey(cleaner, runner=lambda _c: (3, out)), [])
 
 
 class ResolveSimIdTests(unittest.TestCase):
