@@ -775,6 +775,15 @@ FOCUSED_SUITES=(
   # shapes alone.
   -only-testing:PlayheadTests/CertaintyTieredSkipShipsOnTests
   -only-testing:PlayheadTests/CertaintyTieredSkipFlagsWireInTests
+  # playhead-9v09: the ingest census's RETRACTION path (H01-H10). Two suites,
+  # ~0.6s combined. The behavioural one drives the real orchestrator through the
+  # preload door and then the retroactive sweep; the taxonomy one is a pure test
+  # of the value type's three classifiers and its rendering. Both are needed and
+  # neither substitutes: a classifier mutation is invisible to the behavioural
+  # suite's row assertions when the row is not written at all, and a wiring
+  # mutation is invisible to a pure test by construction.
+  -only-testing:PlayheadTests/AdWindowIngestRetroactiveRetirementTests
+  -only-testing:PlayheadTests/AdWindowIngestTaxonomyTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1268,6 +1277,26 @@ T_NQEY_WIREIN_DEFAULT="AdDetectionConfig.default ships the certainty-tiered gate
 T_NQEY_WIREIN_BYTEID="Omitted wraj flags: runBackfill is byte-identical to explicit-default (true/0.9/90.0) flags"
 T_NQEY_WIREIN_OMITTED="AdDetectionConfig.init defaults the three certainty-tiered fields when omitted"
 T_NQEY_WIREIN_VERBATIM="AdDetectionConfig.init carries each certainty-tiered field through verbatim, one at a time"
+
+# playhead-9v09 (H series): the census's SILENT RETRACTION PATH. The rails
+# divide into (a) the two WRITES the retroactive sweep now performs — the
+# per-window stamp and the durable row — which only a behavioural run through
+# the preload door and then `setEpisodeDuration` can see; (b) the REASON, which
+# travels on both and is what separates four different bugs; (c) the NEGATIVE,
+# an outcome that fires when nothing was retired being exactly as useless as one
+# that never fires; and (d) the three CLASSIFIERS the balance is derived from,
+# which are pure and whose mis-keying is invisible to every behavioural
+# assertion that does not read `retired=`.
+T_9V09_BOTH="the census shows BOTH the arm and the retirement, with the reason"
+T_9V09_NEGATIVE="a span that stays armed records NO retirement, and the sweep is still live"
+T_9V09_MANAGED="a managed window swept by a declared chapter is named with THAT reason"
+T_9V09_AGGREGATE="a sweep that retires two windows writes ONE row that aggregates them"
+T_9V09_BALANCE="armed minus retired is what the listener could have seen"
+T_9V09_LIFETIME="endEpisode clears the retirement stamp and keeps the count"
+T_9V09_ONE_RETRACTION="exactly one outcome is a retraction"
+T_9V09_NOT_BOTH="a retraction is neither a delivery nor a door outcome"
+T_9V09_RENDER="a retraction row renders retired= and a delivery row does not"
+T_9V09_THREE_DELIVERED="exactly three outcomes count as delivered"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -2355,6 +2384,59 @@ MUTATIONS=(
   # bead's hard constraint exists to forbid, and the only test that sees it is
   # the discriminating negative added by this bead.
   "G10|169|FUSION|$T_6QVF_FLOOR_CHROMA"
+
+  # ---- playhead-9v09 (H series): the census's silent retraction path --------
+  #
+  # Batching note. Each batch pairs ONE orchestrator-wiring mutation with ONE
+  # value-type mutation, because the two files cannot interact and their
+  # expected sets are disjoint. Two wiring mutations are never batched together:
+  # they all edit the same twenty lines of
+  # `reapplyInventoryFilterToManagedWindows`, which is precisely the "two edits
+  # to the same loop" case this file keeps in separate batches.
+  #
+  # H01 deletes the STAMP and H02 the ROW. They are separate defects and each is
+  # separately survivable: the row is built from locals, so deleting the stamp
+  # leaves every row assertion green, and deleting the row leaves every counter
+  # assertion green. A battery that only mutated one of them would certify the
+  # other by association.
+  "H01|170|ORCH|$T_9V09_NEGATIVE;$T_9V09_MANAGED;$T_9V09_BALANCE;$T_9V09_LIFETIME"
+
+  # H06 also reddens the two row tests, because a `retiredCount` keyed on the
+  # wrong classifier renders no `retired=` at all. Both are named so the KILL
+  # cannot be credited to its batchmate.
+  "H06|170|INGO|$T_9V09_RENDER;$T_9V09_BOTH;$T_9V09_AGGREGATE"
+
+  "H02|171|ORCH|$T_9V09_BOTH;$T_9V09_MANAGED;$T_9V09_AGGREGATE;$T_9V09_NEGATIVE"
+
+  # The rendering asymmetry is deliberate and load-bearing: a delivery row is
+  # written the instant the delivery concludes, so `retired=0` there would be a
+  # claim it is in no position to make. Only the pure test sees this.
+  "H07|171|INGO|$T_9V09_RENDER"
+
+  # H03 drops the REASON from the row, H04 from the stamp. Same information,
+  # two independent carriers — and a field investigation reads the row while a
+  # test reads the stamp, so neither covers the other.
+  "H03|172|ORCH|$T_9V09_BOTH;$T_9V09_MANAGED;$T_9V09_AGGREGATE"
+
+  "H08|172|INGO|$T_9V09_ONE_RETRACTION;$T_9V09_NOT_BOTH"
+
+  "H04|173|ORCH|$T_9V09_MANAGED"
+
+  # The classification error that would let a retraction inflate `delivered=` —
+  # the numerator check of playhead-aqo9's "what would this read if the thing
+  # never happened?", applied to the audit row's own headline.
+  "H09|173|INGO|$T_9V09_THREE_DELIVERED;$T_9V09_NOT_BOTH;$T_9V09_BOTH"
+
+  # THE NEGATIVE, and the mutation the bead's second acceptance exists for: a
+  # sweep that retires everything it looks at. Alone in its batch because its
+  # blast radius covers most of the behavioural suite — it also reddens
+  # T_9V09_AGGREGATE, which is read, not batched around.
+  "H05|174|ORCH|$T_9V09_NEGATIVE;$T_9V09_BALANCE;$T_9V09_BOTH"
+
+  # `forwarded` and the summed counts must agree on the retraction row too, or
+  # the existing "a gap means a missing instrumentation site" reading of the
+  # census silently stops holding for the new row shape.
+  "H10|175|ORCH|$T_9V09_BOTH;$T_9V09_AGGREGATE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2556,6 +2638,16 @@ describe_mutation() {
     G08) echo "6qvf: drop .rediffSlotChroma from isWidthOwnership — chroma loses width ownership" ;;
     G09) echo "6qvf: remove the (.rediffSlotChroma, .rediffSlotChroma) Equatable arm (default:false trap)" ;;
     G10) echo "6qvf: the host-read floor re-grants its exemption to ANY width oracle" ;;
+    H01) echo "9v09: the retroactive sweep stops STAMPING — the exact silence the bead closed" ;;
+    H02) echo "9v09: the retroactive sweep stops writing its durable census ROW" ;;
+    H03) echo "9v09: the sweep's row loses the filter's REJECTION REASON" ;;
+    H04) echo "9v09: the sweep's per-window stamp loses the rejection reason (detail: nil)" ;;
+    H05) echo "9v09: a PASSED verdict retires too — an outcome that fires on every sweep" ;;
+    H06) echo "9v09: AdWindowIngestCensus.retiredCount keys on isDelivered, not isRetraction" ;;
+    H07) echo "9v09: retired= is rendered on EVERY row, so a delivery row claims retired=0" ;;
+    H08) echo "9v09: armedSuggest is classified a retraction — the balance eats its own numerator" ;;
+    H09) echo "9v09: the retirement is classified DELIVERED, inflating every delivered= figure" ;;
+    H10) echo "9v09: the sweep row reports forwarded=0 while its counts say otherwise" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -5741,6 +5833,149 @@ EOF
            skipConfidence < config.hostReadConfidenceFloor {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-9v09 (H series) --------------------------------------------
+
+  # THE SHIPPED DEFECT, restored. The window is still retired; nothing says so.
+  H01)
+    snippet OLD <<'EOF'
+            let reason = rejectionReasonsById[id]
+            noteIngestOutcome(
+                .retiredReapplyInventoryFilter,
+                windowId: id,
+                detail: reason?.rawValue
+            )
+            retiredCount += 1
+EOF
+    snippet NEW <<'EOF'
+            let reason = rejectionReasonsById[id]
+            retiredCount += 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # The other half of the same silence: counted in memory, invisible to a device
+  # pull. This is the half that decides whether a support ticket can be answered.
+  H02)
+    snippet OLD <<'EOF'
+        if retiredCount > 0 {
+            recordIngestCensus(
+EOF
+    snippet NEW <<'EOF'
+        if retiredCount < 0 {
+            recordIngestCensus(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  H03)
+    snippet OLD <<'EOF'
+            if let reason {
+                let key = "\(AdWindowIngestOutcome.retiredReapplyInventoryFilter.rawValue)"
+                    + ":\(reason.rawValue)"
+                details[key, default: 0] += 1
+            }
+EOF
+    snippet NEW <<'EOF'
+            _ = reason
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  H04)
+    patch "$file" \
+      "                detail: reason?.rawValue" \
+      "                detail: nil" ;;
+
+  # The suggest loop keeps its `.rejected` binding for the reason, and then
+  # retires whatever the filter said — including the spans it PASSED. The
+  # managed loop is deliberately left alone, so the managed rail stays green and
+  # the kill cannot be credited to a blanket retire-everything.
+  H05)
+    snippet OLD <<'EOF'
+            guard case let .rejected(reason) = verdict else { continue }
+EOF
+    snippet NEW <<'EOF'
+            let reason: InventorySanityRejectionReason
+            if case let .rejected(rejected) = verdict {
+                reason = rejected
+            } else {
+                reason = .tooLate
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  H06)
+    patch "$file" \
+      "        counts.reduce(0) { \$0 + (\$1.key.isRetraction ? \$1.value : 0) }" \
+      "        counts.reduce(0) { \$0 + (\$1.key.isDelivered ? \$1.value : 0) }" ;;
+
+  H07)
+    snippet OLD <<'EOF'
+        if retiredCount > 0 {
+            parts.append("retired=\(retiredCount)")
+        }
+EOF
+    snippet NEW <<'EOF'
+        parts.append("retired=\(retiredCount)")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  H08)
+    snippet OLD <<'EOF'
+        case .retiredReapplyInventoryFilter:
+            return true
+        case .admittedManaged, .armedSuggest, .retainedAppliedReceipt,
+             .doorDroppedNotPlaying, .doorDroppedStoreReadFailed,
+EOF
+    snippet NEW <<'EOF'
+        case .retiredReapplyInventoryFilter, .armedSuggest:
+            return true
+        case .admittedManaged, .retainedAppliedReceipt,
+             .doorDroppedNotPlaying, .doorDroppedStoreReadFailed,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # The whole `isDelivered` switch is rewritten in one patch rather than two:
+  # the case has to leave the false arm as it joins the true one, and the false
+  # arm's tail lines are byte-identical to `isDoorOutcome`'s, so a two-anchor
+  # edit would not be unique.
+  H09)
+    snippet OLD <<'EOF'
+        case .admittedManaged, .armedSuggest, .retainedAppliedReceipt:
+            return true
+        case .doorDroppedNotPlaying, .doorDroppedStoreReadFailed,
+             .doorDroppedEpisodeReplaced, .doorDroppedNoAdmissibleRows,
+             .droppedNoActiveEpisode, .droppedForeignAsset,
+             .droppedStaleProducerRevision, .droppedTerminalProducerReplay,
+             .droppedEpisodeReplaced, .droppedInvalidMaterial,
+             .droppedMalformedDecisionState, .droppedMalformedEligibilityGate,
+             .droppedUserResolvedSuggestion, .droppedUserReverted,
+             .droppedProducerTerminalState, .droppedInventorySanity,
+             .droppedBlockedGate, .droppedAlreadyBannered,
+             .suggestReplayNotRearmed, .bufferedProvisionalResolution,
+             .retiredReapplyInventoryFilter:
+            return false
+EOF
+    snippet NEW <<'EOF'
+        case .admittedManaged, .armedSuggest, .retainedAppliedReceipt,
+             .retiredReapplyInventoryFilter:
+            return true
+        case .doorDroppedNotPlaying, .doorDroppedStoreReadFailed,
+             .doorDroppedEpisodeReplaced, .doorDroppedNoAdmissibleRows,
+             .droppedNoActiveEpisode, .droppedForeignAsset,
+             .droppedStaleProducerRevision, .droppedTerminalProducerReplay,
+             .droppedEpisodeReplaced, .droppedInvalidMaterial,
+             .droppedMalformedDecisionState, .droppedMalformedEligibilityGate,
+             .droppedUserResolvedSuggestion, .droppedUserReverted,
+             .droppedProducerTerminalState, .droppedInventorySanity,
+             .droppedBlockedGate, .droppedAlreadyBannered,
+             .suggestReplayNotRearmed, .bufferedProvisionalResolution:
+            return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  H10)
+    patch "$file" \
+      "                    forwarded: retiredCount," \
+      "                    forwarded: 0," ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
