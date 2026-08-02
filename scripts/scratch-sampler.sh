@@ -140,8 +140,19 @@ sample_line () {
   done
   derived="$(dir_kb "$DERIVED")"
   simlogs="$(dir_kb "$HOME/Library/Logs/CoreSimulator")"
-  printf '{"t":%s,"elapsed":%s,"free_kb":%s,"dev_kb":%s,"scratch_kb":%s,"scratch_entries":%s,"container_kb":%s,"derived_kb":%s,"simlogs_kb":%s' \
-    "$now" "$elapsed" "${free:-0}" "$dev" "$scratch" "$entries" "$container" "$derived" "$simlogs"
+  # SWAP IS A DISK CONSUMER, and on this box the DOMINANT one (playhead-cgka,
+  # measured 2026-08-02): a full-plan run grew the swapfiles by ~5.6 GiB, which
+  # is ~70% of the free space it consumed, against ~2.0 GiB of test scratch. A
+  # sampler that walks only directories attributes none of it and makes
+  # "No space left on device" look like a pure file-accumulation problem.
+  local swaptotal swapused hostrss
+  set -- $(sysctl -n vm.swapusage 2>/dev/null)
+  swaptotal="${3%M}"; swapused="${6%M}"
+  # RSS of the test host, so memory growth and swap growth can be told apart.
+  hostrss="$(ps -o rss= -p "$(pgrep -x Playhead 2>/dev/null | head -1)" 2>/dev/null | awk 'END {print $1}')"
+  printf '{"t":%s,"elapsed":%s,"free_kb":%s,"dev_kb":%s,"scratch_kb":%s,"scratch_entries":%s,"container_kb":%s,"derived_kb":%s,"simlogs_kb":%s,"swap_total_mb":%s,"swap_used_mb":%s,"host_rss_kb":%s' \
+    "$now" "$elapsed" "${free:-0}" "$dev" "$scratch" "$entries" "$container" "$derived" "$simlogs" \
+    "${swaptotal:-0}" "${swapused:-0}" "${hostrss:-0}"
   # The user temp folder is tens of GiB of unrelated caches, so walking it costs
   # ~1.2s per sample. Off by default: `free_kb` is the exact catch-all, so this
   # is only needed once the sim + derivedData figures FAIL to account for the
@@ -150,6 +161,25 @@ sample_line () {
     printf ',"hosttmp_kb":%s' "$(dir_kb "${TMPDIR:-/tmp}")"
   fi
   printf '}\n'
+}
+
+# Disk guard. Measuring the ENOSPC failure is the point, but letting the volume
+# actually reach zero wedges the simulator and the host, so stop the run while
+# there is still headroom and say so. Signals go to an explicit PID — NEVER a
+# `pkill -f` pattern, which self-matches any guard whose own command line
+# contains the string.
+guard_check () {
+  [ -n "$GUARD_PID" ] || return 0
+  [ "$GUARD_FREE_MIB" -gt 0 ] || return 0
+  [ "${GUARD_TRIPPED:-0}" -eq 0 ] || return 0
+  local fkb
+  fkb="$(free_kb)"
+  [ -n "$fkb" ] || return 0
+  [ "$fkb" -lt $(( GUARD_FREE_MIB * 1024 )) ] || return 0
+  echo "# scratch-sampler: GUARD TRIPPED at $(( fkb / 1024 )) MiB free — SIGINT to pid $GUARD_PID" >&2
+  [ -n "$OUT" ] && echo "# GUARD TRIPPED at $(( fkb / 1024 )) MiB free" >>"$OUT"
+  kill -INT "$GUARD_PID" 2>/dev/null
+  GUARD_TRIPPED=1
 }
 
 case "$MODE" in
@@ -199,7 +229,7 @@ print(f"samples={len(rows)}  span={last['elapsed'] - first['elapsed']}s")
 print()
 print(f"{'metric':16} {'start':>12} {'peak':>12} {'end':>12} {'peak-start':>12}")
 for name in ("free_kb", "dev_kb", "scratch_kb", "container_kb", "derived_kb",
-             "simlogs_kb", "hosttmp_kb"):
+             "simlogs_kb", "hosttmp_kb", "host_rss_kb"):
     if not any(name in r for r in rows):
         continue
     vals = col(name)
@@ -237,25 +267,20 @@ PY
       line="$(sample_line)"
       [ "$QUIET" -eq 1 ] || echo "$line"
       [ -n "$OUT" ] && echo "$line" >>"$OUT"
-      # Disk guard. Measuring the ENOSPC failure is the point, but letting the
-      # volume actually reach zero wedges the simulator and the host, so stop
-      # the run while there is still headroom and report the trip.
-      if [ -n "$GUARD_PID" ] && [ "$GUARD_FREE_MIB" -gt 0 ] && [ "$GUARD_TRIPPED" -eq 0 ]; then
-        fkb="$(free_kb)"
-        if [ -n "$fkb" ] && [ "$fkb" -lt $(( GUARD_FREE_MIB * 1024 )) ]; then
-          echo "# scratch-sampler: GUARD TRIPPED at $(( fkb / 1024 )) MiB free — SIGINT to pid $GUARD_PID" >&2
-          [ -n "$OUT" ] && echo "# GUARD TRIPPED at $(( fkb / 1024 )) MiB free" >>"$OUT"
-          kill -INT "$GUARD_PID" 2>/dev/null
-          sleep 10
-          kill -TERM "$GUARD_PID" 2>/dev/null
-          GUARD_TRIPPED=1
-        fi
-      fi
       if [ "$DURATION" -gt 0 ]; then
         now="$(date +%s)"
         [ $(( now - T0 )) -ge "$DURATION" ] && break
       fi
-      sleep "$INTERVAL"
+      # Sleep in 1s steps and check the disk guard on every one. MEASURED
+      # 2026-08-02: free space fell from 1.72 GiB to 0.15 GiB inside a single
+      # 10s sample period, so a guard evaluated once per sample fires far too
+      # late to protect the volume.
+      guard_slept=0
+      while [ "$guard_slept" -lt "$INTERVAL" ]; do
+        guard_check
+        sleep 1
+        guard_slept=$(( guard_slept + 1 ))
+      done
     done
     ;;
 esac
