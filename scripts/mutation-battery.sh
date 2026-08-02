@@ -2598,7 +2598,16 @@ MUTATIONS=(
 
   # The ledger never persists. Per-detector state exists in memory for one
   # transaction and is gone — indistinguishable from working, for one call.
-  "I08|187|DETLED|$T_GARD_ROUNDTRIP;$T_GARD_DEMOTION_HAPPENS;$T_GARD_DOOR_OPENS"
+  #
+  # EXPECTATION CORRECTED after the first I run, which is what established what
+  # this mutation can actually reach. It originally named the demotion and the
+  # escape; both SURVIVE it, and correctly so. With no persisted ledger every
+  # class re-seeds from the LEGACY triple on each read, and the legacy triple
+  # demotes and escapes on exactly the same thresholds — so a single-detector
+  # story still reads right. What the mutation cannot fake is anything that
+  # requires the ledger to hold state the scalar does not: a round-trip, blame
+  # that is NOT shared, and the per-class weights after one gesture.
+  "I08|187|DETLED|$T_GARD_ROUNDTRIP;$T_GARD_BLAME_NOT_SHARED;$T_GARD_LEGACY_ONCE"
 
   # THE NEGATIVE the bead's third acceptance exists for: per-detector trust
   # that never demotes anything. Every positive rail stays green.
