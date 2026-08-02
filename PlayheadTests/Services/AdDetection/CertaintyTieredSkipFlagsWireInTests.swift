@@ -14,16 +14,19 @@
 // at the real `runBackfill` construction site (the ONLY production path to the
 // gate; `runBackfill` previously built a bare `FusionWeightConfig()`):
 //   (a) Config default / init plumbing — the three flags default to
-//       false / 0.9 / 90.0 in `AdDetectionConfig.default` AND when omitted from
+//       true / 0.9 / 90.0 in `AdDetectionConfig.default` AND when omitted from
 //       the init, and the init stores each verbatim (one-at-a-time probes so a
-//       swapped assignment cannot slip through).
-//   (c) Default-OFF byte-identity at the decision seam — running `runBackfill`
+//       swapped assignment cannot slip through). playhead-nqey flipped the
+//       master switch from false to true; the floor and guard values are
+//       unchanged.
+//   (c) Default byte-identity at the decision seam — running `runBackfill`
 //       on a gate-SENSITIVE fixture (a lexical ad that decodes to an eligible,
 //       non-rediff, host-read span the gate WOULD demote) with the config left
 //       at its default vs the three flags explicitly at their default values
-//       produces byte-identical persisted AdWindow rows (default == explicit-
-//       false; the OFF gate never fires). Non-vacuous because the SAME fixture
-//       demotes under the flag-ON arms in (d).
+//       produces byte-identical persisted AdWindow rows (omitted == explicit-
+//       default). Non-vacuity comes from a third, explicitly-OFF arm that must
+//       leave the fixture eligible — since nqey the DEFAULT arm may itself
+//       demote, so the default arm can no longer serve as its own anchor.
 //   (d) Flag-ON threading — each of the three fields, flipped in CONFIG (not at
 //       the `FusionWeightConfig` call site), observably changes `runBackfill`
 //       output at the persisted-gate seam. Four arms on one fixture, robust to
@@ -124,9 +127,9 @@ struct CertaintyTieredSkipFlagsWireInTests {
     }
 
     /// Base config with the three WRAJ flags OMITTED — proves "no config change"
-    /// carries the production-OFF state for them. `fmBackfillMode: .off` keeps
-    /// the pipeline deterministic (no FoundationModels dependence in the
-    /// harness).
+    /// carries the production state for them, which since playhead-nqey is ON /
+    /// 0.9 / 90.0. `fmBackfillMode: .off` keeps the pipeline deterministic (no
+    /// FoundationModels dependence in the harness).
     ///
     /// playhead-2350 caveat: this is no longer the *whole* default config — it
     /// pins `unanchoredExtentBlocksAutoSkip: false` against that flag's shipped
@@ -199,11 +202,16 @@ struct CertaintyTieredSkipFlagsWireInTests {
 
     // MARK: - (a) Config defaults + init threading
 
-    @Test("AdDetectionConfig.default ships the certainty-tiered gate OFF at the calibrated floor + guard")
-    func configDefaultsAreOff() {
+    @Test("AdDetectionConfig.default ships the certainty-tiered gate ON at the calibrated floor + guard")
+    func configDefaultsAreOn() {
         let config = AdDetectionConfig.default
-        #expect(config.certaintyTieredSkipEnabled == false,
-                "the certainty-tiered auto-skip gate ships OFF — enablement is Dan's Gate-2 decision")
+        // playhead-nqey (2026-08-02): flipped ON. Dan's Gate-2 decision, taken
+        // 2026-08-01 conditional on sik9, which landed as #330. The behavior
+        // this suite pins is unchanged — it is the THREADING that is under test,
+        // and threading is proved by the arms in (d), which set each field
+        // explicitly and are indifferent to what the default happens to be.
+        #expect(config.certaintyTieredSkipEnabled == true,
+                "the certainty-tiered auto-skip gate ships ON since playhead-nqey")
         #expect(config.hostReadConfidenceFloor == 0.9,
                 "T=0.9 themove host-read calibration (2026-07-17)")
         #expect(config.postRollGuardSeconds == 90.0,
@@ -216,7 +224,7 @@ struct CertaintyTieredSkipFlagsWireInTests {
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1"
         )
-        #expect(omitted.certaintyTieredSkipEnabled == false, "init default must match .default (OFF)")
+        #expect(omitted.certaintyTieredSkipEnabled == true, "init default must match .default (ON since nqey)")
         #expect(omitted.hostReadConfidenceFloor == 0.9, "init default must match .default (0.9)")
         #expect(omitted.postRollGuardSeconds == 90.0, "init default must match .default (90.0)")
     }
@@ -226,21 +234,25 @@ struct CertaintyTieredSkipFlagsWireInTests {
         // One field at a time, distinct non-default sentinels, so a swapped
         // assignment in the init cannot pass (each probe pins its own field to
         // a unique value AND asserts the other two stayed at their defaults).
-        let enabledOn = AdDetectionConfig(
+        // playhead-nqey: the master-switch probe now goes the OTHER way (the
+        // shipped default is ON, so `false` is the non-default sentinel). The
+        // property is unchanged: one field set, the other two must stay at their
+        // defaults.
+        let enabledOff = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1",
-            certaintyTieredSkipEnabled: true
+            certaintyTieredSkipEnabled: false
         )
-        #expect(enabledOn.certaintyTieredSkipEnabled == true)
-        #expect(enabledOn.hostReadConfidenceFloor == 0.9)
-        #expect(enabledOn.postRollGuardSeconds == 90.0)
+        #expect(enabledOff.certaintyTieredSkipEnabled == false)
+        #expect(enabledOff.hostReadConfidenceFloor == 0.9)
+        #expect(enabledOff.postRollGuardSeconds == 90.0)
 
         let customFloor = AdDetectionConfig(
             candidateThreshold: 0.40, confirmationThreshold: 0.70, suppressionThreshold: 0.25,
             hotPathLookahead: 90.0, detectorVersion: "test-v1",
             hostReadConfidenceFloor: 0.42
         )
-        #expect(customFloor.certaintyTieredSkipEnabled == false)
+        #expect(customFloor.certaintyTieredSkipEnabled == true)
         #expect(customFloor.hostReadConfidenceFloor == 0.42)
         #expect(customFloor.postRollGuardSeconds == 90.0)
 
@@ -249,25 +261,41 @@ struct CertaintyTieredSkipFlagsWireInTests {
             hotPathLookahead: 90.0, detectorVersion: "test-v1",
             postRollGuardSeconds: 123.5
         )
-        #expect(customGuard.certaintyTieredSkipEnabled == false)
+        #expect(customGuard.certaintyTieredSkipEnabled == true)
         #expect(customGuard.hostReadConfidenceFloor == 0.9)
         #expect(customGuard.postRollGuardSeconds == 123.5)
     }
 
     // MARK: - (c) Default-OFF byte-identity at the decision seam
 
-    @Test("Omitted wraj flags: runBackfill is byte-identical to explicit-default (false/0.9/90.0) flags")
+    @Test("Omitted wraj flags: runBackfill is byte-identical to explicit-default (true/0.9/90.0) flags")
     func defaultConfigMatchesExplicitDefaults() async throws {
         let assetId = "asset-wraj-byteid"
         let storeDefault = try await makeSeededStore(assetId: assetId)
         let storeExplicit = try await makeSeededStore(assetId: assetId)
+        let storeOffAnchor = try await makeSeededStore(assetId: assetId)
 
         let chunks = makeAdSignalChunks(assetId: assetId)
         try await makeService(store: storeDefault, config: makeBaseConfig()).runBackfill(
             chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
         )
+        // playhead-nqey: the explicit arm now spells out the SHIPPED default
+        // (true/0.9/90.0). The property under test is unchanged — "omitting the
+        // wraj trio equals passing their defaults" — only the defaults moved.
         try await makeService(
             store: storeExplicit,
+            config: makeTieredConfig(enabled: true, floor: 0.9, guardSeconds: 90.0)
+        ).runBackfill(
+            chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
+        )
+        // Non-vacuity anchor, run with the switch explicitly OFF. Before nqey
+        // this could be read straight off the default arm; now that the default
+        // may itself demote the fixture, the anchor has to come from a run where
+        // the gate provably did not fire. What it proves is unchanged: the
+        // fixture is gate-SENSITIVE, so (c)'s equality is not the trivial
+        // equality of two empty eligible sets and (d) has something to demote.
+        try await makeService(
+            store: storeOffAnchor,
             config: makeTieredConfig(enabled: false, floor: 0.9, guardSeconds: 90.0)
         ).runBackfill(
             chunks: chunks, analysisAssetId: assetId, podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
@@ -275,14 +303,11 @@ struct CertaintyTieredSkipFlagsWireInTests {
 
         let windowsDefault = try await fetchWindows(storeDefault, assetId: assetId)
         let windowsExplicit = try await fetchWindows(storeExplicit, assetId: assetId)
+        let windowsOffAnchor = try await fetchWindows(storeOffAnchor, assetId: assetId)
 
         try #require(!windowsDefault.isEmpty, "fixture must produce a window so the byte-identity sweep is meaningful")
-        // Non-vacuity anchor: the fixture must produce a gate-SENSITIVE window
-        // (an eligible, non-rediff span the flag-ON arms in (d) demote). If this
-        // ever regresses to zero eligible windows, (c) would be trivially equal
-        // and (d) would have nothing to demote — this require catches that.
-        try #require(!eligibleStarts(windowsDefault).isEmpty,
-                     "fixture must yield an eligible non-rediff window — the byte-identity sweep is only meaningful on a span the gate WOULD demote")
+        try #require(!eligibleStarts(windowsOffAnchor).isEmpty,
+                     "fixture must yield an eligible non-rediff window with the gate OFF — the byte-identity sweep is only meaningful on a span the gate WOULD demote")
 
         #expect(
             windowsDefault.count == windowsExplicit.count,
@@ -319,7 +344,9 @@ struct CertaintyTieredSkipFlagsWireInTests {
 
         // OFF: master switch off — the gate never fires; the eligible span
         // survives. This is the baseline eligible set the demotions shrink.
-        try await makeService(store: storeOff, config: makeBaseConfig()).runBackfill(
+        // playhead-nqey: stated EXPLICITLY rather than taken from the omitted
+        // default, which now ships ON.
+        try await makeService(store: storeOff, config: makeTieredConfig(enabled: false, floor: 0.9, guardSeconds: 90.0)).runBackfill(
             chunks: makeAdSignalChunks(assetId: idOff), analysisAssetId: idOff,
             podcastId: Self.podcastId, episodeDuration: Self.episodeDuration
         )
