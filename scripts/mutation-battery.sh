@@ -29,6 +29,31 @@
 # exception: if the source moved on and the mutation no longer reproduces the
 # defect it describes, rewrite the EDIT — never the expectation.)
 #
+# K2 SERIES STATUS — playhead-mptr, 2026-08-02
+#   The artifact-backed shard ORDERING (unread audio before audio we already
+#   hold). 10 entries K201-K210, 4 batches (200-203).
+#   FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 5 builds — batches 200, 201, 202,
+#   203, then K206 alone after its expectation string was corrected.
+#
+#   TWO THINGS THAT COST A BUILD EACH, WORTH KNOWING BEFORE ADDING A SERIES:
+#
+#   1. The 4th field is the EXACT `@Test` display name, matched verbatim against
+#      the observed failures — it is not a prose description. Every K2 entry
+#      first came back `expected test never ran` while the mutation had in fact
+#      killed its test perfectly. Check the name with `grep '@Test("'`, and note
+#      the field is SPLIT ON ';', so a test whose name contains a semicolon can
+#      never be matched (one K2 test was renamed for exactly this).
+#
+#   2. `--dry-run` DOES NOT RELIABLY RESTORE. Running batches 200-203 back to
+#      back in one shell loop left six mutations live on disk while every batch
+#      printed "the tree was restored"; batch 203 then reported phantom "anchor
+#      drift" because it was patching an already-mutated file. Real runs leave
+#      the tree dirty too. Nothing reached HEAD only because commits staged
+#      EXPLICIT PATHS — which is the same discipline the `git add -A` warning at
+#      the top of this file demands, and this is the second mechanism that makes
+#      it necessary. ALWAYS `git checkout -- .` and re-check `git status` between
+#      invocations, and never trust the restore message alone.
+#
 # THE R SERIES LIVES ELSEWHERE (playhead-voez)
 # --------------------------------------------
 # The rails for the gate baseline — `scripts/gate_baseline.py` and the baseline
