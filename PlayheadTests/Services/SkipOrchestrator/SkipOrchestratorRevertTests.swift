@@ -5167,6 +5167,27 @@ struct SkipOrchestratorRevertTests {
             !(await orchestrator.activeWindowIDs()).contains(admitted.id),
             "a same-ID geometry change has no reusable inventory admission"
         )
+        // playhead-le02: the two assertions above are both blind to the suggest
+        // tier — a rejected span routed there pushes no cue and joins no
+        // managed set, and since playhead-d3g0 it emits nothing until the
+        // playhead enters it. So "not auto-skipped" was the whole claim, and
+        // "not surfaced at all" was never checked. The census names the cause;
+        // the suggest-tier snapshot catches an arming that stamped nothing.
+        #expect(
+            !(await orchestrator.activeSuggestWindowIDs()).contains(admitted.id),
+            "an inventory-rejected replacement must reach NO tier — armed in the suggest tier it banners on playhead entry"
+        )
+        let ingest = await orchestrator.lastAdWindowIngestOutcome(
+            forWindowId: admitted.id
+        )
+        #expect(
+            ingest?.outcome == .droppedInventorySanity,
+            "census must attribute the drop to the inventory filter; got \(String(describing: ingest?.outcome))"
+        )
+        #expect(
+            ingest?.detail == InventorySanityRejectionReason.tooEarly.rawValue,
+            "the replacement lies wholly inside the head margin; got \(String(describing: ingest?.detail))"
+        )
     }
 
     @Test("same-ID decision with changed bounds must pass inventory validation")
@@ -5235,6 +5256,15 @@ struct SkipOrchestratorRevertTests {
         #expect(
             !(await orchestrator.activeWindowIDs()).contains(admitted.id),
             "decision envelopes must not reuse inventory admission across geometry revisions"
+        )
+        // playhead-le02: the AdWindow twin above gets a census row; this door
+        // does not (isp5 instruments `receiveAdWindows`), and it has its own
+        // `registerSuggestedWindow` branch. The suggest-tier snapshot is
+        // therefore the only witness available here, and without it the
+        // symmetry this test exists to hold was only half-asserted.
+        #expect(
+            !(await orchestrator.activeSuggestWindowIDs()).contains(admitted.id),
+            "an inventory-rejected decision revision must reach NO tier, not the suggest tier"
         )
     }
 

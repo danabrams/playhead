@@ -257,6 +257,28 @@ struct SkipOrchestratorMidSessionIngestTests {
         #expect(delivered == 0, "the minted asset is not the one playing")
         #expect(await orchestrator.activeWindowIDs().isEmpty)
         #expect(pushedCues.isEmpty)
+        // playhead-le02: none of the three assertions above can see the suggest
+        // tier. A row armed there joins no managed set and pushes no cue, and
+        // since playhead-d3g0 it emits nothing until the playhead enters its
+        // span — so a foreign-asset row that leaked into the suggest tier would
+        // leave this test green and banner over the episode the user IS playing.
+        #expect(
+            await orchestrator.activeSuggestWindowIDs().isEmpty,
+            "a foreign asset's row must reach NO tier of the live session"
+        )
+        // The positive witness: the door refused, and refused FOR THIS REASON.
+        //
+        // An absolute count is right HERE and a delta is right in
+        // `revertedRowsAreNotIngested`, which is not an inconsistency: these
+        // counters are process-wide, and the `beginEpisode` above records
+        // `doorDroppedNoAdmissibleRows`, a DIFFERENT outcome. So exactly one
+        // `doorDroppedNotPlaying` can occur in this test and the absolute form
+        // is the stronger claim. Where the same outcome can fire twice, it is
+        // not — see the note there.
+        #expect(
+            await orchestrator.adWindowIngestOutcomeCount(.doorDroppedNotPlaying) == 1,
+            "the isp5 census must record the asset-identity refusal — this is the outcome the bead was filed to be able to rule out"
+        )
         // The marks are NOT lost — they are on disk for the next launch.
         #expect(try await store.fetchAdWindows(assetId: "asset-2").count == 1)
     }
@@ -276,6 +298,17 @@ struct SkipOrchestratorMidSessionIngestTests {
 
         #expect(delivered == 0, "no beginEpisode ⇒ no live session to deliver to")
         #expect(pushedCues.isEmpty)
+        // playhead-le02: `pushedCues.isEmpty` alone is blind to an arming, and
+        // this test does not even watch the managed set. Both halves of "no
+        // live session received anything" now have a witness.
+        #expect(
+            await orchestrator.activeSuggestWindowIDs().isEmpty,
+            "with no active episode there is no tier for a row to land in, including the suggest tier"
+        )
+        #expect(
+            await orchestrator.adWindowIngestOutcomeCount(.doorDroppedNotPlaying) == 1,
+            "the census must record the door's refusal rather than leaving 'dropped' and 'never fired' indistinguishable"
+        )
     }
 
     /// The admission rule is the PRELOAD's, not a second one written by hand.
@@ -299,6 +332,16 @@ struct SkipOrchestratorMidSessionIngestTests {
             decisionState: AdDecisionState.reverted.rawValue
         )], in: store)
 
+        // playhead-le02: the isp5 counters are PROCESS-WIDE by design — a drop
+        // cause does not become a different fact because a different producer
+        // supplied the row. `beginEpisode` above already ran a cross-launch
+        // preload that found an empty store and recorded the SAME outcome, so
+        // an absolute `== 1` here measures the wrong thing (it was written that
+        // way first, and read 2). The delta across THIS call is what attributes
+        // the refusal to THIS door.
+        let refusalsBefore = await orchestrator
+            .adWindowIngestOutcomeCount(.doorDroppedNoAdmissibleRows)
+
         let delivered = await orchestrator.ingestPersistedAdWindows(
             analysisAssetId: Fx.assetId
         )
@@ -306,6 +349,21 @@ struct SkipOrchestratorMidSessionIngestTests {
         #expect(delivered == 0, "a reverted row is outside the preload's admission set")
         #expect(await orchestrator.activeWindowIDs().isEmpty)
         #expect(pushedCues.isEmpty)
+        // This is the veto-bypass rail, so the suggest tier is exactly where a
+        // bypass would hide. A vetoed row re-surfaced as a suggestion asks the
+        // user the question they already answered — a bypass of the veto, not a
+        // softer form of honouring it — and every assertion above would have
+        // stayed green while it happened.
+        #expect(
+            await orchestrator.activeSuggestWindowIDs().isEmpty,
+            "a user-vetoed row must not be resurrected into the suggest tier either"
+        )
+        let refusalsAfter = await orchestrator
+            .adWindowIngestOutcomeCount(.doorDroppedNoAdmissibleRows)
+        #expect(
+            refusalsAfter == refusalsBefore + 1,
+            "the door must record that it READ the vetoed row and refused it — 'the admission rule took every row' is the news here, and it is different from 'the store had nothing'"
+        )
     }
 
     /// playhead-ynmk / qs0d, through the new door: a 9s6q segment-recovered

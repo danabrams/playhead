@@ -707,6 +707,61 @@ struct LightweightInventoryChecksSettingsTests {
 @Suite("SkipOrchestrator + InventorySanityFilter integration (playhead-xr3t)")
 struct SkipOrchestratorInventoryFilterIntegrationTests {
 
+    /// playhead-le02: the positive witness every rejection rail in this suite
+    /// needs, and did not have.
+    ///
+    /// `#expect(!active.contains(id))` — what these tests asserted alone — is a
+    /// statement about the MANAGED set, and a span routed to the suggest tier
+    /// is not in the managed set. Nor is it confirmed, nor does it push a cue,
+    /// nor (since playhead-d3g0 deferred emission to playhead entry) does it
+    /// emit a banner inside a test that never moves the playhead. So every
+    /// assertion this suite made stayed green while the span armed a banner
+    /// that fires in the field the moment playback reaches it. That is the A11
+    /// survivor from playhead-avbn, reproduced on eight more rails.
+    ///
+    /// Two claims, because they fail for different reasons and one alone is
+    /// weaker than it looks:
+    ///
+    ///   * `activeSuggestWindowIDs()` reads the REAL collection the suggest
+    ///     tier lands in, so it catches an arming however it was reached —
+    ///     including one that forgot to stamp a census row.
+    ///   * the isp5 census names the terminal disposition AND its cause, so
+    ///     "dropped by the inventory filter for THIS reason" stops being the
+    ///     same observation as "absent for any reason at all". Without it a
+    ///     mutant that drops the span for the WRONG reason still passes.
+    ///
+    /// Deliberately NOT asserted here: anything that fires on every delivery.
+    /// A witness that is always true is exactly as useless as one that is never
+    /// checked — see the `retired=` asymmetry in `AdWindowIngestOutcome`'s
+    /// header for the same rule stated about the census row itself.
+    private func expectRejectedByInventoryFilter(
+        _ orchestrator: SkipOrchestrator,
+        windowId: String,
+        reason: InventorySanityRejectionReason,
+        outcome: AdWindowIngestOutcome = .droppedInventorySanity,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async {
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        #expect(
+            !suggested.contains(windowId),
+            "\(windowId): a filtered span must reach NO tier — it is armed in the suggest tier, which banners on playhead entry (playhead-d3g0/le02)",
+            sourceLocation: sourceLocation
+        )
+        let ingest = await orchestrator.lastAdWindowIngestOutcome(
+            forWindowId: windowId
+        )
+        #expect(
+            ingest?.outcome == outcome,
+            "\(windowId): census must record `\(outcome.rawValue)`; got \(String(describing: ingest?.outcome))",
+            sourceLocation: sourceLocation
+        )
+        #expect(
+            ingest?.detail == reason.rawValue,
+            "\(windowId): census must name `\(reason.rawValue)` — the four rejection reasons are four unrelated defects; got \(String(describing: ingest?.detail))",
+            sourceLocation: sourceLocation
+        )
+    }
+
     /// Build an orchestrator with the filter forced ON, asset row
     /// carrying a known duration.
     private func makeOrchestrator(
@@ -764,6 +819,9 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
 
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-too-short"))
+        await expectRejectedByInventoryFilter(
+            orchestrator, windowId: "ad-too-short", reason: .tooShort
+        )
     }
 
     @Test("Span lying inside the first 3 s is filtered out")
@@ -785,6 +843,9 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
 
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-too-early"))
+        await expectRejectedByInventoryFilter(
+            orchestrator, windowId: "ad-too-early", reason: .tooEarly
+        )
     }
 
     /// The half of the defect that no xr3t test could see. The suite's
@@ -808,6 +869,9 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
 
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-too-late"))
+        await expectRejectedByInventoryFilter(
+            orchestrator, windowId: "ad-too-late", reason: .tooLate
+        )
     }
 
     @Test("A post-roll ending at the episode end reaches the active set")
@@ -864,6 +928,11 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
 
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-overlaps-chapter"))
+        await expectRejectedByInventoryFilter(
+            orchestrator,
+            windowId: "ad-overlaps-chapter",
+            reason: .overlapsDeclaredChapter
+        )
     }
 
     @Test("Inferred chapters are filtered out of the orchestrator's declared list")
@@ -974,6 +1043,18 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("fusion-short"))
         #expect(active.contains("fusion-good"))
+
+        // playhead-le02: the AdDecisionResult path has its OWN
+        // `registerSuggestedWindow` branch (the catalog-provenance fail-closed
+        // one), so "not managed" and "not surfaced" are two different facts
+        // here too. It writes no isp5 census row — that instrument is on the
+        // `receiveAdWindows` door — so the suggest-tier collection is the whole
+        // witness available on this path, and it is the one that matters.
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        #expect(
+            !suggested.contains("fusion-short"),
+            "a filter-rejected fusion result must reach NO tier, not the suggest tier"
+        )
     }
 
     @Test("Chapters arriving AFTER preloaded spans retroactively reject overlapping windows")
@@ -1009,6 +1090,17 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
 
         active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-stale-from-prior-run"))
+        // playhead-le02 / 9v09: a RETROACTIVE retirement overwrites the
+        // delivery's stamp, so the census reads `retiredReapplyInventoryFilter`
+        // here rather than the `droppedInventorySanity` of the hot path. The
+        // distinction is the point: this span WAS admitted and was then taken
+        // back, and a mutant that merely never admitted it is a different bug.
+        await expectRejectedByInventoryFilter(
+            orchestrator,
+            windowId: "ad-stale-from-prior-run",
+            reason: .overlapsDeclaredChapter,
+            outcome: .retiredReapplyInventoryFilter
+        )
     }
 
     @Test("Retro re-evaluation retires .applied windows ONLY when playhead has not reached them yet")
@@ -1119,6 +1211,11 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
 
         let active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-in-synthesized-interval"))
+        await expectRejectedByInventoryFilter(
+            orchestrator,
+            windowId: "ad-in-synthesized-interval",
+            reason: .overlapsDeclaredChapter
+        )
     }
 
     @Test("Episode duration arriving mid-episode retroactively retires late-edge spans")
@@ -1147,6 +1244,12 @@ struct SkipOrchestratorInventoryFilterIntegrationTests {
         await orchestrator.setEpisodeDuration(600, analysisAssetId: "asset-xr3t")
         active = await orchestrator.activeWindowIDs()
         #expect(!active.contains("ad-late-arriving-tail"))
+        await expectRejectedByInventoryFilter(
+            orchestrator,
+            windowId: "ad-late-arriving-tail",
+            reason: .tooLate,
+            outcome: .retiredReapplyInventoryFilter
+        )
     }
 
     @Test("Flag-OFF orchestrator preserves all windows on retroactive update (no-op invariant)")
