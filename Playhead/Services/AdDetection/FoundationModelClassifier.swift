@@ -1565,10 +1565,33 @@ struct FoundationModelClassifier: Sendable {
     }
 
     /// Internal test hook so unit tests can observe coarse-pass window submit /
-    /// error diagnostics without scraping `os.Logger`. Mirrors
-    /// `refinementDecodeFailureObserver`. Production builds leave it nil;
-    /// invoking it is a no-op.
-    nonisolated(unsafe) static var coarsePassDiagnosticObserver: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
+    /// error diagnostics without scraping `os.Logger`. Production builds never
+    /// bind it, so reading it yields nil and invoking it is a no-op.
+    ///
+    /// playhead-5n8k: this is a `@TaskLocal`, NOT a `nonisolated(unsafe) static
+    /// var`. As a process-global it was silently shared: under Swift Testing's
+    /// in-process parallelism any *other* test running a coarse pass emitted
+    /// into whichever capture box happened to be installed, so a test asserting
+    /// on `submits.first` described whichever window won the race. That
+    /// presented as a FAST (~0.1s) failure carrying coordinates the test's own
+    /// fixture could not produce — exactly the shape gate triage reserves for
+    /// real regressions, so it cost a triage round every time it appeared.
+    ///
+    /// A task-local makes the collision impossible by construction rather than
+    /// merely unlikely: the binding is scoped to the installing task's tree, so
+    /// a concurrent coarse pass in another task reads its own binding (nil, in
+    /// practice) and cannot reach a box it does not own. Bind it with
+    /// `FoundationModelClassifier.$coarsePassDiagnosticObserver.withValue(_:operation:)`;
+    /// there is deliberately no setter, so a future "just assign it" cannot
+    /// reintroduce the global.
+    ///
+    /// The one thing this costs: a diagnostic emitted from a `Task.detached`
+    /// (which does not inherit task-locals) would not reach the observer. Every
+    /// coarse-pass emit site is a synchronous call inside the caller's own task
+    /// tree, and `CoarsePassDiagnosticTaskScopingTests` pins that with a
+    /// positive witness, so a future detach shows up as a failing test rather
+    /// than as diagnostics that quietly stop arriving.
+    @TaskLocal static var coarsePassDiagnosticObserver: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
 
     /// Static identifier for the refinement @Generable schema. Used by the
     /// diagnostic payload so future schema rotations are visible in logs.

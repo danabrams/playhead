@@ -8,11 +8,19 @@ import FoundationModels
 #endif
 
 // Cycle 2 Agent A: pin this suite to serial execution so the
-// shared static `coarsePassDiagnosticObserver` /
-// `refinementRefusalDiagnosticObserver` test hooks cannot race
-// across parallel test runs. Adding the new Cycle2FixesTests suite
+// shared static `refinementRefusalDiagnosticObserver` test hook cannot
+// race across parallel test runs. Adding the new Cycle2FixesTests suite
 // shifted Swift Testing's parallel scheduling enough to surface a
 // pre-existing race that was masked by the previous test count.
+//
+// playhead-5n8k: `.serialized` was never sufficient for
+// `coarsePassDiagnosticObserver`, and that is why it is no longer a
+// shared static. `.serialized` orders the tests INSIDE this suite; it
+// says nothing about the dozens of OTHER suites that run a coarse pass
+// concurrently and install no observer of their own. Their windows
+// landed in whichever box this suite had installed. That hook is now a
+// `@TaskLocal` bound via `withCoarsePassDiagnostics(capturing:_:)`, so
+// its scope is the calling task's tree rather than the process.
 @Suite("Foundation Model Classifier — Pass A/B", .serialized)
 struct FoundationModelClassifierTests {
 
@@ -1762,15 +1770,14 @@ struct FoundationModelClassifierTests {
         let classifier = FoundationModelClassifier(runtime: recorder.runtime)
 
         let captured = CoarsePassDiagnosticCaptureBox()
-        let previousObserver = FoundationModelClassifier.coarsePassDiagnosticObserver
-        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
-            captured.append(diagnostic)
+        // playhead-5n8k: the observer is task-local, so this binding reaches
+        // only the coarse pass run inside it. The failure this replaced was a
+        // FAST one — `firstSubmit.lastSegmentIndex == 29` against a fixture
+        // whose window is segments 0–5 — i.e. another suite's window arriving
+        // in this box.
+        let output = try await withCoarsePassDiagnostics(capturing: captured) {
+            try await classifier.coarsePassA(segments: segments)
         }
-        defer {
-            FoundationModelClassifier.coarsePassDiagnosticObserver = previousObserver
-        }
-
-        let output = try await classifier.coarsePassA(segments: segments)
         // The fixture builds exactly one window and it is guardrailed, so the
         // whole pass has nothing to report but that guardrail. playhead-qbib
         // added the per-window record underneath: the guardrail is now a
@@ -3672,10 +3679,6 @@ struct FoundationModelClassifierTests {
     @Test("coarse pass smart shrink iterates up to three retries")
     func coarsePassSmartShrinkIteratesUpToThreeRetries() async throws {
         let captureBox = CoarsePassDiagnosticCaptureBox()
-        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
-            captureBox.append(diagnostic)
-        }
-        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
 
         // 16 segments collapsed into a single planner window so the
         // smart-shrink loop has plenty of room to iterate. Each call
@@ -3716,7 +3719,9 @@ struct FoundationModelClassifierTests {
             config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6)
         )
 
-        let output = try await classifier.coarsePassA(segments: segments)
+        let output = try await withCoarsePassDiagnostics(capturing: captureBox) {
+            try await classifier.coarsePassA(segments: segments)
+        }
         let snapshot = await recorder.snapshot()
 
         #expect(output.status == .success)
@@ -3745,10 +3750,6 @@ struct FoundationModelClassifierTests {
     @Test("coarse pass smart shrink abandons after three retries")
     func coarsePassSmartShrinkAbandonsAfterThreeRetries() async throws {
         let captureBox = CoarsePassDiagnosticCaptureBox()
-        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
-            captureBox.append(diagnostic)
-        }
-        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
 
         let segments = (0..<8).map { idx in
             makeSegment(
@@ -3783,7 +3784,9 @@ struct FoundationModelClassifierTests {
             config: .init(safetyMarginTokens: 4, maximumResponseTokens: 6)
         )
 
-        let output = try await classifier.coarsePassA(segments: segments)
+        let output = try await withCoarsePassDiagnostics(capturing: captureBox) {
+            try await classifier.coarsePassA(segments: segments)
+        }
         let snapshot = await recorder.snapshot()
 
         // 1 initial + 3 retries = 4 respond calls.
@@ -4562,10 +4565,6 @@ struct FoundationModelClassifierTests {
     @Test("coarse pass continues after a single window refusal")
     func coarsePassContinuesAfterSingleWindowRefusal() async throws {
         let captureBox = CoarsePassDiagnosticCaptureBox()
-        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
-            captureBox.append(diagnostic)
-        }
-        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
 
         let segments = [
             makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text."),
@@ -4596,7 +4595,9 @@ struct FoundationModelClassifierTests {
             config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
         )
 
-        let output = try await classifier.coarsePassA(segments: segments)
+        let output = try await withCoarsePassDiagnostics(capturing: captureBox) {
+            try await classifier.coarsePassA(segments: segments)
+        }
         let snapshot = await recorder.snapshot()
 
         // Planner must emit 3 one-segment windows.
@@ -4692,10 +4693,6 @@ struct FoundationModelClassifierTests {
     @Test("coarse pass continues after multiple window refusals")
     func coarsePassContinuesAfterMultipleWindowRefusals() async throws {
         let captureBox = CoarsePassDiagnosticCaptureBox()
-        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
-            captureBox.append(diagnostic)
-        }
-        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
 
         let segments = (0..<6).map { idx in
             makeSegment(
@@ -4731,7 +4728,9 @@ struct FoundationModelClassifierTests {
             config: .init(safetyMarginTokens: 5, maximumResponseTokens: 6)
         )
 
-        let output = try await classifier.coarsePassA(segments: segments)
+        let output = try await withCoarsePassDiagnostics(capturing: captureBox) {
+            try await classifier.coarsePassA(segments: segments)
+        }
 
         let plans = try await classifier.planPassA(segments: segments)
         #expect(plans.count == 6)
@@ -4828,10 +4827,6 @@ struct FoundationModelClassifierTests {
     @Test("refusal diagnostic emits recordReflect field populated with reflection dump")
     func refusalDiagnosticEmitsRecordReflectField() async throws {
         let captureBox = CoarsePassDiagnosticCaptureBox()
-        FoundationModelClassifier.coarsePassDiagnosticObserver = { diagnostic in
-            captureBox.append(diagnostic)
-        }
-        defer { FoundationModelClassifier.coarsePassDiagnosticObserver = nil }
 
         let segments = [
             makeSegment(index: 0, startTime: 0, endTime: 5, text: "Window zero text.")
@@ -4847,7 +4842,9 @@ struct FoundationModelClassifierTests {
         )
         let classifier = FoundationModelClassifier(runtime: recorder.runtime)
 
-        _ = try await classifier.coarsePassA(segments: segments)
+        _ = try await withCoarsePassDiagnostics(capturing: captureBox) {
+            try await classifier.coarsePassA(segments: segments)
+        }
 
         let refusalDetails = captureBox.snapshot()
             .filter { $0.kind == .refusalDetail }
@@ -6404,6 +6401,28 @@ private final class CoarsePassDiagnosticCaptureBox: @unchecked Sendable {
         defer { lock.unlock() }
         return items
     }
+}
+
+/// playhead-5n8k: bind the coarse-pass diagnostic observer to `box` for the
+/// duration of `operation` and no longer, scoped to the CALLING TASK'S TREE.
+///
+/// The observer used to be a `nonisolated(unsafe) static var` that each test
+/// assigned and restored by hand. Under Swift Testing's in-process parallelism
+/// that is a shared mailbox rather than a per-test hook: a coarse pass running
+/// in ANY other suite — none of which install an observer of their own — landed
+/// in whichever box happened to be installed at that instant, so assertions on
+/// `submits.first` described whichever window won the race. Now the binding
+/// travels with the task, so a concurrent pass elsewhere reads its own (nil)
+/// binding and cannot reach `box`. `CoarsePassDiagnosticTaskScopingTests` is
+/// the rail that keeps that true.
+private func withCoarsePassDiagnostics<R>(
+    capturing box: CoarsePassDiagnosticCaptureBox,
+    _ operation: () async throws -> R
+) async rethrows -> R {
+    try await FoundationModelClassifier.$coarsePassDiagnosticObserver.withValue(
+        { diagnostic in box.append(diagnostic) },
+        operation: operation
+    )
 }
 
 /// bd-3h2 / bd-34e refinement: aggregates refinement-pass refusal
