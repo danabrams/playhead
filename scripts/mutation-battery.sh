@@ -3326,6 +3326,25 @@ MUTATIONS=(
   # compare-and-swap. Every mutation that attacks it therefore patches BOTH
   # sites — a single-site mutation survives on the other's back, which would be
   # a report about redundancy rather than about coverage.
+  #
+  # RUN 2026-08-03: 9 KILLED / 0 SURVIVED / 0 ERROR, one mutation per batch,
+  # baseline green. Kill-set sizes, in order: 8, 1, 5, 3, 1, 5, 1, 5, 2.
+  # Three things worth keeping:
+  #   • "a refused promotion RETAINS the flag" failed under SIX of the nine
+  #     (KN01/03/05/06/07/08), and is the SOLE killer of KN05 and KN07. That is
+  #     the shape you want from a rail guarding a token spent exactly once — and
+  #     it is the only rail that can see those two at all, because the flag is
+  #     private in-memory state whose survival is observable only as the priority
+  #     a LATER enqueue lands at.
+  #   • KN02 has a kill set of ONE: the store-level rail that puts a stale lease
+  #     on a still-`queued` row. That row is the only witness that
+  #     `leaseOwner IS NULL` does work `state = 'queued'` does not — precisely
+  #     the case the bead's own wording ("guard to state='queued'") would have
+  #     left uncovered. It looks like a contrived state and is not: every lease
+  #     expiry produces it.
+  #   • KN01 fails eight rails including the flag one, because a guard that
+  #     refuses nothing also makes every refusal "served". The blast radius is
+  #     the tell that it removed the mechanism rather than bending it.
   "KN01|300|STORE|$T_KANF_LEASED;$T_KANF_RUNNING;$T_KANF_PAUSED;$T_KANF_TERMINAL;$T_KANF_PRODLEASE;$T_KANF_TAP_LEASED;$T_KANF_TAP_RUNNING"
   "KN02|301|STORE|$T_KANF_LEASED"
   "KN03|302|STORE|$T_KANF_RUNNING;$T_KANF_PAUSED;$T_KANF_TERMINAL;$T_KANF_TAP_RUNNING"
@@ -3622,6 +3641,15 @@ describe_mutation() {
     I19) echo "gard: a lookup FAILURE grants the exempt class auto" ;;
     I21) echo "gard: a show with NO profile row gets an empty per-detector map — first listen sends the exempt class to shadow" ;;
     I20) echo "gard: a session override never reaches the per-detector map — the stale episode map governs" ;;
+    KN01) echo "kanf: the promotion guard deleted at BOTH sites — the tap re-ranks a running job" ;;
+    KN02) echo "kanf: 'state is enough' — the lease half of the guard dropped at both sites" ;;
+    KN03) echo "kanf: the mirror image — the state half dropped, so paused/terminal/crashed rows promote" ;;
+    KN04) echo "kanf: already-at-the-floor collapses into refused, so the one-shot flag is never spent" ;;
+    KN05) echo "kanf: a refusal is reported as served — the flag is burned on a leased row" ;;
+    KN06) echo "kanf: THE defect restored — skip the promotion and call the intent served" ;;
+    KN07) echo "kanf: the flag is consumed unconditionally again, so a refused tap cannot retry" ;;
+    KN08) echo "kanf: promote to the SOON floor — the row keeps starving in a deferred lane" ;;
+    KN09) echo "kanf: the promotion rotates generationID, breaking the orphan-recovery join" ;;
     *)   echo "(no description)" ;;
   esac
 }
