@@ -90,7 +90,13 @@ struct SegmentAggregatorWiringTests {
             hotPathLookahead: 90.0,
             detectorVersion: "0usd-test",
             fmBackfillMode: .off,
-            autoSkipConfidenceThreshold: 0.80
+            autoSkipConfidenceThreshold: 0.80,
+            // playhead-bllt: the extent block OFF, deliberately — this suite's
+            // `eligibilityGate == "markOnly"` assertions are claims about the
+            // PRECISION gate's verdict on an aggregator segment, and bllt would
+            // make them true by construction. See the same note in
+            // `AutoSkipPrecisionGateIntegrationTests.makeService`.
+            unanchoredExtentBlocksAutoSkip: false
         )
         return AdDetectionService(
             store: store,

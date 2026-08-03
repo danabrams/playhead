@@ -82,7 +82,13 @@ struct Hygc18DogfoodScenarioTests {
             hotPathLookahead: 90.0,
             detectorVersion: "hygc-1.8-dogfood",
             fmBackfillMode: .off,
-            autoSkipConfidenceThreshold: 0.80
+            autoSkipConfidenceThreshold: 0.80,
+            // playhead-bllt: the extent block OFF, deliberately. The
+            // boundary-singleton assertion here ("a slot-only promotion is
+            // markOnly", playhead-9ro7) is a claim about the precision gate;
+            // bllt would satisfy it regardless. See the same note in
+            // `AutoSkipPrecisionGateIntegrationTests.makeService`.
+            unanchoredExtentBlocksAutoSkip: false
         )
         return AdDetectionService(
             store: store,

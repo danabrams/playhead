@@ -126,6 +126,13 @@ enum AdWindowIngestOutcome: String, Sendable, Hashable, CaseIterable {
     /// The window entered the suggest tier and is ARMED — it will banner when
     /// the playhead enters its span (playhead-d3g0). This is the success case
     /// the 2026-08-01 field episode expected and did not get.
+    ///
+    /// playhead-bllt: carries an `unanchored_extent_<edges>` detail when the
+    /// row's per-edge provenance is what kept it out of the managed tier. That
+    /// is the whole hot-path population by construction, so the detail is how a
+    /// device pull tells "demoted for want of a proven edge" from "the score
+    /// was never high enough" — two different reasons a listener got asked
+    /// instead of skipped.
     case armedSuggest = "ingest_armed_suggest"
 
     /// An exact replay of an already-`.applied` producer revision: the durable
@@ -320,9 +327,19 @@ struct AdWindowIngestCensus: Sendable, Hashable {
     /// Terminal disposition counts, keyed by outcome.
     let counts: [AdWindowIngestOutcome: Int]
 
-    /// Free-form sub-cause tallies for the outcomes that carry one — today
-    /// only `droppedInventorySanity`, whose four rejection reasons are four
-    /// unrelated bugs. Keyed `"<outcome rawValue>:<detail>"`.
+    /// Free-form sub-cause tallies for the outcomes that carry one. Keyed
+    /// `"<outcome rawValue>:<detail>"`.
+    ///
+    /// Two carry a detail today:
+    ///   * `droppedInventorySanity`, whose four rejection reasons are four
+    ///     unrelated bugs;
+    ///   * the three suggest-tier outcomes (`armedSuggest`,
+    ///     `suggestReplayNotRearmed`, `droppedAlreadyBannered`), which carry
+    ///     `unanchored_extent_<edges>` when the row's extent is what kept it
+    ///     out of the managed tier (playhead-bllt).
+    ///
+    /// A detail is written only when it discriminates. Neither of these fires
+    /// on every delivery — the same rule as the `retired=` asymmetry above.
     let details: [String: Int]
 
     /// How many forwarded rows reached a tier a listener can eventually see.

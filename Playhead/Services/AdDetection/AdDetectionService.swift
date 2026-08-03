@@ -3936,11 +3936,33 @@ actor AdDetectionService {
                 lexicalCategories: lexicalCategories,
                 podcastId: podcastId
             )
+            // playhead-bllt: the EXTENT half of the verdict, for the hot path.
+            // `precisionGateLabel` answered PRESENCE; this site owns the edges,
+            // and this site invents them — no boundary refiner and no byte
+            // differ ran on the single-window path, so both anchors are
+            // `.unanchored`. That is not a placeholder, it is the honest value,
+            // and `HotPathExtentGate` demotes an `"autoSkip"` verdict over
+            // invented edges to `"markOnly"` exactly as playhead-2350 does for
+            // the fused verdict. ONE variable, persisted AND consulted, so the
+            // label can never disagree with the anchors the row carries.
+            let extentSupport = SpanExtentSupport.unanchored
+            let gatedLabel = HotPathExtentGate.gatedLabel(
+                gateResult.label,
+                extent: extentSupport,
+                blockingUnanchoredAutoSkip: config.unanchoredExtentBlocksAutoSkip
+            )
+            if gatedLabel != gateResult.label {
+                logger.info(
+                    "[bllt] hot-path single-window \(expanded.startTime, format: .fixed(precision: 2))–\(expanded.endTime, format: .fixed(precision: 2)) extent unanchored on \(extentSupport.unanchoredEdges.joined(separator: "+"), privacy: .public) — autoSkip→markOnly (confidence \(result.adProbability, format: .fixed(precision: 2)) unchanged)"
+                )
+            }
             // `.detectionOnly` is represented by a nil label and is a
             // terminal "do not persist" result. Persisting it would erase the
             // precision decision at the AdWindow boundary because legacy nil
-            // gates remain admissible to SkipOrchestrator.
-            guard let eligibilityGate = gateResult.label else { continue }
+            // gates remain admissible to SkipOrchestrator. `gatedLabel`
+            // preserves nil exactly — it never drops a row and never creates
+            // one.
+            guard let eligibilityGate = gatedLabel else { continue }
             adWindows.append(buildAdWindow(
                 from: result,
                 boundaryState: .acousticRefined,
@@ -3952,7 +3974,8 @@ actor AdDetectionService {
                 eligibilityGate: eligibilityGate,
                 catalogMatch: gateResult.catalogMatch,
                 catalogStoreMatchSimilarity:
-                    gateResult.catalogStoreMatchSimilarity
+                    gateResult.catalogStoreMatchSimilarity,
+                extentSupport: extentSupport
             ))
         }
 
@@ -11248,7 +11271,10 @@ actor AdDetectionService {
         // playhead-gtt9.11: each aggregator segment passes through the
         // precision gate before persistence. The gate determines
         // eligibilityGate = "autoSkip" | "markOnly" based on score,
-        // duration, and the safety-signal conjunction. Lexical categories
+        // duration, and the safety-signal conjunction — PRESENCE only.
+        // playhead-bllt then applies the EXTENT half at the emission site
+        // below, which is what stops a promoted segment's invented edges from
+        // reaching the auto-skip tier. Lexical categories
         // for the gate are the union across lexical candidates that
         // overlap the segment span (Tier 1-only segments carry an empty
         // set — this is honest: no lexical evidence exists).
@@ -11270,10 +11296,28 @@ actor AdDetectionService {
                 lexicalCategories: overlappingCategories,
                 podcastId: podcastId
             )
+            // playhead-bllt: the EXTENT half, for the aggregator producer.
+            // A promoted segment's edges are wherever the scoring windows
+            // happened to fall — the aggregator coalesces scores, it never
+            // observes a boundary — so both anchors are `.unanchored`, and an
+            // `"autoSkip"` verdict over them demotes to `"markOnly"` exactly as
+            // a fused verdict does under playhead-2350. Same variable persisted
+            // and consulted; see the single-window site for the full argument.
+            let extentSupport = SpanExtentSupport.unanchored
+            let gatedLabel = HotPathExtentGate.gatedLabel(
+                gateResult.label,
+                extent: extentSupport,
+                blockingUnanchoredAutoSkip: config.unanchoredExtentBlocksAutoSkip
+            )
+            if gatedLabel != gateResult.label {
+                logger.info(
+                    "[bllt] hot-path aggregator \(segment.startTime, format: .fixed(precision: 2))–\(segment.endTime, format: .fixed(precision: 2)) extent unanchored on \(extentSupport.unanchoredEdges.joined(separator: "+"), privacy: .public) — autoSkip→markOnly (segmentScore \(segment.segmentScore, format: .fixed(precision: 2)) unchanged)"
+                )
+            }
             // A nil label means detection-only. Do not turn that fail-closed
             // result into a legacy nil-gated AdWindow at this second producer
             // site.
-            guard let eligibilityGate = gateResult.label else { continue }
+            guard let eligibilityGate = gatedLabel else { continue }
             newWindows.append(
                 AdWindow(
                     id: UUID().uuidString,
@@ -11304,7 +11348,9 @@ actor AdDetectionService {
                     catalogMatchedLearningSource: gateResult.catalogMatch?
                         .entry.learningSource.rawValue,
                     catalogMatchedLearningLifecycle: gateResult.catalogMatch?
-                        .entry.learningLifecycle.rawValue
+                        .entry.learningLifecycle.rawValue,
+                    startEdgeAnchor: extentSupport.startAnchor.rawValue,
+                    endEdgeAnchor: extentSupport.endAnchor.rawValue
                 )
             )
         }
@@ -11911,7 +11957,15 @@ actor AdDetectionService {
     ///   - eligibilityGate: playhead-gtt9.11 precision-gate stamp. "autoSkip"
     ///     admits the window to `SkipOrchestrator.receiveAdWindows` auto-skip
     ///     path; "markOnly" keeps it visible as a UI marker but blocks
-    ///     auto-skip. Nil preserves legacy behavior (no stamp).
+    ///     auto-skip. Nil preserves legacy behavior (no stamp). playhead-bllt:
+    ///     callers must pass the label AFTER `HotPathExtentGate.gatedLabel`,
+    ///     derived from the SAME `extentSupport` they hand this function.
+    ///   - extentSupport: playhead-bllt. The per-edge provenance persisted on
+    ///     the row. Defaults to `.unanchored` — the conservative value, and the
+    ///     one the hot path genuinely has, since nothing on this path proves an
+    ///     edge. It used to be reached by omission (`AdWindow`'s own default);
+    ///     naming it makes it a value the caller can pass to the gate rather
+    ///     than a fact only the persistence layer knew.
     private func buildAdWindow(
         from result: ClassifierResult,
         boundaryState: AdBoundaryState,
@@ -11922,7 +11976,8 @@ actor AdDetectionService {
         expandedEndTime: Double? = nil,
         eligibilityGate: String? = nil,
         catalogMatch: CatalogMatch? = nil,
-        catalogStoreMatchSimilarity: Double? = nil
+        catalogStoreMatchSimilarity: Double? = nil,
+        extentSupport: SpanExtentSupport = .unanchored
     ) -> AdWindow {
         AdWindow(
             id: UUID().uuidString,
@@ -11952,7 +12007,9 @@ actor AdDetectionService {
             catalogMatchedLearningSource:
                 catalogMatch?.entry.learningSource.rawValue,
             catalogMatchedLearningLifecycle:
-                catalogMatch?.entry.learningLifecycle.rawValue
+                catalogMatch?.entry.learningLifecycle.rawValue,
+            startEdgeAnchor: extentSupport.startAnchor.rawValue,
+            endEdgeAnchor: extentSupport.endAnchor.rawValue
         )
     }
 

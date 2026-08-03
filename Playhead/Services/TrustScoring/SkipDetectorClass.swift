@@ -161,12 +161,14 @@ extension AdWindow {
     /// has not been rewritten with yet; this property is the row-only fallback
     /// and the one every non-orchestrator reader uses.
     var detectorClass: SkipDetectorClass {
-        SkipDetectorClass.classify(
+        // playhead-bllt: through the SHARED row decode (`AdWindow
+        // .extentSupport`), not a fourth local re-spelling of it. Behaviour is
+        // unchanged — that property is the same expression this used to inline.
+        let support = extentSupport
+        return SkipDetectorClass.classify(
             boundaryState: boundaryState,
-            startAnchor: AutoSkipEdgeAnchor(rawValue: startEdgeAnchor)
-                ?? .unanchored,
-            endAnchor: AutoSkipEdgeAnchor(rawValue: endEdgeAnchor)
-                ?? .unanchored
+            startAnchor: support.startAnchor,
+            endAnchor: support.endAnchor
         )
     }
 }

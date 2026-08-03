@@ -185,6 +185,34 @@
 #   FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 16 builds. Batches 1-157 and 159
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
+
+#   PARTIAL RE-RUN 2026-08-02 (playhead-bllt). Batches 240-247 only (BL01-BL10,
+#   10 new entries, 8 batches — five of them edit ONE predicate in
+#   `HotPathExtentGate.gatedLabel` and so cannot be batched together at all).
+#   FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 9 builds (1 baseline + 8 batches),
+#   ~18m wall clock across six invocations. Batches 1-239 were NOT re-run and
+#   carry the verdicts above. Recount: the array now holds 312 live entries.
+#
+#   Two operational faults, both recorded because neither is about a mutation:
+#     • The first attempt reported `BL01 ERROR — anchor did not apply`, which
+#       reads like source drift and was not: a MUTABLE_FILES entry is TWO edits,
+#       and `rec_file`'s case had not been given a `HOTGATE)` arm, so `file`
+#       resolved to the empty string. Any new series adding a file will hit this.
+#     • The batch loop ran `git checkout -- .` between invocations and thereby
+#       discarded the UNCOMMITTED `rec_file` fix, making batches 242-247 fail for
+#       a reason unrelated to their anchors. That is the header's own
+#       "commit script edits before --dry-run" trap, hit from the other side:
+#       the restore does not distinguish your script edit from a live mutant.
+#       Restrict the between-batch restore to the SOURCE trees
+#       (`git checkout -- Playhead PlayheadTests`) and the problem disappears.
+#
+#   One thing the run proved that is worth keeping: BL03 inverts the gate's
+#   condition so that ANCHORED rows demote and invented ones auto-skip, and the
+#   whole-domain MONOTONICITY sweep stays green under it — passing an
+#   `"autoSkip"` through is not a rise. It is killed by the EXACT-transition and
+#   anchored-row rails instead. That is the measured argument for why
+#   monotonicity alone is not the safety property, stated in
+#   `HotPathExtentGateMonotonicityTests`' header and now demonstrated.
 #
 #   Three faults found and fixed during the run, recorded because two of them
 #   are traps any new series can hit:
@@ -732,13 +760,26 @@ DETLED="Playhead/Services/TrustScoring/DetectorTrustLedger.swift"
 # the only thing that can put a real value in the columns at all — a battery
 # over the pure types structurally cannot see a seam that never fires.
 SPLIT="Playhead/Services/AdDetection/SemanticScanThroughputSplit.swift"
+# playhead-bllt: THE HOT PATH'S PRESENCE-vs-EXTENT GATE (BL series). Three
+# files, because the claim is a chain and each link fails silently on its own.
+# HOTGATE is the pure rule — one predicate, and every plausible mis-scoping of
+# it (make it inert, invert it, read either edge instead of both, ignore the
+# kill switch, turn the demotion into a drop) compiles and passes a
+# positive-only test set. ADSVC holds the two EMISSION sites, which are the only
+# things that can wire the rule to a persisted row at all: a battery over the
+# pure type structurally cannot see a gate that is computed and then ignored,
+# nor a site that persists an anchor pair it did not gate on. ORCH is where the
+# demotion becomes VISIBLE — the isp5 census sub-cause that separates "demoted
+# for want of a proven edge" from "absent for some reason nobody wrote down",
+# which is the whole difference between this bead and the silence it replaced.
+HOTGATE="Playhead/Services/AdDetection/HotPathExtentGate.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
-  "$DETCLS" "$DETLED" "$SPLIT"
+  "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE"
 )
 
 FOCUSED_SUITES=(
@@ -836,6 +877,16 @@ FOCUSED_SUITES=(
   # K15 reported ERROR ("expected test never ran") rather than KILLED — the
   # script's own named failure mode for a suite missing from this list.
   -only-testing:PlayheadTests/RediffDayZeroTriggerIdempotencyTests
+  # playhead-bllt: the hot path's presence-vs-extent gate (BL series). Two
+  # suites, and BOTH are needed. The monotonicity suite is pure and exhaustive
+  # — it is the only thing that can see a rule that widens somewhere it was not
+  # looked at — but it cannot see whether the rule is WIRED. The integration
+  # suite drives the real `runHotPath` through both producers and reads the
+  # persisted row, which is the only place a computed-then-ignored gate shows
+  # up. Neither alone is sufficient and the battery proves it: BL01 kills both,
+  # BL06/BL07 kill only the integration suite, BL04 kills only the pure one.
+  -only-testing:PlayheadTests/HotPathExtentGateMonotonicityTests
+  -only-testing:PlayheadTests/AutoSkipPrecisionGateIntegrationTests
   # playhead-eks2: the pod-continuation flip (L01-L09). The d3g0/96ot suites
   # above stay in scope deliberately — a continuation window is delivered by
   # `ingestPersistedAdWindows` and presented by the entry gate, so a mutation
@@ -1599,6 +1650,25 @@ T_HX6N_RUNNER_STAMPS="every row the runner persists carries attribution, and the
 T_HX6N_FOREGROUND_RUN="a foreground run lands on the foreground side of the same split"
 T_HX6N_BROKEN_PROVIDER="a provider that breaks the vocabulary yields unattributed rows, not guessed ones"
 T_HX6N_LADDER_RAIL="Cycle 4 H1 RAIL: the isolated ladder does NOT run createTables()"
+
+# playhead-bllt — THE HOT PATH'S UNANCHORED ROWS (BL series). The names divide
+# into (a) the exhaustive monotonicity claims, which are the safety argument and
+# are the only rails that can see a widening in a cell nobody wrote a test for;
+# (b) the two SHIPPING-config integration rails, one per producer, which are the
+# only rails that can see the gate being computed and then not used; and (c) the
+# two PRESENCE rails, which run with the block held OFF and are what proves the
+# kill switch still kills.
+T_BLLT_MONOTONE="no input becomes more admissible — the whole domain, every cell"
+T_BLLT_ONLY_TRANSITION="the ONLY transition is autoSkip → markOnly on an unanchored extent with the block on"
+T_BLLT_COUNT="exactly 5 of the 180 cells change, and every one of them is a demotion"
+T_BLLT_NOT_A_DROP="a non-nil label never becomes nil — the gate never DROPS a row"
+T_BLLT_KILL_SWITCH="the block OFF is a no-op — the kill switch actually kills"
+T_BLLT_DETAIL="the census detail fires only when it discriminates, and names the edges"
+T_BLLT_ANCHORED="an anchored hot-path row keeps its autoSkip verdict — the gate reads the extent, not the producer (playhead-bllt)"
+T_BLLT_SINGLE_SHIPPED="single-window fast path: the same 0.85 + strong-lexical window persists markOnly at the SHIPPING config — its edges are invented (playhead-bllt)"
+T_BLLT_AGG_SHIPPED="hot path: the same slot+lexical segment persists markOnly at the SHIPPING config — its edges are invented (playhead-bllt)"
+T_BLLT_SINGLE_PRESENCE="single-window fast path: 0.85 window with ≥1 safety signal reaches the autoSkip PRESENCE verdict and is auto-skipped (extent block off)"
+T_BLLT_AGG_PRESENCE="hot path: ≥0.55 score in pre-roll WITH a non-slot signal (sponsor/promoCode/URL lexical) reaches the autoSkip PRESENCE verdict (extent block off)"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -2940,6 +3010,29 @@ MUTATIONS=(
   "T12|215|STORE|$T_HX6N_SQL_AGREES"
 
   "T15|216|STORE|$T_HX6N_SQL_AGREES"
+
+  # playhead-bllt — THE HOT PATH'S PRESENCE-vs-EXTENT GATE. Ten entries,
+  # batches 240-247.
+  #
+  # WHAT SETS THE BATCH FLOOR, since it is not the expectation lists. Five of
+  # these mutations edit ONE predicate in `HotPathExtentGate.gatedLabel`, so no
+  # two of them can share a batch at all: whichever lands first destroys the
+  # other's anchor. That is the floor, and it is the same reason the D series
+  # runs one-per-batch. The two that CAN pair (BL06+BL07, BL09+BL10) do, and
+  # both pairings were checked for the rescue hazard the T09 note describes as
+  # well as for overlapping expectations — BL06 and BL07 are different producers
+  # whose rows are asserted separately, and BL10 edits a helper BL09's site does
+  # not call on the path BL09 breaks.
+  "BL01|240|HOTGATE|$T_BLLT_ONLY_TRANSITION;$T_BLLT_COUNT;$T_BLLT_SINGLE_SHIPPED;$T_BLLT_AGG_SHIPPED"
+  "BL02|241|HOTGATE|$T_BLLT_NOT_A_DROP;$T_BLLT_ONLY_TRANSITION"
+  "BL03|242|HOTGATE|$T_BLLT_ONLY_TRANSITION;$T_BLLT_ANCHORED;$T_BLLT_SINGLE_SHIPPED"
+  "BL04|243|HOTGATE|$T_BLLT_ANCHORED;$T_BLLT_COUNT;$T_BLLT_ONLY_TRANSITION"
+  "BL05|244|HOTGATE|$T_BLLT_KILL_SWITCH;$T_BLLT_SINGLE_PRESENCE;$T_BLLT_AGG_PRESENCE"
+  "BL06|245|ADSVC|$T_BLLT_SINGLE_SHIPPED"
+  "BL07|245|ADSVC|$T_BLLT_AGG_SHIPPED"
+  "BL08|246|ADSVC|$T_BLLT_SINGLE_SHIPPED"
+  "BL09|247|ORCH|$T_BLLT_SINGLE_SHIPPED;$T_BLLT_AGG_SHIPPED"
+  "BL10|247|HOTGATE|$T_BLLT_DETAIL"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -2987,6 +3080,16 @@ describe_mutation() {
     T13) echo "ScanThroughputBucket.realtimeRatio: a zero denominator reports 1.0 instead of nil" ;;
     T14) echo "SemanticScanThroughputSplit.attributedFraction: an empty corpus reports 1.0" ;;
     T15) echo "fetchSemanticScanThroughputSplit: OVERWRITE the unattributed bucket instead of summing" ;;
+    BL01) echo "bllt: gatedLabel is INERT — the hot path reaches auto-skip on invented edges again (THE shipped defect)" ;;
+    BL02) echo "bllt: the demotion becomes a DROP — the ad is silently un-persisted instead of bannered" ;;
+    BL03) echo "bllt: the condition is INVERTED — anchored rows demote, invented ones auto-skip" ;;
+    BL04) echo "bllt: BOTH edges must be invented to demote, so a half-anchored span auto-skips on its invented edge" ;;
+    BL05) echo "bllt: the blocking flag is ignored — the kill switch stops killing" ;;
+    BL06) echo "bllt: the single-window site persists the UNGATED label (gate computed, then not used)" ;;
+    BL07) echo "bllt: the aggregator site persists the UNGATED label (gate computed, then not used)" ;;
+    BL08) echo "bllt: the single-window site persists an anchor it did NOT gate on — label and row disagree" ;;
+    BL09) echo "bllt: the suggest-tier census loses the extent REASON — demotion is silent again" ;;
+    BL10) echo "bllt: censusDetail fires on EVERY row, so the detail stops discriminating" ;;
     M01) echo "revertByTimeRange: delete the MANAGED loop's in-loop lifecycle guard" ;;
     M02) echo "revertByTimeRange: delete the SUGGEST loop's in-loop lifecycle guard" ;;
     M03) echo "revertByTimeRange: MANAGED in-loop guard 'break' -> 'return'" ;;
@@ -3414,6 +3517,140 @@ EOF
             case .unattributed: split.unattributed = group
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-bllt (BL series) -------------------------------------------
+
+  # BL01 — THE SHIPPED DEFECT, restored. The gate is present, its call sites are
+  # wired, and it decides nothing. This is what the hot path did before this
+  # bead: an `"autoSkip"` verdict over two invented edges went straight into the
+  # managed tier. It must be killed by BOTH suites — the pure one (the
+  # transition is gone) and the integration one (the persisted row is autoSkip
+  # again) — because a gate that is present but inert is exactly the shape that
+  # a single-suite battery reports as healthy.
+  BL01)
+    snippet OLD <<'EOF'
+        guard blockingUnanchoredAutoSkip,
+              !extent.isFullyAnchored,
+              label == autoSkipLabel
+        else { return label }
+        return markOnlyLabel
+EOF
+    snippet NEW <<'EOF'
+        return label
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # BL02 — the demotion becomes a DROP. Strictly fewer auto-skips, so
+  # monotonicity alone is satisfied; the row simply never exists, and the
+  # listener hears the ad with no banner. Trading a wrong skip for a missed ad
+  # is a different decision than the one this bead was given.
+  BL02)
+    patch "$file" \
+      "        return markOnlyLabel" \
+      "        return nil" ;;
+
+  # BL03 — the condition inverted. Note what this does NOT trip: the whole-domain
+  # monotonicity sweep stays GREEN, because passing an `"autoSkip"` through is
+  # not a rise. That is the entry that proves the "EXACT" and "anchored"
+  # assertions are load-bearing rather than decoration.
+  BL03)
+    patch "$file" \
+      "              !extent.isFullyAnchored," \
+      "              extent.isFullyAnchored," ;;
+
+  # BL04 — "a span is only as well-bounded as its weaker edge" replaced by "both
+  # edges must be bad". A byte-exact start with an invented end then auto-skips
+  # at the invented edge, which is the edge that clips the show.
+  BL04)
+    patch "$file" \
+      "              !extent.isFullyAnchored," \
+      "              extent.startTier == .none && extent.endTier == .none," ;;
+
+  # BL05 — the kill switch stops killing. The flag is the SAME one playhead-2350
+  # uses, so a mutation that ignores it here half-fires the switch: turning
+  # `unanchoredExtentBlocksAutoSkip` off would silence fusion and not the hot
+  # path. Killed by the two PRESENCE rails, which are the only tests that run
+  # with the block held off.
+  BL05)
+    patch "$file" \
+      "        guard blockingUnanchoredAutoSkip," \
+      "        guard true," ;;
+
+  # BL06 — the single-window site computes the gated label, logs about it, and
+  # then persists the ungated one. The pure suite cannot see this: the rule is
+  # perfect and simply unused.
+  BL06)
+    snippet OLD <<'EOF'
+            guard let eligibilityGate = gatedLabel else { continue }
+            adWindows.append(buildAdWindow(
+EOF
+    snippet NEW <<'EOF'
+            guard let eligibilityGate = gateResult.label else { continue }
+            adWindows.append(buildAdWindow(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # BL07 — the same defect at the OTHER producer. Two sites, two entries: a
+  # battery that pinned only one would certify a fix that closed half the hole,
+  # which is precisely how the hot path came to be missed by playhead-2350.
+  BL07)
+    snippet OLD <<'EOF'
+            guard let eligibilityGate = gatedLabel else { continue }
+            newWindows.append(
+EOF
+    snippet NEW <<'EOF'
+            guard let eligibilityGate = gateResult.label else { continue }
+            newWindows.append(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # BL08 — the label and the persisted anchors come apart. The row claims a
+  # byte-exact start it does not have, so every downstream consumer that reads
+  # the anchors (AutoSkipEdgePadding, SkipDetectorClass, the census) is lied to.
+  # This is the rail for "one variable, persisted AND consulted" — the
+  # playhead-6qvf lesson — and it cannot be seen by the pure suite at all.
+  BL08)
+    snippet OLD <<'EOF'
+            startEdgeAnchor: extentSupport.startAnchor.rawValue,
+            endEdgeAnchor: extentSupport.endAnchor.rawValue
+        )
+    }
+
+    // MARK: - Precision-gate wiring (playhead-gtt9.11)
+EOF
+    snippet NEW <<'EOF'
+            startEdgeAnchor: AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+            endEdgeAnchor: extentSupport.endAnchor.rawValue
+        )
+    }
+
+    // MARK: - Precision-gate wiring (playhead-gtt9.11)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # BL09 — the demotion goes back to being invisible. The row still lands in the
+  # suggest tier and the banner still fires, so every assertion about BEHAVIOUR
+  # stays green; what is lost is the audit trail's ability to say WHY, which is
+  # the difference between this bead and the silence playhead-isp5 was filed
+  # about.
+  BL09)
+    snippet OLD <<'EOF'
+                let extentDetail = HotPathExtentGate.censusDetail(
+                    for: resolvedExtentSupport(for: adWindow)
+                )
+EOF
+    snippet NEW <<'EOF'
+                let extentDetail: String? = nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # BL10 — the detail fires on every row, anchored or not. A sub-cause that is
+  # always present carries no information, which is the same rule
+  # `AdWindowIngestOutcome`'s header states about `retired=`.
+  BL10)
+    patch "$file" \
+      "        guard !extent.isFullyAnchored else { return nil }" \
+      "        guard true else { return nil }" ;;
 
 
   M01)
@@ -7234,6 +7471,7 @@ rec_file()   {
     DETCLS) printf '%s' "$DETCLS" ;;
     DETLED) printf '%s' "$DETLED" ;;
     SPLIT) printf '%s' "$SPLIT" ;;
+    HOTGATE) printf '%s' "$HOTGATE" ;;
     *)     printf '%s' "" ;;
   esac
 }

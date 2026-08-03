@@ -80,11 +80,27 @@ struct AutoSkipPrecisionGateIntegrationTests {
         try await store.insertFeatureWindows(windows)
     }
 
+    /// - Parameter blocksUnanchoredExtent: playhead-bllt's gate, which ships
+    ///   `true` and which this suite DEFAULTS OFF. That is deliberate and it is
+    ///   the opposite of hiding from it.
+    ///
+    ///   This suite's subject is the PRECISION gate — "does the presence
+    ///   evidence admit auto-skip?" — and with bllt on, every hot-path row is
+    ///   `"markOnly"` whatever the precision gate decided, so every
+    ///   `== "markOnly"` assertion here would become true by construction and
+    ///   stop discriminating. A rail that cannot fail is the defect
+    ///   playhead-le02 spent a bead removing; adding seven more of them while
+    ///   fixing a different problem would be a poor trade.
+    ///
+    ///   The SHIPPING behaviour is not untested — it is pinned by the two
+    ///   `(playhead-bllt)` tests below, which pass `true` explicitly and say so
+    ///   in their names, and by `HotPathExtentGateMonotonicityTests`.
     private func makeService(
         store: AnalysisStore,
         classifier: ClassifierService,
         classifierCalibrationProfile: ClassifierCalibrationProfile =
-            .production
+            .production,
+        blocksUnanchoredExtent: Bool = false
     ) -> AdDetectionService {
         let config = AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -93,7 +109,8 @@ struct AutoSkipPrecisionGateIntegrationTests {
             hotPathLookahead: 90.0,
             detectorVersion: "gtt9.11-test",
             fmBackfillMode: .off,
-            autoSkipConfidenceThreshold: 0.80
+            autoSkipConfidenceThreshold: 0.80,
+            unanchoredExtentBlocksAutoSkip: blocksUnanchoredExtent
         )
         return AdDetectionService(
             store: store,
@@ -326,7 +343,16 @@ struct AutoSkipPrecisionGateIntegrationTests {
 
     // MARK: - 2. segmentScore ≥ autoSkip, ONE safety signal → autoSkip
 
-    @Test("hot path: ≥0.55 score in pre-roll WITH a non-slot signal (sponsor/promoCode/URL lexical) persists eligibilityGate=autoSkip")
+    /// playhead-bllt: the PRESENCE half, isolated.
+    ///
+    /// This test's original assertion — a slot+lexical hot-path segment
+    /// persists `"autoSkip"` — is now false at the shipping config, because the
+    /// aggregator invents its edges and bllt demotes an unanchored `"autoSkip"`
+    /// at the emission site. The claim gtt9.11 made is still true and still
+    /// worth pinning, so it is pinned HERE with the extent block off, and the
+    /// shipping behaviour is pinned by the companion test below. Two arms, one
+    /// fixture, so a regression in either half is attributable.
+    @Test("hot path: ≥0.55 score in pre-roll WITH a non-slot signal (sponsor/promoCode/URL lexical) reaches the autoSkip PRESENCE verdict (extent block off)")
     func highScoreSegmentWithSafetySignalAutoSkips() async throws {
         // playhead-9ro7 cycle-2 follow-up: a slot prior on its own no
         // longer admits autoSkip — the service-level helper
@@ -386,6 +412,80 @@ struct AutoSkipPrecisionGateIntegrationTests {
                 "slot+lexical safety signals fired → must stamp eligibilityGate=autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
 
         try await assertSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
+    }
+
+    /// playhead-bllt: the SHIPPING behaviour of the same fixture.
+    ///
+    /// Byte-identical to the test above except for the flag. The presence
+    /// verdict is still `"autoSkip"` (proved there); the persisted row is
+    /// `"markOnly"`, because the segment's edges are wherever the scoring
+    /// windows happened to fall and nothing observed either one.
+    @Test("hot path: the same slot+lexical segment persists markOnly at the SHIPPING config — its edges are invented (playhead-bllt)")
+    func highScoreSegmentWithSafetySignalDemotesOnUnanchoredExtent() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-bllt-slot-plus-lexical-demoted"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 3600
+        try await insertFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: [:],
+            defaultScore: 0.10,
+            chunkScore: 0.85
+        )
+        // The SHIPPING config, opted into explicitly — this suite defaults the
+        // extent block OFF so its precision-gate assertions keep discriminating.
+        let service = makeService(
+            store: store,
+            classifier: classifier,
+            blocksUnanchoredExtent: true
+        )
+
+        let normalized = "brought to you by squarespace use promo code playhead at squarespace.com"
+        let chunk = TranscriptChunk(
+            id: "chunk-bllt-slot-lexical",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-bllt-slot-lexical",
+            chunkIndex: 0,
+            startTime: 60,
+            endTime: 120,
+            text: normalized,
+            normalizedText: normalized,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
+        _ = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        #expect(persisted.count == 1,
+                "one AdWindow expected; got \(persisted.count)")
+        #expect(persisted.first?.eligibilityGate == "markOnly",
+                "an unanchored hot-path row must demote to markOnly; got \(String(describing: persisted.first?.eligibilityGate))")
+        // The demotion must be attributable: the row's own anchors are what
+        // caused it, and they are persisted, so a device pull can check.
+        #expect(persisted.first?.extentSupport == .unanchored,
+                "the row's persisted anchors must be the unanchored pair the gate read")
+        // PRESENCE is untouched. A demotion that also moved the score would be
+        // the presence/extent conflation playhead-2350 removed.
+        #expect(persisted.first?.confidence == 0.85,
+                "the demotion must not touch the score; got \(String(describing: persisted.first?.confidence))")
+
+        try await assertNoSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
+        // The POSITIVE witness (playhead-le02): a demoted row must still reach
+        // the listener as a banner. "No cue" alone is also what a dropped row
+        // looks like, and dropping it would be a different decision.
+        try await assertArmedInSuggestTierWithUnanchoredExtentCensus(
+            store: store,
+            windows: persisted,
+            assetId: assetId
+        )
     }
 
     // MARK: - 3. segmentScore ∈ [uiCandidate, autoSkip) → markOnly
@@ -476,7 +576,10 @@ struct AutoSkipPrecisionGateIntegrationTests {
 
     // MARK: - 5. Single 0.85 window WITH ≥1 safety signal → autoSkip
 
-    @Test("single-window fast path: 0.85 window with ≥1 safety signal persists eligibilityGate=autoSkip and is auto-skipped")
+    /// playhead-bllt: the PRESENCE half of the SINGLE-WINDOW producer,
+    /// isolated with the extent block off. See the aggregator pair at §2 for
+    /// the argument; the shipping behaviour is the companion test below.
+    @Test("single-window fast path: 0.85 window with ≥1 safety signal reaches the autoSkip PRESENCE verdict and is auto-skipped (extent block off)")
     func singleHighConfidenceWindowWithSafetySignalAutoSkips() async throws {
         // Chunk carrying sponsor + promoCode + strong-URL lexical hits
         // → strongLexicalAdPhrase safety signal fires via the {sponsor,
@@ -535,6 +638,115 @@ struct AutoSkipPrecisionGateIntegrationTests {
                 "lexical sponsor signal fires → must stamp eligibilityGate=autoSkip; got \(String(describing: persisted.first?.eligibilityGate))")
 
         try await assertSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
+    }
+
+    /// playhead-bllt — THE CENTREPIECE RAIL. An unanchored hot-path row must
+    /// not reach auto-skip.
+    ///
+    /// This is the single-window producer at the SHIPPING config, with the
+    /// strongest presence evidence the suite can manufacture: a 0.85 classifier
+    /// score and a firing `strongLexicalAdPhrase`. Before this bead the row
+    /// persisted `"autoSkip"` and `SkipOrchestrator` cut the audio at
+    /// boundaries a lexical seed had guessed — the THEMOVE failure playhead-2350
+    /// fixed for the fusion producer and left open for this one.
+    @Test("single-window fast path: the same 0.85 + strong-lexical window persists markOnly at the SHIPPING config — its edges are invented (playhead-bllt)")
+    func singleHighConfidenceWindowDemotesOnUnanchoredExtent() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-bllt-single-window-demoted"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let duration: Double = 3600
+        try await insertFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: [:],
+            defaultScore: 0.10,
+            chunkScore: 0.85
+        )
+        // The SHIPPING config, opted into explicitly — this suite defaults the
+        // extent block OFF so its precision-gate assertions keep discriminating.
+        let service = makeService(
+            store: store,
+            classifier: classifier,
+            blocksUnanchoredExtent: true
+        )
+
+        let normalized = "brought to you by squarespace use promo code playhead at squarespace.com"
+        let chunk = TranscriptChunk(
+            id: "chunk-bllt-sponsor",
+            analysisAssetId: assetId,
+            segmentFingerprint: "fp-bllt-sponsor",
+            chunkIndex: 0,
+            startTime: 1500,
+            endTime: 1560,
+            text: normalized,
+            normalizedText: normalized,
+            pass: "final",
+            modelVersion: "test-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+
+        _ = try await service.runHotPath(
+            chunks: [chunk],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let persisted = try await store.fetchAdWindows(assetId: assetId)
+        #expect(persisted.count == 1,
+                "exactly one AdWindow from the single-window path; got \(persisted.count)")
+        #expect(persisted.first?.eligibilityGate == "markOnly",
+                "an unanchored hot-path row must demote to markOnly; got \(String(describing: persisted.first?.eligibilityGate))")
+        #expect(persisted.first?.extentSupport == .unanchored,
+                "the row's persisted anchors must be the unanchored pair the gate read")
+        #expect(persisted.first?.confidence == 0.85,
+                "the demotion must not touch the score; got \(String(describing: persisted.first?.confidence))")
+
+        try await assertNoSkipCueEmitted(store: store, windows: persisted, assetId: assetId)
+        try await assertArmedInSuggestTierWithUnanchoredExtentCensus(
+            store: store,
+            windows: persisted,
+            assetId: assetId
+        )
+    }
+
+    /// playhead-bllt: an ANCHORED row is unaffected — the negative direction of
+    /// the acceptance criteria, stated at the producer's own emission site.
+    ///
+    /// The hot path has no way to produce an anchored row today (that is the
+    /// whole finding), so this drives `HotPathExtentGate` with the anchors a
+    /// future producer would carry. Without it, "unanchored rows demote" is
+    /// indistinguishable from "hot-path rows always demote", and the day
+    /// somebody teaches the hot path to read a byte-exact edge, the gate would
+    /// silently keep demoting it.
+    @Test("an anchored hot-path row keeps its autoSkip verdict — the gate reads the extent, not the producer (playhead-bllt)")
+    func anchoredHotPathRowIsUnaffected() {
+        for anchor in [AutoSkipEdgeAnchor.rediffByteExact, .stingerSnapped] {
+            let anchored = SpanExtentSupport(startAnchor: anchor, endAnchor: anchor)
+            #expect(
+                HotPathExtentGate.gatedLabel(
+                    HotPathExtentGate.autoSkipLabel,
+                    extent: anchored,
+                    blockingUnanchoredAutoSkip: true
+                ) == HotPathExtentGate.autoSkipLabel,
+                "\(anchor.rawValue) on BOTH edges must pass the gate untouched"
+            )
+        }
+        // And the asymmetric cases are NOT "half safe": one invented edge is
+        // enough to clip the show, so a mixed pair demotes like a bare one.
+        for (start, end) in [
+            (AutoSkipEdgeAnchor.rediffByteExact, AutoSkipEdgeAnchor.unanchored),
+            (AutoSkipEdgeAnchor.unanchored, AutoSkipEdgeAnchor.stingerSnapped),
+        ] {
+            #expect(
+                HotPathExtentGate.gatedLabel(
+                    HotPathExtentGate.autoSkipLabel,
+                    extent: SpanExtentSupport(startAnchor: start, endAnchor: end),
+                    blockingUnanchoredAutoSkip: true
+                ) == HotPathExtentGate.markOnlyLabel,
+                "\(start.rawValue)/\(end.rawValue): one unanchored edge must demote"
+            )
+        }
     }
 
     // MARK: - 6. Single 0.85 window with ZERO safety signals → markOnly (NEW)
@@ -756,6 +968,58 @@ struct AutoSkipPrecisionGateIntegrationTests {
 
         #expect(captured.nonEmptyBatchCount >= 1,
                 "autoSkip windows must emit at least one skip cue; got \(captured.nonEmptyBatchCount) non-empty batches")
+    }
+
+    /// playhead-bllt, using the playhead-le02 idiom: the POSITIVE witness a
+    /// demotion needs, and that `assertNoSkipCueEmitted` cannot supply.
+    ///
+    /// "No skip cue" is also what a row that was dropped, filtered, or never
+    /// delivered looks like. A demotion is a specific claim — the row reached
+    /// the listener, in the suggest tier, for a NAMED reason — and each of the
+    /// three checks below fails for a different mutation:
+    ///
+    ///   * `activeSuggestWindowIDs()` reads the real collection the suggest
+    ///     tier lands in, so a demotion that turned into a drop reddens here.
+    ///   * the isp5 census OUTCOME distinguishes armed from every other way a
+    ///     row can be absent from the managed tier.
+    ///   * the census DETAIL names the extent as the cause, so a row demoted
+    ///     for some unrelated reason is not mistaken for this one.
+    private func assertArmedInSuggestTierWithUnanchoredExtentCensus(
+        store: AnalysisStore,
+        windows: [AdWindow],
+        assetId: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        let orchestrator = try await buildAutoOrchestrator(store: store, assetId: assetId)
+        await orchestrator.receiveAdWindows(windows)
+
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        let managed = await orchestrator.activeWindowIDs()
+        for window in windows {
+            #expect(
+                suggested.contains(window.id),
+                "\(window.id): a demoted row must still reach the listener as a banner — it is in NO tier",
+                sourceLocation: sourceLocation
+            )
+            #expect(
+                !managed.contains(window.id),
+                "\(window.id): a demoted row must not be in the managed (auto-skip) tier",
+                sourceLocation: sourceLocation
+            )
+            let ingest = await orchestrator.lastAdWindowIngestOutcome(
+                forWindowId: window.id
+            )
+            #expect(
+                ingest?.outcome == .armedSuggest,
+                "\(window.id): census must record `ingest_armed_suggest`; got \(String(describing: ingest?.outcome))",
+                sourceLocation: sourceLocation
+            )
+            #expect(
+                ingest?.detail == "unanchored_extent_start+end",
+                "\(window.id): census must NAME the extent as the cause — absence from the managed tier for an unstated reason is what this bead exists to stop; got \(String(describing: ingest?.detail))",
+                sourceLocation: sourceLocation
+            )
+        }
     }
 
     private func buildAutoOrchestrator(
