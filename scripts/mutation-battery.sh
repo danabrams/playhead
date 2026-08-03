@@ -7443,6 +7443,7 @@ rec_file()   {
     DETCLS) printf '%s' "$DETCLS" ;;
     DETLED) printf '%s' "$DETLED" ;;
     SPLIT) printf '%s' "$SPLIT" ;;
+    HOTGATE) printf '%s' "$HOTGATE" ;;
     *)     printf '%s' "" ;;
   esac
 }
