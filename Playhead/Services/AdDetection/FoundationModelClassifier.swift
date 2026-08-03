@@ -1593,6 +1593,17 @@ struct FoundationModelClassifier: Sendable {
     /// than as diagnostics that quietly stop arriving.
     @TaskLocal static var coarsePassDiagnosticObserver: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
 
+    /// playhead-5n8k: the ONE place production reads the observer.
+    ///
+    /// Funnelled deliberately. Five emit sites each reading the task-local is
+    /// five places a future change could reintroduce a process-global cache,
+    /// and only one of them would have to do it for cross-talk to come back.
+    /// Behaviourally this is the call the five sites already made — same
+    /// value, same call order, nil in every production build.
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        coarsePassDiagnosticObserver?(diagnostic)
+    }
+
     /// Static identifier for the refinement @Generable schema. Used by the
     /// diagnostic payload so future schema rotations are visible in logs.
     static let refinementSchemaName = "RefinementWindowSchema"
@@ -5554,7 +5565,7 @@ struct FoundationModelClassifier: Sendable {
             promptTokens=\(plan.promptTokenCount, privacy: .public)
             """
         )
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
     }
 
     private func refinementResponse(
@@ -5937,7 +5948,7 @@ struct FoundationModelClassifier: Sendable {
             """
         )
 
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
     }
 
     /// bd-34e diagnostic: emit a structured breadcrumb in the catch arm of a
@@ -6006,7 +6017,7 @@ struct FoundationModelClassifier: Sendable {
             )
         }
 
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
     }
 
     /// bd-3h7: emit a supplementary breadcrumb when the error is an
@@ -6073,7 +6084,7 @@ struct FoundationModelClassifier: Sendable {
             """
         )
 
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
         #endif
     }
 
@@ -6304,7 +6315,7 @@ struct FoundationModelClassifier: Sendable {
             smartShrinkIteration: iteration,
             smartShrinkOutcome: nil
         )
-        Self.coarsePassDiagnosticObserver?(attemptDiagnostic)
+        Self.emitCoarsePassDiagnostic(attemptDiagnostic)
 
         return CoarsePassWindowPlan(
             windowIndex: 0,
