@@ -3146,10 +3146,29 @@ MUTATIONS=(
   # the same hazard in the other direction — PG03 drops what PG05/PG06 fold, so
   # together they partially cancel.
   #
-  # The two that CAN share: PG07 edits `meanScore`, a different type member
-  # reached by every exit, and PG08 is in a different FILE. Neither can repair
-  # the other and their expectations are disjoint (PG07 moves every score, PG08
-  # moves only the persisted gate), so they ride together in 276.
+  # The two that CAN share: PG07 edits `dropPendingTail`, reached by every exit,
+  # and PG08 is in a different FILE. Neither can repair the other and their
+  # expectations are disjoint (PG07 moves every score, PG08 moves only the
+  # persisted anchors), so they ride together in 276.
+  #
+  # RUN 2026-08-03: 8 KILLED / 0 SURVIVED / 0 ERROR, after a first pass that
+  # reported PG02, PG05 and PG07 SURVIVED. Recorded because two of those three
+  # were holes in the NEW rails and the shapes recur:
+  #   • PG02 — the rail ended on a QUALIFYING window, which folds a wrongly
+  #     deferred window straight back in, so correct and inverted behaviour were
+  #     byte-identical. A containment rail has to CLOSE the segment right after
+  #     the window it is arguing about.
+  #   • PG05 — the witness was GLOBAL (`strictImprovements > 0`) and the
+  #     short-tail cases satisfied it through the FLUSH exit while the COUNTDOWN
+  #     exit was the one mutated. A witness any path can satisfy proves nothing
+  #     about the path under test; it is now `== comparisons`.
+  #   • PG07 — NOT a hole. The first edit put the extra term in `meanScore`,
+  #     which every exit reaches only after the tail is settled, so it was inert
+  #     and could not have been killed by anything. Re-aimed at
+  #     `dropPendingTail`, where the tail still has a value.
+  # PG08 was predicted vacuous and is not: `eligibilityGate` cannot see it (no
+  # safety signal fires on that fixture, so the PRECISION gate withholds
+  # autoSkip on its own) but the two edge-anchor witnesses can.
   "PG01|270|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_VALUE;$T_PGGN_PERSISTED"
   "PG02|271|SEGAGG|$T_PGGN_WORKED;$T_PGGN_ALREADY_INSIDE"
   "PG03|272|SEGAGG|$T_PGGN_FOLD_LATER"
