@@ -99,3 +99,42 @@ segment-recovered does not, because the differ says so again.
 retryable exit (`.noDivergentSlot`) would otherwise fall through into the ordinary
 three-attempt budget — ~324 MB where the policy promises ~108 MB. `UG09` is the mutation that
 proves the difference.
+
+## 6. Two things found while re-reading, not while testing
+
+**A vetoed anchored row was un-proving itself.** `DayZeroMarkCensus.classify` originally tested
+`isSettled` before `isFullyAnchored`, so a day-0 mark that was anchored AND later vetoed landed
+in `settledCount` and vanished from `anchoredCount`. The rescue's whole safety argument is
+"one anchored row proves the mint could stamp an anchor, so the unanchored siblings are
+provably 9s6q segment-recovered" — and that proof was being erased by a user gesture that has
+nothing to do with it. An asset whose only anchored mark the user vetoed would have read back
+`isRescuable` and the rescue would have re-derived exactly the slots qs0d withheld.
+
+The buckets stay disjoint and still sum to the same total either way, which is why the ordering
+read as tidiness. Fixed by testing anchored first; `UG14` is the rail, and it is deliberately
+phrased as a re-ordering rather than a deletion because that is the shape the defect had.
+
+**The mid-session ingest door is additive-only.** `SkipOrchestrator.forwardPersistedAdWindows`
+re-reads `ad_windows` and forwards; nothing removes an in-session window whose row has since
+been DELETED. Until this bead no producer retired a day-0 row mid-session, so it could not
+matter. Now a strict rescue retires its degraded row and playhead-96ot delivers the replacement
+into the live session — the new row arrives, the retired one does not leave, and the listener
+can hold a stale banner over the span the new row auto-skips. Bounded (one play, self-corrects
+at `endEpisode`) and NOT fixed here: teaching that door to retire vanished ids is a real
+behavioural change needing its own rails, and an empty read must never be read as "everything
+was deleted". Filed as **playhead-dyhq**.
+
+## 7. The UG mutation battery, and the two rails it repaired
+
+14 mutations, batches 250-260, **0 survivors** after two repairs the battery itself forced:
+
+* **UG03 SURVIVED** on the first pass. `supersedableIsNarrow` claimed "only a degraded,
+  UNSETTLED, day-0 row is supersedable" and had no settled case, so dropping `!isSettled`
+  left it green while a re-mint deleted a user veto. One negative per conjunct now.
+* **UG13 SURVIVED** on a mis-scoped expectation of mine. Every trigger rail handed
+  `attemptContextProvider` a hand-built context, so none of them could observe the STORE read
+  — a `fetchDayZeroAttemptContext` returning an empty census would leave the whole suite green
+  while no trapped asset on any device was ever rescued. Repaired with a NEW rail
+  (`rescueReadsTheCensusFromTheStore`) that drives the production provider expression over
+  rows and a record actually on disk, plus the anchored-row witness so "it fetched" cannot be
+  satisfied by a provider that ignores the census. Not by narrowing the expectation.

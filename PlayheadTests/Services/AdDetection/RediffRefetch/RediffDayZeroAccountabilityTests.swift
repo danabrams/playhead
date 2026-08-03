@@ -82,7 +82,12 @@ struct RediffDayZeroAccountabilityTests {
             .deniedLowDataMode: "denied_low_data_mode",
             .deniedCellularNotAllowed: "denied_cellular_not_allowed",
             .deniedPower: "denied_power",
-            .deniedDailyBudget: "denied_daily_budget"
+            .deniedDailyBudget: "denied_daily_budget",
+            // playhead-ug9m — the surfaced "permanently frozen" state. Persisted
+            // in `lastExit` by the suppression recorder exactly like its
+            // siblings, so it is under the same frozen-wire-format contract.
+            // This canary is what caught the addition, which is what it is for.
+            .rescueExhausted: "rescue_exhausted"
         ]
         for exit in Exit.allCases {
             #expect(exit.rawValue == expected[exit],
