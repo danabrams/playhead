@@ -1565,10 +1565,59 @@ struct FoundationModelClassifier: Sendable {
     }
 
     /// Internal test hook so unit tests can observe coarse-pass window submit /
-    /// error diagnostics without scraping `os.Logger`. Mirrors
-    /// `refinementDecodeFailureObserver`. Production builds leave it nil;
-    /// invoking it is a no-op.
-    nonisolated(unsafe) static var coarsePassDiagnosticObserver: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
+    /// error diagnostics without scraping `os.Logger`. Production builds never
+    /// bind it, so reading it yields nil and invoking it is a no-op.
+    ///
+    /// playhead-5n8k: this is a `@TaskLocal`, NOT a `nonisolated(unsafe) static
+    /// var`. As a process-global it was silently shared: under Swift Testing's
+    /// in-process parallelism any *other* test running a coarse pass emitted
+    /// into whichever capture box happened to be installed, so a test asserting
+    /// on `submits.first` described whichever window won the race. That
+    /// presented as a FAST (~0.1s) failure carrying coordinates the test's own
+    /// fixture could not produce — exactly the shape gate triage reserves for
+    /// real regressions, so it cost a triage round every time it appeared.
+    ///
+    /// A task-local makes the collision impossible by construction rather than
+    /// merely unlikely: the binding is scoped to the installing task's tree, so
+    /// a concurrent coarse pass in another task reads its own binding (nil, in
+    /// practice) and cannot reach a box it does not own. Bind it with
+    /// `withCoarsePassDiagnosticObserver(_:operation:)` below; there is
+    /// deliberately no setter, so a future "just assign it" cannot reintroduce
+    /// the global.
+    ///
+    /// The one thing this costs: a diagnostic emitted from a `Task.detached`
+    /// (which does not inherit task-locals) would not reach the observer. Every
+    /// coarse-pass emit site is a synchronous call inside the caller's own task
+    /// tree, and `CoarsePassDiagnosticTaskScopingTests` pins that with a
+    /// positive witness, so a future detach shows up as a failing test rather
+    /// than as diagnostics that quietly stop arriving.
+    @TaskLocal static var coarsePassDiagnosticObserver: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
+
+    /// playhead-5n8k: the ONE place production reads the observer.
+    ///
+    /// Funnelled deliberately. Five emit sites each reading the task-local is
+    /// five places a future change could reintroduce a process-global cache,
+    /// and only one of them would have to do it for cross-talk to come back.
+    /// Behaviourally this is the call the five sites already made — same
+    /// value, same call order, nil in every production build.
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        coarsePassDiagnosticObserver?(diagnostic)
+    }
+
+    /// playhead-5n8k: the ONE supported way to install the observer, and the
+    /// counterpart to `emitCoarsePassDiagnostic`.
+    ///
+    /// Paired with the funnel above, these two functions are the entire
+    /// lifetime of the hook — one install, one read. That is what lets the
+    /// mutation battery restore the historical defect faithfully (a
+    /// process-global assigned on install and read on emit) in two edits, and
+    /// have the rails judge the real thing rather than an approximation of it.
+    static func withCoarsePassDiagnosticObserver<R>(
+        _ observer: @escaping @Sendable (CoarsePassWindowDiagnostic) -> Void,
+        operation: () async throws -> R
+    ) async rethrows -> R {
+        try await $coarsePassDiagnosticObserver.withValue(observer, operation: operation)
+    }
 
     /// Static identifier for the refinement @Generable schema. Used by the
     /// diagnostic payload so future schema rotations are visible in logs.
@@ -5531,7 +5580,7 @@ struct FoundationModelClassifier: Sendable {
             promptTokens=\(plan.promptTokenCount, privacy: .public)
             """
         )
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
     }
 
     private func refinementResponse(
@@ -5914,7 +5963,7 @@ struct FoundationModelClassifier: Sendable {
             """
         )
 
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
     }
 
     /// bd-34e diagnostic: emit a structured breadcrumb in the catch arm of a
@@ -5983,7 +6032,7 @@ struct FoundationModelClassifier: Sendable {
             )
         }
 
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
     }
 
     /// bd-3h7: emit a supplementary breadcrumb when the error is an
@@ -6050,7 +6099,7 @@ struct FoundationModelClassifier: Sendable {
             """
         )
 
-        Self.coarsePassDiagnosticObserver?(diagnostic)
+        Self.emitCoarsePassDiagnostic(diagnostic)
         #endif
     }
 
@@ -6281,7 +6330,7 @@ struct FoundationModelClassifier: Sendable {
             smartShrinkIteration: iteration,
             smartShrinkOutcome: nil
         )
-        Self.coarsePassDiagnosticObserver?(attemptDiagnostic)
+        Self.emitCoarsePassDiagnostic(attemptDiagnostic)
 
         return CoarsePassWindowPlan(
             windowIndex: 0,

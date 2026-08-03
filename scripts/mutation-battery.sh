@@ -1109,6 +1109,17 @@ FOCUSED_SUITES=(
   # lands at. ~1.3 s for both.
   -only-testing:PlayheadTests/AnalysisStoreUserIntentPromotionTests
   -only-testing:PlayheadTests/AnalysisWorkSchedulerUserIntentTests
+  # playhead-5n8k: the observer-scoping rails (TS series). 0.6 s.
+  -only-testing:PlayheadTests/CoarsePassDiagnosticTaskScopingTests
+  # ...plus ONE test from the 100-test FoundationModelClassifierTests suite,
+  # selected by method rather than by suite. It is the consumer's-eye view — the
+  # test whose fast, misleading failure was the tax this bead removes — and it
+  # is the only thing that can see the funnel go inert while the scoping suite's
+  # own fixtures still look self-consistent. Naming the whole suite would put
+  # 25 s on EVERY batch of this script, for one test's worth of judgement.
+  # The parentheses are quoted: bash parses a bare `()` inside an array literal
+  # as a syntax error, which is a fast failure but a confusing one.
+  '-only-testing:PlayheadTests/FoundationModelClassifierTests/coarsePassWindowGuardrailViolationEmitsDiagnostic()'
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1836,6 +1847,17 @@ T_KANF_FLAG_KEPT="a refused promotion RETAINS the flag, so the next enqueue stil
 T_KANF_FLAG_SPENT="a SERVED promotion consumes the flag — a later auto enqueue is not promoted"
 T_KANF_RETAP="re-tapping an already-promoted job is idempotent and consumes the flag"
 T_KANF_NO_INTENT="a plain auto enqueue over an existing queued row leaves its priority alone"
+
+# playhead-5n8k (TS series). The coarse-pass diagnostic observer's scoping.
+# All four live in CoarsePassDiagnosticTaskScopingTests, which is deliberately
+# NOT `.serialized` — it creates the collision on purpose.
+T_5N8K_FOREIGN="an unobserved coarse pass in another task tree cannot reach a bound capture box"
+T_5N8K_CONCURRENT="two concurrent bindings each receive only their own windows"
+T_5N8K_SCOPE="a binding does not outlive its scope"
+T_5N8K_NESTED="a nested binding shadows the outer one and then restores it"
+# The bd-34e test whose FAST failure was the tax this bead removes. It is the
+# consumer's-eye view: if the observer stops delivering, this is what breaks.
+T_5N8K_BD34E="coarse pass window submission and guardrail violation emit bd-34e diagnostics"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3354,6 +3376,63 @@ MUTATIONS=(
   "KN07|306|SCHED|$T_KANF_FLAG_KEPT"
   "KN08|307|SCHED|$T_KANF_TAP;$T_KANF_TAP_LEASED"
   "KN09|308|STORE|$T_KANF_NUDGE;$T_KANF_IDENT"
+
+  # ---- playhead-5n8k: the coarse-pass diagnostic observer is per-test (TS) ----
+  #
+  # WHAT IS BEING DEFENDED. Not a product behaviour — the observer is nil in
+  # every production build. What is defended is the INTEGRITY OF A VERDICT: as a
+  # `nonisolated(unsafe) static var` the hook was a shared mailbox, so any other
+  # suite's coarse pass landed in whichever capture box happened to be installed.
+  # The resulting failure was FAST (0.03-0.27s), which is the shape gate triage
+  # reserves for REAL defects, so it cost a full triage round every time it
+  # appeared and looked like a regression in whatever was under test.
+  #
+  # ALL FOUR ATTACK THE SAME TWO FUNCTIONS — `withCoarsePassDiagnosticObserver`
+  # (the only install) and `emitCoarsePassDiagnostic` (the only read). Those two
+  # exist so that these mutations have one anchor apiece instead of five, and so
+  # a regression cannot come back through whichever of the five emit sites a
+  # mutation happened not to pick. One batch each, because the outcomes
+  # interfere: TS03 makes every box empty and TS01 makes one box overfull, so
+  # run together each would be credited with the other's failures.
+  #
+  # TS01 and TS02 are two DIFFERENT process-global regressions — assign-and-
+  # restore, and cache-and-leak. The listed expectations are the rails each one
+  # must fail on the mechanism alone, and they differ: TS01's save/restore is
+  # CORRECT inside a single task, so the lifetime rails (scope, nesting) cannot
+  # see it and only the concurrency ones can; TS02 is the mirror image.
+  #
+  # MEASURED 2026-08-03, and it did not match that prediction: each mutation
+  # failed ALL FIVE tests, including the two the analysis said it could not
+  # reach. The reason is the finding, not a flaw — once ANY process-global
+  # exists, the scoping suite is no longer alone with it. It runs concurrently
+  # with the bd-34e consumer test, which installs an observer of its own, so
+  # every rail acquires cross-talk it cannot control. That is the whole bug
+  # restated: a shared hook does not fail where you predict, it fails wherever
+  # two things happen to overlap, and the verdict moves run to run.
+  #
+  # The expectations are kept NARROW rather than widened to the observed five.
+  # A kill set produced by incidental overlap is not a claim this file should
+  # make: the named rails are the ones that fail on the mutation's own
+  # mechanism, and those are the ones whose passing would mean the defect
+  # returned undetected.
+  #
+  # TS03 and TS04 are the vacuity controls. Every rail here is built as "my own
+  # windows arrived AND nothing else did"; without a mutation that empties every
+  # box, the second half would be passing on an observer that never fires.
+  #
+  # RUN 2026-08-03: 4 KILLED / 0 SURVIVED / 0 ERROR, one mutation per batch,
+  # baseline green each time. All four failed the same five tests. One
+  # operational note worth keeping, because it is not about a mutation: TS03 and
+  # TS04 first came back ERROR ("batch did not build/run", rc=28) — that is the
+  # DISK PREFLIGHT refusing, not an anchor that stopped applying. The baseline
+  # started at 13.74 GiB free and the destination simulator had grown to 6.7 GiB
+  # across the earlier batches, leaving 7.84. Erase the sim between batteries
+  # (and clear `$TMPDIR/Deleting-*`, which is where erase actually puts it);
+  # do not go looking for a broken EDIT.
+  "TS01|310|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT"
+  "TS02|311|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_SCOPE"
+  "TS03|312|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
+  "TS04|313|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3650,6 +3729,10 @@ describe_mutation() {
     KN07) echo "kanf: the flag is consumed unconditionally again, so a refused tap cannot retry" ;;
     KN08) echo "kanf: promote to the SOON floor — the row keeps starving in a deferred lane" ;;
     KN09) echo "kanf: the promotion rotates generationID, breaking the orphan-recovery join" ;;
+    TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
+    TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
+    TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
+    TS04) echo "5n8k: the emit moves onto a detached task, where the task-local binding is out of scope" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -8426,6 +8509,129 @@ EOF
     snippet NEW <<'EOF'
             SET priority = ?, updatedAt = ?, generationID = ''
             WHERE workKey = ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-5n8k: coarse-pass diagnostic observer scoping (TS series) ----
+  #
+  # The hook's whole lifetime is two functions: `withCoarsePassDiagnosticObserver`
+  # installs, `emitCoarsePassDiagnostic` reads. Both exist so these mutations
+  # have one anchor apiece instead of five scattered reads, and so a regression
+  # cannot come back through whichever emit site a mutation happened not to pick.
+
+  # TS01 — THE historical defect, restored verbatim rather than approximated.
+  # Install assigns a process-global and restores it in a `defer`; the funnel
+  # reads that global. This is byte-for-byte what the code did before this bead,
+  # down to the save/restore, which is why it is worth two edits instead of one:
+  # a leak-style approximation (TS02) would have let the rails be judged against
+  # a defect the repo never actually had.
+  #
+  # The defect was never about one test's own bookkeeping — save/restore is
+  # correct inside one task — but about a second, concurrent installer
+  # overwriting the first so the first's windows go somewhere else. Hence the
+  # two named expectations. RUN 2026-08-03: KILLED, and it took all five tests
+  # down including the bd-34e consumer, which is the ORIGINAL playhead-5n8k
+  # failure reproduced on demand. See the series header for why the extra kills
+  # are the finding rather than a wider claim.
+  TS01)
+    snippet OLD <<'EOF'
+    static func withCoarsePassDiagnosticObserver<R>(
+        _ observer: @escaping @Sendable (CoarsePassWindowDiagnostic) -> Void,
+        operation: () async throws -> R
+    ) async rethrows -> R {
+        try await $coarsePassDiagnosticObserver.withValue(observer, operation: operation)
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func withCoarsePassDiagnosticObserver<R>(
+        _ observer: @escaping @Sendable (CoarsePassWindowDiagnostic) -> Void,
+        operation: () async throws -> R
+    ) async rethrows -> R {
+        let previous = CoarsePassDiagnosticGlobal.observer
+        CoarsePassDiagnosticGlobal.observer = observer
+        defer { CoarsePassDiagnosticGlobal.observer = previous }
+        return try await operation()
+    }
+
+    enum CoarsePassDiagnosticGlobal {
+        nonisolated(unsafe) static var observer: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        coarsePassDiagnosticObserver?(diagnostic)
+    }
+EOF
+    snippet NEW <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        CoarsePassDiagnosticGlobal.observer?(diagnostic)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # TS02 — the mirror image, and a regression that is easier to write by
+  # accident than TS01 is: the funnel remembers the last binding it saw and
+  # falls back to it, so a binding outlives its scope and an UNBOUND task
+  # inherits it. Its own mechanism is visible to the lifetime rails, which is
+  # the complement of TS01 and the argument for keeping both.
+  # RUN 2026-08-03: KILLED, all five, for the same reason TS01 was.
+  TS02)
+    snippet OLD <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        coarsePassDiagnosticObserver?(diagnostic)
+    }
+EOF
+    snippet NEW <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        if let bound = coarsePassDiagnosticObserver {
+            CoarsePassDiagnosticLeak.observer = bound
+        }
+        (coarsePassDiagnosticObserver ?? CoarsePassDiagnosticLeak.observer)?(diagnostic)
+    }
+
+    private enum CoarsePassDiagnosticLeak {
+        nonisolated(unsafe) static var observer: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # TS03 — the vacuity control. Nothing is ever emitted. Every rail in the
+  # scoping suite is built as "my own windows arrived AND nothing else did", so
+  # this must kill all four; if it did not, the negative half would be passing
+  # on an observer that never fires. The bd-34e consumer test is in the kill set
+  # too, as the check that the funnel is genuinely load-bearing.
+  # RUN 2026-08-03: KILLED, all five.
+  TS03)
+    snippet OLD <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        coarsePassDiagnosticObserver?(diagnostic)
+    }
+EOF
+    snippet NEW <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        _ = diagnostic
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # TS04 — the documented cost of choosing a task-local, made concrete. A
+  # `Task.detached` does not inherit task-locals, so an emit moved onto one
+  # reads nil and the diagnostic is lost. This is the regression the source
+  # comment on `coarsePassDiagnosticObserver` warns about; encoding it is what
+  # turns that warning from a note into something a test can enforce.
+  # RUN 2026-08-03: KILLED, all five — so the one real cost of choosing a
+  # task-local is now a test failure rather than diagnostics quietly stopping.
+  TS04)
+    snippet OLD <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        coarsePassDiagnosticObserver?(diagnostic)
+    }
+EOF
+    snippet NEW <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        Task.detached { Self.coarsePassDiagnosticObserver?(diagnostic) }
+    }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
