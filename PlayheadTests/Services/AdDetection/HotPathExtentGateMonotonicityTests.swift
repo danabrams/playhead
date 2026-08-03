@@ -267,27 +267,6 @@ struct HotPathExtentGateMonotonicityTests {
         )
     }
 
-    // MARK: - `demotes` agrees with `gatedLabel`
-
-    @Test("`demotes` is exactly `gatedLabel != label`, over the whole domain")
-    func demotesAgreesWithGatedLabel() {
-        for cell in Self.allCells {
-            let after = HotPathExtentGate.gatedLabel(
-                cell.label,
-                extent: cell.extent,
-                blockingUnanchoredAutoSkip: cell.blocking
-            )
-            #expect(
-                HotPathExtentGate.demotes(
-                    cell.label,
-                    extent: cell.extent,
-                    blockingUnanchoredAutoSkip: cell.blocking
-                ) == (after != cell.label),
-                "`demotes` disagreed with `gatedLabel` at \(String(describing: cell.label))"
-            )
-        }
-    }
-
     // MARK: - The admission ordinal itself
 
     @Test("admission maps each label to the tier the orchestrator actually gives it")

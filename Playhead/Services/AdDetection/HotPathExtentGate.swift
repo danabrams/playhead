@@ -154,19 +154,10 @@ enum HotPathExtentGate {
         return markOnlyLabel
     }
 
-    /// Whether `gatedLabel` would change this row's verdict — for the caller
-    /// that wants to log the demotion without re-deriving the condition.
-    static func demotes(
-        _ label: String?,
-        extent: SpanExtentSupport,
-        blockingUnanchoredAutoSkip: Bool
-    ) -> Bool {
-        gatedLabel(
-            label,
-            extent: extent,
-            blockingUnanchoredAutoSkip: blockingUnanchoredAutoSkip
-        ) != label
-    }
+    // No `demotes(_:extent:blocking:)` convenience is exposed. Both call sites
+    // already hold the gated label and compare it to the original, which is
+    // one expression rather than two that must agree; a second spelling of the
+    // condition is what playhead-6qvf is a bead about.
 
     /// The isp5 census sub-cause a suggest-tier row carries when its persisted
     /// extent is unanchored — i.e. when, whatever else was true of it, it could
