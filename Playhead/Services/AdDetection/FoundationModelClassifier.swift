@@ -1581,9 +1581,9 @@ struct FoundationModelClassifier: Sendable {
     /// merely unlikely: the binding is scoped to the installing task's tree, so
     /// a concurrent coarse pass in another task reads its own binding (nil, in
     /// practice) and cannot reach a box it does not own. Bind it with
-    /// `FoundationModelClassifier.$coarsePassDiagnosticObserver.withValue(_:operation:)`;
-    /// there is deliberately no setter, so a future "just assign it" cannot
-    /// reintroduce the global.
+    /// `withCoarsePassDiagnosticObserver(_:operation:)` below; there is
+    /// deliberately no setter, so a future "just assign it" cannot reintroduce
+    /// the global.
     ///
     /// The one thing this costs: a diagnostic emitted from a `Task.detached`
     /// (which does not inherit task-locals) would not reach the observer. Every

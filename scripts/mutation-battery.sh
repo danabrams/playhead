@@ -3395,17 +3395,26 @@ MUTATIONS=(
   # interfere: TS03 makes every box empty and TS01 makes one box overfull, so
   # run together each would be credited with the other's failures.
   #
-  # THE KILL SETS ARE DELIBERATELY UNEQUAL, and that is the report. TS01 and
-  # TS02 are two DIFFERENT process-global regressions and they are caught by
-  # DIFFERENT rails:
-  #   • TS01 restores the historical code exactly — assign on install, restore
-  #     in a defer. Save/restore is correct within one task, so the scoping and
-  #     nesting rails stay green under it and SHOULD: it is concurrent
-  #     installers it cannot survive, which is precisely the bug.
-  #   • TS02 leaks instead of restoring, so it is the mirror image — the
-  #     lifetime rails catch it and the concurrency rail does not.
-  # A series where every mutation kills every rail would mean the rails were
-  # measuring one thing under four names.
+  # TS01 and TS02 are two DIFFERENT process-global regressions — assign-and-
+  # restore, and cache-and-leak. The listed expectations are the rails each one
+  # must fail on the mechanism alone, and they differ: TS01's save/restore is
+  # CORRECT inside a single task, so the lifetime rails (scope, nesting) cannot
+  # see it and only the concurrency ones can; TS02 is the mirror image.
+  #
+  # MEASURED 2026-08-03, and it did not match that prediction: each mutation
+  # failed ALL FIVE tests, including the two the analysis said it could not
+  # reach. The reason is the finding, not a flaw — once ANY process-global
+  # exists, the scoping suite is no longer alone with it. It runs concurrently
+  # with the bd-34e consumer test, which installs an observer of its own, so
+  # every rail acquires cross-talk it cannot control. That is the whole bug
+  # restated: a shared hook does not fail where you predict, it fails wherever
+  # two things happen to overlap, and the verdict moves run to run.
+  #
+  # The expectations are kept NARROW rather than widened to the observed five.
+  # A kill set produced by incidental overlap is not a claim this file should
+  # make: the named rails are the ones that fail on the mutation's own
+  # mechanism, and those are the ones whose passing would mean the defect
+  # returned undetected.
   #
   # TS03 and TS04 are the vacuity controls. Every rail here is built as "my own
   # windows arrived AND nothing else did"; without a mutation that empties every
@@ -8507,11 +8516,13 @@ EOF
   # a leak-style approximation (TS02) would have let the rails be judged against
   # a defect the repo never actually had.
   #
-  # What it does NOT break is the report. Save/restore is CORRECT inside one
-  # task, so the lifetime rails — scope and nesting — stay green, and should.
-  # The defect was never about one test's own bookkeeping; it was that a second,
-  # concurrent installer overwrites the first and the first's windows go
-  # somewhere else. Only the concurrency and foreign-task rails can see that.
+  # The defect was never about one test's own bookkeeping — save/restore is
+  # correct inside one task — but about a second, concurrent installer
+  # overwriting the first so the first's windows go somewhere else. Hence the
+  # two named expectations. RUN 2026-08-03: KILLED, and it took all five tests
+  # down including the bd-34e consumer, which is the ORIGINAL playhead-5n8k
+  # failure reproduced on demand. See the series header for why the extra kills
+  # are the finding rather than a wider claim.
   TS01)
     snippet OLD <<'EOF'
     static func withCoarsePassDiagnosticObserver<R>(
@@ -8552,8 +8563,9 @@ EOF
   # TS02 — the mirror image, and a regression that is easier to write by
   # accident than TS01 is: the funnel remembers the last binding it saw and
   # falls back to it, so a binding outlives its scope and an UNBOUND task
-  # inherits it. Caught by the lifetime rails, invisible to the concurrency one
-  # — the exact complement of TS01, which is the argument for keeping both.
+  # inherits it. Its own mechanism is visible to the lifetime rails, which is
+  # the complement of TS01 and the argument for keeping both.
+  # RUN 2026-08-03: KILLED, all five, for the same reason TS01 was.
   TS02)
     snippet OLD <<'EOF'
     private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
