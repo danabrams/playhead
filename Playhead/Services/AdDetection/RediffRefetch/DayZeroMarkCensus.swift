@@ -82,17 +82,27 @@ struct DayZeroMarkCensus: Sendable, Equatable {
 
     /// Day-0 byte-exact rows anchored `.rediffByteExact` on BOTH edges — a
     /// playhead-qs0d strict mint.
+    ///
+    /// Counted **whether or not the row was later settled**, and that ordering
+    /// is load-bearing rather than tidy. This count is the evidence behind
+    /// "the mint that produced these marks COULD stamp an anchor", which is what
+    /// makes the unanchored siblings provably segment-recovered. A user vetoing
+    /// the anchored row does not un-prove it — bucketing it as settled would
+    /// read the asset back as rescuable and re-derive exactly the 9s6q slots
+    /// playhead-qs0d withheld.
     let anchoredCount: Int
 
-    /// Day-0 byte-exact rows carrying anything less on either edge, and which a
-    /// re-mint would be ALLOWED to supersede (see `isSupersedable`).
+    /// Day-0 byte-exact rows carrying anything less on either edge AND still
+    /// unsettled — precisely the rows a re-mint would be ALLOWED to supersede
+    /// (see `isSupersedable`).
     let degradedCount: Int
 
-    /// Day-0 byte-exact rows the user or the pipeline has settled — vetoed
-    /// (`.reverted`), confirmed, already skipped, or banner-dismissed. Counted
-    /// so a "no anchored marks" reading cannot be produced by rows that are
-    /// simply off limits, and NEVER superseded: the fidelity ladder puts a user
-    /// gesture above anything a re-fetch can derive.
+    /// Day-0 byte-exact rows that are NOT fully anchored and that the user or
+    /// the pipeline has settled — vetoed (`.reverted`), confirmed, already
+    /// skipped, or banner-dismissed. Counted separately from `degradedCount`
+    /// because they are off limits: the fidelity ladder puts a user gesture
+    /// above anything a re-fetch can derive, so they are never superseded and
+    /// never make an asset rescuable.
     let settledCount: Int
 
     static let empty = DayZeroMarkCensus(
@@ -144,11 +154,15 @@ struct DayZeroMarkCensus: Sendable, Equatable {
         var anchored = 0
         var degraded = 0
         var settled = 0
+        // ANCHORED IS TESTED FIRST, deliberately — see `anchoredCount`. A
+        // vetoed-but-anchored row still proves the mint could stamp an anchor,
+        // and that proof is what withholds the rescue from its segment-recovered
+        // siblings.
         for row in rows where isDayZeroByteExactMark(row) {
-            if isSettled(row) {
-                settled += 1
-            } else if isFullyAnchored(row) {
+            if isFullyAnchored(row) {
                 anchored += 1
+            } else if isSettled(row) {
+                settled += 1
             } else {
                 degraded += 1
             }

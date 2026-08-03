@@ -1694,6 +1694,7 @@ T_BLLT_DETAIL="the census detail fires only when it discriminates, and names the
 T_UG9M_RESCUABLE="an asset with an ANCHORED day-0 row is never rescued — its unanchored siblings are 9s6q-recovered"
 T_UG9M_SUPERSEDE_NARROW="only a degraded, unsettled, day-0 row is supersedable"
 T_UG9M_HALF_ANCHORED="a HALF-anchored row is degraded, not anchored"
+T_UG9M_VETOED_ANCHORED="a VETOED but ANCHORED row still counts as anchored, and still blocks the rescue"
 T_UG9M_VETO="a STRICT re-mint does not supersede a user-VETOED day-0 row"
 T_UG9M_FOREIGN_PRODUCER="a STRICT re-mint does not supersede another producer's window"
 T_UG9M_ANCHORED_ROW="a STRICT re-mint does not supersede an already-ANCHORED day-0 row"
@@ -3079,7 +3080,7 @@ MUTATIONS=(
   "BL09|247|ORCH|$T_BLLT_SINGLE_SHIPPED;$T_BLLT_AGG_SHIPPED"
   "BL10|247|HOTGATE|$T_BLLT_DETAIL"
 
-  # playhead-ug9m — THE DAY-0 RESCUE. Thirteen entries, batches 250-259.
+  # playhead-ug9m — THE DAY-0 RESCUE. Fourteen entries, batches 250-260.
   #
   # WHAT SETS THE BATCH FLOOR. UG01-UG05 all edit predicates inside
   # `DayZeroMarkCensus`, and UG02/UG03/UG04 edit the SAME expression
@@ -3103,6 +3104,7 @@ MUTATIONS=(
   "UG11|258|ADSVC|$T_UG9M_STRICT_SUPERSEDES"
   "UG12|258|UGCEN|$T_UG9M_FREEZE_REPORT"
   "UG13|259|STORE|$T_UG9M_CONTEXT;$T_UG9M_TRIGGER_REFETCH"
+  "UG14|260|UGCEN|$T_UG9M_VETOED_ANCHORED"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3173,6 +3175,7 @@ describe_mutation() {
     UG11) echo "ug9m: the mint retires nothing — the degraded row survives beside the anchored one" ;;
     UG12) echo "ug9m: freezeState reports frozen as rescuable — the permanent state stops being visible" ;;
     UG13) echo "ug9m: fetchDayZeroAttemptContext returns an EMPTY census — the rescue never fires" ;;
+    UG14) echo "ug9m: classify buckets a settled row before an anchored one — a vetoed anchored mark stops proving the mint could stamp" ;;
     M01) echo "revertByTimeRange: delete the MANAGED loop's in-loop lifecycle guard" ;;
     M02) echo "revertByTimeRange: delete the SUGGEST loop's in-loop lifecycle guard" ;;
     M03) echo "revertByTimeRange: MANAGED in-loop guard 'break' -> 'return'" ;;
@@ -3778,6 +3781,26 @@ EOF
 EOF
     snippet NEW <<'EOF'
             markCensus: DayZeroMarkCensus.classify(rows: [])
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UG14 — the bucketing ORDER, reversed. Reads as pure tidiness (three disjoint
+  # buckets either way, every count still sums to the same total) and quietly
+  # removes the proof that withholds the rescue: an asset whose only anchored
+  # day-0 mark the user vetoed reads back `rescuable`, and the rescue then
+  # re-derives exactly the 9s6q slots playhead-qs0d refused to promote.
+  UG14)
+    snippet OLD <<'EOF'
+            if isFullyAnchored(row) {
+                anchored += 1
+            } else if isSettled(row) {
+                settled += 1
+EOF
+    snippet NEW <<'EOF'
+            if isSettled(row) {
+                settled += 1
+            } else if isFullyAnchored(row) {
+                anchored += 1
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -170,6 +170,37 @@ struct DayZeroMarkCensusTests {
         }
     }
 
+    /// The ordering hole this caught, and it is not hypothetical: a settled row
+    /// bucketed away from `anchoredCount` would make an asset whose ONLY
+    /// anchored mark the user vetoed read back as rescuable — and the rescue
+    /// would then re-derive exactly the 9s6q segment-recovered siblings qs0d
+    /// withheld. A veto retracts a MARK; it does not un-prove that the mint
+    /// could stamp an anchor.
+    @Test("a VETOED but ANCHORED row still counts as anchored, and still blocks the rescue")
+    func vetoedAnchoredRowStillProvesTheMintCouldStamp() {
+        let census = DayZeroMarkCensus.classify(rows: [
+            RescueFixture.window(id: "vetoed", anchor: .rediffByteExact, decisionState: .reverted),
+            RescueFixture.window(id: "degraded", start: 400, end: 460)
+        ])
+        #expect(census.anchoredCount == 1, "anchored is tested BEFORE settled")
+        #expect(census.settledCount == 0)
+        #expect(census.degradedCount == 1)
+        #expect(!census.isRescuable)
+        #expect(DayZeroRediffAttemptPolicy.decide(
+            record: RescueFixture.record(generation: RescueFixture.foreignGeneration),
+            markCensus: census,
+            now: 10_000_000
+        ) == .suppress(reason: .marked, nextEligibleAt: nil))
+        // The witness that the fixture is discriminating: drop the vetoed
+        // anchored row and the SAME degraded row is rescuable again.
+        #expect(DayZeroMarkCensus.classify(rows: [
+            RescueFixture.window(id: "degraded", start: 400, end: 460)
+        ]).isRescuable)
+        // And it is still not supersedable — a veto is off limits either way.
+        #expect(!DayZeroMarkCensus.isSupersedable(
+            RescueFixture.window(id: "vetoed", anchor: .rediffByteExact, decisionState: .reverted)))
+    }
+
     /// THE conjunction the whole bound rests on.
     @Test("isRescuable requires degraded rows AND no anchored row")
     func rescuableIsAConjunction() {
