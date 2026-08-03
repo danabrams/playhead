@@ -800,6 +800,12 @@ DLMGR="Playhead/Services/Downloads/DownloadManager.swift"
 FQSCAN="Playhead/Services/Downloads/ForceQuitResumeScan.swift"
 BGFEED="Playhead/Services/PodcastFeed/BackgroundFeedRefreshService.swift"
 EPPREP="Playhead/Services/Downloads/EpisodePreparationCoordinator.swift"
+# playhead-kanf (KN series). SCHED owns the one-shot user-intent flag and the
+# decision to promote; STORE (already listed) owns the guarded write. The two
+# halves are genuinely separable — a store that promotes a leased row and a
+# scheduler that burns the flag on nothing are different defects — so both are
+# mutated.
+SCHED="Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -807,7 +813,7 @@ MUTABLE_FILES=(
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
-  "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP"
+  "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
 )
 
 FOCUSED_SUITES=(
@@ -1091,6 +1097,18 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/DownloadContextTests
   -only-testing:PlayheadTests/EpisodePreparationCoordinatorTests
   -only-testing:PlayheadTests/BackgroundFeedRefreshSharedEnqueuePathTests
+  # playhead-kanf: the user-intent promotion rails (KN series). Two suites, and
+  # neither can see what the other does. AnalysisStoreUserIntentPromotionTests
+  # is the only thing that judges the guarded write in isolation — a `queued`
+  # row carrying a stale lease, and a `running` row carrying none, are states
+  # the scheduler cannot construct through its own API, so the two halves of
+  # `state = 'queued' AND leaseOwner IS NULL` are separable only there.
+  # AnalysisWorkSchedulerUserIntentTests is the only thing that can observe the
+  # one-shot flag at all: it is private in-memory scheduler state with no
+  # accessor, and its survival is visible ONLY as the priority a LATER enqueue
+  # lands at. ~1.3 s for both.
+  -only-testing:PlayheadTests/AnalysisStoreUserIntentPromotionTests
+  -only-testing:PlayheadTests/AnalysisWorkSchedulerUserIntentTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1790,6 +1808,34 @@ T_KKZU_PLAYED="The played path's context is byte-identical under the new constru
 T_KKZU_AUTO="An auto-download carries the show it belongs to"
 T_KKZU_PREPARE="cellular + policy on: proceeds with download"
 T_KKZU_CLEAR="Clearing the cache takes the attribution with it"
+
+# playhead-kanf (KN series). The claim is a promotion AND a refusal, and the
+# refusal is the one worth rails: "a leased job must not be promoted" is the
+# correctness boundary the bead draws, and a fix that promotes everything
+# passes every promotion rail. Note which direction is silent here — a
+# promotion that does not happen writes nothing and fails nothing, which is
+# exactly how the original defect survived being documented as intended.
+# Verbatim @Test display names, not paraphrases of the claim.
+T_KANF_PROMOTES="a queued, unleased row is promoted to the .now floor"
+T_KANF_NUDGE="promotion touches priority and updatedAt only — never the lifecycle columns"
+T_KANF_SOON="an explicit-download row at priority 10 is still promoted to the .now floor"
+T_KANF_LEASED="a LEASED row is not promoted, while an unleased twin in the same store is"
+T_KANF_RUNNING="a RUNNING row is not promoted, while a queued twin in the same store is"
+T_KANF_PRODLEASE="a row leased through acquireLease — the production shape — is not promoted"
+T_KANF_PAUSED="a paused row is not promoted (one promotable state, deliberately)"
+T_KANF_TERMINAL="a complete row is not promoted"
+T_KANF_ATFLOOR="a row already at the floor reports alreadyPromoted and is left untouched"
+T_KANF_RUNATFLOOR="a RUNNING row already at the floor reports alreadyPromoted, not notPromotable"
+T_KANF_NOROW="an unoccupied work key reports noRow and creates nothing"
+T_KANF_SCOPED="promotion is keyed on workKey alone and moves no other row"
+T_KANF_TAP="a tap on an ALREADY-queued episode promotes that job to the .now lane"
+T_KANF_IDENT="promotion is a selection nudge: createdAt and the routing pair survive it"
+T_KANF_TAP_LEASED="a LEASED job is not promoted, while a queued episode tapped in the same breath is"
+T_KANF_TAP_RUNNING="a RUNNING job with no live lease is not promoted either"
+T_KANF_FLAG_KEPT="a refused promotion RETAINS the flag, so the next enqueue still honours it"
+T_KANF_FLAG_SPENT="a SERVED promotion consumes the flag — a later auto enqueue is not promoted"
+T_KANF_RETAP="re-tapping an already-promoted job is idempotent and consumes the flag"
+T_KANF_NO_INTENT="a plain auto enqueue over an existing queued row leaves its priority alone"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3260,6 +3306,35 @@ MUTATIONS=(
   "KZ09|288|FQSCAN|$T_KKZU_FORCE_QUIT"
   "KZ10|289|DLMGR|$T_KKZU_CANCEL"
   "KZ11|290|DLMGR|$T_KKZU_CLEAR"
+
+  # ---- playhead-kanf: a user-intent tap promotes a queued job (KN series) ----
+  #
+  # ONE MUTATION PER BATCH, and here that is not caution but necessity: KN01,
+  # KN02 and KN03 all rewrite the SAME guard, and KN06 and KN08 the same call.
+  # More importantly the outcomes interfere — KN01 makes everything promotable
+  # and KN04 makes nothing already-served, so run together each would be
+  # credited with failures the other caused.
+  #
+  # WHAT IS ACTUALLY BEING DEFENDED. The bead's promise ("the tap promotes")
+  # and its constraint ("never a leased or running row") pull in opposite
+  # directions, and a fix that satisfies only the first passes every promotion
+  # rail. So the centrepiece is KN01/KN02/KN03 — the refusals — and the
+  # promotion rails exist mostly to keep those from being vacuous.
+  #
+  # The lease defence is deliberately DOUBLE: a Swift guard that classifies
+  # (so the caller learns *why*) and a SQL predicate that is its own
+  # compare-and-swap. Every mutation that attacks it therefore patches BOTH
+  # sites — a single-site mutation survives on the other's back, which would be
+  # a report about redundancy rather than about coverage.
+  "KN01|300|STORE|$T_KANF_LEASED;$T_KANF_RUNNING;$T_KANF_PAUSED;$T_KANF_TERMINAL;$T_KANF_PRODLEASE;$T_KANF_TAP_LEASED;$T_KANF_TAP_RUNNING"
+  "KN02|301|STORE|$T_KANF_LEASED"
+  "KN03|302|STORE|$T_KANF_RUNNING;$T_KANF_PAUSED;$T_KANF_TERMINAL;$T_KANF_TAP_RUNNING"
+  "KN04|303|STORE|$T_KANF_ATFLOOR;$T_KANF_RUNATFLOOR;$T_KANF_RETAP"
+  "KN05|304|SCHED|$T_KANF_FLAG_KEPT"
+  "KN06|305|SCHED|$T_KANF_TAP;$T_KANF_IDENT;$T_KANF_TAP_LEASED;$T_KANF_FLAG_KEPT"
+  "KN07|306|SCHED|$T_KANF_FLAG_KEPT"
+  "KN08|307|SCHED|$T_KANF_TAP;$T_KANF_TAP_LEASED"
+  "KN09|308|STORE|$T_KANF_NUDGE;$T_KANF_IDENT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -8138,6 +8213,194 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-kanf: a user-intent tap promotes a queued job (KN series) ----
+
+  # KN01 — the tap always wins. Drop the promotion guard entirely, at both
+  # sites. This is the most likely wrong fix for this bead and it reads as the
+  # most user-friendly one: the user asked, so promote it. It re-ranks a row a
+  # worker is executing, which races the lease/epoch stamping, and it is
+  # completely silent — a promoted running job still finishes.
+  KN01)
+    snippet OLD <<'EOF'
+        guard job.state == "queued", !leased else {
+            return .notPromotable(
+                jobId: job.jobId,
+                state: job.state,
+                priority: job.priority,
+                leased: leased
+            )
+        }
+EOF
+    snippet NEW <<'EOF'
+        // guard removed
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            WHERE workKey = ?
+              AND state = 'queued'
+              AND leaseOwner IS NULL
+              AND priority < ?
+EOF
+    snippet NEW <<'EOF'
+            WHERE workKey = ?
+              AND priority < ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN02 — "state is enough". Keep `state = 'queued'`, drop `leaseOwner IS
+  # NULL`. This is the bead's own wording taken literally, and it is the
+  # mutation with the narrowest kill set: only a QUEUED row still carrying a
+  # stale lease can see it. That row is not hypothetical — `fetchNextEligibleJob`
+  # selects `state IN ('queued','paused') AND (leaseOwner IS NULL OR
+  # leaseExpiresAt < ?)`, so the schema produces it on every lease expiry.
+  KN02)
+    snippet OLD <<'EOF'
+        guard job.state == "queued", !leased else {
+EOF
+    snippet NEW <<'EOF'
+        guard job.state == "queued" else {
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+              AND state = 'queued'
+              AND leaseOwner IS NULL
+              AND priority < ?
+EOF
+    snippet NEW <<'EOF'
+              AND state = 'queued'
+              AND priority < ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN03 — the mirror image: keep the lease check, drop the state check. Reads
+  # as the more sophisticated fix ("the lease is the real authority; state is
+  # derived"), and it promotes every `running` row whose worker crashed without
+  # clearing the lease, plus `paused` and terminal rows.
+  KN03)
+    snippet OLD <<'EOF'
+        guard job.state == "queued", !leased else {
+EOF
+    snippet NEW <<'EOF'
+        guard !leased else {
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+              AND state = 'queued'
+              AND leaseOwner IS NULL
+EOF
+    snippet NEW <<'EOF'
+              AND leaseOwner IS NULL
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN04 — collapse "already served" into "refused". Entirely reasonable on its
+  # face — no row changed, so report no promotion — and it is what a Bool
+  # return would have forced. The cost is invisible: the one-shot flag is then
+  # never spent on a row that is already `.now`, so it survives forever and
+  # every later enqueue for that episode inherits a lane nobody asked for.
+  KN04)
+    snippet OLD <<'EOF'
+        if job.priority >= priority {
+            return .alreadyPromoted(jobId: job.jobId, priority: job.priority)
+        }
+EOF
+    snippet NEW <<'EOF'
+        if job.priority >= priority {
+            return .notPromotable(
+                jobId: job.jobId,
+                state: job.state,
+                priority: job.priority,
+                leased: leased
+            )
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN05 — report a refusal as served. The single most tempting simplification
+  # on the scheduler side ("we asked, we're done"), and it restores exactly half
+  # of the original defect: the tap still does nothing to a leased row, and now
+  # the one-shot flag is burned for it too, so the retry that would have worked
+  # never happens.
+  KN05)
+    snippet OLD <<'EOF'
+                    (playhead-kanf: never re-rank a leased/running row; flag retained)
+                    """
+                )
+                return false
+EOF
+    snippet NEW <<'EOF'
+                    (playhead-kanf: never re-rank a leased/running row; flag retained)
+                    """
+                )
+                return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN06 — THE defect, restored. Skip the promotion and call the intent served.
+  # This is not a strawman: it is precisely what the code did before this bead,
+  # and it was DOCUMENTED as intended ("Recording intent for an episode that
+  # already has a queued job does NOT retroactively promote it"). It fails
+  # nothing, logs nothing alarming, and the control still shows live status.
+  KN06)
+    snippet OLD <<'EOF'
+                userIntentServed = await promoteExistingJobToUserIntentLane(
+                    episodeId: episodeId,
+                    workKey: workKey,
+                    priority: priority
+                )
+EOF
+    snippet NEW <<'EOF'
+                userIntentServed = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN07 — consume the flag unconditionally, as the pre-kanf code did. The
+  # promotion still works, so every promotion rail stays green; what breaks is
+  # only the RETRY, which is visible nowhere except in the priority a later
+  # enqueue lands at.
+  KN07)
+    snippet OLD <<'EOF'
+        if userIntentServed {
+            pendingUserIntentEpisodes.remove(episodeId)
+            pendingUserIntentCoverage[episodeId] = nil
+        }
+EOF
+    snippet NEW <<'EOF'
+        logger.debug("user_intent_served=\(userIntentServed)")
+        pendingUserIntentEpisodes.remove(episodeId)
+        pendingUserIntentCoverage[episodeId] = nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN08 — promote to the SOON floor instead of the NOW floor. The plausible
+  # compromise ("a tap shouldn't outrank playback"), and it silently gives up
+  # the entire point: `.soon` is deferred work, which is the lane the job was
+  # already starving in. Only the exact floor distinguishes it.
+  KN08)
+    snippet OLD <<'EOF'
+                    priority: priority
+EOF
+    snippet NEW <<'EOF'
+                    priority: Self.soonLanePriorityFloor
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KN09 — treat the promotion as a lifecycle transition rather than a
+  # selection nudge: rotate the routing identity while re-ranking. Reads as
+  # hygiene ("a re-ranked row is a new dispatch generation") and breaks
+  # orphan-recovery routing, which joins `analysis_jobs` to `work_journal` on
+  # {generationID, schedulerEpoch}. Nothing fails at promotion time.
+  KN09)
+    snippet OLD <<'EOF'
+            SET priority = ?, updatedAt = ?
+            WHERE workKey = ?
+EOF
+    snippet NEW <<'EOF'
+            SET priority = ?, updatedAt = ?, generationID = ''
+            WHERE workKey = ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -8198,6 +8461,7 @@ rec_file()   {
     FQSCAN) printf '%s' "$FQSCAN" ;;
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;
+    SCHED) printf '%s' "$SCHED" ;;
     *)     printf '%s' "" ;;
   esac
 }
