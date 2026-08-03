@@ -89,3 +89,69 @@ No batching, deliberately: a batch of N trades N-1 windows of guaranteed-durable
 FM work for a write saving on a path that is already writing at that cadence, and
 the whole point of the bead is that a window's worth of FM compute is expensive
 and a row write is not.
+
+## What adversarial review changed
+
+The first cut had a real defect and three weaker spots. Recorded here because the
+defect is the same shape as the bug the bead is about — a quantity that claims
+more than it knows.
+
+* **The cursor followed INTENT, not persistence.** The row loop steps over a
+  failed write on purpose (retrying it every checkpoint would spend the rest of
+  the pass on a row a permanent validator error rejects every time). But the
+  coverage walk was computed from `banked.windows` — the in-memory outcomes — so
+  a window whose row did NOT land still advanced the contiguous prefix, and
+  `narrowedForResume` would then skip audio no row covers. A permanent, silent
+  coverage hole: exactly pmp9, reintroduced by the fix for a different bug. The
+  box now tracks `durableWindowCount` (frozen at the first failed write) apart
+  from `processedWindowCount`, and the walk sees only the durable prefix.
+* **The checkpoint could outlive its job.** `FMNoProgressWatchdog` abandons a
+  wedged pass rather than awaiting it, so the pass body can still fire a
+  checkpoint after the drain loop has moved the job to a terminal state.
+  `runJob` now defuses the box on every exit path, and the closure holds the
+  runner weakly — an abandoned pass parks it forever, on a device whose headline
+  failure mode is jetsam.
+* **One test was vacuous.** `rerunningTheSamePassIsIdempotent` re-ran a
+  `.complete` job, which short-circuits before the classifier, so "no new rows"
+  was true for any implementation — including a plain `INSERT` with a random row
+  id. It now asserts `coarseCallCount == 0`, which pins the M-5 skip that is the
+  real contract there, and the row-level idempotency claim moved to the test
+  where the double write actually happens.
+* **The walk was cubic in the plan count.** Each plan's line-ref `Set` was built
+  inside the innermost closure; with the walk now running once per window that
+  is O(P^3 * L) across a pass. Hoisted.
+
+## The one thing deliberately NOT changed
+
+The t1kq cancellation branch (`BackfillJobRunner.swift`, the retry arm) writes
+`salvagedCursor ?? job.progressCursor` — the ADMISSION-TIME cursor. Since the
+checkpoint writes the database directly, that can rewind a mid-flight
+checkpoint to nil.
+
+It looks like a bug and it is not. It fires only when the coarse pass was FULLY
+covered (that is the one case where `honestCursorBox` is deliberately left
+unset), and there the rewind is correct: keeping a partial cursor would make
+`narrowedForResume` trim the resume to the last window, so the refinement for
+every earlier ad would never run and the job would then mark complete. That is
+precisely what `BackfillRateLimitDeferTests.fullCoverageCancellationDoesNotCheckpoint`
+pins, and it still passes.
+
+The cost is real — a fully-covered-then-cancelled pass re-pays its coarse FM —
+but the alternative is a coverage hole, and changing it is a deliberate
+alteration of t1kq's contract rather than a drive-by. Dan's call.
+
+## Downstream consequence worth a product decision
+
+`SemanticSweepMarkComposer` mints mark-only `AdWindow`s directly from passA
+`containsAd` rows, without requiring pass B, up to `maximumMarkDurationSeconds`
+(300 s). It ships ON. Durable coarse-only rows used to be rare; after this bead
+a killed pass leaves them routinely, and the windows below the resume cursor are
+never revisited by a pass B. So the app will show MORE mark-only banners, at
+unrefined coarse extent.
+
+Bounded: `markOnly`, `.candidate`, both edges `.unanchored`, and the composer
+refuses to emit over an existing window — so the worst case is a wrong banner,
+never a wrong cut. But it is a frequency change on a user-visible surface and it
+interacts with "a mark is worth far less than a skip and can itself cost show".
+Flagged, not guarded: guarding it would be a detection-semantics change, which
+this bead's non-goals exclude.
