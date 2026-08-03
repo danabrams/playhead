@@ -81,17 +81,26 @@ struct AutoSkipPrecisionGateIntegrationTests {
     }
 
     /// - Parameter blocksUnanchoredExtent: playhead-bllt's gate, which ships
-    ///   `true`. Passing `false` is how the two autoSkip tests below isolate
-    ///   the PRESENCE verdict this suite was originally written to pin: with
-    ///   the extent block off, the hot path stamps exactly what
-    ///   `precisionGateLabel` decided, so the gtt9.11 claim stays testable
-    ///   after bllt started demoting it at the emission site.
+    ///   `true` and which this suite DEFAULTS OFF. That is deliberate and it is
+    ///   the opposite of hiding from it.
+    ///
+    ///   This suite's subject is the PRECISION gate — "does the presence
+    ///   evidence admit auto-skip?" — and with bllt on, every hot-path row is
+    ///   `"markOnly"` whatever the precision gate decided, so every
+    ///   `== "markOnly"` assertion here would become true by construction and
+    ///   stop discriminating. A rail that cannot fail is the defect
+    ///   playhead-le02 spent a bead removing; adding seven more of them while
+    ///   fixing a different problem would be a poor trade.
+    ///
+    ///   The SHIPPING behaviour is not untested — it is pinned by the two
+    ///   `(playhead-bllt)` tests below, which pass `true` explicitly and say so
+    ///   in their names, and by `HotPathExtentGateMonotonicityTests`.
     private func makeService(
         store: AnalysisStore,
         classifier: ClassifierService,
         classifierCalibrationProfile: ClassifierCalibrationProfile =
             .production,
-        blocksUnanchoredExtent: Bool = true
+        blocksUnanchoredExtent: Bool = false
     ) -> AdDetectionService {
         let config = AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -368,11 +377,7 @@ struct AutoSkipPrecisionGateIntegrationTests {
             defaultScore: 0.10,
             chunkScore: 0.85
         )
-        let service = makeService(
-            store: store,
-            classifier: classifier,
-            blocksUnanchoredExtent: false
-        )
+        let service = makeService(store: store, classifier: classifier)
 
         // Pre-roll chunk [60, 120]: center 90 s ÷ 3600 s = 2.5% < 10%
         // slotFraction → metadataSlotPrior fires. The same sponsor /
@@ -428,8 +433,13 @@ struct AutoSkipPrecisionGateIntegrationTests {
             defaultScore: 0.10,
             chunkScore: 0.85
         )
-        // The SHIPPING config: `unanchoredExtentBlocksAutoSkip` defaults true.
-        let service = makeService(store: store, classifier: classifier)
+        // The SHIPPING config, opted into explicitly — this suite defaults the
+        // extent block OFF so its precision-gate assertions keep discriminating.
+        let service = makeService(
+            store: store,
+            classifier: classifier,
+            blocksUnanchoredExtent: true
+        )
 
         let normalized = "brought to you by squarespace use promo code playhead at squarespace.com"
         let chunk = TranscriptChunk(
@@ -590,11 +600,7 @@ struct AutoSkipPrecisionGateIntegrationTests {
             defaultScore: 0.10,
             chunkScore: 0.85
         )
-        let service = makeService(
-            store: store,
-            classifier: classifier,
-            blocksUnanchoredExtent: false
-        )
+        let service = makeService(store: store, classifier: classifier)
 
         // 60 s chunk at mid-episode (center 1530 — no slot prior).
         //  - "brought to you by" at chars 0-17
@@ -656,8 +662,13 @@ struct AutoSkipPrecisionGateIntegrationTests {
             defaultScore: 0.10,
             chunkScore: 0.85
         )
-        // The SHIPPING config: `unanchoredExtentBlocksAutoSkip` defaults true.
-        let service = makeService(store: store, classifier: classifier)
+        // The SHIPPING config, opted into explicitly — this suite defaults the
+        // extent block OFF so its precision-gate assertions keep discriminating.
+        let service = makeService(
+            store: store,
+            classifier: classifier,
+            blocksUnanchoredExtent: true
+        )
 
         let normalized = "brought to you by squarespace use promo code playhead at squarespace.com"
         let chunk = TranscriptChunk(

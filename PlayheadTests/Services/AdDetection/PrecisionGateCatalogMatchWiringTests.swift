@@ -108,7 +108,16 @@ struct PrecisionGateCatalogMatchWiringTests {
             hotPathLookahead: 90.0,
             detectorVersion: "2m2i-test",
             fmBackfillMode: .off,
-            autoSkipConfidenceThreshold: 0.80
+            autoSkipConfidenceThreshold: 0.80,
+            // playhead-bllt: the extent block OFF, deliberately. This suite's
+            // claim is "catalog evidence alone must not admit autoSkip" — a
+            // statement about the PRECISION gate. With bllt on, every hot-path
+            // row is markOnly regardless, so that assertion would hold no
+            // matter what the catalog logic did: a rail that cannot fail.
+            // bllt's own behaviour is pinned in
+            // `HotPathExtentGateMonotonicityTests` and the two SHIPPING-config
+            // tests in `AutoSkipPrecisionGateIntegrationTests`.
+            unanchoredExtentBlocksAutoSkip: false
         )
         return AdDetectionService(
             store: store,
