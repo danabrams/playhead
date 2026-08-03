@@ -317,6 +317,42 @@
 #       and `git status` reads clean. Repaired in 35fd529c and re-run from a
 #       verified-clean tree; the interrupted verdict was discarded, not reported.
 #
+#   PARTIAL RE-RUN 2026-08-02 (playhead-le02). Batches 230-231 (LE01-LE08, 8
+#   new entries), 2 batches. FINAL 8 KILLED / 0 SURVIVED / 0 ERROR, 4 builds
+#   (1 baseline + 1 batch, twice). Batches 1-217 were NOT re-run and carry the
+#   verdicts below. Recount with `--list`: 302 live entries.
+#
+#   These are the A11 class generalised. avbn repaired ONE rail; le02 enumerated
+#   the rest (`scripts/le02-negative-banner-audit.py`, 39 A11-blind test
+#   functions of 75 that make a negative surfacing claim) and repaired 15.
+#
+#   Two results worth keeping:
+#
+#   LE01 is the cruellest form of the class and the reason the repairs assert
+#   TWO witnesses. It arms a suggestion while leaving the census stamp intact,
+#   so `lastAdWindowIngestOutcome` still reads `droppedInventorySanity`. A rail
+#   that trusted the census alone survives it; only `activeSuggestWindowIDs()`
+#   — the collection the suggest tier actually lands in — kills it. It also
+#   demonstrated the OTHER half of the acceptance criterion: the inventory
+#   suite's positive controls (pre-roll survives, post-roll survives, valid
+#   spans survive, flag-OFF passes everything) all stayed GREEN under it, so
+#   the new witness is targeted rather than a blanket assertion that fires on
+#   every delivery.
+#
+#   LE08's blast radius is WIDER than its comment claims. It is described as
+#   "narrowed to applied rows so its blast radius stays inside the rail it is
+#   aimed at"; measured, it also reddens three other preload tests and two
+#   revert rails. Harmless — nothing else in batch 231 claims those tests, so
+#   attribution held — but the comment overstates the narrowing and the next
+#   person should not batch anything near it on that basis.
+#
+#   Batch 231 first reported 4 ERROR / "batch did not build/run, rc=28". That
+#   was NOT a build failure: 28 is the playhead-3nfa disk preflight refusing to
+#   start. The battery reports any non-running batch as ERROR, which is the
+#   right default, but rc=28 specifically means "reclaim disk and re-run", not
+#   "fix the EDIT". Re-ran after erasing the destination simulator and sweeping
+#   $TMPDIR/Deleting-*: 4/4 KILLED, nothing about the mutations changed.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-avbn). Batches 130-134 (A01-A11, 11 new
 #   entries), 5 batches. FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 7 builds
 #   (1 baseline + 5 batches + 1 re-run of batch 133). Batches 1-125 were NOT
