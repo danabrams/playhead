@@ -185,6 +185,34 @@
 #   FINAL 11 KILLED / 0 SURVIVED / 0 ERROR, 16 builds. Batches 1-157 and 159
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
+
+#   PARTIAL RE-RUN 2026-08-02 (playhead-bllt). Batches 240-247 only (BL01-BL10,
+#   10 new entries, 8 batches — five of them edit ONE predicate in
+#   `HotPathExtentGate.gatedLabel` and so cannot be batched together at all).
+#   FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 9 builds (1 baseline + 8 batches),
+#   ~18m wall clock across six invocations. Batches 1-239 were NOT re-run and
+#   carry the verdicts above. Recount: the array now holds 312 live entries.
+#
+#   Two operational faults, both recorded because neither is about a mutation:
+#     • The first attempt reported `BL01 ERROR — anchor did not apply`, which
+#       reads like source drift and was not: a MUTABLE_FILES entry is TWO edits,
+#       and `rec_file`'s case had not been given a `HOTGATE)` arm, so `file`
+#       resolved to the empty string. Any new series adding a file will hit this.
+#     • The batch loop ran `git checkout -- .` between invocations and thereby
+#       discarded the UNCOMMITTED `rec_file` fix, making batches 242-247 fail for
+#       a reason unrelated to their anchors. That is the header's own
+#       "commit script edits before --dry-run" trap, hit from the other side:
+#       the restore does not distinguish your script edit from a live mutant.
+#       Restrict the between-batch restore to the SOURCE trees
+#       (`git checkout -- Playhead PlayheadTests`) and the problem disappears.
+#
+#   One thing the run proved that is worth keeping: BL03 inverts the gate's
+#   condition so that ANCHORED rows demote and invented ones auto-skip, and the
+#   whole-domain MONOTONICITY sweep stays green under it — passing an
+#   `"autoSkip"` through is not a rise. It is killed by the EXACT-transition and
+#   anchored-row rails instead. That is the measured argument for why
+#   monotonicity alone is not the safety property, stated in
+#   `HotPathExtentGateMonotonicityTests`' header and now demonstrated.
 #
 #   Three faults found and fixed during the run, recorded because two of them
 #   are traps any new series can hit:
