@@ -294,8 +294,18 @@ struct RediffDayZeroAccountabilityTests {
         )
         // The marks are already on disk; re-fetching would spend ~108 MB to
         // mint nothing, so the generation reset must NOT reach this case.
+        //
+        // playhead-ug9m NARROWED THE CLAIM, and this call still states it
+        // exactly: with no mark census in hand (the default `.empty`) the
+        // suppression is unconditional, as it always was. The one exception —
+        // an asset whose every day-0 mark is DEGRADED, which is a fact read off
+        // the persisted rows rather than a guess — is proved in
+        // `DayZeroRescuePolicyTests`, together with its bound.
         #expect(Policy.decide(record: marked, now: 1_000 + 365 * Self.day)
                 == .suppress(reason: .marked, nextEligibleAt: nil))
+        #expect(Policy.decide(record: marked, markCensus: .empty, now: 1_000 + 365 * Self.day)
+                == .suppress(reason: .marked, nextEligibleAt: nil),
+                "an asset with no day-0 marks on disk is never a rescue case")
     }
 
     @Test("a SUCCESSFUL day-0 never re-fetches, no matter how much time passes")
@@ -1314,7 +1324,19 @@ struct DayZeroPolicyGenerationCanaryTests {
 
     /// The generation these values were calibrated against. Changing any
     /// expectation below without changing this is the mistake.
-    static let calibratedGeneration = 1
+    ///
+    /// **2 (playhead-ug9m), re-calibrated DELIBERATELY and with the bump, which
+    /// is the whole point of this canary.** Two outcome-determining changes had
+    /// landed at generation 1 without one: playhead-qs0d changed what a mint
+    /// PERSISTS (a strict slot now earns `.rediffByteExact` anchors and
+    /// `eligibilityGate = .eligible` rather than `unanchored`/`.markOnly`), and
+    /// playhead-ug9m lets a strict re-mint supersede its own degraded rows.
+    /// Neither is visible in the knobs pinned below — qs0d changed the mint's
+    /// OUTPUT rather than its thresholds — which is the gap this canary's own
+    /// doc comment names ("it cannot catch a logic edit INSIDE
+    /// `gateAndDiffBytes`"). The bump is what lets the assets that were marked
+    /// under generation 1 be re-attempted at all.
+    static let calibratedGeneration = 2
 
     private static let bumpHint = """
         Day-0's outcome-determining behavior changed. Either bump \
@@ -1368,7 +1390,16 @@ struct DayZeroPolicyGenerationCanaryTests {
         // is still pinned above. Bumping the generation for this would spend
         // ~390 MB of re-fetch per already-exhausted asset to re-derive the same
         // verdict.
-        #expect(RediffDayZeroExit.allCases.count == 19, "\(Self.bumpHint)")
+        //
+        // playhead-ug9m added a SIXTH such case, `.rescueExhausted` (20), and
+        // it is re-calibrated here TOGETHER WITH the generation bump above
+        // rather than quietly. It is also a pre-fetch refusal — free, never
+        // returned by the mint — but unlike the five before it, this bead DID
+        // change what day-0 concludes: a `.marked` asset whose every mark is
+        // degraded is now re-attemptable once, and a strict re-mint may
+        // supersede its own degraded rows. That is precisely the case the bump
+        // exists for.
+        #expect(RediffDayZeroExit.allCases.count == 20, "\(Self.bumpHint)")
     }
 }
 
