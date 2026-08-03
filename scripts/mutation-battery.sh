@@ -54,8 +54,13 @@
 #      it necessary. ALWAYS `git checkout -- .` and re-check `git status` between
 #      invocations, and never trust the restore message alone.
 #
-# THE R SERIES LIVES ELSEWHERE (playhead-voez)
-# --------------------------------------------
+# THE R AND P SERIES LIVE ELSEWHERE (playhead-voez, playhead-3nfa)
+# ----------------------------------------------------------------
+# The P series — the disk-headroom preflight, `scripts/disk_preflight.py` plus
+# the preflight half of `scripts/fast-gate.sh` and `scripts/disk-cleanup.sh` —
+# is in `scripts/mutation-battery-disk-preflight.py`, for the same reason the R
+# series is, and it reuses the R series' engine outright rather than copying it.
+#
 # The rails for the gate baseline — `scripts/gate_baseline.py` and the baseline
 # half of `scripts/fast-gate.sh` — are in
 # `scripts/mutation-battery-gate-baseline.py`, not here. This script is

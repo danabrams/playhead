@@ -73,10 +73,15 @@
 #   PLAYHEAD_SIM_ID      simulator UDID for -308 recovery (else parsed from DEST id=)
 #   PLAYHEAD_SKIP_BASELINE=1  bypass the baseline verdict (raw exit code)
 #   PLAYHEAD_GATE_BASELINE    baseline file path override
+#   PLAYHEAD_DISK_MIN_GIB     disk-headroom threshold override (default: see
+#                             scripts/disk_preflight.py, where it is derived)
+#   PLAYHEAD_SKIP_DISK_PREFLIGHT=1  bypass the headroom refusal entirely
 #   DEVELOPER_DIR        toolchain select (e.g. the Xcode 27 beta)
 #
 # Extra args are forwarded to xcodebuild (e.g. -only-testing:...).
-# `--accept-baseline` is consumed here and never forwarded.
+# `--accept-baseline` and `--reclaim-disk` are consumed here, never forwarded.
+#
+# Exit 28 (POSIX ENOSPC) means the disk preflight REFUSED — no build, no tests.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -91,10 +96,12 @@ JOBS="${PLAYHEAD_BUILD_JOBS:-4}"
 # the exit code exactly as xcodebuild set it — mutation-battery.sh reads it.
 ACCEPT_BASELINE=0
 SELECTIVE=0
+RECLAIM_DISK=0
 FORWARD=()
 for arg in "$@"; do
   case "$arg" in
     --accept-baseline) ACCEPT_BASELINE=1 ;;
+    --reclaim-disk) RECLAIM_DISK=1 ;;
     -only-testing*|-skip-testing*) SELECTIVE=1; FORWARD+=("$arg") ;;
     *) FORWARD+=("$arg") ;;
   esac
@@ -108,6 +115,30 @@ if [ -z "$SIM_ID" ]; then
   case "$DEST" in
     *id=*) SIM_ID="$(printf '%s' "$DEST" | sed -n 's/.*id=\([0-9A-Fa-f-]*\).*/\1/p')" ;;
   esac
+fi
+
+# Snag 0: DISK HEADROOM (playhead-3nfa). Runs before everything, because a gate
+# that runs out of room does not fail — it WEDGES. xcodebuild stays alive with
+# zero output and never exits, having failed to write its result bundle; there is
+# no POSIX 28, no non-zero exit, nothing in the log. It is indistinguishable from
+# a slow test run, which is how four disk-outs on 2026-08-01 were each caught by
+# someone happening to look rather than by the tooling.
+#
+# Refusing here costs seconds. Wedging costs minutes plus the diagnosis, and the
+# run has to be redone anyway. See scripts/disk_preflight.py for the threshold
+# and its derivation. `--reclaim-disk` lets it run scripts/disk-cleanup.sh ONCE
+# and try again; without that flag nothing is ever deleted.
+#
+# Escape hatch: PLAYHEAD_SKIP_DISK_PREFLIGHT=1. Deliberately not named in the
+# refusal text — same reasoning as PLAYHEAD_SKIP_BASELINE. An override printed
+# in the failure message stops being an override and becomes the workaround.
+if [ "${PLAYHEAD_SKIP_DISK_PREFLIGHT:-0}" != "1" ]; then
+  PREFLIGHT_ARGS=(--sim-id "$SIM_ID" --dest "$DEST")
+  [ -n "${PLAYHEAD_DISK_MIN_GIB:-}" ] && PREFLIGHT_ARGS+=(--min-gib "$PLAYHEAD_DISK_MIN_GIB")
+  [ "$RECLAIM_DISK" -eq 1 ] && PREFLIGHT_ARGS+=(--reclaim)
+  if ! python3 scripts/disk_preflight.py "${PREFLIGHT_ARGS[@]}"; then
+    exit 28   # POSIX ENOSPC, as the error this would otherwise have hidden
+  fi
 fi
 
 # Snag 1: bootstrap a fresh worktree — link the gitignored model, then regenerate
