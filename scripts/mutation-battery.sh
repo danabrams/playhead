@@ -789,6 +789,17 @@ POLICY="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroOutcome.swift"
 # it ships with. ADSVC is already listed and carries the PG08 extent-support
 # literal, which is the one mutation in this series that reaches the row.
 SEGAGG="Playhead/Services/AdDetection/SegmentAggregator.swift"
+# playhead-kkzu (KZ series). The download path is the ONLY writer of
+# `analysis_jobs.podcastId`, and before this bead every background/auto
+# download wrote a NULL there. DLMGR owns the context type, the durable
+# attribution sidecar and the completion enqueue; FQSCAN is the force-quit
+# resume, the one production caller that genuinely cannot derive the show and
+# must recover it from disk; BGFEED and EPPREP are the two callers that always
+# could and were dropping it.
+DLMGR="Playhead/Services/Downloads/DownloadManager.swift"
+FQSCAN="Playhead/Services/Downloads/ForceQuitResumeScan.swift"
+BGFEED="Playhead/Services/PodcastFeed/BackgroundFeedRefreshService.swift"
+EPPREP="Playhead/Services/Downloads/EpisodePreparationCoordinator.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -796,6 +807,7 @@ MUTABLE_FILES=(
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
+  "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP"
 )
 
 FOCUSED_SUITES=(
@@ -1066,6 +1078,19 @@ FOCUSED_SUITES=(
   # construction. ~0.3 s for both.
   -only-testing:PlayheadTests/SegmentAggregatorTests
   -only-testing:PlayheadTests/SegmentAggregatorWiringTests
+  # playhead-kkzu: the download-attribution rails (KZ series). Four suites and
+  # each sees something the others structurally cannot. DownloadShowAttribution
+  # Tests drives the real DownloadManager, so it is the only thing that can
+  # observe the podcastId that actually lands in `analysis_jobs` and the only
+  # thing that can see the sidecar cross a process boundary. DownloadContext
+  # Tests is pure and is the only thing that judges the type-level half — a
+  # blank identity and a named absence. The other two are the callers: a
+  # coordinator or feed-refresh mutation is invisible to the manager, because
+  # the manager faithfully records whatever it is handed. ~0.5 s for all four.
+  -only-testing:PlayheadTests/DownloadShowAttributionTests
+  -only-testing:PlayheadTests/DownloadContextTests
+  -only-testing:PlayheadTests/EpisodePreparationCoordinatorTests
+  -only-testing:PlayheadTests/BackgroundFeedRefreshSharedEnqueuePathTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1744,6 +1769,23 @@ T_BLLT_SINGLE_SHIPPED="single-window fast path: the same 0.85 + strong-lexical w
 T_BLLT_AGG_SHIPPED="hot path: the same slot+lexical segment persists markOnly at the SHIPPING config — its edges are invented (playhead-bllt)"
 T_BLLT_SINGLE_PRESENCE="single-window fast path: 0.85 window with ≥1 safety signal reaches the autoSkip PRESENCE verdict and is auto-skipped (extent block off)"
 T_BLLT_AGG_PRESENCE="hot path: ≥0.55 score in pre-roll WITH a non-slot signal (sponsor/promoCode/URL lexical) reaches the autoSkip PRESENCE verdict (extent block off)"
+
+# playhead-kkzu — a background download carries the show it belongs to. The
+# dangerous direction here is SILENCE: a dropped identity does not fail, it
+# writes NULL, and `AnalysisWorkScheduler` turns that into `?? ""` so every
+# unattributed episode pools under one fake show. So the claims are weighted
+# toward "the value that arrived is THIS show" rather than "a value arrived".
+T_KKZU_ENQUEUE="a background download enqueues analysis against the show it was queued with (playhead-kkzu)"
+T_KKZU_RESTART="a completion delivered to a NEW DownloadManager still carries the show — the attribution is durable, not in-memory"
+T_KKZU_REAP="queueing writes the attribution and a terminal completion reaps it"
+T_KKZU_RESUME_KEEPS="dropping the resume blob leaves the attribution, which is the force-quit path's only route back to the show"
+T_KKZU_FORCE_QUIT="a force-quit resume re-queues the fresh download against the recovered show"
+T_KKZU_CANCEL="cancelling a download reaps its attribution"
+T_KKZU_NAMED="a null show identity always carries the reason it is null"
+T_KKZU_BLANK="an empty or non-canonical identifier is a named absence, not a joinable key"
+T_KKZU_PLAYED="the played path's context is byte-identical under the new constructor"
+T_KKZU_AUTO="an auto-download carries the show it belongs to, and each episode its OWN show"
+T_KKZU_PREPARE="the prepare coordinator hands the download half the same show it hands the analysis half"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3177,6 +3219,25 @@ MUTATIONS=(
   "PG06|275|SEGAGG|$T_PGGN_GAP_CLOSE"
   "PG07|276|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_VALUE;$T_PGGN_TAIL_WIDTH"
   "PG08|276|ADSVC|$T_PGGN_BLLT"
+
+  # ---- playhead-kkzu: the show a background download carries (KZ series) ----
+  #
+  # WHAT SETS THE BATCH FLOOR. KZ01/KZ02 both destroy the attribution that
+  # reaches the enqueue — one at the write, one at the read — so together they
+  # would be judged on a path where the identity is already gone and the second
+  # would be credited a kill it did not earn. KZ04/KZ05 both edit the private
+  # DownloadContext initializer and would collide textually. KZ06/KZ07 patch
+  # the SAME line in the auto-download enqueue. Each of those pairs is split.
+  "KZ01|280|DLMGR|$T_KKZU_ENQUEUE;$T_KKZU_RESTART"
+  "KZ02|281|DLMGR|$T_KKZU_ENQUEUE;$T_KKZU_REAP;$T_KKZU_RESTART"
+  "KZ03|282|FQSCAN|$T_KKZU_RESUME_KEEPS;$T_KKZU_FORCE_QUIT"
+  "KZ04|283|DLMGR|$T_KKZU_BLANK"
+  "KZ05|284|DLMGR|$T_KKZU_NAMED"
+  "KZ06|285|BGFEED|$T_KKZU_AUTO"
+  "KZ07|286|BGFEED|$T_KKZU_AUTO"
+  "KZ08|287|EPPREP|$T_KKZU_PREPARE"
+  "KZ09|288|FQSCAN|$T_KKZU_FORCE_QUIT"
+  "KZ10|289|DLMGR|$T_KKZU_CANCEL"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -7884,6 +7945,164 @@ EOF
       "        return uncovered + covered" \
       "        return covered + uncovered" ;;
 
+  # ---- playhead-kkzu: the show a background download carries (KZ series) ----
+
+  # KZ01 — THE defect, restored. `handleBackgroundDownloadComplete` is the only
+  # thing that enqueues analysis for a background/auto download; before this
+  # bead it passed `context: nil` unconditionally. The mutation is the modern
+  # spelling of exactly that: a named absence in place of the recovered record.
+  # It looks entirely reasonable — "the completion cannot know the show" — and
+  # is silent, because a NULL podcastId fails nothing.
+  KZ01)
+    snippet OLD <<'EOF'
+            await enqueueAnalysisIfNeeded(
+                episodeId: episodeId,
+                sourceFingerprint: strongHash,
+                context: attribution
+            )
+EOF
+    snippet NEW <<'EOF'
+            await enqueueAnalysisIfNeeded(
+                episodeId: episodeId,
+                sourceFingerprint: strongHash,
+                context: .unattributed(
+                    reason: .resumeWithoutRecordedShow,
+                    isExplicitDownload: false
+                )
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ02 — the same loss one step earlier: never write the record. Plausible as
+  # a "why persist what the caller already has" simplification, and it is the
+  # mutation an in-memory implementation would be indistinguishable from.
+  KZ02)
+    snippet OLD <<'EOF'
+        persistDownloadAttribution(episodeId: episodeId, context: context)
+EOF
+    snippet NEW <<'EOF'
+        _ = context
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ03 — reap the attribution alongside the resume blob. This reads as
+  # symmetry ("clean up everything for this episode") and is precisely wrong: a
+  # SUSPENSION is not terminal, and the force-quit resume path has no other
+  # route back to the show.
+  KZ03)
+    snippet OLD <<'EOF'
+        // playhead-wrj8: symmetric cleanup of the freshness sidecar.
+        try? fm.removeItem(at: validatorURL)
+        reportedSuspendedTransfers.remove(episodeId)
+EOF
+    snippet NEW <<'EOF'
+        // playhead-wrj8: symmetric cleanup of the freshness sidecar.
+        try? fm.removeItem(at: validatorURL)
+        deleteDownloadAttribution(episodeId: episodeId)
+        reportedSuspendedTransfers.remove(episodeId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ04 — admit the identity in whatever spelling arrived. `""` then becomes a
+  # show key rather than a named absence, which is strictly worse than NULL: it
+  # JOINS, pooling every unattributed episode into one fake show.
+  KZ04)
+    snippet OLD <<'EOF'
+            canonicalPodcastId:
+                RecurrenceMaterialIdentity.canonicalIdentifier(podcastId),
+            unattributedReason: .showIdentityUnresolvable,
+EOF
+    snippet NEW <<'EOF'
+            canonicalPodcastId: podcastId,
+            unattributedReason: .showIdentityUnresolvable,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ05 — store the reason unconditionally. Every context then claims a reason
+  # it has no absence for, and "carries a reason" stops distinguishing an
+  # unknowable identity from a known one.
+  KZ05)
+    snippet OLD <<'EOF'
+        self.unattributedReason =
+            canonicalPodcastId == nil ? unattributedReason : nil
+EOF
+    snippet NEW <<'EOF'
+        self.unattributedReason = unattributedReason
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ06 — the auto-download drops the show again. This is the original bug's
+  # home: the feed URL is right there in `FeedRefreshNewEpisode`, and the whole
+  # population is the one whose work should be done before the user presses play.
+  KZ06)
+    snippet OLD <<'EOF'
+                context: .resolving(
+                    podcastId: episode.feedURL.absoluteString,
+EOF
+    snippet NEW <<'EOF'
+                context: .resolving(
+                    podcastId: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ07 — attribute every episode in the sweep to the FIRST group's feed. A
+  # rail that only asserts "podcastId is not nil" passes this happily, and the
+  # result is worse than a NULL: real episodes filed under the wrong show.
+  KZ07)
+    snippet OLD <<'EOF'
+                    podcastId: episode.feedURL.absoluteString,
+EOF
+    snippet NEW <<'EOF'
+                    podcastId: groups.first?.feedURL.absoluteString,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ08 — the sharpest case from the bead: the prepare coordinator receives a
+  # podcastId, threads it into the analysis half, and drops it for the download
+  # half. Restored verbatim.
+  KZ08)
+    snippet OLD <<'EOF'
+            context: .resolving(
+                podcastId: request.podcastId,
+EOF
+    snippet NEW <<'EOF'
+            context: .resolving(
+                podcastId: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ09 — the force-quit resume stops recovering. It looks defensible ("this
+  # path cannot know the show"), and it is the one call site where that
+  # sentence is nearly true — but the sidecar written by the ORIGINAL queue is
+  # exactly the thing that makes it false.
+  KZ09)
+    snippet OLD <<'EOF'
+                let recovered = loadDownloadAttribution(episodeId: episodeId)
+                    ?? .unattributed(
+                        reason: .resumeWithoutRecordedShow,
+                        isExplicitDownload: false
+                    )
+EOF
+    snippet NEW <<'EOF'
+                let recovered = DownloadContext.unattributed(
+                    reason: .resumeWithoutRecordedShow,
+                    isExplicitDownload: false
+                )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ10 — a cancel stops reaping. Not a correctness defect in the enqueue, but
+  # an unbounded on-disk leak: one record per cancelled episode, forever.
+  KZ10)
+    snippet OLD <<'EOF'
+            deleteDownloadAttribution(episodeId: episodeId)
+            logger.info("Cancelled download for \(episodeId)")
+EOF
+    snippet NEW <<'EOF'
+            logger.info("Cancelled download for \(episodeId)")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -7940,6 +8159,10 @@ rec_file()   {
     UGCEN) printf '%s' "$UGCEN" ;;
     POLICY) printf '%s' "$POLICY" ;;
     SEGAGG) printf '%s' "$SEGAGG" ;;
+    DLMGR) printf '%s' "$DLMGR" ;;
+    FQSCAN) printf '%s' "$FQSCAN" ;;
+    BGFEED) printf '%s' "$BGFEED" ;;
+    EPPREP) printf '%s' "$EPPREP" ;;
     *)     printf '%s' "" ;;
   esac
 }

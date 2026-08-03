@@ -275,6 +275,65 @@ struct DownloadShowAttributionTests {
         )
     }
 
+    /// The force-quit resume path in full. When the server has rotated its
+    /// stitch, `resumeSuspendedTransfer` discards the blob and re-queues a
+    /// FRESH background download — from a `DownloadManager` extension with no
+    /// SwiftData in scope, so the sidecar is its only route back to the show.
+    ///
+    /// The assertion works because the re-queue REWRITES the record from the
+    /// context it was handed: a resume that passed an unattributed context
+    /// would overwrite the good record with a null one.
+    @Test("A force-quit resume re-queues the fresh download against the recovered show")
+    func forceQuitResumeRecoversTheShow() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "kkzu-force-quit"
+        let src = URL(string: "https://dai.example.com/\(episodeId).mp3")!
+        // A PREVIOUS process queued this transfer and recorded its show; this
+        // process only inherits the filesystem. Written directly rather than
+        // via `backgroundDownload` so the episode does not hold this
+        // instance's in-flight slot, which is exactly the state a relaunch
+        // starts from.
+        await manager.persistDownloadAttribution(
+            episodeId: episodeId,
+            context: DownloadContext(
+                podcastId: Self.showId, isExplicitDownload: false
+            )
+        )
+        try await manager.persistResumeData(
+            episodeId: episodeId,
+            data: Data([0x01, 0x02, 0x03]),
+            sourceURL: src,
+            validator: HTTPAssetMetadata(
+                etag: "\"A\"", contentLength: 100, lastModified: nil
+            )
+        )
+        // The server now serves a different stitch, so the blob is unusable
+        // and the fresh-redownload branch is the one that runs.
+        await manager.setResumeValidatorProviderForTesting { _ in
+            HTTPAssetMetadata(
+                etag: "\"B\"", contentLength: 80, lastModified: nil
+            )
+        }
+
+        let outcome = try await manager.resumeSuspendedTransfer(
+            episodeId: episodeId
+        )
+
+        // Positive witness: the branch under test is the one that ran.
+        #expect(outcome == .redownloadedFresh)
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId)?
+                .podcastId == Self.showId,
+            "the re-queued fresh download must carry the show recovered from disk"
+        )
+
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
     /// An explicit cancel IS terminal, so the record goes with it.
     @Test("Cancelling a download reaps its attribution")
     func cancelReapsAttribution() async throws {
