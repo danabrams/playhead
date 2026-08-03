@@ -889,11 +889,19 @@ actor AnalysisWorkScheduler {
     /// for an episode in this set is stamped at the user-intent (`.now`)
     /// lane (priority 20) so it preempts starving background work — the
     /// whole point of the foreground on-demand control. The entry is
-    /// consumed (removed) by that enqueue: it is a one-shot promotion of
-    /// the imminent analysis job, not a standing flag. Recording intent
-    /// for an episode that already has a queued job does NOT retroactively
-    /// promote it (the enqueue dedups by work key); the control still
-    /// reflects the in-progress analysis as its live status.
+    /// consumed (removed) by that enqueue — but only once it has actually
+    /// been *served*: it is a one-shot promotion of the imminent analysis
+    /// job, not a standing flag, and not a token spent on nothing.
+    ///
+    /// playhead-kanf: recording intent for an episode that ALREADY has a
+    /// queued job now promotes that row in place (`insertJob` is
+    /// `INSERT OR IGNORE` on `workKey`, so the freshly-minted priority-20
+    /// struct is otherwise discarded whole). That is the starving-background-job
+    /// case the control exists for. A leased / running row is deliberately NOT
+    /// promoted — re-ranking work a worker holds is a lease/epoch decision made
+    /// elsewhere — and in that case the flag is RETAINED rather than burned, so
+    /// a second tap, or the next enqueue once the row returns to `queued`, can
+    /// still honour it.
     private var pendingUserIntentEpisodes: Set<String> = []
     /// playhead-3xtw: requested analysis coverage (the episode duration)
     /// for a user-intent episode, applied when the enqueue omits an
@@ -1038,8 +1046,17 @@ actor AnalysisWorkScheduler {
             generationID: UUID().uuidString,
             schedulerEpoch: currentEpoch
         )
+        // playhead-kanf: whether this call actually put the episode's work in
+        // the user-intent lane. Only a served intent may consume the one-shot
+        // flag below. When no intent is pending there is nothing to serve, so
+        // the (no-op) clear runs exactly as it always did.
+        var userIntentServed = !userInitiated
         do {
             let inserted = try await store.insertJob(job)
+            if inserted {
+                // The minted row already carries `priority` == 20.
+                userIntentServed = true
+            }
             if !inserted {
                 // playhead-y8f3: `insertJob` is `INSERT OR IGNORE`, so this
                 // return value is the ONLY evidence that a re-request did
@@ -1075,6 +1092,19 @@ actor AnalysisWorkScheduler {
                 clearPendingDownloadState(episodeId: episodeId)
                 return
             }
+            if !inserted, userInitiated {
+                // playhead-kanf: the key was already held, so the priority-20
+                // struct above went nowhere. Promote the EXISTING row instead —
+                // this is the whole point of the control, and the only case in
+                // which the tap used to do nothing at all. Placed after the
+                // retirement guard so a download the user deleted mid-flight is
+                // never promoted.
+                userIntentServed = await promoteExistingJobToUserIntentLane(
+                    episodeId: episodeId,
+                    workKey: workKey,
+                    priority: priority
+                )
+            }
             queueWaitStates[job.jobId] = PreAnalysisInstrumentation.beginQueueWait(jobId: job.jobId)
             logger.info("Enqueued job \(job.jobId) for episode \(episodeId), priority=\(priority), coverage=\(coverage)s")
         } catch {
@@ -1085,8 +1115,18 @@ actor AnalysisWorkScheduler {
         // the job (or its work-key-idempotent no-op) has been recorded, so
         // a later auto enqueue for the same episode does not inherit the
         // user-intent lane.
-        pendingUserIntentEpisodes.remove(episodeId)
-        pendingUserIntentCoverage[episodeId] = nil
+        //
+        // playhead-kanf: …but ONLY once the intent was served — the row was
+        // minted at the `.now` floor, promoted to it, or already sat at or
+        // above it. A tap that could not be honoured (the row is leased,
+        // running, paused, terminal, gone, or the store threw) leaves the flag
+        // standing so the next enqueue or the next tap can still honour it.
+        // Burning a one-shot token on nothing is the defect this bead exists
+        // to remove; burning it twice over would just move the defect.
+        if userIntentServed {
+            pendingUserIntentEpisodes.remove(episodeId)
+            pendingUserIntentCoverage[episodeId] = nil
+        }
 
         // playhead-i9dj: write self-describing titles to the
         // AnalysisStore as soon as the SwiftData side has them in scope.
@@ -1296,6 +1336,80 @@ actor AnalysisWorkScheduler {
         }
     }
 
+    /// playhead-kanf: promote the already-queued row occupying `workKey` into
+    /// the user-intent (`.now`) lane and wake the loop so it re-ranks.
+    ///
+    /// - Returns: `true` when the user's intent is now served — the row was
+    ///   promoted, or was already at/above the `.now` floor. `false` when it
+    ///   could not be honoured, which is the caller's signal to KEEP the
+    ///   one-shot flag.
+    ///
+    /// The refusal cases are the point as much as the promotion is. A leased or
+    /// running row is left exactly as it is: re-ranking work a worker holds
+    /// would race the lease/epoch stamping, and the deliberate choice (per the
+    /// bead) is to decline rather than to make that call here. The user is not
+    /// left worse off — a running job is already the best available outcome for
+    /// this episode, and the retained flag means the next tap promotes it if it
+    /// ever falls back to `queued`.
+    private func promoteExistingJobToUserIntentLane(
+        episodeId: String,
+        workKey: String,
+        priority: Int
+    ) async -> Bool {
+        do {
+            let outcome = try await store.promoteQueuedJobToUserIntentLane(
+                workKey: workKey,
+                priority: priority
+            )
+            switch outcome {
+            case .promoted(let jobId, let fromPriority, let toPriority):
+                logger.info(
+                    """
+                    user_intent_promoted episode=\(episodeId, privacy: .public) \
+                    job=\(jobId, privacy: .public) \
+                    priority=\(fromPriority)->\(toPriority) (playhead-kanf)
+                    """
+                )
+                // Re-rank now rather than at the next poll: the whole promise of
+                // the control is preemption, and `preemptLowerLanes` fires from
+                // the dispatch path once the loop selects this `.now` row.
+                wakeSchedulerLoop()
+                return true
+            case .alreadyPromoted(let jobId, let rowPriority):
+                logger.info(
+                    """
+                    user_intent_already_now_lane episode=\(episodeId, privacy: .public) \
+                    job=\(jobId, privacy: .public) priority=\(rowPriority) (playhead-kanf)
+                    """
+                )
+                return true
+            case .notPromotable(let jobId, let state, let rowPriority, let leased):
+                logger.info(
+                    """
+                    user_intent_promotion_declined episode=\(episodeId, privacy: .public) \
+                    job=\(jobId, privacy: .public) state=\(state, privacy: .public) \
+                    leased=\(leased) priority=\(rowPriority) \
+                    (playhead-kanf: never re-rank a leased/running row; flag retained)
+                    """
+                )
+                return false
+            case .noRow:
+                logger.info(
+                    """
+                    user_intent_promotion_no_row episode=\(episodeId, privacy: .public) \
+                    (playhead-kanf: work key held at insert time, gone at promote time; flag retained)
+                    """
+                )
+                return false
+            }
+        } catch {
+            logger.error(
+                "Failed to promote user-intent job for \(episodeId): \(error)"
+            )
+            return false
+        }
+    }
+
     private func clearPendingDownloadState(episodeId: String) {
         pendingUserIntentEpisodes.remove(episodeId)
         pendingUserIntentCoverage[episodeId] = nil
@@ -1320,8 +1434,11 @@ actor AnalysisWorkScheduler {
     /// — lands at the user-intent (`.now`) lane with the requested
     /// coverage.
     ///
-    /// One-shot: the flag is consumed by that next `enqueue`. Idempotent —
-    /// re-marking is a plain set insert. Wakes the loop so an
+    /// One-shot: the flag is consumed by the next `enqueue` **that manages to
+    /// serve it** (playhead-kanf) — mint at the `.now` floor, promote an
+    /// already-queued row to it, or find the row already there. An enqueue that
+    /// cannot honour it (leased / running row) leaves the flag standing.
+    /// Idempotent — re-marking is a plain set insert. Wakes the loop so an
     /// already-enqueued-and-about-to-run pass re-evaluates promptly.
     func markEpisodeUserIntent(episodeId: String, desiredCoverageSec: Double?) {
         pendingUserIntentEpisodes.insert(episodeId)
@@ -1336,9 +1453,14 @@ actor AnalysisWorkScheduler {
     /// Enqueue the full analysis pipeline for an ALREADY-downloaded
     /// episode at the user-intent (`.now`) lane. Marks user intent (so the
     /// enqueue is stamped priority 20) then enqueues through the shared
-    /// `enqueue(...)` path, inheriting its work-key dedup (idempotent —
-    /// re-tapping a preparing episode is a no-op), title/duration
-    /// bookkeeping, and background rearm. `desiredCoverageSec` (the
+    /// `enqueue(...)` path, inheriting its work-key dedup (idempotent — the
+    /// episode never gains a second row), title/duration bookkeeping, and
+    /// background rearm.
+    ///
+    /// playhead-kanf: work-key dedup no longer means the tap does *nothing*.
+    /// When the auto-pipeline already queued this episode, the existing row is
+    /// promoted to the `.now` lane in place; a leased/running row is left
+    /// alone. `desiredCoverageSec` (the
     /// episode duration) requests full coverage; the backfill machinery
     /// drives it to completion.
     func enqueueUserIntentAnalysis(

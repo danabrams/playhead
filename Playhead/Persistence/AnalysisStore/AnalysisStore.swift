@@ -13782,6 +13782,110 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-kanf: the outcome of a user-intent lane promotion attempt.
+    ///
+    /// Four cases rather than a `Bool` because the caller has to distinguish
+    /// *served* from *changed*: a row already sitting in the `.now` lane needs
+    /// no write but has satisfied the user's request, whereas a leased row
+    /// needs no write and has NOT. Collapsing those two into "no rows changed"
+    /// is what would let the one-shot user-intent flag be burned without
+    /// effect.
+    enum UserIntentPromotion: Equatable, Sendable {
+        /// The row was `queued` + unleased below the floor and is now at it.
+        case promoted(jobId: String, fromPriority: Int, toPriority: Int)
+        /// The row already sits at or above the floor — nothing to write, but
+        /// the intent is satisfied.
+        case alreadyPromoted(jobId: String, priority: Int)
+        /// The row exists but is not safe to re-rank: leased, running, paused,
+        /// or terminal. Deliberately NOT promoted; see the guard note below.
+        case notPromotable(jobId: String, state: String, priority: Int, leased: Bool)
+        /// No row occupies the key.
+        case noRow
+    }
+
+    /// playhead-kanf: raise the `priority` of the still-`queued` row occupying
+    /// `workKey` to the user-intent (`.now`) floor, so a tap on "Download &
+    /// Analyze" preempts a starving background job instead of silently doing
+    /// nothing.
+    ///
+    /// This exists because ``insertJob`` is `INSERT OR IGNORE` on the UNIQUE
+    /// `workKey`: when the auto-pipeline already queued the episode, the
+    /// scheduler's freshly-minted priority-20 job struct is discarded whole and
+    /// the stored row keeps its background priority. The lane lives in the
+    /// column, so promoting it has to be a write against the existing row.
+    ///
+    /// **The guard is `state = 'queued' AND leaseOwner IS NULL`, and both
+    /// halves are load-bearing.** Re-ranking a row a worker is executing is a
+    /// lease/epoch correctness decision the bead explicitly declines to make
+    /// here. `state='running'` is what every lease writer sets
+    /// (``acquireLease``, ``acquireLeaseWithJournal``, ``acquireEpisodeLease``),
+    /// but the two conditions are not equivalent: ``fetchNextEligibleJob``
+    /// selects `state IN ('queued','paused') AND (leaseOwner IS NULL OR
+    /// leaseExpiresAt < ?)`, so the schema tolerates a `queued` row still
+    /// carrying a stale lease. ``restampQueuedJobEpochs`` already uses this same
+    /// pair as its safe-to-touch predicate. `paused` is excluded too: one
+    /// promotable state keeps the rule stateable in a sentence, and the caller
+    /// retains its one-shot flag so the next tap promotes the row once it
+    /// returns to `queued`.
+    ///
+    /// Like ``updateJobPriority``, only `priority` + `updatedAt` change — this
+    /// is a selection nudge, not a lifecycle transition, so `state`, the lease
+    /// columns, `createdAt` (the FIFO tiebreak), `desiredCoverageSec`,
+    /// `generationID` and `schedulerEpoch` are all left exactly as they were.
+    ///
+    /// The read and the write are one actor-isolated method, so no other store
+    /// call can interleave between them; the `UPDATE` nevertheless re-states the
+    /// whole predicate so it is its own compare-and-swap.
+    func promoteQueuedJobToUserIntentLane(
+        workKey: String,
+        priority: Int,
+        now: Double = Date().timeIntervalSince1970
+    ) throws -> UserIntentPromotion {
+        guard let job = try fetchJob(byWorkKey: workKey) else { return .noRow }
+        let leased = job.leaseOwner != nil
+        if job.priority >= priority {
+            return .alreadyPromoted(jobId: job.jobId, priority: job.priority)
+        }
+        guard job.state == "queued", !leased else {
+            return .notPromotable(
+                jobId: job.jobId,
+                state: job.state,
+                priority: job.priority,
+                leased: leased
+            )
+        }
+        let sql = """
+            UPDATE analysis_jobs
+            SET priority = ?, updatedAt = ?
+            WHERE workKey = ?
+              AND state = 'queued'
+              AND leaseOwner IS NULL
+              AND priority < ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, priority)
+        bind(stmt, 2, now)
+        bind(stmt, 3, workKey)
+        bind(stmt, 4, priority)
+        try step(stmt, expecting: SQLITE_DONE)
+        guard sqlite3_changes(db) > 0 else {
+            // Lost the CAS: something claimed the row between the read and the
+            // write. Report it as declined, never as promoted.
+            return .notPromotable(
+                jobId: job.jobId,
+                state: job.state,
+                priority: job.priority,
+                leased: leased
+            )
+        }
+        return .promoted(
+            jobId: job.jobId,
+            fromPriority: job.priority,
+            toPriority: priority
+        )
+    }
+
     /// playhead-gy2s (RC-2): record why the admission gate hard-rejected a
     /// pre-analysis pass, as a durable advisory on the job row. UPDATED in
     /// place (never appended) so a job rejecting on every 30 s poll refreshes
