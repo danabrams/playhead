@@ -189,22 +189,118 @@ enum DownloadManagerError: Error, CustomStringConvertible {
 /// don't have the SwiftData side in scope (e.g. background-session completion
 /// routes) leave them `nil`, and the AnalysisStore reconciles titles lazily on
 /// the next call site that does supply them.
-struct DownloadContext: Sendable {
+///
+/// playhead-kkzu: `podcastId` is `nil` only when a caller SAID it could not
+/// resolve the show, and then `unattributedReason` names why. The designated
+/// initializer takes a non-optional `String`, so a caller cannot arrive at a
+/// null identity by forgetting — the compiler makes it spell the absence out.
+/// This matters because a null here becomes `job.podcastId ?? ""` inside the
+/// analysis pipeline, which pools every unattributed episode under one fake
+/// show; an absence that was never noticed and one that was measured must not
+/// look alike downstream.
+struct DownloadContext: Sendable, Equatable {
+
+    /// Why a download carries no show identity. Every case is a claim a caller
+    /// had to make deliberately; there is no `.unknown` catch-all, because the
+    /// point of the type is that "nobody said" stops being expressible.
+    enum UnattributedReason: String, Sendable, Codable, Equatable, CaseIterable {
+        /// The SwiftData row in hand has no canonical feed identity —
+        /// `Episode.resolvedShowIdentity` returned nil. The show is genuinely
+        /// unresolvable from what the caller holds, not merely unfetched.
+        case showIdentityUnresolvable
+
+        /// A force-quit resume replayed from an on-disk blob after the
+        /// originating process died, with no attribution sidecar beside it
+        /// (a transfer started before this record existed). SwiftData is not
+        /// in scope on that path.
+        case resumeWithoutRecordedShow
+
+        /// A DEBUG-only test/diagnostic route that is not modelling a real
+        /// show. Never reachable in a shipping build.
+        case testHarness
+    }
+
     let podcastId: String?
+    /// Non-nil exactly when `podcastId` is nil.
+    let unattributedReason: UnattributedReason?
     let isExplicitDownload: Bool
     let podcastTitle: String?
     let episodeTitle: String?
 
+    /// A download whose show is known.
+    ///
+    /// The identity is admitted only in its exact canonical spelling
+    /// (`RecurrenceMaterialIdentity.canonicalIdentifier`) — the same gate
+    /// `Episode.resolvedShowIdentity` and `SkipOrchestrator.beginEpisode`
+    /// apply. An empty or non-canonical string is not a show, so it becomes a
+    /// NAMED absence rather than a joinable key: `""` reaching
+    /// `analysis_jobs.podcastId` would pool unrelated episodes under one fake
+    /// show exactly as a NULL does, only harder to see.
     init(
-        podcastId: String?,
+        podcastId: String,
         isExplicitDownload: Bool,
         podcastTitle: String? = nil,
         episodeTitle: String? = nil
     ) {
-        self.podcastId = podcastId
+        self.init(
+            canonicalPodcastId:
+                RecurrenceMaterialIdentity.canonicalIdentifier(podcastId),
+            unattributedReason: .showIdentityUnresolvable,
+            isExplicitDownload: isExplicitDownload,
+            podcastTitle: podcastTitle,
+            episodeTitle: episodeTitle
+        )
+    }
+
+    private init(
+        canonicalPodcastId: String?,
+        unattributedReason: UnattributedReason,
+        isExplicitDownload: Bool,
+        podcastTitle: String?,
+        episodeTitle: String?
+    ) {
+        self.podcastId = canonicalPodcastId
+        self.unattributedReason =
+            canonicalPodcastId == nil ? unattributedReason : nil
         self.isExplicitDownload = isExplicitDownload
         self.podcastTitle = podcastTitle
         self.episodeTitle = episodeTitle
+    }
+
+    /// A download whose show could not be resolved, and the reason.
+    static func unattributed(
+        reason: UnattributedReason,
+        isExplicitDownload: Bool,
+        podcastTitle: String? = nil,
+        episodeTitle: String? = nil
+    ) -> DownloadContext {
+        DownloadContext(
+            canonicalPodcastId: nil,
+            unattributedReason: reason,
+            isExplicitDownload: isExplicitDownload,
+            podcastTitle: podcastTitle,
+            episodeTitle: episodeTitle
+        )
+    }
+
+    /// For a caller holding an optional identity it did not compute itself.
+    /// Routes to whichever of the two constructors the value actually is, so
+    /// the nil branch still carries a named reason rather than a bare `nil`.
+    static func resolving(
+        podcastId: String?,
+        unattributedReason: UnattributedReason,
+        isExplicitDownload: Bool,
+        podcastTitle: String? = nil,
+        episodeTitle: String? = nil
+    ) -> DownloadContext {
+        DownloadContext(
+            canonicalPodcastId:
+                RecurrenceMaterialIdentity.canonicalIdentifier(podcastId),
+            unattributedReason: unattributedReason,
+            isExplicitDownload: isExplicitDownload,
+            podcastTitle: podcastTitle,
+            episodeTitle: episodeTitle
+        )
     }
 }
 
@@ -256,6 +352,20 @@ actor DownloadManager {
     /// body is the opaque OS resume-data blob returned from
     /// `URLSessionDownloadTask.cancel(byProducingResumeData:)`.
     nonisolated let resumeDataDirectory: URL
+
+    /// playhead-kkzu: subdirectory for background-transfer ATTRIBUTION —
+    /// the show a queued background download belongs to. One JSON file per
+    /// episode keyed by `safeFilename(for: episodeId)`.
+    ///
+    /// This is on disk rather than in a dictionary for one reason: the
+    /// analysis enqueue for a background download happens in
+    /// `handleBackgroundDownloadComplete`, and iOS relaunches the app to
+    /// deliver `handleEventsForBackgroundURLSession`, so that enqueue
+    /// routinely runs in a DIFFERENT PROCESS from the `backgroundDownload`
+    /// that started the transfer. An in-memory map would lose the show for
+    /// precisely the population whose work should already be finished when
+    /// the user presses play.
+    nonisolated let attributionDirectory: URL
 
     /// In-memory set of episode IDs the most recent scan reported as
     /// having a persisted resume-data blob. Populated by
@@ -473,6 +583,7 @@ actor DownloadManager {
         self.partialsDirectory = root.appendingPathComponent("partials", isDirectory: true)
         self.completeDirectory = root.appendingPathComponent("complete", isDirectory: true)
         self.resumeDataDirectory = root.appendingPathComponent("resumeData", isDirectory: true)
+        self.attributionDirectory = root.appendingPathComponent("attribution", isDirectory: true)
         self.maxCacheBytes = maxCacheBytes
         self.sessionDelegate = EpisodeDownloadDelegate()
         let config = preAnalysisConfig ?? PreAnalysisConfig.load()
@@ -990,7 +1101,13 @@ actor DownloadManager {
     /// Create required directories on first use.
     func bootstrap() throws {
         let fm = FileManager.default
-        for dir in [cacheDirectory, partialsDirectory, completeDirectory, resumeDataDirectory] {
+        for dir in [
+            cacheDirectory,
+            partialsDirectory,
+            completeDirectory,
+            resumeDataDirectory,
+            attributionDirectory,
+        ] {
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
@@ -1673,7 +1790,11 @@ actor DownloadManager {
                 etag: nil,
                 weakFingerprint: "test-weak",
                 bytesWritten: bytesWritten,
-                context: nil
+                // playhead-kkzu: a DEBUG harness hook that is not modelling a
+                // real show. Named, not defaulted.
+                context: .unattributed(
+                    reason: .testHarness, isExplicitDownload: false
+                )
             ).accepted
         } catch {
             return false
@@ -2166,11 +2287,94 @@ actor DownloadManager {
         }
     }
 
+    // MARK: - Background-Transfer Attribution (playhead-kkzu)
+
+    /// The on-disk form of a `DownloadContext`. Codable rather than the
+    /// context itself so the stored shape is explicit and versionable.
+    struct DownloadAttributionRecord: Codable, Sendable, Equatable {
+        var podcastId: String?
+        var unattributedReason: DownloadContext.UnattributedReason?
+        var isExplicitDownload: Bool
+        var podcastTitle: String?
+        var episodeTitle: String?
+    }
+
+    private func attributionFileURL(episodeId: String) -> URL {
+        attributionDirectory.appendingPathComponent(
+            "\(Self.safeFilename(for: episodeId)).attribution"
+        )
+    }
+
+    /// Records which show a background transfer belongs to, so the completion
+    /// — which may land in a later process — can enqueue analysis against it.
+    func persistDownloadAttribution(episodeId: String, context: DownloadContext) {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: attributionDirectory.path) {
+            try? fm.createDirectory(
+                at: attributionDirectory, withIntermediateDirectories: true
+            )
+        }
+        let record = DownloadAttributionRecord(
+            podcastId: context.podcastId,
+            unattributedReason: context.unattributedReason,
+            isExplicitDownload: context.isExplicitDownload,
+            podcastTitle: context.podcastTitle,
+            episodeTitle: context.episodeTitle
+        )
+        guard let encoded = try? JSONEncoder().encode(record) else { return }
+        try? encoded.write(
+            to: attributionFileURL(episodeId: episodeId), options: .atomic
+        )
+    }
+
+    /// Reads back the attribution written when the transfer was queued.
+    /// `nil` means no record was written — a transfer started by a build
+    /// before this existed, or one whose sidecar was already consumed.
+    func loadDownloadAttribution(episodeId: String) -> DownloadContext? {
+        guard let data = try? Data(
+            contentsOf: attributionFileURL(episodeId: episodeId)
+        ),
+            let record = try? JSONDecoder().decode(
+                DownloadAttributionRecord.self, from: data
+            ) else {
+            return nil
+        }
+        return .resolving(
+            podcastId: record.podcastId,
+            unattributedReason:
+                record.unattributedReason ?? .resumeWithoutRecordedShow,
+            isExplicitDownload: record.isExplicitDownload,
+            podcastTitle: record.podcastTitle,
+            episodeTitle: record.episodeTitle
+        )
+    }
+
+    /// Drops the sidecar once the transfer it describes has reached a terminal
+    /// state. Called on every exit from `handleBackgroundDownloadComplete` and
+    /// on explicit cancellation, so records do not accumulate.
+    func deleteDownloadAttribution(episodeId: String) {
+        try? FileManager.default.removeItem(
+            at: attributionFileURL(episodeId: episodeId)
+        )
+    }
+
     // MARK: - Background Pre-Cache
 
     /// Queues a background download for an episode (pre-caching).
     /// Completes even if the app is suspended.
-    func backgroundDownload(episodeId: String, from url: URL) {
+    ///
+    /// playhead-kkzu: `context` is NOT optional and has no default. Every
+    /// caller must state the show — or state, with a reason, that it cannot.
+    /// The completion path (`handleBackgroundDownloadComplete`) is what
+    /// enqueues the analysis job, and before this bead it passed `nil`
+    /// unconditionally, so every auto/background download recorded a NULL
+    /// `analysis_jobs.podcastId`. A defaulted parameter would let the next
+    /// caller reintroduce that silently.
+    func backgroundDownload(
+        episodeId: String,
+        from url: URL,
+        context: DownloadContext
+    ) {
         guard activeStreamingTransfer?.episodeId != episodeId else {
             logger.debug(
                 "Skipping background download for \(episodeId): foreground stream active"
@@ -2192,6 +2396,16 @@ actor DownloadManager {
         guard !bgInFlightEpisodes.contains(episodeId) else {
             logger.debug("Skipping background download for \(episodeId): already in flight")
             return
+        }
+
+        // playhead-kkzu: record the show BEFORE the transfer starts. The
+        // completion that enqueues analysis may run in a later process, and
+        // this file is the only thing that crosses that boundary.
+        persistDownloadAttribution(episodeId: episodeId, context: context)
+        if let reason = context.unattributedReason {
+            logger.info(
+                "Background download for \(episodeId, privacy: .public) carries no show identity: \(reason.rawValue, privacy: .public)"
+            )
         }
 
         // Pre-cache work: route through the maintenance lane when the
@@ -2241,6 +2455,10 @@ actor DownloadManager {
         }
 
         if cancelled {
+            // playhead-kkzu: an explicit cancel is terminal for the transfer,
+            // so its attribution goes with it. A later re-download re-queues
+            // through `backgroundDownload`, which writes a fresh record.
+            deleteDownloadAttribution(episodeId: episodeId)
             logger.info("Cancelled download for \(episodeId)")
         }
     }
@@ -3409,6 +3627,18 @@ actor DownloadManager {
         let capturedCacheOwnershipGeneration =
             cacheOwnershipGenerationByEpisode[episodeId, default: 0]
 
+        // playhead-kkzu: the show this transfer belongs to, recovered from the
+        // sidecar `backgroundDownload` wrote — possibly in an earlier process.
+        // Read once, up front, so every exit below sees the same answer.
+        // Absent means the transfer predates the sidecar (an in-flight upgrade)
+        // or was started by a path that could not name a show; either way the
+        // absence is named rather than defaulted.
+        let attribution = loadDownloadAttribution(episodeId: episodeId)
+            ?? .unattributed(
+                reason: .resumeWithoutRecordedShow,
+                isExplicitDownload: false
+            )
+
         if let transferIdentity {
             guard !backgroundCallbackIsRetired(
                 identity: transferIdentity,
@@ -3416,6 +3646,9 @@ actor DownloadManager {
             ) else {
                 try? fm.removeItem(at: stagedURL)
                 try? deleteResumeData(episodeId: episodeId)
+                // playhead-kkzu: terminal for this transfer — a retry re-queues
+                // through `backgroundDownload` and rewrites the sidecar.
+                deleteDownloadAttribution(episodeId: episodeId)
                 finishBackgroundTransfer(
                     identity: transferIdentity,
                     episodeId: episodeId
@@ -3442,6 +3675,7 @@ actor DownloadManager {
                 episodeId: episodeId
             )
             try? deleteResumeData(episodeId: episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
             logger.info(
                 "Background completion for \(episodeId, privacy: .public): discarded because foreground stream owns the artifact"
             )
@@ -3488,6 +3722,7 @@ actor DownloadManager {
                 episodeId: episodeId
             )
             try? deleteResumeData(episodeId: episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
             logger.info("Background completion for \(episodeId, privacy: .public): complete pinned artifact already present — kept it, discarded re-fetch at \(existing.lastPathComponent, privacy: .public)")
             return
         }
@@ -3638,11 +3873,14 @@ actor DownloadManager {
                 expectedBytes: pin.expectedBytes,
                 expectedHash: strongHash
             )
+            // playhead-kkzu: was `context: nil` — the single line that made
+            // every background/auto download record a NULL podcastId.
             await enqueueAnalysisIfNeeded(
                 episodeId: episodeId,
                 sourceFingerprint: strongHash,
-                context: nil
+                context: attribution
             )
+            deleteDownloadAttribution(episodeId: episodeId)
         } catch {
             logger.error(
                 "Strong fingerprint hash failed for \(episodeId, privacy: .public): \(String(describing: error), privacy: .public)"

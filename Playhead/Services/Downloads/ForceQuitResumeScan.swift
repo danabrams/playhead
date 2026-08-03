@@ -495,7 +495,25 @@ extension DownloadManager {
                 try? deleteResumeData(episodeId: episodeId)
                 // Fresh full download to a new artifact via the normal
                 // background path (its own overwrite guard + pinning apply).
-                backgroundDownload(episodeId: episodeId, from: sourceURL)
+                //
+                // playhead-kkzu: this path runs from on-disk state after a
+                // relaunch, so SwiftData is not in scope and the show cannot
+                // be derived here. It is recovered from the attribution
+                // sidecar the ORIGINAL `backgroundDownload` wrote — which is
+                // why that record survives a suspension and is only dropped
+                // on a terminal outcome. A transfer started before the
+                // sidecar existed has no record, and that absence is named
+                // rather than passed as a bare nil.
+                let recovered = loadDownloadAttribution(episodeId: episodeId)
+                    ?? .unattributed(
+                        reason: .resumeWithoutRecordedShow,
+                        isExplicitDownload: false
+                    )
+                backgroundDownload(
+                    episodeId: episodeId,
+                    from: sourceURL,
+                    context: recovered
+                )
                 return .redownloadedFresh
             }
         }

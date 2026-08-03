@@ -36,7 +36,16 @@ protocol EpisodePreparationDownloads: Sendable {
     /// Start a user-triggered download for the episode. Idempotent — the
     /// underlying manager skips episodes that are already cached / in
     /// flight.
-    func startDownload(episodeId: String, from url: URL) async
+    ///
+    /// playhead-kkzu: `context` carries the show. The coordinator already
+    /// receives a `podcastId` in its `Request` and threads it into
+    /// `enqueueUserIntentAnalysis`; it used to drop it for the download half,
+    /// so the analysis job the download itself enqueued recorded a NULL show.
+    func startDownload(
+        episodeId: String,
+        from url: URL,
+        context: DownloadContext
+    ) async
 }
 
 /// Analysis side of the prepare action. Wraps the user-intent enqueue
@@ -189,7 +198,26 @@ struct EpisodePreparationCoordinator: Sendable {
             episodeId: request.episodeId,
             desiredCoverageSec: request.durationSec
         )
-        await downloads.startDownload(episodeId: request.episodeId, from: request.audioURL)
+        // playhead-kkzu: the same identity that went to `enqueueUserIntent`
+        // above now goes to the download half, so the analysis job the
+        // completion enqueues is attributed to the show the user asked about.
+        //
+        // `isExplicitDownload` stays FALSE deliberately. Every background
+        // download previously enqueued with `context?.isExplicitDownload ??
+        // false`, and user intent already reaches the scheduler through the
+        // `markUserIntent` call directly above. Raising it here would change
+        // scheduling, and this bead is plumbing the identity — not policy.
+        await downloads.startDownload(
+            episodeId: request.episodeId,
+            from: request.audioURL,
+            context: .resolving(
+                podcastId: request.podcastId,
+                unattributedReason: .showIdentityUnresolvable,
+                isExplicitDownload: false,
+                podcastTitle: request.podcastTitle,
+                episodeTitle: request.episodeTitle
+            )
+        )
         return .startedDownload
     }
 
@@ -232,8 +260,14 @@ struct DownloadManagerPreparationAdapter: EpisodePreparationDownloads {
         )?.strong
     }
 
-    func startDownload(episodeId: String, from url: URL) async {
-        await manager.backgroundDownload(episodeId: episodeId, from: url)
+    func startDownload(
+        episodeId: String,
+        from url: URL,
+        context: DownloadContext
+    ) async {
+        await manager.backgroundDownload(
+            episodeId: episodeId, from: url, context: context
+        )
     }
 }
 

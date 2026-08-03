@@ -4015,8 +4015,15 @@ final class PlayheadRuntime {
             // fields are optional: `Episode.title` is required-non-empty
             // in our SwiftData schema, but `Podcast.title` may legitimately
             // be missing on partial feeds.
-            let titleContext = DownloadContext(
+            // playhead-kkzu: `.resolving` because `resolvedShowIdentity` is
+            // legitimately nullable. Behaviour is unchanged for both arms —
+            // a resolvable show still carries its id, an unresolvable one
+            // still enqueues without one — but the nil now arrives NAMED
+            // rather than as a bare optional a later reader cannot
+            // distinguish from a caller that simply forgot.
+            let titleContext = DownloadContext.resolving(
                 podcastId: podcastId,
+                unattributedReason: .showIdentityUnresolvable,
                 isExplicitDownload: false,
                 podcastTitle: episode.podcast?.title,
                 episodeTitle: episode.title
