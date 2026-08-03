@@ -1186,7 +1186,25 @@ struct HypothesisHotPathIntegrationTests {
 @Suite("Pipeline Integration – Known Ads Episode")
 struct KnownAdsIntegrationTests {
 
-    @Test("Play episode with known ads: full pipeline detects and skips at correct times")
+    /// playhead-bllt CHANGED WHAT THIS TEST CAN CLAIM, and the change is the
+    /// point rather than an inconvenience.
+    ///
+    /// This asserted that the full pipeline "detects and skips". At the shipped
+    /// config it now detects and BANNERS: the hot path's rows are unanchored on
+    /// both edges by construction, and an unanchored row is a banner, never a
+    /// skip. That is Dan's 2026-07-28 call ("close it now — consistency wins"),
+    /// and its recall cost is the price that decision paid — so a test that
+    /// still demanded an applied skip here would be asserting the defect.
+    ///
+    /// The end-to-end claim it makes is the same one, one tier down, and it is
+    /// NOT weaker: every detected window must reach the listener (in the
+    /// suggest tier — checked against the real collection, playhead-le02, not
+    /// inferred from an absent banner), and nothing may be surfaced far from
+    /// ground truth. What it no longer covers is the managed-tier wiring from a
+    /// HOT-PATH row, which is now unreachable by construction; that path is
+    /// covered from an anchored producer (day-0 byte-exact) and, with the
+    /// extent block held off, by `AutoSkipPrecisionGateIntegrationTests`.
+    @Test("Play episode with known ads: full pipeline detects at the correct times and surfaces every detection")
     func knownAdsSkipFires() async throws {
         // 1. Set up real services.
         let store = try await makeIntegrationStore()
@@ -1282,22 +1300,43 @@ struct KnownAdsIntegrationTests {
 
         let log = await orchestrator.getDecisionLog()
 
-        // At least one window should have been applied or confirmed.
-        let actionable = log.filter {
-            $0.decision == .applied || $0.decision == .confirmed
+        // playhead-bllt: every detection must reach the listener. Read the REAL
+        // suggest collection rather than inferring delivery from an absent
+        // banner — since playhead-d3g0 deferred emission to playhead entry, a
+        // test that never moves the playhead sees no banner either way.
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        #expect(!suggested.isEmpty,
+                "Orchestrator should surface at least one detected window in auto mode")
+        for window in confirmedWindows {
+            #expect(suggested.contains(window.id),
+                    "window \(window.id) at \(window.startTime)-\(window.endTime) reached no tier at all")
+            // The census names WHY it is a banner and not a skip, so "surfaced"
+            // cannot silently become "surfaced for the wrong reason".
+            let ingest = await orchestrator.lastAdWindowIngestOutcome(
+                forWindowId: window.id
+            )
+            #expect(ingest?.outcome == .armedSuggest,
+                    "window \(window.id): census must record `ingest_armed_suggest`; got \(String(describing: ingest?.outcome))")
+            #expect(ingest?.detail == "unanchored_extent_start+end",
+                    "window \(window.id): census must name the unanchored extent as the cause; got \(String(describing: ingest?.detail))")
         }
-        #expect(!actionable.isEmpty,
-                "Orchestrator should apply or confirm at least one window in auto mode")
 
-        // Verify no spurious skips far from ground truth.
-        for record in log where record.decision == .applied {
+        // Nothing may be SURFACED far from ground truth — the anti-spurious
+        // claim the applied-skip loop used to make, restated at the tier the
+        // rows now reach so it is not vacuous.
+        for window in confirmedWindows where suggested.contains(window.id) {
             let nearGroundTruth = groundTruth.contains { gt in
-                record.originalStart < gt.endTime + 10 &&
-                record.originalEnd > gt.startTime - 10
+                window.startTime < gt.endTime + 10 &&
+                window.endTime > gt.startTime - 10
             }
             #expect(nearGroundTruth,
-                    "Applied skip at \(record.originalStart)-\(record.originalEnd) should be near a ground-truth segment")
+                    "Surfaced window at \(window.startTime)-\(window.endTime) should be near a ground-truth segment")
         }
+
+        // And nothing was SKIPPED: an unanchored row is a banner, never a skip.
+        let applied = log.filter { $0.decision == .applied }
+        #expect(applied.isEmpty,
+                "no hot-path row may auto-skip at the shipped config (playhead-bllt); got \(applied.count)")
     }
 }
 
