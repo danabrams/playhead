@@ -3419,6 +3419,16 @@ MUTATIONS=(
   # TS03 and TS04 are the vacuity controls. Every rail here is built as "my own
   # windows arrived AND nothing else did"; without a mutation that empties every
   # box, the second half would be passing on an observer that never fires.
+  #
+  # RUN 2026-08-03: 4 KILLED / 0 SURVIVED / 0 ERROR, one mutation per batch,
+  # baseline green each time. All four failed the same five tests. One
+  # operational note worth keeping, because it is not about a mutation: TS03 and
+  # TS04 first came back ERROR ("batch did not build/run", rc=28) — that is the
+  # DISK PREFLIGHT refusing, not an anchor that stopped applying. The baseline
+  # started at 13.74 GiB free and the destination simulator had grown to 6.7 GiB
+  # across the earlier batches, leaving 7.84. Erase the sim between batteries
+  # (and clear `$TMPDIR/Deleting-*`, which is where erase actually puts it);
+  # do not go looking for a broken EDIT.
   "TS01|310|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT"
   "TS02|311|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_SCOPE"
   "TS03|312|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
@@ -8591,6 +8601,7 @@ EOF
   # this must kill all four; if it did not, the negative half would be passing
   # on an observer that never fires. The bd-34e consumer test is in the kill set
   # too, as the check that the funnel is genuinely load-bearing.
+  # RUN 2026-08-03: KILLED, all five.
   TS03)
     snippet OLD <<'EOF'
     private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
@@ -8609,6 +8620,8 @@ EOF
   # reads nil and the diagnostic is lost. This is the regression the source
   # comment on `coarsePassDiagnosticObserver` warns about; encoding it is what
   # turns that warning from a note into something a test can enforce.
+  # RUN 2026-08-03: KILLED, all five — so the one real cost of choosing a
+  # task-local is now a test failure rather than diagnostics quietly stopping.
   TS04)
     snippet OLD <<'EOF'
     private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
