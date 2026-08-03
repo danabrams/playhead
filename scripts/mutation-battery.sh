@@ -773,13 +773,24 @@ SPLIT="Playhead/Services/AdDetection/SemanticScanThroughputSplit.swift"
 # for want of a proven edge" from "absent for some reason nobody wrote down",
 # which is the whole difference between this bead and the silence it replaced.
 HOTGATE="Playhead/Services/AdDetection/HotPathExtentGate.swift"
+# playhead-ug9m: THE DAY-0 RESCUE (UG series). Two files, because the claim is
+# split between a pure rule and the two places that spend real bytes on it.
+# UGCEN is the census + the supersede predicate — every plausible loosening of
+# either (drop a conjunct, read one edge, ignore a veto, ignore the producer)
+# compiles and passes a positive-only test set, and a loosened `isSupersedable`
+# is how a 9s6q segment-recovered slot would get promoted. POLICY is the
+# terminality arm and the rescue CEILING, which is the only thing bounding a
+# ~108 MB re-fetch; ADSVC is the mint site, the only place able to observe a
+# gate that is computed and then not applied to the retire set.
+UGCEN="Playhead/Services/AdDetection/RediffRefetch/DayZeroMarkCensus.swift"
+POLICY="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroOutcome.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
-  "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE"
+  "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY"
 )
 
 FOCUSED_SUITES=(
@@ -827,6 +838,14 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SkipOrchestratorSuggestTierTests
   # playhead-1mq1.2.1: the mixed-width attribution rails (P01/P02).
   -only-testing:PlayheadTests/RevertMixedWidthAttributionTests
+  # playhead-ug9m: the day-0 rescue rails (UG series). Five suites — the pure
+  # census, the policy bound, the mint over real divergent MP3 bytes, the store
+  # round-trip + surfacing query, and the trigger wiring. ~0.8 s for all thirty.
+  -only-testing:PlayheadTests/DayZeroMarkCensusTests
+  -only-testing:PlayheadTests/DayZeroRescuePolicyTests
+  -only-testing:PlayheadTests/DayZeroRescueMintTests
+  -only-testing:PlayheadTests/DayZeroRescuePersistenceTests
+  -only-testing:PlayheadTests/DayZeroRescueTriggerTests
   # playhead-d3g0: the playhead-entry gate (D01-D06) and the skip affordance
   # (D07-D09).
   -only-testing:PlayheadTests/SuggestBannerEntryGateTests
@@ -1664,6 +1683,32 @@ T_BLLT_COUNT="exactly 5 of the 180 cells change, and every one of them is a demo
 T_BLLT_NOT_A_DROP="a non-nil label never becomes nil — the gate never DROPS a row"
 T_BLLT_KILL_SWITCH="the block OFF is a no-op — the kill switch actually kills"
 T_BLLT_DETAIL="the census detail fires only when it discriminates, and names the edges"
+
+# playhead-ug9m — THE DAY-0 RESCUE. The dangerous direction is PROMOTION: a
+# day-0 row persisted `eligible` auto-skips with nothing downstream to catch it
+# (bllt gates `runHotPath`/`runSegmentAggregation`, 2350 gates the fusion path,
+# and the day-0 mint passes through none of them). So the claims below are
+# weighted toward the negatives, and the centrepiece — a 9s6q segment-recovered
+# slot is never promoted — is asserted at three tiers so no single loosening can
+# take all three out.
+T_UG9M_RESCUABLE="an asset with an ANCHORED day-0 row is never rescued"
+T_UG9M_SUPERSEDE_NARROW="only a degraded, unsettled, day-0 row is supersedable"
+T_UG9M_HALF_ANCHORED="a HALF-anchored row reads as degraded, never as anchored"
+T_UG9M_VETO="a user-VETOED day-0 row survives a STRICT re-mint"
+T_UG9M_FOREIGN_PRODUCER="another producer's window survives a STRICT re-mint"
+T_UG9M_ANCHORED_ROW="an already-anchored day-0 row is not replaced"
+T_UG9M_RECOVERED_NOT_PROMOTED="a SEGMENT-RECOVERED re-mint supersedes nothing and promotes nothing"
+T_UG9M_STRICT_SUPERSEDES="a STRICT re-mint retires its degraded row and persists anchors + eligible"
+T_UG9M_TERMINAL_IN_GEN="a marked exit in the CURRENT generation is still terminal"
+T_UG9M_EXACTLY_ONE="a trapped asset spends EXACTLY ONE rescue across repeated plays"
+T_UG9M_NAMED="a spent rescue suppresses as rescueExhausted, not as silence"
+T_UG9M_CEILING="the ceiling holds even when the rescue ended in a RETRYABLE exit"
+T_UG9M_ADVANCE="advance counts a rescue only for a marked prior that spent bytes"
+T_UG9M_CONTEXT="fetchDayZeroAttemptContext returns the record AND the census together"
+T_UG9M_TRIGGER_REFETCH="a trapped asset's rescue reaches the k-way fetch"
+T_UG9M_TRIGGER_STOPS="an anchored sibling stops the trigger before any bytes are spent"
+T_UG9M_TRIGGER_NAMED="a spent rescue refuses at the trigger and NAMES itself"
+T_UG9M_FREEZE_REPORT="fetchDayZeroMarkFreezeReports names rescuable, frozen and anchored assets"
 T_BLLT_ANCHORED="an anchored hot-path row keeps its autoSkip verdict — the gate reads the extent, not the producer (playhead-bllt)"
 T_BLLT_SINGLE_SHIPPED="single-window fast path: the same 0.85 + strong-lexical window persists markOnly at the SHIPPING config — its edges are invented (playhead-bllt)"
 T_BLLT_AGG_SHIPPED="hot path: the same slot+lexical segment persists markOnly at the SHIPPING config — its edges are invented (playhead-bllt)"
@@ -3033,6 +3078,31 @@ MUTATIONS=(
   "BL08|246|ADSVC|$T_BLLT_SINGLE_SHIPPED"
   "BL09|247|ORCH|$T_BLLT_SINGLE_SHIPPED;$T_BLLT_AGG_SHIPPED"
   "BL10|247|HOTGATE|$T_BLLT_DETAIL"
+
+  # playhead-ug9m — THE DAY-0 RESCUE. Thirteen entries, batches 250-259.
+  #
+  # WHAT SETS THE BATCH FLOOR. UG01-UG05 all edit predicates inside
+  # `DayZeroMarkCensus`, and UG02/UG03/UG04 edit the SAME expression
+  # (`isSupersedable`), so those three cannot share a batch — whichever lands
+  # first destroys the others' anchors. UG06-UG09 are four separate sites in
+  # `DayZeroRediffAttemptPolicy`; UG06 and UG08 pair (different functions,
+  # disjoint expectations, and neither can REPAIR the other's damage — the T09
+  # hazard was checked). UG10/UG11 are the two mint sites and are deliberately
+  # split, because UG10 makes the supersede over-fire and UG11 makes it
+  # under-fire: batched together they would cancel and both report SURVIVED.
+  "UG01|250|UGCEN|$T_UG9M_RESCUABLE;$T_UG9M_TRIGGER_STOPS"
+  "UG05|250|UGCEN|$T_UG9M_HALF_ANCHORED"
+  "UG02|251|UGCEN|$T_UG9M_SUPERSEDE_NARROW;$T_UG9M_ANCHORED_ROW"
+  "UG03|252|UGCEN|$T_UG9M_SUPERSEDE_NARROW;$T_UG9M_VETO"
+  "UG04|253|UGCEN|$T_UG9M_SUPERSEDE_NARROW;$T_UG9M_FOREIGN_PRODUCER"
+  "UG06|254|POLICY|$T_UG9M_TERMINAL_IN_GEN"
+  "UG08|254|POLICY|$T_UG9M_ADVANCE;$T_UG9M_EXACTLY_ONE"
+  "UG07|255|POLICY|$T_UG9M_EXACTLY_ONE;$T_UG9M_NAMED;$T_UG9M_TRIGGER_NAMED"
+  "UG09|256|POLICY|$T_UG9M_CEILING"
+  "UG10|257|ADSVC|$T_UG9M_RECOVERED_NOT_PROMOTED"
+  "UG11|258|ADSVC|$T_UG9M_STRICT_SUPERSEDES"
+  "UG12|258|UGCEN|$T_UG9M_FREEZE_REPORT"
+  "UG13|259|STORE|$T_UG9M_CONTEXT;$T_UG9M_TRIGGER_REFETCH"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3090,6 +3160,19 @@ describe_mutation() {
     BL08) echo "bllt: the single-window site persists an anchor it did NOT gate on — label and row disagree" ;;
     BL09) echo "bllt: the suggest-tier census loses the extent REASON — demotion is silent again" ;;
     BL10) echo "bllt: censusDetail fires on EVERY row, so the detail stops discriminating" ;;
+    UG01) echo "ug9m: isRescuable drops the no-anchored-row conjunct — a 9s6q-withheld asset is rescued and re-promoted" ;;
+    UG02) echo "ug9m: isSupersedable drops !isFullyAnchored — a re-mint replaces an already-proven row" ;;
+    UG03) echo "ug9m: isSupersedable drops !isSettled — a re-mint deletes a USER VETO" ;;
+    UG04) echo "ug9m: isSupersedable drops the producer check — a re-mint retires another detector's window" ;;
+    UG05) echo "ug9m: isFullyAnchored accepts EITHER edge — a half-anchored row reads as healthy" ;;
+    UG06) echo "ug9m: the rescue arm ignores the generation — a marked exit becomes retryable within a generation" ;;
+    UG07) echo "ug9m: the rescue CEILING is removed — the re-fetch is unbounded" ;;
+    UG08) echo "ug9m: advance never increments rescueAttemptCount — the bound is never reached" ;;
+    UG09) echo "ug9m: the ceiling reads lastExit instead of the mark census — a retryable rescue outcome escapes it" ;;
+    UG10) echo "ug9m: the mint drops the strict conjunct — a SEGMENT-RECOVERED re-mint supersedes and promotes (THE negative)" ;;
+    UG11) echo "ug9m: the mint retires nothing — the degraded row survives beside the anchored one" ;;
+    UG12) echo "ug9m: freezeState reports frozen as rescuable — the permanent state stops being visible" ;;
+    UG13) echo "ug9m: fetchDayZeroAttemptContext returns an EMPTY census — the rescue never fires" ;;
     M01) echo "revertByTimeRange: delete the MANAGED loop's in-loop lifecycle guard" ;;
     M02) echo "revertByTimeRange: delete the SUGGEST loop's in-loop lifecycle guard" ;;
     M03) echo "revertByTimeRange: MANAGED in-loop guard 'break' -> 'return'" ;;
@@ -3557,6 +3640,146 @@ EOF
     patch "$file" \
       "              !extent.isFullyAnchored," \
       "              extent.isFullyAnchored," ;;
+
+  # ---- playhead-ug9m (UG series) -------------------------------------------
+
+  # UG01 — THE CENTREPIECE NEGATIVE, at the policy tier. One anchored day-0 row
+  # proves the mint could stamp anchors and did, which makes its unanchored
+  # siblings 9s6q segment-recovered and DELIBERATELY withheld. Dropping the
+  # conjunct rescues those assets, re-derives the same recovered slots, and
+  # spends ~108 MB doing it.
+  UG01)
+    patch "$file" \
+      "        anchoredCount == 0 && degradedCount > 0" \
+      "        degradedCount > 0" ;;
+
+  # UG02 — a re-mint replaces a row that is ALREADY proven. Strictly worse than
+  # doing nothing: this fetch's geometry has no claim over the one already
+  # anchored, and the swap is invisible in any count of rows.
+  UG02)
+    patch "$file" \
+      "        isDayZeroByteExactMark(row) && !isSettled(row) && !isFullyAnchored(row)" \
+      "        isDayZeroByteExactMark(row) && !isSettled(row)" ;;
+
+  # UG03 — the fidelity ladder, inverted. A user veto is deleted by a re-fetch.
+  UG03)
+    patch "$file" \
+      "        isDayZeroByteExactMark(row) && !isSettled(row) && !isFullyAnchored(row)" \
+      "        isDayZeroByteExactMark(row) && !isFullyAnchored(row)" ;;
+
+  # UG04 — the relaxation escapes its own producer and starts retiring other
+  # detectors' windows.
+  UG04)
+    patch "$file" \
+      "        isDayZeroByteExactMark(row) && !isSettled(row) && !isFullyAnchored(row)" \
+      "        !isSettled(row) && !isFullyAnchored(row)" ;;
+
+  # UG05 — one proven edge is read as two. The row then counts as `anchored`,
+  # which BLOCKS its own rescue while its other edge is still invented.
+  UG05)
+    snippet OLD <<'EOF'
+        return support.startAnchor == .rediffByteExact
+            && support.endAnchor == .rediffByteExact
+EOF
+    snippet NEW <<'EOF'
+        return support.startAnchor == .rediffByteExact
+            || support.endAnchor == .rediffByteExact
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UG06 — the generation scope falls off the rescue arm. `.marked` becomes
+  # retryable on every replay within a generation, which is the ~108 MB-per-play
+  # bleed playhead-p70f exists to prevent, reintroduced through the new door.
+  UG06)
+    snippet OLD <<'EOF'
+            if record.lastExit == .marked,
+               record.policyGeneration != currentGeneration,
+               markCensus.isRescuable {
+EOF
+    snippet NEW <<'EOF'
+            if record.lastExit == .marked,
+               markCensus.isRescuable {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UG07 — the CEILING is removed. Everything else still reads correctly; the
+  # rescue simply never stops, and `rescueExhausted` becomes unreachable.
+  UG07)
+    snippet OLD <<'EOF'
+        if markCensus.hasMarks, record.rescueAttemptCount >= maxRescueAttempts {
+            return .suppress(reason: .rescueExhausted, nextEligibleAt: nil)
+        }
+EOF
+    snippet NEW <<'EOF'
+        if false, record.rescueAttemptCount >= maxRescueAttempts {
+            return .suppress(reason: .rescueExhausted, nextEligibleAt: nil)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UG08 — the counter never rises, so the ceiling above is present and can
+  # never fire. The bound looks enforced and is not — the exact shape of the
+  # defect this bead is fixing one level up.
+  UG08)
+    patch "$file" \
+      "        let isRescue = record?.lastExit == .marked && spentBandwidth" \
+      "        let isRescue = record?.lastExit == .noDivergentSlot && spentBandwidth" ;;
+
+  # UG09 — the ceiling keyed on the EXIT rather than on the marks. A rescue that
+  # ended in `.noDivergentSlot` then falls through into the ordinary
+  # three-attempt budget: ~324 MB where the policy promised ~108 MB.
+  UG09)
+    patch "$file" \
+      "        if markCensus.hasMarks, record.rescueAttemptCount >= maxRescueAttempts {" \
+      "        if record.lastExit == .marked, record.rescueAttemptCount >= maxRescueAttempts {" ;;
+
+  # UG10 — THE CENTREPIECE NEGATIVE, at the mint tier and the one that matters
+  # most. Without the `strict` conjunct a 9s6q SEGMENT-RECOVERED re-mint retires
+  # the existing row and persists its own — and since the anchor stamp and the
+  # eligibility gate are chosen from the same `strict` value, the replacement is
+  # an unanchored, mark-only row that DELETED a banner. A second draw that
+  # dropped runs is not evidence it is better than the first.
+  UG10)
+    snippet OLD <<'EOF'
+                guard strict,
+                      overlappingExisting.allSatisfy(DayZeroMarkCensus.isSupersedable)
+                else { continue }
+EOF
+    snippet NEW <<'EOF'
+                guard overlappingExisting.allSatisfy(DayZeroMarkCensus.isSupersedable)
+                else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UG11 — the mint computes the supersede set and then does not apply it. Both
+  # rows survive: the degraded one keeps bannering beside the new anchored one,
+  # so the listener gets a banner AND a skip over the same seconds.
+  UG11)
+    patch "$file" \
+      "                retiredIDs: Set(superseded.keys)," \
+      "                retiredIDs: []," ;;
+
+  # UG12 — `frozen` reports as `rescuable`. Nothing behaves differently; the
+  # permanently-frozen state simply stops being visible in a support pull, which
+  # is precisely the silence this bead replaced.
+  UG12)
+    patch "$file" \
+      "        return rescueAttemptCount < DayZeroRediffAttemptPolicy.maxRescueAttempts" \
+      "        return rescueAttemptCount >= 0" ;;
+
+  # UG13 — the two legs of the decision stop being one snapshot: the context
+  # read reports an empty census, so `isRescuable` is never true and every
+  # trapped asset stays frozen with the whole policy suite green.
+  UG13)
+    snippet OLD <<'EOF'
+            markCensus: DayZeroMarkCensus.classify(
+                rows: try fetchAdWindows(assetId: assetId)
+            )
+EOF
+    snippet NEW <<'EOF'
+            markCensus: DayZeroMarkCensus.classify(rows: [])
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # BL04 — "a span is only as well-bounded as its weaker edge" replaced by "both
   # edges must be bad". A byte-exact start with an invented end then auto-skips
@@ -7472,6 +7695,8 @@ rec_file()   {
     DETLED) printf '%s' "$DETLED" ;;
     SPLIT) printf '%s' "$SPLIT" ;;
     HOTGATE) printf '%s' "$HOTGATE" ;;
+    UGCEN) printf '%s' "$UGCEN" ;;
+    POLICY) printf '%s' "$POLICY" ;;
     *)     printf '%s' "" ;;
   esac
 }
