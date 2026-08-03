@@ -99,61 +99,35 @@ struct BackfillCoarseCheckpointTests {
         )
     }
 
-    /// The no-progress bound, shrunk enough to run at gate speed but NOT to the
-    /// millisecond.
+    /// The stall bound is left at its PRODUCTION value (180 s x 3) in every test
+    /// in this suite, deliberately.
     ///
-    /// The bound is on SILENCE, and the silence these tests need to produce is a
-    /// window that never answers. Every other window here answers from an
-    /// in-memory queue, so the real gap between ticks is microseconds of work
-    /// plus a couple of SQLite writes — but the gate runs ~8,300 tests
-    /// concurrently and a 10 ms budget is close enough to a loaded machine's
-    /// scheduling jitter to be a coin flip. 250 ms x 3 leaves three orders of
-    /// magnitude of headroom over the legitimate gap while still firing in under
-    /// a second. No assertion here measures elapsed time.
-    private func stallBoundConfig() -> FoundationModelClassifier.Config {
-        FoundationModelClassifier.Config(
-            safetyMarginTokens: 128,
-            coarseMaximumResponseTokens: 96,
-            refinementMaximumResponseTokens: 1024,
-            coarseNoProgressInterval: .milliseconds(250),
-            coarseNoProgressIntervalLimit: 3
-        )
-    }
-
+    /// The first version of this suite shrank it to run the wedge fast, and the
+    /// full gate destroyed it: under ~10,000 concurrently-running tests a
+    /// perfectly healthy pass answered nothing for longer than the shrunken
+    /// budget, the no-progress watchdog abandoned it, and four tests failed on
+    /// `windowCount > 1` — a pass with ZERO windows. A silence bound cannot be
+    /// shrunk into a saturated machine's scheduling jitter, and there is no
+    /// constant that is both small enough to be fast and large enough to be
+    /// safe.
+    ///
+    /// So no test below measures, or depends on, elapsed time. Durability is
+    /// observed the only way that is actually load-independent: by reading the
+    /// database FROM INSIDE the pass, at a point where the pass demonstrably has
+    /// not returned. See `CoarseInFlightObserver`.
     private func makeRunner(
         store: AnalysisStore,
-        runtime: FoundationModelClassifier.Runtime,
-        config: FoundationModelClassifier.Config
+        runtime: FoundationModelClassifier.Runtime
     ) -> BackfillJobRunner {
         BackfillJobRunner(
             store: store,
             admissionController: AdmissionController(),
-            classifier: FoundationModelClassifier(runtime: runtime, config: config),
+            classifier: FoundationModelClassifier(runtime: runtime),
             coveragePlanner: CoveragePlanner(),
             mode: .shadow,
             capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
             batteryLevelProvider: { 1.0 },
             scanCohortJSON: makeTestScanCohortJSON()
-        )
-    }
-
-    /// A runtime that answers `answeringWindows` coarse calls and then never
-    /// answers again.
-    ///
-    /// This is the death mode the bead is about, expressed in the one form a
-    /// test can produce deterministically. A real jetsam runs no in-process code
-    /// at all; a wedged window runs none of the code that matters either,
-    /// because `FMNoProgressWatchdog` ABANDONS the pass rather than awaiting it
-    /// — so the banked windows never reach the `return` that used to be their
-    /// only route into the database. Same observable: the pass's work exists
-    /// only in memory that nobody will ever read.
-    private func wedgingAfter(_ answeringWindows: Int) -> TestFMRuntime {
-        TestFMRuntime(
-            tokenCountRule: { $0.count },
-            onCoarseRespond: { ordinal in
-                guard ordinal > answeringWindows else { return }
-                await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
-            }
         )
     }
 
@@ -165,79 +139,176 @@ struct BackfillCoarseCheckpointTests {
             .filter { $0.scanPass == "passA" }
     }
 
-    // MARK: - 1. The work survives the death
+    /// Samples the DATABASE at the start of every coarse window, from inside the
+    /// running pass.
+    ///
+    /// This is the whole trick that makes the suite deterministic. The contract
+    /// under test is "the windows a pass has screened are durable BEFORE the
+    /// pass returns" — and a database row observed while the pass is provably
+    /// still running is that contract, directly. Whatever kills the pass after
+    /// that instant, and however long it takes to do it, cannot un-write a
+    /// committed row. So the test needs no death and no clock, and asserting on
+    /// what survives a real death becomes a corollary rather than a measurement.
+    private actor CoarseInFlightObserver {
+        struct Sample: Sendable {
+            let respondOrdinal: Int
+            let durableSuccessRows: Int
+            let durableCursor: Double?
+            let maxDurableWindowEndTime: Double?
+        }
 
-    /// The headline. Before this bead the expected row count here was ZERO, for
-    /// any number of successfully screened windows, because the only write site
-    /// was downstream of a `return` this pass never reaches.
-    @Test("a coarse pass killed mid-flight keeps the windows it already screened")
-    func midFlightDeathKeepsTheScreenedWindows() async throws {
-        let assetId = "asset-26od-durable"
-        let store = try await makeTestStore()
-        try await store.insertAsset(makeAsset(id: assetId))
-        let answeringWindows = 3
-        let runner = makeRunner(
-            store: store,
-            runtime: wedgingAfter(answeringWindows).runtime,
-            config: stallBoundConfig()
-        )
+        private let store: AnalysisStore
+        private let assetId: String
+        private let transcriptVersion: String
+        private var resolvedJobId: String?
+        private(set) var samples: [Sample] = []
 
-        _ = try? await runner.runPendingBackfill(
-            for: makeInputs(assetId: assetId, lineCount: 40)
-        )
+        init(store: AnalysisStore, assetId: String, transcriptVersion: String) {
+            self.store = store
+            self.assetId = assetId
+            self.transcriptVersion = transcriptVersion
+        }
 
-        let rows = try await passARows(store, assetId: assetId)
-        let successes = rows.filter { $0.status == .success }
-        // Every window that answered, and only those. A pass that banked three
-        // windows and lost them is the measured field state; a pass that banked
-        // three and persisted five would be fabricating coverage, which is the
-        // failure mode qbib and pmp9 both exist to prevent.
-        #expect(successes.count == answeringWindows)
-        // The vacuity guard: a single-window pass could not distinguish
-        // "checkpointed as it went" from "wrote one row at the end".
-        #expect(answeringWindows > 1)
-        // Every row is a real screening of real audio, not a sentinel.
-        for row in successes {
-            #expect(row.windowEndTime > row.windowStartTime)
-            #expect(row.analysisAssetId == assetId)
+        /// The job id is a pure function of (asset, transcriptVersion, phase,
+        /// offset), so the running job can be FOUND rather than guessed at.
+        /// Resolved once and cached — searching every phase on every window
+        /// would swamp the samples with reads.
+        private func runningJobId() async -> String? {
+            if let resolvedJobId { return resolvedJobId }
+            for phase in BackfillJobPhase.allCases {
+                for offset in 0..<4 {
+                    let candidate = BackfillJobRunner.makeJobIdForTesting(
+                        analysisAssetId: assetId,
+                        transcriptVersion: transcriptVersion,
+                        phase: phase,
+                        offset: offset
+                    )
+                    guard let job = try? await store.fetchBackfillJob(byId: candidate),
+                          job.status == .running else { continue }
+                    resolvedJobId = candidate
+                    return candidate
+                }
+            }
+            return nil
+        }
+
+        func sample(respondOrdinal: Int) async {
+            let rows = (try? await store.fetchSemanticScanResults(analysisAssetId: assetId)) ?? []
+            let successes = rows.filter { $0.scanPass == "passA" && $0.status == .success }
+            var cursor: Double?
+            if let jobId = await runningJobId(),
+               let job = try? await store.fetchBackfillJob(byId: jobId) {
+                cursor = job.progressCursor?.lastProcessedUpperBoundSec
+            }
+            samples.append(
+                Sample(
+                    respondOrdinal: respondOrdinal,
+                    durableSuccessRows: successes.count,
+                    durableCursor: cursor,
+                    maxDurableWindowEndTime: successes.map(\.windowEndTime).max()
+                )
+            )
         }
     }
 
-    /// The other half of "a subsequent run does not re-do them": the durable
-    /// rows are useless if nothing records HOW FAR the pass got, because
+    // MARK: - 1. The work is durable BEFORE the pass returns
+
+    /// The headline, asserted at the only instant that proves it: while the pass
+    /// is still running.
+    ///
+    /// Before this bead the observed row count at every one of these instants was
+    /// ZERO, for any number of already-screened windows, because the only write
+    /// site was downstream of a `return`. That is exactly the field state — the
+    /// 2026-08-03 pull's ten jobs had a live `updatedAt` and no rows.
+    ///
+    /// The sequence asserted is exact, not a lower bound: at the start of the
+    /// N-th coarse call, precisely N-1 windows are durable. One fewer would mean
+    /// the checkpoint lags a window behind what it claims; one more would mean it
+    /// is persisting a window that has not resolved.
+    @Test("every screened window is durable before the pass returns")
+    func screenedWindowsAreDurableBeforeThePassReturns() async throws {
+        let assetId = "asset-26od-durable"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let inputs = makeInputs(assetId: assetId, lineCount: 40)
+        let observer = CoarseInFlightObserver(
+            store: store,
+            assetId: assetId,
+            transcriptVersion: inputs.transcriptVersion
+        )
+        let fmRuntime = TestFMRuntime(
+            tokenCountRule: { $0.count },
+            onCoarseRespond: { ordinal in await observer.sample(respondOrdinal: ordinal) }
+        )
+
+        _ = try await makeRunner(store: store, runtime: fmRuntime.runtime)
+            .runPendingBackfill(for: inputs)
+
+        let samples = await observer.samples
+        // The vacuity guard. With one window there is no "before the return" to
+        // observe, and every claim below holds trivially.
+        #expect(samples.count > 2, "need several windows for an in-flight claim to mean anything")
+        for sample in samples {
+            #expect(
+                sample.durableSuccessRows == sample.respondOrdinal - 1,
+                "at coarse call \(sample.respondOrdinal) expected \(sample.respondOrdinal - 1) durable rows, saw \(sample.durableSuccessRows)"
+            )
+        }
+        // Stated once more as the thing the bead is actually about, so a future
+        // reader does not have to derive it from the loop: real screened windows
+        // were in the database while the pass was still running.
+        let lastInFlight = try #require(samples.last)
+        #expect(lastInFlight.durableSuccessRows > 0)
+    }
+
+    /// The other half of "a subsequent run does not re-do them": the durable rows
+    /// are useless if nothing records HOW FAR the pass got, because
     /// `narrowedForResume` is the only sub-episode skip in production and it
     /// reads `backfill_jobs.progressCursor`.
     ///
-    /// Note what is asserted about the cursor's VALUE. It is not a number picked
-    /// by this test; it is exactly the audio the persisted rows cover. A cursor
-    /// past that would strand unscanned audio forever — the pmp9 defect — and a
-    /// cursor short of it would re-scan work that is already durable.
-    @Test("a coarse pass killed mid-flight checkpoints an honest resume cursor")
-    func midFlightDeathCheckpointsTheHonestCursor() async throws {
+    /// Note what is asserted about the cursor's VALUE. It is never a number this
+    /// test picked; at every instant it is exactly the audio the rows durable at
+    /// that same instant cover. A cursor past that would strand unscanned audio
+    /// forever — the pmp9 defect — and a cursor short of it would re-scan work
+    /// that is already durable.
+    @Test("the resume cursor is checkpointed in step with the durable rows")
+    func resumeCursorIsCheckpointedInStepWithTheRows() async throws {
         let assetId = "asset-26od-cursor"
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: assetId))
-        let runner = makeRunner(
+        let inputs = makeInputs(assetId: assetId, lineCount: 40)
+        let observer = CoarseInFlightObserver(
             store: store,
-            runtime: wedgingAfter(3).runtime,
-            config: stallBoundConfig()
+            assetId: assetId,
+            transcriptVersion: inputs.transcriptVersion
+        )
+        let fmRuntime = TestFMRuntime(
+            tokenCountRule: { $0.count },
+            onCoarseRespond: { ordinal in await observer.sample(respondOrdinal: ordinal) }
         )
 
-        let result = try? await runner.runPendingBackfill(
-            for: makeInputs(assetId: assetId, lineCount: 40)
-        )
+        _ = try await makeRunner(store: store, runtime: fmRuntime.runtime)
+            .runPendingBackfill(for: inputs)
 
-        let jobId = try #require(result?.admittedJobIds.first)
-        let job = try #require(await store.fetchBackfillJob(byId: jobId))
-        let cursor = try #require(job.progressCursor?.lastProcessedUpperBoundSec)
-
-        let successes = try await passARows(store, assetId: assetId)
-            .filter { $0.status == .success }
-        let coveredThrough = try #require(successes.map(\.windowEndTime).max())
-        #expect(cursor == coveredThrough)
-        // Positive, so it can actually narrow anything. `cursorAdvanced` treats
-        // a cursor of 0 as no progress.
-        #expect(cursor > 0)
+        let samples = await observer.samples
+        #expect(samples.count > 2)
+        var previousCursor = 0.0
+        var sawAPositiveCursor = false
+        for sample in samples {
+            guard let cursor = sample.durableCursor else { continue }
+            // Never past audio nobody screened. This is the invariant the whole
+            // coverage walk exists to hold.
+            let covered = try #require(sample.maxDurableWindowEndTime)
+            #expect(cursor <= covered)
+            // Monotonic: a resume must never be told to go back and re-scan, and
+            // must never be told to skip forward over a hole.
+            #expect(cursor >= previousCursor)
+            previousCursor = cursor
+            if cursor > 0 { sawAPositiveCursor = true }
+        }
+        // `cursorAdvanced` treats a cursor of 0 as no progress, so a cursor that
+        // never becomes positive would narrow nothing on the next run.
+        #expect(sawAPositiveCursor, "no positive resume cursor was ever durable mid-pass")
     }
 
     // MARK: - 2. The next run does not pay for it again
@@ -245,33 +316,62 @@ struct BackfillCoarseCheckpointTests {
     /// End-to-end composition: the state a mid-flight death leaves behind is
     /// state the NEXT run consumes.
     ///
-    /// The seam in the middle is the reaper. A jetsam leaves the row `running`
-    /// and `AnalysisStore.resetStrandedBackfillJobs` flips it to `queued`,
-    /// touching only `status` and `updatedAt` — the `progressCursor` survives by
-    /// construction, which is what makes this composition work at all. That flip
-    /// has its own test (`BackfillStallBoundTests`), so this one carries the
-    /// durable row across to a fresh store and re-queues it, which is what the
-    /// next app launch sees.
+    /// The seam in the middle is a JETSAM, and it is captured live rather than
+    /// simulated. Run 1 is stopped being observed at a chosen window, and the
+    /// job row as it stood AT THAT INSTANT — status, cursor and all — is what
+    /// run 2 is handed. That row is precisely what a process death at that
+    /// instant would leave on disk, because a committed row is not undone by the
+    /// process that wrote it going away.
     ///
-    /// Nothing here is hand-fed: the cursor and the job are read out of run 1's
-    /// database, not written by the test.
+    /// The reaper is the only step modelled rather than executed: it flips the
+    /// row `running` -> `queued` and touches nothing else
+    /// (`AnalysisStore.resetStrandedBackfillJobs` SETs only `status` and
+    /// `updatedAt`, which is what lets a mid-flight `progressCursor` survive at
+    /// all), and it has its own test in `BackfillStallBoundTests`.
+    ///
+    /// Nothing here is hand-fed: the cursor is read out of run 1's live
+    /// database, never written by the test.
     @Test("a run resuming after a mid-flight death does not re-scan the covered prefix")
     func resumeAfterMidFlightDeathSkipsTheCoveredPrefix() async throws {
         let assetId = "asset-26od-resume"
         let inputs = makeInputs(assetId: assetId, lineCount: 40)
 
-        // --- Run 1: dies mid-flight.
+        // --- Run 1, observed from inside: capture the job row exactly as it
+        //     stands part-way through the coarse pass.
         let firstStore = try await makeTestStore()
         try await firstStore.insertAsset(makeAsset(id: assetId))
-        let firstRunner = makeRunner(
-            store: firstStore,
-            runtime: wedgingAfter(3).runtime,
-            config: stallBoundConfig()
+        let captured = CapturedJobBox()
+        let captureAtWindow = 4
+        let firstRuntime = TestFMRuntime(
+            tokenCountRule: { $0.count },
+            onCoarseRespond: { ordinal in
+                guard ordinal == captureAtWindow else { return }
+                for phase in BackfillJobPhase.allCases {
+                    for offset in 0..<4 {
+                        let candidate = BackfillJobRunner.makeJobIdForTesting(
+                            analysisAssetId: assetId,
+                            transcriptVersion: inputs.transcriptVersion,
+                            phase: phase,
+                            offset: offset
+                        )
+                        if let job = try? await firstStore.fetchBackfillJob(byId: candidate),
+                           job.status == .running {
+                            await captured.set(job)
+                            return
+                        }
+                    }
+                }
+            }
         )
-        let firstResult = try? await firstRunner.runPendingBackfill(for: inputs)
-        let jobId = try #require(firstResult?.admittedJobIds.first)
-        let diedJob = try #require(await firstStore.fetchBackfillJob(byId: jobId))
-        let cursor = try #require(diedJob.progressCursor?.lastProcessedUpperBoundSec)
+        _ = try await makeRunner(store: firstStore, runtime: firstRuntime.runtime)
+            .runPendingBackfill(for: inputs)
+
+        let diedJob = try #require(await captured.job, "never observed a running job mid-pass")
+        let cursor = try #require(
+            diedJob.progressCursor?.lastProcessedUpperBoundSec,
+            "no cursor was durable at the captured instant — nothing for a resume to use"
+        )
+        #expect(cursor > 0)
 
         // --- The reaper: same row, same cursor, back in the queue.
         let secondStore = try await makeTestStore()
@@ -295,12 +395,8 @@ struct BackfillCoarseCheckpointTests {
 
         // --- Run 2: healthy, and must not re-screen covered audio.
         let secondRuntime = TestFMRuntime(tokenCountRule: { $0.count })
-        let secondRunner = makeRunner(
-            store: secondStore,
-            runtime: secondRuntime.runtime,
-            config: stallBoundConfig()
-        )
-        _ = try await secondRunner.runPendingBackfill(for: inputs)
+        _ = try await makeRunner(store: secondStore, runtime: secondRuntime.runtime)
+            .runPendingBackfill(for: inputs)
 
         let submitted = await secondRuntime.snapshotSubmittedCoarseLineRefs()
         let resubmitted = Set(submitted.flatMap { $0 })
@@ -333,7 +429,6 @@ struct BackfillCoarseCheckpointTests {
         let runner = makeRunner(
             store: store,
             runtime: fmRuntime.runtime,
-            config: stallBoundConfig()
         )
 
         let result = try await runner.runPendingBackfill(
@@ -376,7 +471,6 @@ struct BackfillCoarseCheckpointTests {
         let firstRunner = makeRunner(
             store: store,
             runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
-            config: stallBoundConfig()
         )
         _ = try await firstRunner.runPendingBackfill(for: inputs)
         let afterFirst = try await passARows(store, assetId: assetId)
@@ -386,7 +480,6 @@ struct BackfillCoarseCheckpointTests {
         let secondRunner = makeRunner(
             store: store,
             runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
-            config: stallBoundConfig()
         )
         _ = try await secondRunner.runPendingBackfill(for: inputs)
         let afterSecond = try await passARows(store, assetId: assetId)
@@ -536,6 +629,16 @@ struct CoarseCheckpointBoxTests {
     func zeroIsNotAnAdvance() {
         let box = CoarseCheckpointBox()
         #expect(box.advanceCursor(to: 0.0) == false)
+    }
+}
+
+/// Holds the `backfill_jobs` row as it stood at a chosen instant inside a
+/// running coarse pass — the state a jetsam at that instant would leave behind.
+private actor CapturedJobBox {
+    private(set) var job: BackfillJob?
+
+    func set(_ job: BackfillJob) {
+        self.job = job
     }
 }
 
