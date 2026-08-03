@@ -179,7 +179,7 @@ struct DayZeroMarkCensusTests {
     @Test("a VETOED but ANCHORED row still counts as anchored, and still blocks the rescue")
     func vetoedAnchoredRowStillProvesTheMintCouldStamp() {
         let census = DayZeroMarkCensus.classify(rows: [
-            RescueFixture.window(id: "vetoed", anchor: .rediffByteExact, decisionState: .reverted),
+            RescueFixture.window(id: "vetoed", decisionState: .reverted, anchor: .rediffByteExact),
             RescueFixture.window(id: "degraded", start: 400, end: 460)
         ])
         #expect(census.anchoredCount == 1, "anchored is tested BEFORE settled")
@@ -198,7 +198,7 @@ struct DayZeroMarkCensusTests {
         ]).isRescuable)
         // And it is still not supersedable — a veto is off limits either way.
         #expect(!DayZeroMarkCensus.isSupersedable(
-            RescueFixture.window(id: "vetoed", anchor: .rediffByteExact, decisionState: .reverted)))
+            RescueFixture.window(id: "vetoed", decisionState: .reverted, anchor: .rediffByteExact)))
     }
 
     /// THE conjunction the whole bound rests on.
