@@ -360,6 +360,35 @@ struct DownloadShowAttributionTests {
         #expect(await manager.loadDownloadAttribution(episodeId: episodeId) == nil)
     }
 
+    /// A cache clear is an ownership boundary for every per-transfer artifact.
+    /// Attribution is one, so it goes with the bytes it describes rather than
+    /// outliving them.
+    @Test("Clearing the cache takes the attribution with it")
+    func clearCacheReapsAttribution() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "kkzu-cleared"
+        await manager.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+            context: DownloadContext(
+                podcastId: Self.showId, isExplicitDownload: false
+            )
+        )
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId) != nil,
+            "positive witness: there was a record for the clear to take"
+        )
+
+        try await manager.clearCache()
+
+        #expect(await manager.loadDownloadAttribution(episodeId: episodeId) == nil)
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
     // MARK: - R4: an absence cannot be anonymous
 
     /// The type-level half of the fix. A caller can no longer arrive at a null

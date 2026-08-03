@@ -1786,6 +1786,7 @@ T_KKZU_BLANK="an empty or non-canonical identifier is a named absence, not a joi
 T_KKZU_PLAYED="the played path's context is byte-identical under the new constructor"
 T_KKZU_AUTO="an auto-download carries the show it belongs to, and each episode its OWN show"
 T_KKZU_PREPARE="the prepare coordinator hands the download half the same show it hands the analysis half"
+T_KKZU_CLEAR="clearing the cache takes the attribution with the bytes it describes"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3238,6 +3239,7 @@ MUTATIONS=(
   "KZ08|287|EPPREP|$T_KKZU_PREPARE"
   "KZ09|288|FQSCAN|$T_KKZU_FORCE_QUIT"
   "KZ10|289|DLMGR|$T_KKZU_CANCEL"
+  "KZ11|290|DLMGR|$T_KKZU_CLEAR"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -8100,6 +8102,19 @@ EOF
 EOF
     snippet NEW <<'EOF'
             logger.info("Cancelled download for \(episodeId)")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # KZ11 — a cache clear stops taking the attribution. The enumeration stays
+  # (so the fail-closed check still passes) and only the removal is dropped,
+  # which is exactly how this kind of leak survives review.
+  KZ11)
+    snippet OLD <<'EOF'
+        for contents in [partialContents, resumeContents, attributionContents] {
+EOF
+    snippet NEW <<'EOF'
+        _ = attributionContents
+        for contents in [partialContents, resumeContents] {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

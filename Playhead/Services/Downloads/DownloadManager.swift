@@ -3492,6 +3492,10 @@ actor DownloadManager {
         let completeContents = try contentsOfDirectory(completeDirectory)
         let partialContents = try contentsOfDirectory(partialsDirectory)
         let resumeContents = try contentsOfDirectory(resumeDataDirectory)
+        // playhead-kkzu: attribution is per-transfer state, so a cache clear
+        // takes it with the bytes it describes. Enumerated with the others,
+        // before anything is removed, so the fail-closed property holds.
+        let attributionContents = try contentsOfDirectory(attributionDirectory)
 
         let (pins, nonPins) = completeContents.reduce(
             into: (pins: [URL](), nonPins: [URL]())
@@ -3516,9 +3520,9 @@ actor DownloadManager {
         }) {
             try removeItem(fileURL)
         }
-        // Include partial and resume-data directories so a clear + relaunch
-        // cannot resurrect a suspended transfer.
-        for contents in [partialContents, resumeContents] {
+        // Include partial, resume-data and attribution directories so a clear
+        // + relaunch cannot resurrect a suspended transfer.
+        for contents in [partialContents, resumeContents, attributionContents] {
             for fileURL in contents.sorted(by: {
                 $0.lastPathComponent < $1.lastPathComponent
             }) {
