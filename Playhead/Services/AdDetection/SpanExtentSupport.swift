@@ -23,16 +23,24 @@
 // This type never moves an edge. It only reports how much the existing edges are
 // worth.
 //
-// SCOPE OF THE INVARIANT — read this before assuming it is global. The block is
-// applied in `AdDetectionService.runBackfill`'s emission loop, so it covers the
-// FUSED verdict only. The hot path (`runHotPath` / the segment-aggregator
-// promotion) stamps `AdWindow.eligibilityGate` from `precisionGateLabel`, whose
-// `"autoSkip"` literal is not a `SkipEligibilityGate` raw value and therefore
-// rides the orchestrator's legacy nil-gate contract straight into the auto-skip
-// path — and `buildAdWindow` never sets the edge-anchor columns, so those rows
-// are `.unanchored` by construction. Closing that hole is a separate change
-// against a different producer; it is tracked as an adjacent finding on
-// playhead-2350, not fixed here.
+// SCOPE OF THE INVARIANT — read this before assuming it is global. The block
+// declared in this file is applied in `AdDetectionService.runBackfill`'s
+// emission loop, so it covers the FUSED verdict only.
+//
+// The hot path (`runHotPath` / the segment-aggregator promotion) is a SECOND
+// producer that reaches auto-skip. It stamps `AdWindow.eligibilityGate` from
+// `precisionGateLabel`, whose `"autoSkip"` literal is not a
+// `SkipEligibilityGate` raw value and therefore rides the orchestrator's legacy
+// nil-gate contract straight into the auto-skip path — and neither hot-path
+// site sets the edge-anchor columns, so those rows are `.unanchored` by
+// construction. 2350 left that hole open and tracked it as an adjacent finding.
+//
+// playhead-bllt CLOSED IT, in `HotPathExtentGate` — a separate file because it
+// is a separate producer with a different verdict type (a persisted label
+// string, not a `DecisionResult`), reading the SAME `SpanExtentSupport` and
+// keyed on the SAME `AdDetectionConfig.unanchoredExtentBlocksAutoSkip` flag so
+// one kill switch governs both producers and cannot half-fire. Read that file's
+// header for the hot path's side of the rule.
 
 import Foundation
 
@@ -162,6 +170,30 @@ struct SpanExtentSupport: Sendable, Equatable, Hashable {
                 rediffByteExact: rediffOwnsWidth,
                 stingerSnapped: stingerTrace?.endSnapped ?? false
             )
+        )
+    }
+}
+
+// MARK: - AdWindow
+
+extension AdWindow {
+    /// The extent support a PERSISTED row carries, read from its own columns.
+    ///
+    /// playhead-bllt added this because the row→anchors decode had grown three
+    /// spellings and was about to grow a fourth. An unrecognised raw value
+    /// resolves `.unanchored` — the conservative direction, and the same one
+    /// `AnalysisStore` uses when the column is absent on a pre-playhead-hdgk
+    /// row.
+    ///
+    /// `SkipOrchestrator` prefers the RUNTIME-stamped anchors when it has them
+    /// (`setEdgeAnchors`), because ingest can know a provenance the row has not
+    /// been rewritten with yet; this property is the row-only reading.
+    var extentSupport: SpanExtentSupport {
+        SpanExtentSupport(
+            startAnchor: AutoSkipEdgeAnchor(rawValue: startEdgeAnchor)
+                ?? .unanchored,
+            endAnchor: AutoSkipEdgeAnchor(rawValue: endEdgeAnchor)
+                ?? .unanchored
         )
     }
 }

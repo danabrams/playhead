@@ -3021,9 +3021,24 @@ actor SkipOrchestrator {
                         "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — surfacing as suggest tier"
                     )
                 }
+                // playhead-bllt: the census carries WHY a row is in the suggest
+                // tier rather than the managed one, when the reason is its
+                // extent. A row whose edges nobody proved could not have been
+                // auto-skipped whatever its score said, and after this bead the
+                // hot path's rows are exactly that population — so `delivered=`
+                // shifting from managed to suggest is a demotion the audit
+                // trail can now name, instead of a banner that merely failed to
+                // appear somewhere else. `nil` (and therefore no detail token)
+                // for a fully-anchored row, deliberately: a detail that fires
+                // on every delivery says nothing.
+                let extentDetail = HotPathExtentGate.censusDetail(
+                    for: resolvedExtentSupport(for: adWindow)
+                )
                 if banneredWindowIds.contains(adWindow.id) {
                     noteIngestOutcome(
-                        .droppedAlreadyBannered, windowId: adWindow.id
+                        .droppedAlreadyBannered,
+                        windowId: adWindow.id,
+                        detail: extentDetail
                     )
                 } else {
                     registerSuggestedWindow(adWindow)
@@ -3036,7 +3051,8 @@ actor SkipOrchestrator {
                         armedSuggestWindowIds.contains(adWindow.id)
                             ? .armedSuggest
                             : .suggestReplayNotRearmed,
-                        windowId: adWindow.id
+                        windowId: adWindow.id,
+                        detail: extentDetail
                     )
                 }
                 continue
@@ -6567,11 +6583,18 @@ actor SkipOrchestrator {
         if let stamped = edgeAnchorsByWindowId[window.id] {
             return stamped
         }
-        return (
-            start: AutoSkipEdgeAnchor(rawValue: window.startEdgeAnchor)
-                ?? .unanchored,
-            end: AutoSkipEdgeAnchor(rawValue: window.endEdgeAnchor)
-                ?? .unanchored
+        // playhead-bllt: through the SHARED row decode, not a local re-spelling.
+        let support = window.extentSupport
+        return (start: support.startAnchor, end: support.endAnchor)
+    }
+
+    /// `resolvedEdgeAnchors` as the extent-support value the playhead-2350 /
+    /// playhead-bllt rule is stated over.
+    private func resolvedExtentSupport(for window: AdWindow) -> SpanExtentSupport {
+        let anchors = resolvedEdgeAnchors(for: window)
+        return SpanExtentSupport(
+            startAnchor: anchors.start,
+            endAnchor: anchors.end
         )
     }
 
