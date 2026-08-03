@@ -133,7 +133,16 @@ protocol FeedRefreshing: Sendable {
 /// Enqueues a background pre-cache download for a newly-discovered
 /// episode. Production wires this to `DownloadManager.backgroundDownload`.
 protocol AutoDownloadEnqueueing: Sendable {
-    func enqueueBackgroundDownload(episodeId: String, from url: URL) async
+    /// playhead-kkzu: `context` names the show. Auto-downloaded episodes are
+    /// exactly the population whose analysis should be finished before the
+    /// user presses play, and they used to enqueue that analysis with a NULL
+    /// `podcastId` even though `FeedRefreshNewEpisode.feedURL` — the very
+    /// value the runtime uses as the show identity — was in hand.
+    func enqueueBackgroundDownload(
+        episodeId: String,
+        from url: URL,
+        context: DownloadContext
+    ) async
 }
 
 /// Provides the user's current `AutoDownloadOnSubscribe` setting.
@@ -854,9 +863,20 @@ actor BackgroundFeedRefreshService {
         }
         var enqueuedCount = 0
         for episode in toDownload {
+            // playhead-kkzu: `feedURL` IS the show identity in this codebase
+            // (`PlayheadRuntime` derives `podcastId` from
+            // `feedURL.absoluteString`), so an auto-download can always name
+            // its show. `.resolving` still guards the spelling: a feed URL
+            // that is not a canonical identifier becomes a NAMED absence
+            // rather than a key that joins to the wrong namespace.
             await downloader.enqueueBackgroundDownload(
                 episodeId: episode.canonicalEpisodeKey,
-                from: episode.audioURL
+                from: episode.audioURL,
+                context: .resolving(
+                    podcastId: episode.feedURL.absoluteString,
+                    unattributedReason: .showIdentityUnresolvable,
+                    isExplicitDownload: false
+                )
             )
             enqueuedCount += 1
         }
@@ -989,8 +1009,14 @@ struct ProductionFeedRefresher: FeedRefreshing {
 struct ProductionAutoDownloadEnqueuer: AutoDownloadEnqueueing {
     let downloadManager: DownloadManager
 
-    func enqueueBackgroundDownload(episodeId: String, from url: URL) async {
-        await downloadManager.backgroundDownload(episodeId: episodeId, from: url)
+    func enqueueBackgroundDownload(
+        episodeId: String,
+        from url: URL,
+        context: DownloadContext
+    ) async {
+        await downloadManager.backgroundDownload(
+            episodeId: episodeId, from: url, context: context
+        )
     }
 }
 

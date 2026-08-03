@@ -49,7 +49,11 @@ private actor MinimalRefresher: FeedRefreshing {
 }
 
 private struct NoopDownloader: AutoDownloadEnqueueing {
-    func enqueueBackgroundDownload(episodeId _: String, from _: URL) async {}
+    func enqueueBackgroundDownload(
+        episodeId _: String,
+        from _: URL,
+        context _: DownloadContext
+    ) async {}
 }
 
 private struct OffSettings: DownloadsSettingsProviding {

@@ -233,11 +233,30 @@ private extension EpisodeListView {
                                 modelContext: modelContext
                             )
                         }
+                        // playhead-kkzu: capture the show (and titles) on the
+                        // MainActor, where the SwiftData `Episode` is valid,
+                        // rather than touching the model inside the Task. A
+                        // "Download Next" pick always has the row in hand, so
+                        // the analysis job its download enqueues is attributed.
+                        let contexts = picked.map {
+                            (
+                                episodeId: $0.canonicalEpisodeKey,
+                                url: $0.audioURL,
+                                context: DownloadContext.resolving(
+                                    podcastId: $0.resolvedShowIdentity,
+                                    unattributedReason: .showIdentityUnresolvable,
+                                    isExplicitDownload: false,
+                                    podcastTitle: $0.podcast?.title,
+                                    episodeTitle: $0.title
+                                )
+                            )
+                        }
                         Task {
-                            for episode in picked {
+                            for pick in contexts {
                                 await runtime.downloadManager.backgroundDownload(
-                                    episodeId: episode.canonicalEpisodeKey,
-                                    from: episode.audioURL
+                                    episodeId: pick.episodeId,
+                                    from: pick.url,
+                                    context: pick.context
                                 )
                             }
                         }
