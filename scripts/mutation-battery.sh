@@ -1025,8 +1025,12 @@ T_LE02_BYPASS_DECISION="same-ID decision with changed bounds must pass inventory
 T_LE02_DOOR_FOREIGN="ingest for an asset that is NOT the one playing delivers nothing"
 T_LE02_DOOR_NOEPISODE="ingest with no active episode delivers nothing"
 T_LE02_DOOR_VETOED="a user-vetoed row is not resurrected by the mid-session door"
-T_LE02_PRELOAD_APPLIED="testPreloadedAppliedWindowDoesNotEmitBanner"
-T_LE02_ENDEPISODE_RESET="testEndEpisodeResetsEmittedAutoSkipBannersSet"
+# These two are XCTest, which this battery could not match until le02 taught
+# `extract_ran`/`extract_failures` to read `Test Case '-[Suite method]'` lines.
+# Written in the QUALIFIED `Suite/method` form the extractors also emit, so a
+# same-named method in another suite cannot manufacture a kill.
+T_LE02_PRELOAD_APPLIED="SkipOrchestratorPreloadTests/testPreloadedAppliedWindowDoesNotEmitBanner"
+T_LE02_ENDEPISODE_RESET="SkipOrchestratorPreloadTests/testEndEpisodeResetsEmittedAutoSkipBannersSet"
 T_LISTEN_RACE="A Listen revert whose episode is replaced mid-flight still calibrates the captured show"
 T_MANAGED_RACE="A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone"
 T_SUGGEST_RACE="A suggest-only revert whose episode is replaced mid-loop keeps its receipt and stops retiring banners"
@@ -7298,8 +7302,30 @@ import re, sys
 # else in the log emits.
 pat_named = re.compile(r"✘ Test \"(.+?)\" (?:failed|recorded an issue)")
 pat_plain = re.compile(r"✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) failed")
+# playhead-le02: XCTest, which this battery could not see at all. Until now an
+# expectation naming an XCTest case reported ERROR ("expected test never ran"),
+# so those rails were "verified by hand" (see the kvs8 note in FOCUSED_SUITES)
+# — i.e. not verified by anything that fails when someone stops doing it.
+#
+# The duration heuristic INVERTS for XCTest and that matters here: a Swift
+# Testing failure over ~97 s is a load flake, but an XCTest failure is an
+# ASSERTION and is fast (0.025 s is typical). Nothing in this function times
+# anything, which is correct — a mutation battery wants every failure, flake or
+# not, because the baseline run is the control.
+# `chr(39)` rather than a literal apostrophe: this whole program is inside a
+# single-quoted `python3 -c` argument, so an apostrophe would end it.
+Q = chr(39)
+pat_xctest = re.compile(r"Test Case " + Q + r"-\[[A-Za-z0-9_.]*?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]" + Q + r" failed")
 seen = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    x = pat_xctest.search(line)
+    if x:
+        # Both forms, so an expectation may be written bare when the method
+        # name is distinctive or qualified when it is not.
+        for name in (x.group(2), x.group(1) + "/" + x.group(2)):
+            if name not in seen:
+                seen.append(name)
+        continue
     m = pat_named.search(line) or pat_plain.search(line)
     if m and m.group(1) not in seen:
         seen.append(m.group(1))
@@ -7329,8 +7355,20 @@ import re, sys
 # KILL itself comes from extract_failures.
 pat_named = re.compile(r"◇ Test \"(.+?)\" started")
 pat_plain = re.compile(r"◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
+# playhead-le02: the XCTest half — see extract_failures for why. Must stay in
+# lockstep with that function: a name this one cannot record is reported as a
+# harness fault no matter what the other one saw, which is exactly the
+# false-ERROR direction the "never ran" check exists to remove.
+Q = chr(39)  # see extract_failures
+pat_xctest = re.compile(r"Test Case " + Q + r"-\[[A-Za-z0-9_.]*?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]" + Q + r" started")
 seen = []
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    x = pat_xctest.search(line)
+    if x:
+        for name in (x.group(2), x.group(1) + "/" + x.group(2)):
+            if name not in seen:
+                seen.append(name)
+        continue
     m = pat_named.search(line) or pat_plain.search(line)
     if m and m.group(1) not in seen:
         seen.append(m.group(1))
