@@ -3387,21 +3387,33 @@ MUTATIONS=(
   # reserves for REAL defects, so it cost a full triage round every time it
   # appeared and looked like a regression in whatever was under test.
   #
-  # ALL THREE ATTACK THE SAME ONE-LINE FUNNEL, `emitCoarsePassDiagnostic`, which
-  # exists so that they can: five separate reads of the task-local would mean a
-  # regression could come back through any one of them, and a mutation would
-  # have to guess which. One batch each, because they interfere — TS02 makes
-  # every box empty and TS01 makes one box overfull, so run together each would
-  # be credited with the other's failures.
+  # ALL FOUR ATTACK THE SAME TWO FUNCTIONS — `withCoarsePassDiagnosticObserver`
+  # (the only install) and `emitCoarsePassDiagnostic` (the only read). Those two
+  # exist so that these mutations have one anchor apiece instead of five, and so
+  # a regression cannot come back through whichever of the five emit sites a
+  # mutation happened not to pick. One batch each, because the outcomes
+  # interfere: TS03 makes every box empty and TS01 makes one box overfull, so
+  # run together each would be credited with the other's failures.
   #
-  # TS01 is the centrepiece and it is the ONLY one that reproduces the bead's
-  # actual defect: a second, concurrent installer being silently absorbed. The
-  # other two are the controls that keep TS01's rails from being vacuous —
-  # without them "no foreign window arrived" is equally satisfied by an observer
-  # that never fires at all.
-  "TS01|310|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_SCOPE"
-  "TS02|311|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
+  # THE KILL SETS ARE DELIBERATELY UNEQUAL, and that is the report. TS01 and
+  # TS02 are two DIFFERENT process-global regressions and they are caught by
+  # DIFFERENT rails:
+  #   • TS01 restores the historical code exactly — assign on install, restore
+  #     in a defer. Save/restore is correct within one task, so the scoping and
+  #     nesting rails stay green under it and SHOULD: it is concurrent
+  #     installers it cannot survive, which is precisely the bug.
+  #   • TS02 leaks instead of restoring, so it is the mirror image — the
+  #     lifetime rails catch it and the concurrency rail does not.
+  # A series where every mutation kills every rail would mean the rails were
+  # measuring one thing under four names.
+  #
+  # TS03 and TS04 are the vacuity controls. Every rail here is built as "my own
+  # windows arrived AND nothing else did"; without a mutation that empties every
+  # box, the second half would be passing on an observer that never fires.
+  "TS01|310|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT"
+  "TS02|311|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_SCOPE"
   "TS03|312|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
+  "TS04|313|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3698,9 +3710,10 @@ describe_mutation() {
     KN07) echo "kanf: the flag is consumed unconditionally again, so a refused tap cannot retry" ;;
     KN08) echo "kanf: promote to the SOON floor — the row keeps starving in a deferred lane" ;;
     KN09) echo "kanf: the promotion rotates generationID, breaking the orphan-recovery join" ;;
-    TS01) echo "5n8k: THE defect restored — the funnel caches the last binding in a process-global and falls back to it" ;;
-    TS02) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
-    TS03) echo "5n8k: the emit moves onto a detached task, where the task-local binding is out of scope" ;;
+    TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
+    TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
+    TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
+    TS04) echo "5n8k: the emit moves onto a detached task, where the task-local binding is out of scope" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -8482,20 +8495,66 @@ EOF
 
   # ---- playhead-5n8k: coarse-pass diagnostic observer scoping (TS series) ----
   #
-  # All three replace the SAME function, `emitCoarsePassDiagnostic` — the one
-  # place production reads the task-local. That funnel exists so these
-  # mutations have a single anchor instead of five, and so a regression cannot
-  # come back through whichever emit site a mutation happened not to pick.
+  # The hook's whole lifetime is two functions: `withCoarsePassDiagnosticObserver`
+  # installs, `emitCoarsePassDiagnostic` reads. Both exist so these mutations
+  # have one anchor apiece instead of five scattered reads, and so a regression
+  # cannot come back through whichever emit site a mutation happened not to pick.
 
-  # TS01 — THE defect restored, in the only form the current type can express
-  # it: the funnel remembers the last binding it saw in a process-global and
-  # falls back to it. A pass in an unbound task then reaches a box it does not
-  # own, which is exactly what "another suite's window arrived in my capture
-  # box" was. Note what this mutation does NOT break: every positive witness
-  # still passes, because each box still receives its own windows. It is
-  # detectable only by asserting the box holds NOTHING ELSE — which is why the
-  # rails assert an exact coordinate list rather than a non-empty one.
+  # TS01 — THE historical defect, restored verbatim rather than approximated.
+  # Install assigns a process-global and restores it in a `defer`; the funnel
+  # reads that global. This is byte-for-byte what the code did before this bead,
+  # down to the save/restore, which is why it is worth two edits instead of one:
+  # a leak-style approximation (TS02) would have let the rails be judged against
+  # a defect the repo never actually had.
+  #
+  # What it does NOT break is the report. Save/restore is CORRECT inside one
+  # task, so the lifetime rails — scope and nesting — stay green, and should.
+  # The defect was never about one test's own bookkeeping; it was that a second,
+  # concurrent installer overwrites the first and the first's windows go
+  # somewhere else. Only the concurrency and foreign-task rails can see that.
   TS01)
+    snippet OLD <<'EOF'
+    static func withCoarsePassDiagnosticObserver<R>(
+        _ observer: @escaping @Sendable (CoarsePassWindowDiagnostic) -> Void,
+        operation: () async throws -> R
+    ) async rethrows -> R {
+        try await $coarsePassDiagnosticObserver.withValue(observer, operation: operation)
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func withCoarsePassDiagnosticObserver<R>(
+        _ observer: @escaping @Sendable (CoarsePassWindowDiagnostic) -> Void,
+        operation: () async throws -> R
+    ) async rethrows -> R {
+        let previous = CoarsePassDiagnosticGlobal.observer
+        CoarsePassDiagnosticGlobal.observer = observer
+        defer { CoarsePassDiagnosticGlobal.observer = previous }
+        return try await operation()
+    }
+
+    enum CoarsePassDiagnosticGlobal {
+        nonisolated(unsafe) static var observer: (@Sendable (CoarsePassWindowDiagnostic) -> Void)?
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        coarsePassDiagnosticObserver?(diagnostic)
+    }
+EOF
+    snippet NEW <<'EOF'
+    private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
+        CoarsePassDiagnosticGlobal.observer?(diagnostic)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # TS02 — the mirror image, and a regression that is easier to write by
+  # accident than TS01 is: the funnel remembers the last binding it saw and
+  # falls back to it, so a binding outlives its scope and an UNBOUND task
+  # inherits it. Caught by the lifetime rails, invisible to the concurrency one
+  # — the exact complement of TS01, which is the argument for keeping both.
+  TS02)
     snippet OLD <<'EOF'
     private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
         coarsePassDiagnosticObserver?(diagnostic)
@@ -8515,12 +8574,12 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # TS02 — the vacuity control. Nothing is ever emitted. Every rail in the
+  # TS03 — the vacuity control. Nothing is ever emitted. Every rail in the
   # scoping suite is built as "my own windows arrived AND nothing else did", so
   # this must kill all four; if it did not, the negative half would be passing
   # on an observer that never fires. The bd-34e consumer test is in the kill set
   # too, as the check that the funnel is genuinely load-bearing.
-  TS02)
+  TS03)
     snippet OLD <<'EOF'
     private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
         coarsePassDiagnosticObserver?(diagnostic)
@@ -8533,12 +8592,12 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # TS03 — the documented cost of choosing a task-local, made concrete. A
+  # TS04 — the documented cost of choosing a task-local, made concrete. A
   # `Task.detached` does not inherit task-locals, so an emit moved onto one
   # reads nil and the diagnostic is lost. This is the regression the source
   # comment on `coarsePassDiagnosticObserver` warns about; encoding it is what
   # turns that warning from a note into something a test can enforce.
-  TS03)
+  TS04)
     snippet OLD <<'EOF'
     private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
         coarsePassDiagnosticObserver?(diagnostic)

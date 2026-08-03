@@ -1604,6 +1604,21 @@ struct FoundationModelClassifier: Sendable {
         coarsePassDiagnosticObserver?(diagnostic)
     }
 
+    /// playhead-5n8k: the ONE supported way to install the observer, and the
+    /// counterpart to `emitCoarsePassDiagnostic`.
+    ///
+    /// Paired with the funnel above, these two functions are the entire
+    /// lifetime of the hook — one install, one read. That is what lets the
+    /// mutation battery restore the historical defect faithfully (a
+    /// process-global assigned on install and read on emit) in two edits, and
+    /// have the rails judge the real thing rather than an approximation of it.
+    static func withCoarsePassDiagnosticObserver<R>(
+        _ observer: @escaping @Sendable (CoarsePassWindowDiagnostic) -> Void,
+        operation: () async throws -> R
+    ) async rethrows -> R {
+        try await $coarsePassDiagnosticObserver.withValue(observer, operation: operation)
+    }
+
     /// Static identifier for the refinement @Generable schema. Used by the
     /// diagnostic payload so future schema rotations are visible in logs.
     static let refinementSchemaName = "RefinementWindowSchema"

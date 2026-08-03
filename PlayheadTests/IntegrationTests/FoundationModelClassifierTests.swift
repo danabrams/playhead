@@ -6419,7 +6419,7 @@ private func withCoarsePassDiagnostics<R>(
     capturing box: CoarsePassDiagnosticCaptureBox,
     _ operation: () async throws -> R
 ) async rethrows -> R {
-    try await FoundationModelClassifier.$coarsePassDiagnosticObserver.withValue(
+    try await FoundationModelClassifier.withCoarsePassDiagnosticObserver(
         { diagnostic in box.append(diagnostic) },
         operation: operation
     )
@@ -6760,11 +6760,19 @@ private actor ScopingRendezvous {
 /// reserves for real defects (the ≥97s heuristic identifies load flakes), so it
 /// cost a full triage round every time it appeared.
 ///
-/// This suite is deliberately NOT `.serialized`. Serialization is what the old
-/// mitigation tried and it was never sufficient — it orders the tests inside
-/// ONE suite and says nothing about the rest of the process. These tests
-/// create the collision on purpose instead.
-@Suite("Coarse-pass diagnostic observer — task scoping (playhead-5n8k)")
+/// `.serialized` here is NOT the old mitigation returning. It orders these four
+/// tests relative to each other and nothing else: the suite still runs
+/// concurrently with the other ~8,300 tests in the process, which is where the
+/// collision came from and where these rails have to hold.
+///
+/// It is here because each test manufactures its own collision deterministically
+/// — a detached task, a two-party rendezvous — and racing them against each
+/// OTHER only adds noise to what they report. That was measured: under a
+/// process-global mutation the unserialized suite failed three of four tests,
+/// but WHICH three depended on which test happened to hold the global at the
+/// moment another one looked, so the same defect produced a different verdict
+/// run to run. A rail whose verdict moves is a rail nobody can act on.
+@Suite("Coarse-pass diagnostic observer — task scoping (playhead-5n8k)", .serialized)
 struct CoarsePassDiagnosticTaskScopingTests {
 
     /// Run a coarse pass over six segments numbered `startIndex ..< startIndex + 6`,
