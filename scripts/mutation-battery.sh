@@ -3232,6 +3232,23 @@ MUTATIONS=(
   # would be credited a kill it did not earn. KZ04/KZ05 both edit the private
   # DownloadContext initializer and would collide textually. KZ06/KZ07 patch
   # the SAME line in the auto-download enqueue. Each of those pairs is split.
+  #
+  # RUN 2026-08-03: 11 KILLED / 0 SURVIVED / 0 ERROR, one mutation per batch.
+  # Three things worth keeping:
+  #   • The first attempt reported KZ01 as ERROR — "an expectation names a test
+  #     that never ran" — because the T_KKZU_* constants were DESCRIPTIONS of the
+  #     claim rather than the @Test display names. The guard caught it at the
+  #     BASELINE, before a build was spent on a mutant. They are display names now.
+  #   • KZ02 (never persist the record) failed SIX rails, not the three it names.
+  #     Dropping the write breaks every attribution rail at once, which is the
+  #     shape you want from the mutation that removes the mechanism itself.
+  #   • KZ07 is the one a lazy rail would miss. It attributes every auto-download
+  #     to the FIRST group's feed, so "podcastId is not nil" stays true for every
+  #     row while real episodes are filed under the wrong show. It is killed only
+  #     by the per-episode half of the auto-download rail.
+  # Batch 285 also ERRORed once on rc=28 — the disk preflight refusing, not a
+  # surviving mutant. `simctl erase` + clearing $TMPDIR/Deleting-* took the volume
+  # from 14 GiB to 20 GiB and it passed on the re-run.
   "KZ01|280|DLMGR|$T_KKZU_ENQUEUE;$T_KKZU_RESTART"
   "KZ02|281|DLMGR|$T_KKZU_ENQUEUE;$T_KKZU_REAP;$T_KKZU_RESTART"
   "KZ03|282|FQSCAN|$T_KKZU_RESUME_KEEPS;$T_KKZU_FORCE_QUIT"
