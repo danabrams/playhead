@@ -329,15 +329,17 @@ struct BackfillCoarseCheckpointTests {
     /// `updatedAt`, which is what lets a mid-flight `progressCursor` survive at
     /// all), and it has its own test in `BackfillStallBoundTests`.
     ///
-    /// Nothing here is hand-fed: the cursor is read out of run 1's live
-    /// database, never written by the test.
+    /// Nothing here is hand-fed: the cursor AND the rows are read out of run 1's
+    /// live database, never written by the test. Both are carried across, so
+    /// what run 2 faces is the whole durable state of the death instant — which
+    /// also means run 2 has to co-exist with rows it did not write.
     @Test("a run resuming after a mid-flight death does not re-scan the covered prefix")
     func resumeAfterMidFlightDeathSkipsTheCoveredPrefix() async throws {
         let assetId = "asset-26od-resume"
         let inputs = makeInputs(assetId: assetId, lineCount: 40)
 
-        // --- Run 1, observed from inside: capture the job row exactly as it
-        //     stands part-way through the coarse pass.
+        // --- Run 1, observed from inside: capture the job row AND the scan rows
+        //     exactly as they stand part-way through the coarse pass.
         let firstStore = try await makeTestStore()
         try await firstStore.insertAsset(makeAsset(id: assetId))
         let captured = CapturedJobBox()
@@ -356,7 +358,10 @@ struct BackfillCoarseCheckpointTests {
                         )
                         if let job = try? await firstStore.fetchBackfillJob(byId: candidate),
                            job.status == .running {
-                            await captured.set(job)
+                            let rows = (try? await firstStore.fetchSemanticScanResults(
+                                analysisAssetId: assetId
+                            )) ?? []
+                            await captured.set(job, rows: rows)
                             return
                         }
                     }
@@ -373,9 +378,15 @@ struct BackfillCoarseCheckpointTests {
         )
         #expect(cursor > 0)
 
-        // --- The reaper: same row, same cursor, back in the queue.
+        // --- The reaper: the same row and the same rows the death left on disk,
+        //     with status flipped `running` -> `queued` and nothing else touched.
+        let carriedRows = await captured.rows
+        #expect(!carriedRows.isEmpty, "the death instant carried no durable rows — nothing to preserve")
         let secondStore = try await makeTestStore()
         try await secondStore.insertAsset(makeAsset(id: assetId))
+        for row in carriedRows {
+            try await secondStore.insertSemanticScanResult(row)
+        }
         try await secondStore.insertBackfillJob(
             BackfillJob(
                 jobId: diedJob.jobId,
@@ -405,6 +416,88 @@ struct BackfillCoarseCheckpointTests {
         // or below the cursor is audio run 1 already screened and banked.
         let coveredRefs = resubmitted.filter { Double($0 + 1) * Self.segmentSeconds <= cursor }
         #expect(coveredRefs.isEmpty, "run 2 re-scanned already-durable audio: \(coveredRefs.sorted())")
+
+        // The work run 1 banked is still there, once each, after run 2 wrote its
+        // own rows alongside it. This is the half a two-store seam cannot see:
+        // the resume co-exists with rows it did not write.
+        let afterSecond = try await passARows(secondStore, assetId: assetId)
+        let survivingIds = Set(afterSecond.map(\.id))
+        for row in carriedRows where row.scanPass == "passA" {
+            #expect(survivingIds.contains(row.id), "run 2 destroyed a row run 1 had banked")
+        }
+        #expect(Set(afterSecond.map(\.id)).count == afterSecond.count)
+    }
+
+    // MARK: - 2b. The literal death, in the serial lane
+
+    /// An ACTUAL abandoned pass, end to end: the runtime stops answering, the
+    /// no-progress watchdog abandons the pass, and the banked windows never
+    /// reach the `return` that used to be their only route into the database.
+    ///
+    /// Everything this asserts is entailed by the in-flight tests above — a
+    /// committed row is not un-written by the process that wrote it giving up —
+    /// so this is a belt on their braces. What it adds is the segment of the
+    /// path they cannot reach: that the runner's own failure handling, which
+    /// runs after the abandonment and marks the job `.failed`, does not delete
+    /// or overwrite the rows on its way out.
+    ///
+    /// PerfGate'd because it is the one test here that MUST shrink the silence
+    /// bound, and a shrunken silence bound is exactly what the parallel gate
+    /// destroys — see the note on `makeRunner`. In the serial pass a healthy
+    /// window's gap is microseconds and 250 ms x 3 is four orders of magnitude
+    /// of headroom. Registered in `scripts/perf-tests.sh`.
+    @Test(
+        "an abandoned coarse pass leaves its screened windows in the database",
+        .enabled(if: PerfGate.runsMeasurementTests, "shrinks the FM no-progress bound — perf pass only (playhead-zx0l)")
+    )
+    func abandonedPassLeavesItsScreenedWindowsBehind() async throws {
+        let assetId = "asset-26od-abandoned"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let answeringWindows = 3
+        let fmRuntime = TestFMRuntime(
+            tokenCountRule: { $0.count },
+            onCoarseRespond: { ordinal in
+                guard ordinal > answeringWindows else { return }
+                await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
+            }
+        )
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(
+                runtime: fmRuntime.runtime,
+                config: FoundationModelClassifier.Config(
+                    safetyMarginTokens: 128,
+                    coarseMaximumResponseTokens: 96,
+                    refinementMaximumResponseTokens: 1024,
+                    coarseNoProgressInterval: .milliseconds(250),
+                    coarseNoProgressIntervalLimit: 3
+                )
+            ),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
+        )
+
+        _ = try? await runner.runPendingBackfill(
+            for: makeInputs(assetId: assetId, lineCount: 40)
+        )
+
+        let successes = try await passARows(store, assetId: assetId)
+            .filter { $0.status == .success }
+        // Every window that answered, and only those. Before this bead the count
+        // here was zero. A count ABOVE `answeringWindows` would be worse than
+        // zero — it would be coverage claimed for audio nobody screened, which
+        // is the failure qbib and pmp9 both exist to prevent.
+        #expect(successes.count == answeringWindows)
+        #expect(answeringWindows > 1, "a one-window pass cannot distinguish this from a final write")
+        for row in successes {
+            #expect(row.windowEndTime > row.windowStartTime)
+            #expect(row.analysisAssetId == assetId)
+        }
     }
 
     // MARK: - 3. The negative: a pass that finishes is unchanged
@@ -456,12 +549,22 @@ struct BackfillCoarseCheckpointTests {
         #expect(Set(result.scanResultIds).count == result.scanResultIds.count)
     }
 
-    /// Re-running the identical job against a database that already holds its
-    /// rows must converge, not accumulate. The reuse key is per-job
-    /// (`reuseScope` is the `jobId`), so this is the only re-run shape that can
-    /// collide at all — and it is exactly the shape a reaped-and-redriven job
-    /// produces.
-    @Test("re-running a completed pass adds no rows")
+    /// A `.complete` job is skipped outright on re-invocation, so a second run
+    /// does no FM work and writes nothing.
+    ///
+    /// **What this does and does not pin.** An earlier version of this test
+    /// asserted only that the row set was unchanged, and was therefore vacuous:
+    /// run 2 short-circuits at `if existing.status == .complete { continue }`
+    /// before touching the classifier, so "no new rows" was true no matter what
+    /// the persistence layer did — a plain `INSERT`, no dedupe box and a random
+    /// row id would all have passed. The `coarseCallCount == 0` assertion below
+    /// is what makes the claim real: it pins the M-5 short-circuit itself, which
+    /// is the actual contract on this path.
+    ///
+    /// Row-level idempotency under a repeated write is pinned where it actually
+    /// happens — `normalPassPersistsExactlyOneRowPerWindow`, where the checkpoint
+    /// and the end-of-pass digest both write every success row.
+    @Test("a completed pass is skipped entirely on re-invocation")
     func rerunningTheSamePassIsIdempotent() async throws {
         let assetId = "asset-26od-idempotent"
         let inputs = makeInputs(assetId: assetId, lineCount: 40)
@@ -470,22 +573,121 @@ struct BackfillCoarseCheckpointTests {
 
         let firstRunner = makeRunner(
             store: store,
-            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime
         )
         _ = try await firstRunner.runPendingBackfill(for: inputs)
         let afterFirst = try await passARows(store, assetId: assetId)
         #expect(!afterFirst.isEmpty)
 
         // A fresh runner over the same store is what a second app launch is.
-        let secondRunner = makeRunner(
-            store: store,
-            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
-        )
+        let secondFMRuntime = TestFMRuntime(tokenCountRule: { $0.count })
+        let secondRunner = makeRunner(store: store, runtime: secondFMRuntime.runtime)
         _ = try await secondRunner.runPendingBackfill(for: inputs)
+        // The non-vacuity guard: run 2 reached the classifier ZERO times.
+        // Without this the row assertions below hold for any implementation.
+        #expect(await secondFMRuntime.coarseCallCount == 0)
         let afterSecond = try await passARows(store, assetId: assetId)
 
         #expect(afterSecond.count == afterFirst.count)
         #expect(Set(afterSecond.map(\.id)) == Set(afterFirst.map(\.id)))
+    }
+
+    /// The "successes only" rule, pinned.
+    ///
+    /// It is the load-bearing reason the checkpoint can write a row that the
+    /// end-of-pass digest will write again: `insertSemanticScanResult` leaves
+    /// `attemptCount` alone for a `.success` row but sets it to
+    /// `max(existing + 1, incoming)` for a NON-success one. So a failure row
+    /// written twice would silently report a single failed window as two
+    /// attempts, corrupting exactly the failure accounting playhead-qbib and
+    /// playhead-8d5r exist to make trustworthy.
+    @Test("a coarse window that FAILED is written once, not twice")
+    func failedWindowsAreNotDoubleWritten() async throws {
+        let assetId = "asset-26od-failure"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        // One window refuses; its siblings answer. bd-34e Fix B v3 makes a
+        // refusal a tolerable per-window failure, so the pass continues and the
+        // digest persists a failure row for it.
+        let fmRuntime = TestFMRuntime(
+            coarseFailures: [nil, .refusal],
+            tokenCountRule: { $0.count }
+        )
+
+        _ = try await makeRunner(store: store, runtime: fmRuntime.runtime)
+            .runPendingBackfill(for: makeInputs(assetId: assetId, lineCount: 40))
+
+        let rows = try await passARows(store, assetId: assetId)
+        let failures = rows.filter { $0.status != .success }
+        #expect(!failures.isEmpty, "no failure row was produced — the assertion below would be vacuous")
+        for row in failures {
+            #expect(
+                row.attemptCount == 1,
+                "failure row \(row.id) reports \(row.attemptCount) attempts — it was written more than once"
+            )
+        }
+        // And still exactly one row per logical window, successes included.
+        #expect(Set(rows.map(\.id)).count == rows.count)
+    }
+
+    /// A checkpoint whose row write FAILED must not advance the resume cursor
+    /// past that window.
+    ///
+    /// The row loop deliberately steps over a failed write — retrying it on
+    /// every subsequent checkpoint would spend the rest of the pass on a row a
+    /// permanent validator error rejects every time, and would block every later
+    /// window from being banked at all. The CURSOR must not step over it. A
+    /// cursor is a contiguous prefix and `narrowedForResume` DROPS everything at
+    /// or below it, so crediting a window whose row is missing tells the next run
+    /// to skip audio that nothing covers — a permanent, silent coverage hole,
+    /// and the exact defect (pmp9) the whole coverage walk exists to prevent.
+    ///
+    /// The failure injected here is a real one: `insertSemanticScanResult`
+    /// validates `scanCohortJSON` before anything else, so a runner configured
+    /// with a malformed cohort cannot persist a scan row at all. Nothing lands,
+    /// so nothing may be credited, so the cursor must stay unset.
+    @Test("a checkpoint whose write failed does not advance the resume cursor")
+    func aFailedCheckpointWriteDoesNotAdvanceTheCursor() async throws {
+        let assetId = "asset-26od-writefail"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let inputs = makeInputs(assetId: assetId, lineCount: 40)
+        let fmRuntime = TestFMRuntime(tokenCountRule: { $0.count })
+        let runner = BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: "{ this is not valid cohort json"
+        )
+
+        _ = try? await runner.runPendingBackfill(for: inputs)
+
+        // Nothing was persisted — the premise of the test.
+        let rows = try await passARows(store, assetId: assetId)
+        #expect(rows.isEmpty, "the injected failure did not actually stop the writes")
+
+        // ... so no cursor may claim any audio. A cursor here would send the
+        // next run past windows that were screened but never stored.
+        for phase in BackfillJobPhase.allCases {
+            for offset in 0..<4 {
+                let jobId = BackfillJobRunner.makeJobIdForTesting(
+                    analysisAssetId: assetId,
+                    transcriptVersion: inputs.transcriptVersion,
+                    phase: phase,
+                    offset: offset
+                )
+                guard let job = try await store.fetchBackfillJob(byId: jobId) else { continue }
+                let cursor = job.progressCursor?.lastProcessedUpperBoundSec ?? 0
+                #expect(
+                    cursor == 0,
+                    "job \(phase.rawValue) claims coverage through \(cursor)s with zero durable rows"
+                )
+            }
+        }
     }
 
     // MARK: - 4. The classifier's half of the contract
@@ -591,11 +793,11 @@ struct CoarseCheckpointBoxTests {
         #expect(box.processedWindowCount == 0)
 
         // Checkpoint 1 sees one window.
-        box.markProcessed(throughCount: 1)
+        box.noteWrite(index: 0, succeeded: true)
         #expect(box.processedWindowCount == 1)
         // Checkpoint 2 sees the same window plus one more; only the new one is
         // work.
-        box.markProcessed(throughCount: 2)
+        box.noteWrite(index: 1, succeeded: true)
         #expect(box.processedWindowCount == 2)
     }
 
@@ -604,8 +806,8 @@ struct CoarseCheckpointBoxTests {
     @Test("the processed count never goes backwards")
     func processedCountIsMonotonic() {
         let box = CoarseCheckpointBox()
-        box.markProcessed(throughCount: 5)
-        box.markProcessed(throughCount: 2)
+        box.noteWrite(index: 4, succeeded: true)
+        box.noteWrite(index: 1, succeeded: true)
         #expect(box.processedWindowCount == 5)
     }
 
@@ -630,15 +832,55 @@ struct CoarseCheckpointBoxTests {
         let box = CoarseCheckpointBox()
         #expect(box.advanceCursor(to: 0.0) == false)
     }
+
+    /// The distinction between "offered to the store" and "actually in the
+    /// store", which is what stops a failed write from becoming a permanent,
+    /// silent coverage hole.
+    ///
+    /// The row loop steps over a failed write on purpose — retrying it every
+    /// checkpoint would spend the rest of the pass on a row a permanent
+    /// validator error rejects every time. The CURSOR must not step over it: it
+    /// is a contiguous prefix, and crediting a window whose row is missing tells
+    /// the next run to skip audio that nothing covers.
+    @Test("a failed write freezes the durable prefix but not the processed count")
+    func aFailedWriteFreezesTheDurablePrefix() {
+        let box = CoarseCheckpointBox()
+        box.noteWrite(index: 0, succeeded: true)
+        box.noteWrite(index: 1, succeeded: true)
+        #expect(box.processedWindowCount == 2)
+        #expect(box.durableWindowCount == 2)
+
+        // Window 2's row did not land.
+        box.noteWrite(index: 2, succeeded: false)
+        #expect(box.processedWindowCount == 3, "the row loop must move on")
+        #expect(box.durableWindowCount == 2, "the cursor must not credit a row that is not there")
+
+        // And nothing after the hole can be credited either, however well it
+        // writes — the prefix is contiguous.
+        box.noteWrite(index: 3, succeeded: true)
+        #expect(box.processedWindowCount == 4)
+        #expect(box.durableWindowCount == 2)
+    }
+
+    /// A pass that outlives its job must not write to it.
+    @Test("a defused box accepts nothing further")
+    func aDefusedBoxAcceptsNothing() {
+        let box = CoarseCheckpointBox()
+        #expect(box.isDefused == false)
+        box.defuse()
+        #expect(box.isDefused)
+    }
 }
 
 /// Holds the `backfill_jobs` row as it stood at a chosen instant inside a
 /// running coarse pass — the state a jetsam at that instant would leave behind.
 private actor CapturedJobBox {
     private(set) var job: BackfillJob?
+    private(set) var rows: [SemanticScanResult] = []
 
-    func set(_ job: BackfillJob) {
+    func set(_ job: BackfillJob, rows: [SemanticScanResult]) {
         self.job = job
+        self.rows = rows
     }
 }
 

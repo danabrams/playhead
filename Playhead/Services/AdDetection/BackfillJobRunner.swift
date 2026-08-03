@@ -43,7 +43,9 @@ private final class BackfillHonestCursorBox {
 final class CoarseCheckpointBox: Sendable {
     private struct State {
         var processedWindowCount = 0
+        var durableWindowCount = 0
         var lastCheckpointedUpperBoundSec: Double?
+        var defused = false
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -55,8 +57,47 @@ final class CoarseCheckpointBox: Sendable {
         state.withLock { $0.processedWindowCount }
     }
 
-    func markProcessed(throughCount count: Int) {
-        state.withLock { $0.processedWindowCount = max($0.processedWindowCount, count) }
+    /// How many banked windows are actually IN the store — the length of the
+    /// unbroken run of successful writes from the first window.
+    ///
+    /// This is deliberately NOT `processedWindowCount`. A write that failed is
+    /// still stepped over (see `checkpointCoarseWindows`), so the two diverge
+    /// exactly when a row did not land — and the resume cursor must be computed
+    /// from what is DURABLE, never from what was merely attempted. A cursor that
+    /// counted a failed write would tell the next run to skip audio no row
+    /// covers, which is a permanent, silent coverage hole.
+    var durableWindowCount: Int {
+        state.withLock { $0.durableWindowCount }
+    }
+
+    /// Record the outcome of offering window `index` to the store.
+    ///
+    /// A failure freezes `durableWindowCount` at `index` for the rest of the
+    /// pass. That is intentional and conservative: the cursor is a CONTIGUOUS
+    /// prefix, so once a hole exists nothing after it can be credited anyway.
+    func noteWrite(index: Int, succeeded: Bool) {
+        state.withLock {
+            $0.processedWindowCount = max($0.processedWindowCount, index + 1)
+            if succeeded, $0.durableWindowCount == index {
+                $0.durableWindowCount = index + 1
+            }
+        }
+    }
+
+    /// Stop accepting checkpoints.
+    ///
+    /// `FMNoProgressWatchdog` ABANDONS a wedged pass rather than awaiting it, so
+    /// the pass body can still be running — and can still fire this callback —
+    /// after `runJob` has thrown and the drain loop has moved the job to a
+    /// terminal state. A checkpoint arriving then would write a cursor onto a row
+    /// whose run is over. `runJob` defuses the box on every exit path, so the
+    /// checkpoint's lifetime is exactly the job's.
+    func defuse() {
+        state.withLock { $0.defused = true }
+    }
+
+    var isDefused: Bool {
+        state.withLock { $0.defused }
     }
 
     /// Accept `upperBound` only if it STRICTLY advances the covered prefix.
@@ -1751,12 +1792,20 @@ actor BackfillJobRunner {
         windows: [FMCoarseWindowOutput],
         failedWindows: [CoarseWindowFailure]
     ) -> CoarseCoverageWalk {
+        // playhead-26od: each plan's line-ref set is built ONCE. The inline
+        // version rebuilt it inside the innermost closure, so a pass with P
+        // plans and W outcomes paid O(W*P) set constructions — and because the
+        // mid-flight checkpoint now runs this walk once per window, that is
+        // cubic in the plan count across a pass, on a thermally-constrained
+        // phone, in the middle of the pass this bead exists to keep alive.
+        let planLineRefSets = plans.map { (windowIndex: $0.windowIndex, lineRefs: Set($0.lineRefs)) }
+        func planIndex(coveringLineRefs refs: [Int]) -> Int? {
+            let needle = Set(refs)
+            return planLineRefSets.first(where: { needle.isSubset(of: $0.lineRefs) })?.windowIndex
+        }
+
         let succeededPlanIndices = Set(
-            windows.compactMap { window in
-                plans.first(where: { plan in
-                    Set(window.lineRefs).isSubset(of: Set(plan.lineRefs))
-                })?.windowIndex
-            }
+            windows.compactMap { planIndex(coveringLineRefs: $0.lineRefs) }
         )
         // playhead-qbib: a plan that produced BOTH a recovered window and an
         // un-recovered remainder (bounded permissive shrink) is not fully
@@ -1764,9 +1813,7 @@ actor BackfillJobRunner {
         // partially-recovered window from inflating the coverage cursor.
         let failedPlanIndices = Set(
             failedWindows.map { failure in
-                plans.first(where: { plan in
-                    Set(failure.lineRefs).isSubset(of: Set(plan.lineRefs))
-                })?.windowIndex ?? failure.planWindowIndex
+                planIndex(coveringLineRefs: failure.lineRefs) ?? failure.planWindowIndex
             }
         )
         let fullyCoveredPlanIndices = succeededPlanIndices.subtracting(failedPlanIndices)
@@ -1834,9 +1881,11 @@ actor BackfillJobRunner {
         priorCursor: BackfillProgressCursor?,
         runMode: SemanticScanPhase
     ) async {
+        guard !box.isDefused else { return }
+
         // Each checkpoint carries the whole banked prefix, and `windows` is
         // append-only, so everything below `processedWindowCount` is already
-        // durable. Slicing rather than rebuilding every row keeps this O(n)
+        // offered. Slicing rather than rebuilding every row keeps this O(n)
         // across a pass instead of O(n^2) — `makeScanResult` encodes JSON.
         let alreadyProcessed = box.processedWindowCount
         if alreadyProcessed < banked.windows.count {
@@ -1850,26 +1899,36 @@ actor BackfillJobRunner {
                     status: .success,
                     runMode: runMode
                 )
+                var wrote = true
                 do {
                     try await store.insertSemanticScanResult(
                         await attributed(result, jobId: jobId)
                     )
                 } catch {
+                    wrote = false
                     logger.warning(
                         "fm.coarse.checkpoint_write_failed job=\(jobId, privacy: .public) window=\(index, privacy: .public) error=\(String(describing: error), privacy: .public)"
                     )
                 }
-                // Advance past a failed write too. Retrying it on every
-                // subsequent checkpoint would spend the rest of the pass on a
-                // row that a permanent validator error will reject every time,
-                // and would block every later window from ever being banked.
-                box.markProcessed(throughCount: index + 1)
+                // Step past a failed write, but do NOT credit it. Retrying it on
+                // every subsequent checkpoint would spend the rest of the pass on
+                // a row a permanent validator error rejects every time, and would
+                // block every later window from being banked at all — so the row
+                // loop moves on. The CURSOR must not: `noteWrite` freezes the
+                // durable prefix here, so the resume is never told to skip audio
+                // that no row covers. The end-of-pass digest attempts the row
+                // again through the normal `try await` path, where a genuine
+                // persistence failure still surfaces exactly as it did before.
+                box.noteWrite(index: index, succeeded: wrote)
             }
         }
 
+        // Coverage is computed from what LANDED, not from what the pass
+        // screened. These are the same list until a write fails, and the whole
+        // point of the distinction is the case where one did.
         let walk = Self.coarseCoverageWalk(
             plans: banked.plans,
-            windows: banked.windows,
+            windows: Array(banked.windows.prefix(box.durableWindowCount)),
             failedWindows: banked.failedWindows
         )
         // Same guard as t1kq's: a fully-covered cursor is episode-end, which
@@ -2071,10 +2130,22 @@ actor BackfillJobRunner {
         // here: it needs the pass to have returned, and it salvages where the
         // pass got to, not what it found.
         let checkpointBox = CoarseCheckpointBox()
+        // The pass can outlive this function: `FMNoProgressWatchdog` abandons a
+        // wedged pass rather than awaiting it, so the pass body may still fire
+        // this callback after `runJob` has thrown and the drain loop has put the
+        // job in a terminal state. Defusing on EVERY exit path bounds the
+        // checkpoint's lifetime to the job's, so no orphaned pass can write a
+        // cursor onto a row whose run is over.
+        defer { checkpointBox.defuse() }
         let checkpointJobId = job.jobId
         let checkpointJobPhase = job.phase
         let checkpointPriorCursor = job.progressCursor
-        let onCoarseWindowsBanked: @Sendable (FMCoarseBankedWindows) async -> Void = { [self] banked in
+        // `[weak self]` for the same reason the qk44 lease closure above hoists
+        // its captures: an abandoned pass parks this closure forever, and a
+        // strong capture would pin the whole runner with it on a device whose
+        // headline failure mode is jetsam.
+        let onCoarseWindowsBanked: @Sendable (FMCoarseBankedWindows) async -> Void = { [weak self] banked in
+            guard let self else { return }
             await self.checkpointCoarseWindows(
                 banked,
                 box: checkpointBox,
