@@ -1770,23 +1770,26 @@ T_BLLT_AGG_SHIPPED="hot path: the same slot+lexical segment persists markOnly at
 T_BLLT_SINGLE_PRESENCE="single-window fast path: 0.85 window with ≥1 safety signal reaches the autoSkip PRESENCE verdict and is auto-skipped (extent block off)"
 T_BLLT_AGG_PRESENCE="hot path: ≥0.55 score in pre-roll WITH a non-slot signal (sponsor/promoCode/URL lexical) reaches the autoSkip PRESENCE verdict (extent block off)"
 
-# playhead-kkzu — a background download carries the show it belongs to. The
+# playhead-kkzu — a background download carries the show it belongs to. NOTE:
+# these strings are the @Test DISPLAY NAMES verbatim, not descriptions of the
+# claim — the runner matches them against what actually ran, and a paraphrase
+# reports "an expectation names a test that never ran" at the baseline. The
 # dangerous direction here is SILENCE: a dropped identity does not fail, it
 # writes NULL, and `AnalysisWorkScheduler` turns that into `?? ""` so every
 # unattributed episode pools under one fake show. So the claims are weighted
 # toward "the value that arrived is THIS show" rather than "a value arrived".
-T_KKZU_ENQUEUE="a background download enqueues analysis against the show it was queued with (playhead-kkzu)"
-T_KKZU_RESTART="a completion delivered to a NEW DownloadManager still carries the show — the attribution is durable, not in-memory"
-T_KKZU_REAP="queueing writes the attribution and a terminal completion reaps it"
-T_KKZU_RESUME_KEEPS="dropping the resume blob leaves the attribution, which is the force-quit path's only route back to the show"
-T_KKZU_FORCE_QUIT="a force-quit resume re-queues the fresh download against the recovered show"
-T_KKZU_CANCEL="cancelling a download reaps its attribution"
-T_KKZU_NAMED="a null show identity always carries the reason it is null"
-T_KKZU_BLANK="an empty or non-canonical identifier is a named absence, not a joinable key"
-T_KKZU_PLAYED="the played path's context is byte-identical under the new constructor"
-T_KKZU_AUTO="an auto-download carries the show it belongs to, and each episode its OWN show"
-T_KKZU_PREPARE="the prepare coordinator hands the download half the same show it hands the analysis half"
-T_KKZU_CLEAR="clearing the cache takes the attribution with the bytes it describes"
+T_KKZU_ENQUEUE="A background download enqueues analysis against the show it was queued with"
+T_KKZU_RESTART="A completion delivered to a NEW manager instance still carries the show"
+T_KKZU_REAP="Queueing writes the attribution and a terminal completion reaps it"
+T_KKZU_RESUME_KEEPS="Dropping the resume blob leaves the attribution for the resume path"
+T_KKZU_FORCE_QUIT="A force-quit resume re-queues the fresh download against the recovered show"
+T_KKZU_CANCEL="Cancelling a download reaps its attribution"
+T_KKZU_NAMED="A null show identity always carries the reason it is null"
+T_KKZU_BLANK="An empty or non-canonical identifier is a named absence, not a key"
+T_KKZU_PLAYED="The played path's context is byte-identical under the new constructor"
+T_KKZU_AUTO="An auto-download carries the show it belongs to"
+T_KKZU_PREPARE="cellular + policy on: proceeds with download"
+T_KKZU_CLEAR="Clearing the cache takes the attribution with it"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
