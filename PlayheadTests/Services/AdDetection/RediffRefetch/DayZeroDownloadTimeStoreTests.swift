@@ -362,7 +362,7 @@ struct DayZeroTriggerTransportBudgetTests {
             transportProvider: { transport },
             chargeStateProvider: { isCharging },
             deepScanOptInProvider: { false },
-            attemptRecordProvider: { _ in nil },
+            attemptContextProvider: { _ in .never },
             suppressionRecorder: { assetId, exit, at in
                 suppressions.record(assetId, exit, at)
             },
@@ -506,7 +506,7 @@ struct DayZeroTriggerTransportBudgetTests {
             },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
-            attemptRecordProvider: { _ in nil },
+            attemptContextProvider: { _ in .never },
             suppressionRecorder: { _, _, _ in },
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: {

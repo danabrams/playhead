@@ -520,7 +520,7 @@ struct RediffActivationWiringTests {
             transportProvider: { .testWifi },
             chargeStateProvider: { false },          // unplugged
             deepScanOptInProvider: { false },        // settings opt-in OFF
-            attemptRecordProvider: { _ in nil },   // no store in this suite —
+            attemptContextProvider: { _ in .never },   // no store in this suite —
             suppressionRecorder: { _, _, _ in },    // opt OUT of idempotency, explicitly
             // playhead-96ot: no orchestrator in this suite either — the
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.

@@ -61,6 +61,12 @@ struct DiagnosticsRediffSnapshot: Sendable {
     var refetchStates: [RediffRefetchStateRow] = []
     var dayZeroAttempts: [RediffDayZeroAttemptRecord] = []
     var backgroundRuns: [BackgroundTaskRunRecord] = []
+    /// playhead-ug9m: per-asset day-0 MARK QUALITY. Distinct from
+    /// `dayZeroAttempts`, which says what the last attempt DID; this says what
+    /// the user is left with — and in particular whether an asset is `frozen`,
+    /// i.e. every one of its day-0 marks banners, none can auto-skip, and no
+    /// further attempt will ever be made.
+    var dayZeroMarkFreeze: [DayZeroMarkFreezeReport] = []
     /// Names (from `RediffDiagnosticsFetchAdapter.Read`) of the reads that
     /// THREW. Empty is the healthy case. Without this an unreadable table and
     /// an empty table are the same bundle — the "zero is not evidence" mistake
@@ -397,6 +403,31 @@ enum DiagnosticsBundleBuilder {
                 )
             }
 
+        // playhead-ug9m: the assets whose day-0 marks are DEGRADED come first,
+        // because they are the only rows anybody reads this section for — a
+        // healthy `anchored` asset is background. Within a state, id order, so
+        // two exports of the same device are comparable.
+        let dayZeroMarkFreeze = snapshot.dayZeroMarkFreeze
+            .sorted { lhs, rhs in
+                let lhsRank = dayZeroFreezeRank(lhs.state)
+                let rhsRank = dayZeroFreezeRank(rhs.state)
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                return lhs.analysisAssetId < rhs.analysisAssetId
+            }
+            .prefix(rediffRowCap)
+            .map { report in
+                DefaultBundle.DayZeroMarkFreezeSummary(
+                    assetIdHash: hash(report.analysisAssetId),
+                    state: report.state.rawValue,
+                    anchoredCount: report.census.anchoredCount,
+                    degradedCount: report.census.degradedCount,
+                    settledCount: report.census.settledCount,
+                    rescueAttemptCount: report.rescueAttemptCount,
+                    lastExit: report.lastExit?.rawValue,
+                    policyGeneration: report.policyGeneration
+                )
+            }
+
         let backgroundRuns = snapshot.backgroundRuns
             .filter { $0.entryPoint == .rediffRefetch }
             .sorted { $0.startedAt > $1.startedAt }
@@ -425,9 +456,22 @@ enum DiagnosticsBundleBuilder {
             bandwidth: bandwidth,
             refetchStates: Array(refetchStates),
             dayZeroAttempts: Array(dayZeroAttempts),
+            dayZeroMarkFreeze: Array(dayZeroMarkFreeze),
             backgroundRuns: Array(backgroundRuns),
             readFailures: readFailures
         )
+    }
+
+    /// Sort key for the day-0 freeze projection: worst first. `frozen` outranks
+    /// `rescuable` because it is the state nothing will change on its own.
+    private static func dayZeroFreezeRank(_ state: DayZeroMarkFreezeState) -> Int {
+        switch state {
+        case .frozen: return 0
+        case .rescuable: return 1
+        case .settled: return 2
+        case .anchored: return 3
+        case .noMarks: return 4
+        }
     }
 
     /// Longest `deferReason` this parser will scan. The rediff annotation is

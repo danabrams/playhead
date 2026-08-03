@@ -661,7 +661,7 @@ struct RediffDayZeroTriggerIdempotencyTests {
             transportProvider: { .testWifi },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
-            attemptRecordProvider: { _ in prior },
+            attemptContextProvider: { _ in DayZeroAttemptContext(record: prior) },
             suppressionRecorder: { assetId, reason, at in
                 spy.recorded.append((assetId, reason, at))
             },
@@ -767,9 +767,9 @@ struct RediffDayZeroTriggerIdempotencyTests {
             transportProvider: { .testCellularNotAllowed },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
-            attemptRecordProvider: { assetId in
+            attemptContextProvider: { assetId in
                 reads.recorded.append((assetId, .marked, 0))
-                return nil
+                return .never
             },
             suppressionRecorder: { assetId, reason, at in spy.recorded.append((assetId, reason, at)) },
             mintedMarkDelivery: { _ in },

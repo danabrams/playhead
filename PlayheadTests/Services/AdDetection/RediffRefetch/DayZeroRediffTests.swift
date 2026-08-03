@@ -78,7 +78,7 @@ struct DayZeroRediffTriggerTests {
             // No store in this suite — opt OUT of day-0 idempotency explicitly
             // (the parameters are required precisely so this is a visible
             // choice, not an inherited default).
-            attemptRecordProvider: { _ in nil },
+            attemptContextProvider: { _ in .never },
             suppressionRecorder: { _, _, _ in },
             // playhead-96ot: no orchestrator in this suite — the in-session
             // delivery of a minted mark is asserted by DayZeroMarkDeliveryTests.
@@ -253,7 +253,7 @@ struct DayZeroRediffTriggerTests {
             transportProvider: { reachRead.mark(); return .testWifi },
             chargeStateProvider: { chargeRead.mark(); return true },
             deepScanOptInProvider: { false },
-            attemptRecordProvider: { _ in nil },   // no store in this suite —
+            attemptContextProvider: { _ in .never },   // no store in this suite —
             suppressionRecorder: { _, _, _ in },    // opt OUT of idempotency, explicitly
             // playhead-96ot: no orchestrator in this suite either — the
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.
@@ -341,7 +341,7 @@ struct DayZeroRediffTriggerTests {
             transportProvider: { .testWifi },
             chargeStateProvider: { true },
             deepScanOptInProvider: { false },
-            attemptRecordProvider: { _ in nil },   // no store in this suite —
+            attemptContextProvider: { _ in .never },   // no store in this suite —
             suppressionRecorder: { _, _, _ in },    // opt OUT of idempotency, explicitly
             // playhead-96ot: no orchestrator in this suite either — the
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.
