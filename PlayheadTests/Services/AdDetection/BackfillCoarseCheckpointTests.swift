@@ -772,6 +772,292 @@ struct BackfillCoarseCheckpointTests {
             #expect(observed.screening == plain.screening)
         }
     }
+
+    // MARK: - 5. What a mid-flight-durable coarse row SURFACES
+
+    /// Capture the scan rows a jetsam at coarse window `captureAtWindow` would
+    /// leave on disk, plus the job row as it stood at that instant.
+    ///
+    /// Every coarse window after the first returns `containsAd`, so the rows
+    /// this yields are the WORST case for surfacing: a whole prefix of
+    /// presence verdicts that no refinement pass ever visited. Window 0 is
+    /// `noAds` so the composed extents all lie ahead of a playhead at 0 and
+    /// the surfacing question is about arming, not about a mark the listener
+    /// has already passed.
+    private func captureDeathInstant(
+        assetId: String,
+        inputs: BackfillJobRunner.AssetInputs,
+        captureAtWindow: Int = 5
+    ) async throws -> (job: BackfillJob, rows: [SemanticScanResult]) {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let captured = CapturedJobBox()
+        let runtime = TestFMRuntime(
+            coarseResponses: [CoarseScreeningSchema(disposition: .noAds, support: nil)]
+                + Array(
+                    repeating: CoarseScreeningSchema(
+                        disposition: .containsAd,
+                        support: nil
+                    ),
+                    count: 64
+                ),
+            tokenCountRule: { $0.count },
+            onCoarseRespond: { ordinal in
+                guard ordinal == captureAtWindow else { return }
+                for phase in BackfillJobPhase.allCases {
+                    for offset in 0..<4 {
+                        let candidate = BackfillJobRunner.makeJobIdForTesting(
+                            analysisAssetId: assetId,
+                            transcriptVersion: inputs.transcriptVersion,
+                            phase: phase,
+                            offset: offset
+                        )
+                        if let job = try? await store.fetchBackfillJob(byId: candidate),
+                           job.status == .running {
+                            let rows = (try? await store.fetchSemanticScanResults(
+                                analysisAssetId: assetId
+                            )) ?? []
+                            await captured.set(job, rows: rows)
+                            return
+                        }
+                    }
+                }
+            }
+        )
+        _ = try await makeRunner(store: store, runtime: runtime.runtime)
+            .runPendingBackfill(for: inputs)
+        let job = try #require(await captured.job, "never observed a running job mid-pass")
+        return (job, await captured.rows)
+    }
+
+    /// Stand up the production surfacing door over a fresh store and deliver
+    /// `windows` through it, exactly as `SemanticSweepMarkSurfacingTests` does.
+    private func deliverToSuggestTier(
+        _ windows: [AdWindow],
+        assetId: String,
+        episodeDuration: Double
+    ) async throws -> SkipOrchestrator {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(
+                id: assetId,
+                episodeId: "ep-\(assetId)",
+                episodeDurationSec: episodeDuration
+            )
+        )
+        let orchestrator = SkipOrchestrator(
+            store: store,
+            correctionStore: PersistentUserCorrectionStore(store: store),
+            inventoryFilter: InventorySanityFilter(isEnabled: true)
+        )
+        await orchestrator.beginEpisode(
+            analysisAssetId: assetId,
+            episodeId: "ep-\(assetId)",
+            podcastId: "podcast-26od"
+        )
+        await orchestrator.setEpisodeDuration(episodeDuration, analysisAssetId: assetId)
+        await orchestrator.updatePlayheadTime(0)
+        try await store.upsertHotPathAdWindows(windows, existingIDs: [], retiredIDs: [])
+        _ = await orchestrator.ingestPersistedAdWindows(analysisAssetId: assetId)
+        return orchestrator
+    }
+
+    /// A span the inventory filter genuinely rejects — 2.0 s wholly inside the
+    /// 3.0 s head margin — carried in the SAME delivery as the marks under
+    /// test. playhead-le02 measured 39 rails that were blind on this axis
+    /// because "no banner emitted" is true by construction when the door never
+    /// ran; this row makes "the door ran and made a decision" a positive
+    /// observation rather than an inference from silence.
+    private func headArtifact(assetId: String) -> AdWindow {
+        AdWindow(
+            id: "artifact-26od-head",
+            analysisAssetId: assetId,
+            startTime: 0.0,
+            endTime: 2.0,
+            confidence: 1.0,
+            boundaryState: AdDetectionService.dayZeroRediffByteExactBoundaryState,
+            decisionState: AdDecisionState.candidate.rawValue,
+            detectorVersion: "detection-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: 0.0,
+            metadataSource: AdDetectionService.dayZeroRediffByteExactMetadataSource,
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            catalogStoreMatchSimilarity: nil,
+            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
+            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+        )
+    }
+
+    /// A `passB` row that localizes an ad inside `coarse` — what the refinement
+    /// pass would have written had the job lived long enough to run it.
+    private func refinementRow(
+        narrowing coarse: SemanticScanResult,
+        start: Double,
+        end: Double
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: "scan-26od-passB-\(Int(start))",
+            analysisAssetId: coarse.analysisAssetId,
+            windowFirstAtomOrdinal: coarse.windowFirstAtomOrdinal,
+            windowLastAtomOrdinal: coarse.windowLastAtomOrdinal,
+            windowStartTime: start,
+            windowEndTime: end,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: coarse.scanCohortJSON,
+            transcriptVersion: coarse.transcriptVersion
+        )
+    }
+
+    /// THE MEASUREMENT, not an assumption: what does a coarse-only row banked
+    /// by the mid-flight checkpoint actually put in front of a listener?
+    ///
+    /// This is the axis playhead-26od moves and nothing pinned. The checkpoint
+    /// makes coarse verdicts durable that a mid-pass death used to discard, and
+    /// playhead-y3ya (`SemanticSweepMarkComposer`, shipped ON) turns a durable
+    /// `containsAd` verdict with NO pass-B refinement into a mark-only
+    /// `AdWindow` at the COARSE extent. So the rows this bead preserves reach
+    /// the suggest tier, at ~coarse-window width, and the resume cursor means
+    /// the prefix they cover is never re-scanned and therefore never refined.
+    ///
+    /// Asserted with playhead-le02's idiom — the isp5 census outcome AND the
+    /// live suggest set, plus a control row that MUST still drop in the same
+    /// delivery — so the answer is a positive observation either way. If the
+    /// policy is later changed so an unrefined coarse verdict does not surface,
+    /// this test is where that decision becomes visible: the expected outcome
+    /// flips from `.armedSuggest` to no mark at all, and the control row's drop
+    /// is what proves the door still ran.
+    @Test("a coarse-only row banked mid-flight reaches the suggest tier at coarse extent")
+    func midFlightCoarseOnlyRowsReachTheSuggestTier() async throws {
+        let assetId = "asset-26od-surface"
+        let inputs = makeInputs(assetId: assetId, lineCount: 40)
+        let episodeDuration = Double(40) * Self.segmentSeconds
+        let death = try await captureDeathInstant(assetId: assetId, inputs: inputs)
+
+        // Durability, restated here so bullet 3 is asserted alongside bullet 1
+        // rather than in a different file: the death instant carried rows AND a
+        // cursor. Everything below is about what those rows then do.
+        #expect(!death.rows.isEmpty, "the death instant carried no durable rows")
+        let cursor = try #require(death.job.progressCursor?.lastProcessedUpperBoundSec)
+        #expect(cursor > 0)
+        let coarsePresence = death.rows.filter {
+            $0.scanPass == "passA" && $0.disposition == .containsAd && $0.status == .success
+        }
+        #expect(!coarsePresence.isEmpty, "no durable presence verdict — the claim below is vacuous")
+        #expect(
+            !death.rows.contains { $0.scanPass == "passB" },
+            "the pass died before refinement, so no row may be a refinement"
+        )
+
+        let marks = SemanticSweepMarkComposer.compose(
+            scanRows: death.rows,
+            existingWindows: [],
+            analysisAssetId: assetId
+        )
+        #expect(!marks.isEmpty, "the composer emitted nothing — nothing to observe")
+
+        let orchestrator = try await deliverToSuggestTier(
+            marks + [headArtifact(assetId: assetId)],
+            assetId: assetId,
+            episodeDuration: episodeDuration
+        )
+
+        // The control: the door ran and made a decision.
+        let dropped = await orchestrator.lastAdWindowIngestOutcome(
+            forWindowId: "artifact-26od-head"
+        )
+        #expect(dropped?.outcome == .droppedInventorySanity)
+        #expect(dropped?.detail == InventorySanityRejectionReason.tooEarly.rawValue)
+
+        // The measurement: every unrefined coarse mark arms a suggestion.
+        let armed = await orchestrator.activeSuggestWindowIDs()
+        for mark in marks {
+            let outcome = await orchestrator.lastAdWindowIngestOutcome(forWindowId: mark.id)
+            #expect(outcome?.outcome == .armedSuggest, "mark \(mark.id) at \(mark.startTime)-\(mark.endTime)")
+            #expect(armed.contains(mark.id))
+        }
+        #expect(
+            await orchestrator.adWindowIngestOutcomeCount(.armedSuggest) == marks.count
+        )
+        // Mark-only by construction, so nothing here can cut show.
+        #expect(await orchestrator.adWindowIngestOutcomeCount(.admittedManaged) == 0)
+    }
+
+    /// The other direction, which a suppression rule would have to preserve: a
+    /// refinement narrows the SAME durable coarse row and the mark surfaces at
+    /// the refined extent, not the coarse one.
+    ///
+    /// Both directions matter — a rule that suppressed everything would satisfy
+    /// "no coarse-extent banner" and be exactly as broken as one that suppressed
+    /// nothing.
+    @Test("once refinement localizes it, the same durable row surfaces at the REFINED extent")
+    func aRefinedRowSurfacesAtTheRefinedExtent() async throws {
+        let assetId = "asset-26od-surface-refined"
+        let inputs = makeInputs(assetId: assetId, lineCount: 40)
+        let episodeDuration = Double(40) * Self.segmentSeconds
+        let death = try await captureDeathInstant(assetId: assetId, inputs: inputs)
+
+        let coarse = try #require(
+            death.rows
+                .filter { $0.scanPass == "passA" && $0.disposition == .containsAd }
+                .min(by: { $0.windowStartTime < $1.windowStartTime })
+        )
+        // A refinement strictly inside the coarse window, and strictly narrower
+        // than it, so "the refined extent won" is observable rather than
+        // coincidental.
+        let refinedStart = coarse.windowStartTime + Self.segmentSeconds
+        let refinedEnd = refinedStart + Self.segmentSeconds
+        #expect(refinedEnd < coarse.windowEndTime, "fixture: the refinement must be narrower")
+
+        let marks = SemanticSweepMarkComposer.compose(
+            scanRows: death.rows + [
+                refinementRow(narrowing: coarse, start: refinedStart, end: refinedEnd)
+            ],
+            existingWindows: [],
+            analysisAssetId: assetId
+        )
+        let refinedMark = try #require(
+            marks.first { $0.startTime >= refinedStart && $0.endTime <= refinedEnd },
+            "no mark carries the refined extent: \(marks.map { ($0.startTime, $0.endTime) })"
+        )
+        #expect(refinedMark.startTime == refinedStart)
+        #expect(refinedMark.endTime == refinedEnd)
+
+        let orchestrator = try await deliverToSuggestTier(
+            marks + [headArtifact(assetId: assetId)],
+            assetId: assetId,
+            episodeDuration: episodeDuration
+        )
+        #expect(
+            await orchestrator.lastAdWindowIngestOutcome(
+                forWindowId: refinedMark.id
+            )?.outcome == .armedSuggest
+        )
+        #expect(await orchestrator.activeSuggestWindowIDs().contains(refinedMark.id))
+        // Same control, same delivery.
+        #expect(
+            await orchestrator.lastAdWindowIngestOutcome(
+                forWindowId: "artifact-26od-head"
+            )?.outcome == .droppedInventorySanity
+        )
+    }
 }
 
 /// The two properties that bound this bead's write cost.

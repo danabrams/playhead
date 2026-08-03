@@ -1890,6 +1890,13 @@ actor BackfillJobRunner {
         let alreadyProcessed = box.processedWindowCount
         if alreadyProcessed < banked.windows.count {
             for index in alreadyProcessed..<banked.windows.count {
+                // Re-checked per iteration, not just on entry. `defuse()` is a
+                // synchronous flag flip and this loop suspends on every write,
+                // so a checkpoint that entered while the job was alive can be
+                // resumed after `runJob` has already exited. Re-reading the flag
+                // at each suspension boundary is what keeps the checkpoint's
+                // lifetime bounded by the job's rather than by the callback's.
+                guard !box.isDefused else { return }
                 let result = makeScanResult(
                     windowOutput: banked.windows[index],
                     inputs: inputs,
@@ -1922,6 +1929,15 @@ actor BackfillJobRunner {
                 box.noteWrite(index: index, succeeded: wrote)
             }
         }
+
+        // The last and most important defuse check, taken AFTER every row write
+        // has suspended. The cursor is the one thing this function writes that a
+        // terminal path may deliberately have moved somewhere else: playhead-t1kq
+        // REWINDS the cursor to the admission-time value when a cancellation
+        // arrives with the coarse pass fully covered, and a late checkpoint
+        // landing after that rewind would put the partial cursor back and strand
+        // the refinement t1kq's rewind exists to preserve.
+        guard !box.isDefused else { return }
 
         // Coverage is computed from what LANDED, not from what the pass
         // screened. These are the same list until a write fails, and the whole
