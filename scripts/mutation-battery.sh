@@ -1691,15 +1691,15 @@ T_BLLT_DETAIL="the census detail fires only when it discriminates, and names the
 # weighted toward the negatives, and the centrepiece — a 9s6q segment-recovered
 # slot is never promoted — is asserted at three tiers so no single loosening can
 # take all three out.
-T_UG9M_RESCUABLE="an asset with an ANCHORED day-0 row is never rescued"
+T_UG9M_RESCUABLE="an asset with an ANCHORED day-0 row is never rescued — its unanchored siblings are 9s6q-recovered"
 T_UG9M_SUPERSEDE_NARROW="only a degraded, unsettled, day-0 row is supersedable"
-T_UG9M_HALF_ANCHORED="a HALF-anchored row reads as degraded, never as anchored"
-T_UG9M_VETO="a user-VETOED day-0 row survives a STRICT re-mint"
-T_UG9M_FOREIGN_PRODUCER="another producer's window survives a STRICT re-mint"
-T_UG9M_ANCHORED_ROW="an already-anchored day-0 row is not replaced"
+T_UG9M_HALF_ANCHORED="a HALF-anchored row is degraded, not anchored"
+T_UG9M_VETO="a STRICT re-mint does not supersede a user-VETOED day-0 row"
+T_UG9M_FOREIGN_PRODUCER="a STRICT re-mint does not supersede another producer's window"
+T_UG9M_ANCHORED_ROW="a STRICT re-mint does not supersede an already-ANCHORED day-0 row"
 T_UG9M_RECOVERED_NOT_PROMOTED="a SEGMENT-RECOVERED re-mint supersedes nothing and promotes nothing"
-T_UG9M_STRICT_SUPERSEDES="a STRICT re-mint retires its degraded row and persists anchors + eligible"
-T_UG9M_TERMINAL_IN_GEN="a marked exit in the CURRENT generation is still terminal"
+T_UG9M_STRICT_SUPERSEDES="a STRICT re-mint supersedes its own degraded day-0 row and persists anchors + eligible"
+T_UG9M_TERMINAL_IN_GEN="a marked exit in the CURRENT generation is still terminal, degraded marks or not"
 T_UG9M_EXACTLY_ONE="a trapped asset spends EXACTLY ONE rescue across repeated plays"
 T_UG9M_NAMED="a spent rescue suppresses as rescueExhausted, not as silence"
 T_UG9M_CEILING="the ceiling holds even when the rescue ended in a RETRYABLE exit"

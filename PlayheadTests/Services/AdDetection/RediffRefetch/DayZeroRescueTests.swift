@@ -211,7 +211,7 @@ struct DayZeroRescuePolicyTests {
     /// The pre-existing contract, restated: within a generation `.marked` is as
     /// terminal as it ever was. A rescue is granted by a generation BUMP, which
     /// is a deliberate act, not by replaying an episode.
-    @Test("`.marked` in the CURRENT generation is still terminal, degraded marks or not")
+    @Test("a marked exit in the CURRENT generation is still terminal, degraded marks or not")
     func markedStaysTerminalWithinAGeneration() {
         let decision = DayZeroRediffAttemptPolicy.decide(
             record: RescueFixture.record(generation: DayZeroRediffAttemptPolicy.currentGeneration),
@@ -222,7 +222,7 @@ struct DayZeroRescuePolicyTests {
     }
 
     /// THE RESCUE.
-    @Test("`.marked` from an OLDER generation with WHOLLY DEGRADED marks re-attempts once")
+    @Test("a marked exit from an OLDER generation with WHOLLY DEGRADED marks re-attempts once")
     func rescueIsGranted() {
         let decision = DayZeroRediffAttemptPolicy.decide(
             record: RescueFixture.record(generation: RescueFixture.foreignGeneration),
@@ -257,7 +257,7 @@ struct DayZeroRescuePolicyTests {
     }
 
     /// THE BOUND, and the state the bead exists to make visible.
-    @Test("a spent rescue suppresses as `rescueExhausted`, not as silence")
+    @Test("a spent rescue suppresses as rescueExhausted, not as silence")
     func spentRescueIsNamed() {
         let decision = DayZeroRediffAttemptPolicy.decide(
             record: RescueFixture.record(
@@ -314,7 +314,7 @@ struct DayZeroRescuePolicyTests {
         }
     }
 
-    @Test("`rescueExhausted` is free and terminal")
+    @Test("rescueExhausted is free and terminal")
     func rescueExhaustedTaxonomy() {
         #expect(!RediffDayZeroExit.rescueExhausted.spentBandwidth,
                 "the refusal happens before any fetch")
@@ -359,7 +359,7 @@ struct DayZeroRescuePolicyTests {
         #expect(!reasons.isEmpty, "vacuity guard: later plays really were evaluated")
     }
 
-    @Test("advance counts a rescue only when the prior record was `.marked` AND bytes were spent")
+    @Test("advance counts a rescue only for a marked prior that spent bytes")
     func advanceCountsTheRightAttempts() {
         let prior = RescueFixture.record(generation: RescueFixture.foreignGeneration)
 
