@@ -22,6 +22,51 @@ private final class BackfillHonestCursorBox {
     var lastCoveredUpperBoundSec: Double?
 }
 
+/// playhead-26od: what the mid-flight coarse checkpoint has already made
+/// durable, so it never writes the same thing twice.
+///
+/// Each checkpoint carries the whole prefix banked so far, not a delta — that
+/// is what makes the snapshot self-sufficient for the coverage walk. Without
+/// this memory the checkpoint would rewrite every earlier window on every
+/// window, which is O(n^2) row writes over a pass.
+///
+/// The mutable state is `OSAllocatedUnfairLock`-guarded rather than left
+/// unsynchronised, the same way ``FMProgressTicker`` is: the box has to cross
+/// into a `@Sendable` callback that the classifier invokes from its own
+/// isolation, and a box that merely *promises* it will only ever be touched
+/// from one actor is a promise the compiler cannot check.
+private final class CoarseCheckpointBox: Sendable {
+    private struct State {
+        var processedWindowCount = 0
+        var lastCheckpointedUpperBoundSec: Double?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// How many of the banked windows have already been offered to the store.
+    /// The banked list is append-only, so this doubles as the index of the
+    /// first window this checkpoint still has work to do on.
+    var processedWindowCount: Int {
+        state.withLock { $0.processedWindowCount }
+    }
+
+    func markProcessed(throughCount count: Int) {
+        state.withLock { $0.processedWindowCount = max($0.processedWindowCount, count) }
+    }
+
+    /// Accept `upperBound` only if it STRICTLY advances the covered prefix.
+    /// Returns false otherwise, so a checkpoint whose new window did not extend
+    /// the contiguous prefix — playhead-lxkq attempts ad-likely windows first,
+    /// so most early ones will not — costs no `backfill_jobs` write at all.
+    func advanceCursor(to upperBound: Double) -> Bool {
+        state.withLock {
+            guard upperBound > ($0.lastCheckpointedUpperBoundSec ?? 0) else { return false }
+            $0.lastCheckpointedUpperBoundSec = upperBound
+            return true
+        }
+    }
+}
+
 actor BackfillJobRunner {
 
     // MARK: - Inputs / Outputs
@@ -1655,6 +1700,203 @@ actor BackfillJobRunner {
         "expiredWithoutProgress-\(phase.rawValue)"
     }
 
+    /// playhead-pmp9 / playhead-bkhc / playhead-qbib, extracted verbatim by
+    /// playhead-26od: how far the CONTIGUOUS successfully-scanned prefix of a
+    /// coarse pass reaches, and whether the pass covered every plan.
+    ///
+    /// **Why it is a function now.** playhead-26od computes this twice — once
+    /// per resolved window while the pass is still running (to checkpoint a
+    /// resume cursor that survives a jetsam), and once at the end of the pass
+    /// as before. Two copies of a rule whose whole job is "never let the cursor
+    /// advance past audio nobody screened" is exactly the drift the qbib
+    /// comments below already warn about, so there is one.
+    ///
+    /// Pure arithmetic: no FM work, no persistence, no `await`. That matters
+    /// because the end-of-pass caller must be able to compute it when the
+    /// enclosing Task is ALREADY CANCELLED — that is when the checkpoint is
+    /// worth the most.
+    ///
+    /// Attribution is STRUCTURAL (line-ref subset), for successes and failures
+    /// alike, so the two lists never have to agree by raw position; if they
+    /// ever drifted an index-only match would silently no-op and let the cursor
+    /// advance past a hole.
+    struct CoarseCoverageWalk: Sendable, Equatable {
+        /// Every plan produced a window and none of them also failed.
+        let fullyCovered: Bool
+        /// End time of the last plan in the unbroken run of fully-covered plans
+        /// from the start of the episode; nil when the very first plan is not
+        /// covered.
+        let contiguousUpperBoundSec: Double?
+        /// Plans that produced at least one successfully screened window.
+        let succeededPlanIndices: Set<Int>
+        /// Plans that recorded at least one failure.
+        let failedPlanIndices: Set<Int>
+        /// Plans that were never reached — neither a success nor a failure is
+        /// attributed to them. This is where a `.pass`-scoped abort stopped.
+        func unattemptedPlans(from plans: [CoarsePassWindowPlan]) -> [CoarsePassWindowPlan] {
+            plans.filter {
+                !succeededPlanIndices.contains($0.windowIndex)
+                    && !failedPlanIndices.contains($0.windowIndex)
+            }
+        }
+    }
+
+    nonisolated static func coarseCoverageWalk(
+        plans: [CoarsePassWindowPlan],
+        windows: [FMCoarseWindowOutput],
+        failedWindows: [CoarseWindowFailure]
+    ) -> CoarseCoverageWalk {
+        let succeededPlanIndices = Set(
+            windows.compactMap { window in
+                plans.first(where: { plan in
+                    Set(window.lineRefs).isSubset(of: Set(plan.lineRefs))
+                })?.windowIndex
+            }
+        )
+        // playhead-qbib: a plan that produced BOTH a recovered window and an
+        // un-recovered remainder (bounded permissive shrink) is not fully
+        // covered. Subtracting the failed plan indices is what stops a
+        // partially-recovered window from inflating the coverage cursor.
+        let failedPlanIndices = Set(
+            failedWindows.map { failure in
+                plans.first(where: { plan in
+                    Set(failure.lineRefs).isSubset(of: Set(plan.lineRefs))
+                })?.windowIndex ?? failure.planWindowIndex
+            }
+        )
+        let fullyCoveredPlanIndices = succeededPlanIndices.subtracting(failedPlanIndices)
+        // playhead-bkhc: an EMPTY plan list must never read as "fully covered".
+        // `count == count` is vacuously true at zero, so a missing denominator
+        // would silently certify complete coverage of audio nobody screened —
+        // the precise failure this whole computation exists to prevent.
+        let fullyCovered = !plans.isEmpty
+            && fullyCoveredPlanIndices.count == plans.count
+        // playhead-pmp9: walk plans in TIME order; advance across an unbroken
+        // run of successes from the start and STOP at the first window that was
+        // not successfully scanned. This guarantees a resume never skips
+        // unscanned audio even if a later window succeeded past an earlier hole.
+        var walkedUpperBound: Double? = nil
+        for plan in plans.sorted(by: { $0.startTime < $1.startTime }) {
+            guard fullyCoveredPlanIndices.contains(plan.windowIndex) else { break }
+            walkedUpperBound = plan.endTime
+        }
+        return CoarseCoverageWalk(
+            fullyCovered: fullyCovered,
+            contiguousUpperBoundSec: walkedUpperBound,
+            succeededPlanIndices: succeededPlanIndices,
+            failedPlanIndices: failedPlanIndices
+        )
+    }
+
+    /// playhead-26od: make everything a coarse pass has screened SO FAR durable,
+    /// while the pass is still running.
+    ///
+    /// Called once per resolved window, from inside `coarsePassA`. Two writes,
+    /// both of which the end-of-pass digest would otherwise be the first and
+    /// only source of:
+    ///
+    /// 1. **The scan rows.** One per successfully screened window that this
+    ///    checkpoint has not already written. Successes ONLY — see below.
+    /// 2. **The resume cursor.** The contiguous covered prefix, and only when it
+    ///    strictly advances, so an out-of-episode-order window (playhead-lxkq
+    ///    promotes ad-likely windows to the front of the ATTEMPT order) costs no
+    ///    `backfill_jobs` write at all.
+    ///
+    /// **Why successes only.** `insertSemanticScanResult` leaves `attemptCount`
+    /// alone for a `.success` row but, for a NON-success row, sets it to
+    /// `max(existing + 1, incoming)`. So writing a success row here and again at
+    /// end of pass is an exact `INSERT OR REPLACE` under the same deterministic
+    /// id — the database is unchanged — while writing a FAILURE row twice would
+    /// silently inflate its attempt counter and make a single failed window read
+    /// as two. Failure rows stay where they are, at end of pass. Nothing is lost
+    /// by that: the covered prefix stops at the first plan that is not a clean
+    /// success, so every failed window is at or after the cursor and a resume
+    /// re-attempts it anyway.
+    ///
+    /// **Best effort, and deliberately so.** A store error here is logged and
+    /// stepped over rather than retried or rethrown. This callback runs inside
+    /// the FM pass; it must not change what the pass concludes, and it must not
+    /// become a second, quieter place where persistence errors are reported. The
+    /// end-of-pass digest attempts every row again through the normal `try await`
+    /// path, so a genuine persistence failure still surfaces exactly where it
+    /// did before.
+    private func checkpointCoarseWindows(
+        _ banked: FMCoarseBankedWindows,
+        box: CoarseCheckpointBox,
+        inputs: AssetInputs,
+        jobId: String,
+        jobPhase: BackfillJobPhase,
+        priorCursor: BackfillProgressCursor?,
+        runMode: SemanticScanPhase
+    ) async {
+        // Each checkpoint carries the whole banked prefix, and `windows` is
+        // append-only, so everything below `processedWindowCount` is already
+        // durable. Slicing rather than rebuilding every row keeps this O(n)
+        // across a pass instead of O(n^2) — `makeScanResult` encodes JSON.
+        let alreadyProcessed = box.processedWindowCount
+        if alreadyProcessed < banked.windows.count {
+            for index in alreadyProcessed..<banked.windows.count {
+                let result = makeScanResult(
+                    windowOutput: banked.windows[index],
+                    inputs: inputs,
+                    jobId: jobId,
+                    jobPhase: jobPhase,
+                    scanPass: "passA",
+                    status: .success,
+                    runMode: runMode
+                )
+                do {
+                    try await store.insertSemanticScanResult(
+                        await attributed(result, jobId: jobId)
+                    )
+                } catch {
+                    logger.warning(
+                        "fm.coarse.checkpoint_write_failed job=\(jobId, privacy: .public) window=\(index, privacy: .public) error=\(String(describing: error), privacy: .public)"
+                    )
+                }
+                // Advance past a failed write too. Retrying it on every
+                // subsequent checkpoint would spend the rest of the pass on a
+                // row that a permanent validator error will reject every time,
+                // and would block every later window from ever being banked.
+                box.markProcessed(throughCount: index + 1)
+            }
+        }
+
+        let walk = Self.coarseCoverageWalk(
+            plans: banked.plans,
+            windows: banked.windows,
+            failedWindows: banked.failedWindows
+        )
+        // Same guard as t1kq's: a fully-covered cursor is episode-end, which
+        // `narrowedForResume` collapses to an empty resume. Unreachable while
+        // the pass still has a window left to attempt, which is the only state
+        // this function is ever called in, but the cursor rule is the same rule
+        // wherever it is applied.
+        guard !walk.fullyCovered,
+              let upperBound = walk.contiguousUpperBoundSec,
+              box.advanceCursor(to: upperBound) else {
+            return
+        }
+        let honest = BackfillProgressCursor(
+            processedPhaseCount: 0,
+            lastProcessedUpperBoundSec: upperBound
+        )
+        // Never regress below a cursor an earlier deferred run already reached
+        // — the same monotonic merge the rate-limit and cancellation branches
+        // apply.
+        let merged = priorCursor.map { honest.monotonic(from: $0) } ?? honest
+        do {
+            try await store.checkpointBackfillJobProgress(
+                jobId: jobId,
+                progressCursor: merged
+            )
+        } catch {
+            logger.warning(
+                "fm.coarse.checkpoint_cursor_failed job=\(jobId, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
     /// playhead-pmp9: narrow `inputs` to the un-scanned remainder for an
     /// intra-episode RESUME. A job that previously deferred on a rate-limited
     /// coarse window persisted an honest cursor (end of the contiguous scanned
@@ -1806,6 +2048,39 @@ actor BackfillJobRunner {
             try? await leaseStore.markBackfillJobRunning(jobId: leaseJobId)
         }
 
+        // playhead-26od: make the pass's work DURABLE as it happens, not at the
+        // instant it returns.
+        //
+        // qk44 made the lease an honest work clock, which told an operator that
+        // a pass was alive — but a live pass still banked its windows in a local
+        // array with exactly one durability event, its `return`. A pass needs
+        // 12-45 minutes and a lifecycle window or BG grant is ~30, so the two do
+        // not fit: the 2026-08-03 device pull recorded ~4.6 hours of running
+        // time across ten jobs and ZERO durable scan rows. Every mid-pass death
+        // that is not a graceful `CancellationError` — jetsam, suspend, the
+        // no-progress watchdog abandoning a wedge — discarded all of it, the
+        // reaper flipped the row back to `queued`, and the next run paid for the
+        // same FM seconds again.
+        //
+        // t1kq salvages the CURSOR on a graceful cancellation and does not help
+        // here: it needs the pass to have returned, and it salvages where the
+        // pass got to, not what it found.
+        let checkpointBox = CoarseCheckpointBox()
+        let checkpointJobId = job.jobId
+        let checkpointJobPhase = job.phase
+        let checkpointPriorCursor = job.progressCursor
+        let onCoarseWindowsBanked: @Sendable (FMCoarseBankedWindows) async -> Void = { [self] banked in
+            await self.checkpointCoarseWindows(
+                banked,
+                box: checkpointBox,
+                inputs: inputs,
+                jobId: checkpointJobId,
+                jobPhase: checkpointJobPhase,
+                priorCursor: checkpointPriorCursor,
+                runMode: runMode
+            )
+        }
+
         // playhead-lxkq: measured pointers at where to look FIRST. Empty on
         // every path except a flag-on `.fullEpisodeScan`, and empty there too
         // whenever no channel fired — in which case `planPassA` returns episode
@@ -1821,13 +2096,15 @@ actor BackfillJobRunner {
                 sensitiveRouter: router,
                 permissiveClassifier: classifierBox.classifier,
                 seeds: scanOrderSeeds,
-                onProgress: onCoarseProgress
+                onProgress: onCoarseProgress,
+                onWindowsBanked: onCoarseWindowsBanked
             )
         } else {
             coarse = try await classifier.coarsePassA(
                 segments: inputs.segments,
                 seeds: scanOrderSeeds,
-                onProgress: onCoarseProgress
+                onProgress: onCoarseProgress,
+                onWindowsBanked: onCoarseWindowsBanked
             )
         }
 
@@ -1943,56 +2220,22 @@ actor BackfillJobRunner {
             // plans also removes the drift hazard the comment below guards
             // against: there is now only ONE plan list.
             let coarsePlans = coarse.plans
-            let succeededPlanIndices = Set(
-                coarse.windows.compactMap { window in
-                    coarsePlans.first(where: { plan in
-                        Set(window.lineRefs).isSubset(of: Set(plan.lineRefs))
-                    })?.windowIndex
-                }
-            )
-            // playhead-qbib: a plan that produced BOTH a recovered window and
-            // an un-recovered remainder (bounded permissive shrink) is not
-            // fully covered. Subtracting the failed plan indices is what stops
-            // a partially-recovered window from inflating the coverage cursor
-            // — the cursor must never advance past audio nobody screened.
+            // playhead-26od: the walk itself now lives in `coarseCoverageWalk`,
+            // because the mid-flight checkpoint installed below has to compute
+            // the same quantity by the same rule. Its doc comment carries the
+            // pmp9 / bkhc / qbib reasoning that used to live here.
             //
-            // Attribute each failure to a plan the SAME structural way
-            // successes are attributed (line-ref subset), falling back to the
-            // index the classifier recorded. Matching structurally keeps the
-            // two independently-built plan lists from having to agree by raw
-            // position: if they ever drifted, an index-only match would
-            // silently no-op and let the cursor advance past a hole — the
-            // exact failure this bead exists to prevent.
-            let failedPlanIndices = Set(
-                coarse.failedWindows.map { failure in
-                    coarsePlans.first(where: { plan in
-                        Set(failure.lineRefs).isSubset(of: Set(plan.lineRefs))
-                    })?.windowIndex ?? failure.planWindowIndex
-                }
+            // We are inside `!failedWindows.isEmpty || !windows.isEmpty`, so
+            // zero plans is a contradiction (outcomes without a plan to
+            // attribute them to); the walk treats it as incomplete and the
+            // cursor stays where it was.
+            let walk = Self.coarseCoverageWalk(
+                plans: coarsePlans,
+                windows: coarse.windows,
+                failedWindows: coarse.failedWindows
             )
-            let fullyCoveredPlanIndices = succeededPlanIndices.subtracting(failedPlanIndices)
-            // playhead-pmp9: honest coverage cursor. Walk plans in TIME order;
-            // advance the cursor across an unbroken run of successes from the
-            // start and STOP at the first window that was not successfully
-            // scanned (rate-limited / abandoned). This guarantees a resume never
-            // skips unscanned audio even if a later window succeeded past an
-            // earlier hole. (Pure arithmetic, no FM work, no persistence — the
-            // no-rate-limit path stays byte-identical.)
-            // playhead-bkhc: an EMPTY plan list must never read as "fully
-            // covered". `count == count` is vacuously true at zero, so a
-            // missing denominator would silently certify complete coverage of
-            // audio nobody screened — the precise failure this whole block
-            // exists to prevent. We are inside `!failedWindows.isEmpty ||
-            // !windows.isEmpty`, so zero plans is a contradiction (outcomes
-            // without a plan to attribute them to); treat it as incomplete and
-            // let the cursor stay where it was.
-            coverageFullyCovered = !coarsePlans.isEmpty
-                && fullyCoveredPlanIndices.count == coarsePlans.count
-            var walkedUpperBound: Double? = nil
-            for plan in coarsePlans.sorted(by: { $0.startTime < $1.startTime }) {
-                guard fullyCoveredPlanIndices.contains(plan.windowIndex) else { break }
-                walkedUpperBound = plan.endTime
-            }
+            coverageFullyCovered = walk.fullyCovered
+            let walkedUpperBound = walk.contiguousUpperBoundSec
             coverageContiguousUpperBound = walkedUpperBound
             // playhead-t1kq: expose the honest PARTIAL coarse cursor so a
             // CancellationError (BG-window expiry) during the remaining
@@ -2041,9 +2284,7 @@ actor BackfillJobRunner {
             // A `.pass`-scoped abort stops the loop before the remaining plans
             // are ever attempted. Record the first unattempted plan so the
             // denominator shows where the pass stopped.
-            let unattemptedPlans = coarsePlans.filter {
-                !succeededPlanIndices.contains($0.windowIndex) && !failedPlanIndices.contains($0.windowIndex)
-            }
+            let unattemptedPlans = walk.unattemptedPlans(from: coarsePlans)
             // playhead-8d5r: this row stands for a plan that was NEVER
             // ATTEMPTED, so it must not claim the pass's terminal status when
             // that status names something that happened to a DIFFERENT window.

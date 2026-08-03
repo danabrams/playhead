@@ -670,6 +670,36 @@ struct CoarseWindowFailure: Sendable, Equatable {
 
 }
 
+/// playhead-26od: everything a caller needs to make a coarse pass's work
+/// DURABLE before the pass returns.
+///
+/// **Why this type exists.** `coarsePassA` used to have exactly one durability
+/// event — its `return`. Every scan row is written by
+/// `BackfillJobRunner.runJob` from the returned `FMCoarseScanOutput`, so a pass
+/// in flight was invisible in the database by construction. A healthy coarse
+/// pass is 12–45 minutes of FM wall clock and an app-lifecycle window or a
+/// background grant is ~30 minutes, so the two do not fit: the 2026-08-03
+/// device pull recorded ~4.6 hours of running time across ten jobs and ZERO
+/// durable scan rows, because every one of those passes was killed before it
+/// could return.
+///
+/// This is the same three fields the caller reads off the final
+/// `FMCoarseScanOutput`, delivered early. Carrying the PLANS as well as the
+/// outcomes is what makes the snapshot self-sufficient: coverage is a question
+/// about the episode's plan list (the denominator), and a caller that only saw
+/// the outcomes could not tell a covered prefix from a hole.
+struct FMCoarseBankedWindows: Sendable, Equatable {
+    /// The pass's full plan list in EPISODE order — the coverage denominator.
+    /// Complete from the first checkpoint onward: planning finishes before any
+    /// window is attempted.
+    let plans: [CoarsePassWindowPlan]
+    /// Windows screened successfully so far, in ATTEMPT order (which is episode
+    /// order only when playhead-lxkq promoted no seed).
+    let windows: [FMCoarseWindowOutput]
+    /// Per-window failures recorded so far, in the same attempt order.
+    let failedWindows: [CoarseWindowFailure]
+}
+
 struct FMCoarseScanOutput: Sendable, Equatable {
     let status: SemanticScanStatus
     let windows: [FMCoarseWindowOutput]
@@ -1724,7 +1754,8 @@ struct FoundationModelClassifier: Sendable {
         segments: [AdTranscriptSegment],
         locale: Locale = .current,
         seeds: [AdLikelihoodSeed] = [],
-        onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil
+        onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil,
+        onWindowsBanked: (@Sendable (FMCoarseBankedWindows) async -> Void)? = nil
     ) async throws -> FMCoarseScanOutput {
         try await coarsePassA(
             segments: segments,
@@ -1732,7 +1763,8 @@ struct FoundationModelClassifier: Sendable {
             sensitiveRouter: nil,
             permissiveClassifier: nil,
             seeds: seeds,
-            onProgress: onProgress
+            onProgress: onProgress,
+            onWindowsBanked: onWindowsBanked
         )
     }
 
@@ -1758,6 +1790,13 @@ struct FoundationModelClassifier: Sendable {
     /// `onProgress` receives the same ticks so a caller can keep durable state
     /// (the `backfill_jobs` lease) honest about work that is otherwise
     /// invisible until this function returns.
+    ///
+    /// playhead-26od: `onWindowsBanked` receives, at the same instants, the
+    /// windows the pass has actually screened. That is what lets a caller make
+    /// them DURABLE before the pass returns — see ``FMCoarseBankedWindows``.
+    /// Like `onProgress` it is awaited, so a slow observer delays the pass
+    /// rather than racing it, and a nil observer is byte-identical to the
+    /// pre-26od path.
     @available(iOS 26.0, *)
     func coarsePassA(
         segments: [AdTranscriptSegment],
@@ -1765,7 +1804,8 @@ struct FoundationModelClassifier: Sendable {
         sensitiveRouter: SensitiveWindowRouter?,
         permissiveClassifier: PermissiveAdClassifier?,
         seeds: [AdLikelihoodSeed] = [],
-        onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil
+        onProgress: (@Sendable (_ completedUnits: Int) async -> Void)? = nil,
+        onWindowsBanked: (@Sendable (FMCoarseBankedWindows) async -> Void)? = nil
     ) async throws -> FMCoarseScanOutput {
         let ticker = FMProgressTicker()
         // Both consumers of a completed unit of work, composed once so the
@@ -1787,7 +1827,8 @@ struct FoundationModelClassifier: Sendable {
                 sensitiveRouter: sensitiveRouter,
                 permissiveClassifier: permissiveClassifier,
                 seeds: seeds,
-                progress: progress
+                progress: progress,
+                onWindowsBanked: onWindowsBanked
             )
         }
     }
@@ -1805,7 +1846,8 @@ struct FoundationModelClassifier: Sendable {
         sensitiveRouter: SensitiveWindowRouter?,
         permissiveClassifier: PermissiveAdClassifier?,
         seeds: [AdLikelihoodSeed] = [],
-        progress: @escaping @Sendable (_ completedUnits: Int) async -> Void
+        progress: @escaping @Sendable (_ completedUnits: Int) async -> Void,
+        onWindowsBanked: (@Sendable (FMCoarseBankedWindows) async -> Void)? = nil
     ) async throws -> FMCoarseScanOutput {
         let clock = ContinuousClock()
         let start = clock.now
@@ -1931,6 +1973,26 @@ struct FoundationModelClassifier: Sendable {
             // already recorded the only work that precedes it.
             if planIndex > 0 {
                 await progress(planIndex)
+                // playhead-26od: the same instant, for the same reason. Window
+                // N-1 has resolved, so everything banked so far is final and
+                // can be made durable. Handing the caller the outcomes HERE
+                // rather than at `return` is the whole fix: a pass that is
+                // killed at window N keeps windows 0…N-2 instead of losing all
+                // of them.
+                //
+                // `reportedPlans` (episode order), not `plans` (attempt order):
+                // coverage is a question about the episode, and the caller's
+                // contiguous-prefix walk would otherwise be reading a list
+                // playhead-lxkq may have permuted.
+                if let onWindowsBanked {
+                    await onWindowsBanked(
+                        FMCoarseBankedWindows(
+                            plans: reportedPlans,
+                            windows: windows,
+                            failedWindows: failedWindows
+                        )
+                    )
+                }
             }
             // playhead-pmp9: optional inter-window pacing. Default 0 = no delay
             // = byte-identical to the pre-pmp9 loop. When a background driver
