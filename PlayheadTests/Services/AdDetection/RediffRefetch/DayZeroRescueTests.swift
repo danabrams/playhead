@@ -224,6 +224,12 @@ struct DayZeroMarkCensusTests {
 
     /// `isSupersedable` is what the mint's relaxed overlap filter consults, so
     /// it gets its own positive case rather than being proved only by negatives.
+    ///
+    /// ONE NEGATIVE PER CONJUNCT, and the settled one is here because the UG03
+    /// mutation proved it had to be: dropping `!isSettled` left this rail green
+    /// while a re-mint deleted a user veto. A rail named "only a degraded,
+    /// UNSETTLED, day-0 row" that could not see the settled axis was making a
+    /// claim it did not test.
     @Test("only a degraded, unsettled, day-0 row is supersedable")
     func supersedableIsNarrow() {
         #expect(DayZeroMarkCensus.isSupersedable(RescueFixture.window(id: "degraded")))
@@ -231,6 +237,13 @@ struct DayZeroMarkCensusTests {
             RescueFixture.window(id: "anchored", anchor: .rediffByteExact)))
         #expect(!DayZeroMarkCensus.isSupersedable(
             RescueFixture.window(id: "other", boundaryState: AdBoundaryState.segmentAggregated.rawValue)))
+        #expect(!DayZeroMarkCensus.isSupersedable(
+            RescueFixture.window(id: "vetoed", decisionState: .reverted)),
+            "a user veto is off limits to a re-fetch")
+        #expect(!DayZeroMarkCensus.isSupersedable(
+            RescueFixture.window(id: "dismissed", userDismissedBanner: true)))
+        #expect(!DayZeroMarkCensus.isSupersedable(
+            RescueFixture.window(id: "skipped", wasSkipped: true)))
     }
 }
 
@@ -905,6 +918,131 @@ struct DayZeroRescueTriggerTests {
         ))
         #expect(fetcher.calls.isEmpty, "a 9s6q-recovered sibling is not a rescue case")
         #expect(suppressions.recorded.map(\.reason) == [.marked])
+    }
+
+    /// THE WIRING, end to end over a REAL store — the rail UG13 proved was
+    /// missing.
+    ///
+    /// Every other trigger test here hands `attemptContextProvider` a
+    /// hand-built `DayZeroAttemptContext`, so none of them can see the store
+    /// read at all: a `fetchDayZeroAttemptContext` that returned an empty
+    /// census would leave every one of them green while no trapped asset on any
+    /// device was ever rescued. This one drives the SAME provider expression
+    /// production uses, over rows and an attempt record that are actually on
+    /// disk.
+    @Test("the rescue decision reads the census from the STORE, not from a fixture")
+    func rescueReadsTheCensusFromTheStore() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(AnalysisAsset(
+            id: "a1", episodeId: "ep-a1", assetFingerprint: "fp-a1",
+            weakFingerprint: nil, sourceURL: "file:///dev/null/a1.mp3",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil, episodeDurationSec: 280
+        ))
+        // The trapped shape, ON DISK: day-0 marked under an older generation,
+        // and every one of its marks unanchored.
+        try await store.upsertHotPathAdWindows(
+            [RescueFixture.window(id: "w1"), RescueFixture.window(id: "w2", start: 400, end: 460)],
+            existingIDs: [], retiredIDs: []
+        )
+        try await store.upsertRediffDayZeroAttempt(
+            RescueFixture.record(generation: RescueFixture.foreignGeneration)
+        )
+
+        let fetcher = KWaySpyFullFetcher()
+        let suppressions = SuppressionBox()
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: StubRefetchEnumerator(),
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: fetcher,
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: StubTaskScheduler(),
+            dayZeroMinter: SpyDayZeroMinter(),
+            now: { 0 }
+        )
+        let trigger = DayZeroRediffTrigger(
+            service: service,
+            enabled: true,
+            kWayFetchCount: 2,
+            transportProvider: { .testWifi },
+            chargeStateProvider: { true },
+            deepScanOptInProvider: { false },
+            // The PRODUCTION expression, verbatim.
+            attemptContextProvider: { [store] assetId in
+                (try? await store.fetchDayZeroAttemptContext(assetId: assetId)) ?? .never
+            },
+            suppressionRecorder: { assetId, reason, at in
+                suppressions.recorded.append((assetId, reason, at))
+            },
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
+        )
+        await fire(trigger)
+        #expect(!fetcher.calls.isEmpty,
+                "the census the store computed is what unlocks the rescue")
+        #expect(suppressions.recorded.isEmpty)
+
+        // The discriminating witness: ANCHOR one of the same rows on disk and
+        // the same store, the same record and the same provider must now refuse.
+        // Without this, "it fetched" would be satisfied by a provider that
+        // ignored the census entirely.
+        let anchoredStore = try await makeTestStore()
+        try await anchoredStore.insertAsset(AnalysisAsset(
+            id: "a1", episodeId: "ep-a1", assetFingerprint: "fp-a1",
+            weakFingerprint: nil, sourceURL: "file:///dev/null/a1.mp3",
+            featureCoverageEndTime: nil, fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil, analysisState: "new",
+            analysisVersion: 1, capabilitySnapshot: nil, episodeDurationSec: 280
+        ))
+        try await anchoredStore.upsertHotPathAdWindows(
+            [RescueFixture.window(id: "w1", anchor: .rediffByteExact),
+             RescueFixture.window(id: "w2", start: 400, end: 460)],
+            existingIDs: [], retiredIDs: []
+        )
+        try await anchoredStore.upsertRediffDayZeroAttempt(
+            RescueFixture.record(generation: RescueFixture.foreignGeneration)
+        )
+        let anchoredFetcher = KWaySpyFullFetcher()
+        let anchoredSuppressions = SuppressionBox()
+        let anchoredService = RediffRefetchService(
+            enabled: true,
+            enumerator: StubRefetchEnumerator(),
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: anchoredFetcher,
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: StubTaskScheduler(),
+            dayZeroMinter: SpyDayZeroMinter(),
+            now: { 0 }
+        )
+        await fire(DayZeroRediffTrigger(
+            service: anchoredService,
+            enabled: true,
+            kWayFetchCount: 2,
+            transportProvider: { .testWifi },
+            chargeStateProvider: { true },
+            deepScanOptInProvider: { false },
+            attemptContextProvider: { [anchoredStore] assetId in
+                (try? await anchoredStore.fetchDayZeroAttemptContext(assetId: assetId)) ?? .never
+            },
+            suppressionRecorder: { assetId, reason, at in
+                anchoredSuppressions.recorded.append((assetId, reason, at))
+            },
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
+        ))
+        #expect(anchoredFetcher.calls.isEmpty,
+                "one anchored row on disk must stop the same rescue")
+        #expect(anchoredSuppressions.recorded.map(\.reason) == [.marked])
     }
 
     /// And the bound, surfaced: a spent rescue records `rescueExhausted`.

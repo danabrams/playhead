@@ -1707,6 +1707,11 @@ T_UG9M_CEILING="the ceiling holds even when the rescue ended in a RETRYABLE exit
 T_UG9M_ADVANCE="advance counts a rescue only for a marked prior that spent bytes"
 T_UG9M_CONTEXT="fetchDayZeroAttemptContext returns the record AND the census together"
 T_UG9M_TRIGGER_REFETCH="a trapped asset's rescue reaches the k-way fetch"
+# playhead-ug9m: added AFTER UG13 survived. The three rails above hand the
+# trigger a hand-built context, so none of them can observe the STORE read at
+# all — a `fetchDayZeroAttemptContext` returning an empty census left every one
+# of them green while no trapped asset would ever be rescued on a device.
+T_UG9M_STORE_WIRING="the rescue decision reads the census from the STORE, not from a fixture"
 T_UG9M_TRIGGER_STOPS="an anchored sibling stops the trigger before any bytes are spent"
 T_UG9M_TRIGGER_NAMED="a spent rescue refuses at the trigger and NAMES itself"
 T_UG9M_FREEZE_REPORT="fetchDayZeroMarkFreezeReports names rescuable, frozen and anchored assets"
@@ -3103,7 +3108,7 @@ MUTATIONS=(
   "UG10|257|ADSVC|$T_UG9M_RECOVERED_NOT_PROMOTED"
   "UG11|258|ADSVC|$T_UG9M_STRICT_SUPERSEDES"
   "UG12|258|UGCEN|$T_UG9M_FREEZE_REPORT"
-  "UG13|259|STORE|$T_UG9M_CONTEXT;$T_UG9M_TRIGGER_REFETCH"
+  "UG13|259|STORE|$T_UG9M_CONTEXT;$T_UG9M_STORE_WIRING"
   "UG14|260|UGCEN|$T_UG9M_VETOED_ANCHORED"
 )
 
