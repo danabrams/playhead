@@ -19,10 +19,18 @@ struct DownloadContextTests {
         #expect(ctx.episodeTitle == nil)
     }
 
-    @Test("Constructs with nil podcastId")
+    // playhead-kkzu: a nil podcastId is now reachable only by NAMING the
+    // absence. `DownloadContext(podcastId: nil, ...)` no longer compiles —
+    // the designated initializer takes a non-optional String — so a caller
+    // that simply forgot cannot produce this value any more.
+    @Test("An unattributed context carries the reason it has no show")
     func constructWithNilPodcastId() {
-        let ctx = DownloadContext(podcastId: nil, isExplicitDownload: false)
+        let ctx = DownloadContext.unattributed(
+            reason: .resumeWithoutRecordedShow,
+            isExplicitDownload: false
+        )
         #expect(ctx.podcastId == nil)
+        #expect(ctx.unattributedReason == .resumeWithoutRecordedShow)
         #expect(ctx.isExplicitDownload == false)
     }
 

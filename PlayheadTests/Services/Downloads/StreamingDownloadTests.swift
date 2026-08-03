@@ -129,7 +129,10 @@ struct StreamingDownloadCachedTests {
 
         await manager.backgroundDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.com/episode.m4a")!
+            from: URL(string: "https://example.com/episode.m4a")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
         #expect(
             await manager.backgroundSessionsAlreadyInstantiated().isEmpty,
@@ -416,7 +419,10 @@ struct StreamingDownloadCachedTests {
             episodeId: episodeId,
             from: URL(
                 string: "https://example.invalid/replacement.m4a"
-            )!
+            )!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
         #expect(
             await manager._isBackgroundDownloadInFlightForTesting(
@@ -452,7 +458,10 @@ struct StreamingDownloadCachedTests {
 
         await manager.backgroundDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.invalid/episode.mp3")!
+            from: URL(string: "https://example.invalid/episode.mp3")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
 
         #expect(

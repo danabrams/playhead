@@ -24,7 +24,11 @@ struct EpisodePreparationCoordinatorTests {
         enum Op: Equatable {
             case markUserIntent(episodeId: String, coverage: Double?)
             case enqueueUserIntent(episodeId: String, fingerprint: String, coverage: Double?)
-            case startDownload(episodeId: String, url: URL)
+            // playhead-kkzu: the recorder now witnesses the show the
+            // download carries, not merely that a download started.
+            case startDownload(
+                episodeId: String, url: URL, context: DownloadContext
+            )
         }
         private(set) var ops: [Op] = []
         func record(_ op: Op) { ops.append(op) }
@@ -37,8 +41,16 @@ struct EpisodePreparationCoordinatorTests {
 
         func isCached(episodeId: String) async -> Bool { cached }
         func strongFingerprint(episodeId: String, audioURL: URL) async -> String? { fingerprint }
-        func startDownload(episodeId: String, from url: URL) async {
-            await recorder.record(.startDownload(episodeId: episodeId, url: url))
+        func startDownload(
+            episodeId: String,
+            from url: URL,
+            context: DownloadContext
+        ) async {
+            await recorder.record(
+                .startDownload(
+                    episodeId: episodeId, url: url, context: context
+                )
+            )
         }
     }
 
@@ -67,6 +79,17 @@ struct EpisodePreparationCoordinatorTests {
     // MARK: - Fixture
 
     private static let audioURL = URL(string: "https://example.com/ep1.mp3")!
+
+    /// playhead-kkzu: the exact context the coordinator must hand the
+    /// download seam — the SAME show it already hands `enqueueUserIntent`.
+    /// Written out rather than derived from the request so a regression that
+    /// drops the identity again fails here instead of comparing nil to nil.
+    private static let expectedDownloadContext = DownloadContext(
+        podcastId: "pod-1",
+        isExplicitDownload: false,
+        podcastTitle: "Pod",
+        episodeTitle: "Ep 1"
+    )
 
     private func makeCoordinator(
         recorder: Recorder,
@@ -111,7 +134,11 @@ struct EpisodePreparationCoordinatorTests {
         // inherits the user-intent lane.
         #expect(ops == [
             .markUserIntent(episodeId: "ep-1", coverage: 3600),
-            .startDownload(episodeId: "ep-1", url: Self.audioURL),
+            .startDownload(
+                episodeId: "ep-1",
+                url: Self.audioURL,
+                context: Self.expectedDownloadContext
+            ),
         ])
         // No direct analysis enqueue (there is no fingerprint yet), and —
         // critically — no playback: the op list is exactly the two
@@ -154,7 +181,11 @@ struct EpisodePreparationCoordinatorTests {
         await c.prepare(request())
 
         let ops = await recorder.ops
-        #expect(ops.contains(.startDownload(episodeId: "ep-1", url: Self.audioURL)))
+        #expect(ops.contains(.startDownload(
+            episodeId: "ep-1",
+            url: Self.audioURL,
+            context: Self.expectedDownloadContext
+        )))
         #expect(ops.contains(.markUserIntent(episodeId: "ep-1", coverage: 3600)))
     }
 
@@ -166,7 +197,11 @@ struct EpisodePreparationCoordinatorTests {
             reachability: .wifi, policy: .off
         )
         await c.prepare(request())
-        #expect(await recorder.ops.contains(.startDownload(episodeId: "ep-1", url: Self.audioURL)))
+        #expect(await recorder.ops.contains(.startDownload(
+            episodeId: "ep-1",
+            url: Self.audioURL,
+            context: Self.expectedDownloadContext
+        )))
     }
 
     @Test("unreachable: does not download")

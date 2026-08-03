@@ -117,10 +117,21 @@ private actor StubFeedRefresher: FeedRefreshing {
 }
 
 private actor StubAutoDownloadEnqueuer: AutoDownloadEnqueueing {
-    private(set) var enqueued: [(episodeId: String, url: URL)] = []
+    private(set) var enqueued:
+        [(episodeId: String, url: URL, context: DownloadContext)] = []
 
-    func enqueueBackgroundDownload(episodeId: String, from url: URL) async {
-        enqueued.append((episodeId: episodeId, url: url))
+    func enqueueBackgroundDownload(
+        episodeId: String,
+        from url: URL,
+        context: DownloadContext
+    ) async {
+        enqueued.append((episodeId: episodeId, url: url, context: context))
+    }
+
+    /// playhead-kkzu: the show each auto-download was attributed to, in
+    /// enqueue order. A NULL here is the defect this bead fixed.
+    func enqueuedPodcastIds() -> [String?] {
+        enqueued.map(\.context.podcastId)
     }
 
     func enqueuedEpisodeIds() -> [String] {

@@ -434,7 +434,10 @@ struct DelegateWorkJournalTests {
             await manager._backgroundDownloadAdmissionCountForTesting()
         await manager.backgroundDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.invalid/retry.mp3")!
+            from: URL(string: "https://example.invalid/retry.mp3")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
         #expect(
             await manager._backgroundDownloadAdmissionCountForTesting()
