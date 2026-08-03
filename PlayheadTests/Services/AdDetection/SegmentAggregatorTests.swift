@@ -347,4 +347,191 @@ struct SegmentAggregatorTests {
         // Duration-weighted mean = (2·0.80 + 1·0.40 + 1·0.40) / 4 = 2.4 / 4 = 0.60
         #expect(abs(s.segmentScore - 0.60) < 1e-9)
     }
+
+    // MARK: - 10. playhead-pggn: the score describes the span the segment reports
+    //
+    // A trailing below-continuation window used to be added to
+    // `weightedScoreSum` AND to the `totalDuration` denominator while the
+    // emitted `endTime` stayed snapped to `lastQualifyingEndTime`. The row that
+    // reached the database was therefore N seconds wide carrying a number that
+    // described N + tail seconds.
+    //
+    // The invariant these tests pin: **no region outside `[startTime, endTime]`
+    // contributes to `segmentScore`.**
+
+    /// Build the bead's shape: two adjacent 30 s seed slots at `seed`, then one
+    /// trailing below-continuation slot of `tailWidth` seconds at `tail`.
+    private func seedThenTail(
+        seed: Double,
+        tail: Double,
+        tailWidth: Double
+    ) -> [SegmentAggregator.WindowScore] {
+        [
+            .init(startTime: 1500.0, endTime: 1530.0, score: seed),
+            .init(startTime: 1530.0, endTime: 1560.0, score: seed),
+            .init(startTime: 1560.0, endTime: 1560.0 + tailWidth, score: tail)
+        ]
+    }
+
+    @Test("playhead-pggn worked example: a 0.62 slot with a 0.20 lead-out reports 0.62 over 30 s, not 0.41")
+    func pggnWorkedExampleReportsTheSeedScoreNotTheDilutedOne() {
+        // The bead's example verbatim, taken from observed device data: a
+        // single high-confidence 0.62 slot at [1530,1560) followed by a 0.20
+        // slot at [1560,1590).
+        //
+        // BEFORE: endTime 1560, segmentScore (0.62·30 + 0.20·30)/60 = 0.41.
+        // A 30-second row carrying a number that described 60 seconds — and
+        // 0.41 sits in the markOnly band while 0.62 does not.
+        let windows: [SegmentAggregator.WindowScore] = [
+            .init(startTime: 1530.0, endTime: 1560.0, score: 0.62),
+            .init(startTime: 1560.0, endTime: 1590.0, score: 0.20)
+        ]
+        let segments = SegmentAggregator.aggregate(
+            windows: windows,
+            config: Self.defaultConfig
+        )
+        #expect(segments.count == 1)
+        guard let s = segments.first else { return }
+        #expect(abs(s.startTime - 1530.0) < 1e-9)
+        #expect(abs(s.endTime - 1560.0) < 1e-9,
+                "the reported extent must still snap back off the sub-continuation tail")
+        #expect(abs(s.segmentScore - 0.62) < 1e-9,
+                "the 30 s the segment reports scored 0.62; the 0.20 tail is outside it")
+        #expect(s.windowCount == 1,
+                "the tail is counted no more than it is scored")
+        #expect(s.promoted)
+        // The whole point of the defect: 0.41 is below the 0.55 auto-skip
+        // threshold and 0.62 is above it. A true detection was being pushed
+        // under the bar by its own lead-out.
+        #expect(s.segmentScore >= AutoSkipPrecisionGateConfig.default.autoSkipThreshold)
+    }
+
+    @Test("playhead-pggn: the reported score does not depend on the VALUE of a sub-continuation tail")
+    func subContinuationTailValueCannotMoveTheReportedScore() {
+        // The invariant stated as an experiment: vary the tail across the whole
+        // below-continuation range and nothing about the emitted segment may
+        // move. This is what fails the instant the tail re-enters `include()`.
+        var observed: Set<String> = []
+        for tail in stride(from: 0.0, through: 0.27, by: 0.01) {
+            let segments = SegmentAggregator.aggregate(
+                windows: seedThenTail(seed: 0.50, tail: tail, tailWidth: 30.0),
+                config: Self.defaultConfig
+            )
+            #expect(segments.count == 1)
+            guard let s = segments.first else { return }
+            observed.insert("\(s.startTime)|\(s.endTime)|\(s.segmentScore)|\(s.windowCount)|\(s.promoted)")
+        }
+        #expect(observed.count == 1,
+                "a region outside the reported extent must not change the reported segment; saw \(observed.count) distinct outcomes: \(observed.sorted())")
+        // Positive witness: name the one outcome, so this cannot pass by
+        // emitting nothing at all.
+        #expect(observed.first == "1500.0|1560.0|0.5|2|true")
+    }
+
+    @Test("playhead-pggn: the reported score does not depend on the WIDTH of a sub-continuation tail")
+    func subContinuationTailWidthCannotMoveTheReportedScore() {
+        // Widths below `belowContinuationSecondsToEnd` (3 s) leave the segment
+        // open to the end of the stream and exercise the flush path; widths at
+        // or above it close the segment through `ingestIntoOpenSegment`. Both
+        // exits must settle the pending tail the same way.
+        for width in [0.5, 2.0, 3.0, 10.0, 30.0, 120.0] {
+            let segments = SegmentAggregator.aggregate(
+                windows: seedThenTail(seed: 0.50, tail: 0.10, tailWidth: width),
+                config: Self.defaultConfig
+            )
+            #expect(segments.count == 1, "width \(width)")
+            guard let s = segments.first else { return }
+            #expect(abs(s.endTime - 1560.0) < 1e-9, "width \(width)")
+            #expect(abs(s.segmentScore - 0.50) < 1e-9,
+                    "width \(width): a \(width) s tail outside the extent moved the score to \(s.segmentScore)")
+            #expect(s.windowCount == 2, "width \(width)")
+        }
+    }
+
+    @Test("playhead-pggn: a sub-continuation tail can never LOWER a promoted segment's score")
+    func subContinuationTailNeverLowersThePromotedScore() {
+        // The direction claim from the file header, checked against the
+        // counterfactual computed inline: `dilutedMean` is exactly what the
+        // pre-pggn code produced for this shape (every window in the score,
+        // extent snapped back).
+        //
+        // μ_old is a weighted average of μ_new and the tail's mean, so μ_new
+        // can only fall below μ_old when it is already below the tail — and
+        // every tail window is under `continuationThreshold` (0.28), which is
+        // under `promotionThreshold` (0.40). So no PROMOTED segment can lose.
+        var strictImprovements = 0
+        var comparisons = 0
+        for seed in stride(from: 0.35, through: 0.99, by: 0.01) {
+            for tail in stride(from: 0.0, through: 0.27, by: 0.03) {
+                for width in [2.0, 5.0, 30.0, 90.0] {
+                    let segments = SegmentAggregator.aggregate(
+                        windows: seedThenTail(seed: seed, tail: tail, tailWidth: width),
+                        config: Self.defaultConfig
+                    )
+                    guard let s = segments.first, s.promoted else { continue }
+                    let dilutedMean = (seed * 60.0 + tail * width) / (60.0 + width)
+                    comparisons += 1
+                    #expect(s.segmentScore >= dilutedMean - 1e-12,
+                            "seed \(seed) tail \(tail) width \(width): promoted score fell from \(dilutedMean) to \(s.segmentScore)")
+                    if s.segmentScore > dilutedMean + 1e-12 { strictImprovements += 1 }
+                }
+            }
+        }
+        // Positive witnesses: the loop ran, and the correction is real rather
+        // than a no-op that would satisfy a >= assertion trivially.
+        #expect(comparisons > 0)
+        #expect(strictImprovements > 0,
+                "every promoted segment scored identically before and after — the tail is not being excluded at all")
+    }
+
+    @Test("playhead-pggn: a below-continuation window the extent LATER covers is scored, not discarded")
+    func subContinuationWindowInsideTheFinalExtentIsScored() {
+        // The mirror of the defect. Dropping a below-continuation window
+        // outright — rather than deferring it until the extent's fate is known
+        // — would leave a hole: a score describing LESS than the span it
+        // reports. Here a later qualifying window carries the extent past the
+        // dip, so the dip is inside `[startTime, endTime]` and must count.
+        let windows: [SegmentAggregator.WindowScore] = [
+            .init(startTime: 0.0, endTime: 2.0, score: 0.35),   // seed 1
+            .init(startTime: 2.0, endTime: 4.0, score: 0.35),   // seed 2 → opens
+            .init(startTime: 4.0, endTime: 6.0, score: 0.10),   // dip, below continuation
+            .init(startTime: 6.0, endTime: 8.0, score: 0.50)    // carries the extent past it
+        ]
+        let segments = SegmentAggregator.aggregate(
+            windows: windows,
+            config: Self.defaultConfig
+        )
+        #expect(segments.count == 1)
+        guard let s = segments.first else { return }
+        #expect(abs(s.endTime - 8.0) < 1e-9)
+        // (0.35·2 + 0.35·2 + 0.10·2 + 0.50·2) / 8 = 2.6 / 8 = 0.325.
+        // Discarding the dip instead of folding it in would read 2.4/6 = 0.40.
+        #expect(abs(s.segmentScore - 0.325) < 1e-9,
+                "the dip is inside the reported extent, so it belongs in the mean; got \(s.segmentScore)")
+        #expect(s.windowCount == 4)
+    }
+
+    @Test("playhead-pggn: a below-continuation window already covered by the extent is scored immediately")
+    func subContinuationWindowAlreadyInsideTheExtentIsScored() {
+        // Tier 1 emits 30 s slots and Tier 2 emits 2 s candidates into the same
+        // sorted stream (SegmentAggregator contract, file header), so a narrow
+        // low-scoring window can arrive while the extent already reaches past
+        // its end. That window is inside the reported span and must count.
+        let windows: [SegmentAggregator.WindowScore] = [
+            .init(startTime: 0.0, endTime: 30.0, score: 0.65),   // opens; extent → 30
+            .init(startTime: 10.0, endTime: 12.0, score: 0.10),  // 2 s dip INSIDE [0,30)
+            .init(startTime: 30.0, endTime: 60.0, score: 0.50)
+        ]
+        let segments = SegmentAggregator.aggregate(
+            windows: windows,
+            config: Self.defaultConfig
+        )
+        #expect(segments.count == 1)
+        guard let s = segments.first else { return }
+        #expect(abs(s.endTime - 60.0) < 1e-9)
+        // (0.65·30 + 0.10·2 + 0.50·30) / 62 = 34.7 / 62.
+        #expect(abs(s.segmentScore - (34.7 / 62.0)) < 1e-9,
+                "a dip already inside the extent must not be deferred out of the score; got \(s.segmentScore)")
+        #expect(s.windowCount == 3)
+    }
 }
