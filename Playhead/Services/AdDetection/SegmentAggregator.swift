@@ -390,9 +390,10 @@ enum SegmentAggregator {
             // carries the extent past them folds them in; a close or a flush
             // drops them. Nothing else may read these — `meanScore` must not.
             //
-            // Held as three scalars rather than a list so the state stays O(1)
-            // no matter how many zero-width windows arrive (a zero-width
-            // window advances no countdown, so a list would be unbounded).
+            // Held as four scalars rather than a list of windows so the state
+            // stays O(1) no matter how many zero-width windows arrive (a
+            // zero-width window advances no countdown, so a list would be
+            // unbounded).
 
             /// Sum of (score · duration) over the pending tail.
             var tailWeightedScoreSum: Double = 0
