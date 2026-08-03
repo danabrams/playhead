@@ -940,6 +940,13 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SemanticScanRunAttributionTests
   -only-testing:PlayheadTests/SemanticScanAttributionWireInTests
   -only-testing:PlayheadTests/MigrationLadderTests
+
+  # playhead-le02: the cross-launch preload suite. It is the only place that
+  # can see `endEpisode`'s suggest-tier reset and the preloaded `.applied`
+  # row's tier, and it was not in this list — so LE07 and LE08 would have
+  # reported SURVIVED for the honest but useless reason that nothing able to
+  # judge them ever ran.
+  -only-testing:PlayheadTests/SkipOrchestratorPreloadTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -997,6 +1004,29 @@ T_AVBN_LEGACY_CODABLE="the pre-rename raw value decodes through Codable too"
 T_AVBN_LEGACY_REENCODE="re-encoding a legacy row writes the CANONICAL raw value, not the alias"
 T_AVBN_ALIAS_ONE_WAY="the alias is one-way: no OTHER unknown raw value decodes"
 T_AVBN_BLOCKED_DROPPED="blocked eligibilityGate values do NOT enter active managed-window set"
+
+# playhead-le02 (LE01-LE08). The A11 CLASS, generalised past the one rail avbn
+# repaired. A11 survived five negative assertions because it only ARMED a banner
+# and playhead-d3g0 defers emission to playhead entry; le02 found the same hole
+# on fourteen more rails and gave each a positive witness. These mutations are
+# the proof: every one routes a must-drop span to the suggest tier, or corrupts
+# the census row that names where a span went. A repaired rail dies; the rail as
+# it stood before le02 would not have noticed.
+T_LE02_INV_SHORT="Hot-path span < 2 s is filtered out before reaching active set"
+T_LE02_INV_HEAD="Span lying inside the first 3 s is filtered out"
+T_LE02_INV_TAIL="Span lying inside the last 3 s is filtered out when duration is known"
+T_LE02_INV_CHAPTER="Chapter overlap filters the span — and requires the chapters push"
+T_LE02_INV_SYNTH="Non-trailing open-ended chapter gets its end synthesized from the next chapter"
+T_LE02_INV_FUSION="Filter also gates AdDecisionResult path (fusion → backfill push)"
+T_LE02_INV_RETRO_CHAPTER="Chapters arriving AFTER preloaded spans retroactively reject overlapping windows"
+T_LE02_INV_RETRO_DURATION="Episode duration arriving mid-episode retroactively retires late-edge spans"
+T_LE02_BYPASS_ADWINDOW="same-ID AdWindow with changed bounds must pass inventory validation"
+T_LE02_BYPASS_DECISION="same-ID decision with changed bounds must pass inventory validation"
+T_LE02_DOOR_FOREIGN="ingest for an asset that is NOT the one playing delivers nothing"
+T_LE02_DOOR_NOEPISODE="ingest with no active episode delivers nothing"
+T_LE02_DOOR_VETOED="a user-vetoed row is not resurrected by the mid-session door"
+T_LE02_PRELOAD_APPLIED="testPreloadedAppliedWindowDoesNotEmitBanner"
+T_LE02_ENDEPISODE_RESET="testEndEpisodeResetsEmittedAutoSkipBannersSet"
 T_LISTEN_RACE="A Listen revert whose episode is replaced mid-flight still calibrates the captured show"
 T_MANAGED_RACE="A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone"
 T_SUGGEST_RACE="A suggest-only revert whose episode is replaced mid-loop keeps its receipt and stops retiring banners"
@@ -2451,6 +2481,32 @@ MUTATIONS=(
 
   "A05|134|FMSUP|$T_AVBN_COARSE_VOTES;$T_AVBN_COARSE_PAIR_TRIGGERS"
 
+  # playhead-le02 (LE01-LE08). Two batches, and the split is by EXPECTATION
+  # OVERLAP rather than by blast radius: within a batch no two mutants claim the
+  # same test, so a kill is attributable without re-running.
+  #
+  # LE01 is the centrepiece and is deliberately the CRUELLEST version of the
+  # A11 class: it arms a suggestion while LEAVING THE CENSUS STAMP INTACT. A
+  # rail that trusted only `lastAdWindowIngestOutcome` would still read
+  # `droppedInventorySanity` and pass. Only the `activeSuggestWindowIDs()`
+  # claim — which reads the collection the suggest tier actually lands in —
+  # can see it. That is why the repair asserts both and not either.
+  "LE01|230|ORCH|$T_LE02_INV_SHORT;$T_LE02_INV_HEAD;$T_LE02_INV_TAIL;$T_LE02_INV_CHAPTER;$T_LE02_INV_SYNTH;$T_LE02_BYPASS_ADWINDOW"
+  "LE04|230|ORCH|$T_LE02_DOOR_FOREIGN;$T_LE02_DOOR_NOEPISODE"
+  "LE06|230|ORCH|$T_LE02_BYPASS_DECISION"
+  "LE07|230|ORCH|$T_LE02_ENDEPISODE_RESET"
+
+  # LE02/LE03 attack the census's PRECISION rather than its presence: the four
+  # inventory rejection reasons are four unrelated defects (playhead-b6r2 was
+  # exactly a tooEarly/tooLate mix-up), and a retroactive retirement is a
+  # different fact from a hot-path drop. LE05 mis-attributes a door cause.
+  # LE08 is the A11 shape at the tier-routing `if` itself, narrowed to applied
+  # rows so its blast radius stays inside the rail it is aimed at.
+  "LE02|231|ORCH|$T_LE02_INV_HEAD;$T_LE02_INV_TAIL;$T_LE02_INV_CHAPTER;$T_LE02_INV_SYNTH"
+  "LE03|231|ORCH|$T_LE02_INV_RETRO_CHAPTER;$T_LE02_INV_RETRO_DURATION"
+  "LE05|231|ORCH|$T_LE02_DOOR_VETOED"
+  "LE08|231|ORCH|$T_LE02_PRELOAD_APPLIED"
+
   # playhead-sik9 (C01-C10). ONE predicate, five ways to get it wrong, and
   # every one of them compiles. C01 deletes the exemption (the old blanket
   # demotion — the thing that would delete Dan's post-roll); C02 inverts it;
@@ -3031,6 +3087,14 @@ describe_mutation() {
     A09) echo "SkipEligibilityGate: widen the alias, so EVERY unknown raw value decodes to the FM-consensus block" ;;
     A10) echo "applyFMSuppression: build the windows inline again, bypassing the admission rule" ;;
     A11) echo "receiveAdWindows: route blockedByFMConsensus to the suggest tier (the surface the bead closed)" ;;
+    LE01) echo "receiveAdWindows: an inventory-REJECTED span also arms a suggestion — census stamp left intact, so only the suggest-tier witness can see it" ;;
+    LE02) echo "receiveAdWindows: the inventory census always names tooShort, so four unrelated rejection reasons become one" ;;
+    LE03) echo "retroactive sweep: stamp droppedInventorySanity, erasing the difference between 'never admitted' and 'admitted then taken back'" ;;
+    LE04) echo "ingestPersistedAdWindows: drop the doorDroppedNotPlaying stamp, so 'the door refused' and 'the door never fired' are one observation again" ;;
+    LE05) echo "forwardPersistedAdWindows: mis-attribute an empty admission set to doorDroppedEpisodeReplaced" ;;
+    LE06) echo "receiveAdDecisionResults: an inventory-rejected decision arms a suggestion instead of reaching no tier" ;;
+    LE07) echo "endEpisode: stop clearing suggestWindows, so an arming leaks into the next episode" ;;
+    LE08) echo "receiveAdWindows: route .applied rows to the suggest tier (the A11 shape at the tier-routing if)" ;;
     C01) echo "post-roll guard: DELETE the byte-anchored exemption — the old blanket demotion that would delete Dan's post-roll" ;;
     C02) echo "post-roll guard: INVERT the exemption, so only byte-exact tails are demoted and everything else is exempt" ;;
     C03) echo "post-roll guard: widen the exemption to ANY width oracle, so an acoustic .spliceSlot tail auto-skips" ;;
@@ -6162,6 +6226,145 @@ EOF
     snippet NEW <<'EOF'
             if decodedGate == .markOnly
                 || decodedGate == .blockedByFMConsensus
+                || (
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+
+  # ---- playhead-le02: a negative banner assertion needs a positive witness ----
+
+  # The centrepiece. Arms a suggestion for a span the inventory filter rejected
+  # while LEAVING THE CENSUS STAMP INTACT, so the row still reads
+  # `droppedInventorySanity`. A rail that trusted the census alone survives this;
+  # only reading the collection the suggest tier lands in kills it.
+  LE01)
+    snippet OLD <<'EOF'
+                    noteIngestOutcome(
+                        .droppedInventorySanity,
+                        windowId: adWindow.id,
+                        detail: reason.rawValue
+                    )
+                    continue
+EOF
+    snippet NEW <<'EOF'
+                    noteIngestOutcome(
+                        .droppedInventorySanity,
+                        windowId: adWindow.id,
+                        detail: reason.rawValue
+                    )
+                    registerSuggestedWindow(adWindow)
+                    continue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  LE02)
+    snippet OLD <<'EOF'
+                        .droppedInventorySanity,
+                        windowId: adWindow.id,
+                        detail: reason.rawValue
+EOF
+    snippet NEW <<'EOF'
+                        .droppedInventorySanity,
+                        windowId: adWindow.id,
+                        detail: InventorySanityRejectionReason.tooShort.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  LE03)
+    snippet OLD <<'EOF'
+            noteIngestOutcome(
+                .retiredReapplyInventoryFilter,
+                windowId: id,
+                detail: reason?.rawValue
+            )
+EOF
+    snippet NEW <<'EOF'
+            noteIngestOutcome(
+                .droppedInventorySanity,
+                windowId: id,
+                detail: reason?.rawValue
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  LE04)
+    snippet OLD <<'EOF'
+            noteIngestDoorOutcome(
+                .doorDroppedNotPlaying,
+                door: .midSessionIngest,
+                analysisAssetId: analysisAssetId,
+                detail: "active=\(activeAssetId ?? "nil")"
+            )
+            return 0
+EOF
+    snippet NEW <<'EOF'
+            return 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  LE05)
+    snippet OLD <<'EOF'
+            noteIngestDoorOutcome(
+                .doorDroppedNoAdmissibleRows,
+                door: door,
+EOF
+    snippet NEW <<'EOF'
+            noteIngestDoorOutcome(
+                .doorDroppedEpisodeReplaced,
+                door: door,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  LE06)
+    snippet OLD <<'EOF'
+                    retireAllNonRevertedWindowStateIfPresent(
+                        windowId: result.id
+                    )
+                    continue
+                }
+            }
+EOF
+    snippet NEW <<'EOF'
+                    retireAllNonRevertedWindowStateIfPresent(
+                        windowId: result.id
+                    )
+                    if let revision = result.producerRevision {
+                        registerSuggestedWindow(revision)
+                    }
+                    continue
+                }
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # Anchored on the two lines ABOVE the reset block, because `endEpisode` and
+  # the begin-side reset share a byte-identical six-line sequence.
+  LE07)
+    snippet OLD <<'EOF'
+        inAdState = false
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        suggestBanneredWindowIds.removeAll()
+        suggestWindows.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        inAdState = false
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        suggestBanneredWindowIds.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  LE08)
+    snippet OLD <<'EOF'
+            if decodedGate == .markOnly
+                || (
+EOF
+    snippet NEW <<'EOF'
+            if decodedGate == .markOnly
+                || adWindow.decisionState == AdDecisionState.applied.rawValue
                 || (
 EOF
     patch "$file" "$OLD" "$NEW" ;;
