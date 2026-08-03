@@ -46,6 +46,57 @@
 // Choice: **duration-weighted arithmetic mean** of included window scores.
 // Weight = window duration in seconds. No time decay.
 //
+// THE SCORE DESCRIBES THE SPAN THE SEGMENT REPORTS (playhead-pggn)
+// ----------------------------------------------------------------
+// Invariant: **no region outside `[startTime, endTime]` contributes to
+// `segmentScore`.** The emitted confidence and the emitted geometry name the
+// same region, so a downstream threshold on the score is reasoning about the
+// span it will act on.
+//
+// It did not hold before playhead-pggn. A trailing below-continuation window
+// was passed to `include()` — landing in `weightedScoreSum` and, crucially, in
+// the `totalDuration` denominator — while the emitted `endTime` stayed snapped
+// to `lastQualifyingEndTime`. A 0.62 slot at [1530,1560) followed by a 0.20
+// slot at [1560,1590) emitted a 30 s window carrying (0.62·30 + 0.20·30)/60 =
+// 0.41, a number that described 60 s. The strong half was reported at the
+// diluted score of the weak half.
+//
+// Two invariants were available and they are not equivalent:
+//   (a) compute the score only over the reported extent, or
+//   (b) grow the extent to cover everything the score consumed.
+//
+// (a) is what this file implements. A window below `continuationThreshold` is
+// not absent evidence, it is NEGATIVE evidence — the classifier looked at that
+// region and said it does not look like an ad. (b) would push the reported ad
+// boundary into a region measured as not-ad, and with Tier 1's 30 s slots that
+// is a whole slot at a time (`belowContinuationSecondsToEnd` is 3.0 s, so one
+// sub-continuation slot both trips the countdown and would widen the span).
+// playhead-4xqf's boundary-collapse concern does not argue for (b) here: 4xqf
+// is about reporting narrower than the evidence SUPPORTS, and a
+// sub-continuation tail is evidence that does not support the span. Widening
+// onto it spends show audio at an inner edge, the expensive kind.
+//
+// What (a) gives up: the tail no longer moderates the reported confidence, so
+// a genuine ad followed by a long quiet decay reports the strong number for
+// its span and carries no hint that the region is trailing off. That is
+// correct under this invariant — the number describes that span and nothing
+// else — but "how ad-like is the neighbourhood" is a different quantity and
+// would need its own field, not a denominator.
+//
+// The tail is NOT discarded as evidence. It still drives
+// `belowContinuationSeconds`, i.e. the decision of where the segment ends,
+// which was always its real job.
+//
+// Direction of the correction (measured, and provable):
+//   Let μ_new be the mean over the reported extent and μ_T the mean of the
+//   dropped tail. μ_old is a weighted average of the two, so μ_new < μ_old
+//   implies μ_new < μ_T. Every tail window scores strictly below
+//   `continuationThreshold` (0.28), so μ_T < 0.28, hence μ_new < 0.28 <
+//   `promotionThreshold` (0.40). **A segment whose score can fall is a
+//   segment neither run would promote.** Every score movement on an emitted
+//   segment is upward or nil. Pinned by
+//   `subContinuationTailNeverLowersThePromotedScore`.
+//
 // Rationale (documented per bead acceptance #2):
 //   - Mean (vs max): max over-credits an isolated spike. A 0.90 window
 //     surrounded by 0.20s is the C22D6EC6 FP shape — we want that segment
@@ -69,9 +120,13 @@
 // Adding a window whose score is ≥ the running duration-weighted mean
 // cannot decrease the mean. (Adding a window with score ≥ μ and weight w
 // gives μ' = (μ·W + s·w) / (W + w) ≥ (μ·W + μ·w) / (W + w) = μ.)
-// Conversely, adding a window below the running mean may decrease it —
-// that's how the [0.30]-tail can drag a segment below `promotionThreshold`.
-// Unit-tested in `segmentScoreMonotonicityWhenAddingAboveMeanWindow`.
+// Conversely, adding a window below the running mean may decrease it — that
+// is how a [0.30] run drags a segment below `promotionThreshold`. Unit-tested
+// in `segmentScoreMonotonicityWhenAddingAboveMeanWindow`.
+//
+// Note this applies to windows INSIDE the reported extent. A trailing
+// below-continuation window is outside it and never reaches the mean at all;
+// see the playhead-pggn section above.
 //
 // Thresholds & magic numbers
 // --------------------------
@@ -213,10 +268,14 @@ struct AdSegmentCandidate: Sendable, Equatable {
     /// `endTime` — snapped back to the last ≥ continuation window, NOT
     /// the end of a trailing below-continuation tail).
     let endTime: Double
-    /// Duration-weighted mean of per-window scores (see file header
-    /// comment for rationale).
+    /// Duration-weighted mean of per-window scores **over `[startTime,
+    /// endTime]` and nothing else** — see the file header's "THE SCORE
+    /// DESCRIBES THE SPAN THE SEGMENT REPORTS" section for the invariant and
+    /// why the other one was rejected. playhead-pggn.
     let segmentScore: Double
-    /// Number of input windows included in this segment.
+    /// Number of input windows that contributed to `segmentScore` — i.e. those
+    /// lying within the reported extent. A trailing below-continuation window
+    /// lies outside it, so it is counted here no more than it is scored.
     let windowCount: Int
     /// `true` iff `segmentScore >= promotionThreshold` AND
     /// `(endTime - startTime) >= minAdDurationSeconds`. Safety signals
@@ -322,10 +381,65 @@ enum SegmentAggregator {
             /// `belowContinuationSecondsToEnd`.
             var belowContinuationSeconds: Double = 0
 
+            // MARK: pending tail (playhead-pggn)
+            //
+            // Below-continuation windows lying BEYOND `lastQualifyingEndTime`
+            // are held here instead of in the segment's sums, because at the
+            // moment they arrive it is not yet known whether they will end up
+            // inside the reported extent. A later qualifying window that
+            // carries the extent past them folds them in; a close or a flush
+            // drops them. Nothing else may read these — `meanScore` must not.
+            //
+            // Held as four scalars rather than a list of windows so the state
+            // stays O(1) no matter how many zero-width windows arrive (a
+            // zero-width window advances no countdown, so a list would be
+            // unbounded).
+
+            /// Sum of (score · duration) over the pending tail.
+            var tailWeightedScoreSum: Double = 0
+            /// Sum of durations over the pending tail.
+            var tailDuration: Double = 0
+            /// Count of pending-tail windows.
+            var tailWindowCount: Int = 0
+            /// Largest `endTime` in the pending tail. The extent must reach at
+            /// least this far before the tail may be folded in.
+            var tailMaxEndTime: Double = -.infinity
+
+            /// Add a window to the segment's score. The caller is responsible
+            /// for having established that the window lies within the reported
+            /// extent — see `deferBeyondExtent` for the ones that do not.
             mutating func include(_ w: WindowScore) {
                 weightedScoreSum += w.score * w.durationSeconds
                 totalDuration += w.durationSeconds
                 windowCount += 1
+            }
+
+            /// Hold a below-continuation window that currently sits beyond the
+            /// reported extent. It contributes to neither the score nor the
+            /// count unless `foldPendingTail` later admits it.
+            mutating func deferBeyondExtent(_ w: WindowScore) {
+                tailWeightedScoreSum += w.score * w.durationSeconds
+                tailDuration += w.durationSeconds
+                tailWindowCount += 1
+                tailMaxEndTime = max(tailMaxEndTime, w.endTime)
+            }
+
+            /// Admit the pending tail into the score: the extent has grown to
+            /// cover it, so it is no longer a tail.
+            mutating func foldPendingTail() {
+                weightedScoreSum += tailWeightedScoreSum
+                totalDuration += tailDuration
+                windowCount += tailWindowCount
+                dropPendingTail()
+            }
+
+            /// Discard the pending tail unscored — the segment is ending here,
+            /// or the extent will not reach it.
+            mutating func dropPendingTail() {
+                tailWeightedScoreSum = 0
+                tailDuration = 0
+                tailWindowCount = 0
+                tailMaxEndTime = -.infinity
             }
 
             var meanScore: Double {
@@ -374,8 +488,12 @@ enum SegmentAggregator {
 
         /// Public: flush an open segment at end-of-stream.
         mutating func flushOpenSegment() -> AdSegmentCandidate? {
-            guard let seg = open else { return nil }
+            guard var seg = open else { return nil }
             open = nil
+            // The stream ended with a below-continuation tail still pending.
+            // Nothing will ever carry the extent past it, so it stays unscored
+            // (playhead-pggn).
+            seg.dropPendingTail()
             return Self.materialize(segment: seg, config: config)
         }
 
@@ -467,11 +585,28 @@ enum SegmentAggregator {
                 // have closed already — see the gap branch below).
                 if gap > config.maxInternalGapSeconds {
                     // Gap too large to bridge. Close the open segment and
-                    // then treat `w` as a fresh ingest from idle state.
+                    // then treat `w` as a fresh ingest from idle state. The
+                    // segment ends at `lastQualifyingEndTime`, so any pending
+                    // tail is outside it and stays unscored.
+                    seg.dropPendingTail()
                     finishedSlot = Self.materialize(segment: seg, config: config)
                     open = nil
                     ingestWhileIdle(w)
                     return
+                }
+                // The extent is about to advance to `w.endTime`. Anything held
+                // in the pending tail that this covers is now INSIDE the
+                // reported extent, so it must be scored — leaving it out would
+                // be the same defect mirrored, a score describing less than the
+                // span it reports. If the extent does not reach the whole tail
+                // (possible because `lastQualifyingEndTime` is assigned rather
+                // than maxed — see playhead-eqo8), the tail is dropped instead:
+                // under-covering the extent is tolerable, over-covering it is
+                // the thing this invariant forbids.
+                if w.endTime >= seg.tailMaxEndTime {
+                    seg.foldPendingTail()
+                } else {
+                    seg.dropPendingTail()
                 }
                 seg.include(w)
                 seg.lastQualifyingEndTime = w.endTime
@@ -480,17 +615,29 @@ enum SegmentAggregator {
                 return
             }
 
-            // Below continuation. Include the window in the score
-            // (it's still evidence about the region), but advance the
-            // end countdown. Note: the emitted endTime still snaps to
-            // `lastQualifyingEndTime`, so sub-continuation tail does
-            // NOT extend the reported segment boundary.
-            seg.include(w)
+            // Below continuation. This window is still evidence — it drives the
+            // end countdown below, which is what decides where the segment
+            // stops — but it may describe region the segment will never report,
+            // because the emitted endTime snaps to `lastQualifyingEndTime`.
+            //
+            // playhead-pggn: it therefore only enters the SCORE when it lies
+            // within the extent. A window already covered by
+            // `lastQualifyingEndTime` is inside and is scored immediately;
+            // anything reaching past it is held pending, to be folded in by a
+            // later qualifying window or dropped when the segment closes.
+            if w.endTime <= seg.lastQualifyingEndTime {
+                seg.include(w)
+            } else {
+                seg.deferBeyondExtent(w)
+            }
             seg.belowContinuationSeconds += w.durationSeconds
 
             if gap > config.maxInternalGapSeconds ||
                seg.belowContinuationSeconds >= config.belowContinuationSecondsToEnd {
-                // End condition met. Close the segment.
+                // End condition met. Close the segment. The pending tail is by
+                // construction beyond `lastQualifyingEndTime`, which is where
+                // the segment ends, so it is dropped rather than scored.
+                seg.dropPendingTail()
                 finishedSlot = Self.materialize(segment: seg, config: config)
                 open = nil
                 // A sub-continuation window cannot itself re-seed a new
@@ -555,6 +702,14 @@ enum SegmentAggregator {
             segment seg: OpenSegment,
             config: SegmentAggregatorConfig
         ) -> AdSegmentCandidate {
+            // playhead-pggn: every exit from an open segment must have settled
+            // the pending tail — folded it in because the extent covers it, or
+            // dropped it because it does not. Arriving here with one still
+            // pending would mean a caller found a fourth way out of the state
+            // machine, and the score would silently start describing region the
+            // geometry does not.
+            assert(seg.tailDuration == 0 && seg.tailWindowCount == 0,
+                   "materialize with an unsettled below-continuation tail")
             let mean = seg.meanScore
             let endTime = seg.lastQualifyingEndTime
             let duration = endTime - seg.startTime

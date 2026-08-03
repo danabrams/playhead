@@ -81,7 +81,8 @@ struct SegmentAggregatorWiringTests {
 
     private func makeService(
         store: AnalysisStore,
-        classifier: ClassifierService
+        classifier: ClassifierService,
+        unanchoredExtentBlocksAutoSkip: Bool = false
     ) -> AdDetectionService {
         let config = AdDetectionConfig(
             candidateThreshold: 0.40,
@@ -91,12 +92,15 @@ struct SegmentAggregatorWiringTests {
             detectorVersion: "0usd-test",
             fmBackfillMode: .off,
             autoSkipConfidenceThreshold: 0.80,
-            // playhead-bllt: the extent block OFF, deliberately — this suite's
-            // `eligibilityGate == "markOnly"` assertions are claims about the
-            // PRECISION gate's verdict on an aggregator segment, and bllt would
-            // make them true by construction. See the same note in
-            // `AutoSkipPrecisionGateIntegrationTests.makeService`.
-            unanchoredExtentBlocksAutoSkip: false
+            // playhead-bllt: the extent block defaults OFF here, deliberately —
+            // this suite's `eligibilityGate == "markOnly"` assertions are claims
+            // about the PRECISION gate's verdict on an aggregator segment, and
+            // bllt would make them true by construction. See the same note in
+            // `AutoSkipPrecisionGateIntegrationTests.makeService`. The pggn
+            // interaction test below passes `true` on purpose, to record what
+            // the shipped configuration does with a score that has stopped
+            // being diluted.
+            unanchoredExtentBlocksAutoSkip: unanchoredExtentBlocksAutoSkip
         )
         return AdDetectionService(
             store: store,
@@ -426,6 +430,124 @@ struct SegmentAggregatorWiringTests {
         ]
         #expect(!singleWindowActions.intersection(expectedPerWindowActions).isEmpty,
                 "per-window Tier 1 actions must remain in the log; got \(singleWindowActions)")
+    }
+
+    // MARK: - 6. playhead-pggn: the persisted confidence describes the persisted span
+
+    /// The bead's shape at Tier 1's 30 s slot granularity: a two-slot ad
+    /// followed by a quiet lead-out.
+    ///
+    ///   [  0, 30) @ 0.10   noise, below continuation — discarded while idle
+    ///   [ 30, 60) @ 0.62   opens the segment on the high-confidence branch
+    ///   [ 60, 90) @ 0.62   continues it; extent → 90
+    ///   [ 90,120) @ 0.10   the lead-out. Below continuation, 30 s ≥ the 3 s
+    ///                      countdown, so it closes the segment — and it lies
+    ///                      beyond the extent the segment reports.
+    ///   [120,180) @ 0.10   noise
+    ///
+    /// The persisted row spans [30, 90). Before playhead-pggn its confidence
+    /// was (0.62·30 + 0.62·30 + 0.10·30) / 90 = 0.4467 — a 60-second row
+    /// carrying a number that described 90 seconds, and one that sits in the
+    /// markOnly band rather than above the 0.55 auto-skip threshold.
+    private func leadOutSlotScores() -> [Double: Double] {
+        [0.0: 0.10, 30.0: 0.62, 60.0: 0.62, 90.0: 0.10, 120.0: 0.10, 150.0: 0.10]
+    }
+
+    @Test("playhead-pggn: a quiet lead-out does not dilute the confidence persisted on the row it is outside of")
+    func quietLeadOutDoesNotDiluteThePersistedConfidence() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-pggn-lead-out"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let duration: Double = 180
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: leadOutSlotScores(),
+            defaultScore: 0.10
+        )
+        let service = makeService(store: store, classifier: classifier)
+
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let aggregated = try await store.fetchAdWindows(assetId: assetId)
+            .filter { $0.boundaryState == AdBoundaryState.segmentAggregated.rawValue }
+        #expect(aggregated.count == 1,
+                "expected exactly one aggregator row for the lead-out shape; got \(aggregated.count)")
+        guard let win = aggregated.first else { return }
+
+        #expect(abs(win.startTime - 30.0) < 1e-6, "got \(win.startTime)")
+        #expect(abs(win.endTime - 90.0) < 1e-6,
+                "the reported extent must still stop at the last qualifying slot; got \(win.endTime)")
+        #expect(abs(win.confidence - 0.62) < 1e-6,
+                "the 60 s this row reports scored 0.62; got \(win.confidence)")
+        let diluted = (0.62 * 30 + 0.62 * 30 + 0.10 * 30) / 90
+        #expect(abs(win.confidence - diluted) > 1e-6,
+                "confidence is still the pre-pggn mean over 90 s (\(diluted)), not over the 60 s reported")
+    }
+
+    @Test("playhead-pggn × playhead-bllt: an undiluted 0.62 aggregator row still persists markOnly under the shipped extent gate")
+    func undilutedAggregatorRowStillDemotesUnderTheExtentGate() async throws {
+        // The net effect on auto-skip admission, recorded rather than assumed.
+        // `runSegmentAggregation` hardcodes `extentSupport = .unanchored`, so
+        // under the shipped `unanchoredExtentBlocksAutoSkip: true` every
+        // aggregator verdict is demoted. pggn raises this row's score across
+        // 0.55 and that changes nothing about what it is allowed to do.
+        //
+        // BE PRECISE ABOUT WHICH ASSERTION DOES THE WORK, because the obvious
+        // reading is wrong. On THIS fixture no safety signal fires (mid-episode
+        // segment, uniform feature grid, no lexical chunks), so
+        // `AutoSkipPrecisionGate` returns `.uiCandidate(.noSafetySignals)` and
+        // the row would be `markOnly` even with the extent block off. The
+        // `eligibilityGate` assertion below therefore does NOT discriminate a
+        // broken extent gate — the two ANCHOR assertions do, and the PG08
+        // mutation (claim `.rediffByteExact` on both edges) is killed by them
+        // and by nothing else. The demotion itself is pinned where it can be
+        // seen: `AutoSkipPrecisionGateIntegrationTests
+        // .highScoreSegmentWithSafetySignalDemotesOnUnanchoredExtent`, whose
+        // fixture co-fires a sponsor/promoCode/URL chunk so the gate really
+        // does reach the autoSkip PRESENCE verdict first (playhead-bllt,
+        // battery entries BL01/BL05).
+        let store = try await makeTestStore()
+        let assetId = "asset-pggn-bllt-interaction"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let duration: Double = 180
+        try await insertUniformFeatureGrid(store: store, assetId: assetId, duration: duration)
+
+        let classifier = SlotScoringClassifier(
+            scoresByStartTime: leadOutSlotScores(),
+            defaultScore: 0.10
+        )
+        let service = makeService(
+            store: store,
+            classifier: classifier,
+            unanchoredExtentBlocksAutoSkip: true
+        )
+
+        _ = try await service.runHotPath(
+            chunks: [],
+            analysisAssetId: assetId,
+            episodeDuration: duration
+        )
+
+        let aggregated = try await store.fetchAdWindows(assetId: assetId)
+            .filter { $0.boundaryState == AdBoundaryState.segmentAggregated.rawValue }
+        #expect(aggregated.count == 1, "got \(aggregated.count)")
+        guard let win = aggregated.first else { return }
+
+        // Positive witnesses, so this cannot pass by persisting nothing or by
+        // persisting a row whose score never reached the threshold in question.
+        #expect(win.confidence >= AutoSkipPrecisionGateConfig.default.autoSkipThreshold,
+                "the score must actually be above 0.55 for the demotion to be the thing under test; got \(win.confidence)")
+        #expect(win.eligibilityGate == "markOnly",
+                "an unanchored aggregator extent must not reach auto-skip at any score; got \(String(describing: win.eligibilityGate))")
+        #expect(win.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
+        #expect(win.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
     }
 }
 
