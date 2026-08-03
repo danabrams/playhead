@@ -3156,7 +3156,7 @@ MUTATIONS=(
   "PG04|273|SEGAGG|$T_PGGN_TAIL_WIDTH"
   "PG05|274|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_VALUE;$T_PGGN_NEVER_LOWERS"
   "PG06|275|SEGAGG|$T_PGGN_GAP_CLOSE"
-  "PG07|276|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_WIDTH"
+  "PG07|276|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_VALUE;$T_PGGN_TAIL_WIDTH"
   "PG08|276|ADSVC|$T_PGGN_BLLT"
 )
 
@@ -3226,7 +3226,7 @@ describe_mutation() {
     PG04) echo "pggn: the end-of-stream flush scores its pending tail" ;;
     PG05) echo "pggn: the countdown close scores its pending tail" ;;
     PG06) echo "pggn: the unbridgeable-gap close scores its pending tail" ;;
-    PG07) echo "pggn: the DENOMINATOR alone grows with the tail — dilution with no numerator contribution" ;;
+    PG07) echo "pggn: the DENOMINATOR alone grows with the dropped tail — dilution with no numerator contribution" ;;
     PG08) echo "pggn/bllt: the aggregator claims byte-exact edges, so an undiluted 0.62 reaches auto-skip over invented boundaries" ;;
     UG06) echo "ug9m: the rescue arm ignores the generation — a marked exit becomes retryable within a generation" ;;
     UG07) echo "ug9m: the rescue CEILING is removed — the re-fetch is unbounded" ;;
@@ -3962,13 +3962,27 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # PG07 — the denominator alone grows with the tail: `meanScore` divides by the
-  # region the tail covers without crediting its score. The sharpest form of the
-  # original defect, and the one a reader of `include()` alone cannot see.
+  # PG07 — the denominator alone grows with the tail: the dropped region is
+  # added to `totalDuration` without crediting its score. The sharpest form of
+  # the original defect, and the one a reader of `include()` alone cannot see.
+  #
+  # NOTE the first attempt at this mutation was `meanScore` dividing by
+  # `totalDuration + tailDuration`. That is INERT: every exit settles the tail
+  # before `materialize` reads the mean, so `tailDuration` is always 0 there and
+  # the edit changes nothing. It reported SURVIVED and was not a coverage hole.
+  # The mutation has to land where the tail still has a value — inside
+  # `dropPendingTail` itself.
   PG07)
-    patch "$file" \
-      "                totalDuration > 0 ? weightedScoreSum / totalDuration : 0.0" \
-      "                totalDuration > 0 ? weightedScoreSum / (totalDuration + tailDuration) : 0.0" ;;
+    snippet OLD <<'EOF'
+            mutating func dropPendingTail() {
+                tailWeightedScoreSum = 0
+EOF
+    snippet NEW <<'EOF'
+            mutating func dropPendingTail() {
+                totalDuration += tailDuration
+                tailWeightedScoreSum = 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # PG08 — the aggregator claims BOTH edges are byte-exact. Its edges are
   # wherever the scoring windows happened to fall; it never observes a boundary.

@@ -497,6 +497,21 @@ struct SegmentAggregatorWiringTests {
         // under the shipped `unanchoredExtentBlocksAutoSkip: true` every
         // aggregator verdict is demoted. pggn raises this row's score across
         // 0.55 and that changes nothing about what it is allowed to do.
+        //
+        // BE PRECISE ABOUT WHICH ASSERTION DOES THE WORK, because the obvious
+        // reading is wrong. On THIS fixture no safety signal fires (mid-episode
+        // segment, uniform feature grid, no lexical chunks), so
+        // `AutoSkipPrecisionGate` returns `.uiCandidate(.noSafetySignals)` and
+        // the row would be `markOnly` even with the extent block off. The
+        // `eligibilityGate` assertion below therefore does NOT discriminate a
+        // broken extent gate — the two ANCHOR assertions do, and the PG08
+        // mutation (claim `.rediffByteExact` on both edges) is killed by them
+        // and by nothing else. The demotion itself is pinned where it can be
+        // seen: `AutoSkipPrecisionGateIntegrationTests
+        // .highScoreSegmentWithSafetySignalDemotesOnUnanchoredExtent`, whose
+        // fixture co-fires a sponsor/promoCode/URL chunk so the gate really
+        // does reach the autoSkip PRESENCE verdict first (playhead-bllt,
+        // battery entries BL01/BL05).
         let store = try await makeTestStore()
         let assetId = "asset-pggn-bllt-interaction"
         try await store.insertAsset(makeAsset(id: assetId))

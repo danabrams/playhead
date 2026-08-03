@@ -304,8 +304,13 @@ struct AutoSkipPrecisionGateIntegrationTests {
     func highScoreSegmentWithNoSafetySignalsStaysMarkOnly() async throws {
         // Three adjacent Tier 1 slots at 0.85 opens via high-confidence
         // branch; one trailing sub-continuation slot (0.10) closes the
-        // segment. Mean ≈ (0.85·3 + 0.10)/4 = 0.6625, duration = 90 s
-        // (inclusive of gate upper bound). Segment centered at mid-
+        // segment. Mean = 0.85, duration = 90 s (inclusive of gate upper
+        // bound). playhead-pggn: the mean used to read
+        // (0.85·3 + 0.10)/4 = 0.6625, because the trailing 0.10 slot was
+        // scored while the emitted extent snapped back off it — a 90 s row
+        // carrying a 120 s number. Geometry is unchanged; only the number is.
+        // Both values clear this test's thresholds, so its assertions are
+        // untouched. Segment centered at mid-
         // episode (~1545 s in a 3600 s episode) — NOT in the first/last
         // 10% slot-prior window. No music grid (MusicBedLevel.none), no
         // user corrections, no chunks → no strong lexical signal. Result:

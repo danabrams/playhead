@@ -471,17 +471,24 @@ struct SegmentAggregatorTests {
                     guard let s = segments.first, s.promoted else { continue }
                     let dilutedMean = (seed * 60.0 + tail * width) / (60.0 + width)
                     comparisons += 1
+                    #expect(abs(s.segmentScore - seed) < 1e-9,
+                            "seed \(seed) tail \(tail) width \(width): the 60 s this segment reports scored \(seed); got \(s.segmentScore)")
                     #expect(s.segmentScore >= dilutedMean - 1e-12,
                             "seed \(seed) tail \(tail) width \(width): promoted score fell from \(dilutedMean) to \(s.segmentScore)")
                     if s.segmentScore > dilutedMean + 1e-12 { strictImprovements += 1 }
                 }
             }
         }
-        // Positive witnesses: the loop ran, and the correction is real rather
-        // than a no-op that would satisfy a >= assertion trivially.
+        // Positive witnesses. `comparisons > 0` proves the loop ran at all.
+        // The second one is EVERY case, not merely one: every tail here is
+        // strictly below its seed and every width is positive, so every single
+        // shape must improve strictly. A global `> 0` was too weak — it stayed
+        // satisfied by the short-tail cases (which exit through the flush) while
+        // a mutation folded the tail at the COUNTDOWN exit, and PG05 walked
+        // through it green.
         #expect(comparisons > 0)
-        #expect(strictImprovements > 0,
-                "every promoted segment scored identically before and after — the tail is not being excluded at all")
+        #expect(strictImprovements == comparisons,
+                "every one of these shapes must score strictly above the diluted mean; only \(strictImprovements) of \(comparisons) did")
     }
 
     @Test("playhead-pggn: closing a segment on an unbridgeable gap drops the pending tail rather than scoring it")
@@ -542,21 +549,50 @@ struct SegmentAggregatorTests {
         // sorted stream (SegmentAggregator contract, file header), so a narrow
         // low-scoring window can arrive while the extent already reaches past
         // its end. That window is inside the reported span and must count.
-        let windows: [SegmentAggregator.WindowScore] = [
+        //
+        // THE SEGMENT MUST CLOSE RIGHT AFTER THE DIP for this to discriminate,
+        // and that is not a stylistic preference — it is the fix for a measured
+        // hole. The first version of this rail ended with a QUALIFYING window,
+        // which folds a wrongly-deferred dip straight back in; correct and
+        // inverted behaviour then agree exactly, and the PG02 mutation (defer
+        // what is inside, score what is outside) walked through it green.
+        let closing: [SegmentAggregator.WindowScore] = [
             .init(startTime: 0.0, endTime: 30.0, score: 0.65),   // opens; extent → 30
             .init(startTime: 10.0, endTime: 12.0, score: 0.10),  // 2 s dip INSIDE [0,30)
-            .init(startTime: 30.0, endTime: 60.0, score: 0.50)
+            .init(startTime: 30.0, endTime: 34.0, score: 0.02)   // 4 s beyond it; countdown 6 ≥ 3 → close
         ]
-        let segments = SegmentAggregator.aggregate(
-            windows: windows,
+        let closed = SegmentAggregator.aggregate(
+            windows: closing,
             config: Self.defaultConfig
         )
-        #expect(segments.count == 1)
-        guard let s = segments.first else { return }
+        #expect(closed.count == 1)
+        guard let c = closed.first else { return }
+        #expect(abs(c.endTime - 30.0) < 1e-9)
+        // (0.65·30 + 0.10·2) / 32 = 19.7 / 32 = 0.615625. The dip counts
+        // because it is inside the reported extent; the 0.02 window does not
+        // because it is not. Deferring the dip instead would drop it at close
+        // and read 19.58 / 34 = 0.5759.
+        #expect(abs(c.segmentScore - (19.7 / 32.0)) < 1e-9,
+                "a dip already inside the extent must not be deferred out of the score; got \(c.segmentScore)")
+        #expect(c.windowCount == 2)
+
+        // The same containment rule when a qualifying window DOES follow. This
+        // arm cannot tell deferral from inclusion on its own — it is kept
+        // because it pins the arithmetic of the fold path end to end.
+        let continuing: [SegmentAggregator.WindowScore] = [
+            .init(startTime: 0.0, endTime: 30.0, score: 0.65),
+            .init(startTime: 10.0, endTime: 12.0, score: 0.10),
+            .init(startTime: 30.0, endTime: 60.0, score: 0.50)
+        ]
+        let carried = SegmentAggregator.aggregate(
+            windows: continuing,
+            config: Self.defaultConfig
+        )
+        #expect(carried.count == 1)
+        guard let s = carried.first else { return }
         #expect(abs(s.endTime - 60.0) < 1e-9)
         // (0.65·30 + 0.10·2 + 0.50·30) / 62 = 34.7 / 62.
-        #expect(abs(s.segmentScore - (34.7 / 62.0)) < 1e-9,
-                "a dip already inside the extent must not be deferred out of the score; got \(s.segmentScore)")
+        #expect(abs(s.segmentScore - (34.7 / 62.0)) < 1e-9, "got \(s.segmentScore)")
         #expect(s.windowCount == 3)
     }
 }
