@@ -66,12 +66,15 @@ struct DayZeroRediffTrigger: Sendable {
     /// The user's "deep-scan" opt-in — lets a day-0 fetch run unplugged on WiFi.
     /// Defaults to `false` (no opt-in) until a settings toggle is wired.
     let deepScanOptInProvider: @Sendable () -> Bool
-    /// playhead-p70f change 2: the DURABLE per-asset day-0 history this trigger
+    /// playhead-p70f change 2: the DURABLE per-asset day-0 state this trigger
     /// consults before spending anything. Production reads
-    /// `AnalysisStore.fetchRediffDayZeroAttempt`. The `nil`-returning default
-    /// reproduces the pre-p70f "always attempt" behavior for callers that have
-    /// no store.
-    let attemptRecordProvider: @Sendable (String) async -> RediffDayZeroAttemptRecord?
+    /// `AnalysisStore.fetchDayZeroAttemptContext`.
+    ///
+    /// playhead-ug9m widened this from a bare attempt record to a
+    /// `DayZeroAttemptContext`, because the rescue decision is a conjunction
+    /// over the record AND the asset's day-0 marks and the two must come from
+    /// one snapshot — see `DayZeroAttemptContext`.
+    let attemptContextProvider: @Sendable (String) async -> DayZeroAttemptContext
     /// playhead-p70f: records that a kickoff was DECLINED without spending
     /// bytes. A suppression that leaves no trace is indistinguishable from a
     /// trigger that never fired, which is the mistake this whole bead exists to
@@ -87,7 +90,7 @@ struct DayZeroRediffTrigger: Sendable {
     /// fire-and-forget and drop the outcome on the floor. Putting the decision
     /// at the one place that already computes the outcome means a third caller
     /// cannot reintroduce the bug by forgetting, and it is the same reasoning
-    /// (and the same required-parameter discipline) as `attemptRecordProvider`
+    /// (and the same required-parameter discipline) as `attemptContextProvider`
     /// above.
     let mintedMarkDelivery: @Sendable (String) async -> Void
     /// playhead-4dqe: the rolling 24 h day-0 byte window
@@ -116,10 +119,10 @@ struct DayZeroRediffTrigger: Sendable {
         // turn that regression into a compile error, which is a stronger
         // guarantee than any test could give. Callers that genuinely have no
         // store pass the opt-outs explicitly and say why.
-        attemptRecordProvider: @escaping @Sendable (String) async -> RediffDayZeroAttemptRecord?,
+        attemptContextProvider: @escaping @Sendable (String) async -> DayZeroAttemptContext,
         suppressionRecorder: @escaping @Sendable (String, RediffDayZeroExit, Double) async -> Void,
         // DELIBERATELY NOT DEFAULTED, for exactly the reason recorded above
-        // `attemptRecordProvider`. A `{ _ in }` default reproduces the
+        // `attemptContextProvider`. A `{ _ in }` default reproduces the
         // playhead-96ot defect verbatim — marks minted, nothing delivered, the
         // whole suite green — and nothing in the suite builds a real
         // `PlayheadRuntime`, so deleting the wiring there would be invisible.
@@ -141,7 +144,7 @@ struct DayZeroRediffTrigger: Sendable {
         self.transportProvider = transportProvider
         self.chargeStateProvider = chargeStateProvider
         self.deepScanOptInProvider = deepScanOptInProvider
-        self.attemptRecordProvider = attemptRecordProvider
+        self.attemptContextProvider = attemptContextProvider
         self.suppressionRecorder = suppressionRecorder
         self.mintedMarkDelivery = mintedMarkDelivery
         self.budgetWindowProvider = budgetWindowProvider
@@ -222,8 +225,12 @@ struct DayZeroRediffTrigger: Sendable {
         //
         // The check runs AFTER the transport/power gate but BEFORE anything is
         // fetched.
-        let prior = await attemptRecordProvider(analysisAssetId)
-        if case let .suppress(reason, _) = DayZeroRediffAttemptPolicy.decide(record: prior, now: now) {
+        let prior = await attemptContextProvider(analysisAssetId)
+        if case let .suppress(reason, _) = DayZeroRediffAttemptPolicy.decide(
+            record: prior.record,
+            markCensus: prior.markCensus,
+            now: now
+        ) {
             await suppressionRecorder(analysisAssetId, reason, now)
             return SweepSummary()
         }

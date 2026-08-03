@@ -164,6 +164,23 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
     /// ≥1 mark-only banner was minted. The success terminal.
     case marked = "marked"
 
+    /// playhead-ug9m — THE SURFACED "PERMANENTLY FROZEN" STATE. This asset's
+    /// day-0 marks are all degraded (no `.rediffByteExact` anchor on any of
+    /// them, so every one banners and none can auto-skip) AND the one rescue
+    /// re-attempt this generation grants has already been spent.
+    ///
+    /// It exists as its own case rather than folding into `.marked` because the
+    /// two say opposite things about whether the user is getting what the
+    /// detection earned. `.marked` means "day-0 is done here"; this means
+    /// "day-0 is done here and the result is worse than the detector was capable
+    /// of, and nothing further will be attempted until
+    /// `DayZeroRediffAttemptPolicy.currentGeneration` moves". A support pull can
+    /// count these; silence could not be counted.
+    ///
+    /// FREE (spends nothing — it is a pre-fetch refusal) and NOT retryable: it
+    /// is a terminal statement about this generation by construction.
+    case rescueExhausted = "rescue_exhausted"
+
     /// Whether this exit means the attempt spent (or could have spent) the
     /// ~54 MB × K full fetch. The pre-fetch exits are free by construction
     /// (playhead-p70f change 3 moved them ahead of the download); everything
@@ -173,7 +190,8 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
         case .minterUnavailable, .assetRowMissing, .assetFetchFailed,
              .aSideNotAnchored, .aSideReadFailed, .suppressedByBackoff,
              .alreadyInFlight, .deniedUnreachable, .deniedLowDataMode,
-             .deniedCellularNotAllowed, .deniedPower, .deniedDailyBudget:
+             .deniedCellularNotAllowed, .deniedPower, .deniedDailyBudget,
+             .rescueExhausted:
             return false
         case .fetchFailed, .tooFewBCopies, .noAcceptedByteDiff, .noDivergentSlot,
              .allSlotsAlreadyCovered, .persistFailed, .marked:
@@ -191,7 +209,7 @@ enum RediffDayZeroExit: String, Sendable, Equatable, Codable, CaseIterable {
     /// backoff, not this flag, is what stops it spinning.
     var isRetryable: Bool {
         switch self {
-        case .marked:
+        case .marked, .rescueExhausted:
             return false
         case .minterUnavailable, .assetRowMissing, .assetFetchFailed,
              .aSideNotAnchored, .aSideReadFailed, .suppressedByBackoff,
@@ -256,6 +274,21 @@ struct RediffDayZeroMintOutcome: Sendable, Equatable {
     /// idempotency filter. `> 0` with `markCount == 0` means
     /// `allSlotsAlreadyCovered`.
     var divergentSlotCount: Int = 0
+    /// playhead-ug9m: how many of `markCount` were STRICT monotonic-clean
+    /// byte-exact slots — the ones that earned `.rediffByteExact` anchors and,
+    /// under `RediffActivation.dayZeroByteExactAutoSkipEnabled`, auto-skip
+    /// eligibility. `markCount - strictMarkCount` is the 9s6q segment-recovered
+    /// remainder, which banners.
+    ///
+    /// This is the quantity the whole bead turns on, and it was previously
+    /// visible only in an os_log line: a mint of 4 marks, 0 of them strict, is
+    /// the D9B513CD case — a `.marked` terminal that delivers no skip at all.
+    var strictMarkCount: Int = 0
+    /// playhead-ug9m: degraded day-0 rows from an EARLIER attempt that this
+    /// mint's strict slots superseded (retired and replaced). `0` on every
+    /// first-listen mint; non-zero only on a rescue that actually improved
+    /// something.
+    var supersededMarkCount: Int = 0
     /// Free-text detail (an error description). Truncated by the recorder
     /// before it reaches the database.
     var detail: String?
@@ -325,6 +358,17 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
     /// day-0, so the budget starts over — see
     /// `DayZeroRediffAttemptPolicy.currentGeneration`.
     let policyGeneration: Int
+    /// playhead-ug9m: how many RESCUE re-attempts this asset has spent in the
+    /// current generation — a re-attempt made after day-0 had ALREADY marked the
+    /// asset, granted only because those marks were all degraded.
+    ///
+    /// Separate from `attemptCount` because it bounds a different thing. The
+    /// attempt budget bounds the FIRST-listen probe; this bounds the second
+    /// chance, and it is checked whatever exit the previous attempt took, so a
+    /// rescue that lands in `.noDivergentSlot` cannot then fall through into the
+    /// ordinary three-attempt budget and spend another ~216 MB re-deriving
+    /// nothing. Capped at `DayZeroRediffAttemptPolicy.maxRescueAttempts`.
+    let rescueAttemptCount: Int
 
     init(
         analysisAssetId: String,
@@ -342,7 +386,8 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         suppressedCount: Int = 0,
         lastSuppressedAt: Double? = nil,
         lastDetail: String? = nil,
-        policyGeneration: Int = DayZeroRediffAttemptPolicy.currentGeneration
+        policyGeneration: Int = DayZeroRediffAttemptPolicy.currentGeneration,
+        rescueAttemptCount: Int = 0
     ) {
         self.analysisAssetId = analysisAssetId
         self.attemptCount = attemptCount
@@ -360,6 +405,7 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         self.lastSuppressedAt = lastSuppressedAt
         self.lastDetail = lastDetail
         self.policyGeneration = policyGeneration
+        self.rescueAttemptCount = rescueAttemptCount
     }
 }
 
@@ -416,9 +462,39 @@ enum DayZeroRediffAttemptPolicy {
     /// actually replayed; NOT bumping silently withholds the fix from every
     /// episode that already exhausted its budget.
     ///
-    /// `.marked` is exempt and stays terminal across generations: the marks are
-    /// already persisted, so a re-fetch would spend ~108 MB to mint nothing.
-    static let currentGeneration = 1
+    /// `.marked` is exempt and stays terminal across generations — EXCEPT for
+    /// the narrow playhead-ug9m rescue below: the marks are already persisted,
+    /// so a re-fetch would spend ~108 MB to mint nothing, UNLESS every one of
+    /// those marks is degraded, in which case a re-fetch is the only way to
+    /// mint what the detector was capable of.
+    ///
+    /// **2 (playhead-ug9m), was 1.** Bumped because day-0's outcome-determining
+    /// behavior changed twice without a bump: playhead-qs0d changed what a mint
+    /// PERSISTS (a strict slot now carries `.rediffByteExact` anchors and
+    /// `eligibilityGate = .eligible` instead of `unanchored`/`.markOnly`), and
+    /// this bead lets a strict re-mint supersede its own degraded rows. Assets
+    /// that exhausted their budget under generation 1 were measuring a build
+    /// whose day-0 could not stamp an anchor at all.
+    static let currentGeneration = 2
+
+    /// playhead-ug9m — the RESCUE bound. How many re-attempts, per generation,
+    /// an asset that ALREADY has day-0 marks may spend.
+    ///
+    /// **1, and it is enforced by a persisted counter, not by hope.** A rescue
+    /// costs a full k-way fetch (~108 MB at `dayZeroKWayFetchCount == 2`), and
+    /// the failure mode this bead is fixing was itself created by a policy that
+    /// looked bounded and was not. One is enough to be worth doing: the trapped
+    /// populations are (a) rows minted before qs0d, which are unanchored even
+    /// when strict and whose re-mint on this build stamps the anchor they
+    /// earned, and (b) rows whose first attempt came out wholly non-strict,
+    /// which get exactly one draw at different personas. If the second draw is
+    /// also degraded, the asset is `.frozen` and SAYS SO
+    /// (`RediffDayZeroExit.rescueExhausted`) rather than going quiet.
+    ///
+    /// Generation-scoped like `maxAttempts`, and for the same reason: a bump is
+    /// a deliberate statement that day-0 behaves differently now, which is
+    /// exactly when a frozen asset deserves another look.
+    static let maxRescueAttempts = 1
 
     /// The decision, with the reason attached so the caller can RECORD a
     /// suppression rather than silently doing nothing (the original sin).
@@ -449,20 +525,60 @@ enum DayZeroRediffAttemptPolicy {
     /// May a day-0 attempt run for this asset now?
     ///
     /// - `nil` record ⇒ never attempted ⇒ attempt 1.
-    /// - last exit `.marked` ⇒ NEVER again. The marks are already persisted and
-    ///   the mint's own overlap filter would drop everything anyway; re-fetching
-    ///   would spend ~108 MB to mint zero windows. This is the single most
-    ///   valuable suppression.
+    /// - the asset already has day-0 marks AND its rescue budget is spent ⇒
+    ///   suppress as `.rescueExhausted`, whatever exit the last attempt took
+    ///   (playhead-ug9m; see `maxRescueAttempts`).
+    /// - last exit `.marked` ⇒ NEVER again, with ONE exception. The marks are
+    ///   already persisted and the mint's own overlap filter would drop
+    ///   everything anyway; re-fetching would spend ~108 MB to mint zero
+    ///   windows. This is the single most valuable suppression. The exception
+    ///   (playhead-ug9m) is an asset from an OLDER generation whose every day-0
+    ///   mark is DEGRADED — see `DayZeroMarkCensus.isRescuable` for why that is
+    ///   a fact about persisted rows rather than a guess about provenance.
     /// - record from an OLDER generation ⇒ the budget starts over (see
-    ///   `currentGeneration`); `.marked` is checked first and stays terminal.
+    ///   `currentGeneration`); `.marked` is checked first and stays terminal
+    ///   apart from the rescue.
     /// - attempt budget exhausted ⇒ suppress until the generation changes.
     /// - inside the backoff window ⇒ suppress until it elapses.
+    ///
+    /// - Parameter markCensus: what is ON DISK for this asset right now, read
+    ///   in the SAME snapshot as `record` (see `DayZeroAttemptContext`). The
+    ///   default is `.empty` — "no day-0 marks" — which reproduces the
+    ///   pre-playhead-ug9m behavior exactly: no rescue is ever granted and no
+    ///   ceiling ever fires. That is the CONSERVATIVE direction, so a caller
+    ///   that omits it withholds a fix rather than spending bandwidth.
     static func decide(
         record: RediffDayZeroAttemptRecord?,
+        markCensus: DayZeroMarkCensus = .empty,
         now: Double
     ) -> Decision {
         guard let record else { return .attempt(attemptNumber: 1) }
+        // playhead-ug9m — THE RESCUE CEILING, checked before anything else that
+        // could grant an attempt. Deliberately keyed on "this asset HAS day-0
+        // marks" rather than on `lastExit == .marked`: a rescue that ended in
+        // `.noDivergentSlot` leaves a RETRYABLE exit behind, and without this
+        // it would fall straight through into the ordinary three-attempt budget
+        // — turning a bounded second chance into ~324 MB.
+        if markCensus.hasMarks, record.rescueAttemptCount >= maxRescueAttempts {
+            return .suppress(reason: .rescueExhausted, nextEligibleAt: nil)
+        }
         guard record.lastExit.isRetryable else {
+            // playhead-ug9m — THE RESCUE. Three conjuncts, each load-bearing:
+            //   * `.marked` — the only non-retryable exit a rescue applies to.
+            //     `.rescueExhausted` falls through to the suppression below,
+            //     which is what makes it terminal.
+            //   * a FOREIGN generation — this build's day-0 behaves differently
+            //     from the one that produced these marks. Within a generation
+            //     `.marked` stays exactly as terminal as it was.
+            //   * `isRescuable` — every day-0 mark on this asset is degraded.
+            //     One anchored row proves the mint could stamp anchors and did,
+            //     which makes the unanchored siblings a deliberate qs0d
+            //     withholding, not a loss.
+            if record.lastExit == .marked,
+               record.policyGeneration != currentGeneration,
+               markCensus.isRescuable {
+                return .attempt(attemptNumber: 1)
+            }
             return .suppress(reason: record.lastExit, nextEligibleAt: nil)
         }
         // Deliberately AFTER the `.marked` check and BEFORE the budget check:
@@ -512,6 +628,13 @@ enum DayZeroRediffAttemptPolicy {
     ) -> RediffDayZeroAttemptRecord {
         let budgeted = record?.policyGeneration == currentGeneration ? record : nil
         let spentBandwidth = outcome.exit.spentBandwidth
+        // playhead-ug9m: THIS attempt is a rescue exactly when the record it
+        // folds into already said `.marked` — `decide` grants an attempt over a
+        // `.marked` record through one branch and one branch only, so the prior
+        // exit IS the discriminator and no extra parameter has to be threaded
+        // through the service to carry it. It counts only if bytes were spent,
+        // for the same reason `attemptCount` does.
+        let isRescue = record?.lastExit == .marked && spentBandwidth
         return RediffDayZeroAttemptRecord(
             analysisAssetId: assetId,
             attemptCount: (budgeted?.attemptCount ?? 0) + (spentBandwidth ? 1 : 0),
@@ -531,7 +654,10 @@ enum DayZeroRediffAttemptPolicy {
             suppressedCount: record?.suppressedCount ?? 0,
             lastSuppressedAt: record?.lastSuppressedAt,
             lastDetail: outcome.detail.map { String($0.prefix(detailCharCap)) },
-            policyGeneration: currentGeneration
+            policyGeneration: currentGeneration,
+            // Generation-scoped like `attemptCount`: a bump grants one fresh
+            // rescue, and within a generation the counter only ever rises.
+            rescueAttemptCount: (budgeted?.rescueAttemptCount ?? 0) + (isRescue ? 1 : 0)
         )
     }
 

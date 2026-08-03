@@ -1678,10 +1678,13 @@ final class PlayheadRuntime {
                     await batteryProvider.currentBatteryState().isCharging
                 },
                 deepScanOptInProvider: { false },
-                attemptRecordProvider: { assetId in
+                attemptContextProvider: { assetId in
                     // A store read failure must FAIL OPEN (attempt) rather than
                     // permanently suppressing day-0 on a transient error.
-                    (try? await dayZeroAttemptStore.fetchRediffDayZeroAttempt(assetId: assetId)) ?? nil
+                    // playhead-ug9m: ONE store call, so the attempt record and
+                    // the day-0 mark census cannot straddle a mint.
+                    (try? await dayZeroAttemptStore.fetchDayZeroAttemptContext(assetId: assetId))
+                        ?? .never
                 },
                 suppressionRecorder: { assetId, reason, now in
                     try? await dayZeroAttemptStore.noteRediffDayZeroSuppression(
@@ -1695,7 +1698,7 @@ final class PlayheadRuntime {
                 },
                 // playhead-4dqe: the rolling 24 h day-0 byte budget. A read
                 // failure FAILS OPEN (an empty window ⇒ the whole cap) for the
-                // same reason `attemptRecordProvider` does: a transient store
+                // same reason `attemptContextProvider` does: a transient store
                 // error must not permanently starve the lane. The bound that
                 // matters is still enforced on the write side, which is atomic.
                 budgetWindowProvider: {

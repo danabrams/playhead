@@ -388,6 +388,11 @@ enum RediffDiagnosticsFetchAdapter {
         case bandwidth
         case refetchStates = "refetch_states"
         case dayZeroAttempts = "day_zero_attempts"
+        /// playhead-ug9m. Named for the same reason as its siblings, and the
+        /// reason bites hardest here: an unreadable mark census renders as "no
+        /// asset is frozen", which is the exact conflation between an absence
+        /// and a healthy zero that this whole telemetry surface exists to stop.
+        case dayZeroMarkFreeze = "day_zero_mark_freeze"
         case backgroundRuns = "background_runs"
     }
 
@@ -399,6 +404,8 @@ enum RediffDiagnosticsFetchAdapter {
                 try? await store.fetchRediffRefetchStates()
             async let dayZero: [RediffDayZeroAttemptRecord]? =
                 try? await store.fetchRediffDayZeroAttempts(limit: rowFetchLimit)
+            async let freeze: [DayZeroMarkFreezeReport]? =
+                try? await store.fetchDayZeroMarkFreezeReports(limit: rowFetchLimit)
             async let runs: [BackgroundTaskRunRecord]? = try? await store.fetchRecentBackgroundTaskRuns(
                 entryPoint: .rediffRefetch, limit: backgroundRunFetchLimit
             )
@@ -406,6 +413,7 @@ enum RediffDiagnosticsFetchAdapter {
             let readBandwidth = await bandwidth
             let readStates = await states
             let readDayZero = await dayZero
+            let readFreeze = await freeze
             let readRuns = await runs
 
             // Fixed order, so two exports of the same fault are comparable.
@@ -413,6 +421,7 @@ enum RediffDiagnosticsFetchAdapter {
             if readBandwidth == nil { failures.append(Read.bandwidth.rawValue) }
             if readStates == nil { failures.append(Read.refetchStates.rawValue) }
             if readDayZero == nil { failures.append(Read.dayZeroAttempts.rawValue) }
+            if readFreeze == nil { failures.append(Read.dayZeroMarkFreeze.rawValue) }
             if readRuns == nil { failures.append(Read.backgroundRuns.rawValue) }
 
             return DiagnosticsRediffSnapshot(
@@ -420,6 +429,7 @@ enum RediffDiagnosticsFetchAdapter {
                 refetchStates: readStates ?? [],
                 dayZeroAttempts: readDayZero ?? [],
                 backgroundRuns: readRuns ?? [],
+                dayZeroMarkFreeze: readFreeze ?? [],
                 readFailures: failures
             )
         }

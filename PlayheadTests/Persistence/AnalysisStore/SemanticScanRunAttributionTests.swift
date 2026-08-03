@@ -159,7 +159,7 @@ struct SemanticScanRunAttributionTests {
         let (store, dir) = try await makeTestStoreWithDirectory()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 42)
+        #expect(AnalysisStore.currentSchemaVersion == 43)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

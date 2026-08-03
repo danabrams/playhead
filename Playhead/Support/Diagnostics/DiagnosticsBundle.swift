@@ -396,6 +396,9 @@ struct DefaultBundle: Codable, Sendable, Equatable {
         let bandwidth: RediffBandwidthSummary
         let refetchStates: [RediffRefetchStateSummary]
         let dayZeroAttempts: [RediffDayZeroAttemptSummary]
+        /// playhead-ug9m: per-asset day-0 MARK QUALITY — what the listener is
+        /// left with, as opposed to what the last attempt did.
+        let dayZeroMarkFreeze: [DayZeroMarkFreezeSummary]
         let backgroundRuns: [RediffBackgroundRunSummary]
         /// Which of the four reads THREW, by the closed
         /// `RediffDiagnosticsFetchAdapter.Read` vocabulary. Empty is healthy.
@@ -413,6 +416,7 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             bandwidth: RediffBandwidthSummary(),
             refetchStates: [],
             dayZeroAttempts: [],
+            dayZeroMarkFreeze: [],
             backgroundRuns: [],
             readFailures: []
         )
@@ -421,12 +425,14 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             bandwidth: RediffBandwidthSummary,
             refetchStates: [RediffRefetchStateSummary],
             dayZeroAttempts: [RediffDayZeroAttemptSummary],
+            dayZeroMarkFreeze: [DayZeroMarkFreezeSummary] = [],
             backgroundRuns: [RediffBackgroundRunSummary],
             readFailures: [String] = []
         ) {
             self.bandwidth = bandwidth
             self.refetchStates = refetchStates
             self.dayZeroAttempts = dayZeroAttempts
+            self.dayZeroMarkFreeze = dayZeroMarkFreeze
             self.backgroundRuns = backgroundRuns
             self.readFailures = readFailures
         }
@@ -440,14 +446,67 @@ struct DefaultBundle: Codable, Sendable, Equatable {
             // Absent in bundles minted before review round 2 — decode as
             // "nothing failed" rather than rejecting the whole bundle.
             readFailures = try container.decodeIfPresent([String].self, forKey: .readFailures) ?? []
+            // playhead-ug9m: absent in bundles minted before this bead. Decoded
+            // as EMPTY, which reads as "this build did not report mark quality"
+            // — not as "no asset is frozen". The distinction matters because
+            // `frozen` is exactly the state that used to be indistinguishable
+            // from silence.
+            dayZeroMarkFreeze = try container.decodeIfPresent(
+                [DayZeroMarkFreezeSummary].self,
+                forKey: .dayZeroMarkFreeze
+            ) ?? []
         }
 
         enum CodingKeys: String, CodingKey {
             case bandwidth
             case refetchStates = "refetch_states"
             case dayZeroAttempts = "day_zero_attempts"
+            case dayZeroMarkFreeze = "day_zero_mark_freeze"
             case backgroundRuns = "background_runs"
             case readFailures = "read_failures"
+        }
+    }
+
+    /// playhead-ug9m — one asset's day-0 MARK QUALITY.
+    ///
+    /// HOW TO READ IT. `state` is the whole point:
+    ///   * `anchored` — at least one day-0 mark carries a byte-exact anchor on
+    ///     both edges, so the listener gets a SKIP where the differ was strict.
+    ///     Healthy.
+    ///   * `rescuable` — every day-0 mark is unanchored: the listener gets a
+    ///     banner and never a skip. One re-attempt is still available.
+    ///   * `frozen` — the same, with the re-attempt spent. Nothing further will
+    ///     happen for this asset until
+    ///     `DayZeroRediffAttemptPolicy.currentGeneration` moves. THIS is the
+    ///     state that was previously pure silence.
+    ///   * `settled` — every day-0 mark was vetoed, dismissed, applied or
+    ///     confirmed. Not a defect: the user decided.
+    ///
+    /// `degraded_count` beside `anchored_count` is what earns the state, and
+    /// `rescue_attempt_count` is what bounds it. No free text; every field is an
+    /// integer or a closed enum `rawValue`, and the asset id is hashed by
+    /// `EpisodeIdHasher` exactly as its siblings are.
+    struct DayZeroMarkFreezeSummary: Codable, Sendable, Equatable {
+        let assetIdHash: String
+        let state: String
+        let anchoredCount: Int
+        let degradedCount: Int
+        let settledCount: Int
+        let rescueAttemptCount: Int
+        /// The last day-0 attempt's exit, `nil` when the asset has day-0 marks
+        /// but no attempt row (a row deleted, or a pre-playhead-p70f mint).
+        let lastExit: String?
+        let policyGeneration: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case assetIdHash = "asset_id_hash"
+            case state
+            case anchoredCount = "anchored_count"
+            case degradedCount = "degraded_count"
+            case settledCount = "settled_count"
+            case rescueAttemptCount = "rescue_attempt_count"
+            case lastExit = "last_exit"
+            case policyGeneration = "policy_generation"
         }
     }
 
