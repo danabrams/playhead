@@ -24,7 +24,10 @@ struct StreamingDownloadCachedTests {
 
         let result = try await manager.streamingDownload(
             episodeId: "cached-ep",
-            from: URL(string: "https://example.com/ep.mp3")!
+            from: URL(string: "https://example.com/ep.mp3")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
 
         #expect(result.fileURL == completeURL)
@@ -56,7 +59,10 @@ struct StreamingDownloadCachedTests {
 
         let result = try await manager.streamingDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.com/route.php")!
+            from: URL(string: "https://example.com/route.php")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
 
         #expect(result.fileURL == completeURL)
@@ -86,7 +92,10 @@ struct StreamingDownloadCachedTests {
 
         let result = try await manager.streamingDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.com/route.php")!
+            from: URL(string: "https://example.com/route.php")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
 
         #expect(result.fileURL == completeURL)
@@ -116,14 +125,20 @@ struct StreamingDownloadCachedTests {
 
         let streaming = try await manager.streamingDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.com/episode.m4a")!
+            from: URL(string: "https://example.com/episode.m4a")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
         #expect(streaming.fileURL == mp3URL)
         #expect(streaming.contentType == "public.mp3")
 
         let progressive = try await manager.progressiveDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.com/episode.m4a")!
+            from: URL(string: "https://example.com/episode.m4a")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
         #expect(progressive == mp3URL)
 
@@ -378,7 +393,10 @@ struct StreamingDownloadCachedTests {
 
         let result = try await manager.streamingDownload(
             episodeId: episodeId,
-            from: URL(string: "https://example.com/episode.m4a")!
+            from: URL(string: "https://example.com/episode.m4a")!,
+            context: .unattributed(
+                reason: .testHarness, isExplicitDownload: false
+            )
         )
 
         #expect(result.fileURL == mp3URL)

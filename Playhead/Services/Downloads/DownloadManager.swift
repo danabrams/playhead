@@ -822,9 +822,9 @@ actor DownloadManager {
     /// paths.
     private func makeRedirectRecordingDelegate(
         url: URL,
-        context: DownloadContext?
+        context: DownloadContext
     ) -> RedirectChainRecordingDelegate? {
-        guard daiStitchRecorder != nil, context?.podcastId != nil else { return nil }
+        guard daiStitchRecorder != nil, context.podcastId != nil else { return nil }
         return RedirectChainRecordingDelegate(initialHost: url.host)
     }
 
@@ -834,12 +834,12 @@ actor DownloadManager {
     /// response URL host, appended when it differs from the last recorded hop.
     private func recordDAIStitchChain(
         delegate: RedirectChainRecordingDelegate?,
-        context: DownloadContext?,
+        context: DownloadContext,
         finalHost: String?
     ) {
         guard let recorder = daiStitchRecorder,
               let delegate,
-              let podcastId = context?.podcastId else { return }
+              let podcastId = context.podcastId else { return }
         var hosts = delegate.hopHosts
         if let finalHost, !finalHost.isEmpty, hosts.last != finalHost {
             hosts.append(finalHost)
@@ -1325,10 +1325,13 @@ actor DownloadManager {
     /// The download continues in the background until complete.
     ///
     /// If the file is already fully cached, returns immediately.
+    /// playhead-kkzu: `context` is required, with no default. This entry
+    /// point has no production caller today, and a defaulted context is
+    /// exactly how the next one would silently record a NULL show.
     func progressiveDownload(
         episodeId: String,
         from url: URL,
-        context: DownloadContext? = nil
+        context: DownloadContext
     ) async throws -> URL {
         guard activeStreamingTransfer?.episodeId != episodeId else {
             throw DownloadManagerError.alreadyDownloading(episodeId)
@@ -1371,7 +1374,7 @@ actor DownloadManager {
 
     /// Core download logic: downloads to a temp file, then moves to cache.
     /// Uses URLSession.shared.download(for:) to avoid byte-at-a-time iteration.
-    private func performDownload(episodeId: String, url: URL, context: DownloadContext? = nil) async throws -> URL {
+    private func performDownload(episodeId: String, url: URL, context: DownloadContext) async throws -> URL {
         let completeURL = completeFileURL(for: episodeId)
 
         let request = URLRequest(url: url)
@@ -1480,12 +1483,12 @@ actor DownloadManager {
         if let scheduler = analysisWorkScheduler {
             await scheduler.enqueue(
                 episodeId: episodeId,
-                podcastId: context?.podcastId,
+                podcastId: context.podcastId,
                 downloadId: episodeId,
                 sourceFingerprint: strongHash,
-                isExplicitDownload: context?.isExplicitDownload ?? false,
-                podcastTitle: context?.podcastTitle,
-                episodeTitle: context?.episodeTitle
+                isExplicitDownload: context.isExplicitDownload,
+                podcastTitle: context.podcastTitle,
+                episodeTitle: context.episodeTitle
             )
         }
 
@@ -1653,7 +1656,7 @@ actor DownloadManager {
         etag: String?,
         weakFingerprint: String,
         bytesWritten: Int64,
-        context: DownloadContext?
+        context: DownloadContext
     ) async throws -> (accepted: Bool, strongHash: String?) {
         guard let active = activeStreamingTransfer,
               active.id == transferId,
@@ -1812,7 +1815,10 @@ actor DownloadManager {
         episodeId: String,
         from url: URL,
         playableThreshold: Int64 = DownloadManager.defaultPlayableThreshold,
-        context: DownloadContext? = nil
+        // playhead-kkzu: required, with no default. The played path already
+        // supplied a context; removing the default is what keeps the NEXT
+        // caller from omitting it and landing a NULL show in analysis_jobs.
+        context: DownloadContext
     ) async throws -> StreamingDownloadResult {
         if let existing = activeDownloads[episodeId] {
             existing.cancel()
@@ -2224,20 +2230,20 @@ actor DownloadManager {
     fileprivate func enqueueAnalysisIfNeeded(
         episodeId: String,
         sourceFingerprint: String,
-        context: DownloadContext?
+        context: DownloadContext
     ) async {
         guard let scheduler = analysisWorkScheduler else { return }
         await scheduler.enqueue(
             episodeId: episodeId,
-            podcastId: context?.podcastId,
+            podcastId: context.podcastId,
             downloadId: episodeId,
             sourceFingerprint: sourceFingerprint,
-            isExplicitDownload: context?.isExplicitDownload ?? false,
+            isExplicitDownload: context.isExplicitDownload,
             // playhead-i9dj: human-readable titles flow through to
             // AnalysisStore writes inside the scheduler so an exported
             // analysis.sqlite is legible on its own.
-            podcastTitle: context?.podcastTitle,
-            episodeTitle: context?.episodeTitle
+            podcastTitle: context.podcastTitle,
+            episodeTitle: context.episodeTitle
         )
     }
 
