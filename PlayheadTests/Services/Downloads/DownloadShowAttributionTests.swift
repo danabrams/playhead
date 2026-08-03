@@ -1,0 +1,406 @@
+// DownloadShowAttributionTests.swift
+// playhead-kkzu: a background download must carry the show it belongs to.
+//
+// The defect: `handleBackgroundDownloadComplete` — the only thing that
+// enqueues analysis for a background/auto download — passed `context: nil`
+// unconditionally, so `analysis_jobs.podcastId` was NULL for every episode
+// that was NOT explicitly played. That is precisely the population whose
+// analysis should already be finished when the user presses play, and
+// `AnalysisWorkScheduler` turns the NULL into `job.podcastId ?? ""`, pooling
+// every unattributed episode under one fake show.
+//
+// playhead-le02 idiom: every negative assertion here is paired with a
+// POSITIVE WITNESS. "podcastId is not nil" is worthless if no job row was
+// written at all, and "podcastId is nil for an unattributed download" is
+// worthless if the assertion would hold for an attributed one too. Each rail
+// below drives BOTH arms through the same harness.
+
+import Foundation
+import Testing
+@testable import Playhead
+
+@Suite("Download show attribution (playhead-kkzu)")
+struct DownloadShowAttributionTests {
+
+    private static let showId = "https://feeds.example.com/diary.xml"
+
+    private func makeScheduler(store: AnalysisStore) -> AnalysisWorkScheduler {
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(
+                speechService: speechService,
+                store: store
+            ),
+            adDetection: StubAdDetectionProvider()
+        )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
+        return AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: StubCapabilitiesProvider(),
+            downloadManager: StubDownloadProvider(),
+            batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider(),
+            config: PreAnalysisConfig()
+        )
+    }
+
+    /// Drives one background completion to its analysis enqueue and returns
+    /// the job row that landed. `manager` is injectable so a rail can hand
+    /// the completion to a DIFFERENT manager than the one that queued the
+    /// transfer — the process-restart case.
+    @discardableResult
+    private func completeBackgroundDownload(
+        manager: DownloadManager,
+        store: AnalysisStore,
+        episodeId: String,
+        cacheDir: URL
+    ) async throws -> AnalysisJob? {
+        let staged = cacheDir.appendingPathComponent("\(episodeId)-staged.mp3")
+        // Distinct bytes per episode: the scheduler's `workKey` is derived
+        // from the source fingerprint, so two episodes staged with identical
+        // content would collide and the second enqueue would be dropped as a
+        // duplicate — silently making a contrast arm look like a failure to
+        // enqueue.
+        try Data("kkzu-\(episodeId)-".utf8).write(to: staged)
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: staged,
+            originalURL: URL(string: "https://cdn.example.com/\(episodeId).mp3"),
+            metadata: HTTPAssetMetadata(
+                etag: "\"kkzu\"", contentLength: 512, lastModified: nil
+            )
+        )
+        return try await store.fetchLatestJobForEpisode(episodeId)
+    }
+
+    // MARK: - R1 (centrepiece): the enqueue carries the show
+
+    /// THE rail this bead exists for. A background download queued with a
+    /// show must enqueue its analysis job against that show.
+    ///
+    /// Both witnesses are load-bearing:
+    ///   - a job row EXISTS, so "podcastId != nil" is not vacuously true
+    ///     because nothing was enqueued;
+    ///   - the SAME harness driven with an unattributed context produces a
+    ///     job whose podcastId IS nil, so the assertion is sensitive to the
+    ///     context rather than to some unrelated default.
+    @Test("A background download enqueues analysis against the show it was queued with")
+    func backgroundDownloadEnqueuesWithPodcastId() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try await makeTestStore()
+        let manager = DownloadManager(cacheDirectory: dir)
+        await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
+        try await manager.bootstrap()
+
+        let attributed = "kkzu-attributed"
+        await manager.backgroundDownload(
+            episodeId: attributed,
+            from: URL(string: "https://cdn.example.com/\(attributed).mp3")!,
+            context: DownloadContext(
+                podcastId: Self.showId,
+                isExplicitDownload: false,
+                podcastTitle: "Diary of a CEO",
+                episodeTitle: "Episode 1"
+            )
+        )
+        let attributedJob = try await completeBackgroundDownload(
+            manager: manager, store: store,
+            episodeId: attributed, cacheDir: dir
+        )
+
+        // Positive witness: a job actually landed.
+        #expect(
+            attributedJob != nil,
+            "no analysis job was enqueued at all — the podcastId assertion below would be vacuous"
+        )
+        #expect(
+            attributedJob?.podcastId == Self.showId,
+            "a background download must record the show it belongs to, got \(String(describing: attributedJob?.podcastId))"
+        )
+        #expect(attributedJob?.podcastId?.isEmpty == false)
+
+        // Contrast arm, same harness: an UNATTRIBUTED download still
+        // enqueues, and still records no show. Without this the rail above
+        // could pass on a harness that hard-codes a podcastId somewhere.
+        let unattributed = "kkzu-unattributed"
+        await manager.backgroundDownload(
+            episodeId: unattributed,
+            from: URL(string: "https://cdn.example.com/\(unattributed).mp3")!,
+            context: .unattributed(
+                reason: .resumeWithoutRecordedShow,
+                isExplicitDownload: false
+            )
+        )
+        let unattributedJob = try await completeBackgroundDownload(
+            manager: manager, store: store,
+            episodeId: unattributed, cacheDir: dir
+        )
+        #expect(
+            unattributedJob != nil,
+            "the contrast arm must enqueue too, or it proves nothing"
+        )
+        #expect(unattributedJob?.podcastId == nil)
+    }
+
+    // MARK: - R2: the attribution survives a process restart
+
+    /// iOS relaunches the app to deliver `handleEventsForBackgroundURLSession`,
+    /// so the completion that enqueues analysis routinely runs in a DIFFERENT
+    /// PROCESS from the `backgroundDownload` that started the transfer. This
+    /// rail models that by handing the completion to a second `DownloadManager`
+    /// built over the same cache directory — a fresh actor with no in-memory
+    /// state whatsoever. An in-memory `[episodeId: context]` map passes R1 and
+    /// fails here, which is exactly why the attribution is on disk.
+    @Test("A completion delivered to a NEW manager instance still carries the show")
+    func attributionSurvivesProcessRestart() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try await makeTestStore()
+
+        let queueing = DownloadManager(cacheDirectory: dir)
+        try await queueing.bootstrap()
+        let episodeId = "kkzu-restart"
+        await queueing.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+            context: DownloadContext(
+                podcastId: Self.showId, isExplicitDownload: false
+            )
+        )
+
+        // A brand-new manager: nothing carries over but the filesystem.
+        let relaunched = DownloadManager(cacheDirectory: dir)
+        await relaunched.setAnalysisWorkScheduler(makeScheduler(store: store))
+        try await relaunched.bootstrap()
+        #expect(
+            await relaunched.loadDownloadAttribution(episodeId: episodeId)?
+                .podcastId == Self.showId,
+            "the relaunched manager must recover the show from disk"
+        )
+
+        let job = try await completeBackgroundDownload(
+            manager: relaunched, store: store,
+            episodeId: episodeId, cacheDir: dir
+        )
+        #expect(job != nil, "positive witness: the relaunched completion enqueued")
+        #expect(job?.podcastId == Self.showId)
+
+        // Negative witness: the fresh manager genuinely had no in-memory
+        // knowledge — an episode it was never told about resolves to nothing.
+        #expect(
+            await relaunched.loadDownloadAttribution(
+                episodeId: "kkzu-never-queued"
+            ) == nil
+        )
+    }
+
+    // MARK: - R3: the record is written, then reaped
+
+    @Test("Queueing writes the attribution and a terminal completion reaps it")
+    func attributionIsWrittenThenReaped() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try await makeTestStore()
+        let manager = DownloadManager(cacheDirectory: dir)
+        await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
+        try await manager.bootstrap()
+
+        let episodeId = "kkzu-reaped"
+        // Positive witness FIRST: absent before, present after — so the
+        // "absent afterwards" assertion cannot pass because nothing was
+        // ever written.
+        #expect(await manager.loadDownloadAttribution(episodeId: episodeId) == nil)
+        await manager.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+            context: DownloadContext(
+                podcastId: Self.showId, isExplicitDownload: false
+            )
+        )
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId)?
+                .podcastId == Self.showId
+        )
+
+        try await completeBackgroundDownload(
+            manager: manager, store: store,
+            episodeId: episodeId, cacheDir: dir
+        )
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId) == nil,
+            "a terminal completion must reap the record so it cannot accumulate"
+        )
+    }
+
+    /// A SUSPENDED transfer is not terminal, and the force-quit resume path
+    /// (`ForceQuitResumeScan`, which runs after a relaunch with no SwiftData
+    /// in scope) recovers the show from this record. So dropping the
+    /// resume-data blob must NOT drop the attribution with it.
+    @Test("Dropping the resume blob leaves the attribution for the resume path")
+    func resumeBlobDeletionPreservesAttribution() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "kkzu-suspended"
+        await manager.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+            context: DownloadContext(
+                podcastId: Self.showId, isExplicitDownload: false
+            )
+        )
+        try await manager.persistResumeData(
+            episodeId: episodeId,
+            data: Data(repeating: 0x11, count: 32)
+        )
+        // Positive witness: the blob was really there to delete.
+        #expect(try await manager.loadResumeData(episodeId: episodeId) != nil)
+
+        try await manager.deleteResumeData(episodeId: episodeId)
+
+        #expect(try await manager.loadResumeData(episodeId: episodeId) == nil)
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId)?
+                .podcastId == Self.showId,
+            "the resume path's only route back to the show must survive a blob drop"
+        )
+    }
+
+    /// An explicit cancel IS terminal, so the record goes with it.
+    @Test("Cancelling a download reaps its attribution")
+    func cancelReapsAttribution() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "kkzu-cancelled"
+        await manager.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+            context: DownloadContext(
+                podcastId: Self.showId, isExplicitDownload: false
+            )
+        )
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: episodeId) != nil,
+            "positive witness: there was a record to reap"
+        )
+
+        await manager.cancelDownload(episodeId: episodeId)
+
+        #expect(await manager.loadDownloadAttribution(episodeId: episodeId) == nil)
+    }
+
+    // MARK: - R4: an absence cannot be anonymous
+
+    /// The type-level half of the fix. A caller can no longer arrive at a null
+    /// show by omission — `DownloadContext(podcastId:)` takes a non-optional
+    /// `String`, so every nil in the system came from a named constructor.
+    @Test("A null show identity always carries the reason it is null")
+    func nullIdentityIsAlwaysNamed() {
+        let named = DownloadContext.unattributed(
+            reason: .resumeWithoutRecordedShow, isExplicitDownload: false
+        )
+        #expect(named.podcastId == nil)
+        #expect(named.unattributedReason == .resumeWithoutRecordedShow)
+
+        let resolvedNil = DownloadContext.resolving(
+            podcastId: nil,
+            unattributedReason: .showIdentityUnresolvable,
+            isExplicitDownload: false
+        )
+        #expect(resolvedNil.podcastId == nil)
+        #expect(resolvedNil.unattributedReason == .showIdentityUnresolvable)
+
+        // Positive witness: the SAME constructor with a real show records no
+        // reason, so "reason != nil" above is not simply always set.
+        let resolvedSome = DownloadContext.resolving(
+            podcastId: Self.showId,
+            unattributedReason: .showIdentityUnresolvable,
+            isExplicitDownload: false
+        )
+        #expect(resolvedSome.podcastId == Self.showId)
+        #expect(resolvedSome.unattributedReason == nil)
+    }
+
+    /// `""` is the sibling defect of NULL: it is not a show, but unlike NULL
+    /// it JOINS — every unattributed episode collapses into one fake show.
+    /// A blank or non-canonical identifier therefore becomes a named absence
+    /// rather than a key.
+    @Test("An empty or non-canonical identifier is a named absence, not a key")
+    func blankIdentityIsRejected() {
+        for blank in ["", "   ", "\n"] {
+            let ctx = DownloadContext(
+                podcastId: blank, isExplicitDownload: false
+            )
+            #expect(
+                ctx.podcastId == nil,
+                "\(blank.debugDescription) must not become a joinable show key"
+            )
+            #expect(ctx.unattributedReason == .showIdentityUnresolvable)
+        }
+
+        // Untrimmed spelling is not this show's canonical identity either —
+        // admitting it would retarget show-scoped evidence to a neighbouring
+        // namespace.
+        let untrimmed = DownloadContext(
+            podcastId: " \(Self.showId) ", isExplicitDownload: false
+        )
+        #expect(untrimmed.podcastId == nil)
+
+        // Positive witness: the canonical spelling IS admitted, so the rail
+        // above is not just "this initializer always yields nil".
+        let canonical = DownloadContext(
+            podcastId: Self.showId, isExplicitDownload: false
+        )
+        #expect(canonical.podcastId == Self.showId)
+        #expect(canonical.unattributedReason == nil)
+    }
+
+    // MARK: - R5: the played path is unchanged
+
+    /// The acceptance negative. `PlayheadRuntime`'s streaming branch moved
+    /// from `DownloadContext(podcastId:)` to `.resolving(podcastId:)` because
+    /// `Episode.resolvedShowIdentity` is legitimately nullable. For every
+    /// resolvable show the two must be indistinguishable — that path already
+    /// worked and this bead must not perturb it.
+    @Test("The played path's context is byte-identical under the new constructor")
+    func playedPathContextIsUnchanged() {
+        let direct = DownloadContext(
+            podcastId: Self.showId,
+            isExplicitDownload: false,
+            podcastTitle: "Diary of a CEO",
+            episodeTitle: "Episode 1"
+        )
+        let viaResolving = DownloadContext.resolving(
+            podcastId: Self.showId,
+            unattributedReason: .showIdentityUnresolvable,
+            isExplicitDownload: false,
+            podcastTitle: "Diary of a CEO",
+            episodeTitle: "Episode 1"
+        )
+        #expect(direct == viaResolving)
+
+        // Positive witness: the comparison can fail. A different show is not
+        // equal, so the equality above is a real check and not `nil == nil`.
+        #expect(
+            direct != DownloadContext.resolving(
+                podcastId: "https://feeds.example.com/other.xml",
+                unattributedReason: .showIdentityUnresolvable,
+                isExplicitDownload: false,
+                podcastTitle: "Diary of a CEO",
+                episodeTitle: "Episode 1"
+            )
+        )
+    }
+}

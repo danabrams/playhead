@@ -444,6 +444,52 @@ struct BackgroundFeedRefreshSharedEnqueuePathTests {
                 ".off must resolve to zero enqueues")
     }
 
+    // playhead-kkzu: an auto-downloaded episode is exactly the population
+    // whose analysis should be finished before the user presses play, and it
+    // used to enqueue that analysis with a NULL podcastId even though the
+    // feed URL — which IS the show identity in this codebase — was in hand.
+    @Test("An auto-download carries the show it belongs to")
+    func autoDownloadCarriesTheShow() async {
+        let feed = URL(string: "https://example.com/a.xml")!
+        let other = URL(string: "https://example.com/b.xml")!
+        let (service, _, _, downloader, _) = makeService(setting: .all)
+        let groups = [
+            FeedRefreshDiscoveryGroup(
+                feedURL: feed,
+                autoDownloadOverride: nil,
+                newEpisodes: [feedEpisode(key: "ep-a", feed: feed)]
+            ),
+            FeedRefreshDiscoveryGroup(
+                feedURL: other,
+                autoDownloadOverride: nil,
+                newEpisodes: [feedEpisode(key: "ep-b", feed: other)]
+            ),
+        ]
+
+        let count = await service.enqueueAutoDownloads(for: groups)
+
+        // Positive witness: downloads were actually enqueued, so the
+        // "no NULLs" assertion below is not vacuously true over an empty list.
+        #expect(count == 2)
+        #expect(Set(await downloader.enqueuedEpisodeIds()) == Set(["ep-a", "ep-b"]))
+
+        let ids = await downloader.enqueuedPodcastIds()
+        #expect(
+            ids.allSatisfy { $0 != nil },
+            "an auto-download must never enqueue a NULL podcastId, got \(ids)"
+        )
+        // And each is attributed to ITS OWN show, not merely to some show —
+        // a single hard-coded identity would pass the check above.
+        let enqueued = await downloader.enqueued
+        let byEpisode = Dictionary(
+            uniqueKeysWithValues: enqueued.map {
+                ($0.episodeId, $0.context.podcastId)
+            }
+        )
+        #expect(byEpisode["ep-a"] == feed.absoluteString)
+        #expect(byEpisode["ep-b"] == other.absoluteString)
+    }
+
     @Test("Setting .last3 selects the three newest undownloaded episodes")
     func last3SelectsNewestThree() async {
         let feed = URL(string: "https://example.com/a.xml")!
