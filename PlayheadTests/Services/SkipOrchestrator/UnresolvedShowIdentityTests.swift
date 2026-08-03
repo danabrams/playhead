@@ -722,6 +722,39 @@ struct ShowIdentityRecoveryTests {
         #expect(await orchestrator.currentSkipMode() == .auto)
     }
 
+    /// playhead-kkzu asked, and this answers it by OBSERVATION rather than by
+    /// reading the code: does a NULL `analysis_jobs.podcastId` — what every
+    /// background/auto download used to write — put an episode into shadow
+    /// mode? It does not. `beginEpisode`'s identity comes from the caller,
+    /// which in production is `Episode.resolvedShowIdentity` (SwiftData), and
+    /// recovery from the job row is only consulted when that is already nil.
+    ///
+    /// The two witnesses are the point: the mode is the show's REAL `.auto`
+    /// (so the trust lookup genuinely ran against the supplied identity), and
+    /// the `.unresolvedShowIdentity` counter is zero (so nothing fell through
+    /// the failure branch on the way there).
+    @Test("a NULL job row does not shadow an episode whose caller knows the show")
+    func aNullJobRowDoesNotShadowASuppliedIdentity() async throws {
+        let store = try await makeTestStore()
+        let orchestrator = try await Fx.makeOrchestrator(store: store)
+        try await Fx.seedJobRow(in: store, podcastId: nil)
+
+        await orchestrator.beginEpisode(
+            analysisAssetId: Fx.assetId,
+            episodeId: Fx.episodeId,
+            podcastId: Fx.seededPodcastId
+        )
+
+        #expect(await orchestrator.activePodcastIdForTesting() == Fx.seededPodcastId)
+        #expect(await orchestrator.currentSkipMode() == .auto)
+        #expect(await orchestrator.currentSkipModeResolution() == .showTrustProfile)
+        #expect(
+            await orchestrator.skipModeResolutionFailureCount(
+                .unresolvedShowIdentity
+            ) == 0
+        )
+    }
+
     /// The field asset's actual shape: a job row exists but its `podcastId`
     /// column is NULL. Recovery cannot invent an answer, and must fall through
     /// to the NAMED failure rather than to silence.
