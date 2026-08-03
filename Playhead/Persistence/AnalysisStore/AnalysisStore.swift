@@ -9008,11 +9008,17 @@ actor AnalysisStore {
     ///
     /// `analysis_jobs` is the only table that carries a `podcastId` for an
     /// episode; `analysis_assets` was never given the column. That makes this a
-    /// LAGGING MIRROR, not an authority: rows enqueued through a path that
-    /// supplies no `DownloadContext` (every background / auto download) store
-    /// NULL here even when the show is perfectly well known upstream. So it is
-    /// a recovery source only — the caller's value always wins, and a NULL
-    /// column resolves to `nil` rather than to a fabricated identity.
+    /// LAGGING MIRROR, not an authority — it is a recovery source only: the
+    /// caller's value always wins, and a NULL column resolves to `nil` rather
+    /// than to a fabricated identity.
+    ///
+    /// playhead-kkzu: it used to be worse than lagging. Every background and
+    /// auto download enqueued through a path that supplied no `DownloadContext`
+    /// at all, so those rows stored NULL even when the show was perfectly well
+    /// known upstream — and that is the population whose analysis is meant to
+    /// be finished before the user presses play. The download path now carries
+    /// the show, so a NULL here means the show was genuinely unresolvable
+    /// rather than merely dropped.
     ///
     /// Newest row wins. Guarded on `tableExists` so seeded fixtures that omit
     /// the scheduler tables read `nil` instead of throwing on the playback path.

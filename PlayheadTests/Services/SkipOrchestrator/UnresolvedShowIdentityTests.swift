@@ -723,9 +723,18 @@ struct ShowIdentityRecoveryTests {
     }
 
     /// The field asset's actual shape: a job row exists but its `podcastId`
-    /// column is NULL, because the episode was downloaded through a path that
-    /// supplies no `DownloadContext`. Recovery cannot invent an answer, and
-    /// must fall through to the NAMED failure rather than to silence.
+    /// column is NULL. Recovery cannot invent an answer, and must fall through
+    /// to the NAMED failure rather than to silence.
+    ///
+    /// playhead-kkzu changed WHY such a row exists, not what happens to it.
+    /// Every background/auto download used to enqueue with no `DownloadContext`
+    /// at all; the download path now carries the show, so a NULL job row means
+    /// the show was genuinely unresolvable. Note also what this rail does NOT
+    /// say: reaching `.shadow` needs the CALLER's `podcastId` to be nil too
+    /// (here it is passed explicitly). In production that value comes from
+    /// `Episode.resolvedShowIdentity` — SwiftData, not `analysis_jobs` — so a
+    /// NULL job row alone never put an episode into shadow mode. It removed the
+    /// recovery net underneath a SwiftData failure.
     @Test("a job row with a NULL podcastId falls through to the named failure")
     func aNullJobRowStillFailsButNamed() async throws {
         let store = try await makeTestStore()
