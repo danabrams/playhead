@@ -442,8 +442,16 @@ struct BackfillCoarseCheckpointTests {
         #expect(last.windows.count == output.windows.count - 1)
     }
 
-    /// A pass with no observer must behave exactly as it did before this bead.
-    @Test("a coarse pass with no checkpoint observer is unaffected")
+    /// A pass with no observer must reach the same verdicts as one with an
+    /// observer. The observer is a durability mechanism; it is not allowed to
+    /// change what the pass CONCLUDES.
+    ///
+    /// Compared field by field rather than by whole-struct equality, and
+    /// deliberately: `FMCoarseWindowOutput.latencyMillis` is measured wall clock,
+    /// so `==` on the struct compares two stopwatches and fails on any machine.
+    /// Everything that is a verdict or a coordinate is compared; the stopwatch
+    /// is not.
+    @Test("a coarse pass with no checkpoint observer reaches the same verdicts")
     func coarsePassWithoutObserverIsUnaffected() async throws {
         let assetId = "asset-26od-no-observer"
         let inputs = makeInputs(assetId: assetId, lineCount: 40)
@@ -455,10 +463,19 @@ struct BackfillCoarseCheckpointTests {
             runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime
         ).coarsePassA(segments: inputs.segments)
 
-        #expect(withObserver.windows == without.windows)
-        #expect(withObserver.plans == without.plans)
         #expect(withObserver.status == without.status)
+        #expect(withObserver.plans == without.plans)
         #expect(withObserver.failedWindows == without.failedWindows)
+        #expect(withObserver.windows.count == without.windows.count)
+        #expect(withObserver.windows.count > 1, "single-window pass makes this vacuous")
+        for (observed, plain) in zip(withObserver.windows, without.windows) {
+            #expect(observed.windowIndex == plain.windowIndex)
+            #expect(observed.lineRefs == plain.lineRefs)
+            #expect(observed.startTime == plain.startTime)
+            #expect(observed.endTime == plain.endTime)
+            #expect(observed.transcriptQuality == plain.transcriptQuality)
+            #expect(observed.screening == plain.screening)
+        }
     }
 }
 
@@ -492,7 +509,7 @@ struct CoarseCoverageWalkTests {
             promptTokenCount: 10,
             startTime: Double(index) * 30.0,
             endTime: Double(index + 1) * 30.0,
-            transcriptQuality: .high
+            transcriptQuality: .good
         )
     }
 
@@ -502,7 +519,7 @@ struct CoarseCoverageWalkTests {
             lineRefs: [index],
             startTime: Double(index) * 30.0,
             endTime: Double(index + 1) * 30.0,
-            transcriptQuality: .high,
+            transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
             latencyMillis: 1.0
         )
