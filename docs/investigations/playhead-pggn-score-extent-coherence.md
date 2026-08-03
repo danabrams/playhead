@@ -45,7 +45,12 @@ reported extent ends up **narrower** than the region the score covers, which is 
 `playhead-4xqf` boundary-collapse family. It also matters mechanically for the fix — a deferred
 "fold the tail in once the extent covers it" rule is only well-defined if the extent is monotone.
 
-Decision recorded below with its measurement.
+**Decision: filed as `playhead-eqo8`, NOT fixed here.** Measured with the same differential harness,
+swapping the assignment for a max moves population C's segment count 81,754 -> 54,607 (-33%),
+changes geometry on 26,948 segments and moves scores in BOTH directions. That is a calibration
+change needing its own before/after, and folding it in would have made pggn's numbers unreadable.
+The fold guard below (`w.endTime >= tailMaxEndTime`) is what keeps pggn's deferral sound while the
+regression is still possible; delete it when eqo8 lands.
 
 ## The invariant choice
 
@@ -83,7 +88,10 @@ Windows below continuation are held in a **pending tail accumulator** rather tha
 segment's sums:
 
 - a qualifying window folds the pending tail into the main sums (the extent has now grown past it,
-  so those windows are inside the reported span) and then includes itself;
+  so those windows are inside the reported span) and then includes itself — but only when
+  `w.endTime >= tailMaxEndTime`, i.e. when the extent really does reach the whole tail. Otherwise the
+  tail is dropped. Under-covering the extent is tolerable; over-covering it is what this invariant
+  forbids;
 - close / flush drops the pending tail (it lies beyond `lastQualifyingEndTime`);
 - a sub-continuation window whose `endTime` is already `<= lastQualifyingEndTime` is inside the
   reported extent and goes straight into the main sums — excluding it would open a hole in the
@@ -93,8 +101,9 @@ Containment, not proration, for a window straddling the extent edge: the file he
 (:32-37) is that a window is an atomic `[start,end)` interval with a single score. Splitting one
 would contradict the stated model.
 
-`belowContinuationSeconds` accounting is untouched, so segment geometry — where segments open, close
-and merge — is byte-identical apart from the `lastQualifyingEndTime` monotonicity decision.
+`belowContinuationSeconds` accounting is untouched and `lastQualifyingEndTime` is left exactly as it
+was, so segment geometry — where segments open, close and merge — is **byte-identical**. Confirmed
+across ~300,000 differential segments and 3,000,000 fuzz streams: zero geometry differences.
 
 ## Interaction with playhead-bllt (#339)
 
@@ -165,7 +174,7 @@ Plus two saturation checks:
 - **Structured enumeration** over the bead's shape — seed 0.28…0.99 × tail 0.00…0.27 × tail width
   {2, 5, 10, 30}: 7,280 cases, **7,280 up, 0 same, 0 down**.
 - **Unconstrained fuzz**, 3,000,000 random 3–10 window streams with arbitrary widths (0.05–35 s),
-  arbitrary scores, arbitrary gaps: 1,684,398 up, 2,799,315 unchanged, **0 down, 0 geometry
+  arbitrary scores, arbitrary gaps: 1,684,494 up, 2,799,219 unchanged, **0 down, 0 geometry
   differences**.
 
 **Geometry is unchanged in every one of the ~300,000 segments above.** `startTime`, `endTime` and
