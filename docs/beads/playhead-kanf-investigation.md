@@ -105,3 +105,15 @@ add new in-memory state and does not make that boundary worse. It does make the
 boundary *less* costly in one direction: the durable `priority` column now carries
 the promotion, so once a tap has promoted a row the promotion survives a relaunch,
 whereas today nothing survived at all.
+
+**A gap this bead does NOT close, named so it is not mistaken for fixed.**
+`EpisodePreparationCoordinator.prepare` has two shapes. For a **cached** episode
+it calls `enqueueUserIntent` synchronously — that is the path kanf repairs, and it
+is the one where the auto-pipeline has usually queued the job already. For an
+episode that still needs **downloading** it calls `markUserIntent` and relies on
+the download completion, minutes or hours later, to fire the enqueue that consumes
+the flag. If iOS relaunches the app for `handleEventsForBackgroundURLSession` in
+between, that flag is gone with the process and the completion enqueues at the auto
+priority. Making it survive would mean persisting the intent, i.e. a persistence
+decision, which is Dan's call rather than a detail to slip into a scheduling fix.
+The observable symptom is unchanged from today; kanf simply does not help there.
