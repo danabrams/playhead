@@ -11694,7 +11694,9 @@ actor AdDetectionService {
         func outcome(
             _ exit: RediffDayZeroExit,
             markCount: Int = 0,
-            divergentSlotCount: Int = 0
+            divergentSlotCount: Int = 0,
+            strictMarkCount: Int = 0,
+            supersededMarkCount: Int = 0
         ) -> RediffDayZeroMintOutcome {
             RediffDayZeroMintOutcome(
                 markCount: markCount,
@@ -11703,7 +11705,9 @@ actor AdDetectionService {
                 bSidesAccepted: perBSideSlots.count,
                 bSidesGateRejected: gateRejected,
                 bSidesUnreadable: unreadable,
-                divergentSlotCount: divergentSlotCount
+                divergentSlotCount: divergentSlotCount,
+                strictMarkCount: strictMarkCount,
+                supersededMarkCount: supersededMarkCount
             )
         }
 
@@ -11742,10 +11746,43 @@ actor AdDetectionService {
         )
         var windows: [AdWindow] = []
         var strictMarkCount = 0
+        // playhead-ug9m: degraded day-0 rows from an EARLIER attempt that a
+        // STRICT slot of THIS mint replaces. Keyed by id and carried as the
+        // store's `expectedProducerRevisions`, so the retire is validated
+        // against the row that was read rather than against a name.
+        var superseded: [String: AdWindow] = [:]
         for (slotIndex, slot) in unioned.enumerated() {
-            let overlapsExisting = existing.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
+            let strict = strictMask[slotIndex]
             let overlapsEmitted = windows.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
-            if overlapsExisting || overlapsEmitted { continue }
+            if overlapsEmitted { continue }
+            let overlappingExisting = existing.filter { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
+            if !overlappingExisting.isEmpty {
+                // playhead-ug9m — THE OVERLAP FILTER, RELAXED IN EXACTLY ONE
+                // DIRECTION. It still drops a slot that collides with anything
+                // already on disk, with one exception: a STRICT slot may
+                // supersede this producer's OWN degraded rows.
+                //
+                // Both conjuncts are load-bearing and neither is convenience.
+                //
+                //   * `strict` — replace only with something PROVABLY better.
+                //     A rescue re-fetch draws fresh personas and may diverge
+                //     differently; without this a second, worse draw could
+                //     retire two correct banners and mint one. A non-strict
+                //     re-mint therefore changes nothing at all: the slot is
+                //     dropped exactly as before, the existing row survives, and
+                //     the asset ends the attempt still `.frozen` — which it
+                //     then SAYS (`RediffDayZeroExit.rescueExhausted`).
+                //   * `allSatisfy(isSupersedable)` — every overlapped row must
+                //     be a day-0 byte-exact mark, unsettled, and not already
+                //     anchored. A user veto, a dismissed banner, an applied
+                //     skip or another detector's window blocks the slot, as it
+                //     always did. The fidelity ladder is not negotiable by a
+                //     re-fetch.
+                guard strict,
+                      overlappingExisting.allSatisfy(DayZeroMarkCensus.isSupersedable)
+                else { continue }
+                for row in overlappingExisting { superseded[row.id] = row }
+            }
             // THE BLOCKER this bead exists to clear (measured 2026-07-31): both
             // day-0 windows persisted with `startEdgeAnchor == endEdgeAnchor ==
             // unanchored` — the SAME pair the 0.40-confidence aggregator windows
@@ -11759,7 +11796,6 @@ actor AdDetectionService {
             // provenance fact, and it is what `AutoSkipEdgePadding` needs to
             // compute a late-safe window at all. Only the eligibility promotion
             // reads `dayZeroByteExactAutoSkipEnabled`.
-            let strict = strictMask[slotIndex]
             if strict { strictMarkCount += 1 }
             let anchor: AutoSkipEdgeAnchor = strict ? .rediffByteExact : .unanchored
             let gate: SkipEligibilityGate =
@@ -11804,15 +11840,31 @@ actor AdDetectionService {
             return outcome(.allSlotsAlreadyCovered, divergentSlotCount: unioned.count)
         }
         do {
-            try await store.upsertHotPathAdWindows(windows, existingIDs: [], retiredIDs: [])
+            // playhead-ug9m: the retire and the insert are ONE transaction, and
+            // `expectedProducerRevisions` makes the store re-validate every
+            // retired row against what was read — so a concurrent user veto
+            // between the read and the write aborts the whole mint rather than
+            // silently deleting the veto.
+            try await store.upsertHotPathAdWindows(
+                windows,
+                existingIDs: [],
+                retiredIDs: Set(superseded.keys),
+                expectedProducerRevisions: superseded
+            )
         } catch {
             logger.warning("[xsdz.36.4] day-0 mint persist failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
             var failed = outcome(.persistFailed, divergentSlotCount: unioned.count)
             failed.detail = String(describing: error)
             return failed
         }
-        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) banner(s) asset=\(analysisAssetId, privacy: .public) — \(strictMarkCount) STRICT byte-exact (anchored\(RediffActivation.dayZeroByteExactAutoSkipEnabled ? ", auto-skip eligible" : ", mark-only")), \(windows.count - strictMarkCount) segment-recovered (unanchored, mark-only)")
-        return outcome(.marked, markCount: windows.count, divergentSlotCount: unioned.count)
+        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) banner(s) asset=\(analysisAssetId, privacy: .public) — \(strictMarkCount) STRICT byte-exact (anchored\(RediffActivation.dayZeroByteExactAutoSkipEnabled ? ", auto-skip eligible" : ", mark-only")), \(windows.count - strictMarkCount) segment-recovered (unanchored, mark-only), \(superseded.count) degraded day-0 row(s) superseded [ug9m]")
+        return outcome(
+            .marked,
+            markCount: windows.count,
+            divergentSlotCount: unioned.count,
+            strictMarkCount: strictMarkCount,
+            supersededMarkCount: superseded.count
+        )
     }
 
     /// playhead-p70f change 3 — the FREE, LOCAL-ONLY preconditions of the day-0

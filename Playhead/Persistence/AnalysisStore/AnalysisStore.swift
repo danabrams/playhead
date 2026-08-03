@@ -2436,6 +2436,9 @@ actor AnalysisStore {
             // in which scene phase, and under which run. Additive-only, three
             // nullable columns, no backfill.
             try migrateSemanticScanAttributionV42IfNeeded()
+            // playhead-ug9m: the day-0 RESCUE counter — how many re-attempts an
+            // asset that already has marks has spent this generation.
+            try migrateRediffDayZeroRescueV43IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2783,6 +2786,9 @@ actor AnalysisStore {
         // playhead-hx6n (v42): guarded on `tableExists`, so a seeded fixture
         // without `semantic_scan_results` still reaches v42.
         try migrateSemanticScanAttributionV42IfNeeded()
+        // playhead-ug9m (v43): guarded on `tableExists`, so a seeded fixture
+        // without `rediff_day_zero_attempts` still reaches v43.
+        try migrateRediffDayZeroRescueV43IfNeeded()
     }
     #endif
 
@@ -6375,6 +6381,42 @@ actor AnalysisStore {
         try setSchemaVersion(42)
     }
 
+    // MARK: - V43: day-0 RESCUE budget (playhead-ug9m)
+    //
+    // One column. `rediff_day_zero_attempts.rescueAttemptCount` — how many
+    // re-attempts an asset that ALREADY has day-0 marks has spent in the
+    // current `DayZeroRediffAttemptPolicy.currentGeneration`.
+    //
+    // WHY IT CANNOT BE DERIVED. `attemptCount` counts first-listen probes and is
+    // reset by a generation bump, which is exactly the event that grants a
+    // rescue — so at the moment the rescue is decided the two are both 0 and
+    // indistinguishable. Without a separate counter the bound would be
+    // "re-attempt once per generation, we think", and this bead exists because
+    // an unenforced bandwidth policy was believed to be enforced.
+    //
+    // `DEFAULT 0` is correct for every existing row: no build before this one
+    // could have spent a rescue.
+
+    /// V43 migration — the day-0 rescue counter. Idempotent
+    /// (`addColumnIfNeeded`) and guarded on `tableExists` so a seeded fixture
+    /// without the day-0 table still reaches v43.
+    private func migrateRediffDayZeroRescueV43IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 43 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39, exactly as V40/V41/V42 do not —
+        // see `migrateSemanticScanAttributionV42IfNeeded` for why the ladder
+        // does not enforce this structurally.
+        guard observed >= 42 else { return }
+        if try tableExists("rediff_day_zero_attempts") {
+            try addColumnIfNeeded(
+                table: "rediff_day_zero_attempts",
+                column: "rescueAttemptCount",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+        }
+        try setSchemaVersion(43)
+    }
+
     /// Fold ONE settled day-0 kickoff into its episode's row.
     ///
     /// The counters accumulate in SQL rather than in Swift so two writers can
@@ -6992,8 +7034,8 @@ actor AnalysisStore {
              lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
              lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
              totalFullFetchBytes, suppressedCount, lastSuppressedAt, lastDetail,
-             policyGeneration)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             policyGeneration, rescueAttemptCount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(analysisAssetId) DO UPDATE SET
                 attemptCount = excluded.attemptCount,
                 lastAttemptAt = excluded.lastAttemptAt,
@@ -7007,7 +7049,8 @@ actor AnalysisStore {
                 lastFullFetchBytes = excluded.lastFullFetchBytes,
                 totalFullFetchBytes = excluded.totalFullFetchBytes,
                 lastDetail = excluded.lastDetail,
-                policyGeneration = excluded.policyGeneration
+                policyGeneration = excluded.policyGeneration,
+                rescueAttemptCount = excluded.rescueAttemptCount
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -7037,6 +7080,7 @@ actor AnalysisStore {
             sqlite3_bind_null(stmt, 15)
         }
         bind(stmt, 16, record.policyGeneration)
+        bind(stmt, 17, record.rescueAttemptCount)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -7086,6 +7130,69 @@ actor AnalysisStore {
         return readRediffDayZeroAttemptRow(stmt)
     }
 
+    /// playhead-ug9m — everything `DayZeroRediffAttemptPolicy.decide` reads
+    /// about one asset, in ONE actor-serialized read.
+    ///
+    /// The attempt record and the day-0 mark census must come from the same
+    /// snapshot: the rescue is a conjunction over them, and the mint writes
+    /// `ad_windows` and `rediff_day_zero_attempts` in that order, so two
+    /// separate reads can straddle a mint and produce a decision that was never
+    /// true of any single state of the database. Being one `func` on the store
+    /// actor is what makes them one snapshot.
+    func fetchDayZeroAttemptContext(assetId: String) throws -> DayZeroAttemptContext {
+        DayZeroAttemptContext(
+            record: try fetchRediffDayZeroAttempt(assetId: assetId),
+            markCensus: DayZeroMarkCensus.classify(
+                rows: try fetchAdWindows(assetId: assetId)
+            )
+        )
+    }
+
+    /// playhead-ug9m — THE SURFACING QUERY. Every asset day-0 has minted marks
+    /// for, with what state those marks are in.
+    ///
+    /// WHY IT EXISTS. Before this, an asset whose day-0 marks were all degraded
+    /// was indistinguishable from one whose marks were fine: both had a
+    /// `.marked` attempt row and some `ad_windows`, and the difference —
+    /// whether any of them carries a `.rediffByteExact` anchor, and therefore
+    /// whether the listener gets a SKIP or a tap — was visible only by reading
+    /// the anchor columns of every row by hand. `.frozen` in particular was
+    /// pure silence: nothing recorded that an asset had reached the end of what
+    /// day-0 would ever do for it. A state you cannot query is a state nobody
+    /// counts.
+    ///
+    /// Rows are classified in Swift through `DayZeroMarkCensus.classify` rather
+    /// than by a SQL predicate, deliberately: one spelling of "degraded", shared
+    /// with the mint's own supersede rule, so the surface and the policy cannot
+    /// disagree about which assets are trapped.
+    func fetchDayZeroMarkFreezeReports(limit: Int = 200) throws -> [DayZeroMarkFreezeReport] {
+        let stmt = try prepare("""
+            SELECT DISTINCT analysisAssetId FROM ad_windows
+            WHERE boundaryState = ?
+            ORDER BY analysisAssetId
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, AdDetectionService.dayZeroRediffByteExactBoundaryState)
+        bind(stmt, 2, max(0, limit))
+        var assetIds: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            assetIds.append(text(stmt, 0))
+        }
+        return try assetIds.map { assetId in
+            let record = try fetchRediffDayZeroAttempt(assetId: assetId)
+            return DayZeroMarkFreezeReport(
+                analysisAssetId: assetId,
+                census: DayZeroMarkCensus.classify(
+                    rows: try fetchAdWindows(assetId: assetId)
+                ),
+                rescueAttemptCount: record?.rescueAttemptCount ?? 0,
+                lastExit: record?.lastExit,
+                policyGeneration: record?.policyGeneration
+            )
+        }
+    }
+
     /// Every day-0 attempt record, most recent first — the diagnostics-bundle
     /// query surface.
     func fetchRediffDayZeroAttempts(limit: Int = 200) throws -> [RediffDayZeroAttemptRecord] {
@@ -7105,7 +7212,7 @@ actor AnalysisStore {
                lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
                lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
                totalFullFetchBytes, lastDetail, suppressedCount, lastSuppressedAt,
-               policyGeneration
+               policyGeneration, rescueAttemptCount
         FROM rediff_day_zero_attempts
         """
 
@@ -7135,7 +7242,10 @@ actor AnalysisStore {
             // Read POSITIONALLY, never defaulted: a row written before this
             // column existed reads 0, which is a foreign generation, which is
             // what earns it a fresh attempt budget.
-            policyGeneration: Int(sqlite3_column_int64(stmt, 15))
+            policyGeneration: Int(sqlite3_column_int64(stmt, 15)),
+            // playhead-ug9m: same discipline. A row written before v43 reads 0
+            // — no rescue spent — which is the truth for every one of them.
+            rescueAttemptCount: Int(sqlite3_column_int64(stmt, 16))
         )
     }
 
