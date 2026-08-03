@@ -369,6 +369,36 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             """
         )
 
+        // playhead-le02: `emittedAutoSkipBannersSnapshot()` is emission-
+        // specific, which was its whole point in cycle-23 — and that is
+        // precisely what makes it blind after playhead-d3g0. A preloaded
+        // `.applied` row routed to the SUGGEST tier is armed, not emitted, so
+        // it never reaches `emitBannerItem` and never enters this snapshot. The
+        // assertion above stays green while the row banners the moment playback
+        // re-enters the span it already skipped last launch — the "banner for
+        // audio already gone" complaint, arriving through a different door.
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        XCTAssertFalse(
+            suggested.contains("win-applied"),
+            """
+            playhead-le02: the preloaded `.applied` window was armed in the \
+            suggest tier. An arming emits nothing until the playhead enters \
+            the span, so every emission-based assertion in this test passes \
+            while the banner still fires in the field.
+            """
+        )
+        // The positive witness: the row was RETAINED as an applied receipt —
+        // its durable receipt and cue kept, nothing new presented. That names
+        // what happened, where the assertions above only name what did not.
+        let ingest = await orchestrator.lastAdWindowIngestOutcome(
+            forWindowId: "win-applied"
+        )
+        XCTAssertEqual(
+            ingest?.outcome,
+            .retainedAppliedReceipt,
+            "the census must record the applied replay as retained, not as a fresh delivery"
+        )
+
         // Deterministic: wait for the auto-promoted banner to arrive.
         // The collector breaks after 1
         // item, so we get exactly the FIRST banner emitted. This
@@ -605,6 +635,26 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         )
 
         await orchestrator.endEpisode()
+
+        // playhead-le02: `endEpisode` clears FOUR collections that can make a
+        // new episode banner about the old one — the emission set this test was
+        // written for, and `suggestWindows` / `armedSuggestWindowIds` /
+        // `suggestBanneredWindowIds`, which it never checked. Since
+        // playhead-d3g0 the armed set is the one that survives longest without
+        // being noticed: an armed suggestion emits nothing at all until a
+        // playhead enters its span, so a leaked arming is invisible until the
+        // NEXT episode reaches those timestamps and banners about a show that
+        // is no longer playing. Asserting the emission reset alone would let
+        // that regression through.
+        let suggestedAfterEnd = await orchestrator.activeSuggestWindowIDs()
+        XCTAssertTrue(
+            suggestedAfterEnd.isEmpty,
+            """
+            playhead-le02: `endEpisode` did NOT clear the suggest tier. An \
+            armed suggestion carried into the next episode banners when that \
+            episode's playhead reaches the old span's timestamps.
+            """
+        )
 
         let emittedAfterEnd = await orchestrator.emittedAutoSkipBannersSnapshot()
         XCTAssertTrue(
