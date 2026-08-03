@@ -484,6 +484,31 @@ struct SegmentAggregatorTests {
                 "every promoted segment scored identically before and after — the tail is not being excluded at all")
     }
 
+    @Test("playhead-pggn: closing a segment on an unbridgeable gap drops the pending tail rather than scoring it")
+    func gapClosingASegmentDropsThePendingTailFromTheScore() {
+        // The third way out of an open segment, and the one the other tests do
+        // not reach: a qualifying window arrives after a gap too large to
+        // bridge, so the segment closes at `lastQualifyingEndTime` while a
+        // below-continuation window is still pending. That window is outside
+        // the span the segment reports and must not be scored.
+        let windows: [SegmentAggregator.WindowScore] = [
+            .init(startTime: 1500.0, endTime: 1530.0, score: 0.50),
+            .init(startTime: 1530.0, endTime: 1560.0, score: 0.50),
+            .init(startTime: 1560.0, endTime: 1561.0, score: 0.10),  // 1 s tail, countdown 1 < 3
+            .init(startTime: 1571.0, endTime: 1601.0, score: 0.50)   // gap 11 s > 5 s → close
+        ]
+        let segments = SegmentAggregator.aggregate(
+            windows: windows,
+            config: Self.defaultConfig
+        )
+        #expect(segments.count == 1)
+        guard let s = segments.first else { return }
+        #expect(abs(s.endTime - 1560.0) < 1e-9)
+        // Scoring the tail here would read (0.50·30 + 0.50·30 + 0.10·1)/61 = 0.4934.
+        #expect(abs(s.segmentScore - 0.50) < 1e-9, "got \(s.segmentScore)")
+        #expect(s.windowCount == 2)
+    }
+
     @Test("playhead-pggn: a below-continuation window the extent LATER covers is scored, not discarded")
     func subContinuationWindowInsideTheFinalExtentIsScored() {
         // The mirror of the defect. Dropping a below-continuation window

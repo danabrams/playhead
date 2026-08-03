@@ -784,13 +784,18 @@ HOTGATE="Playhead/Services/AdDetection/HotPathExtentGate.swift"
 # gate that is computed and then not applied to the retire set.
 UGCEN="Playhead/Services/AdDetection/RediffRefetch/DayZeroMarkCensus.swift"
 POLICY="Playhead/Services/AdDetection/RediffRefetch/RediffDayZeroOutcome.swift"
+# playhead-pggn (PG series). SEGAGG is the pure aggregator — the only place
+# able to observe a score that describes a different region than the geometry
+# it ships with. ADSVC is already listed and carries the PG08 extent-support
+# literal, which is the one mutation in this series that reaches the row.
+SEGAGG="Playhead/Services/AdDetection/SegmentAggregator.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
-  "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY"
+  "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
 )
 
 FOCUSED_SUITES=(
@@ -1053,6 +1058,14 @@ FOCUSED_SUITES=(
   # reported SURVIVED for the honest but useless reason that nothing able to
   # judge them ever ran.
   -only-testing:PlayheadTests/SkipOrchestratorPreloadTests
+  # playhead-pggn: the score/extent coherence rails (PG series). Two suites and
+  # both are needed. SegmentAggregatorTests is the only thing that can see the
+  # pure state machine's four exits from an open segment; SegmentAggregatorWiring
+  # Tests is the only thing that can see what CONFIDENCE actually lands on the
+  # persisted row, and a wiring mutation (PG08) is invisible to a pure test by
+  # construction. ~0.3 s for both.
+  -only-testing:PlayheadTests/SegmentAggregatorTests
+  -only-testing:PlayheadTests/SegmentAggregatorWiringTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1698,6 +1711,17 @@ T_UG9M_VETOED_ANCHORED="a VETOED but ANCHORED row still counts as anchored, and 
 T_UG9M_VETO="a STRICT re-mint does not supersede a user-VETOED day-0 row"
 T_UG9M_FOREIGN_PRODUCER="a STRICT re-mint does not supersede another producer's window"
 T_UG9M_ANCHORED_ROW="a STRICT re-mint does not supersede an already-ANCHORED day-0 row"
+
+# playhead-pggn — the score describes the span the segment reports.
+T_PGGN_WORKED="playhead-pggn worked example: a 0.62 slot with a 0.20 lead-out reports 0.62 over 30 s, not 0.41"
+T_PGGN_TAIL_VALUE="playhead-pggn: the reported score does not depend on the VALUE of a sub-continuation tail"
+T_PGGN_TAIL_WIDTH="playhead-pggn: the reported score does not depend on the WIDTH of a sub-continuation tail"
+T_PGGN_NEVER_LOWERS="playhead-pggn: a sub-continuation tail can never LOWER a promoted segment's score"
+T_PGGN_GAP_CLOSE="playhead-pggn: closing a segment on an unbridgeable gap drops the pending tail rather than scoring it"
+T_PGGN_FOLD_LATER="playhead-pggn: a below-continuation window the extent LATER covers is scored, not discarded"
+T_PGGN_ALREADY_INSIDE="playhead-pggn: a below-continuation window already covered by the extent is scored immediately"
+T_PGGN_PERSISTED="playhead-pggn: a quiet lead-out does not dilute the confidence persisted on the row it is outside of"
+T_PGGN_BLLT="playhead-pggn × playhead-bllt: an undiluted 0.62 aggregator row still persists markOnly under the shipped extent gate"
 T_UG9M_RECOVERED_NOT_PROMOTED="a SEGMENT-RECOVERED re-mint supersedes nothing and promotes nothing"
 T_UG9M_STRICT_SUPERSEDES="a STRICT re-mint supersedes its own degraded day-0 row and persists anchors + eligible"
 T_UG9M_TERMINAL_IN_GEN="a marked exit in the CURRENT generation is still terminal, degraded marks or not"
@@ -3110,6 +3134,30 @@ MUTATIONS=(
   "UG12|258|UGCEN|$T_UG9M_FREEZE_REPORT"
   "UG13|259|STORE|$T_UG9M_CONTEXT;$T_UG9M_STORE_WIRING"
   "UG14|260|UGCEN|$T_UG9M_VETOED_ANCHORED"
+
+  # playhead-pggn — THE SCORE DESCRIBES THE SPAN IT REPORTS. Eight entries,
+  # batches 270-276.
+  #
+  # WHAT SETS THE BATCH FLOOR. PG01-PG06 all live inside the same ~40 lines of
+  # `ingestIntoOpenSegment` / `flushOpenSegment`, and the masking hazard is real
+  # rather than theoretical: PG01 removes the defer entirely, so a PG02-PG06
+  # mutation sharing its batch would be judged on a code path that no longer
+  # runs and would be credited a KILL it did not earn. PG03 and PG05/PG06 are
+  # the same hazard in the other direction — PG03 drops what PG05/PG06 fold, so
+  # together they partially cancel.
+  #
+  # The two that CAN share: PG07 edits `meanScore`, a different type member
+  # reached by every exit, and PG08 is in a different FILE. Neither can repair
+  # the other and their expectations are disjoint (PG07 moves every score, PG08
+  # moves only the persisted gate), so they ride together in 276.
+  "PG01|270|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_VALUE;$T_PGGN_PERSISTED"
+  "PG02|271|SEGAGG|$T_PGGN_WORKED;$T_PGGN_ALREADY_INSIDE"
+  "PG03|272|SEGAGG|$T_PGGN_FOLD_LATER"
+  "PG04|273|SEGAGG|$T_PGGN_TAIL_WIDTH"
+  "PG05|274|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_VALUE;$T_PGGN_NEVER_LOWERS"
+  "PG06|275|SEGAGG|$T_PGGN_GAP_CLOSE"
+  "PG07|276|SEGAGG|$T_PGGN_WORKED;$T_PGGN_TAIL_WIDTH"
+  "PG08|276|ADSVC|$T_PGGN_BLLT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3172,6 +3220,14 @@ describe_mutation() {
     UG03) echo "ug9m: isSupersedable drops !isSettled — a re-mint deletes a USER VETO" ;;
     UG04) echo "ug9m: isSupersedable drops the producer check — a re-mint retires another detector's window" ;;
     UG05) echo "ug9m: isFullyAnchored accepts EITHER edge — a half-anchored row reads as healthy" ;;
+    PG01) echo "pggn: the sub-continuation tail is scored unconditionally again — a 30 s row carries a 60 s number (THE shipped defect)" ;;
+    PG02) echo "pggn: the containment test is INVERTED — inside the extent is deferred, outside it is scored" ;;
+    PG03) echo "pggn: the deferred tail is DROPPED even once the extent covers it — the score describes LESS than the span" ;;
+    PG04) echo "pggn: the end-of-stream flush scores its pending tail" ;;
+    PG05) echo "pggn: the countdown close scores its pending tail" ;;
+    PG06) echo "pggn: the unbridgeable-gap close scores its pending tail" ;;
+    PG07) echo "pggn: the DENOMINATOR alone grows with the tail — dilution with no numerator contribution" ;;
+    PG08) echo "pggn/bllt: the aggregator claims byte-exact edges, so an undiluted 0.62 reaches auto-skip over invented boundaries" ;;
     UG06) echo "ug9m: the rescue arm ignores the generation — a marked exit becomes retryable within a generation" ;;
     UG07) echo "ug9m: the rescue CEILING is removed — the re-fetch is unbounded" ;;
     UG08) echo "ug9m: advance never increments rescueAttemptCount — the bound is never reached" ;;
@@ -3806,6 +3862,131 @@ EOF
                 settled += 1
             } else if isFullyAnchored(row) {
                 anchored += 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-pggn (PG series) --------------------------------------------
+  #
+  # Every one of these restores a state in which `segmentScore` describes a
+  # different region than `[startTime, endTime]` — the defect, reached through
+  # each of the four exits from an open segment plus the two directions of the
+  # containment test. PG08 is the only one that leaves the aggregator.
+
+  # PG01 — THE SHIPPED DEFECT, restored verbatim. The sub-continuation branch
+  # scores the tail unconditionally while the emitted endTime still snaps back,
+  # so a 30 s row carries a number describing 60 s.
+  PG01)
+    snippet OLD <<'EOF'
+            if w.endTime <= seg.lastQualifyingEndTime {
+                seg.include(w)
+            } else {
+                seg.deferBeyondExtent(w)
+            }
+EOF
+    snippet NEW <<'EOF'
+            seg.include(w)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # PG02 — the containment test is INVERTED: a window inside the extent is
+  # deferred and one outside it is scored. Both halves of the invariant break at
+  # once, in opposite directions.
+  PG02)
+    patch "$file" \
+      "            if w.endTime <= seg.lastQualifyingEndTime {" \
+      "            if w.endTime > seg.lastQualifyingEndTime {" ;;
+
+  # PG03 — the deferred tail is DROPPED even when a later qualifying window
+  # carries the extent past it. The score then describes LESS than the span it
+  # reports — the same defect mirrored, and the reason the fix defers rather
+  # than discards.
+  PG03)
+    snippet OLD <<'EOF'
+                if w.endTime >= seg.tailMaxEndTime {
+                    seg.foldPendingTail()
+                } else {
+                    seg.dropPendingTail()
+                }
+EOF
+    snippet NEW <<'EOF'
+                seg.dropPendingTail()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # PG04 — the end-of-stream flush SCORES its pending tail. Only reachable when
+  # the tail is shorter than the 3 s countdown, which is exactly the Tier-2
+  # width regime.
+  PG04)
+    snippet OLD <<'EOF'
+            seg.dropPendingTail()
+            return Self.materialize(segment: seg, config: config)
+EOF
+    snippet NEW <<'EOF'
+            seg.foldPendingTail()
+            return Self.materialize(segment: seg, config: config)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # PG05 — the countdown close SCORES its pending tail. This is the exit the
+  # bead's own worked example takes: one 30 s sub-continuation slot both trips
+  # the countdown and is the thing being wrongly scored.
+  PG05)
+    snippet OLD <<'EOF'
+                // End condition met. Close the segment. The pending tail is by
+                // construction beyond `lastQualifyingEndTime`, which is where
+                // the segment ends, so it is dropped rather than scored.
+                seg.dropPendingTail()
+EOF
+    snippet NEW <<'EOF'
+                // End condition met. Close the segment. The pending tail is by
+                // construction beyond `lastQualifyingEndTime`, which is where
+                // the segment ends, so it is dropped rather than scored.
+                seg.foldPendingTail()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # PG06 — the unbridgeable-gap close SCORES its pending tail. A third exit, and
+  # the one no other mutation in this series reaches.
+  PG06)
+    snippet OLD <<'EOF'
+                    seg.dropPendingTail()
+                    finishedSlot = Self.materialize(segment: seg, config: config)
+                    open = nil
+                    ingestWhileIdle(w)
+EOF
+    snippet NEW <<'EOF'
+                    seg.foldPendingTail()
+                    finishedSlot = Self.materialize(segment: seg, config: config)
+                    open = nil
+                    ingestWhileIdle(w)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # PG07 — the denominator alone grows with the tail: `meanScore` divides by the
+  # region the tail covers without crediting its score. The sharpest form of the
+  # original defect, and the one a reader of `include()` alone cannot see.
+  PG07)
+    patch "$file" \
+      "                totalDuration > 0 ? weightedScoreSum / totalDuration : 0.0" \
+      "                totalDuration > 0 ? weightedScoreSum / (totalDuration + tailDuration) : 0.0" ;;
+
+  # PG08 — the aggregator claims BOTH edges are byte-exact. Its edges are
+  # wherever the scoring windows happened to fall; it never observes a boundary.
+  # With the score no longer diluted, this is the mutation that would turn a
+  # 0.62 marker into an auto-skip over invented edges.
+  PG08)
+    snippet OLD <<'EOF'
+            // a fused verdict does under playhead-2350. Same variable persisted
+            // and consulted; see the single-window site for the full argument.
+            let extentSupport = SpanExtentSupport.unanchored
+EOF
+    snippet NEW <<'EOF'
+            // a fused verdict does under playhead-2350. Same variable persisted
+            // and consulted; see the single-window site for the full argument.
+            let extentSupport = SpanExtentSupport(
+                startAnchor: .rediffByteExact,
+                endAnchor: .rediffByteExact
+            )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -7725,6 +7906,7 @@ rec_file()   {
     HOTGATE) printf '%s' "$HOTGATE" ;;
     UGCEN) printf '%s' "$UGCEN" ;;
     POLICY) printf '%s' "$POLICY" ;;
+    SEGAGG) printf '%s' "$SEGAGG" ;;
     *)     printf '%s' "" ;;
   esac
 }
