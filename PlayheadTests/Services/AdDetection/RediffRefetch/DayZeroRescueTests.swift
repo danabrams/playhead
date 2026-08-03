@@ -779,3 +779,121 @@ struct DayZeroRescuePersistenceTests {
         #expect(try await store.fetchDayZeroMarkFreezeReports().isEmpty)
     }
 }
+
+// MARK: - 5. The trigger actually spends (and refuses) the rescue
+
+/// The wiring tier. Everything above is true of values and of the store; none of
+/// it can see a trigger that computes the census and then hands `decide` an
+/// empty one — which would restore the frozen state with every other rail green.
+@Suite("Day-0 rescue reaches the fetch (playhead-ug9m)")
+struct DayZeroRescueTriggerTests {
+
+    private static let enclosure = URL(string: "https://cdn.example.com/ep.mp3")!
+    private static let played = URL(fileURLWithPath: "/tmp/ug9m-played.mp3")
+
+    private func makeTrigger(
+        context: DayZeroAttemptContext,
+        fetcher: KWaySpyFullFetcher,
+        suppressions: SuppressionBox
+    ) -> DayZeroRediffTrigger {
+        let service = RediffRefetchService(
+            enabled: true,
+            enumerator: StubRefetchEnumerator(),
+            rangedSampler: StubRangedSampler(),
+            localSampler: StubLocalSampler(),
+            fullFetcher: fetcher,
+            bsideFingerprinter: StubBSideFingerprinter(),
+            recorder: SpyRefetchRecorder(),
+            fileRemover: SpyTempFileRemover(),
+            taskScheduler: StubTaskScheduler(),
+            dayZeroMinter: SpyDayZeroMinter(),
+            now: { 0 }
+        )
+        return DayZeroRediffTrigger(
+            service: service,
+            enabled: true,
+            kWayFetchCount: 2,
+            transportProvider: { .testWifi },
+            chargeStateProvider: { true },
+            deepScanOptInProvider: { false },
+            attemptContextProvider: { _ in context },
+            suppressionRecorder: { assetId, reason, at in
+                suppressions.recorded.append((assetId, reason, at))
+            },
+            mintedMarkDelivery: { _ in },
+            budgetWindowProvider: { .empty },
+            budgetSpendRecorder: { _, _ in }
+        )
+    }
+
+    final class SuppressionBox: @unchecked Sendable {
+        var recorded: [(assetId: String, reason: RediffDayZeroExit, at: Double)] = []
+    }
+
+    private func fire(_ trigger: DayZeroRediffTrigger) async {
+        _ = await trigger.triggerIfEligible(
+            analysisAssetId: "a1",
+            enclosureURL: Self.enclosure,
+            playedFileURL: Self.played,
+            at: 10_000_000
+        )
+    }
+
+    /// THE AUDIBLE HALF, at the wiring tier: a trapped asset really does reach
+    /// the fetch again.
+    @Test("a trapped asset's rescue reaches the k-way fetch")
+    func trappedAssetRefetches() async throws {
+        let fetcher = KWaySpyFullFetcher()
+        let suppressions = SuppressionBox()
+        await fire(makeTrigger(
+            context: DayZeroAttemptContext(
+                record: RescueFixture.record(generation: RescueFixture.foreignGeneration),
+                markCensus: RescueFixture.degradedCensus
+            ),
+            fetcher: fetcher,
+            suppressions: suppressions
+        ))
+        #expect(!fetcher.calls.isEmpty, "the rescue must actually spend the fetch")
+        #expect(suppressions.recorded.isEmpty)
+    }
+
+    /// The same record with an ANCHORED sibling must NOT refetch — the census
+    /// is what distinguishes them, so this pair is the proof that the trigger
+    /// reads it rather than passing `.empty`.
+    @Test("an anchored sibling stops the trigger before any bytes are spent")
+    func anchoredSiblingStopsTheFetch() async throws {
+        let fetcher = KWaySpyFullFetcher()
+        let suppressions = SuppressionBox()
+        await fire(makeTrigger(
+            context: DayZeroAttemptContext(
+                record: RescueFixture.record(generation: RescueFixture.foreignGeneration),
+                markCensus: RescueFixture.mixedCensus
+            ),
+            fetcher: fetcher,
+            suppressions: suppressions
+        ))
+        #expect(fetcher.calls.isEmpty, "a 9s6q-recovered sibling is not a rescue case")
+        #expect(suppressions.recorded.map(\.reason) == [.marked])
+    }
+
+    /// And the bound, surfaced: a spent rescue records `rescueExhausted`.
+    @Test("a spent rescue refuses at the trigger and NAMES itself")
+    func spentRescueRefusesAndIsNamed() async throws {
+        let fetcher = KWaySpyFullFetcher()
+        let suppressions = SuppressionBox()
+        await fire(makeTrigger(
+            context: DayZeroAttemptContext(
+                record: RescueFixture.record(
+                    generation: RescueFixture.foreignGeneration,
+                    rescueAttemptCount: DayZeroRediffAttemptPolicy.maxRescueAttempts
+                ),
+                markCensus: RescueFixture.degradedCensus
+            ),
+            fetcher: fetcher,
+            suppressions: suppressions
+        ))
+        #expect(fetcher.calls.isEmpty)
+        #expect(suppressions.recorded.map(\.reason) == [.rescueExhausted],
+                "the permanently-frozen state is recorded, not silent")
+    }
+}
