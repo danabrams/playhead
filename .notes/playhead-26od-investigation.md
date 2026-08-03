@@ -155,3 +155,61 @@ never a wrong cut. But it is a frequency change on a user-visible surface and it
 interacts with "a mark is worth far less than a skip and can itself cost show".
 Flagged, not guarded: guarding it would be a detection-semantics change, which
 this bead's non-goals exclude.
+
+## Review round II — the surfacing question, MEASURED
+
+Round I flagged the surfacing consequence and did not measure it. It is measured
+now, and the answer is that guarding it cannot be scoped to this bead.
+
+**What surfaces today.** `SemanticSweepMarkComposer.presenceExtents` takes every
+`passA` `containsAd` row that examined its window and, where no `passB`
+refinement overlaps it, emits the COARSE extent verbatim
+(`SemanticSweepMarkComposer.swift`, stage 2 —
+`result.append(contentsOf: narrowed.isEmpty ? [window] : narrowed)`). It ships ON
+(`AdDetectionService.swift`, `semanticSweepMarkEnabled: true`) and composes from
+two sites: `BackfillJobRunner.runJob`'s tail and `AdDetectionService` step 18c.
+Both read every persisted row for the asset, so a row banked by a pass that DIED
+is composed on the next run exactly like one from a pass that returned.
+
+`BackfillCoarseCheckpointTests.midFlightCoarseOnlyRowsReachTheSuggestTier` pins
+it end to end from REAL rows captured inside a running pass: every mark arms
+`.armedSuggest`, appears in `activeSuggestWindowIDs()`, and a head-artifact
+control in the same delivery still drops `.tooEarly` — so the observation is
+positive in playhead-le02's sense rather than an inference from silence.
+`aRefinedRowSurfacesAtTheRefinedExtent` pins the other direction.
+
+**Why 26od makes it worse, specifically.** Before this bead a killed pass left
+nothing, so its windows were eventually re-scanned AND refined by a run that
+completed. After it, the prefix is durable and the resume cursor means it is
+never re-scanned — so it is never refined either. `containsAd` verdicts in that
+prefix stay at coarse extent PERMANENTLY. That is a new steady state, not a
+larger version of an old one.
+
+**Why the guard is not in this bead.** There is no row-level witness that
+separates 26od's population from playhead-y3ya's. y3ya's own field case
+(DE0784D8: `containsAd` at 508–599 and 1604–1731, no `passB`) is a pass that
+RETURNED with a non-`.success` status, which skips refinement
+(`if coarse.status == .success && !coarse.windows.isEmpty`) — and playhead-bkhc
+and playhead-t1kq already checkpoint an honest cursor over it. Same rows, same
+cursor, same absence of a refinement. Requiring a `passB` refinement before a
+coarse verdict may surface therefore narrows y3ya globally.
+
+MEASURED blast radius of that one-line change, run as a probe and reverted:
+
+| suite | issues |
+|---|---|
+| `The semantic-sweep extent policy` | 21 |
+| `A containsAd verdict with no seed under it becomes a candidate` | 3 |
+| `A declined verdict produces nothing` | 3 |
+| `The sweep marks only where the pipeline produced nothing` | 3 |
+| `Semantic-sweep mark wire-in` | 4 |
+| `A semantic verdict arms a suggest candidate` | 4 |
+
+38 failing assertions across six merged y3ya suites, including its acceptance
+test ("both field verdicts arm the suggest tier"). Every remaining stage of the
+composer — merge, clip, width ceiling, additive-only dedupe — loses its input
+and therefore its coverage unless every fixture gains a `passB` row.
+
+So: reverting stage 2's fallback is Dan's call on playhead-y3ya, not a rail
+playhead-26od can add. The rails above make the axis measured rather than blind,
+and the decision is one assertion-flip away in each direction.
