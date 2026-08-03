@@ -479,6 +479,66 @@ struct BackfillCoarseCheckpointTests {
     }
 }
 
+/// The two properties that bound this bead's write cost.
+///
+/// Neither is observable from the database, which is exactly why they are
+/// asserted here: a lost dedupe rewrites rows that are already durable and a
+/// lost cursor guard rewrites a cursor that has not moved. Both converge on the
+/// same correct state, so every row-level test still passes — while the pass
+/// quietly goes from O(n) writes to O(n^2), on a phone, once per window, for
+/// 12-45 minutes.
+@Suite("playhead-26od: checkpoint write cost")
+struct CoarseCheckpointBoxTests {
+
+    /// Each checkpoint carries the whole banked prefix, so without this the
+    /// pass would re-offer every earlier window on every window.
+    @Test("a window already offered to the store is never offered again")
+    func processedWindowsAreNotReoffered() {
+        let box = CoarseCheckpointBox()
+        #expect(box.processedWindowCount == 0)
+
+        // Checkpoint 1 sees one window.
+        box.markProcessed(throughCount: 1)
+        #expect(box.processedWindowCount == 1)
+        // Checkpoint 2 sees the same window plus one more; only the new one is
+        // work.
+        box.markProcessed(throughCount: 2)
+        #expect(box.processedWindowCount == 2)
+    }
+
+    /// A snapshot that somehow arrived stale must not rewind the counter and
+    /// resurrect writes that are already done.
+    @Test("the processed count never goes backwards")
+    func processedCountIsMonotonic() {
+        let box = CoarseCheckpointBox()
+        box.markProcessed(throughCount: 5)
+        box.markProcessed(throughCount: 2)
+        #expect(box.processedWindowCount == 5)
+    }
+
+    /// playhead-lxkq attempts ad-likely windows first, so most early windows do
+    /// NOT extend the contiguous prefix. Those checkpoints must cost no
+    /// `backfill_jobs` write at all.
+    @Test("only a strictly advancing cursor is worth a write")
+    func onlyStrictAdvancesAreWorthAWrite() {
+        let box = CoarseCheckpointBox()
+        #expect(box.advanceCursor(to: 90.0))
+        // Same prefix — the window that just resolved was out of episode order.
+        #expect(box.advanceCursor(to: 90.0) == false)
+        // Behind the prefix — must never regress the cursor.
+        #expect(box.advanceCursor(to: 30.0) == false)
+        #expect(box.advanceCursor(to: 120.0))
+    }
+
+    /// `cursorAdvanced` treats a cursor of 0 as no progress, so a zero upper
+    /// bound is not worth a write either.
+    @Test("a zero upper bound is not an advance")
+    func zeroIsNotAnAdvance() {
+        let box = CoarseCheckpointBox()
+        #expect(box.advanceCursor(to: 0.0) == false)
+    }
+}
+
 /// Collects the checkpoint snapshots a coarse pass emits.
 private actor BankedWindowRecorder {
     private(set) var snapshots: [FMCoarseBankedWindows] = []
