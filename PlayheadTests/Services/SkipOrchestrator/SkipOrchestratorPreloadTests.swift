@@ -62,7 +62,8 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         decisionState: String = "confirmed",
         analysisAssetId: String = "asset-1",
         startEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
-        endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue
+        endEdgeAnchor: String = AutoSkipEdgeAnchor.unanchored.rawValue,
+        eligibilityGate: String? = nil
     ) -> AdWindow {
         AdWindow(
             id: id,
@@ -78,6 +79,7 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             metadataSource: "none",
             metadataConfidence: nil, metadataPromptVersion: nil,
             wasSkipped: false, userDismissedBanner: false,
+            eligibilityGate: eligibilityGate,
             startEdgeAnchor: startEdgeAnchor,
             endEdgeAnchor: endEdgeAnchor
         )
@@ -387,16 +389,26 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             while the banner still fires in the field.
             """
         )
-        // The positive witness: the row was RETAINED as an applied receipt —
-        // its durable receipt and cue kept, nothing new presented. That names
-        // what happened, where the assertions above only name what did not.
+        // The positive witness: the row landed in the MANAGED tier. That names
+        // where it went, where every assertion above only names somewhere it
+        // did not go.
+        //
+        // Measured, not assumed — the first draft of this rail expected
+        // `retainedAppliedReceipt` and the test said `admittedManaged`. That
+        // outcome is for an exact REPLAY of an already-`.applied` producer
+        // revision; this is the preload's first delivery of the row, so
+        // `admittedManaged` is correct and the census row on the same run
+        // agrees (`forwarded=2 delivered=2 ingest_admitted_managed=2`). Worth
+        // recording because the distinction is the whole point of the witness:
+        // "admitted to the auto-skip tier, banner suppressed" and "re-presented
+        // as a suggestion" are different facts, and only one of them is a bug.
         let ingest = await orchestrator.lastAdWindowIngestOutcome(
             forWindowId: "win-applied"
         )
         XCTAssertEqual(
             ingest?.outcome,
-            .retainedAppliedReceipt,
-            "the census must record the applied replay as retained, not as a fresh delivery"
+            .admittedManaged,
+            "the preloaded `.applied` row belongs to the managed tier with its banner suppressed — not to the suggest tier, and not nowhere"
         )
 
         // Deterministic: wait for the auto-promoted banner to arrive.
@@ -612,6 +624,20 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         try await store.insertAdWindow(
             makeAdWindow(id: "win-confirmed", start: 10.0, end: 40.0, confidence: 0.95, decisionState: "confirmed")
         )
+        // playhead-le02: and a markOnly row, so the suggest tier is genuinely
+        // OCCUPIED before `endEpisode` runs. Without this the reset assertion
+        // below would read empty because nothing ever armed — vacuously true,
+        // and blind to the very regression it names. The precondition is
+        // asserted rather than assumed for the same reason the emission set's
+        // is: a setup that silently stopped arming would otherwise present as
+        // the reset working.
+        try await store.insertAdWindow(
+            makeAdWindow(
+                id: "win-marked", start: 100.0, end: 160.0, confidence: 0.95,
+                decisionState: "confirmed",
+                eligibilityGate: SkipEligibilityGate.markOnly.rawValue
+            )
+        )
 
         let bannerStream = await orchestrator.bannerItemStream()
         let collector = Task<[AdSkipBannerItem], Never> {
@@ -634,8 +660,6 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             "Setup precondition: emission set must contain `win-confirmed` after the banner is emitted."
         )
 
-        await orchestrator.endEpisode()
-
         // playhead-le02: `endEpisode` clears FOUR collections that can make a
         // new episode banner about the old one — the emission set this test was
         // written for, and `suggestWindows` / `armedSuggestWindowIds` /
@@ -646,6 +670,18 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         // NEXT episode reaches those timestamps and banners about a show that
         // is no longer playing. Asserting the emission reset alone would let
         // that regression through.
+        //
+        // The precondition is taken BEFORE `endEpisode` and asserted, not
+        // assumed: read afterwards it would be empty either way, which is the
+        // vacuous shape this whole bead is about.
+        let suggestedDuringEpisode = await orchestrator.activeSuggestWindowIDs()
+        XCTAssertTrue(
+            suggestedDuringEpisode.contains("win-marked"),
+            "Setup precondition: the markOnly row must occupy the suggest tier, or the reset assertion below is vacuous."
+        )
+
+        await orchestrator.endEpisode()
+
         let suggestedAfterEnd = await orchestrator.activeSuggestWindowIDs()
         XCTAssertTrue(
             suggestedAfterEnd.isEmpty,
