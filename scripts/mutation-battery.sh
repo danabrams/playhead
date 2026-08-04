@@ -481,6 +481,37 @@
 #   1-80 and 82-84 were NOT re-run and carry the verdicts above. Recount: the
 #   array now holds 152 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-04 (playhead-fil5). Batches 400-407 only, added by
+#   this bead: SC01-SC22 (SC13 was drafted and dropped, see SC01), 21 entries,
+#   7 batches. FINAL 21 KILLED / 0 SURVIVED / 0 ERROR, 8 builds. Batches 1-323
+#   were NOT re-run and carry the verdicts above. Recount: the array now holds
+#   391 live entries.
+#
+#   ONE SURVIVOR ON THE WAY, and it was real rather than a mis-stated
+#   expectation: SC09 ("" persisted as if it were a podcast id) survived
+#   because `runBackfill`'s podcastId gate pre-converted "" to nil at the CALL
+#   SITE, so the row never saw the empty string the normalization exists to
+#   catch and no wire-in test could observe the constructor however it behaved.
+#   The duplicate decision at the call site was deleted and a third rail added
+#   (the value reaching SQLite as NULL); SC09 then KILLED with all three.
+#
+#   TWO OPERATIONAL NOTES, both cost builds:
+#     • The first four batches came back ERROR / "batch did not build/run,
+#       rc=28". That is the DISK PREFLIGHT refusing, not a compile failure —
+#       the baseline build leaves the volume under the 13.50 GiB floor and the
+#       mutated run is then refused. The floor is measured for a FULL plan; a
+#       selective batch was sampled at 5.43 GiB of drawdown (16.11 start,
+#       10.68 minimum), so `PLAYHEAD_DISK_MIN_GIB=9` is the deliberate,
+#       measured lever here — never PLAYHEAD_SKIP_DISK_PREFLIGHT. Pair it with
+#       `PLAYHEAD_MB_SKIP_BASELINE=1` once the baseline has been seen green,
+#       which halves the builds and the drawdown with them.
+#     • `--dry-run --only <NAME>` returns "nothing selected" with exit 2 when
+#       the name does not match, and a loop that greps the output for the word
+#       "anchor" reads that as success for every entry. Worse, the `git
+#       checkout -- .` such a loop uses to tidy up will DISCARD uncommitted
+#       edits to this script itself. Commit the battery entry before dry-running
+#       it, and check the exit code rather than the prose.
+#
 #   THE PRE-FLIGHT EARNED ITS KEEP. The first attempt refused to run: the
 #   focused set was already RED on two xr3t review-round tests
 #   (`managedAdWindowReplacementCannotBypassInventoryFilter` and its
