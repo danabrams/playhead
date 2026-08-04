@@ -1780,6 +1780,26 @@ actor AnalysisJobRunner {
     /// transcript lane's problem?" is one question and must not have two
     /// answers.
     ///
+    /// **A RESIDUAL, named because it will otherwise be re-discovered as a bug**
+    /// (playhead-9y9e R1 review). The GATE spans both passes and the RETURNED
+    /// VALUE is the FAST watermark, so on a final-pass-heavy asset they can
+    /// disagree — and the disagreement is not academic. On the 2026-08-03 pull
+    /// 48E903D7 covers 95.1 % as a two-pass area (clears the 0.95 gate) while
+    /// its fast watermark is 2,010 s of a 2,113 s episode, which is short of the
+    /// deepest tier rung by more than
+    /// ``AnalysisWorkScheduler/tierCoverageSlack(target:)``. Such a pass reaches
+    /// Stage 4 — the entire point — and then still terminates
+    /// `coverageInsufficient:noProgress` rather than `complete`.
+    ///
+    /// That is an IMPROVEMENT on what it replaces (`transcription:zeroCoverage`
+    /// without reaching Stage 4 at all) and it is bounded — `noProgress` is not
+    /// an attempt-cap terminal, so the cap-out rescue does not re-mint on it.
+    /// Returning a two-pass reach instead would fix the terminal and BREAK the
+    /// deliberate parity with `persistedCoverage()`'s `.completed` arm, so the
+    /// two paths would report different coverage for the same asset. Changing
+    /// that is a design decision about what the runner's `transcriptCoverageSec`
+    /// NAMES, not a review fix; it is left alone here on purpose.
+    ///
     /// Every failure to measure returns `nil` — no asset row, no watermark, an
     /// unreadable chunk set, an absent duration. This helper GRANTS a pass the
     /// right to skip the failure accounting, so the safe direction is to
