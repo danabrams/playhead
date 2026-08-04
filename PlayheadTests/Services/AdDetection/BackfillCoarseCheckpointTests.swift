@@ -111,10 +111,19 @@ struct BackfillCoarseCheckpointTests {
     /// constant that is both small enough to be fast and large enough to be
     /// safe.
     ///
-    /// So no test below measures, or depends on, elapsed time. Durability is
-    /// observed the only way that is actually load-independent: by reading the
-    /// database FROM INSIDE the pass, at a point where the pass demonstrably has
-    /// not returned. See `CoarseInFlightObserver`.
+    /// So no test that runs in the DEFAULT plans measures, or depends on,
+    /// elapsed time. Durability is observed the only way that is actually
+    /// load-independent: by reading the database FROM INSIDE the pass, at a
+    /// point where the pass demonstrably has not returned. See
+    /// `CoarseInFlightObserver`.
+    ///
+    /// The one exception is stated rather than hidden:
+    /// `abandonedPassLeavesItsScreenedWindowsBehind` needs a pass to OUTLIVE
+    /// `runJob`, and the only thing that produces one is the no-progress
+    /// watchdog, whose bound is wall-clock and whose injectable `sleep` seam
+    /// `coarsePassA` does not expose. It shrinks the bound, is therefore
+    /// PerfGate'd out of the default plans, and is registered in
+    /// `scripts/perf-tests.sh`.
     private func makeRunner(
         store: AnalysisStore,
         runtime: FoundationModelClassifier.Runtime
@@ -904,7 +913,8 @@ struct BackfillCoarseCheckpointTests {
     private func seedRunningJob(
         _ store: AnalysisStore,
         assetId: String,
-        jobId: String
+        jobId: String,
+        status: BackfillJobStatus = .running
     ) async throws {
         try await store.insertBackfillJob(
             BackfillJob(
@@ -917,7 +927,7 @@ struct BackfillCoarseCheckpointTests {
                 progressCursor: nil,
                 retryCount: 0,
                 deferReason: nil,
-                status: .running,
+                status: status,
                 scanCohortJSON: makeTestScanCohortJSON(),
                 createdAt: Date().timeIntervalSince1970
             )
@@ -1075,6 +1085,56 @@ struct BackfillCoarseCheckpointTests {
         #expect(try await passARows(store, assetId: assetId).isEmpty)
         let job = try #require(try await store.fetchBackfillJob(byId: jobId))
         #expect(job.progressCursor?.lastProcessedUpperBoundSec == nil)
+    }
+
+    /// The OTHER observer `runJob` installs on the pass is bounded by the same
+    /// token, and its guard is asserted here for the reason the checkpoint's
+    /// three are: it fires only from a pass that outlived `runJob`, which only
+    /// the PerfGate'd abandonment test produces, so as two lines inside a
+    /// closure it was a rule nothing could see deleted. `touchCoarseLeaseIfLive`
+    /// exists so the same claim can be made directly and deterministically.
+    ///
+    /// The state that makes it matter is a NON-TERMINAL row.
+    /// `markBackfillJobRunning` accepts `queued`, `deferred` and `running`, and
+    /// `resetStrandedBackfillJobs` only sweeps `running` rows whose `updatedAt`
+    /// is STALE — so a touch from a pass whose own run is over pulls a job a
+    /// later run left `deferred` back into `running` and keeps it fresh there,
+    /// where the reaper will not take it and the drain will not re-admit it.
+    /// That is the stall qk44 exists to prevent, re-entered through qk44's own
+    /// observer.
+    ///
+    /// Both directions, deliberately: a guard that refused everything would
+    /// satisfy the negative half on its own while silently retiring the lease
+    /// heartbeat that is the whole point of qk44.
+    @Test("a defused lease touch cannot resurrect a deferred job — and a live one still leases")
+    func aDefusedLeaseTouchDoesNotResurrectTheJob() async throws {
+        let assetId = "asset-26od-lease"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let runner = makeRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime
+        )
+
+        let orphanedJobId = "job-26od-lease-orphaned"
+        try await seedRunningJob(store, assetId: assetId, jobId: orphanedJobId, status: .deferred)
+        let defused = CoarseCheckpointBox()
+        defused.defuse()
+        await runner.touchCoarseLeaseIfLive(box: defused, jobId: orphanedJobId)
+        let afterOrphan = try #require(try await store.fetchBackfillJob(byId: orphanedJobId))
+        #expect(
+            afterOrphan.status == .deferred,
+            "an orphaned pass pulled a deferred job back into running: \(afterOrphan.status)"
+        )
+
+        let liveJobId = "job-26od-lease-live"
+        try await seedRunningJob(store, assetId: assetId, jobId: liveJobId, status: .deferred)
+        await runner.touchCoarseLeaseIfLive(box: CoarseCheckpointBox(), jobId: liveJobId)
+        let afterLive = try #require(try await store.fetchBackfillJob(byId: liveJobId))
+        #expect(
+            afterLive.status == .running,
+            "a live pass stopped leasing — playhead-qk44's work clock is dead"
+        )
     }
 
     // MARK: - 3c. The write COST, measured over a whole pass
@@ -2080,5 +2140,149 @@ struct CoarseCoverageWalkTests {
             failedWindows: []
         )
         #expect(forward == shuffled)
+    }
+
+    /// An AMBIGUOUS needle credits no plan — the sixth instance of this bead's
+    /// recurring shape, and the one an empty needle's rail does not cover.
+    ///
+    /// The subset test identifies a plan only while the plans' line-ref sets are
+    /// DISJOINT. `planPassA` partitions the segment LIST, which partitions the
+    /// `segmentIndex` VALUES only while those values are unique — and the
+    /// classifier deliberately does not require that (it builds its segment
+    /// lookup with `uniquingKeysWith`, and
+    /// `coarse pass tolerates duplicate segmentIndex without crashing` pins the
+    /// tolerance with two segments both carrying index 0). Two segments sharing
+    /// an index that fall either side of a packing boundary put the same line ref
+    /// in two plans.
+    ///
+    /// The damage lands here, not there. `runCoarseRetry` banks one window per
+    /// sub-prompt of a shrunk plan and a sub-prompt's refs are a strict SUBSET of
+    /// its plan's, so a sub-window of the LATER plan is also a subset of the
+    /// EARLIER plan's refs — and `first(where:)` credited the earlier one. Below,
+    /// plan 0 was never attempted; crediting it would advance the cursor to 30
+    /// and `narrowedForResume` would then delete plan 0's segments forever.
+    @Test("an outcome matching two plans credits neither")
+    func ambiguousLineRefsAttributeToNothing() {
+        // Two plans sharing line ref 0 — the duplicate-`segmentIndex` shape.
+        let shared = [
+            CoarsePassWindowPlan(
+                windowIndex: 0,
+                lineRefs: [0],
+                prompt: "p0",
+                promptTokenCount: 10,
+                startTime: 0.0,
+                endTime: 30.0,
+                transcriptQuality: .good
+            ),
+            CoarsePassWindowPlan(
+                windowIndex: 1,
+                lineRefs: [0, 1],
+                prompt: "p1",
+                promptTokenCount: 10,
+                startTime: 30.0,
+                endTime: 90.0,
+                transcriptQuality: .good
+            )
+        ]
+        // A shrunk sub-window of plan 1 covering only the shared ref. `{0}` is a
+        // subset of BOTH plans' refs.
+        let subWindow = FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: [0],
+            startTime: 30.0,
+            endTime: 60.0,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: shared,
+            windows: [subWindow],
+            failedWindows: []
+        )
+        #expect(
+            walk.succeededPlanIndices.isEmpty,
+            "an ambiguous needle was credited to \(walk.succeededPlanIndices) — the cursor now claims audio nobody screened"
+        )
+        #expect(walk.contiguousUpperBoundSec == nil)
+        #expect(walk.fullyCovered == false)
+
+        // A FAILURE resolves the ambiguity from its own `planWindowIndex`, which
+        // every construction site fills with the OUTER plan's index — the shrunk
+        // sub-plans carry `windowIndex: 0` and are never the source of it. So the
+        // failure disqualifies plan 1, not plan 0, and the cursor stops at plan
+        // 0's end rather than running past the hole.
+        let ambiguousFailure = CoarseWindowFailure(
+            planWindowIndex: 1,
+            lineRefs: [0],
+            startTime: 30.0,
+            endTime: 60.0,
+            status: .rateLimited
+        )
+        let wholePlanZero = FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: [0],
+            startTime: 0.0,
+            endTime: 30.0,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+        let withFailure = BackfillJobRunner.coarseCoverageWalk(
+            plans: shared,
+            windows: [wholePlanZero],
+            failedWindows: [ambiguousFailure]
+        )
+        #expect(withFailure.failedPlanIndices == [1], "an ambiguous failure disqualified the wrong plan")
+        #expect(withFailure.contiguousUpperBoundSec == nil)
+        #expect(withFailure.fullyCovered == false)
+    }
+
+    /// The no-op half: with distinct line refs a needle has at most one superset,
+    /// so requiring a UNIQUE match changes nothing on any healthy episode.
+    ///
+    /// Stated as its own case because "credit nobody when it is ambiguous" is one
+    /// `guard` away from "credit nobody, ever", and that mutation would leave the
+    /// case above green while silently retiring the whole coverage cursor.
+    @Test("a strict subset of exactly one plan still credits that plan")
+    func unambiguousSubsetStillCredits() {
+        let plans = [
+            CoarsePassWindowPlan(
+                windowIndex: 0,
+                lineRefs: [0, 1],
+                prompt: "p0",
+                promptTokenCount: 10,
+                startTime: 0.0,
+                endTime: 60.0,
+                transcriptQuality: .good
+            ),
+            CoarsePassWindowPlan(
+                windowIndex: 1,
+                lineRefs: [2, 3],
+                prompt: "p1",
+                promptTokenCount: 10,
+                startTime: 60.0,
+                endTime: 120.0,
+                transcriptQuality: .good
+            )
+        ]
+        // The shrink case that MUST keep working: one sub-prompt of plan 0.
+        let subWindow = FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: [1],
+            startTime: 30.0,
+            endTime: 60.0,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [subWindow],
+            failedWindows: []
+        )
+        #expect(walk.succeededPlanIndices == [0], "a unique subset match stopped crediting its plan")
+        #expect(walk.contiguousUpperBoundSec == 60.0)
     }
 }

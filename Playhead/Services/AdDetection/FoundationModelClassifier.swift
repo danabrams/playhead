@@ -1980,10 +1980,21 @@ struct FoundationModelClassifier: Sendable {
                 // killed at window N keeps windows 0…N-2 instead of losing all
                 // of them.
                 //
-                // `reportedPlans` (episode order), not `plans` (attempt order):
-                // coverage is a question about the episode, and the caller's
-                // contiguous-prefix walk would otherwise be reading a list
-                // playhead-lxkq may have permuted.
+                // `reportedPlans` (episode order), not `plans` (attempt order),
+                // because this list has to be the SAME denominator the caller
+                // gets back at `return` — `FMCoarseScanOutput.plans` is
+                // `reportedPlans` too. A mid-flight walk and the end-of-pass
+                // walk that disagreed about the denominator could disagree
+                // about coverage, and the whole checkpoint rests on the
+                // mid-flight answer never exceeding the final one.
+                //
+                // Stated precisely, because the obvious reason is the wrong
+                // one: `coarseCoverageWalk` sorts by `startTime` and attributes
+                // by line-ref subset, so it is indifferent to the order of this
+                // array (`the walk is indifferent to the order outcomes arrive
+                // in` pins that). Episode order matters to the CALLER's other
+                // reader — `unattemptedPlans.first`, which answers "where did
+                // the pass stop" about the episode, not about attempt sequence.
                 if let onWindowsBanked {
                     await onWindowsBanked(
                         FMCoarseBankedWindows(

@@ -1780,14 +1780,21 @@ actor BackfillJobRunner {
     ///
     /// **The premise this rests on, stated because it lives in another file.**
     /// `planPassA` advances `lowerBound = upperBound + 1` across a list it has
-    /// already sorted, so the plans PARTITION the segments: disjoint `lineRefs`,
-    /// and every segment in exactly one plan. Both halves are load-bearing here.
-    /// Disjointness is what makes the subset match unambiguous. Totality is what
-    /// makes the cursor cap sound — the cap says "never past where an uncovered
-    /// plan begins", which only covers all unscanned audio if every segment
-    /// belongs to some plan. A future `planPassA` that SKIPS a segment (too
-    /// large, empty, unparseable) would leave audio no plan speaks for, and this
-    /// walk would stride over it without any of its guards firing.
+    /// already sorted, so the plans PARTITION the SEGMENTS: disjoint segment
+    /// ranges, and every segment in exactly one plan. Both halves are
+    /// load-bearing here. Totality is what makes the cursor cap sound — the cap
+    /// says "never past where an uncovered plan begins", which only covers all
+    /// unscanned audio if every segment belongs to some plan. A future
+    /// `planPassA` that SKIPS a segment (too large, empty, unparseable) would
+    /// leave audio no plan speaks for, and this walk would stride over it
+    /// without any of its guards firing.
+    ///
+    /// Disjointness is what would make the subset match unambiguous, and it is
+    /// the half that does NOT come free: `lineRefs` are `segmentIndex` VALUES,
+    /// and a partition of the segment LIST is a partition of those values only
+    /// while `segmentIndex` is unique — which the classifier deliberately does
+    /// not require (see the ambiguity guard in `planIndex` below). So the walk
+    /// establishes uniqueness itself instead of assuming it.
     struct CoarseCoverageWalk: Sendable, Equatable {
         /// Every plan produced a window, none of them also failed, and every one
         /// of those windows is durable.
@@ -1866,7 +1873,45 @@ actor BackfillJobRunner {
             // walk is where the damage would land.
             guard !refs.isEmpty else { return nil }
             let needle = Set(refs)
-            return planLineRefSets.first(where: { needle.isSubset(of: $0.lineRefs) })?.windowIndex
+            // playhead-26od, R4: an AMBIGUOUS needle is not a match either, for
+            // the same reason an empty one is not.
+            //
+            // The subset test identifies a plan only while the plans' line-ref
+            // sets are DISJOINT, and `planPassA` guarantees disjoint SEGMENT
+            // RANGES — not disjoint `segmentIndex` VALUES. Those are the same
+            // thing only while `segmentIndex` is unique across the transcript,
+            // and the classifier explicitly does not require that: it builds
+            // its segment lookup with `uniquingKeysWith` precisely so a
+            // duplicated `segmentIndex` cannot trap, and
+            // `coarse pass tolerates duplicate segmentIndex without crashing`
+            // pins that tolerance. Two segments sharing an index land adjacent
+            // in the packing sort and fall into DIFFERENT plans whenever the
+            // window boundary happens to run between them, and those two plans
+            // then share a line ref.
+            //
+            // What breaks then is not academic. `runCoarseRetry` banks one
+            // window per sub-prompt of a shrunk plan, and a sub-prompt's refs
+            // are a strict SUBSET of its plan's — so a sub-window of the later
+            // plan can be a subset of the earlier plan's refs too, and
+            // `first(where:)` credits the earlier one. If that earlier plan was
+            // never attempted, the contiguous walk starts from a plan no row
+            // covers and `narrowedForResume` deletes its segments forever: the
+            // pmp9 hole, reached through an identity that is not an identity.
+            //
+            // Requiring a UNIQUE superset costs one full scan instead of an
+            // early exit and is a no-op on every episode whose segment indices
+            // are distinct, because there a needle has at most one superset.
+            // When there are two, crediting neither is the conservative answer
+            // for a success and sends a failure to its own `planWindowIndex`,
+            // which every construction site fills with the OUTER plan's index
+            // (the shrunk sub-plans carry `windowIndex: 0` and are never the
+            // source of that field).
+            var unique: Int?
+            for candidate in planLineRefSets where needle.isSubset(of: candidate.lineRefs) {
+                guard unique == nil else { return nil }
+                unique = candidate.windowIndex
+            }
+            return unique
         }
 
         let succeededPlanIndices = Set(
@@ -2021,6 +2066,49 @@ actor BackfillJobRunner {
     /// call it by accident either: it needs a `CoarseCheckpointBox` and an
     /// `FMCoarseBankedWindows`, and the only producer of the latter is
     /// `coarsePassA`'s callback.
+    /// playhead-qk44's per-window lease touch, bounded by playhead-26od's
+    /// job-lifetime token.
+    ///
+    /// The lease is what tells `resetStrandedBackfillJobs` a `running` row is
+    /// alive, and `markBackfillJobRunning` accepts `queued`, `deferred` AND
+    /// `running` — so a touch arriving from a pass whose job is over does not
+    /// merely refresh a timestamp, it can RESURRECT a non-terminal row into
+    /// `running` and then pin it there, fresh, where the reaper will not sweep
+    /// it and the drain will not re-admit it. A `running` row nobody sweeps is
+    /// exactly the stall qk44 exists to prevent.
+    ///
+    /// **Which sequence actually reaches that, stated precisely because the
+    /// obvious one does not.** The only thing that orphans a pass is
+    /// `FMNoProgressWatchdog` abandoning it, and the `FMNoProgressError` that
+    /// produces lands in the drain loop's untyped `catch`, which marks the job
+    /// `.failed`. `markBackfillJobRunning` REFUSES a terminal row
+    /// (`invalidStateTransition`, swallowed by the `try?`), so an orphan cannot
+    /// resurrect the run it came from. What it can outlive is that run: the
+    /// abandoned pass stays parked on an FM call that never returns and keeps
+    /// firing this callback, and by then the SAME `jobId` may have been
+    /// re-driven and left `queued` or `deferred` by a later run. That row is
+    /// non-terminal, so the touch lands — and it lands on work nobody is doing.
+    /// Slower than the sequence this guard was first written for, and reachable
+    /// on a device whose headline failure mode is a pass that never finishes.
+    ///
+    /// A method rather than two lines inside the closure `runJob` installs, and
+    /// for exactly the reason ``checkpointCoarseWindows`` is one: the guard is
+    /// observable only from a pass that outlives `runJob`, which only the
+    /// PerfGate'd abandonment test produces, so inside a closure it was a rule
+    /// no test could see deleted. Here a test can hand it a defused box
+    /// directly. `runJob` remains the only production caller.
+    ///
+    /// Narrowed, not closed: `markBackfillJobRunning` is a suspension away, so
+    /// a `defuse()` landing in that gap still lets ONE touch through. What the
+    /// guard removes is the unbounded case — an orphaned pass refreshing the
+    /// lease for the rest of its life.
+    func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
+        guard !box.isDefused else { return }
+        // `try?` matches the other heartbeat sites: a lease touch that loses a
+        // race with a terminal transition must not fail the pass.
+        try? await store.markBackfillJobRunning(jobId: jobId)
+    }
+
     func checkpointCoarseWindows(
         _ banked: FMCoarseBankedWindows,
         box: CoarseCheckpointBox,
@@ -2316,31 +2404,21 @@ actor BackfillJobRunner {
         // advances once per resolved coarse window, so a fresh `updatedAt`
         // finally MEANS work advanced, and a stale one means it stopped.
         //
-        // `try?` matches the other heartbeat sites: a lease touch that loses a
-        // race with a terminal transition must not fail the pass.
+        // playhead-26od: bounded by the JOB's life, for the same reason the
+        // checkpoint below is — and by the same box, deliberately, so the two
+        // observers of one pass can never disagree about whether that pass is
+        // still the live one. The guard and its rationale live in
+        // ``touchCoarseLeaseIfLive`` rather than here, because a rule spelled
+        // out inside this closure is one no test can see deleted.
+        //
+        // `[weak self]` for the same reason the checkpoint observer below
+        // takes it: an abandoned pass parks this closure forever, and a strong
+        // capture would pin the whole runner with it. It also means a runner
+        // that has been torn down stops refreshing the lease of a job nobody is
+        // working on, which is the outcome the reaper wants.
         let leaseJobId = job.jobId
-        let leaseStore = store
-        let onCoarseProgress: @Sendable (Int) async -> Void = { [checkpointBox] _ in
-            // playhead-26od: bounded by the JOB's life, for the same reason the
-            // checkpoint below is — and it is the same box, deliberately, so the
-            // two observers of one pass can never disagree about whether that
-            // pass is still the live one.
-            //
-            // `FMNoProgressWatchdog` abandons a wedged pass rather than awaiting
-            // it, so this closure can still fire after `runJob` has thrown and
-            // the drain loop has moved the row on. The harm is worse than a
-            // stale timestamp: `markBackfillJobRunning` accepts `queued`,
-            // `deferred` AND `running` (`AnalysisStore`, the state guard on its
-            // UPDATE), so an orphaned pass does not just refresh `updatedAt` —
-            // it RESURRECTS a row the drain loop just deferred back into
-            // `running`, undoing the defer. And `resetStrandedBackfillJobs`
-            // only sweeps `running` rows whose `updatedAt` is stale, so a
-            // still-ticking orphan pins that row in `running` where the reaper
-            // will not take it and the drain will not re-admit it. A `running`
-            // row nobody sweeps is exactly the stall qk44 exists to prevent and
-            // exactly what this bead's field evidence is made of.
-            guard !checkpointBox.isDefused else { return }
-            try? await leaseStore.markBackfillJobRunning(jobId: leaseJobId)
+        let onCoarseProgress: @Sendable (Int) async -> Void = { [weak self, checkpointBox] _ in
+            await self?.touchCoarseLeaseIfLive(box: checkpointBox, jobId: leaseJobId)
         }
 
         // playhead-26od: make the pass's work DURABLE as it happens, not at the

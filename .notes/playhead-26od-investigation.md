@@ -527,3 +527,139 @@ prerequisite.
   The rewind is still right — a partial cursor there strands the refinement —
   but it is a new missed opportunity on a common path, and the fix is the
   resume-key change already sketched under playhead-u99x, not a change here.
+
+## Review round R4 — what it changed
+
+Three defects. Two of them are the SAME two shapes the earlier rounds named, found
+one level further out; the third is a comment whose reasoning was checked against
+the code and did not survive.
+
+* **The sixth instance of "an identity that is not an identity."** Attribution is
+  `needle.isSubset(of: planRefs)` with `first(where:)`, and R3 closed the
+  empty-needle door. The remaining door is an AMBIGUOUS needle. The subset test
+  identifies a plan only while the plans' line-ref sets are DISJOINT, and the
+  walk's own doc asserted that as a consequence of `planPassA` partitioning the
+  segments — but `lineRefs` are `segmentIndex` VALUES, and a partition of the
+  segment LIST is a partition of those values only while `segmentIndex` is
+  UNIQUE. The classifier deliberately does not require that: it builds
+  `segmentByIndex` with `uniquingKeysWith` precisely so a duplicate cannot trap,
+  and `coarse pass tolerates duplicate segmentIndex without crashing` pins the
+  tolerance with two segments both carrying index 0.
+
+  Two such segments sort adjacent and fall into DIFFERENT plans whenever the
+  packing boundary runs between them, and those plans then share a line ref. The
+  damage lands in the walk: `runCoarseRetry` banks one window per sub-prompt of a
+  shrunk plan, and a sub-prompt's refs are a strict SUBSET of its plan's — so a
+  sub-window of the LATER plan is also a subset of the EARLIER plan's refs, and
+  `first(where:)` credited the earlier one. If that earlier plan was never
+  attempted, the contiguous walk starts from a plan no row covers and
+  `narrowedForResume` deletes its segments forever. pmp9's hole, reached through
+  an input the classifier explicitly accepts.
+
+  `planIndex` now requires a UNIQUE superset and returns nil otherwise: a success
+  credits nothing (conservative), a failure falls back to its own
+  `planWindowIndex` (honest — every construction site fills that field with the
+  OUTER plan's index; the shrunk sub-plans carry `windowIndex: 0` and are never
+  its source). It is a no-op on every episode whose segment indices are distinct,
+  because there a needle has at most one superset — which is why no existing
+  cursor test moved. Killed in both directions:
+  `an outcome matching two plans credits neither` and, against the
+  refuse-everything mutation, `a strict subset of exactly one plan still credits
+  that plan`.
+
+* **The qk44 lease guard was Family B, and its stated harm was unreachable.** The
+  guard is right and the reason printed beside it was wrong. It said an orphaned
+  pass "RESURRECTS a row the drain loop just deferred" — but the only thing that
+  orphans a pass is `FMNoProgressWatchdog`, and the `FMNoProgressError` it raises
+  lands in the drain loop's untyped `catch`, which marks the job `.failed`.
+  `markBackfillJobRunning` REFUSES a terminal row, so an orphan can never
+  resurrect the run it came from. What is reachable is slower and worse-shaped:
+  the abandoned pass stays parked on an FM call that never returns, and by the
+  time it fires again the same `jobId` may have been re-driven and left `queued`
+  or `deferred` by a LATER run. That row is non-terminal, the touch lands, and it
+  lands on work nobody is doing.
+
+  The guard was also unpinnable where it sat — two lines inside a closure,
+  observable only from a pass outliving `runJob`. It is now
+  `touchCoarseLeaseIfLive`, an internal method, for exactly the reason
+  `checkpointCoarseWindows` is one, and
+  `a defused lease touch cannot resurrect a deferred job — and a live one still
+  leases` asserts BOTH directions, deterministically, with no clock. The second
+  direction is not decoration: a guard that refused everything satisfies the
+  negative half on its own while silently retiring qk44's work clock.
+
+  The closure now also takes `[weak self]`, matching the checkpoint observer. A
+  runner that has been torn down stops refreshing the lease of a job nobody is
+  working on, which is what the reaper wants.
+
+* **The `reportedPlans` rationale was checked and did not hold.** The comment said
+  the caller's contiguous-prefix walk "would otherwise be reading a list
+  playhead-lxkq may have permuted" — but `coarseCoverageWalk` sorts by
+  `startTime` and attributes structurally, so it is indifferent to that array's
+  order, and `the walk is indifferent to the order outcomes arrive in` pins
+  exactly that. `reportedPlans` is still correct, for two other reasons now
+  stated: it is the SAME denominator `FMCoarseScanOutput.plans` returns (a
+  mid-flight walk and an end-of-pass walk that disagreed about the denominator
+  could disagree about coverage), and episode order is what the caller's OTHER
+  reader — `unattemptedPlans.first`, "where did the pass stop" — is asking about.
+
+Plus one stale claim corrected: the suite header's "no test below measures, or
+depends on, elapsed time" is false for `abandonedPassLeavesItsScreenedWindowsBehind`,
+which shrinks the no-progress bound and is PerfGate'd for that reason 400 lines
+further down. The claim is now scoped to the default plans and names the exception.
+
+### R4 on the three things it was asked to re-verify rather than inherit
+
+* **t1kq's rewind is correct in both directions, and its test is no longer
+  trivially true.** `checkpointBackfillJobProgress` binds the cursor
+  unconditionally (`SET progressCursor = ?`), so writing nil NULLs the column —
+  which means `fullCoverageCancellationDoesNotCheckpoint` now asserts a real
+  rewind of a cursor the mid-flight checkpoint actually wrote (its fixture plans
+  three windows, so checkpoints fire at iterations 1 and 2). Pre-26od the same
+  assertion held for free because nothing had written one. The not-fully-covered
+  arm cannot rewind: the end-of-pass covered set is a superset of every
+  mid-flight one and the walk's bound is monotone non-decreasing in that set.
+* **The lease and the checkpoint share one lifetime box, and an orphan cannot
+  resurrect a `deferred` row — but not for the reason recorded.** See above: the
+  run that produced the orphan is `.failed`, not `deferred`, and
+  `markBackfillJobRunning` refuses terminal rows on its own. The guard earns its
+  place against a LATER run's re-drive.
+* **The write cost is 25 for 13 windows, and the arithmetic is derivable rather
+  than observed.** W-1 mid-flight checkpoints each write exactly the one window
+  that resolved since the last (`processedWindowCount` slice), plus the digest's
+  W: `2W - 1`. The prefix-rewriting implementation writes `W(W-1)/2 + W` = 91.
+  `checkpointWriteCostIsLinearInTheWindowCount` asserts the identity, not a
+  bound, and pins one-job-ness because the identity depends on it.
+
+### R4 on the two rails R3 reported as unpinned
+
+* **The lease guard is now pinned** (above). Half of R3's residual is closed.
+* **`defer { checkpointBox.defuse() }` is still unpinned, and this round
+  establishes WHY that is not fixable here rather than restating it.** The only
+  producer of a pass that outlives `runJob` is `FMNoProgressWatchdog`, whose
+  bound is wall-clock. `FMNoProgressWatchdog.run` DOES take an injectable
+  `sleep` — but `coarsePassA` does not thread one through, so reaching it from a
+  test means adding a production injection point, which this bead's non-goals
+  exclude. An end-to-end orphan test was designed and then abandoned as vacuous:
+  the abandoned run's row is `.failed`, so the resurrection it would assert
+  against is impossible whether the guard is present or not. Deleting the
+  `defer` restores a pre-existing behaviour (one late cursor write, one late
+  lease touch) and cannot make the cursor claim coverage no row supports,
+  because a late checkpoint still writes the durable-prefix value.
+
+### R4 residuals, reported rather than fixed
+
+* **Under duplicate `segmentIndex`, two plans can collide on a ROW as well as on
+  attribution.** `makeScanResult` derives the row key from
+  `atomWindowKey(firstAtomOrdinal:lastAtomOrdinal:)`, looked up by
+  `segments.first(where: { $0.segmentIndex == ... })` — so two plans sharing an
+  index resolve to the same atoms, the same id and the same `reuseKeyHash`, and
+  the second window's row REPLACES the first's. Pre-existing (it predates this
+  bead and affects the end-of-pass digest identically), and the walk fix above is
+  the right containment for the CURSOR regardless: those two plans now credit
+  nobody, so no cursor is issued over the collision. Fixing the row key is a
+  persistence-identity change, not a 26od change.
+* **`plans.sorted(by: { $0.startTime < $1.startTime })` is not a stable sort**, so
+  plans with equal `startTime` are walked in an unspecified-but-deterministic
+  order. Both orders are SAFE — the cap collapses either to at most that shared
+  start — so this is noted for the next reader rather than changed.
