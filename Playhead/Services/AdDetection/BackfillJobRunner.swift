@@ -2043,6 +2043,49 @@ actor BackfillJobRunner {
         )
     }
 
+    /// playhead-qk44's per-window lease touch, bounded by playhead-26od's
+    /// job-lifetime token.
+    ///
+    /// The lease is what tells `resetStrandedBackfillJobs` a `running` row is
+    /// alive, and `markBackfillJobRunning` accepts `queued`, `deferred` AND
+    /// `running` — so a touch arriving from a pass whose job is over does not
+    /// merely refresh a timestamp, it can RESURRECT a non-terminal row into
+    /// `running` and then pin it there, fresh, where the reaper will not sweep
+    /// it and the drain will not re-admit it. A `running` row nobody sweeps is
+    /// exactly the stall qk44 exists to prevent.
+    ///
+    /// **Which sequence actually reaches that, stated precisely because the
+    /// obvious one does not.** The only thing that orphans a pass is
+    /// `FMNoProgressWatchdog` abandoning it, and the `FMNoProgressError` that
+    /// produces lands in the drain loop's untyped `catch`, which marks the job
+    /// `.failed`. `markBackfillJobRunning` REFUSES a terminal row
+    /// (`invalidStateTransition`, swallowed by the `try?`), so an orphan cannot
+    /// resurrect the run it came from. What it can outlive is that run: the
+    /// abandoned pass stays parked on an FM call that never returns and keeps
+    /// firing this callback, and by then the SAME `jobId` may have been
+    /// re-driven and left `queued` or `deferred` by a later run. That row is
+    /// non-terminal, so the touch lands — and it lands on work nobody is doing.
+    /// Slower than the sequence this guard was first written for, and reachable
+    /// on a device whose headline failure mode is a pass that never finishes.
+    ///
+    /// A method rather than two lines inside the closure `runJob` installs, and
+    /// for exactly the reason ``checkpointCoarseWindows`` is one: the guard is
+    /// observable only from a pass that outlives `runJob`, which only the
+    /// PerfGate'd abandonment test produces, so inside a closure it was a rule
+    /// no test could see deleted. Here a test can hand it a defused box
+    /// directly. `runJob` remains the only production caller.
+    ///
+    /// Narrowed, not closed: `markBackfillJobRunning` is a suspension away, so
+    /// a `defuse()` landing in that gap still lets ONE touch through. What the
+    /// guard removes is the unbounded case — an orphaned pass refreshing the
+    /// lease for the rest of its life.
+    func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
+        guard !box.isDefused else { return }
+        // `try?` matches the other heartbeat sites: a lease touch that loses a
+        // race with a terminal transition must not fail the pass.
+        try? await store.markBackfillJobRunning(jobId: jobId)
+    }
+
     /// playhead-26od: make everything a coarse pass has screened SO FAR durable,
     /// while the pass is still running.
     ///
@@ -2093,49 +2136,6 @@ actor BackfillJobRunner {
     /// call it by accident either: it needs a `CoarseCheckpointBox` and an
     /// `FMCoarseBankedWindows`, and the only producer of the latter is
     /// `coarsePassA`'s callback.
-    /// playhead-qk44's per-window lease touch, bounded by playhead-26od's
-    /// job-lifetime token.
-    ///
-    /// The lease is what tells `resetStrandedBackfillJobs` a `running` row is
-    /// alive, and `markBackfillJobRunning` accepts `queued`, `deferred` AND
-    /// `running` — so a touch arriving from a pass whose job is over does not
-    /// merely refresh a timestamp, it can RESURRECT a non-terminal row into
-    /// `running` and then pin it there, fresh, where the reaper will not sweep
-    /// it and the drain will not re-admit it. A `running` row nobody sweeps is
-    /// exactly the stall qk44 exists to prevent.
-    ///
-    /// **Which sequence actually reaches that, stated precisely because the
-    /// obvious one does not.** The only thing that orphans a pass is
-    /// `FMNoProgressWatchdog` abandoning it, and the `FMNoProgressError` that
-    /// produces lands in the drain loop's untyped `catch`, which marks the job
-    /// `.failed`. `markBackfillJobRunning` REFUSES a terminal row
-    /// (`invalidStateTransition`, swallowed by the `try?`), so an orphan cannot
-    /// resurrect the run it came from. What it can outlive is that run: the
-    /// abandoned pass stays parked on an FM call that never returns and keeps
-    /// firing this callback, and by then the SAME `jobId` may have been
-    /// re-driven and left `queued` or `deferred` by a later run. That row is
-    /// non-terminal, so the touch lands — and it lands on work nobody is doing.
-    /// Slower than the sequence this guard was first written for, and reachable
-    /// on a device whose headline failure mode is a pass that never finishes.
-    ///
-    /// A method rather than two lines inside the closure `runJob` installs, and
-    /// for exactly the reason ``checkpointCoarseWindows`` is one: the guard is
-    /// observable only from a pass that outlives `runJob`, which only the
-    /// PerfGate'd abandonment test produces, so inside a closure it was a rule
-    /// no test could see deleted. Here a test can hand it a defused box
-    /// directly. `runJob` remains the only production caller.
-    ///
-    /// Narrowed, not closed: `markBackfillJobRunning` is a suspension away, so
-    /// a `defuse()` landing in that gap still lets ONE touch through. What the
-    /// guard removes is the unbounded case — an orphaned pass refreshing the
-    /// lease for the rest of its life.
-    func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
-        guard !box.isDefused else { return }
-        // `try?` matches the other heartbeat sites: a lease touch that loses a
-        // race with a terminal transition must not fail the pass.
-        try? await store.markBackfillJobRunning(jobId: jobId)
-    }
-
     func checkpointCoarseWindows(
         _ banked: FMCoarseBankedWindows,
         box: CoarseCheckpointBox,

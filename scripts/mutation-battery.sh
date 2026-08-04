@@ -186,6 +186,27 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   PARTIAL RE-RUN 2026-08-04 (playhead-26od). Batches 314-322 only (CK01-CK12,
+#   12 new entries, 9 batches). Batches 1-313 were NOT re-run and carry the
+#   verdicts above. Recount: the array now holds 324 live entries.
+#
+#   One operational fault, recorded because it is not about a mutation and it
+#   cost an hour. Batch 320 WEDGED — its `batch-<n>.log` froze, xcodebuild stayed
+#   alive at 0.0 %% CPU and never exited. That is the disk-exhaustion wedge
+#   `scripts/disk_preflight.py` exists to refuse, and it was reached because the
+#   run set `PLAYHEAD_DISK_MIN_GIB=6`: the volume was at 10 GiB when the batch
+#   started and a selective run of FOCUSED_SUITES draws ~7. Recovery is the one
+#   in CLAUDE.md — TERM the script so its trap restores sources (it did, byte-
+#   exact), kill xcodebuild by PID, `simctl erase`, clear `$TMPDIR/Deleting-*`
+#   (3.0 GiB was stranded there), then re-run the outstanding batches at a floor
+#   HIGH enough to refuse rather than wedge. Do not lower this floor to make a
+#   battery fit; erase the sim between batches instead.
+#
+#   The second fault is worth as much as the first: the dirty-tree guard REFUSED
+#   the re-run because an unrelated edit was in flight, which is exactly right
+#   and is what stops `restore_sources` from eating uncommitted work. Commit
+#   before re-running; do not touch a mutated file while a battery is live.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-bllt). Batches 240-247 only (BL01-BL10,
 #   10 new entries, 8 batches — five of them edit ONE predicate in
 #   `HotPathExtentGate.gatedLabel` and so cannot be batched together at all).
@@ -3461,20 +3482,28 @@ MUTATIONS=(
 
   # ---- playhead-26od: the mid-flight coarse checkpoint (CK series) ----
   #
-  # WHY THESE SEVEN. The bead's whole value is that a pass killed mid-flight
+  # WHY THESE TWELVE. The bead's whole value is that a pass killed mid-flight
   # keeps its screened windows, and every rail that makes that SAFE is invisible
   # in the rows a healthy pass leaves: a full pass never defuses mid-flight,
   # never fails only SOME of its writes, and never sees an ambiguous or empty
-  # line-ref list. Four of the seven were, at one review round or another,
+  # line-ref list. Seven of the twelve were, at one review round or another,
   # deletable with the entire suite green — CK01 most starkly, because the
   # production factory always supplies a router, so the overload every test but
   # one exercised was the one a shipped build never calls.
   #
-  # ONE MUTATION PER BATCH for CK02/CK03 and CK05/CK06: each pair edits the same
-  # function (CK02/CK03 the two defuse guards inside `checkpointCoarseWindows`,
-  # CK05/CK06 the two guards inside `planIndex`), and a pair applied together
-  # would let one be credited with the other's failures. CK04 and CK07 are
-  # disjoint in both file region and expectation, so they share.
+  # ONE MUTATION PER BATCH wherever two edits share a function: CK02/CK03 are
+  # the two defuse guards inside `checkpointCoarseWindows`, and CK05/CK06/CK08
+  # are three edits to `planIndex` — CK08 being the vacuity control for CK06, so
+  # running them together would let each be credited with the other's failures.
+  # CK04+CK07, CK09+CK10 and CK11+CK12 share a batch each: disjoint statements,
+  # disjoint expectations.
+  #
+  # CK05 IS ONLY KILLABLE WITH A ONE-PLAN FIXTURE, and that is not a fixture
+  # detail — it is the interaction between two rails. The empty needle is a
+  # subset of EVERY plan, so with two or more plans CK06's ambiguity guard
+  # already returns nil and the empty guard is redundant. Exactly one plan is the
+  # only shape where the empty set has a UNIQUE superset. The multi-plan fixture
+  # this test shipped with in R3 would have let CK05 SURVIVE.
   #
   # NOT REGISTERED, deliberately: `defer { checkpointBox.defuse() }` itself.
   # Deleting it is observable only from a pass that outlives `runJob`, which
