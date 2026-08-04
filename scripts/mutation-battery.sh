@@ -186,6 +186,29 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   R2 REVIEW ADDITIONS 2026-08-04 (playhead-9y9e). Batch 420, RT14 — one entry,
+#   KILLED on exactly ONE victim, baseline green. Its EDIT is the pre-review
+#   implementation verbatim, the standard RT12 set: the broad mutant (deleting
+#   the duration-sanity guard outright) also reddens
+#   `overshootingNumeratorIsWithheldNotClamped`, a test the reviewed code already
+#   passes, so that verdict would have said nothing about the widening.
+#
+#   R2 ALSO CLOSED THE FOUR RAILS R1 COULD NOT GET A VERDICT ON — RT11, SC25,
+#   SC30, SC33, run ONE AT A TIME, each its own invocation: all four KILLED,
+#   baseline green on each, 0 survivors / 0 errors. R1's four attempts were
+#   destroyed by a concurrent battery in the same worktree, which reports as
+#   "the baseline did not run tests (rc=65)". The check that costs nothing is
+#   `ps -Ao command | grep -c "[x]codebuild test -scheme Playhead"` BEFORE each
+#   invocation, and it is worth doing between entries, not only at the start:
+#   this worktree acquired a second agent mid-session.
+#
+#   THE RUNNING "Recount: the array now holds N entries" FIGURE IS STALE and has
+#   been for a while — measured 2026-08-04 the array holds 417 entries under 416
+#   unique names (`L09` is registered twice at batch 61, both on main, which
+#   predates this bead). Do not carry the old number forward by addition; count
+#   it. The point of the recount line is to catch an entry that was dropped by a
+#   bad merge, and a figure nobody re-derives cannot do that.
+
 #   R1 REVIEW ADDITIONS 2026-08-04 (playhead-9y9e). Batches 418-419, RT12-RT13.
 #   Both KILLED, each on exactly ONE victim. RT02 was also re-run and KILLED on
 #   all three of its named victims, which is the vacuity audit doing its job.
