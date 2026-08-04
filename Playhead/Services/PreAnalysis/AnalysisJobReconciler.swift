@@ -87,8 +87,15 @@ struct ReconciliationReport: Sendable {
     /// reached the transcript finalize floor with a short ad scan and NO
     /// coverage-lane row of any kind. Those assets are invisible to
     /// `adScanRedrivesMinted`'s candidate query by construction (it selects on
-    /// the state of rows that do not exist), which is why 3 of the 12 episodes
-    /// on the 2026-08-03 device pull had no path to a scan at all.
+    /// the state of rows that do not exist), which is why 4 of the 12 episodes
+    /// on the 2026-08-03 device pull had no path to a scan at all — 48E903D7,
+    /// FCDDB309, 4FF3A238 and 2C5C3699, the set
+    /// ``AnalysisStore/fetchAssetIdsMissingCoverageLaneJobs(limit:offset:)``
+    /// returns verbatim against that pull. The bead's own text says three; it
+    /// counts only the assets it judged transcribed, and the count corrected in
+    /// R4 is four. Two of them clear the transcript floor and are minted
+    /// (FCDDB309, 4FF3A238); the other two are refused here and stay
+    /// playhead-9y9e's problem.
     ///
     /// Deliberately OUT of ``recoveredWorkCount``. A claim is a request, not a
     /// dispatchable row — and because this step runs immediately before the

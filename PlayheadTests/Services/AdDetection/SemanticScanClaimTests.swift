@@ -57,10 +57,29 @@ struct SemanticScanClaimPredicateTests {
         #expect(SemanticScanClaim.isOwed(adScanFraction: floor - 0.001))
     }
 
-    /// The three field assets' measured shapes.
+    /// **The three MEASURED field shapes, plus two synthetic bounds — and the
+    /// list used to claim all five were measured.** Re-derived from the
+    /// 2026-08-03 pull in R5: exactly three of the twelve assets own any
+    /// `semantic_scan_results` row, and their `adScanFraction` (coverage-lane
+    /// `passA` windows that examined, intersected with the 5 s-bridged
+    /// fast-transcript region, over the declared duration) is
+    /// **0.000** (53FC53E3 — one 35.8 s window at 2490–2525.8 s, entirely
+    /// outside its fast transcript, so the intersection is genuinely zero),
+    /// **0.207** (AD5F3A0A, 885.3 s of 4280.9 s) and **0.380** (DE0784D8,
+    /// 2097.2 s of 5522.7 s). The last is not just a replication: the device
+    /// wrote `ad scan 0.380 < 0.980 (decodeFailure)` into that asset's own
+    /// `analysis_assets.terminalReason`, so the number has a witness in the
+    /// pull rather than only in this file. The values this list carried before
+    /// R5 — `0.026` and `0.47` — match nothing in the pull.
+    ///
+    /// `0.9` and `floor - epsilon` are deliberately synthetic: they pin the
+    /// approach to the floor, which no field asset is anywhere near.
     @Test(
         "the device's unscanned assets are all owed a scan",
-        arguments: [0.0, 0.026, 0.211, 0.47, 0.9]
+        arguments: [
+            0.0, 0.207, 0.380,
+            0.9, AnalysisJobRunner.semanticBackfillSufficientAdScanFraction - 0.001
+        ]
     )
     func fieldShapesAreOwed(fraction: Double) {
         #expect(SemanticScanClaim.isOwed(adScanFraction: fraction))
