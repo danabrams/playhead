@@ -1006,6 +1006,46 @@ actor BackfillJobRunner {
                     continue
                 }
 
+                // playhead-41mu: THE COVERAGE LANE'S TERMINAL IS MEASURED, NOT
+                // CLAIMED. Everything above this point establishes only that the
+                // job swept the SEGMENTS IT WAS HANDED — and those are whatever
+                // transcript existed when it was dispatched, which the final-pass
+                // hook makes early in a transcript's life. `fullEpisodeScan` is
+                // the one phase whose contract is the EPISODE, so it is the one
+                // phase whose completion has to be measured against the episode.
+                switch await coverageTerminalDecision(for: job) {
+                case .complete:
+                    break
+                case .deferUnderCoverage, .failUnderCoverage:
+                    let outcome = try await recordUnderCoverageTerminal(
+                        job: job,
+                        jobInputs: jobInputs,
+                        coverage: coverage
+                    )
+                    if outcome == .deferred {
+                        deferred.append(job.jobId)
+                    }
+                    let underCoverageCounters = operationalCounters(
+                        jobCounters: jobCounters,
+                        plannerContext: inputs.plannerContext,
+                        resumeAttempted: resumedJobIds.contains(job.jobId),
+                        resumeSucceeded: coverage.lastCoveredUpperBoundSec != nil,
+                        thermalDeferred: false
+                    )
+                    if let metricsEventId = await recordOperationalMetricsEvent(
+                        job: job,
+                        inputs: jobInputs,
+                        audioSegments: jobInputs.segments,
+                        wallStart: jobWallStart,
+                        wallEnd: clock().timeIntervalSince1970,
+                        counters: underCoverageCounters
+                    ) {
+                        evidenceEventIds.append(metricsEventId)
+                    }
+                    await admissionController.finish(jobId: job.jobId)
+                    continue
+                }
+
                 try await store.markBackfillJobComplete(
                     jobId: job.jobId,
                     progressCursor: BackfillProgressCursor(
@@ -1561,19 +1601,112 @@ actor BackfillJobRunner {
     /// survives to do it is playhead-qbib / playhead-i7qe territory, not this
     /// gate's.
     private func fullRescanReadEpisode(assetId: String) async -> Bool {
-        let fraction: Double?
-        do {
-            fraction = try await store
-                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
-                .adScanFraction
-        } catch {
-            logger.warning(
-                "playhead-hvk0: ad-scan coverage read failed for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public); full rescan does not certify the targeted policy"
-            )
+        // playhead-41mu: reads through the shared measurement so this gate and
+        // the coverage-lane terminal ask the store the same question exactly
+        // once, in one place. `.notMeasurable` and `.unreadable` both fall to
+        // `false` here — under-claiming can only route the show's next episode
+        // to a full-episode plan, and it never causes a pass.
+        guard case let .measured(fraction) = await measuredAdScanFraction(assetId: assetId),
+              fraction.isFinite else {
             return false
         }
-        guard let fraction, fraction.isFinite else { return false }
         return fraction >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+    }
+
+    /// playhead-41mu: THE ad-scan ruler for this runner — playhead-pz32's
+    /// ``AnalysisCoverageSummary/adScanFraction``, never recomputed here, so the
+    /// hvk0 certification gate, this bead's terminal, the runner's skip
+    /// predicate, the re-drive mint and the library ✓ all divide the same
+    /// numerator by the same denominator (playhead-csbq pinned that ruler).
+    ///
+    /// Returns three distinguishable outcomes rather than an optional, because
+    /// "the store says this is not measurable" and "the store could not be read"
+    /// have opposite safe answers at the terminal and the same one here.
+    private func measuredAdScanFraction(assetId: String) async -> AdScanMeasurement {
+        do {
+            guard let fraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction else {
+                return .notMeasurable
+            }
+            return .measured(fraction)
+        } catch {
+            logger.warning(
+                "playhead-41mu: ad-scan coverage read failed for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public); the episode is not certified as read"
+            )
+            return .unreadable
+        }
+    }
+
+    /// playhead-41mu: measure this job's episode and decide whether it may
+    /// complete. See ``coverageTerminalDecision(phase:measurement:retryCount:)``
+    /// for the whole argument; this is the actor-side read that feeds it.
+    ///
+    /// The store is only asked for the phase that can be refused, so the
+    /// targeted lane costs no extra query.
+    private func coverageTerminalDecision(for job: BackfillJob) async -> CoverageTerminalDecision {
+        guard job.phase == .fullEpisodeScan else { return .complete }
+        return Self.coverageTerminalDecision(
+            phase: job.phase,
+            measurement: await measuredAdScanFraction(assetId: job.analysisAssetId),
+            retryCount: job.retryCount
+        )
+    }
+
+    /// playhead-41mu: which non-completing terminal a job actually landed on.
+    enum UnderCoverageOutcome: Sendable, Equatable {
+        case deferred
+        case failed
+    }
+
+    /// playhead-41mu: persist the under-coverage terminal — the honest cursor
+    /// first, then the status — mirroring the write ordering of the rate-limit
+    /// (playhead-pmp9) and expiry (playhead-t1kq) branches so a crash between the
+    /// two leaves durable progress rather than a status with nothing behind it.
+    ///
+    /// The retry count advances on every under-coverage attempt. Unlike
+    /// playhead-bkhc's expiry budget there is no "reset on progress" clause,
+    /// and the difference is deliberate: an expiring background window is a
+    /// fragment of one attempt, so charging it would starve a converging job,
+    /// whereas this branch is reached only after a FULL pass over everything the
+    /// job was handed. Each attempt is a whole attempt, so a flat budget of
+    /// ``AdmissionController/maxRetries`` is both finite and never unfair.
+    private func recordUnderCoverageTerminal(
+        job: BackfillJob,
+        jobInputs: AssetInputs,
+        coverage: CoverageOutcome
+    ) async throws -> UnderCoverageOutcome {
+        let cursor = Self.underCoverageCursor(
+            prior: job.progressCursor,
+            scannedUpperBoundSec: coverage.lastCoveredUpperBoundSec,
+            firstSegmentStartSec: jobInputs.segments.first?.startTime
+        )
+        let attempts = job.retryCount + 1
+        let terminal = attempts >= AdmissionController.maxRetries
+        try await store.checkpointBackfillJobProgress(
+            jobId: job.jobId,
+            progressCursor: cursor,
+            retryCount: attempts
+        )
+        if terminal {
+            try await store.markBackfillJobFailed(
+                jobId: job.jobId,
+                reason: Self.underCoverageExpiryReason(phase: job.phase),
+                retryCount: attempts
+            )
+            logger.error(
+                "FM backfill job \(job.jobId, privacy: .public) terminated: \(AdmissionController.maxRetries, privacy: .public) passes ended with the episode under the ad-scan floor"
+            )
+            return .failed
+        }
+        try await store.markBackfillJobDeferred(
+            jobId: job.jobId,
+            reason: Self.underCoverageDeferReason(phase: job.phase)
+        )
+        logger.info(
+            "FM backfill job \(job.jobId, privacy: .public) deferred: measured ad-scan coverage below the sufficiency floor, cursor=\(cursor?.lastProcessedUpperBoundSec ?? -1, privacy: .public) attempt=\(attempts, privacy: .public)"
+        )
+        return .deferred
     }
 
     private func operationalCounters(
@@ -1755,6 +1888,178 @@ actor BackfillJobRunner {
     /// that ran out of time from a job that was never going to finish.
     nonisolated static func noProgressExpiryReason(phase: BackfillJobPhase) -> String {
         "expiredWithoutProgress-\(phase.rawValue)"
+    }
+
+    // MARK: - playhead-41mu: the measured coverage-lane terminal
+
+    /// playhead-41mu: what the runner learned when it asked how much of this
+    /// episode the semantic ad scan has actually read.
+    ///
+    /// Three cases and not two, because "I could not measure it" and "I could
+    /// not ASK" are different facts with opposite safe answers, and collapsing
+    /// them is the defect family this bead belongs to — a value that names an
+    /// absence, read as though it named a quantity.
+    enum AdScanMeasurement: Sendable, Equatable {
+        /// ``AnalysisCoverageSummary/adScanFraction`` returned a number.
+        case measured(Double)
+        /// The store answered and the quantity is not honestly measurable: no
+        /// coverage-lane row at all, no episode duration, or a denominator the
+        /// transcript's own reach disproves. See `adScanFraction`'s doc.
+        case notMeasurable
+        /// The store could not be read. Not evidence of anything.
+        case unreadable
+    }
+
+    /// playhead-41mu: may this job call itself `complete`?
+    enum CoverageTerminalDecision: Sendable, Equatable {
+        case complete
+        /// Under-covered and the budget is not spent: non-terminal, resumable.
+        case deferUnderCoverage
+        /// Under-covered and the budget IS spent: terminal, with a named cause.
+        case failUnderCoverage
+    }
+
+    /// playhead-41mu: the pure decision behind the coverage-lane terminal.
+    ///
+    /// **The defect this replaces.** `markBackfillJobComplete` used to fire
+    /// whenever `runJob` returned without a rate-limit hole, where "done" means
+    /// "I swept the segments I was handed". The segments are atomized from
+    /// whatever transcript exists at dispatch, and the final-pass hook dispatches
+    /// the moment final chunks land — typically early. Measured on the
+    /// 2026-08-03 device pull, exactly two `fullEpisodeScan` rows ever reached
+    /// `complete`, and both were this bug:
+    ///
+    ///   * 53FC53E3 — a 2,528 s episode. Created 04:38:43, complete 04:39:06:
+    ///     **23 seconds**, having durably examined ONE 36 s window
+    ///     (2,490–2,525.8, i.e. only the final-pass chunks, while 2,490 s of
+    ///     fast-pass transcript sat unscanned). Measured `adScanFraction`
+    ///     **0.0142**.
+    ///   * AD5F3A0A — a 4,281 s episode, complete 08-03 08:23:05 with scan
+    ///     windows spanning 3–900 s: the transcript was the 900 s tier when the
+    ///     hook ran. Measured `adScanFraction` **0.2068**.
+    ///
+    /// Both numbers are the same ruler the library ✓ and the re-drive use
+    /// (playhead-pz32's ``AnalysisCoverageSummary/adScanFraction``, never
+    /// recomputed here), against the same floor
+    /// (``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction``, 0.98).
+    /// Do not introduce a second one: a lower floor here would complete jobs the
+    /// rest of the pipeline still considers unscanned.
+    ///
+    /// **Why `complete` is the expensive verdict**, and not merely inaccurate.
+    /// The M-5 idempotency gate skips a `complete` row forever, and
+    /// ``AnalysisStore/countResumableBackfillJobs(assetId:)`` does not count one
+    /// — which is the no-progress guard in
+    /// ``AnalysisWorkScheduler/shouldMintAdScanRedrive(adScanFraction:resumableCoverageJobCount:)``.
+    /// So a 1.4 %-examined `complete` job does not just misreport: it is what
+    /// BLOCKS the rescue that would have fixed it. On the pull, 53FC53E3's
+    /// resumable count is **0**, and it is the only asset with no path to
+    /// another scan.
+    ///
+    /// **Scoped to `.fullEpisodeScan` deliberately.** `CoveragePlanner` emits
+    /// that phase alone under `.fullCoverage` / `.periodicFullRescan`, and the
+    /// three `targetedWithAudit` phases (`scanHarvesterProposals`,
+    /// `scanLikelyAdSlots`, `scanRandomAuditWindows`) never claim to read the
+    /// episode — narrow phases judged against an episode-wide floor would defer
+    /// forever, having done exactly what they were asked to do.
+    ///
+    /// **`.notMeasurable` completes, and that is not a loophole.** A missing
+    /// denominator is a different bug with a different owner (`PlayheadRuntime`'s
+    /// duration-backfill sweep), and refusing to complete on it would strand
+    /// every legacy duration-less row. It is also empty in the field: all twelve
+    /// assets on the 2026-08-03 pull carry `episodeDurationSec`. Note that a job
+    /// which ran and screened nothing is NOT this case — the H13 short-circuit
+    /// persists a no-work sentinel and a failed window persists a failure row,
+    /// so `adScanRowSeen` is non-empty and the fraction reads a measured `0.0`.
+    ///
+    /// **`.unreadable` does NOT complete.** A read that threw is not evidence
+    /// the episode was read, and the cost of being wrong is asymmetric: deferring
+    /// a job that was genuinely finished costs one bounded pass which then
+    /// completes, while completing a job that was not is permanent.
+    ///
+    /// The budget is ``AdmissionController/maxRetries``, the same ceiling the
+    /// M-5 gate enforces, so an episode whose transcript simply cannot support
+    /// the floor (2C5C3699 on the pull has a CEILING of 0.130) terminates with a
+    /// named cause after a bounded number of attempts instead of re-driving
+    /// forever.
+    nonisolated static func coverageTerminalDecision(
+        phase: BackfillJobPhase,
+        measurement: AdScanMeasurement,
+        retryCount: Int
+    ) -> CoverageTerminalDecision {
+        guard phase == .fullEpisodeScan else { return .complete }
+        let underCovered: Bool
+        switch measurement {
+        case let .measured(fraction):
+            guard fraction.isFinite else { return .complete }
+            underCovered = fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+        case .notMeasurable:
+            underCovered = false
+        case .unreadable:
+            underCovered = true
+        }
+        guard underCovered else { return .complete }
+        return retryCount + 1 >= AdmissionController.maxRetries
+            ? .failUnderCoverage
+            : .deferUnderCoverage
+    }
+
+    /// playhead-41mu: the cursor an under-covered job may publish.
+    ///
+    /// A cursor is not a note about this run — it is an assertion that `[0, x]`
+    /// of the EPISODE is covered, because that is exactly how `narrowedForResume`
+    /// reads it: every segment ending at or below `x` is dropped from the next
+    /// attempt. Publishing the end of the contiguous scanned prefix is only
+    /// honest when the run's own plans began at the head.
+    ///
+    /// **The field case that makes this load-bearing.** 53FC53E3's job was handed
+    /// segments starting at 2,490 s and scanned them all, so the coarse walk's
+    /// contiguous upper bound was 2,525.82 — and the row on the device carries
+    /// exactly that cursor on a 2,528 s episode, asserting the episode is read
+    /// while 98.6 % of it was never in the job. Deferring with that cursor would
+    /// reproduce the very lockout this bead removes, in a different costume: the
+    /// re-drive would narrow to nothing, cover no new audio, and burn the retry
+    /// budget. So when there is a hole at the head, the prior cursor stands and
+    /// the next attempt re-windows from the beginning.
+    ///
+    /// **A hole is measured with the coverage reader's own bridge tolerance**
+    /// (``AnalysisCoverageMath/adScanBridgeableGapSec``) rather than a fresh
+    /// constant, so the two agree about what counts as unscanned audio. It is
+    /// not a rounding allowance: AD5F3A0A's first segment starts at 2.8 s, which
+    /// is leading silence and not a hole, and its cursor of 900 IS a genuine
+    /// prefix that a resume should honour. The two witnesses on the pull
+    /// exercise the two branches.
+    nonisolated static func underCoverageCursor(
+        prior: BackfillProgressCursor?,
+        scannedUpperBoundSec: Double?,
+        firstSegmentStartSec: Double?
+    ) -> BackfillProgressCursor? {
+        guard let scannedUpperBoundSec, scannedUpperBoundSec.isFinite else { return prior }
+        let priorUpper = prior?.lastProcessedUpperBoundSec ?? 0
+        if let firstSegmentStartSec, firstSegmentStartSec.isFinite,
+           firstSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
+            return prior
+        }
+        let honest = BackfillProgressCursor(
+            processedPhaseCount: 0,
+            lastProcessedUpperBoundSec: scannedUpperBoundSec
+        )
+        return prior.map { honest.monotonic(from: $0) } ?? honest
+    }
+
+    /// playhead-41mu: the NAMED, queryable cause a coverage-lane job records when
+    /// it declines to certify its own completion. Distinct from the rate-limit
+    /// (`rateLimited-backoff`) and expiry (`cancelled-during-…`) causes so a
+    /// device pull can tell "the model would not answer" from "the model
+    /// answered about a sliver of the episode".
+    nonisolated static func underCoverageDeferReason(phase: BackfillJobPhase) -> String {
+        "underCoverage-\(phase.rawValue)"
+    }
+
+    /// playhead-41mu: the terminal form of the above, once the attempt budget is
+    /// spent. A job that lands here has genuinely stopped converging, and the row
+    /// says so rather than pretending it finished.
+    nonisolated static func underCoverageExpiryReason(phase: BackfillJobPhase) -> String {
+        "underCoverageBudgetSpent-\(phase.rawValue)"
     }
 
     /// playhead-pmp9 / playhead-bkhc / playhead-qbib, extracted verbatim by

@@ -1489,6 +1489,14 @@ FOCUSED_SUITES=(
   # stale while the behaviour is intact — so it has to be under the mutant that
   # deletes the behaviour, not merely in the full gate.
   -only-testing:PlayheadTests/FMUnboundedCallCanaryTests
+  # playhead-41mu: the coverage-lane terminal (UC series). One suite, and it has
+  # to be its own rather than folded into the pmp9 file above: every fixture
+  # there deliberately omits `episodeDurationSec`, which is precisely the input
+  # that makes the measured terminal UNREACHABLE, so a suite built on those
+  # assets could not observe this gate at all. The 15 tests split into pure
+  # decision/cursor rails and four end-to-end runs that are the only things able
+  # to see whether the terminal actually consults the measurement (UC01).
+  -only-testing:PlayheadTests/BackfillCoverageTerminalTests
   # playhead-fil5: the durable scan claim (SC series). Five suites, and all five
   # are needed because the claim has four separable failure modes and no suite
   # can see more than one: the predicates + identity + row shape (pure); the
@@ -2368,6 +2376,21 @@ T_9Y9E_GUARDS="the ad-scan term does not bypass the terminal, budget or cooldown
 # The vacuity control's victims. `pz32`'s own rails, which must stay green under
 # RT12 and red under RT07 — see the batch note.
 T_9Y9E_PZ32_SPRAWL="ad-scan fraction can never exceed 1.0 however far the windows sprawl"
+
+# playhead-41mu — the UC series. The coverage-lane terminal.
+T_41MU_DEFERS="THE 53FC53E3 CASE — a pass that swept every segment it was handed and still read 1/10th of the episode DEFERS, it does not complete"
+T_41MU_NOCURSOR="the under-coverage defer does NOT publish a cursor over audio the job never held — the 2,525.82-on-a-2,528 s-episode shape"
+T_41MU_CURSOR="THE AD5F3A0A CASE — when the run DID start at the head, the under-coverage defer publishes the honest cursor so the resume scans only the remainder"
+T_41MU_REDRIVE="THE CONSEQUENCE — a non-completing terminal leaves resumable work, so the ad-scan re-drive can mint; the old \`complete\` left ZERO and blocked it"
+T_41MU_VACUITY="VACUITY CONTROL — a pass that genuinely reads the episode still COMPLETES, with its full-coverage cursor"
+T_41MU_BOUNDED="the deferral is BOUNDED — an episode that keeps coming back under-covered terminates with a named cause instead of re-driving forever"
+T_41MU_FLOOR="the floor is the pipeline's floor, and the comparison is strict at the boundary"
+T_41MU_SCOPE="ONLY the phase that claims the whole episode is judged against an episode-wide floor"
+T_41MU_ABSENCE="not-measurable and un-readable are different facts with opposite answers"
+T_41MU_BUDGET="the attempt budget is the shared one, and it terminates rather than deferring forever"
+T_41MU_HOLE="a cursor is an assertion about the EPISODE, so a hole at the head freezes it"
+T_41MU_PREFIX="a run that starts at the head publishes the honest bound, and leading silence is not a hole"
+T_41MU_BRIDGE="the hole threshold is the coverage reader's own bridge tolerance, not a fresh constant"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4398,6 +4421,69 @@ MUTATIONS=(
   # (a constant 1.0 declines correctly here); RT17 cannot see RT15 (a nil owes
   # correctly there). Two mutants because it is two directions of one wire.
   "RT17|423|RECON|$T_9Y9E_WIRE_DECLINE"
+
+  # ---------------------------------------------------------------------------
+  # playhead-41mu — the UC series. The `fullEpisodeScan` terminal is MEASURED.
+  #
+  # Every entry is its own batch. They all mutate `$RUNNER` and a batch applies
+  # simultaneously, and several of them move the same two functions in opposite
+  # directions (UC05/UC06 are the two directions of the cursor rule, UC03/UC07
+  # of the refusal), so sharing a batch would let one mutation mask another.
+  #
+  # ON BREADTH, stated because the RT12 lesson says a broad kill is not evidence.
+  # The six pure-decision mutants (UC02–UC07) name one or two victims each. UC01
+  # is deliberately the exception: it is the WIRE-IN, and its victims are exactly
+  # the four end-to-end tests that depend on the terminal actually consulting the
+  # measurement. That is not broader than the fix — it IS the fix — and it is the
+  # one mutant that can tell a correct decision function from a decision function
+  # production never calls.
+  # ---------------------------------------------------------------------------
+
+  # Batch 430 — UC01. THE WIRE-IN. `coverageTerminalDecision(for:)` stops asking
+  # the store and always answers `.complete`, which is the pre-bead behaviour
+  # VERBATIM: the terminal fires whenever `runJob` returned without a rate-limit
+  # hole. Every pure test in the suite still passes under it — that is the whole
+  # point, and it is the "a correct mechanism production never invokes" family
+  # this queue keeps paying out on.
+  "UC01|430|RUNNER|$T_41MU_DEFERS;$T_41MU_NOCURSOR;$T_41MU_CURSOR;$T_41MU_REDRIVE;$T_41MU_BOUNDED"
+
+  # Batch 431 — UC02. The phase scope is dropped, so the three narrow
+  # `targetedWithAudit` phases are judged against an episode-wide floor and
+  # defer forever having done exactly what they were asked to do.
+  "UC02|431|RUNNER|$T_41MU_SCOPE"
+
+  # Batch 432 — UC03. A coverage read that THREW is treated as evidence the
+  # episode was read. The asymmetry is the point: deferring a finished job costs
+  # one bounded pass, completing an unfinished one is permanent.
+  "UC03|432|RUNNER|$T_41MU_ABSENCE"
+
+  # Batch 433 — UC04. The attempt budget never terminates, so an episode whose
+  # transcript cannot support the floor (2C5C3699 on the 2026-08-03 pull has a
+  # CEILING of 0.130) re-drives forever. Names the pure budget test AND the
+  # end-to-end one because the bound is only worth anything if the persistence
+  # path honours it.
+  "UC04|433|RUNNER|$T_41MU_BUDGET;$T_41MU_BOUNDED"
+
+  # Batch 434 — UC05. The head-hole rule is dropped and the walk's contiguous
+  # bound is published unconditionally. This reproduces 53FC53E3's device row
+  # exactly — cursor 2,525.82 on a 2,528 s episode — so `narrowedForResume`
+  # collapses the next attempt to nothing and the deferral buys no coverage:
+  # the same permanent lockout, in a different costume.
+  "UC05|434|RUNNER|$T_41MU_HOLE;$T_41MU_BRIDGE;$T_41MU_NOCURSOR"
+
+  # Batch 435 — UC06. The OTHER direction, and the reason UC05 is not simply
+  # "never write a cursor": the bridge tolerance is dropped, so AD5F3A0A's 2.8 s
+  # of leading silence reads as a hole, the cursor freezes on a genuine prefix,
+  # and every resume re-scans audio it already holds. UC05 cannot see this (a
+  # frozen cursor is correct there); UC06 cannot see UC05 (an advancing cursor is
+  # correct here). Two mutants because it is two directions of one rule.
+  "UC06|435|RUNNER|$T_41MU_PREFIX;$T_41MU_BRIDGE;$T_41MU_CURSOR"
+
+  # Batch 436 — UC07, THE VACUITY CONTROL. The refusal fires unconditionally, so
+  # a job that genuinely read its episode is deferred too. Without this the suite
+  # could be satisfied by a gate that refuses everything, which would strand the
+  # whole library rather than the under-covered slice of it.
+  "UC07|436|RUNNER|$T_41MU_VACUITY;$T_41MU_FLOOR;$T_41MU_ABSENCE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4782,6 +4868,13 @@ describe_mutation() {
     RT15) echo "9y9e R3: the reconciler stops MEASURING the ad scan and hands the decision a constant 1.0" ;;
     RT16) echo "9y9e R3: the both-pass reach guard trusts a final WATERMARK with no chunks behind it" ;;
     RT17) echo "9y9e R3: the reconciler skips the ad-scan read, so the rescue mints on a finished episode forever" ;;
+    UC01) echo "41mu WIRE-IN: the terminal stops measuring and completes whatever runJob returned (the pre-bead behaviour verbatim)" ;;
+    UC02) echo "41mu: the phase scope is dropped, so narrow targeted phases are judged against an episode-wide floor" ;;
+    UC03) echo "41mu: a coverage read that THREW is treated as evidence the episode was read" ;;
+    UC04) echo "41mu: the attempt budget never terminates, so an under-coverable episode re-drives forever" ;;
+    UC05) echo "41mu: the cursor is published over the unscanned head — 53FC53E3's 2,525.82-on-2,528 s row, verbatim" ;;
+    UC06) echo "41mu: the cursor's hole test drops the bridge tolerance, so leading silence freezes a genuine prefix" ;;
+    UC07) echo "41mu VACUITY CONTROL: the terminal refuses unconditionally, deferring episodes that were genuinely read" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10517,6 +10610,108 @@ EOF
 EOF
     snippet NEW <<'EOF'
         let adScanFraction: Double? = nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-41mu, the UC series --------------------------------------
+
+  # UC01 — THE WIRE-IN. The actor-side decision stops asking the store and
+  # answers `.complete` unconditionally, which is the pre-bead terminal
+  # VERBATIM. Every pure test in the suite still passes; only the end-to-end
+  # tests can see it, which is exactly the point of registering it.
+  UC01)
+    snippet OLD <<'EOF'
+        guard job.phase == .fullEpisodeScan else { return .complete }
+        return Self.coverageTerminalDecision(
+            phase: job.phase,
+            measurement: await measuredAdScanFraction(assetId: job.analysisAssetId),
+            retryCount: job.retryCount
+        )
+EOF
+    snippet NEW <<'EOF'
+        return .complete
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC02 — the phase scope is dropped, so `scanHarvesterProposals`,
+  # `scanLikelyAdSlots` and `scanRandomAuditWindows` are judged against a floor
+  # that describes the whole episode and defer forever.
+  UC02)
+    snippet OLD <<'EOF'
+        guard phase == .fullEpisodeScan else { return .complete }
+        let underCovered: Bool
+EOF
+    snippet NEW <<'EOF'
+        let underCovered: Bool
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC03 — a store read that THREW is treated as evidence the episode was read.
+  UC03)
+    snippet OLD <<'EOF'
+        case .unreadable:
+            underCovered = true
+        }
+EOF
+    snippet NEW <<'EOF'
+        case .unreadable:
+            underCovered = false
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC04 — the budget never terminates, so an episode whose transcript cannot
+  # support the floor re-drives until something else stops it.
+  UC04)
+    snippet OLD <<'EOF'
+        return retryCount + 1 >= AdmissionController.maxRetries
+            ? .failUnderCoverage
+            : .deferUnderCoverage
+EOF
+    snippet NEW <<'EOF'
+        _ = retryCount
+        return .deferUnderCoverage
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC05 — the head-hole rule is dropped and the walk's contiguous bound is
+  # published as an episode prefix regardless of where the run's plans began.
+  # This is 53FC53E3's device row reproduced exactly.
+  UC05)
+    snippet OLD <<'EOF'
+        let priorUpper = prior?.lastProcessedUpperBoundSec ?? 0
+        if let firstSegmentStartSec, firstSegmentStartSec.isFinite,
+           firstSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
+            return prior
+        }
+EOF
+    snippet NEW <<'EOF'
+        _ = firstSegmentStartSec
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC06 — the OTHER direction: the hole test drops the coverage reader's bridge
+  # tolerance, so AD5F3A0A's 2.8 s of leading silence reads as unscanned audio
+  # and freezes a cursor that is a genuine prefix.
+  UC06)
+    snippet OLD <<'EOF'
+           firstSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
+EOF
+    snippet NEW <<'EOF'
+           firstSegmentStartSec - priorUpper > 0 {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC07 — THE VACUITY CONTROL. The early return for a sufficiently-scanned
+  # episode is removed, so the terminal refuses everything.
+  UC07)
+    snippet OLD <<'EOF'
+        guard underCovered else { return .complete }
+        return retryCount + 1 >= AdmissionController.maxRetries
+EOF
+    snippet NEW <<'EOF'
+        _ = underCovered
+        return retryCount + 1 >= AdmissionController.maxRetries
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
