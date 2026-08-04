@@ -4438,10 +4438,11 @@ MUTATIONS=(
   # ON BREADTH, stated because the RT12 lesson says a broad kill is not evidence.
   # The six pure-decision mutants (UC02–UC07) name one or two victims each. UC01
   # is deliberately the exception: it is the WIRE-IN, and its victims are exactly
-  # the four end-to-end tests that depend on the terminal actually consulting the
+  # the five end-to-end tests that depend on the terminal actually consulting the
   # measurement. That is not broader than the fix — it IS the fix — and it is the
   # one mutant that can tell a correct decision function from a decision function
-  # production never calls.
+  # production never calls. UC09 (R2) is the same family one operand over: the
+  # decision IS called, with the wrong list.
   # ---------------------------------------------------------------------------
 
   # Batch 430 — UC01. THE WIRE-IN. `coverageTerminalDecision(for:)` stops asking
@@ -4450,7 +4451,7 @@ MUTATIONS=(
   # hole. Every pure test in the suite still passes under it — that is the whole
   # point, and it is the "a correct mechanism production never invokes" family
   # this queue keeps paying out on.
-  "UC01|430|RUNNER|$T_41MU_DEFERS;$T_41MU_NOCURSOR;$T_41MU_CURSOR;$T_41MU_REDRIVE;$T_41MU_BOUNDED"
+  "UC01|430|RUNNER|$T_41MU_DEFERS;$T_41MU_NOCURSOR;$T_41MU_CURSOR;$T_41MU_REDRIVE;$T_41MU_BOUNDED;$T_41MU_RESUMEHOLE"
 
   # Batch 431 — UC02. The phase scope is dropped from the PURE decision, so a
   # caller that reaches it with a narrow `targetedWithAudit` phase judges that
