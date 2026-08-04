@@ -3897,8 +3897,13 @@ MUTATIONS=(
   # ---- playhead-fil5: the durable semantic-scan claim (SC series) ----
   #
   # The bead in one sentence: nothing durably requested a semantic ad scan when
-  # a transcript completed, so three of the twelve episodes on the 2026-08-03
-  # device pull had no path to one at all. The rails split four ways and the
+  # a transcript completed, so FOUR of the twelve episodes on the 2026-08-03
+  # device pull had no path to one at all — 48E903D7, FCDDB309, 4FF3A238 and
+  # 2C5C3699, what the shipped candidate SQL returns verbatim against that pull.
+  # The bead's own text says three; it counts only the assets it judged
+  # transcribed, and R4 corrected the count in the four Swift files that state
+  # it. This line was the fifth and was missed until R6. The rails split four
+  # ways and the
   # batches follow that split, because a mutation in one half is invisible to
   # the other three:
   #   SC01-SC09  the claim itself — predicates, identity, row shape
@@ -3935,8 +3940,23 @@ MUTATIONS=(
   # scan stops claiming for every episode between 95% and 98% scanned.
   "SC02|401|CLAIM|$T_FIL5_CLAIM_FLOOR"
   # SC03 — the mirror image: the transcript gate borrows the ad-scan floor. 0.98
-  # excludes 48E903D7, one of the three assets this bead exists for, from its
-  # own fix.
+  # is `episodePreparationCompleteThreshold`, the floor a FINISHED AD SCAN is
+  # measured against; borrowing it here demands a transcript be more complete
+  # than the scan it is a prerequisite for, and 0.95 is the transcript number
+  # precisely because a decoder chops seconds off the end.
+  #
+  # ITS FIELD COST IS A MARGIN, NOT AN EXCLUSION, and the earlier note here got
+  # that wrong in a way worth recording. It read "0.98 excludes 48E903D7, one of
+  # the three assets this bead exists for" — but 48E903D7 covers 36.9 % of its
+  # duration as a bridged fast-transcript AREA (its 95 % is a WATERMARK; see the
+  # batch-409 note), so this gate refuses it at 0.95 and at 0.98 alike and it is
+  # not the asset that separates the two constants. Measured on the 2026-08-03
+  # pull, NEITHER asset the sweep reaches changes verdict: FCDDB309 is 98.79 %
+  # and 4FF3A238 98.85 %, so both clear 0.98 — by 0.008 and 0.005, which is
+  # inside the decoder tail the 0.95 constant exists to absorb. So the mutant's
+  # rail is the synthetic one (`$T_FIL5_TX_FLOOR` pins the constant and the
+  # 0.95-of-2113 case) rather than a field episode, and that is the honest claim
+  # for it — a wall this narrow is a defect the next episode finds, not this one.
   "SC03|401|CLAIM|$T_FIL5_TX_FLOOR"
   # SC04 — the transcript gate's unmeasurable direction flips permissive. It
   # SUPPRESSES a mint, so `true` on an unknown duration claims for assets whose
@@ -4469,7 +4489,7 @@ describe_mutation() {
     CK12) echo "26od: the snapshot splits at the OFFERED count, crediting a window whose row never landed" ;;
     SC01) echo "fil5: VACUITY AUDIT — an UNMEASURED ad scan reads as sufficient, so the never-scanned asset never claims" ;;
     SC02) echo "fil5: the claim floor drifts onto the transcript's 0.95" ;;
-    SC03) echo "fil5: the transcript gate borrows the ad-scan 0.98 and excludes 48E903D7 from its own fix" ;;
+    SC03) echo "fil5: the transcript gate borrows the ad-scan 0.98, leaving the two field assets it reaches 0.005 of margin" ;;
     SC04) echo "fil5: an unmeasurable transcript reads as ready, so the sweep claims assets it cannot judge" ;;
     SC05) echo "fil5: the claim gets a private jobId, so the runner never re-drives it and it sits deferred forever" ;;
     SC06) echo "fil5: the version is hashed from RAW chunks, so any final-passed asset names a job that does not exist" ;;
