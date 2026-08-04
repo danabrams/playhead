@@ -35,11 +35,14 @@ private final class BackfillHonestCursorBox {
 /// into a `@Sendable` callback that the classifier invokes from its own
 /// isolation, and a box that merely *promises* it will only ever be touched
 /// from one actor is a promise the compiler cannot check.
-/// Internal rather than `private` so `BackfillCoarseCheckpointTests` can pin the
-/// two properties that bound this bead's write cost directly. Both are invisible
-/// from outside — a lost dedupe writes the same rows again and a lost cursor
-/// guard writes the same cursor again, so neither changes any row a test could
-/// read, and the only honest place to assert them is here.
+/// Internal rather than `private` so `BackfillCoarseCheckpointTests` can pin its
+/// properties directly. Two of them bound this bead's write cost and are
+/// invisible from outside — a lost dedupe writes the same rows again and a lost
+/// cursor guard writes the same cursor again, so neither changes any row a test
+/// could read. The third, the split between `processedWindowCount` and
+/// `durableWindowCount`, is a correctness property and IS observable in a row,
+/// but only through a store that rejects one write and accepts its neighbours;
+/// asserting it here as well is cheap and states the rule where it lives.
 final class CoarseCheckpointBox: Sendable {
     private struct State {
         var processedWindowCount = 0
