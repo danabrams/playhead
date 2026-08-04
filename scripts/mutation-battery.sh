@@ -10303,12 +10303,26 @@ EOF
   # dropping the `transcriptIntervals` term that carries the watermark fallback.
   # On an asset whose watermark outlives its chunks the measured ad-scan area
   # goes DOWN, which is the exact claim the surrounding comment makes impossible.
+  #
+  # THE NEW TEXT IS THE PRE-REVIEW IMPLEMENTATION VERBATIM, branch and all, and
+  # that is the whole point. The obvious one-line mutant — an UNCONDITIONAL
+  # `fastIntervals + finalIntervals` — also kills, but it kills off twenty
+  # unrelated victims, because it deletes the watermark fallback for assets with
+  # no chunks of EITHER pass, a shape half the coverage suite is built on. A
+  # mutant that the buggy code would ALSO have failed proves nothing about the
+  # fix; this one is green under the unconditional revert and red only on the
+  # asset the branch actually mishandled (watermark + final chunks + no fast).
   RT12)
     snippet OLD <<'EOF'
             let transcribedIntervals = transcriptIntervals + (finalIntervals[id] ?? [])
 EOF
     snippet NEW <<'EOF'
-            let transcribedIntervals = (fastIntervals[id] ?? []) + (finalIntervals[id] ?? [])
+            let transcribedIntervals: [(start: Double, end: Double)]
+            if chunkMaxEnd != nil || finalMaxEnd[id] != nil {
+                transcribedIntervals = (fastIntervals[id] ?? []) + (finalIntervals[id] ?? [])
+            } else {
+                transcribedIntervals = transcriptIntervals
+            }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
