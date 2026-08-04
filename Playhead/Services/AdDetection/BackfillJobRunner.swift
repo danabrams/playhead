@@ -1013,14 +1013,16 @@ actor BackfillJobRunner {
                 // hook makes early in a transcript's life. `fullEpisodeScan` is
                 // the one phase whose contract is the EPISODE, so it is the one
                 // phase whose completion has to be measured against the episode.
-                switch await coverageTerminalDecision(for: job) {
+                let terminalDecision = await coverageTerminalDecision(for: job)
+                switch terminalDecision {
                 case .complete:
                     break
                 case .deferUnderCoverage, .failUnderCoverage:
                     let outcome = try await recordUnderCoverageTerminal(
                         job: job,
                         jobInputs: jobInputs,
-                        coverage: coverage
+                        coverage: coverage,
+                        decision: terminalDecision
                     )
                     if outcome == .deferred {
                         deferred.append(job.jobId)
@@ -1671,10 +1673,22 @@ actor BackfillJobRunner {
     /// whereas this branch is reached only after a FULL pass over everything the
     /// job was handed. Each attempt is a whole attempt, so a flat budget of
     /// ``AdmissionController/maxRetries`` is both finite and never unfair.
+    ///
+    /// **Whether the budget is spent is CONSUMED from `decision`, never
+    /// recomputed here**, and mutation UC04 is why that sentence exists. This
+    /// function originally re-derived `attempts >= AdmissionController.maxRetries`
+    /// for itself, which made `CoverageTerminalDecision.failUnderCoverage` a
+    /// value that was computed and thrown away: UC04 replaced the whole budget
+    /// arm of the pure decision with an unconditional defer and the end-to-end
+    /// bound test stayed GREEN, because the persistence path was quietly
+    /// applying its own private copy of the same rule. Two rulers for one
+    /// quantity is the defect family this entire queue keeps paying out on, and
+    /// it had reproduced inside the fix for it.
     private func recordUnderCoverageTerminal(
         job: BackfillJob,
         jobInputs: AssetInputs,
-        coverage: CoverageOutcome
+        coverage: CoverageOutcome,
+        decision: CoverageTerminalDecision
     ) async throws -> UnderCoverageOutcome {
         let cursor = Self.underCoverageCursor(
             prior: job.progressCursor,
@@ -1682,7 +1696,7 @@ actor BackfillJobRunner {
             firstSegmentStartSec: jobInputs.segments.first?.startTime
         )
         let attempts = job.retryCount + 1
-        let terminal = attempts >= AdmissionController.maxRetries
+        let terminal = decision == .failUnderCoverage
         try await store.checkpointBackfillJobProgress(
             jobId: job.jobId,
             progressCursor: cursor,
@@ -2028,6 +2042,18 @@ actor BackfillJobRunner {
     /// is leading silence and not a hole, and its cursor of 900 IS a genuine
     /// prefix that a resume should honour. The two witnesses on the pull
     /// exercise the two branches.
+    ///
+    /// **Returning `prior` is a CORRECTION, not merely a no-op**, and the
+    /// distinction matters because `checkpointBackfillJobProgress` writes
+    /// `progressCursor = ?` outright rather than merging. playhead-26od's
+    /// incremental checkpoint may already have published this run's plan-list
+    /// bound mid-pass, so the terminal is the last chance to withdraw a claim
+    /// over the head. Writing `prior` back is sound rather than lucky: when
+    /// there IS a hole at the head, every plan in this run lies above it, so no
+    /// in-run checkpoint could have earned a higher cursor honestly — there is
+    /// never anything legitimate to overwrite. That the walk publishes a
+    /// plan-list prefix as an episode prefix at three OTHER call sites is
+    /// playhead-5pyq, filed separately; this bead fixes only its own terminal.
     nonisolated static func underCoverageCursor(
         prior: BackfillProgressCursor?,
         scannedUpperBoundSec: Double?,
