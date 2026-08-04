@@ -186,6 +186,24 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   PARTIAL RE-RUN 2026-08-04 (playhead-9y9e). Batches 413-417, RT01-RT11 — 11
+#   entries in 5 batches — plus batches 404, 407, 409, 410 and 411, whose EDITs
+#   this bead re-cut when it renamed `bridgedTranscriptCoveredSec(fastRanges:)`
+#   to `(ranges:)` and moved the sweep onto `fetchTranscriptCoveredRanges`.
+#   FINAL 11 KILLED / 0 SURVIVED / 0 ERROR for the RT series, and SC25, SC21,
+#   SC30, SC31 and SC33 all KILLED again on their re-cut anchors. 12 builds
+#   (1 baseline + 5 RT batches, one of them re-run, + 5 SC batches). Batches
+#   1-412 other than those five were NOT re-run and carry the verdicts above.
+#   Recount: the array now holds 335 live entries.
+#
+#   One fault, and it is the second time a mutation has been rejected by LINT
+#   rather than by the compiler: RT10's first EDIT prepended an
+#   `if SemanticScanClaim.isOwed(…)` arm to a chain that already ended in one,
+#   which is a `duplicate_conditions` violation and therefore an ERROR under
+#   `scripts/lint.sh --strict`. The whole chain had to become the anchor. A
+#   mutation that cannot build is not a kill — check a new EDIT against the
+#   linter, not only against `--dry-run`.
+#
 #   PARTIAL RE-RUN 2026-08-04 (playhead-26od). Batches 314-323, CK01-CK13 minus
 #   the withdrawn CK08 — 12 entries in 9 batches. Batches 1-313 were NOT re-run
 #   and carry the verdicts above. Recount: the array now holds 324 live entries.
