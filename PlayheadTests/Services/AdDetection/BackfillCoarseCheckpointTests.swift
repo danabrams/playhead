@@ -459,6 +459,13 @@ struct BackfillCoarseCheckpointTests {
             tokenCountRule: { $0.count },
             onCoarseRespond: { ordinal in
                 guard ordinal > answeringWindows else { return }
+                // A park that NOTHING can wake, deliberately. `FMNoProgressWatchdog`
+                // abandons rather than awaits, and its `work.cancel()` cannot reach a
+                // task suspended on an unresumed continuation — which is the point: a
+                // cancellable `Task.sleep` would unwind on that cancel, the "wedged"
+                // pass would resume answering, and the test would no longer be about a
+                // pass that never returns. The cost is one suspended task plus its
+                // fixtures held for the process's life, once per run of the perf plan.
                 await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
             }
         )
@@ -1390,6 +1397,73 @@ struct CoarseCoverageWalkTests {
         #expect(whole.contiguousUpperBoundSec == 90.0)
         #expect(whole.fullyCovered)
         #expect(whole.unpersistedPlanIndices.isEmpty)
+    }
+
+    /// The cursor must never pass where an UNCOVERED plan BEGINS, even when the
+    /// covered prefix demonstrably runs past it.
+    ///
+    /// "Stop at the first uncovered plan in start-time order" and "everything
+    /// below this timestamp is covered" are the same statement only while plan
+    /// time ranges do not overlap. `planPassA` slices plans out of a list sorted
+    /// by `segmentIndex` and takes each plan's bounds as the min/max over its
+    /// segments — precisely because playhead-csbq measured that the atom
+    /// sequence is NOT time-monotone on 27 of 30 device assets. So a covered
+    /// plan can end long after an uncovered one begins.
+    ///
+    /// The consumer knows nothing about plans: `narrowedForResume` drops every
+    /// segment whose `endTime <= cursor`. So an uncapped cursor of 600 here
+    /// deletes both of P1's segments from the resume, no row covers 65–125, and
+    /// nothing ever plans them again — permanent, silent, and invisible in every
+    /// coverage number. The assertion below is the consumer's rule applied to
+    /// this fixture's real segment times, not a magic number.
+    @Test("the cursor never passes where an uncovered plan begins")
+    func cursorNeverPassesAnUncoveredPlanStart() {
+        // P0's segments are (0,30), (30,60), (60,600) — the third runs long.
+        let covered = CoarsePassWindowPlan(
+            windowIndex: 0,
+            lineRefs: [0, 1, 2],
+            prompt: "p0",
+            promptTokenCount: 10,
+            startTime: 0.0,
+            endTime: 600.0,
+            transcriptQuality: .good
+        )
+        // P1's segments are (65,95) and (95,125) — wholly inside P0's span.
+        let uncovered = CoarsePassWindowPlan(
+            windowIndex: 1,
+            lineRefs: [3, 4],
+            prompt: "p1",
+            promptTokenCount: 10,
+            startTime: 65.0,
+            endTime: 125.0,
+            transcriptQuality: .good
+        )
+        let coveredWindow = FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: [0, 1, 2],
+            startTime: 0.0,
+            endTime: 600.0,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: [covered, uncovered],
+            windows: [coveredWindow],
+            failedWindows: []
+        )
+        #expect(walk.fullyCovered == false)
+        #expect(walk.contiguousUpperBoundSec == 65.0)
+        // The consumer's rule, restated over the segments that have no row: a
+        // resume must keep every one of them.
+        let cursor = walk.contiguousUpperBoundSec ?? 0
+        for unscannedSegmentEnd in [95.0, 125.0] {
+            #expect(
+                unscannedSegmentEnd > cursor,
+                "a resume at cursor \(cursor) drops unscanned audio ending at \(unscannedSegmentEnd)"
+            )
+        }
     }
 
     /// The straddle at the head of the episode: the cursor must be UNSET, not

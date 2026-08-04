@@ -269,3 +269,59 @@ statement of fact this bead's own diff falsified.
   diff makes it false.** Corrected in place, including WHY the no-progress bound
   is unaffected: a wedge in the pre-window stretch still produces no row to
   observe, because there is no screened window yet.
+
+Then a second R2 pass, prompted by an adversarial reviewer, found the walk's
+remaining assumption:
+
+* **The walk assumed plan time ranges do not OVERLAP, and they do.**
+  `planPassA` slices plans out of a list sorted by `segmentIndex`, and takes each
+  plan's bounds as the min/max over its segments — a shape playhead-csbq
+  introduced precisely because the atom sequence is NOT time-monotone on 27 of 30
+  device assets. So a COVERED plan can end long after an UNCOVERED plan begins:
+  P0 = segments (0,30) (30,60) (60,600) and P1 = (65,95) (95,125) is enough. The
+  walk breaks at P1 and returns P0's end, 600 — and `narrowedForResume`, which
+  knows nothing about plans and only drops `segment.endTime <= cursor`, then
+  deletes both of P1's segments from the resume. Nothing plans them again.
+
+  The cursor is now capped at the earliest uncovered plan's `startTime`.
+  Sufficient and exact: every segment of that plan has
+  `endTime > startTime >= cursor`, so none can be dropped. On a time-monotone
+  episode every uncovered plan starts at or after the covered prefix ends, so the
+  `min` picks the walked bound and the cap is a NO-OP — which is why it moves
+  nothing pmp9, bkhc, qbib or t1kq compute on a healthy asset, and why no
+  existing cursor test changed.
+
+  This one was pre-existing in the shared walk. It is fixed here rather than
+  filed because playhead-26od is what makes the cursor get written on the jetsam
+  path, and the bead's own field evidence is that the jetsam path is the dominant
+  one (10 of 10 jobs in the 2026-08-03 pull).
+
+## What R2 did NOT fix, and why — playhead-u99x (P1, filed)
+
+The same adversarial pass found a SECOND cursor hazard that this bead must not
+fix: `lastProcessedUpperBoundSec` is an episode-time SCALAR, and `runJob` applies
+`narrowedForResume` to the ALREADY phase-narrowed inputs. For
+`.scanHarvesterProposals` / `.scanLikelyAdSlots` / `.scanRandomAuditWindows` the
+anchor population is RE-DERIVED every run — and for the audit phase it is
+re-derived *deliberately differently*, since `episodesSinceLastFullRescan` is
+mixed into `auditSeed` so consecutive observations rotate across distinct audit
+windows. A cursor that was honest about run 1's anchors can therefore delete run
+2's anchors, which no row covers.
+
+Three reasons it is filed rather than fixed:
+
+1. It is not a defect in any writer. At the instant it is written the cursor is
+   honest about its own population; the unsound step is the CONSUMER applying an
+   episode-time scalar to a different population. That is pmp9's contract.
+2. It is pre-existing and already reachable: pmp9's rate-limit defer and t1kq's
+   cancellation salvage both persist this cursor for those phases today.
+3. **No 26od-local change closes it.** Gating the mid-flight cursor write to
+   `.fullEpisodeScan` — the obvious containment — leaves the identical hole
+   reachable through pmp9 and t1kq, so it would buy partial risk reduction by
+   giving up this bead's resume win on three phases, and still not fix the bug.
+
+The real fixes (narrow only for `.fullEpisodeScan`; or make the resume key off
+"has a durable row" rather than a time scalar; or freeze the anchor set per job)
+are all changes to a shipped contract. Filed with those three directions and the
+test a fix needs — one that runs a targeted phase twice with a DIFFERENT anchor
+set, which no existing test does.

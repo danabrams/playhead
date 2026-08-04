@@ -1868,6 +1868,33 @@ actor BackfillJobRunner {
             guard fullyCoveredPlanIndices.contains(plan.windowIndex) else { break }
             walkedUpperBound = plan.endTime
         }
+        // playhead-26od: and never past where an UNCOVERED plan begins.
+        //
+        // "Stop at the first uncovered plan in start-time order" is only the
+        // same statement as "cover everything below this timestamp" while plan
+        // time ranges do not OVERLAP — and they can. `planPassA` slices plans
+        // out of a list sorted by `segmentIndex`, and takes each plan's bounds
+        // as the min/max over its segments precisely because, as playhead-csbq
+        // measured, the atom sequence is not time-monotone on 27 of 30 device
+        // assets. A covered plan can therefore END well after an uncovered plan
+        // BEGINS, and the consumer does not know about plans at all:
+        // `narrowedForResume` drops every segment with `endTime <= cursor`, so
+        // it would drop the uncovered plan's early segments and nothing would
+        // ever plan them again.
+        //
+        // Capping at the earliest uncovered plan's START is sufficient and
+        // exact: every segment of that plan has `endTime > startTime >= cursor`,
+        // so none of them can be dropped. On a time-monotone episode every
+        // uncovered plan starts at or after the covered prefix ends, so `min`
+        // picks the walked bound and this is a no-op — which is why it does not
+        // move the cursor pmp9, bkhc, qbib or t1kq compute on healthy assets.
+        let firstUncoveredStart = plans
+            .filter { !fullyCoveredPlanIndices.contains($0.windowIndex) }
+            .map(\.startTime)
+            .min()
+        if let walked = walkedUpperBound, let firstUncoveredStart {
+            walkedUpperBound = min(walked, firstUncoveredStart)
+        }
         return CoarseCoverageWalk(
             fullyCovered: fullyCovered,
             contiguousUpperBoundSec: walkedUpperBound,
