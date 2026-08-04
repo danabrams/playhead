@@ -1007,3 +1007,53 @@ outcome's refs from a plan's own); the comment now says what would break it.
   left to be rediscovered.
 * **`guard !walk.fullyCovered` in `checkpointCoarseWindows` is unreachable.**
   True, and its comment already says so and says why it is stated anyway.
+
+### R5's verification, and the one thing it could not settle
+
+* **lint** — `scripts/lint.sh --changed`: clean, 6 changed Swift files.
+* **Python rails** — `python3 -m unittest scripts.tests.test_gate_baseline`:
+  **81 ran, 0 failed** (was 70 ran / 11 failed, on this branch AND on `main`).
+  `scripts/mutation-battery-gate-baseline.py`: **32 killed, 0 survived, R99
+  vacuity control survived** — the first time the R series has been runnable
+  since playhead-3nfa.
+* **CK series** — `scripts/mutation-battery.sh` reported `baseline green` on the
+  focused suites over the final tree. The one new rail attempted (CK14, for the
+  cursor salvage) is withdrawn along with the change it guarded.
+* **gate** — `RED (44 known / 4 NEW)` then, after `accept`, `RED (48 known /
+  0 new)` at exit 0. The run had **48 Swift Testing failures, none under 97 s**,
+  and **zero XCTest failures** — the format where the duration heuristic inverts
+  and every failure is real.
+* **perf** — `scripts/perf-tests.sh` exits 65 on two XCTest failures,
+  `PlayheadRuntimeLaunchPerfTests.testInitFitsLaunchBudget` and
+  `PlayheadRuntimeMainActorFreedomTests.testMainActorIsNotHeldDuringRuntimeInit`.
+  The 26od PerfGate'd test, `abandonedPassLeavesItsScreenedWindowsBehind`,
+  **passed** in all three runs.
+
+**On those two perf failures, stated at the limit of what was measured.** They
+are load-amplified and they are also over budget on a quiet box. Three runs of
+`PlayheadRuntime.init`, same tree:
+
+| host load (1-min) | median | budget |
+|---|---|---|
+| ~101 | 1013.9 ms | 250 ms |
+| ~91 | 910.8 ms | 250 ms |
+| ~1.1 | **389.7 ms** | 250 ms |
+
+So this box does not meet the 250 ms budget even quiescent, and the excess scales
+with load rather than sitting on top of it — the shape of a scheduler problem, not
+of an added constant.
+
+**It is not this diff, and the reason is structural rather than statistical.**
+`PlayheadRuntime.init` builds `backfillJobRunnerFactory` as a `@Sendable` CLOSURE
+and stores it; the `BackfillJobRunner(...)` call inside is not made during init.
+Nothing this bead touches — `BackfillJobRunner`, `FoundationModelClassifier`,
+`FMInferenceDeadline` — is reachable from init's body. And since the previous
+accepted observation the branch's only production change is comment-only.
+
+**What could NOT be established: the same measurement on `main`.** Two attempts to
+run `scripts/perf-tests.sh` from the primary checkout WEDGED — xcodebuild alive,
+0.0 % CPU, `.derivedData-perf` never created, the log frozen after the
+command-line header, at 14 GiB free. That is the silent-wedge signature
+playhead-3nfa's preflight exists to refuse, and **`perf-tests.sh` does not run
+that preflight** (only `fast-gate.sh` does). Worth closing: the perf pass is the
+one lane where a wedge is indistinguishable from a slow measurement run.
