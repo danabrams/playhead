@@ -257,7 +257,11 @@ struct BackfillCoverageTerminalTests {
     // MARK: - 3. The payoff: the rescue is no longer blocked
 
     @available(iOS 26.0, *)
-    @Test("THE CONSEQUENCE — a non-completing terminal leaves resumable work, so the ad-scan re-drive can mint; the old `complete` left ZERO and blocked it")
+    // NOTE: no ';' in this display name. `mutation-battery.sh` splits its
+    // expectation field on ';', so a test whose name contains one can never be
+    // matched and every mutation naming it prints SURVIVED against a working
+    // rail. The battery's baseline caught exactly that here.
+    @Test("THE CONSEQUENCE — a non-completing terminal leaves resumable work, so the ad-scan re-drive can mint where the old `complete` left ZERO and blocked it")
     func theUnderCoveredJobStaysResumableSoTheRedriveCanMint() async throws {
         let assetId = "asset-41mu-redrive"
         let store = try await makeHeadHoleStore(assetId: assetId)
