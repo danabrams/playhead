@@ -350,9 +350,15 @@ struct FMNoProgressError: Error, Sendable, Equatable {
 ///    `SystemLanguageModel.tokenCount(for:)` is an XPC round trip called once
 ///    per candidate window inside `planPassA`. A hang in any of those never
 ///    reaches a deadline-guarded call at all.
-/// 2. `coarsePassA` persists NOTHING until it returns. Every scan row is
+/// 2. `coarsePassA` persisted NOTHING until it returned. Every scan row was
 ///    written by `BackfillJobRunner.runJob` from the returned windows, so a
-///    pass in flight is invisible in the database by construction.
+///    pass in flight was invisible in the database by construction.
+///    **No longer true as of playhead-26od**, which checkpoints each screened
+///    window and an honest resume cursor while the pass runs — so a live pass
+///    now leaves a trail. That STRENGTHENS the separation this bound draws
+///    rather than replacing it: rows arriving is more evidence of work, and a
+///    wedge in the pre-window stretch (probe, tokenisation, `planPassA`) still
+///    produces no row to observe, because there is no screened window yet.
 /// 3. A healthy coarse pass takes 12–45 minutes per episode on device. So the
 ///    observable state of a healthy pass and a wedged one were, before this
 ///    bead, byte-identical: `running`, no cursor, no rows.

@@ -100,15 +100,23 @@ final class CoarseCheckpointBox: Sendable {
         state.withLock { $0.defused }
     }
 
-    /// Accept `upperBound` only if it STRICTLY advances the covered prefix.
-    /// Returns false otherwise, so a checkpoint whose new window did not extend
-    /// the contiguous prefix — playhead-lxkq attempts ad-likely windows first,
-    /// so most early ones will not — costs no `backfill_jobs` write at all.
-    func advanceCursor(to upperBound: Double) -> Bool {
+    /// Is `upperBound` worth a `backfill_jobs` write — i.e. does it STRICTLY
+    /// advance the last cursor this checkpoint actually got into the database?
+    /// False for a checkpoint whose new window did not extend the contiguous
+    /// prefix — playhead-lxkq attempts ad-likely windows first, so most early
+    /// ones will not — which is what keeps the cursor write off those windows
+    /// entirely.
+    func shouldAdvanceCursor(to upperBound: Double) -> Bool {
+        state.withLock { upperBound > ($0.lastCheckpointedUpperBoundSec ?? 0) }
+    }
+
+    /// Record a cursor that LANDED. Separate from `shouldAdvanceCursor` for the
+    /// same reason `noteWrite` separates offered from durable: remembering a
+    /// cursor whose write threw would suppress every later attempt to re-offer
+    /// it, and the box exists to track what the database holds.
+    func noteCursorWritten(_ upperBound: Double) {
         state.withLock {
-            guard upperBound > ($0.lastCheckpointedUpperBoundSec ?? 0) else { return false }
-            $0.lastCheckpointedUpperBoundSec = upperBound
-            return true
+            $0.lastCheckpointedUpperBoundSec = max($0.lastCheckpointedUpperBoundSec ?? 0, upperBound)
         }
     }
 }
@@ -1767,7 +1775,8 @@ actor BackfillJobRunner {
     /// ever drifted an index-only match would silently no-op and let the cursor
     /// advance past a hole.
     struct CoarseCoverageWalk: Sendable, Equatable {
-        /// Every plan produced a window and none of them also failed.
+        /// Every plan produced a window, none of them also failed, and every one
+        /// of those windows is durable.
         let fullyCovered: Bool
         /// End time of the last plan in the unbroken run of fully-covered plans
         /// from the start of the episode; nil when the very first plan is not
@@ -1777,6 +1786,10 @@ actor BackfillJobRunner {
         let succeededPlanIndices: Set<Int>
         /// Plans that recorded at least one failure.
         let failedPlanIndices: Set<Int>
+        /// Plans with at least one screened window that is NOT in the store.
+        /// Disqualifying for coverage in exactly the way a failure is — see
+        /// `unpersistedWindows` on the walk.
+        let unpersistedPlanIndices: Set<Int>
         /// Plans that were never reached — neither a success nor a failure is
         /// attributed to them. This is where a `.pass`-scoped abort stopped.
         func unattemptedPlans(from plans: [CoarsePassWindowPlan]) -> [CoarsePassWindowPlan] {
@@ -1787,10 +1800,25 @@ actor BackfillJobRunner {
         }
     }
 
+    /// - Parameter unpersistedWindows: windows the pass SCREENED but whose rows
+    ///   are not in the store. Empty at end of pass, where a row write that
+    ///   fails throws and no cursor is computed at all; non-empty only for the
+    ///   mid-flight checkpoint, which steps over a failed write on purpose.
+    ///
+    ///   Their plans are disqualified from coverage, and that is not the same
+    ///   statement as "the durable window prefix stops here". A plan can produce
+    ///   SEVERAL windows — `runCoarseRetry` banks one per sub-prompt of a shrunk
+    ///   plan and permissive recovery banks one per recovered chunk — so a plan
+    ///   can straddle the point where the durable prefix ends, with one sibling
+    ///   window in the store and one missing. Counting it as covered because of
+    ///   the sibling that landed would advance the cursor over the audio of the
+    ///   one that did not: pmp9's hole, entered through the one door a
+    ///   window-index prefix cannot close.
     nonisolated static func coarseCoverageWalk(
         plans: [CoarsePassWindowPlan],
         windows: [FMCoarseWindowOutput],
-        failedWindows: [CoarseWindowFailure]
+        failedWindows: [CoarseWindowFailure],
+        unpersistedWindows: [FMCoarseWindowOutput] = []
     ) -> CoarseCoverageWalk {
         // playhead-26od: each plan's line-ref set is built ONCE. The inline
         // version rebuilt it inside the innermost closure, so a pass with P
@@ -1816,7 +1844,15 @@ actor BackfillJobRunner {
                 planIndex(coveringLineRefs: failure.lineRefs) ?? failure.planWindowIndex
             }
         )
-        let fullyCoveredPlanIndices = succeededPlanIndices.subtracting(failedPlanIndices)
+        // A window whose row did not land disqualifies its plan for the same
+        // reason a failed window does: the cursor is only allowed to credit
+        // audio a persisted row covers.
+        let unpersistedPlanIndices = Set(
+            unpersistedWindows.compactMap { planIndex(coveringLineRefs: $0.lineRefs) }
+        )
+        let fullyCoveredPlanIndices = succeededPlanIndices
+            .subtracting(failedPlanIndices)
+            .subtracting(unpersistedPlanIndices)
         // playhead-bkhc: an EMPTY plan list must never read as "fully covered".
         // `count == count` is vacuously true at zero, so a missing denominator
         // would silently certify complete coverage of audio nobody screened —
@@ -1836,7 +1872,8 @@ actor BackfillJobRunner {
             fullyCovered: fullyCovered,
             contiguousUpperBoundSec: walkedUpperBound,
             succeededPlanIndices: succeededPlanIndices,
-            failedPlanIndices: failedPlanIndices
+            failedPlanIndices: failedPlanIndices,
+            unpersistedPlanIndices: unpersistedPlanIndices
         )
     }
 
@@ -1942,10 +1979,17 @@ actor BackfillJobRunner {
         // Coverage is computed from what LANDED, not from what the pass
         // screened. These are the same list until a write fails, and the whole
         // point of the distinction is the case where one did.
+        //
+        // BOTH halves of the split are handed over, not just the durable prefix.
+        // A plan can produce several windows, so the plan straddling the end of
+        // the prefix has a sibling row that is missing, and only the tail can
+        // say which plan that is — see `unpersistedWindows`.
+        let durableCount = box.durableWindowCount
         let walk = Self.coarseCoverageWalk(
             plans: banked.plans,
-            windows: Array(banked.windows.prefix(box.durableWindowCount)),
-            failedWindows: banked.failedWindows
+            windows: Array(banked.windows.prefix(durableCount)),
+            failedWindows: banked.failedWindows,
+            unpersistedWindows: Array(banked.windows.dropFirst(durableCount))
         )
         // Same guard as t1kq's: a fully-covered cursor is episode-end, which
         // `narrowedForResume` collapses to an empty resume. Unreachable while
@@ -1954,7 +1998,7 @@ actor BackfillJobRunner {
         // wherever it is applied.
         guard !walk.fullyCovered,
               let upperBound = walk.contiguousUpperBoundSec,
-              box.advanceCursor(to: upperBound) else {
+              box.shouldAdvanceCursor(to: upperBound) else {
             return
         }
         let honest = BackfillProgressCursor(
@@ -1970,6 +2014,12 @@ actor BackfillJobRunner {
                 jobId: jobId,
                 progressCursor: merged
             )
+            // Recorded only now, for the same reason `noteWrite` credits only a
+            // write that landed: the box's job is to remember what the DATABASE
+            // holds, so a cursor write that threw must be re-offered rather than
+            // suppressed as "already checkpointed". Costs at most one repeated
+            // `backfill_jobs` UPDATE after a transient store error.
+            box.noteCursorWritten(upperBound)
         } catch {
             logger.warning(
                 "fm.coarse.checkpoint_cursor_failed job=\(jobId, privacy: .public) error=\(String(describing: error), privacy: .public)"

@@ -140,7 +140,27 @@ The cost is real — a fully-covered-then-cancelled pass re-pays its coarse FM �
 but the alternative is a coverage hole, and changing it is a deliberate
 alteration of t1kq's contract rather than a drive-by. Dan's call.
 
-## Downstream consequence worth a product decision
+## Downstream consequence worth a product decision — SETTLED, read this first
+
+**DECIDED BY DAN, 2026-08-03.** The two sections below record how the surfacing
+question was raised (round I) and measured (round II). The decision they were
+feeding is now made, and it is not the one round I anticipated:
+
+* Coarse rows **persist AND surface exactly as `playhead-y3ya` (#326) already
+  ships them.** An earlier reading of "persist but do not surface until refined"
+  is WITHDRAWN. Nothing in this bead narrows y3ya, and the rails below encode
+  the shipped behaviour rather than a candidate replacement for it:
+  `midFlightCoarseOnlyRowsReachTheSuggestTier` asserts an unrefined coarse mark
+  ARMS the suggest tier, `aRefinedRowSurfacesAtTheRefinedExtent` asserts a
+  refined row surfaces at the refined extent.
+* The genuine harm round II identified — a checkpointed row is never re-scanned,
+  therefore never refined, so its coarse extent becomes permanent — is filed as
+  **`playhead-o98e` (P1)**, and Dan chose "make them refinable" over narrowing
+  y3ya or accepting permanent coarse extent. It is OUT OF SCOPE here.
+
+So the "one assertion-flip away in each direction" line at the end of round II
+describes a symmetry that still holds mechanically, not an open question. Read
+the rest of this section as the record of how the answer was reached.
 
 `SemanticSweepMarkComposer` mints mark-only `AdWindow`s directly from passA
 `containsAd` rows, without requiring pass B, up to `maximumMarkDurationSeconds`
@@ -213,3 +233,39 @@ and therefore its coverage unless every fixture gains a `passB` row.
 So: reverting stage 2's fallback is Dan's call on playhead-y3ya, not a rail
 playhead-26od can add. The rails above make the axis measured rather than blind,
 and the decision is one assertion-flip away in each direction.
+
+**Outcome (see the settled section at the top of this file): Dan took neither
+flip.** Coarse rows keep surfacing as y3ya ships them, and the refinement side
+gets the fix, as `playhead-o98e`.
+
+## Review round R2 — what it changed
+
+Two defects, one of them the same shape as the one round I caught, plus a stale
+statement of fact this bead's own diff falsified.
+
+* **The durable prefix is measured in WINDOWS; coverage is measured in PLANS,
+  and one plan can be several windows.** `runCoarseRetry` banks one window per
+  sub-prompt of a shrunk plan (`FoundationModelClassifier.swift`, the
+  `.success(outputs)` arm) and permissive recovery banks one per recovered
+  chunk. So the plan STRADDLING the point where the durable prefix stops has one
+  sibling row in the store and one missing — and round I's walk, seeing only the
+  sibling that landed, credited the whole plan and advanced the cursor over the
+  audio of the one that did not. That is pmp9's hole again, reached through the
+  one door a window-index prefix cannot close, and it is reachable because
+  `insertSemanticScanResult` rejects PER ROW (window geometry, blob size), not
+  only per runner. `coarseCoverageWalk` now takes the unpersisted tail as well
+  as the durable prefix and disqualifies its plans exactly the way a failed
+  window's plan is disqualified. End-of-pass callers pass nothing and are
+  byte-identical (a failed write there THROWS, so no cursor is computed at all).
+* **The box recorded a cursor it had only ATTEMPTED to write.** `advanceCursor`
+  mutated before the store call, so a cursor write that threw was never offered
+  again — the same "credit the intent, not the outcome" mistake `noteWrite`
+  exists to avoid, with a smaller blast radius: the cursor only ever lands
+  BEHIND the truth, so it costs re-scanned audio rather than a coverage hole.
+  Split into `shouldAdvanceCursor` (peek) and `noteCursorWritten` (record after
+  the write returns).
+* **`FMInferenceDeadline.swift`'s fact 2 — "coarsePassA persists NOTHING until
+  it returns" — is what the bead quotes as the statement of the defect, and this
+  diff makes it false.** Corrected in place, including WHY the no-progress bound
+  is unaffected: a wedge in the pre-window stretch still produces no row to
+  observe, because there is no screened window yet.

@@ -1103,12 +1103,13 @@ struct CoarseCheckpointBoxTests {
     @Test("only a strictly advancing cursor is worth a write")
     func onlyStrictAdvancesAreWorthAWrite() {
         let box = CoarseCheckpointBox()
-        #expect(box.advanceCursor(to: 90.0))
+        #expect(box.shouldAdvanceCursor(to: 90.0))
+        box.noteCursorWritten(90.0)
         // Same prefix — the window that just resolved was out of episode order.
-        #expect(box.advanceCursor(to: 90.0) == false)
+        #expect(box.shouldAdvanceCursor(to: 90.0) == false)
         // Behind the prefix — must never regress the cursor.
-        #expect(box.advanceCursor(to: 30.0) == false)
-        #expect(box.advanceCursor(to: 120.0))
+        #expect(box.shouldAdvanceCursor(to: 30.0) == false)
+        #expect(box.shouldAdvanceCursor(to: 120.0))
     }
 
     /// `cursorAdvanced` treats a cursor of 0 as no progress, so a zero upper
@@ -1116,7 +1117,26 @@ struct CoarseCheckpointBoxTests {
     @Test("a zero upper bound is not an advance")
     func zeroIsNotAnAdvance() {
         let box = CoarseCheckpointBox()
-        #expect(box.advanceCursor(to: 0.0) == false)
+        #expect(box.shouldAdvanceCursor(to: 0.0) == false)
+    }
+
+    /// A cursor write that THREW is not a cursor the database holds, so the
+    /// next checkpoint must be free to offer it again.
+    ///
+    /// Recording the intent instead of the outcome is the same defect
+    /// `noteWrite` exists to avoid one level down, with a smaller blast radius:
+    /// the cursor only ever ends up BEHIND the truth, so it costs re-scanned
+    /// audio rather than a coverage hole. It still costs the thing this bead is
+    /// about — durable minutes — whenever the failure is transient and the pass
+    /// dies before the prefix advances again.
+    @Test("a cursor whose write failed is offered again")
+    func aFailedCursorWriteIsRetried() {
+        let box = CoarseCheckpointBox()
+        #expect(box.shouldAdvanceCursor(to: 90.0))
+        // ... the store threw, so nothing is noted.
+        #expect(box.shouldAdvanceCursor(to: 90.0))
+        box.noteCursorWritten(90.0)
+        #expect(box.shouldAdvanceCursor(to: 90.0) == false)
     }
 
     /// The distinction between "offered to the store" and "actually in the
@@ -1301,6 +1321,108 @@ struct CoarseCoverageWalkTests {
             failedWindows: [failure(0)]
         )
         #expect(walk.contiguousUpperBoundSec == nil)
+    }
+
+    /// A plan whose windows straddle the end of the durable prefix is NOT
+    /// covered, even though one of them landed.
+    ///
+    /// A plan is not one window. `runCoarseRetry` banks one window per
+    /// sub-prompt of a shrunk plan and permissive recovery banks one per
+    /// recovered chunk, so "the durable prefix ends at window k" and "every plan
+    /// under windows 0..<k is durable" are different statements. The plan that
+    /// straddles k has a sibling row missing from the store; crediting it
+    /// because of the sibling that landed advances the cursor over audio no row
+    /// covers, and `narrowedForResume` then drops that audio permanently — pmp9,
+    /// through the one door a window-index prefix cannot close.
+    ///
+    /// Both directions are asserted from ONE fixture: the same three windows
+    /// with nothing unpersisted DO carry the cursor to 90 s. Without that
+    /// control an implementation that simply never advanced the cursor would
+    /// pass the interesting half.
+    @Test("a plan straddling the durable prefix is not covered")
+    func straddlingPlanIsNotCovered() {
+        // P1 is one plan covering two line refs, screened as two windows.
+        let plans = [
+            CoarsePassWindowPlan(
+                windowIndex: 0,
+                lineRefs: [0],
+                prompt: "p0",
+                promptTokenCount: 10,
+                startTime: 0.0,
+                endTime: 30.0,
+                transcriptQuality: .good
+            ),
+            CoarsePassWindowPlan(
+                windowIndex: 1,
+                lineRefs: [1, 2],
+                prompt: "p1",
+                promptTokenCount: 10,
+                startTime: 30.0,
+                endTime: 90.0,
+                transcriptQuality: .good
+            )
+        ]
+        let firstHalf = window(1)
+        let secondHalf = window(2)
+
+        let straddled = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [window(0), firstHalf],
+            failedWindows: [],
+            unpersistedWindows: [secondHalf]
+        )
+        #expect(straddled.contiguousUpperBoundSec == 30.0)
+        #expect(straddled.fullyCovered == false)
+        #expect(straddled.unpersistedPlanIndices == [1])
+        // The sibling that DID land still reads as a success — the plan is
+        // disqualified for coverage, not erased from the attempt record, so the
+        // end-of-pass `unattemptedPlans` denominator is unaffected.
+        #expect(straddled.succeededPlanIndices == [0, 1])
+        #expect(straddled.unattemptedPlans(from: plans).isEmpty)
+
+        // The control: with both halves durable the same plans DO carry the
+        // cursor past P1.
+        let whole = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [window(0), firstHalf, secondHalf],
+            failedWindows: []
+        )
+        #expect(whole.contiguousUpperBoundSec == 90.0)
+        #expect(whole.fullyCovered)
+        #expect(whole.unpersistedPlanIndices.isEmpty)
+    }
+
+    /// The straddle at the head of the episode: the cursor must be UNSET, not
+    /// merely short.
+    ///
+    /// Called out separately because it is the case with no safe fallback. Every
+    /// other straddle leaves an earlier covered plan to fall back to, so an
+    /// implementation that only half-applied the rule would still look sane;
+    /// here the only honest answer is nil, and a cursor of 30 s would tell the
+    /// next run to skip the first half of a plan it never durably screened.
+    @Test("a straddle on the very first plan leaves the cursor unset")
+    func straddleOnFirstPlanLeavesNoCursor() {
+        let plans = [
+            CoarsePassWindowPlan(
+                windowIndex: 0,
+                lineRefs: [0, 1],
+                prompt: "p0",
+                promptTokenCount: 10,
+                startTime: 0.0,
+                endTime: 60.0,
+                transcriptQuality: .good
+            ),
+            plan(2)
+        ]
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [window(0), window(2)],
+            failedWindows: [],
+            unpersistedWindows: [window(1)]
+        )
+        #expect(walk.contiguousUpperBoundSec == nil)
+        #expect(walk.fullyCovered == false)
+        #expect(walk.unpersistedPlanIndices == [0])
     }
 
     /// Attribution is structural (line-ref subset), not positional, so the walk
