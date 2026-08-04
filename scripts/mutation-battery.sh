@@ -1086,6 +1086,10 @@ SCHED="Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"
 CLAIM="Playhead/Services/AdDetection/SemanticScanClaim.swift"
 RECON="Playhead/Services/PreAnalysis/AnalysisJobReconciler.swift"
 ATOM="Playhead/Services/AdDetection/TranscriptAtom.swift"
+# playhead-9y9e: the PIPELINE runner (stages 1-5), not `$RUNNER`, which is the
+# coverage-lane `BackfillJobRunner`. Two different files whose names differ by
+# a prefix; the RT series mutates this one.
+AJRUN="Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -1094,7 +1098,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
-  "$CLAIM" "$RECON" "$ATOM"
+  "$CLAIM" "$RECON" "$ATOM" "$AJRUN"
 )
 
 FOCUSED_SUITES=(
@@ -1436,6 +1440,28 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AdScanRedriveDecisionTests
   -only-testing:PlayheadTests/AdScanRedriveReconcilerTests
   -only-testing:PlayheadTests/ResumableBackfillJobSelectorTests
+  # playhead-9y9e: the path from "transcribed" to "read for ads" (RT series).
+  # Four suites, and the split is not cosmetic — the bead has three separable
+  # failure modes in three layers and no suite can see more than one:
+  #
+  #   * the RUNNER's short-circuit (does a pass over a finished transcript reach
+  #     Stage 4 at all, and does the drop leave a row?) — only an end-to-end run
+  #     through a real TranscriptEngineService can observe that;
+  #   * the STORE's ad-scan ruler (is the bound the fast pass or the whole
+  #     transcript?) — a pure interval question that the runner suite cannot see
+  #     because its fixtures are single-pass;
+  #   * the SCHEDULER's cap-out decision (is an unread episode outstanding
+  #     work?) — a pure decision matrix.
+  #
+  # `AnalysisStoreCoverageRulerTests` is where the new ruler tests physically
+  # live (the csbq suite that already owns the numerator/denominator fixtures);
+  # `AnalysisStoreAdScanCoverageTests` is pz32's own suite and is listed because
+  # a widened bound that stopped CLIPPING would satisfy this bead's tests while
+  # breaking the intersection pz32 exists for. `CapOutRetryTests` is y8f3's.
+  -only-testing:PlayheadTests/TranscriptionAlreadyCompleteTests
+  -only-testing:PlayheadTests/AnalysisStoreCoverageRulerTests
+  -only-testing:PlayheadTests/AnalysisStoreAdScanCoverageTests
+  -only-testing:PlayheadTests/CapOutRetryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2248,6 +2274,23 @@ T_FIL5_ROTATE="a claimable asset behind a full window of permanent rejects is re
 
 # playhead-fil5 R4 review round.
 T_FIL5_WRAP="a full window of claimable assets drains without an idle pass"
+
+# playhead-9y9e — the RT series.
+T_9Y9E_REACHES="a pass that adds nothing to a complete transcript runs ad detection"
+T_9Y9E_PARTIAL="a half-transcribed asset still fails, and still journals the failure"
+T_9Y9E_GAPPY="a full watermark over a gappy transcript does not license the short-circuit"
+T_9Y9E_NOCHUNKS="a watermark with no chunks behind it does not license the short-circuit"
+T_9Y9E_INTERRUPT="an interrupted pass does not short-circuit, even on a complete transcript"
+T_9Y9E_FINALONLY="a scan window inside FINAL-pass-only transcript is counted, not discarded"
+T_9Y9E_CEILING="a fully scanned, mostly-final-pass episode can now reach the sufficiency floor"
+T_9Y9E_CLIPS="widening the bound to both passes does not stop it clipping untranscribed audio"
+T_9Y9E_RANGES="fetchTranscriptCoveredRanges spans both passes and drops degenerate rows"
+T_9Y9E_UNSCANNED="a fully transcribed episode whose ad scan is short still gets a retry"
+T_9Y9E_LADDER="an outstanding transcript rung still wins over the ad-scan term"
+T_9Y9E_GUARDS="the ad-scan term does not bypass the terminal, budget or cooldown guards"
+# The vacuity control's victims. `pz32`'s own rails, which must stay green under
+# RT12 and red under RT07 — see the batch note.
+T_9Y9E_PZ32_SPRAWL="ad-scan fraction can never exceed 1.0 however far the windows sprawl"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4152,6 +4195,83 @@ MUTATIONS=(
   # direction (SC32 leaves the cursor at 0, so `$T_FIL5_WRAP`'s reads are never
   # empty; SC34 never fires in `$T_FIL5_ROTATE`'s fixture).
   "SC34|412|RECON|$T_FIL5_WRAP"
+
+  # ---- playhead-9y9e: transcribed -> read for ads (RT series) ----
+  #
+  # Batches 413-415 each carry ONE mutation per LAYER (runner / store /
+  # scheduler). The three layers share no code and no victim, and the bead's
+  # whole claim is that they are separable — a batch that mixed two mutations
+  # inside one layer could not be told apart by which test went red.
+
+  # Batch 413 — the three defects as they stood.
+  #
+  # RT01 — the short-circuit goes: a pass that adds nothing to a finished
+  # transcript is a `transcription:*` failure again and Stage 4 never runs. This
+  # is AD5F3A0A on the 2026-08-03 pull, which spent BOTH onn6 re-drive ordinals
+  # without once reaching the semantic scan.
+  "RT01|413|AJRUN|$T_9Y9E_REACHES"
+  # RT06 — the ad-scan area is bounded by the FAST union again. Nothing throws
+  # and every number still prints; an episode whose transcript came from the
+  # final pass simply measures as unscanned forever. Six of twelve field assets,
+  # four of them below the sufficiency floor by construction.
+  "RT06|413|STORE|$T_9Y9E_FINALONLY;$T_9Y9E_CEILING"
+  # RT09 — the cap-out rescue reverts to a transcript-only measure of
+  # outstanding work, which is the one measure a fully transcribed, never
+  # scanned episode can never satisfy.
+  "RT09|413|SCHED|$T_9Y9E_UNSCANNED"
+
+  # Batch 414 — the direction controls, and the runner's VACUITY AUDIT.
+  #
+  # RT02 — VACUITY AUDIT for the short-circuit's floor. The helper returns the
+  # watermark unconditionally: no chunks required, no area, no floor. Every
+  # NEGATIVE fixture in the runner suite must go red. One staying green means
+  # that fixture never reached the gate it claims to test — which is exactly how
+  # a "half-transcribed asset" test passes against an implementation that never
+  # short-circuits at all.
+  "RT02|414|AJRUN|$T_9Y9E_PARTIAL;$T_9Y9E_GAPPY;$T_9Y9E_NOCHUNKS"
+  # RT07 — the direction control for RT06. Widening the bound is only defensible
+  # while it still CLIPS: take the windows at face value and one prompt whose
+  # bounds straddle an untranscribed block claims the whole episode. Named
+  # against pz32's own sprawl rail as well as this bead's, because the mutation
+  # is a revert of pz32 and must be caught by the suite that owns it.
+  "RT07|414|STORE|$T_9Y9E_CLIPS;$T_9Y9E_PZ32_SPRAWL"
+  # RT10 — the direction control for RT09. The ad-scan term is a FALLBACK, not
+  # an override: while the transcript ladder still has a rung, the target must
+  # stay the ladder's, or a half-transcribed episode is asked for the whole
+  # thing and the cheapest-probe-first ordering is gone.
+  "RT10|414|SCHED|$T_9Y9E_LADDER"
+
+  # Batch 415 — the quantity each gate divides, and the guards it must not jump.
+  #
+  # RT03 — the family-1 revert: the gate divides the WATERMARK (a high-water
+  # REACH) instead of the gap-bridged AREA. A gappy transcript reads 100 % over
+  # audio nobody transcribed — the playhead-sd71 antipattern — and a genuinely
+  # stalled transcription gets a licence to skip its own failure accounting.
+  "RT03|415|AJRUN|$T_9Y9E_GAPPY"
+  # RT08 — `fetchTranscriptCoveredRanges` becomes its fast-only sibling, so
+  # every caller asking "what can a scan read?" is answered "what has the fast
+  # pass reached?" again. Distinct from RT06: that is the summary's bound, this
+  # is the standalone read fil5's sweep and the runner's gate both use.
+  "RT08|415|STORE|$T_9Y9E_RANGES"
+  # RT11 — the ad-scan term jumps the queue, evaluated before the terminal,
+  # budget and cooldown guards. Without this rail the new term would be an
+  # unbounded retry wearing a floor.
+  "RT11|415|SCHED|$T_9Y9E_GUARDS"
+
+  # Batch 416 — RT04 ALONE. The interruption carve-out. playhead-ngev pays a
+  # deliberate cost to hand the scheduler's single running slot back the instant
+  # a listener scrubs; continuing into a full detection pass there reintroduces
+  # exactly what ngev bought. Its own batch because it edits the same `if` the
+  # RT02/RT03 helper feeds.
+  "RT04|416|AJRUN|$T_9Y9E_INTERRUPT"
+
+  # Batch 417 — RT05 ALONE. The trace reverts to a `.failed`/`asrFailed` journal
+  # row. The pass still reaches Stage 4, so every behavioural assertion stays
+  # green and only the row is wrong — which is the whole misattribution this
+  # bead removes (five `asr_failed` rows for an episode that is fully
+  # transcribed). Cannot share 413 with RT01: both redden `$T_9Y9E_REACHES`, and
+  # a mutation credited KILLED off a batchmate's victim is a fabricated rail.
+  "RT05|417|AJRUN|$T_9Y9E_REACHES"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4519,6 +4639,17 @@ describe_mutation() {
     SC26) echo "fil5: the sweep's per-pass mint cap goes, emptying the window into a queue that drains 8" ;;
     SC27) echo "fil5: the candidate window widens to 64, paying a transcript read per reject" ;;
     SC28) echo "fil5: the sweep claims episodes whose analysis pass is still in flight" ;;
+    RT01) echo "9y9e: the short-circuit goes — a finished transcript is a transcription failure again and Stage 4 never runs" ;;
+    RT02) echo "9y9e: VACUITY AUDIT — the short-circuit's floor goes, so every negative runner fixture must go red" ;;
+    RT03) echo "9y9e: the gate divides the WATERMARK, not the bridged area — a gappy transcript reads as finished" ;;
+    RT04) echo "9y9e: the interruption carve-out goes, so a scrub buys a full detection pass on the only slot" ;;
+    RT05) echo "9y9e: the short-circuit journals a FAILED row again — the asr_failed misattribution, behaviour intact" ;;
+    RT06) echo "9y9e: the ad-scan area is bounded by the FAST union again, so a final-passed episode is unscannable forever" ;;
+    RT07) echo "9y9e: the ad-scan bound stops CLIPPING — one window's bounds claim audio nobody transcribed" ;;
+    RT08) echo "9y9e: fetchTranscriptCoveredRanges becomes fast-only, answering the wrong question for every caller" ;;
+    RT09) echo "9y9e: the cap-out rescue measures outstanding TRANSCRIPT only — the one thing an unscanned episode has none of" ;;
+    RT10) echo "9y9e: the ad-scan term overrides the transcript ladder instead of falling back to it" ;;
+    RT11) echo "9y9e: the ad-scan term jumps the terminal, budget and cooldown guards" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -9832,7 +9963,7 @@ EOF
   SC25)
     snippet OLD <<'EOF'
                 coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
-                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                    ranges: try await store.fetchTranscriptCoveredRanges(assetId: assetId)
                 ),
 EOF
     snippet NEW <<'EOF'
@@ -9851,12 +9982,12 @@ EOF
   SC30)
     snippet OLD <<'EOF'
                 coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
-                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                    ranges: try await store.fetchTranscriptCoveredRanges(assetId: assetId)
                 ),
 EOF
     snippet NEW <<'EOF'
                 coveredSec: AnalysisCoverageMath.unionedSeconds(
-                    try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                    try await store.fetchTranscriptCoveredRanges(assetId: assetId)
                 ),
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -9918,12 +10049,205 @@ EOF
   # shorter than the shortest span any lane calls an ad; 500 s is not.
   SC33)
     snippet OLD <<'EOF'
-                fastRanges,
+                ranges,
                 upTo: AnalysisCoverageMath.adScanBridgeableGapSec
 EOF
     snippet NEW <<'EOF'
-                fastRanges,
+                ranges,
                 upTo: 500
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-9y9e: transcribed -> read for ads (RT series) ----
+
+  # RT01 — the short-circuit goes. The condition can never hold, so a pass over
+  # a finished transcript falls through to the zero-coverage failure arm exactly
+  # as it did before this bead and Stage 4 is never reached. Deleting the block
+  # outright would also delete the `else`, so the mutation makes the guard
+  # unsatisfiable instead: same behaviour, one-line anchor.
+  RT01)
+    snippet OLD <<'EOF'
+            if transcriptFailure?.termination != .interrupted,
+               let alreadyTranscribed = await transcriptCoverageOfCompletedTranscript(
+EOF
+    snippet NEW <<'EOF'
+            if transcriptFailure?.termination == .interrupted,
+               let alreadyTranscribed = await transcriptCoverageOfCompletedTranscript(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT02 — VACUITY AUDIT. The helper stops measuring: any positive watermark
+  # licenses the short-circuit, with no chunks required and no floor. Every
+  # NEGATIVE fixture in the runner suite must go red; one staying green means it
+  # never reached the gate it claims to test.
+  RT02)
+    snippet OLD <<'EOF'
+        guard let ranges = try? await store.fetchTranscriptCoveredRanges(assetId: assetId),
+              !ranges.isEmpty else {
+            return nil
+        }
+        guard SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: ranges),
+            episodeDurationSec: asset.episodeDurationSec
+        ) else {
+            return nil
+        }
+        return watermark
+EOF
+    snippet NEW <<'EOF'
+        return watermark
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT03 — the gate divides the WATERMARK instead of the gap-bridged AREA. The
+  # two agree on a contiguous transcript and diverge on a gappy one, where the
+  # watermark reads 100 % over audio nobody transcribed.
+  RT03)
+    snippet OLD <<'EOF'
+            coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: ranges),
+EOF
+    snippet NEW <<'EOF'
+            coveredSec: watermark,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT04 — the interruption carve-out goes, so a listener's scrub over a
+  # finished transcript buys a whole detection pass on the scheduler's only
+  # running slot.
+  RT04)
+    snippet OLD <<'EOF'
+            if transcriptFailure?.termination != .interrupted,
+               let alreadyTranscribed = await transcriptCoverageOfCompletedTranscript(
+EOF
+    snippet NEW <<'EOF'
+            if true,
+               let alreadyTranscribed = await transcriptCoverageOfCompletedTranscript(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT05 — the trace reverts to a failure row. Behaviour is untouched (the pass
+  # still reaches Stage 4); only the account of it is wrong, which is the whole
+  # misattribution — five `asr_failed` rows for a fully transcribed episode.
+  RT05)
+    snippet OLD <<'EOF'
+            eventType: .checkpointed,
+            cause: nil,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+            cause: .asrFailed,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT06 — the ad-scan area is bounded by the FAST union again. The final pass
+  # is still queried, so nothing breaks and every display field is unchanged;
+  # only the ruler shrinks.
+  RT06)
+    snippet OLD <<'EOF'
+                    within: AnalysisCoverageMath.bridgingShortGaps(
+                        transcribedIntervals,
+EOF
+    snippet NEW <<'EOF'
+                    within: AnalysisCoverageMath.bridgingShortGaps(
+                        transcriptIntervals,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT07 — the bound stops clipping. A window's persisted bounds are
+  # `first.startTime ... last.endTime` over the segments that fit one prompt, so
+  # taking them at face value lets one prompt claim every untranscribed block it
+  # straddles. This is a revert of playhead-pz32 and must be caught by pz32's
+  # own rail as well as this bead's.
+  RT07)
+    snippet OLD <<'EOF'
+                adScanCoveredSec = AnalysisCoverageMath.unionedSecondsIntersecting(
+                    adScanIntervals[id] ?? [],
+                    within: AnalysisCoverageMath.bridgingShortGaps(
+                        transcribedIntervals,
+                        upTo: AnalysisCoverageMath.adScanBridgeableGapSec
+                    )
+                )
+EOF
+    snippet NEW <<'EOF'
+                adScanCoveredSec = AnalysisCoverageMath.unionedSeconds(
+                    adScanIntervals[id] ?? []
+                )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT08 — the standalone read becomes its fast-only sibling, so every caller
+  # asking "what can a scan read?" is answered "what has the fast pass
+  # reached?". Distinct from RT06: that is the summary's internal bound, this is
+  # the query fil5's sweep and the runner's own gate both call.
+  RT08)
+    snippet OLD <<'EOF'
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND endTime > startTime
+            ORDER BY startTime
+EOF
+    snippet NEW <<'EOF'
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND pass = 'fast'
+              AND endTime > startTime
+            ORDER BY startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT09 — the cap-out rescue reverts to a transcript-only measure of
+  # outstanding work, which a fully transcribed and never-scanned episode can
+  # never satisfy.
+  RT09)
+    snippet OLD <<'EOF'
+        } else if SemanticScanClaim.isOwed(adScanFraction: adScanFraction), let deepest = ladder.last {
+EOF
+    snippet NEW <<'EOF'
+        } else if false, let deepest = ladder.last {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT10 — the ad-scan term stops being a FALLBACK and becomes an override, so a
+  # half-transcribed episode is asked for the whole thing and the ladder's
+  # cheapest-probe-first ordering is gone.
+  RT10)
+    snippet OLD <<'EOF'
+        let target: Double
+        if let outstanding = outstandingTranscriptTarget(
+EOF
+    snippet NEW <<'EOF'
+        let target: Double
+        if SemanticScanClaim.isOwed(adScanFraction: adScanFraction), let deepest = ladder.last {
+            target = deepest
+        } else if let outstanding = outstandingTranscriptTarget(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT11 — the ad-scan term jumps the terminal, budget and cooldown guards,
+  # turning a bounded rescue into an unbounded retry wearing a floor.
+  RT11)
+    snippet OLD <<'EOF'
+        guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
+        guard let nextOrdinal else { return .declined(.budgetSpent) }
+        guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
+            return .declined(.cooling)
+        }
+        let ladder = coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
+EOF
+    snippet NEW <<'EOF'
+        let ladder = coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
+        if SemanticScanClaim.isOwed(adScanFraction: adScanFraction), let deepest = ladder.last {
+            return .mint(CapOutRetryPlan(
+                workKey: capOutRetryWorkKey(baseWorkKey: baseWorkKey, ordinal: nextOrdinal ?? 1),
+                ordinal: nextOrdinal ?? 1,
+                desiredCoverageSec: deepest
+            ))
+        }
+        guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
+        guard let nextOrdinal else { return .declined(.budgetSpent) }
+        guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
+            return .declined(.cooling)
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -10004,7 +10328,7 @@ EOF
     snippet OLD <<'EOF'
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
                 coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
-                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                    ranges: try await store.fetchTranscriptCoveredRanges(assetId: assetId)
                 ),
                 episodeDurationSec: asset.episodeDurationSec
             ) else { continue }
@@ -10126,6 +10450,7 @@ rec_file()   {
     CLAIM) printf '%s' "$CLAIM" ;;
     RECON) printf '%s' "$RECON" ;;
     ATOM)  printf '%s' "$ATOM" ;;
+    AJRUN) printf '%s' "$AJRUN" ;;
     *)     printf '%s' "" ;;
   esac
 }
