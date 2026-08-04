@@ -2998,6 +2998,152 @@ struct AnalysisStoreCoverageRulerTests {
         #expect(fraction == 1.0)
     }
 
+    // MARK: - playhead-9y9e: the bound is BOTH transcript passes
+
+    private func makePassChunk(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        pass: String
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "\(assetId)-chunk-\(pass)-\(index)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "\(assetId)-fp-\(pass)-\(index)",
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "t",
+            normalizedText: "t",
+            pass: pass,
+            modelVersion: "test-asr",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+    }
+
+    /// RT04 — THE FIELD SHAPE, asset 0C2FC22E on the 2026-08-03 device pull. Its
+    /// two transcript passes are DISJOINT: final chunks hold `[0, 930]` and fast
+    /// chunks hold `[930, 2086]` of a 2,086 s episode. The asset's terminal
+    /// reason reads `transcript 1.000`, and every other watermark agrees — but
+    /// the ad-scan bound was the FAST union alone, so a scan of the first half
+    /// of that episode measured ZERO seconds examined.
+    ///
+    /// Scaled down here; the geometry (disjoint passes, scan window inside the
+    /// final-only region) is the field's.
+    @Test("a scan window inside FINAL-pass-only transcript is counted, not discarded")
+    func adScanAreaCountsFinalPassOnlyRegions() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-disjoint", episodeDurationSec: 1000))
+        // Final pass backs [0, 400]; fast pass backs [400, 1000]. Nothing is
+        // transcribed twice, which is what makes the fast-only reading 60%.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-disjoint", index: 0, start: 0, end: 400, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-disjoint", index: 1, start: 400, end: 1000, pass: "fast")
+        ])
+        // The scan examined the first 400 s — entirely inside the final-only
+        // region, i.e. exactly the audio a fast-only bound throws away.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-disjoint", index: 0, start: 0, end: 400)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-disjoint"])
+        let summary = try #require(summaries["a-9y9e-disjoint"])
+
+        #expect(summary.adScanCoveredSec == 400,
+                "the scan read 400 s of real transcript; a fast-only bound reports 0")
+        #expect(summary.adScanFraction == 0.4)
+
+        // The TX figure is untouched. It names the FAST pass and must keep
+        // naming it — this bead moved the ad-scan bound only.
+        #expect(summary.fastTranscriptCoveredSec == 600)
+        #expect(summary.fastTranscriptCoveredSource == .fastTranscriptChunks)
+    }
+
+    /// RT05 — the CEILING, which is the reach consequence. Under a fast-only
+    /// bound, an asset whose transcript is mostly final-pass has an
+    /// `adScanFraction` maximum below
+    /// `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction`, so NO scan,
+    /// however complete, can ever retire it: every re-drive and every claim it
+    /// mints is work that cannot satisfy itself, and the library ✓ is
+    /// unreachable by construction. Four of the twelve assets on the 2026-08-03
+    /// pull were in that state (0C2FC22E, 48E903D7, AD5F3A0A, 83592353).
+    @Test("a fully scanned, mostly-final-pass episode can now reach the sufficiency floor")
+    func fullyScannedFinalPassEpisodeReachesTheFloor() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-ceiling", episodeDurationSec: 1000))
+        // 90% of the transcript is final-pass. Fast alone caps the fraction at
+        // 0.10 — far under the 0.98 floor.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-ceiling", index: 0, start: 0, end: 900, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-ceiling", index: 1, start: 900, end: 1000, pass: "fast")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-ceiling", index: 0, start: 0, end: 1000)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-ceiling"])
+        let summary = try #require(summaries["a-9y9e-ceiling"])
+        let fraction = try #require(summary.adScanFraction)
+        #expect(fraction == 1.0)
+        #expect(fraction >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+        // And the fast-only reading, stated so the test names what it replaced.
+        #expect(summary.fastTranscriptCoveredSec == 100)
+    }
+
+    /// RT06 — the bound still BINDS. Widening it to both passes must not turn it
+    /// into "take the window's bounds at face value": a window whose span
+    /// straddles audio NEITHER pass transcribed is still clipped, which is the
+    /// whole reason playhead-pz32 intersects at all.
+    @Test("widening the bound to both passes does not stop it clipping untranscribed audio")
+    func bothPassBoundStillClipsUntranscribedAudio() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-clip", episodeDurationSec: 1000))
+        // A 300 s hole neither pass covers — wider than
+        // `adScanBridgeableGapSec`, so bridging cannot close it.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-clip", index: 0, start: 0, end: 300, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-clip", index: 1, start: 600, end: 1000, pass: "fast")
+        ])
+        // One window whose BOUNDS span the whole episode.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-clip", index: 0, start: 0, end: 1000)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-clip"])
+        let summary = try #require(summaries["a-9y9e-clip"])
+        #expect(summary.adScanCoveredSec == 700, "the 300 s hole must not be claimed as scanned")
+        #expect(try #require(summary.adScanFraction) < episodePreparationCompleteThreshold)
+        #expect(300 > AnalysisCoverageMath.adScanBridgeableGapSec,
+                "fixture premise: the hole is wider than the bridge")
+    }
+
+    /// RT07 — `fetchTranscriptCoveredRanges` is what every caller outside this
+    /// summary uses to ask the same question, so it must agree: both passes, and
+    /// degenerate rows dropped (a zero-width row covers no time and must not be
+    /// able to authorise anything).
+    @Test("fetchTranscriptCoveredRanges spans both passes and drops degenerate rows")
+    func transcriptCoveredRangesSpanBothPasses() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-ranges", episodeDurationSec: 1000))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-ranges", index: 0, start: 0, end: 400, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-ranges", index: 1, start: 400, end: 900, pass: "fast"),
+            // Degenerate: end == start.
+            makePassChunk(assetId: "a-9y9e-ranges", index: 2, start: 950, end: 950, pass: "fast")
+        ])
+
+        let all = try await store.fetchTranscriptCoveredRanges(assetId: "a-9y9e-ranges")
+        #expect(all.count == 2)
+        #expect(AnalysisCoverageMath.unionedSeconds(all) == 900)
+
+        // The fast-only sibling is unchanged and still answers the narrower
+        // question the transcript engine asks it.
+        let fastOnly = try await store.fetchFastTranscriptCoveredRanges(assetId: "a-9y9e-ranges")
+        #expect(AnalysisCoverageMath.unionedSeconds(fastOnly) == 500)
+    }
+
     /// The bound, tested where it lives rather than only through the store, so
     /// a numerator that DOES exceed the denominator is exercised directly.
     /// `adScanFraction` must WITHHOLD — a numerator materially past the

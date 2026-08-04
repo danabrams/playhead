@@ -6340,10 +6340,23 @@ actor AnalysisWorkScheduler {
         case budgetSpent
         /// The terminal is younger than ``capOutRetryCooldownSeconds``.
         case cooling
-        /// The transcript already reaches the top of the coverage ladder, so a
-        /// retry would read no audio it has not already read. Refusing here is
-        /// what keeps this from being "a job that runs and achieves nothing".
-        case noOutstandingTranscript
+        /// The transcript already reaches the top of the coverage ladder AND the
+        /// measured ad scan already clears its floor, so a retry would read no
+        /// audio it has not already read and screen nothing it has not already
+        /// screened. Refusing here is what keeps this from being "a job that
+        /// runs and achieves nothing".
+        ///
+        /// **playhead-9y9e renamed this from `noOutstandingTranscript`, and the
+        /// rename is the fix.** The transcript ladder was the ONLY term, which
+        /// made a fully transcribed but never-scanned episode the one shape this
+        /// rescue systematically refused — precisely the shape that needs it.
+        /// Measured on the 2026-08-03 device pull: AD5F3A0A is transcribed to
+        /// 4,281 s of 4,281 s and its ad scan covers 20.7 %, and its
+        /// `…:adScanRedrive:1` is an attempt-cap terminal
+        /// (`maxAttemptsReached:transcription:zeroCoverage`) — i.e. a row this
+        /// mechanism was built to rescue, declined on a measure of the one
+        /// resource it was not short of.
+        case noOutstandingWork
     }
 
     /// playhead-y8f3: mint a bounded retry, or decline with a named reason.
@@ -6370,12 +6383,25 @@ actor AnalysisWorkScheduler {
     ///   the assets behind them are 69–100% transcribed. Reading the job column
     ///   here would conclude "no progress ever" for an episode that is nearly
     ///   done.
+    /// - Parameter adScanFraction: MEASURED semantic ad-scan coverage
+    ///   (``AnalysisCoverageSummary/adScanFraction``), or `nil` when
+    ///   unmeasurable. playhead-9y9e: the SECOND kind of outstanding work, and
+    ///   the reason this rescue reached none of the episodes it exists for. A
+    ///   cap-out terminal on a fully transcribed episode had no outstanding
+    ///   TRANSCRIPT by construction, so the ladder term declined every one of
+    ///   them — while the thing the retry actually buys is a pass that reaches
+    ///   the ad-detection stage. `nil` reads as OWED, the same direction
+    ///   ``shouldMintAdScanRedrive(adScanFraction:resumableCoverageJobCount:)``
+    ///   and ``SemanticScanClaim/isOwed(adScanFraction:)`` take, and for the same
+    ///   reason: a never-scanned asset has no `semantic_scan_results` rows and so
+    ///   measures `nil` rather than a synthetic 0.
     static func capOutRetryDecision(
         baseWorkKey: String,
         chainTail: AnalysisJob,
         nextOrdinal: Int?,
         transcriptCoverageSec: Double,
         episodeDurationSec: Double?,
+        adScanFraction: Double?,
         tiers: [Double],
         now: Double
     ) -> CapOutRetryDecision {
@@ -6384,12 +6410,26 @@ actor AnalysisWorkScheduler {
         guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
             return .declined(.cooling)
         }
-        guard let target = outstandingTranscriptTarget(
+        let ladder = coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
+        let target: Double
+        if let outstanding = outstandingTranscriptTarget(
             transcriptCoverageSec: transcriptCoverageSec,
             tiers: tiers,
             episodeDurationSec: episodeDurationSec
-        ) else {
-            return .declined(.noOutstandingTranscript)
+        ) {
+            target = outstanding
+        } else if SemanticScanClaim.isOwed(adScanFraction: adScanFraction), let deepest = ladder.last {
+            // Nothing left to transcribe, but the audio has not been read for
+            // ads. Ask for the DEEPEST rung: the pass must reach the
+            // ad-detection stage over the whole episode, and any shallower
+            // target would bound the shard set it decodes. The transcription
+            // stage itself is a no-op on this asset — playhead-9y9e's
+            // short-circuit in `AnalysisJobRunner` is what makes that true
+            // rather than a 300 s timeout — so the cost is the scan, which is
+            // the point.
+            target = deepest
+        } else {
+            return .declined(.noOutstandingWork)
         }
         return .mint(CapOutRetryPlan(
             workKey: capOutRetryWorkKey(baseWorkKey: baseWorkKey, ordinal: nextOrdinal),

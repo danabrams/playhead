@@ -444,6 +444,7 @@ struct CapOutRetryTests {
             nextOrdinal: nil,
             transcriptCoverageSec: 0,
             episodeDurationSec: Self.durationSec,
+            adScanFraction: nil,
             tiers: Self.defaultTiers,
             now: clock.value.timeIntervalSince1970
         )
@@ -802,7 +803,8 @@ struct CapOutRetryTests {
             job: AnalysisJob = capped,
             nextOrdinal: Int? = 1,
             covered: Double = 0,
-            duration: Double? = Self.durationSec
+            duration: Double? = Self.durationSec,
+            adScanFraction: Double? = 1.0
         ) -> AnalysisWorkScheduler.CapOutRetryDecision {
             AnalysisWorkScheduler.capOutRetryDecision(
                 baseWorkKey: Self.baseWorkKey,
@@ -810,6 +812,7 @@ struct CapOutRetryTests {
                 nextOrdinal: nextOrdinal,
                 transcriptCoverageSec: covered,
                 episodeDurationSec: duration,
+                adScanFraction: adScanFraction,
                 tiers: Self.defaultTiers,
                 now: now
             )
@@ -829,7 +832,10 @@ struct CapOutRetryTests {
             lastErrorCode: "maxAttemptsReached:cancelMidRun",
             updatedAt: now - 60
         )) == .declined(.cooling))
-        #expect(decide(covered: Self.durationSec) == .declined(.noOutstandingTranscript))
+        // playhead-9y9e: the transcript ladder being exhausted is now only HALF
+        // of "nothing outstanding" — the ad scan has to clear its floor too, so
+        // this case passes `adScanFraction: 1.0` via the helper default.
+        #expect(decide(covered: Self.durationSec) == .declined(.noOutstandingWork))
 
         // Ordering: budget exhaustion outranks cooling, so a spent chain reports
         // the terminating reason rather than a transient one.
@@ -858,6 +864,7 @@ struct CapOutRetryTests {
                 nextOrdinal: 1,
                 transcriptCoverageSec: 0,
                 episodeDurationSec: Self.durationSec,
+                adScanFraction: nil,
                 tiers: Self.defaultTiers,
                 now: now
             )
@@ -867,5 +874,141 @@ struct CapOutRetryTests {
         #expect(decide(age: cooldown) == .mint(.init(
             workKey: Self.retryKey(1), ordinal: 1, desiredCoverageSec: 90
         )))
+    }
+
+    // MARK: - playhead-9y9e: an unread episode is outstanding work
+
+    /// RT01 — THE DEFECT. A cap-out terminal on a FULLY TRANSCRIBED episode had
+    /// no outstanding transcript by construction, so the ladder term declined
+    /// every one of them. That is the exact shape this rescue exists for:
+    /// measured on the 2026-08-03 device pull, AD5F3A0A is transcribed 4,281 s
+    /// of 4,281 s, its ad scan covers 20.7 %, and its `…:adScanRedrive:1` row is
+    /// `superseded` with `maxAttemptsReached:transcription:zeroCoverage`.
+    ///
+    /// The mint asks for the DEEPEST rung, because the pass's job here is to
+    /// reach the ad-detection stage over the whole episode; a shallower target
+    /// would bound the shard set it decodes.
+    @Test("a fully transcribed episode whose ad scan is short still gets a retry")
+    func fullyTranscribedButUnscannedIsOutstandingWork() {
+        let now = 2_000_000.0
+        func decide(adScanFraction: Double?) -> AnalysisWorkScheduler.CapOutRetryDecision {
+            AnalysisWorkScheduler.capOutRetryDecision(
+                baseWorkKey: Self.baseWorkKey,
+                chainTail: makeAnalysisJob(
+                    state: "superseded",
+                    lastErrorCode: "maxAttemptsReached:transcription:zeroCoverage",
+                    updatedAt: now - 86_400
+                ),
+                nextOrdinal: 1,
+                // Past the top of the ladder: nothing left to transcribe.
+                transcriptCoverageSec: Self.durationSec,
+                episodeDurationSec: Self.durationSec,
+                adScanFraction: adScanFraction,
+                tiers: Self.defaultTiers,
+                now: now
+            )
+        }
+        let ladder = AnalysisWorkScheduler.coverageTierLadder(
+            tiers: Self.defaultTiers,
+            episodeDurationSec: Self.durationSec
+        )
+        #expect(ladder.last == Self.durationSec,
+                "fixture premise: the deepest rung is the episode duration")
+        let expected = AnalysisWorkScheduler.CapOutRetryDecision.mint(.init(
+            workKey: Self.retryKey(1),
+            ordinal: 1,
+            desiredCoverageSec: ladder.last ?? Self.durationSec
+        ))
+
+        // Measured short → owed → mint.
+        #expect(decide(adScanFraction: 0.207) == expected)
+        // UNMEASURED is not sufficient. A never-scanned asset has no
+        // `semantic_scan_results` rows at all, so its fraction is `nil` rather
+        // than a synthetic 0 — reading `nil` as "covered" would make the
+        // never-scanned episode the one case this never fires for.
+        #expect(decide(adScanFraction: nil) == expected)
+        #expect(decide(adScanFraction: .nan) == expected)
+        // One tick under the floor is still owed.
+        let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+        #expect(decide(adScanFraction: floor - 0.001) == expected)
+
+        // At or above the floor there is genuinely nothing left to do, and the
+        // decline is NAMED. This is the termination bound: without it the
+        // rescue would mint forever on an episode that is finished.
+        #expect(decide(adScanFraction: floor) == .declined(.noOutstandingWork))
+        #expect(decide(adScanFraction: 1.0) == .declined(.noOutstandingWork))
+    }
+
+    /// RT02 — the new term is a FALLBACK, not an override. While the transcript
+    /// ladder still has a rung, the target must stay the ladder's, whatever the
+    /// scan says. Otherwise a half-transcribed episode would be asked for the
+    /// whole thing and the ladder's cheapest-probe-first ordering would be gone.
+    @Test("an outstanding transcript rung still wins over the ad-scan term")
+    func transcriptLadderTakesPrecedence() {
+        let now = 2_000_000.0
+        func decide(adScanFraction: Double?) -> AnalysisWorkScheduler.CapOutRetryDecision {
+            AnalysisWorkScheduler.capOutRetryDecision(
+                baseWorkKey: Self.baseWorkKey,
+                chainTail: makeAnalysisJob(
+                    state: "superseded",
+                    lastErrorCode: "maxAttemptsReached:transcription:zeroCoverage",
+                    updatedAt: now - 86_400
+                ),
+                nextOrdinal: 1,
+                transcriptCoverageSec: 0,
+                episodeDurationSec: Self.durationSec,
+                adScanFraction: adScanFraction,
+                tiers: Self.defaultTiers,
+                now: now
+            )
+        }
+        let cheapest = AnalysisWorkScheduler.CapOutRetryDecision.mint(.init(
+            workKey: Self.retryKey(1), ordinal: 1, desiredCoverageSec: 90
+        ))
+        #expect(decide(adScanFraction: nil) == cheapest)
+        #expect(decide(adScanFraction: 1.0) == cheapest)
+    }
+
+    /// RT03 — the ad-scan term does not outrank the guards ahead of it. A row
+    /// that is not a cap-out terminal, a spent budget and a cooling terminal all
+    /// still refuse, however unscanned the episode is. Without this the new term
+    /// would be an unbounded retry wearing a floor.
+    @Test("the ad-scan term does not bypass the terminal, budget or cooldown guards")
+    func adScanTermDoesNotBypassEarlierGuards() {
+        let now = 2_000_000.0
+        func decide(
+            job: AnalysisJob,
+            nextOrdinal: Int?
+        ) -> AnalysisWorkScheduler.CapOutRetryDecision {
+            AnalysisWorkScheduler.capOutRetryDecision(
+                baseWorkKey: Self.baseWorkKey,
+                chainTail: job,
+                nextOrdinal: nextOrdinal,
+                transcriptCoverageSec: Self.durationSec,
+                episodeDurationSec: Self.durationSec,
+                // Maximally owed.
+                adScanFraction: 0,
+                tiers: Self.defaultTiers,
+                now: now
+            )
+        }
+        let capped = makeAnalysisJob(
+            state: "superseded",
+            lastErrorCode: "maxAttemptsReached:transcription:zeroCoverage",
+            updatedAt: now - 86_400
+        )
+        #expect(decide(
+            job: makeAnalysisJob(state: "complete", updatedAt: now - 86_400),
+            nextOrdinal: 1
+        ) == .declined(.notACapOutTerminal))
+        #expect(decide(job: capped, nextOrdinal: nil) == .declined(.budgetSpent))
+        #expect(decide(
+            job: makeAnalysisJob(
+                state: "superseded",
+                lastErrorCode: "maxAttemptsReached:transcription:zeroCoverage",
+                updatedAt: now - 60
+            ),
+            nextOrdinal: 1
+        ) == .declined(.cooling))
     }
 }

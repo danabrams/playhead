@@ -685,7 +685,7 @@ actor AnalysisJobRunner {
             group.cancelAll()
             return result
         }
-        let transcriptCoverage = transcriptObservation.coverage
+        var transcriptCoverage = transcriptObservation.coverage
         let transcriptFailure = transcriptObservation.failure
         // playhead-ngev, A TRADEOFF TAKEN DELIBERATELY. An interruption is now
         // terminal for this observation, where before the loop said nothing and
@@ -749,38 +749,102 @@ actor AnalysisJobRunner {
                     stopReason: .preempted
                 )
             }
-            logger.warning("Transcription for asset \(assetId) finished with zero coverage — stream may have ended prematurely or timed out")
-            // playhead-5uvz.7 (Gap-9): write a structured `failed` row to
-            // `work_journal` so a class of episodes that systematically
-            // times out (long, refusal-prone, music-heavy) shows up in
-            // aggregate without operators having to grep `lastErrorCode`
-            // across `analysis_jobs`. Best-effort: a failure here logs but
-            // does NOT affect the runner's outcome — the analysis_jobs
-            // row's `lastErrorCode = 'transcription:zeroCoverage'` remains
-            // the primary signal; the journal row is observability gravy.
-            await emitTranscriptionTimeoutJournal(
-                request: request,
-                assetId: assetId,
-                allShards: allShards,
-                existingChunkCount: existingChunkCount,
-                transcriptStageStart: transcriptStageStart,
-                failure: transcriptFailure,
-                observation: runObservation
-            )
-            return makeOutcome(
-                assetId: assetId,
-                request: request,
-                featureCoverageSec: featureCoverage,
-                transcriptCoverageSec: 0,
-                // playhead-8ysk: name the cause in `analysis_jobs.lastErrorCode`
-                // too. It was a fixed `transcription:zeroCoverage` for every one
-                // of the nine distinguishable causes.
-                //
-                // playhead-ngev (review r1): and route it by TERMINATION, so a
-                // listener moving the playhead does not spend one of the job's
-                // five permanent retry attempts. See `zeroCoverageStopReason`.
-                stopReason: Self.zeroCoverageStopReason(failure: transcriptFailure)
-            )
+            // playhead-9y9e: A PASS THAT ADDS NO TRANSCRIPT TO AN ALREADY
+            // TRANSCRIBED ASSET IS NOT A TRANSCRIPTION FAILURE, and treating it
+            // as one is what stranded the ad scan on episodes the pipeline had
+            // otherwise finished.
+            //
+            // The stage's 300 s cap is FLAT while the work under it is not:
+            // `TranscriptEngineService.runTranscriptionLoop` re-runs full ASR
+            // over every shard, and playhead-mptr deliberately ORDERS
+            // already-backed shards last rather than skipping them (a skipped
+            // shard can never take the duplicate-fingerprint arm's `speakerId` /
+            // `avgConfidence` upgrade — see `FastTranscriptCoverageIndex
+            // .orderingUncoveredFirst`). So on an asset with nothing left to
+            // read, the entire budget is spent re-reading, the cap wins, and the
+            // timeout arm of the task group above returns a HARDCODED
+            // `(0, nil, false)` — it never consults `persistedCoverage()`, which
+            // the `.completed` arm does. Zero here therefore means "this pass
+            // added nothing", which on a finished transcript is success.
+            //
+            // Measured on the 2026-08-03 device pull, asset AD5F3A0A (4,281 s,
+            // transcript watermark 4,281 s, 45 semantic scan rows): its ad-scan
+            // re-drive `…:adScanRedrive:1` is `superseded` with
+            // `maxAttemptsReached:transcription:zeroCoverage` after 5 attempts,
+            // and `…:adScanRedrive:2` was still cycling on the same error. Both
+            // ordinals of playhead-onn6's budget spent, Stage 4 never reached,
+            // and two `fullEpisodeScan` rows left `queued`.
+            //
+            // The floor is `SemanticScanClaim.transcriptClearsFinalizeFloor`
+            // (0.95 of the duration, as a gap-bridged AREA over BOTH transcript
+            // passes) — the same judgement playhead-fil5's sweep makes about
+            // whether an asset is still the transcript lane's problem, so there
+            // is one policy rather than two that drift. BELOW that floor nothing
+            // changes: the transcript genuinely is incomplete, the retry and
+            // journal accounting below is the correct account of it, and a
+            // silent engine must keep reading as a failure.
+            // AN INTERRUPTION IS EXCLUDED, and that exclusion is load-bearing.
+            // playhead-ngev makes a listener's scrub terminate this observation
+            // instantly and hand the scheduler's single running slot back —
+            // `.interrupted` costs the job no attempt. Continuing into ad
+            // detection here would hold that slot through a whole detection pass
+            // while the listener is moving the playhead, which is the cost ngev
+            // paid a design tradeoff to avoid. The re-drive it strands is not
+            // stranded: no attempt was spent, so the retry comes back.
+            if transcriptFailure?.termination != .interrupted,
+               let alreadyTranscribed = await transcriptCoverageOfCompletedTranscript(
+                assetId: assetId
+            ) {
+                await emitTranscriptionAlreadyCompleteJournal(
+                    request: request,
+                    assetId: assetId,
+                    allShards: allShards,
+                    transcriptStageStart: transcriptStageStart,
+                    transcriptCoverageSec: alreadyTranscribed,
+                    observation: runObservation
+                )
+                logger.info(
+                    """
+                    Transcription for asset \(assetId) added no coverage, but the persisted \
+                    transcript already covers the episode (\(alreadyTranscribed, format: .fixed(precision: 1))s) \
+                    — continuing to ad detection
+                    """
+                )
+                transcriptCoverage = alreadyTranscribed
+            } else {
+                logger.warning("Transcription for asset \(assetId) finished with zero coverage — stream may have ended prematurely or timed out")
+                // playhead-5uvz.7 (Gap-9): write a structured `failed` row to
+                // `work_journal` so a class of episodes that systematically
+                // times out (long, refusal-prone, music-heavy) shows up in
+                // aggregate without operators having to grep `lastErrorCode`
+                // across `analysis_jobs`. Best-effort: a failure here logs but
+                // does NOT affect the runner's outcome — the analysis_jobs
+                // row's `lastErrorCode = 'transcription:zeroCoverage'` remains
+                // the primary signal; the journal row is observability gravy.
+                await emitTranscriptionTimeoutJournal(
+                    request: request,
+                    assetId: assetId,
+                    allShards: allShards,
+                    existingChunkCount: existingChunkCount,
+                    transcriptStageStart: transcriptStageStart,
+                    failure: transcriptFailure,
+                    observation: runObservation
+                )
+                return makeOutcome(
+                    assetId: assetId,
+                    request: request,
+                    featureCoverageSec: featureCoverage,
+                    transcriptCoverageSec: 0,
+                    // playhead-8ysk: name the cause in `analysis_jobs.lastErrorCode`
+                    // too. It was a fixed `transcription:zeroCoverage` for every one
+                    // of the nine distinguishable causes.
+                    //
+                    // playhead-ngev (review r1): and route it by TERMINATION, so a
+                    // listener moving the playhead does not spend one of the job's
+                    // five permanent retry attempts. See `zeroCoverageStopReason`.
+                    stopReason: Self.zeroCoverageStopReason(failure: transcriptFailure)
+                )
+            }
         }
 
         if let earlyStop = checkStopConditions() {
@@ -1689,6 +1753,120 @@ actor AnalysisJobRunner {
             extras[DiagnosticsFailureKeys.failureCode] = String(code)
         }
         return extras
+    }
+
+    /// playhead-9y9e: the transcript coverage a pass should carry forward when
+    /// it added none of its own, or `nil` when the asset is not transcribed
+    /// enough for that to be the honest reading.
+    ///
+    /// **What the returned number is.** The asset's
+    /// `fastTranscriptCoverageEndTime` WATERMARK — deliberately the same
+    /// quantity `observeTranscriptEvents`' `persistedCoverage()` closure returns
+    /// on the `.completed` path, so a run that short-circuits here and a run
+    /// that completes normally over the same already-transcribed asset report
+    /// the identical coverage. Everything downstream
+    /// (`tierTargetSatisfied(job:outcome:)`, `shouldRetryCoverageInsufficient`,
+    /// the successor job's seed) compares it against `desiredCoverageSec`, which
+    /// is a REACH in seconds, so a reach is what it must be.
+    ///
+    /// **What the GATE is, which is a different quantity on purpose.** An AREA:
+    /// the gap-bridged interval union of the asset's transcript across BOTH
+    /// passes, over the declared duration, against
+    /// ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``.
+    /// The watermark cannot be the gate — it is a high-water reach and reads
+    /// 100 % over a transcript full of holes (playhead-sd71), which is exactly
+    /// the licence a genuinely stalled transcription must not get. Sharing the
+    /// floor with playhead-fil5's sweep is deliberate: "is this still the
+    /// transcript lane's problem?" is one question and must not have two
+    /// answers.
+    ///
+    /// Every failure to measure returns `nil` — no asset row, no watermark, an
+    /// unreadable chunk set, an absent duration. This helper GRANTS a pass the
+    /// right to skip the failure accounting, so the safe direction is to
+    /// withhold it.
+    private func transcriptCoverageOfCompletedTranscript(assetId: String) async -> Double? {
+        guard let asset = try? await store.fetchAsset(id: assetId),
+              let watermark = asset.fastTranscriptCoverageEndTime,
+              watermark.isFinite, watermark > 0 else {
+            return nil
+        }
+        guard let ranges = try? await store.fetchTranscriptCoveredRanges(assetId: assetId),
+              !ranges.isEmpty else {
+            return nil
+        }
+        guard SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: ranges),
+            episodeDurationSec: asset.episodeDurationSec
+        ) else {
+            return nil
+        }
+        return watermark
+    }
+
+    /// playhead-9y9e: the durable trace for a pass whose transcription stage
+    /// added nothing because there was nothing left to add.
+    ///
+    /// A `.checkpointed` row, not a `.failed` one: the pass did not fail and is
+    /// about to run ad detection, so recording it as a failure would put back
+    /// exactly the misattribution this bead removes (five `asr_failed` rows for
+    /// a fully transcribed episode). `cause` is `nil`, which the journal
+    /// reserves for non-terminal / success events.
+    ///
+    /// It is still a ROW, because a silent short-circuit is indistinguishable
+    /// from the bug: `SELECT * FROM work_journal WHERE metadata LIKE
+    /// '%transcriptionAlreadyComplete%'` is how a device pull counts how often
+    /// a pass paid the full 300 s stage cap to learn it had nothing to do.
+    private func emitTranscriptionAlreadyCompleteJournal(
+        request: AnalysisRangeRequest,
+        assetId: String,
+        allShards: [AnalysisShard],
+        transcriptStageStart: Date,
+        transcriptCoverageSec: Double,
+        observation: TranscriptRunObservation
+    ) async {
+        let job = try? await store.fetchJob(byId: request.jobId)
+        let generationID = (job?.generationID).flatMap { UUID(uuidString: $0) } ?? UUID()
+        let schedulerEpoch = job?.schedulerEpoch ?? 0
+
+        let now = clock()
+        let elapsedSec = max(0, now.timeIntervalSince(transcriptStageStart))
+        let episodeDuration = allShards.map { $0.startTime + $0.duration }.max() ?? 0
+
+        let metadata = SliceCompletionInstrumentation.buildMetadata(
+            sliceDurationMs: Int((elapsedSec * 1000).rounded()),
+            bytesProcessed: 0,
+            shardsCompleted: 0,
+            deviceClass: DeviceClass.detect(),
+            extras: [
+                "stage": "analysisJobRunner.run.transcriptionAlreadyComplete",
+                "job_id": request.jobId,
+                "episode_duration": String(format: "%.3f", episodeDuration),
+                "transcript_coverage_end_time": String(format: "%.3f", transcriptCoverageSec),
+                // What the observation WOULD have been charged as. Kept so the
+                // rows stay joinable with the `transcriptionTimeout` population
+                // they used to be part of.
+                DiagnosticsFailureKeys.failureObservation: observation.rawValue,
+            ]
+        )
+
+        let entry = WorkJournalEntry(
+            id: UUID().uuidString,
+            episodeId: request.episodeId,
+            generationID: generationID,
+            schedulerEpoch: schedulerEpoch,
+            timestamp: now.timeIntervalSince1970,
+            eventType: .checkpointed,
+            cause: nil,
+            metadata: metadata.encodeJSON(),
+            artifactClass: .scratch
+        )
+        do {
+            try await store.appendWorkJournalEntry(entry)
+        } catch {
+            logger.warning(
+                "Failed to append transcriptionAlreadyComplete work_journal row for asset \(assetId): \(error)"
+            )
+        }
     }
 
     private func emitTranscriptionTimeoutJournal(

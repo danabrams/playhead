@@ -606,6 +606,12 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// its prompt never contained; the bridging is what stops every
     /// inter-utterance breath from counting as unscanned.
     ///
+    /// playhead-9y9e: "the transcribed region" means BOTH passes. It was the
+    /// fast pass alone, which on the 2026-08-03 device pull put an unreachable
+    /// ceiling under this fraction for four of twelve assets — see the
+    /// `transcribedIntervals` block in
+    /// ``fetchCoverageSummariesByAssetIds(_:)``.
+    ///
     /// This is the only persisted quantity that answers "how much of this
     /// episode has been read for ads?". It is deliberately NOT any of the
     /// other scalars on this summary:
@@ -10355,6 +10361,47 @@ actor AnalysisStore {
         return results
     }
 
+    /// playhead-9y9e: the time ranges an asset's transcript backs across BOTH
+    /// passes, ascending by start. The companion to
+    /// ``fetchFastTranscriptCoveredRanges(assetId:)`` for callers whose question
+    /// is "what can a semantic scan read?" rather than "how far has the fast
+    /// pass got?".
+    ///
+    /// **Why the union of both passes IS the canonical region.**
+    /// `TranscriptChunkCanonicalizer.canonicalize` drops exactly those fast
+    /// chunks a final chunk FULLY contains, and its `coverageRetained`
+    /// diagnostic asserts that this removes no coverage. So
+    /// `union(canonical) == union(fast) ∪ union(final)`, and this query answers
+    /// it without materialising the text of every chunk in the episode.
+    ///
+    /// The two passes are not nested in the field: on the 2026-08-03 device pull
+    /// asset 0C2FC22E's final chunks hold `[0, 930]` and its fast chunks hold
+    /// `[930, 2086]` — DISJOINT — so a fast-only read of that asset reports
+    /// 55.4 % of a fully transcribed episode.
+    ///
+    /// Same filters and same index (`idx_chunks_time`) as the fast-only sibling;
+    /// a degenerate row covers no time and is dropped.
+    func fetchTranscriptCoveredRanges(
+        assetId: String
+    ) throws -> [(start: Double, end: Double)] {
+        let sql = """
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND endTime > startTime
+            ORDER BY startTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var results: [(start: Double, end: Double)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(
+                (start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1))
+            )
+        }
+        return results
+    }
+
     /// playhead-hygc.1.2: canonical pipeline-progress read model for
     /// Activity rows and the dogfood diagnostics snapshot.
     ///
@@ -10469,7 +10516,11 @@ actor AnalysisStore {
         //              algorithm's correctness.
         var fastIntervals: [String: [(start: Double, end: Double)]] = [:]
         var fastMaxEnd: [String: Double] = [:]
-        // ---- Pass 3 (fold into one query): final-pass chunk MAX(endTime).
+        // ---- Pass 3 (fold into one query): final-pass chunk intervals + MAX(endTime).
+        // playhead-9y9e: the INTERVALS are new. They were not collected before,
+        // and that omission is what capped the ad-scan bound below — see
+        // `transcribedIntervals`.
+        var finalIntervals: [String: [(start: Double, end: Double)]] = [:]
         var finalMaxEnd: [String: Double] = [:]
         // ---- Pass 4 (playhead-pz32): coverage-lane semantic-scan windows
         //      that produced a verdict, for the ad-scan AREA.
@@ -10510,13 +10561,17 @@ actor AnalysisStore {
             }
             sqlite3_finalize(fastStmt)
 
-            // Final pass: only `MAX(endTime)` is useful for display today.
+            // Final pass: interval ranges for the transcribed-region bound +
+            // max. playhead-9y9e: this used to project `MAX(endTime)` alone,
+            // "because only MAX(endTime) is useful for display today" — true of
+            // the display fields, and false of the ad-scan bound that later
+            // reused `transcriptIntervals`. Same shape as the fast query above.
             let finalSQL = """
-                SELECT analysisAssetId, MAX(endTime) AS maxEnd
+                SELECT analysisAssetId, startTime, endTime
                 FROM transcript_chunks
                 WHERE pass = 'final'
                   AND analysisAssetId IN (\(placeholders))
-                GROUP BY analysisAssetId
+                ORDER BY analysisAssetId, startTime, endTime
                 """
             let finalStmt = try prepare(finalSQL)
             for (i, id) in slice.enumerated() {
@@ -10524,8 +10579,15 @@ actor AnalysisStore {
             }
             while sqlite3_step(finalStmt) == SQLITE_ROW {
                 let assetId = text(finalStmt, 0)
-                guard sqlite3_column_type(finalStmt, 1) != SQLITE_NULL else { continue }
-                finalMaxEnd[assetId] = sqlite3_column_double(finalStmt, 1)
+                let startTime = sqlite3_column_double(finalStmt, 1)
+                let endTime = sqlite3_column_double(finalStmt, 2)
+                guard endTime > startTime else { continue }
+                finalIntervals[assetId, default: []].append((start: startTime, end: endTime))
+                if let prior = finalMaxEnd[assetId] {
+                    finalMaxEnd[assetId] = max(prior, endTime)
+                } else {
+                    finalMaxEnd[assetId] = endTime
+                }
             }
             sqlite3_finalize(finalStmt)
 
@@ -10668,6 +10730,47 @@ actor AnalysisStore {
                 transcriptIntervals = []
             }
 
+            // playhead-9y9e: the region a semantic scan can actually READ, which
+            // is the whole transcript — both passes — not the fast pass alone.
+            //
+            // WHY THIS IS A SEPARATE QUANTITY FROM `transcriptIntervals`. The
+            // scan is planned over the CANONICAL chunk stream
+            // (`AdDetectionService.runBackfill` hands `runShadowFMPhase` the
+            // output of `TranscriptChunkCanonicalizer.canonicalize`), where a
+            // final-pass chunk REPLACES the fast coverage it fully contains and
+            // every other chunk of either pass is retained. The canonicalizer's
+            // own `coverageRetained` invariant is that dropping a fully-covered
+            // fast chunk removes no coverage, so the canonical union is exactly
+            // `union(fast) ∪ union(final)` — which is what this builds, without
+            // needing the text.
+            //
+            // Bounding the ad-scan area by the FAST union alone therefore
+            // discarded audio the scan genuinely read. Measured on the
+            // 2026-08-03 device pull, as a bridged AREA over the declared
+            // duration: 0C2FC22E 55.4 % fast vs 100.0 % canonical (its two
+            // passes are DISJOINT — final holds [0, 930] and fast holds
+            // [930, 2086]), 48E903D7 36.9 % vs 95.1 %, AD5F3A0A 44.0 % vs
+            // 99.0 %, D9B513CD 57.2 % vs 88.3 %, 83592353 96.6 % vs 99.5 %,
+            // 53FC53E3 97.9 % vs 99.3 %. Four of those twelve assets therefore
+            // had an `adScanFraction` CEILING below
+            // `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction`: no
+            // scan, however complete, could ever retire them, so every re-drive
+            // and every claim minted for them was work that could not satisfy
+            // itself, and the library ✓ was unreachable by construction.
+            //
+            // Deliberately NOT applied to `fastTranscriptCoveredSec` (the TX
+            // figure, which names the fast pass and must keep naming it) or to
+            // `analysisCoveredSec` (documented as the fast-transcript area
+            // clipped to the analysis frontier). Only the ad-scan bound changes,
+            // and it can only ever move the measured area UP — the intersection
+            // is taken against a superset — so no episode becomes less ready.
+            let transcribedIntervals: [(start: Double, end: Double)]
+            if chunkMaxEnd != nil || finalMaxEnd[id] != nil {
+                transcribedIntervals = (fastIntervals[id] ?? []) + (finalIntervals[id] ?? [])
+            } else {
+                transcribedIntervals = transcriptIntervals
+            }
+
             let analysisCoveredSec: Double?
             if let frontier = analysisFrontierSec, fastCoveredSec != nil {
                 // Gap-aware clip of the transcribed region to the frontier.
@@ -10706,7 +10809,7 @@ actor AnalysisStore {
                 adScanCoveredSec = AnalysisCoverageMath.unionedSecondsIntersecting(
                     adScanIntervals[id] ?? [],
                     within: AnalysisCoverageMath.bridgingShortGaps(
-                        transcriptIntervals,
+                        transcribedIntervals,
                         upTo: AnalysisCoverageMath.adScanBridgeableGapSec
                     )
                 )

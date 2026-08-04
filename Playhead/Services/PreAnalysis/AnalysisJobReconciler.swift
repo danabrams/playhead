@@ -969,12 +969,23 @@ actor AnalysisJobReconciler {
         if let assetId = tail.analysisAssetId {
             asset = try await store.fetchAsset(id: assetId)
         }
+        // playhead-9y9e: the third coverage input. Read only when there IS an
+        // asset — an unresolved asset has nothing to measure, and `nil` already
+        // reads as owed. Paid after the three cheap guards above, same
+        // cheapest-first ordering as `adScanRedriveCandidate`.
+        var adScanFraction: Double?
+        if let assetId = tail.analysisAssetId {
+            adScanFraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction
+        }
         let decision = AnalysisWorkScheduler.capOutRetryDecision(
             baseWorkKey: baseWorkKey,
             chainTail: tail,
             nextOrdinal: nextOrdinal,
             transcriptCoverageSec: asset?.fastTranscriptCoverageEndTime ?? 0,
             episodeDurationSec: asset?.episodeDurationSec,
+            adScanFraction: adScanFraction,
             tiers: [config.defaultT0DepthSeconds, config.t1DepthSeconds, config.t2DepthSeconds],
             now: clock().timeIntervalSince1970
         )
@@ -1362,16 +1373,21 @@ actor AnalysisJobReconciler {
             // halves of that are load-bearing in opposite directions. Against
             // the `max(endTime)` WATERMARK `AnalysisCoordinator.finalizeBackfillVerdict`
             // divides, a gappy transcript reads 100 % over audio nobody
-            // transcribed (the playhead-sd71 antipattern) — 48E903D7 reads
-            // 68.1 % by watermark and 36.9 % as an area. Against the RAW chunk
+            // transcribed (the playhead-sd71 antipattern) — 2C5C3699 reads
+            // 13.0 % as an area against a 900 s fast watermark. Against the RAW chunk
             // union, a fully transcribed episode reads ~87 %, because a chunk
             // spans first-word to last-word and every breath is a hole: on the
             // 2026-08-03 pull the raw union cleared 0.95 for **zero of twelve**
             // assets, which is a gate that mints nothing rather than a strict
-            // one. See ``SemanticScanClaim/bridgedTranscriptCoveredSec(fastRanges:)``.
+            // one. See ``SemanticScanClaim/bridgedTranscriptCoveredSec(ranges:)``.
+            //
+            // playhead-9y9e: the ranges span BOTH transcript passes. Reading the
+            // fast pass alone made this gate refuse 48E903D7 at 36.9 % when its
+            // transcript covers 95.1 %, and 0C2FC22E at 55.4 % when its two
+            // passes tile the episode end to end between them.
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
                 coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
-                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                    ranges: try await store.fetchTranscriptCoveredRanges(assetId: assetId)
                 ),
                 episodeDurationSec: asset.episodeDurationSec
             ) else { continue }
