@@ -1982,6 +1982,7 @@ T_FIL5_ANY_ROW="any coverage-lane row excludes the asset, whatever its status"
 T_FIL5_NO_TX="an asset with no transcript is not a candidate"
 T_FIL5_ORDER="candidates come back oldest-first and respect the limit"
 T_FIL5_ONN6_LEDGER="minted re-drives count as recovered work in the background ledger"
+T_FIL5_STORED_POD="an empty podcastId reaches the database as NULL"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3686,7 +3687,15 @@ MUTATIONS=(
   # SC09 — "" is persisted as if it were a podcast id: the same
   # absence-rendered-as-a-value that closes the `podcastIdMissing` gate in the
   # first place.
-  "SC09|401|CLAIM|$T_FIL5_EMPTY_POD;$T_FIL5_GATE_POD"
+  #
+  # RUN 2026-08-04: SURVIVED on its first registration, and the survivor was
+  # real. The gate call site pre-converted "" to nil ITSELF before handing the
+  # claim over, so the row never saw the empty string the normalization exists
+  # to catch and the wire-in test could not observe it however the constructor
+  # behaved. Fixed by deleting the duplicate decision at the call site, not by
+  # dropping the expectation; the third rail (`record` persisting "" as NULL
+  # through the store) was added at the same time.
+  "SC09|401|CLAIM|$T_FIL5_EMPTY_POD;$T_FIL5_GATE_POD;$T_FIL5_STORED_POD"
 
   # SC05 — the claim gets a private identity. Everything still persists and the
   # gate ledger still reads correctly; the row simply sits `deferred` forever
@@ -9318,7 +9327,7 @@ EOF
                 gate: .podcastIdMissing,
                 chunks: canonicalChunks,
                 analysisAssetId: analysisAssetId,
-                podcastId: nil
+                podcastId: podcastId
             )
 EOF
     snippet NEW <<'EOF'

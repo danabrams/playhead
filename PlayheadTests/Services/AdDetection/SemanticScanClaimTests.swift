@@ -341,6 +341,26 @@ struct SemanticScanClaimPersistenceTests {
                 == .foundationModelsUnavailable)
     }
 
+    /// The third rail on the empty-podcast normalization, added because the
+    /// SC09 mutant survived: the pure constructor test pins the decision, the
+    /// gate wire-in pins that the caller does not pre-empt it, and this pins
+    /// that the value actually reaches SQLite as NULL. A `TEXT` column will
+    /// take `''` happily, and every later reader that asks `podcastId != nil`
+    /// would then get the wrong answer.
+    @Test("an empty podcastId reaches the database as NULL")
+    func emptyPodcastIdPersistsAsNull() async throws {
+        let store = try await makeTestStore()
+        try await seed(store, assetId: "a-empty-pod")
+        #expect(await SemanticScanClaim.record(
+            gate: .podcastIdMissing, analysisAssetId: "a-empty-pod", podcastId: "",
+            transcriptVersion: "tv-1", store: store, logger: logger
+        ) == .minted)
+        let jobId = SemanticScanClaim.jobId(
+            analysisAssetId: "a-empty-pod", transcriptVersion: "tv-1"
+        )
+        #expect(try await store.fetchBackfillJob(byId: jobId)?.podcastId == nil)
+    }
+
     /// A scan that has already read the episode is not owed another one. If
     /// this fired anyway the claim would say "wanted" about work that is done.
     @Test("no claim when the measured ad scan already clears the floor")

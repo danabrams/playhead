@@ -4263,11 +4263,18 @@ actor AdDetectionService {
             )
         } else if podcastId.isEmpty {
             logger.info("Backfill: skipping FM scan phase — missing podcastId for asset \(analysisAssetId)")
+            // The empty id is handed through VERBATIM rather than pre-converted
+            // to nil here. `SemanticScanClaim.claimRow` is the one place that
+            // decides an empty id is an absence, and a second copy of that
+            // decision at the call site is both a policy that can drift and —
+            // while it agrees — one no mutant can kill: the SC09 mutant
+            // survived against exactly this shape, because the row never saw
+            // the "" the normalization exists to catch.
             await recordSemanticScanClaim(
                 gate: .podcastIdMissing,
                 chunks: canonicalChunks,
                 analysisAssetId: analysisAssetId,
-                podcastId: nil
+                podcastId: podcastId
             )
         } else {
             let shadowResult = await runShadowFMPhase(
