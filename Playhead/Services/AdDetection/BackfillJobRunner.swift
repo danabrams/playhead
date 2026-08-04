@@ -1914,6 +1914,28 @@ actor BackfillJobRunner {
             return unique
         }
 
+        /// Every plan the outcome COULD have come from.
+        ///
+        /// The mirror of `planIndex`, and it exists because "conservative" points
+        /// in opposite directions for the two uses. Crediting is conservative
+        /// when an ambiguous outcome credits NOBODY; disqualifying is
+        /// conservative when it disqualifies EVERYBODY. Using `planIndex` for
+        /// both would make an ambiguous outcome disqualify nobody either — so a
+        /// plan credited by one unambiguous window could keep that credit while
+        /// an ambiguous sibling window of the same plan was never persisted, and
+        /// the cursor would advance over the audio that sibling covered. The
+        /// same over-claim, one direction along.
+        ///
+        /// Empty for an empty needle, for the reason above: an outcome that says
+        /// nothing is evidence about no plan, in either direction.
+        func planIndices(overlappingLineRefs refs: [Int]) -> [Int] {
+            guard !refs.isEmpty else { return [] }
+            let needle = Set(refs)
+            return planLineRefSets
+                .filter { needle.isSubset(of: $0.lineRefs) }
+                .map(\.windowIndex)
+        }
+
         let succeededPlanIndices = Set(
             windows.compactMap { planIndex(coveringLineRefs: $0.lineRefs) }
         )
@@ -1929,8 +1951,13 @@ actor BackfillJobRunner {
         // A window whose row did not land disqualifies its plan for the same
         // reason a failed window does: the cursor is only allowed to credit
         // audio a persisted row covers.
+        //
+        // `planIndices`, not `planIndex` — see that helper for why the ambiguous
+        // case has to resolve the other way here. A failure needs no equivalent:
+        // its `planWindowIndex` fallback names the one plan the attempt really
+        // came from, which is strictly better than disqualifying every candidate.
         let unpersistedPlanIndices = Set(
-            unpersistedWindows.compactMap { planIndex(coveringLineRefs: $0.lineRefs) }
+            unpersistedWindows.flatMap { planIndices(overlappingLineRefs: $0.lineRefs) }
         )
         let fullyCoveredPlanIndices = succeededPlanIndices
             .subtracting(failedPlanIndices)

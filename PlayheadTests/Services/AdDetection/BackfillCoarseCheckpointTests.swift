@@ -2509,6 +2509,37 @@ struct CoarseCoverageWalkTests {
         #expect(withFailure.failedPlanIndices == [1], "an ambiguous failure disqualified the wrong plan")
         #expect(withFailure.contiguousUpperBoundSec == nil)
         #expect(withFailure.fullyCovered == false)
+
+        // An UNPERSISTED ambiguous window resolves the other way: crediting is
+        // conservative when it credits nobody, but disqualifying is conservative
+        // only when it disqualifies EVERYBODY. Here plan 1 is credited by an
+        // unambiguous window covering ref 1, while an ambiguous sibling covering
+        // ref 0 never reached the store — so plan 1 is only PARTLY persisted and
+        // the cursor must not be issued over it.
+        let unambiguousForPlanOne = FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: [1],
+            startTime: 60.0,
+            endTime: 90.0,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+        let withUnpersisted = BackfillJobRunner.coarseCoverageWalk(
+            plans: shared,
+            windows: [unambiguousForPlanOne],
+            failedWindows: [],
+            unpersistedWindows: [subWindow]
+        )
+        #expect(
+            withUnpersisted.unpersistedPlanIndices == [0, 1],
+            "an ambiguous unpersisted window disqualified \(withUnpersisted.unpersistedPlanIndices) — it must disqualify every plan it could belong to"
+        )
+        #expect(
+            withUnpersisted.contiguousUpperBoundSec == nil,
+            "the cursor was issued over a plan whose sibling window never reached the store"
+        )
+        #expect(withUnpersisted.fullyCovered == false)
     }
 
     /// The no-op half: with distinct line refs a needle has at most one superset,
