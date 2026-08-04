@@ -2179,19 +2179,32 @@ actor BackfillJobRunner {
     /// It is left that way deliberately, and both halves of the reasoning are
     /// measured on the 2026-08-03 pull rather than argued:
     ///
-    ///   * The residual is real. Nine of the twelve assets carry at least one
+    ///   * The residual is real. TEN of the twelve assets carry at least one
     ///     interior fast-transcript gap wider than
     ///     ``AnalysisCoverageMath/adScanBridgeableGapSec``, and the four widest
-    ///     (AD5F3A0A 2,395 s, D9B513CD 1,196 s, 83592353 150 s, 48E903D7 660 s)
-    ///     are ALSO the four the final pass later fills — 4,327 s of the 4,401 s
-    ///     total. That is recoverable audio, not permanently-untranscribable
-    ///     audio.
+    ///     (AD5F3A0A 2,395 s, D9B513CD 1,196 s, 83592353 150 s, 48E903D7 660 s
+    ///     — each the SUM of that asset's interior gaps) are ALSO the four the
+    ///     final pass later fills, 4,327 s of the 4,401 s total. That is
+    ///     recoverable audio, not permanently-untranscribable audio.
+    ///
+    ///     R3 review: the census is over the FAST union, which is the basis the
+    ///     rest of this note uses and the one the four-widest list requires —
+    ///     48E903D7's single 660 s gap is spanned end-to-end by final chunks, so
+    ///     it does not exist in the CANONICAL (fast ∪ final) union at all, and a
+    ///     canonical census returns nine while excluding one of the four it is
+    ///     quoted alongside. Ten is the number for the sentence as written; the
+    ///     two assets with no interior gap at any width are 0C2FC22E and
+    ///     2C5C3699. Understating it understated the residual, so the direction
+    ///     of the error was toward leaving a1x0 unfixed.
     ///   * The obvious fix is mis-calibrated at this tolerance. Capping the
     ///     cursor at the first gap wider than 5 s would, on the same pull, force
     ///     attempts 2 and 3 to re-scan 96.9 % of 4FF3A238 to recover 20.9 s,
     ///     95.4 % of FCDDB309 to recover 21.7 s and 92.4 % of 58882C47 to
     ///     recover 41.0 s — because those assets' first 5–10 s gap lands at
-    ///     t = 38 s, 64 s and 89 s. Today those attempts cost ZERO FM inference
+    ///     t = 38 s, 64 s and 89 s. (Re-derived R3: the quantity is the BRIDGED
+    ///     fast-transcript area above the cap over the declared duration, i.e.
+    ///     the ad-scan numerator's own basis — the same basis gives 88.9 % for
+    ///     83592353.) Today those attempts cost ZERO FM inference
     ///     (`narrowedForResume` empties them and the empty-segments
     ///     short-circuit fires), which is the load-bearing half of this bead's
     ///     accepted cost. Trading that for a rule whose own threshold is the
