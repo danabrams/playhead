@@ -1777,6 +1777,17 @@ actor BackfillJobRunner {
     /// alike, so the two lists never have to agree by raw position; if they
     /// ever drifted an index-only match would silently no-op and let the cursor
     /// advance past a hole.
+    ///
+    /// **The premise this rests on, stated because it lives in another file.**
+    /// `planPassA` advances `lowerBound = upperBound + 1` across a list it has
+    /// already sorted, so the plans PARTITION the segments: disjoint `lineRefs`,
+    /// and every segment in exactly one plan. Both halves are load-bearing here.
+    /// Disjointness is what makes the subset match unambiguous. Totality is what
+    /// makes the cursor cap sound — the cap says "never past where an uncovered
+    /// plan begins", which only covers all unscanned audio if every segment
+    /// belongs to some plan. A future `planPassA` that SKIPS a segment (too
+    /// large, empty, unparseable) would leave audio no plan speaks for, and this
+    /// walk would stride over it without any of its guards firing.
     struct CoarseCoverageWalk: Sendable, Equatable {
         /// Every plan produced a window, none of them also failed, and every one
         /// of those windows is durable.
@@ -1831,6 +1842,29 @@ actor BackfillJobRunner {
         // phone, in the middle of the pass this bead exists to keep alive.
         let planLineRefSets = plans.map { (windowIndex: $0.windowIndex, lineRefs: Set($0.lineRefs)) }
         func planIndex(coveringLineRefs refs: [Int]) -> Int? {
+            // playhead-26od, R3: an EMPTY needle is not a match, it is an
+            // absence of evidence.
+            //
+            // The subset test below is `needle.isSubset(of: planRefs)`, and the
+            // empty set is a subset of EVERY set — so without this guard an
+            // outcome carrying no line refs attributes to `plans.first`, which
+            // is `windowIndex 0` in episode order. For a SUCCESS that credits
+            // the first plan of the episode as screened on the strength of an
+            // outcome that says nothing, and the contiguous walk then starts
+            // from a plan no row covers: the cursor claims audio nobody looked
+            // at, which is the one failure this whole computation exists to
+            // prevent. For a FAILURE it disqualifies the wrong plan and lets
+            // the cursor run PAST the right one. Returning nil sends a failure
+            // to its own `planWindowIndex` (the honest answer) and drops a
+            // success's attribution (the conservative one).
+            //
+            // No construction site can produce one TODAY — every
+            // `FMCoarseWindowOutput` and `CoarseWindowFailure` is built from a
+            // plan's own refs, one of them with an explicit `isEmpty` fallback
+            // — so this is a rail, not a repair. It is worth two lines because
+            // the guarantee lives in four constructors in another file and the
+            // walk is where the damage would land.
+            guard !refs.isEmpty else { return nil }
             let needle = Set(refs)
             return planLineRefSets.first(where: { needle.isSubset(of: $0.lineRefs) })?.windowIndex
         }
@@ -1978,6 +2012,15 @@ actor BackfillJobRunner {
     /// trace in any row a full-pass test can read — a full pass never defuses
     /// mid-flight and never fails only SOME of its writes. `runJob` remains the
     /// only production caller.
+    ///
+    /// This repo's other method-level test seams carry a `ForTesting` suffix
+    /// (`makeJobIdForTesting`, `makeScanResultIdForTesting`). One is not added
+    /// here because a forwarder would name a second entry point to the same
+    /// mutation of the same two durable tables, and the danger with this
+    /// function is a SECOND caller, not a test-shaped one. Nothing else can
+    /// call it by accident either: it needs a `CoarseCheckpointBox` and an
+    /// `FMCoarseBankedWindows`, and the only producer of the latter is
+    /// `coarsePassA`'s callback.
     func checkpointCoarseWindows(
         _ banked: FMCoarseBankedWindows,
         box: CoarseCheckpointBox,
@@ -1987,6 +2030,10 @@ actor BackfillJobRunner {
         priorCursor: BackfillProgressCursor?,
         runMode: SemanticScanPhase
     ) async {
+        // A fast path, not a rule. Every input this can reject is also rejected
+        // by the per-iteration guard below or by the post-loop one — which is
+        // why no test kills this line on its own, and why the two that follow
+        // are the load-bearing ones.
         guard !box.isDefused else { return }
 
         // Each checkpoint carries the whole banked prefix, and `windows` is
@@ -1999,9 +2046,17 @@ actor BackfillJobRunner {
                 // Re-checked per iteration, not just on entry. `defuse()` is a
                 // synchronous flag flip and this loop suspends on every write,
                 // so a checkpoint that entered while the job was alive can be
-                // resumed after `runJob` has already exited. Re-reading the flag
-                // at each suspension boundary is what keeps the checkpoint's
-                // lifetime bounded by the job's rather than by the callback's.
+                // resumed after `runJob` has already exited.
+                //
+                // Stated exactly, because "bounded by the job's lifetime" is a
+                // shade stronger than what this buys: between this guard and
+                // the write there are still two suspensions (`attributed`, the
+                // insert), so a `defuse()` landing inside them lets at most ONE
+                // further row land. The bound is one write, not zero, and one
+                // write is harmless — the row is real coverage of a window the
+                // model really screened. What the guard actually removes is the
+                // unbounded case: an orphaned pass writing the whole remainder
+                // of its bank onto a row whose run is over.
                 guard !box.isDefused else { return }
                 let result = makeScanResult(
                     windowOutput: banked.windows[index],
@@ -2043,6 +2098,14 @@ actor BackfillJobRunner {
         // arrives with the coarse pass fully covered, and a late checkpoint
         // landing after that rewind would put the partial cursor back and strand
         // the refinement t1kq's rewind exists to preserve.
+        //
+        // Narrowed, not closed, and for the same reason as the row guard: the
+        // store call below is a suspension away, so a `defuse()` arriving in
+        // that gap still lets one cursor write through. Bounded harm — that
+        // cursor is still the durable-prefix value, so it can never claim audio
+        // no row covers; the cost is the re-scan t1kq's rewind was buying back.
+        // Closing it needs a monotone `UPDATE … WHERE cursor < ?` in the store,
+        // which is a store API change this bead's non-goals exclude.
         guard !box.isDefused else { return }
 
         // Coverage is computed from what LANDED, not from what the pass
@@ -2265,13 +2328,17 @@ actor BackfillJobRunner {
             //
             // `FMNoProgressWatchdog` abandons a wedged pass rather than awaiting
             // it, so this closure can still fire after `runJob` has thrown and
-            // the drain loop has moved the row to a terminal state. Unbounded,
-            // an abandoned pass that later resumes keeps refreshing `updatedAt`
-            // on a row whose run is over — which is precisely the state qk44
-            // exists to make impossible, since `resetStrandedBackfillJobs` reads
-            // a fresh `updatedAt` as "this job is alive" and will not sweep it.
-            // A `running` row nobody sweeps is the stall this bead's field
-            // evidence is made of.
+            // the drain loop has moved the row on. The harm is worse than a
+            // stale timestamp: `markBackfillJobRunning` accepts `queued`,
+            // `deferred` AND `running` (`AnalysisStore`, the state guard on its
+            // UPDATE), so an orphaned pass does not just refresh `updatedAt` —
+            // it RESURRECTS a row the drain loop just deferred back into
+            // `running`, undoing the defer. And `resetStrandedBackfillJobs`
+            // only sweeps `running` rows whose `updatedAt` is stale, so a
+            // still-ticking orphan pins that row in `running` where the reaper
+            // will not take it and the drain will not re-admit it. A `running`
+            // row nobody sweeps is exactly the stall qk44 exists to prevent and
+            // exactly what this bead's field evidence is made of.
             guard !checkpointBox.isDefused else { return }
             try? await leaseStore.markBackfillJobRunning(jobId: leaseJobId)
         }
