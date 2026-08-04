@@ -186,10 +186,9 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
-#   PARTIAL RE-RUN 2026-08-04 (playhead-26od). Batches 314-322 (CK01-CK12 as
-#   drafted; CK08 was WITHDRAWN mid-run — see the CK header — so 11 entries in 8
-#   batches ship). Batches 1-313 were NOT re-run and carry the verdicts above.
-#   Recount: the array now holds 323 live entries.
+#   PARTIAL RE-RUN 2026-08-04 (playhead-26od). Batches 314-323, CK01-CK13, 13
+#   entries in 10 batches. Batches 1-313 were NOT re-run and carry the verdicts
+#   above. Recount: the array now holds 325 live entries.
 #
 #   One operational fault, recorded because it is not about a mutation and it
 #   cost an hour. Batch 320 WEDGED — its `batch-<n>.log` froze, xcodebuild stayed
@@ -1905,6 +1904,9 @@ T_26OD_WIRED_PREFIX="the checkpoint's cursor is the contiguous prefix, not the f
 T_26OD_NO_REGRESS="a checkpoint never lowers a cursor an earlier run already reached"
 T_26OD_DISCRIMINATORS="a checkpointed row carries the job's own runMode and phase, not a constant"
 T_26OD_FAILED_WRITE="a checkpoint whose write failed does not advance the resume cursor"
+# The XCTest source canary. The battery reads `Test Case '-[Suite method]'` lines, so an
+# XCTest expectation is written Suite/method.
+T_26OD_LEASE_CANARY="PlayheadTests.FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3483,7 +3485,7 @@ MUTATIONS=(
 
   # ---- playhead-26od: the mid-flight coarse checkpoint (CK series) ----
   #
-  # WHY THESE ELEVEN. The bead's whole value is that a pass killed mid-flight
+  # WHY THESE THIRTEEN. The bead's whole value is that a pass killed mid-flight
   # keeps its screened windows, and every rail that makes that SAFE is invisible
   # in the rows a healthy pass leaves: a full pass never defuses mid-flight,
   # never fails only SOME of its writes, and never sees an ambiguous or empty
@@ -3493,9 +3495,11 @@ MUTATIONS=(
   # one exercised was the one a shipped build never calls.
   #
   # ONE MUTATION PER BATCH wherever two edits share a function: CK02/CK03 are
-  # the two defuse guards inside `checkpointCoarseWindows`, and CK05/CK06 are two
-  # edits to `planIndex`, so running them together would let each be credited
-  # with the other's failures.
+  # the two defuse guards inside `checkpointCoarseWindows`, and CK05/CK06/CK08
+  # are three edits to `planIndex` (CK08 being CK06's vacuity control), so
+  # running them together would let each be credited with the other's failures.
+  # CK07 and CK13 are likewise split: CK07 removes the lease touch's lifetime
+  # BOUND and CK13 removes the touch itself, and CK13 subsumes CK07's failure.
   # CK04+CK07, CK09+CK10 and CK11+CK12 share a batch each: disjoint statements,
   # disjoint expectations.
   #
@@ -3506,21 +3510,15 @@ MUTATIONS=(
   # only shape where the empty set has a UNIQUE superset. The multi-plan fixture
   # this test shipped with in R3 would have let CK05 SURVIVE.
   #
-  # NOT REGISTERED, and this one was LEARNED rather than reasoned: the vacuity
-  # control for CK06. "Credit nobody when it is ambiguous" is one `guard` away
-  # from "credit nobody, ever", so the obvious control is `planIndex` returning
-  # nil unconditionally — and that mutation DOES NOT TERMINATE. With no plan ever
-  # credited the coverage cursor never advances, and the bounded-re-drive suites
-  # (playhead-onn6 / playhead-hvk0, which drive a runner until it converges) spin
-  # forever: measured twice as a batch that froze its log with xcodebuild alive at
-  # 0.0 %% CPU, 13 minutes in, at 17 GiB free — so NOT the disk wedge it first
-  # looked like. A mutation that hangs is worse than one that survives, because it
-  # takes the tool down with it rather than reporting.
-  #
-  # The control itself is not lost — `a strict subset of exactly one plan still
-  # credits that plan` is in the suite and fails against a degrade-to-nothing
-  # implementation. What is lost is a REGISTERED mutation that kills it, and that
-  # is the honest state to record rather than a hanging entry.
+  # CK08 IS THE VACUITY CONTROL AND IT IS SLOW, not broken. Two earlier attempts
+  # to run batch 320 were killed by the operator after their logs went quiet, and
+  # both were misread as the mutation failing to terminate. Neither produced a
+  # verdict, and an unrecorded mutant is not a killed mutant — so it is
+  # registered and run rather than withdrawn on an inference. With no plan ever
+  # credited the coverage cursor never advances, which is exactly what makes the
+  # bounded-re-drive suites (playhead-onn6 / playhead-hvk0) take their slowest
+  # path: they drive a runner until it converges, and here it never does, so they
+  # run to their own bounds instead of returning early. Give batch 320 room.
   #
   # NOT REGISTERED, deliberately: `defer { checkpointBox.defuse() }` itself.
   # Deleting it is observable only from a pass that outlives `runJob`, which
@@ -3538,7 +3536,9 @@ MUTATIONS=(
   "CK09|321|RUNNER|$T_26OD_WIRED_PREFIX"
   "CK10|321|RUNNER|$T_26OD_NO_REGRESS"
   "CK11|322|RUNNER|$T_26OD_DISCRIMINATORS"
+  "CK08|320|RUNNER|$T_26OD_UNIQUE_REFS"
   "CK12|322|RUNNER|$T_26OD_FAILED_WRITE"
+  "CK13|323|RUNNER|$T_26OD_LEASE_GUARD;$T_26OD_LEASE_CANARY"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3846,6 +3846,8 @@ describe_mutation() {
     CK05) echo "26od: a refless outcome is a subset of every plan, so it credits the episode's only plan" ;;
     CK06) echo "26od: attribution returns to the FIRST superset, so a shared line ref credits an unscreened plan" ;;
     CK07) echo "26od: the qk44 lease touch loses its lifetime bound and resurrects a deferred job" ;;
+    CK08) echo "26od: VACUITY CONTROL — attribution credits nobody at all, retiring the coverage cursor" ;;
+    CK13) echo "26od: the lease REFRESH itself goes — the observer ticks and updates nothing" ;;
     CK09) echo "26od: the mid-flight walk stops seeing failures, so a partially-recovered plan reads as covered" ;;
     CK10) echo "26od: the monotonic merge goes, so a resumed pass can overwrite a higher cursor with a lower one" ;;
     CK11) echo "26od: the checkpoint row hardcodes runMode, mislabelling the only row a killed pass leaves" ;;
@@ -8858,6 +8860,34 @@ EOF
 EOF
     snippet NEW <<'EOF'
     func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK08 — the VACUITY CONTROL for CK06. "Credit nobody when it is ambiguous" is
+  # one `guard` away from "credit nobody, ever", and that mutation leaves CK06's
+  # own expectation green while retiring the entire coverage cursor.
+  CK08)
+    snippet OLD <<'EOF'
+            return unique
+EOF
+    snippet NEW <<'EOF'
+            return nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK13 — delete the lease REFRESH itself, as opposed to CK07's lifetime bound
+  # on it. Without this entry the only thing standing between a silent
+  # regression and a 12-45 minute frozen `updatedAt` is a source-grep canary,
+  # and playhead-26od's own extraction is what proved that canary can go stale
+  # while the behaviour is intact.
+  CK13)
+    snippet OLD <<'EOF'
+        // `try?` matches the other heartbeat sites: a lease touch that loses a
+        // race with a terminal transition must not fail the pass.
+        try? await store.markBackfillJobRunning(jobId: jobId)
+EOF
+    snippet NEW <<'EOF'
+        logger.debug("coarse lease tick job=\(jobId, privacy: .public)")
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
