@@ -15739,6 +15739,59 @@ actor AnalysisStore {
         return ids
     }
 
+    /// playhead-fil5: transcribed assets that own NO coverage-lane row of any
+    /// kind, oldest first, capped at `limit`.
+    ///
+    /// **This is the population `playhead-onn6` cannot see, and the difference
+    /// is not a detail.** Its sweep starts from
+    /// ``fetchAssetIdsWithResumableBackfillJobs(limit:)``, which selects assets
+    /// by the STATE of their `backfill_jobs` rows — so an asset with zero rows
+    /// is excluded by construction, forever, no matter how short its ad scan
+    /// is. On the 2026-08-03 device pull that was 3 of 12 episodes, two of them
+    /// transcribed to 100 %.
+    ///
+    /// **`EXISTS` on `transcript_chunks`, not a coverage read.** An asset with
+    /// no transcript has nothing for a semantic scan to read, and the honest
+    /// coverage question (has the transcript reached the finalize floor, is the
+    /// ad scan actually short) needs the duration and the interval union — both
+    /// of which live in ``fetchCoverageSummariesByAssetIds(_:)``. Asking a
+    /// cheap structural question here and the expensive measured one per
+    /// candidate keeps this from being a full coverage sweep at every launch.
+    ///
+    /// Both sub-queries are index-served (`idx_backfill_jobs_asset_phase` on
+    /// `(analysisAssetId, phase)`, `idx_chunks_asset` on `analysisAssetId`), so
+    /// the cost is one scan of `analysis_assets` — tens of rows on a device —
+    /// at one call per `reconcile()`.
+    ///
+    /// Oldest first, so a backlog drains in the order it stranded. The tiebreak
+    /// is `rowid` (insertion order) rather than `id`, because
+    /// `analysis_assets.createdAt` defaults to `strftime('%s','now')` — whole
+    /// SECONDS — so several assets registered in one launch share a timestamp
+    /// and an id-alphabetical tiebreak would order them by a UUID.
+    func fetchAssetIdsMissingCoverageLaneJobs(limit: Int) throws -> [String] {
+        guard limit > 0 else { return [] }
+        let sql = """
+            SELECT a.id
+            FROM analysis_assets a
+            WHERE NOT EXISTS (
+                    SELECT 1 FROM backfill_jobs b WHERE b.analysisAssetId = a.id
+                  )
+              AND EXISTS (
+                    SELECT 1 FROM transcript_chunks c WHERE c.analysisAssetId = a.id
+                  )
+            ORDER BY a.createdAt ASC, a.rowid ASC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, limit)
+        var ids: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            ids.append(text(stmt, 0))
+        }
+        return ids
+    }
+
     /// C3-2: small helper used by the guarded terminal transitions to
     /// distinguish "no row" from "row present in a disallowed state". Returns
     /// `nil` when no row exists for `jobId`.

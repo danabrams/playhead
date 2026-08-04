@@ -667,7 +667,7 @@ actor BackfillJobRunner {
                 podcastId: inputs.podcastId,
                 phase: phase,
                 coveragePolicy: plan.policy,
-                priority: phasePriority(phase),
+                priority: Self.phasePriority(phase),
                 progressCursor: nil,
                 retryCount: 0,
                 deferReason: nil,
@@ -712,7 +712,7 @@ actor BackfillJobRunner {
                     podcastId: inputs.podcastId,
                     phase: .specialistHostReadScan,
                     coveragePolicy: plan.policy,
-                    priority: phasePriority(.specialistHostReadScan),
+                    priority: Self.phasePriority(.specialistHostReadScan),
                     progressCursor: nil,
                     retryCount: 0,
                     deferReason: nil,
@@ -4222,7 +4222,12 @@ actor BackfillJobRunner {
             .joined(separator: "\n")
     }
 
-    private func phasePriority(_ phase: BackfillJobPhase) -> Int {
+    /// playhead-fil5: `nonisolated static` so a durable scan CLAIM row minted
+    /// outside the runner (see ``SemanticScanClaim``) carries the same priority
+    /// the runner would have stamped on the row it later re-drives. Two
+    /// independently-written priority tables would agree until one of them was
+    /// edited.
+    nonisolated static func phasePriority(_ phase: BackfillJobPhase) -> Int {
         switch phase {
         case .scanLikelyAdSlots: 30
         // playhead-b6jq PR 4: below the lexical-slot phase, above harvester —

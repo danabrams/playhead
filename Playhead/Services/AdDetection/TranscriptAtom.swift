@@ -102,16 +102,7 @@ enum TranscriptAtomizer {
         // where `chunkIndex` collides (it does, on 21 of 30 device assets).
         let sorted = chunks.sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
 
-        // Compute transcript version hash from ordered content.
-        // Length-prefix each chunk to prevent boundary ambiguity:
-        // ["ab","cd"] and ["a","bcd"] must produce different hashes.
-        var hasher = SHA256()
-        for chunk in sorted {
-            let textData = Data(chunk.normalizedText.utf8)
-            withUnsafeBytes(of: UInt32(textData.count).bigEndian) { hasher.update(bufferPointer: $0) }
-            hasher.update(data: textData)
-        }
-        let versionHash = hasher.finalize().prefix(16).map { String(format: "%02x", $0) }.joined()
+        let versionHash = versionHash(ofSorted: sorted)
 
         let version = TranscriptVersion(
             transcriptVersion: versionHash,
@@ -166,5 +157,46 @@ enum TranscriptAtomizer {
         }
 
         return (atoms, version)
+    }
+
+    /// playhead-fil5: the `transcriptVersion` for a chunk set, WITHOUT paying
+    /// for atoms.
+    ///
+    /// `transcriptVersion` is half of the coverage-lane job identity
+    /// (``BackfillJobRunner/makeJobIdForTesting(analysisAssetId:transcriptVersion:phase:offset:)``),
+    /// so anything that wants to name a job the runner would later derive has
+    /// to compute the same hash. Before this existed the only way to get it was
+    /// ``atomize(chunks:analysisAssetId:normalizationHash:sourceHash:)``, which
+    /// also runs a SHA-256 and a `TranscriptQualityEstimator` pass PER CHUNK to
+    /// build atoms the caller then throws away.
+    ///
+    /// Extracted rather than re-implemented, and that is the whole point: two
+    /// independently-written hashes over "the transcript" would agree in every
+    /// test and diverge on the first ordering or length-prefix detail, which
+    /// would show up as a claim row that never resolves against the job it
+    /// names — silent, and only visible on a device pull.
+    ///
+    /// The caller owns canonicalization. `runBackfill` atomizes
+    /// `TranscriptChunkCanonicalizer.canonicalize(...)` output, so a caller
+    /// starting from RAW persisted rows must canonicalize first or it will
+    /// compute a different version for the same asset (final-pass chunks
+    /// REPLACE the fast coverage they overlap, so the two chunk sets genuinely
+    /// differ). See ``SemanticScanClaim/transcriptVersion(forPersistedChunks:)``.
+    static func transcriptVersionHash(chunks: [TranscriptChunk]) -> String {
+        versionHash(ofSorted: chunks.sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder))
+    }
+
+    /// The hash itself, over an ALREADY time-ordered chunk array.
+    ///
+    /// Length-prefix each chunk to prevent boundary ambiguity: `["ab","cd"]`
+    /// and `["a","bcd"]` must produce different hashes.
+    private static func versionHash(ofSorted sorted: [TranscriptChunk]) -> String {
+        var hasher = SHA256()
+        for chunk in sorted {
+            let textData = Data(chunk.normalizedText.utf8)
+            withUnsafeBytes(of: UInt32(textData.count).bigEndian) { hasher.update(bufferPointer: $0) }
+            hasher.update(data: textData)
+        }
+        return hasher.finalize().prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 }
