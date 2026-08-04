@@ -1260,11 +1260,14 @@ actor AnalysisJobReconciler {
                 coveredSec: summary?.fastTranscriptCoveredSec,
                 episodeDurationSec: summary?.episodeDurationSec
             ) else { continue }
-            // `nil` is UNMEASURED, and for these assets it is the NORMAL
-            // reading, not an edge case: no scan has ever run, so there are no
-            // `semantic_scan_results` rows and `adScanFraction` is nil rather
-            // than a synthetic 0.
-            guard SemanticScanClaim.isOwed(adScanFraction: summary?.adScanFraction) else { continue }
+            // Whether a scan is OWED is deliberately not re-asked here.
+            // ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``
+            // reads the same coverage summary and refuses with `.notOwed`, and a
+            // copy of that floor in this file would be a second policy that
+            // drifts — and, being behaviourally identical while it agreed, one
+            // no test could ever kill. The transcript floor above is different:
+            // it is this sweep's own judgement about which assets are still the
+            // transcript lane's problem, and nothing downstream makes it.
 
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
             guard !chunks.isEmpty else { continue }

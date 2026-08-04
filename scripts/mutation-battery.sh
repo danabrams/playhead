@@ -827,6 +827,17 @@ EPPREP="Playhead/Services/Downloads/EpisodePreparationCoordinator.swift"
 # scheduler that burns the flag on nothing are different defects — so both are
 # mutated.
 SCHED="Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"
+# playhead-fil5 (SC series). The durable scan CLAIM. Four files, because the
+# claim spans four separable defects and a mutation in one is invisible to the
+# others: CLAIM owns the predicates, the identity and the row shape; ADSVC
+# (already listed) owns whether the four gates record at all; RECON owns the
+# sweep that reaches assets nobody will ever call `runBackfill` for again; STORE
+# (already listed) owns the selector that finds them. ATOM is the shared
+# transcript-version hash the claim's identity is derived from — a claim that
+# hashes differently from the runner names a job that does not exist.
+CLAIM="Playhead/Services/AdDetection/SemanticScanClaim.swift"
+RECON="Playhead/Services/PreAnalysis/AnalysisJobReconciler.swift"
+ATOM="Playhead/Services/AdDetection/TranscriptAtom.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -835,6 +846,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
+  "$CLAIM" "$RECON" "$ATOM"
 )
 
 FOCUSED_SUITES=(
@@ -1156,6 +1168,26 @@ FOCUSED_SUITES=(
   # stale while the behaviour is intact — so it has to be under the mutant that
   # deletes the behaviour, not merely in the full gate.
   -only-testing:PlayheadTests/FMUnboundedCallCanaryTests
+  # playhead-fil5: the durable scan claim (SC series). Five suites, and all five
+  # are needed because the claim has four separable failure modes and no suite
+  # can see more than one: the predicates + identity + row shape (pure); the
+  # store round-trip and its idempotency; the four `runShadowFMPhase` gates
+  # driven through the real `runBackfill`, which is the only place a claim that
+  # is never WRITTEN shows up; the reconciler sweep, the only place a claim that
+  # is never SELECTED shows up; and the selector's own exclusions. ~60 tests,
+  # under 2 s for all five.
+  -only-testing:PlayheadTests/SemanticScanClaimPredicateTests
+  -only-testing:PlayheadTests/SemanticScanClaimPersistenceTests
+  -only-testing:PlayheadTests/SemanticScanClaimGateWireInTests
+  -only-testing:PlayheadTests/SemanticScanClaimReconcilerTests
+  -only-testing:PlayheadTests/MissingCoverageLaneSelectorTests
+  # ...and playhead-onn6's own re-drive suites. The SC series changes what the
+  # re-drive sweep is HANDED, and a mutation that made the claim visible to
+  # nothing (or to everything) would otherwise be judged only by this bead's own
+  # fixtures. These are the tests that know what the sweep is supposed to refuse.
+  -only-testing:PlayheadTests/AdScanRedriveDecisionTests
+  -only-testing:PlayheadTests/AdScanRedriveReconcilerTests
+  -only-testing:PlayheadTests/ResumableBackfillJobSelectorTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1915,6 +1947,41 @@ T_26OD_FAILED_WRITE="a checkpoint whose write failed does not advance the resume
 # NO module prefix: `extract_failures` captures suite and method out of
 # `Test Case '-[PlayheadTests.Suite method]'` and joins them as `Suite/method`.
 T_26OD_LEASE_CANARY="FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
+
+# ---- playhead-fil5: the durable semantic-scan claim (SC series) ----
+# Verbatim `@Test(...)` display names. The field is split on ';', so none of
+# these may contain one.
+T_FIL5_UNMEASURED="an unmeasured ad scan is owed a scan"
+T_FIL5_CLAIM_FLOOR="the claim floor is exactly the runner's skip floor"
+T_FIL5_TX_FLOOR="the transcript gate uses the finalize floor, which admits 95%"
+T_FIL5_TX_UNMEASURABLE="an unmeasurable transcript never clears the floor"
+T_FIL5_ID="the claim's id is the runner's fullCoverage job id"
+T_FIL5_CANONICAL="the persisted-chunk version matches what runBackfill atomizes"
+T_FIL5_HASH="the standalone version hash equals atomize's"
+T_FIL5_ROW="the claim row is resumable, unbudgeted, and names its gate"
+T_FIL5_EMPTY_POD="an empty podcastId persists as nil, not as an empty-string podcast"
+T_FIL5_MINT="a bail mints one durable, resumable, named row"
+T_FIL5_IDEMPOTENT="repeated bails refresh one row and never charge a retry"
+T_FIL5_NOT_OWED="no claim when the measured ad scan already clears the floor"
+T_FIL5_SHORT_MINTS="a short measured ad scan still mints"
+T_FIL5_COMPLETE="a complete row is left alone"
+T_FIL5_IN_FLIGHT="running and failed rows keep their own state and reason"
+T_FIL5_REFUSAL="a store refusal is reported, not thrown"
+T_FIL5_GATE_FM="an FM-unavailable bail leaves a durable claim"
+T_FIL5_GATE_OFF="an fm-mode-off bail leaves a durable claim"
+T_FIL5_GATE_POD="a missing-podcastId bail leaves a claim with no podcast, not an empty one"
+T_FIL5_GATE_FACTORY="a missing-runner-factory bail leaves a durable claim"
+T_FIL5_OPEN_GATE="an open gate mints no claim — the runner's own row does the work"
+T_FIL5_REACHED="a zero-row transcribed asset gets a claim AND a re-drive in one pass"
+T_FIL5_ONCE="repeated reconciles mint exactly one claim, ever"
+T_FIL5_SHORT_TX="an asset short of the transcript finalize floor gets no claim"
+T_FIL5_SCANNED="an already-scanned asset gets no claim"
+T_FIL5_EXISTING_ROW="an asset that already has a coverage-lane row gets no claim"
+T_FIL5_LEDGER="claims are excluded from recoveredWorkCount"
+T_FIL5_ANY_ROW="any coverage-lane row excludes the asset, whatever its status"
+T_FIL5_NO_TX="an asset with no transcript is not a candidate"
+T_FIL5_ORDER="candidates come back oldest-first and respect the limit"
+T_FIL5_ONN6_LEDGER="minted re-drives count as recovered work in the background ledger"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3561,6 +3628,136 @@ MUTATIONS=(
   "CK11|322|RUNNER|$T_26OD_DISCRIMINATORS"
   "CK12|322|RUNNER|$T_26OD_FAILED_WRITE"
   "CK13|323|RUNNER|$T_26OD_LEASE_GUARD;$T_26OD_LEASE_CANARY"
+  # ---- playhead-fil5: the durable semantic-scan claim (SC series) ----
+  #
+  # The bead in one sentence: nothing durably requested a semantic ad scan when
+  # a transcript completed, so three of the twelve episodes on the 2026-08-03
+  # device pull had no path to one at all. The rails split four ways and the
+  # batches follow that split, because a mutation in one half is invisible to
+  # the other three:
+  #   SC01-SC09  the claim itself — predicates, identity, row shape
+  #   SC10-SC14  whether the four gates and the sweep RECORD
+  #   SC15-SC17  whether the selector FINDS the assets nobody will call again
+  #   SC18-SC22  the record/ledger contracts
+
+  # SC01 — THE defect this bead is made of, in one word, and the series'
+  # VACUITY AUDIT. `adScanFraction` is `nil` exactly when no coverage-lane scan
+  # row exists for the asset — it is never a synthetic 0 — so reading `nil` as
+  # sufficient silences the claim for precisely the never-scanned assets it
+  # exists to rescue, and for nothing else.
+  #
+  # Its expectation list is deliberately EVERY positive claim test, which is
+  # what makes it the vacuity control: with no claim ever written each of these
+  # must go red, and one staying green would mean it was passing on something
+  # other than a claim actually landing. The negatives must stay GREEN and are
+  # named here so a future reader can check them rather than infer them:
+  # `no claim when the measured ad scan already clears the floor`, `a short
+  # measured ad scan still mints` (0.47 is finite, so this mutation cannot reach
+  # it), `an open gate mints no claim`, and the three reconciler "gets no claim"
+  # tests.
+  #
+  # An artificial "record() writes nothing" control was drafted and dropped: its
+  # kill set is a subset of this one, and a registered mutant that only restates
+  # a real defect's coverage costs a build for no judgement.
+  "SC01|400|CLAIM|$T_FIL5_UNMEASURED;$T_FIL5_MINT;$T_FIL5_IDEMPOTENT;$T_FIL5_COMPLETE;$T_FIL5_IN_FLIGHT;$T_FIL5_REFUSAL;$T_FIL5_GATE_FM;$T_FIL5_GATE_OFF;$T_FIL5_GATE_POD;$T_FIL5_GATE_FACTORY;$T_FIL5_REACHED;$T_FIL5_ONCE;$T_FIL5_LEDGER"
+
+  # Batch 401 — five floor/identity edits with disjoint blast radii. Each is a
+  # value that reads plausibly and changes which episodes are claimed.
+  #
+  # SC02 — the claim floor drifts onto the TRANSCRIPT's number. 0.95 is
+  # calibrated for a decoder chopping seconds off the end; applying it to the ad
+  # scan stops claiming for every episode between 95% and 98% scanned.
+  "SC02|401|CLAIM|$T_FIL5_CLAIM_FLOOR"
+  # SC03 — the mirror image: the transcript gate borrows the ad-scan floor. 0.98
+  # excludes 48E903D7, one of the three assets this bead exists for, from its
+  # own fix.
+  "SC03|401|CLAIM|$T_FIL5_TX_FLOOR"
+  # SC04 — the transcript gate's unmeasurable direction flips permissive. It
+  # SUPPRESSES a mint, so `true` on an unknown duration claims for assets whose
+  # readiness was never established.
+  "SC04|401|CLAIM|$T_FIL5_TX_UNMEASURABLE"
+  # SC06 — the version is hashed from RAW persisted chunks. Correct on every
+  # single-pass asset, wrong on every asset a final pass has touched, because
+  # canonicalization REPLACES the fast coverage a final chunk overlaps. Every
+  # other test computes its expectation through the same helper, so this is
+  # visible ONLY to the test that compares against `atomize` directly — which is
+  # the whole reason that test exists.
+  "SC06|401|CLAIM|$T_FIL5_CANONICAL"
+  # SC09 — "" is persisted as if it were a podcast id: the same
+  # absence-rendered-as-a-value that closes the `podcastIdMissing` gate in the
+  # first place.
+  "SC09|401|CLAIM|$T_FIL5_EMPTY_POD;$T_FIL5_GATE_POD"
+
+  # SC05 — the claim gets a private identity. Everything still persists and the
+  # gate ledger still reads correctly; the row simply sits `deferred` forever
+  # beside the one the runner later mints and completes. Only two tests can see
+  # it, and one is the happy-path control — which is what makes that control
+  # load-bearing rather than decorative.
+  "SC05|402|CLAIM|$T_FIL5_ID;$T_FIL5_OPEN_GATE"
+  # SC07 — the shared hash stops ORDERING its input, so it agrees with `atomize`
+  # on already-sorted chunks and diverges on everything else. That is the shape
+  # an "extraction" takes when it becomes a second implementation: right in the
+  # fixture, wrong on the 27 of 30 device assets that are non-monotone in
+  # chunkIndex order (playhead-r5um).
+  "SC07|402|ATOM|$T_FIL5_HASH"
+
+  # SC08 — charge a closed gate as a failed attempt. Every resumability query
+  # also demands `retryCount < maxRetries`, so three closed gates would retire an
+  # asset that has never once been scanned. Alone in its batch: the row is
+  # written and correct in every visible field, and what breaks is every
+  # downstream SELECTOR, so the blast radius spans three suites.
+  "SC08|403|CLAIM|$T_FIL5_ROW;$T_FIL5_MINT;$T_FIL5_IDEMPOTENT;$T_FIL5_GATE_FM;$T_FIL5_REACHED;$T_FIL5_ONCE"
+
+  # Batch 404 — the recording sites. Each is one deleted call visible to exactly
+  # one test, which is what makes them a batch.
+  #
+  # SC10 — the FM-unavailable gate stops recording. THE field gate: the
+  # usability probe caches a false for 15 minutes, and on the sessionless
+  # callers the bd-3bz retry marker is skipped too, so the drop was permanent.
+  "SC10|404|ADSVC|$T_FIL5_GATE_FM"
+  # SC11 — the missing-podcastId gate stops recording.
+  "SC11|404|ADSVC|$T_FIL5_GATE_POD"
+  # SC12 — the missing-factory gate stops recording.
+  "SC12|404|ADSVC|$T_FIL5_GATE_FACTORY"
+  # SC14 — the sweep runs a step LATE. The claim is still written, still correct
+  # and still counted; it simply cannot be acted on until the next launch. The
+  # only thing that can see it is the assertion that both counters move in the
+  # SAME pass, which is why that assertion is written as a conjunction.
+  "SC14|404|RECON|$T_FIL5_REACHED"
+
+  # Batch 406 — the selector. Three edits, three disjoint exclusions.
+  #
+  # SC15 — the selector drops the transcript requirement, so an asset with no
+  # transcript gets a claim naming a job over audio nothing has read.
+  "SC15|406|STORE|$T_FIL5_NO_TX"
+  # SC16 — the selector's exclusion becomes status-scoped, so an asset whose scan
+  # COMPLETED reads as missing its lane and is re-claimed on every launch.
+  "SC16|406|STORE|$T_FIL5_ANY_ROW;$T_FIL5_EXISTING_ROW"
+  # SC17 — the selector tiebreaks on `id`. `analysis_assets.createdAt` is whole
+  # SECONDS, so assets registered in one launch share a timestamp and the sweep
+  # drains them by UUID rather than by age.
+  "SC17|406|STORE|$T_FIL5_ORDER"
+
+  # Batch 407 — the record/ledger contracts. Five edits, five disjoint reads.
+  #
+  # SC18 — `record` stops asking whether a scan is owed, so a fully-scanned
+  # episode acquires a claim that solicits a pass with nothing to do.
+  "SC18|407|CLAIM|$T_FIL5_NOT_OWED;$T_FIL5_SCANNED"
+  # SC19 — a `complete` row is treated as claimable. The scan this claim requests
+  # has already run; re-deferring it would reopen finished work.
+  "SC19|407|CLAIM|$T_FIL5_COMPLETE"
+  # SC20 — a `running` row is rewritten to `deferred` under a pass that is
+  # mid-flight and owns that row's state machine.
+  "SC20|407|CLAIM|$T_FIL5_IN_FLIGHT"
+  # SC21 — the reconciler's transcript-floor guard goes, so a half-transcribed
+  # asset spends an ad-scan re-drive on a pass whose real job is transcription.
+  "SC21|407|RECON|$T_FIL5_SHORT_TX"
+  # SC22 — claims are counted as recovered work. The pass a claim unblocks is
+  # already counted as `adScanRedrivesMinted` in the same sweep, so the
+  # background-task ledger would report one repair twice. playhead-onn6's own
+  # ledger test is named too: it loads every EXCLUDED counter and asserts the sum
+  # is nothing, so it is the second thing this mutation breaks.
+  "SC22|407|RECON|$T_FIL5_LEDGER;$T_FIL5_ONN6_LEDGER"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3873,6 +4070,27 @@ describe_mutation() {
     CK10) echo "26od: the monotonic merge goes, so a resumed pass can overwrite a higher cursor with a lower one" ;;
     CK11) echo "26od: the checkpoint row hardcodes runMode, mislabelling the only row a killed pass leaves" ;;
     CK12) echo "26od: the snapshot splits at the OFFERED count, crediting a window whose row never landed" ;;
+    SC01) echo "fil5: VACUITY AUDIT — an UNMEASURED ad scan reads as sufficient, so the never-scanned asset never claims" ;;
+    SC02) echo "fil5: the claim floor drifts onto the transcript's 0.95" ;;
+    SC03) echo "fil5: the transcript gate borrows the ad-scan 0.98 and excludes 48E903D7 from its own fix" ;;
+    SC04) echo "fil5: an unmeasurable transcript reads as ready, so the sweep claims assets it cannot judge" ;;
+    SC05) echo "fil5: the claim gets a private jobId, so the runner never re-drives it and it sits deferred forever" ;;
+    SC06) echo "fil5: the version is hashed from RAW chunks, so any final-passed asset names a job that does not exist" ;;
+    SC07) echo "fil5: the shared hash stops ordering its input — right on sorted fixtures, wrong on 27 of 30 device assets" ;;
+    SC08) echo "fil5: a closed gate is charged as a failed attempt and spends the resumability budget" ;;
+    SC09) echo "fil5: an absent podcast persists as a podcast whose id is the empty string" ;;
+    SC10) echo "fil5: the FM-unavailable gate stops recording — the field gate, and the drop was permanent" ;;
+    SC11) echo "fil5: the missing-podcastId gate stops recording" ;;
+    SC12) echo "fil5: the missing-runner-factory gate stops recording" ;;
+    SC14) echo "fil5: the sweep runs AFTER the re-drive step, so every claim waits a launch to become work" ;;
+    SC15) echo "fil5: the selector drops the transcript requirement and claims over audio nobody has read" ;;
+    SC16) echo "fil5: a COMPLETE coverage lane reads as missing, so a finished asset is re-claimed every launch" ;;
+    SC17) echo "fil5: the selector tiebreaks on id, so same-second assets drain by UUID rather than by age" ;;
+    SC18) echo "fil5: record() stops asking whether a scan is owed" ;;
+    SC19) echo "fil5: a complete row is treated as claimable, reopening finished work" ;;
+    SC20) echo "fil5: a running row is rewritten under a pass that is mid-flight and owns its state machine" ;;
+    SC21) echo "fil5: the sweep's transcript-floor guard goes, spending an ad-scan re-drive on transcription" ;;
+    SC22) echo "fil5: claims are counted as recovered work, reporting one repair twice to the BG ledger" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -8958,6 +9176,289 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-fil5: the durable semantic-scan claim (SC series) ----
+
+  # SC01 — read UNMEASURED as sufficient. `adScanFraction` is `nil` exactly when
+  # no coverage-lane scan row exists, so this silences the claim for the
+  # never-scanned assets it was built to rescue and for nothing else.
+  SC01)
+    snippet OLD <<'EOF'
+        guard let adScanFraction, adScanFraction.isFinite else { return true }
+        return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+EOF
+    snippet NEW <<'EOF'
+        guard let adScanFraction, adScanFraction.isFinite else { return false }
+        return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC02 — the claim floor drifts onto the TRANSCRIPT's number.
+  SC02)
+    snippet OLD <<'EOF'
+        return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+EOF
+    snippet NEW <<'EOF'
+        return adScanFraction < AnalysisCoordinator.finalizeBackfillMinCoverageRatio
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC03 — and the mirror image: the transcript gate borrows the AD SCAN's.
+  SC03)
+    snippet OLD <<'EOF'
+        return ratio + 1e-9 >= AnalysisCoordinator.finalizeBackfillMinCoverageRatio
+EOF
+    snippet NEW <<'EOF'
+        return ratio + 1e-9 >= episodePreparationCompleteThreshold
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC04 — the suppressing gate's unmeasurable direction flips permissive.
+  SC04)
+    snippet OLD <<'EOF'
+              let episodeDurationSec, episodeDurationSec.isFinite, episodeDurationSec > 0 else {
+            return false
+        }
+EOF
+    snippet NEW <<'EOF'
+              let episodeDurationSec, episodeDurationSec.isFinite, episodeDurationSec > 0 else {
+            return true
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC05 — a private identity. The row still persists and still names its gate;
+  # it just never coincides with the job the runner derives, so it is an orphan.
+  SC05)
+    snippet OLD <<'EOF'
+            transcriptVersion: transcriptVersion,
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+            transcriptVersion: transcriptVersion,
+            phase: .scanLikelyAdSlots,
+            offset: 0
+        )
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC06 — hash the RAW persisted rows. Right on every single-pass asset, wrong
+  # on every asset a final pass has touched.
+  SC06)
+    snippet OLD <<'EOF'
+        TranscriptAtomizer.transcriptVersionHash(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+        )
+EOF
+    snippet NEW <<'EOF'
+        TranscriptAtomizer.transcriptVersionHash(
+            chunks: chunks
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC07 — the shared hash stops ORDERING its input. It then agrees with
+  # `atomize` on already-sorted chunks and diverges on everything else.
+  SC07)
+    snippet OLD <<'EOF'
+        versionHash(ofSorted: chunks.sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder))
+EOF
+    snippet NEW <<'EOF'
+        versionHash(ofSorted: chunks)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC08 — charge a closed gate as a failed attempt.
+  SC08)
+    snippet OLD <<'EOF'
+            progressCursor: nil,
+            retryCount: 0,
+            deferReason: gate.deferReason,
+EOF
+    snippet NEW <<'EOF'
+            progressCursor: nil,
+            retryCount: AdmissionController.maxRetries,
+            deferReason: gate.deferReason,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC09 — persist "" as if it were a podcast id.
+  SC09)
+    snippet OLD <<'EOF'
+            podcastId: (podcastId?.isEmpty ?? true) ? nil : podcastId,
+EOF
+    snippet NEW <<'EOF'
+            podcastId: podcastId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC10 — the FM-unavailable gate stops recording. THE field gate.
+  SC10)
+    snippet OLD <<'EOF'
+            await recordSemanticScanClaim(
+                gate: .foundationModelsUnavailable,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+            return wrap(.requeued)
+EOF
+    snippet NEW <<'EOF'
+            return wrap(.requeued)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC11 — the missing-podcastId gate stops recording.
+  SC11)
+    snippet OLD <<'EOF'
+            await recordSemanticScanClaim(
+                gate: .podcastIdMissing,
+                chunks: canonicalChunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: nil
+            )
+EOF
+    snippet NEW <<'EOF'
+            _ = canonicalChunks
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC12 — the missing-factory gate stops recording.
+  SC12)
+    snippet OLD <<'EOF'
+            await recordSemanticScanClaim(
+                gate: .runnerFactoryMissing,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+            return .skipped
+EOF
+    snippet NEW <<'EOF'
+            return .skipped
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC14 — the sweep runs a step LATE: after `mintAdScanRedrives` instead of
+  # before it. The claim is still written, still correct and still counted; it
+  # simply cannot be acted on until the next launch.
+  SC14)
+    snippet OLD <<'EOF'
+        let stepScanClaims = await mintSemanticScanClaims()
+        // playhead-onn6: AFTER the backfill reaper (rows it just rescued from
+        // `running` are now resumable and must be counted) and after step 7 (an
+        // episode receiving a fresh job is already excluded as active).
+        let stepAdScanRedrive = await mintAdScanRedrives()
+EOF
+    snippet NEW <<'EOF'
+        let stepAdScanRedrive = await mintAdScanRedrives()
+        let stepScanClaims = await mintSemanticScanClaims()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC15 — the selector drops the transcript requirement.
+  SC15)
+    snippet OLD <<'EOF'
+              AND EXISTS (
+                    SELECT 1 FROM transcript_chunks c WHERE c.analysisAssetId = a.id
+                  )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC16 — a COMPLETE coverage lane reads as missing.
+  SC16)
+    snippet OLD <<'EOF'
+                    SELECT 1 FROM backfill_jobs b WHERE b.analysisAssetId = a.id
+EOF
+    snippet NEW <<'EOF'
+                    SELECT 1 FROM backfill_jobs b WHERE b.analysisAssetId = a.id AND b.status <> 'complete'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC17 — tiebreak on `id`, a UUID, over a `createdAt` of whole seconds.
+  SC17)
+    snippet OLD <<'EOF'
+            ORDER BY a.createdAt ASC, a.rowid ASC
+EOF
+    snippet NEW <<'EOF'
+            ORDER BY a.createdAt ASC, a.id ASC
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC18 — stop asking whether a scan is owed.
+  SC18)
+    snippet OLD <<'EOF'
+            guard isOwed(adScanFraction: fraction) else {
+EOF
+    snippet NEW <<'EOF'
+            guard isOwed(adScanFraction: fraction) || fraction != nil else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC19 — a `complete` row is treated as claimable.
+  SC19)
+    snippet OLD <<'EOF'
+                case .complete:
+                    return .alreadySatisfied
+EOF
+    snippet NEW <<'EOF'
+                case .complete:
+                    break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC20 — a `running` row is rewritten under the pass that owns it.
+  SC20)
+    snippet OLD <<'EOF'
+                case .running, .failed:
+EOF
+    snippet NEW <<'EOF'
+                case .failed:
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                case .queued, .deferred:
+                    break
+EOF
+    snippet NEW <<'EOF'
+                case .queued, .deferred, .running:
+                    break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC21 — the sweep's transcript-floor guard goes.
+  SC21)
+    snippet OLD <<'EOF'
+            guard SemanticScanClaim.transcriptClearsFinalizeFloor(
+                coveredSec: summary?.fastTranscriptCoveredSec,
+                episodeDurationSec: summary?.episodeDurationSec
+            ) else { continue }
+EOF
+    snippet NEW <<'EOF'
+            _ = summary
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC22 — claims counted as recovered work, double-reporting one repair.
+  SC22)
+    snippet OLD <<'EOF'
+            + adScanRedrivesMinted
+            + capOutRetriesMinted
+    }
+EOF
+    snippet NEW <<'EOF'
+            + adScanRedrivesMinted
+            + capOutRetriesMinted
+            + semanticScanClaimsMinted
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -9019,6 +9520,9 @@ rec_file()   {
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;
     SCHED) printf '%s' "$SCHED" ;;
+    CLAIM) printf '%s' "$CLAIM" ;;
+    RECON) printf '%s' "$RECON" ;;
+    ATOM)  printf '%s' "$ATOM" ;;
     *)     printf '%s' "" ;;
   esac
 }
