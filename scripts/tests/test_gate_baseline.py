@@ -711,6 +711,113 @@ class CLITests(unittest.TestCase):
             self.assertFalse((d / "b.json").exists())
 
 
+# ---------------------------------------------------------------------------
+# What an accept SAYS. playhead-26od R5: it used to say membership and nothing
+# else, which let one accept describe 28 entries as "all timeouts" while three
+# were assertion-only, and arm fifteen hard failures without naming one.
+# ---------------------------------------------------------------------------
+
+class TierChangeTests(unittest.TestCase):
+    def test_crossing_into_deterministic_is_reported_as_a_promotion(self):
+        base = baseline({"swift-testing::x": (2, ["timeout"])}, runs=2)
+        merged = gb.merge(base, gb.parse_run(log(st_fail_timeout("x"))),
+                          plan="PlayheadFastTests")
+        promoted, demoted = gb.tier_changes(base, merged)
+        self.assertEqual(["swift-testing::x"], promoted)
+        self.assertEqual([], demoted)
+
+    def test_an_ALREADY_deterministic_entry_is_not_re_announced(self):
+        # Only a CHANGE is news. Re-announcing every deterministic entry on
+        # every accept is how the loud line stops being read.
+        base = baseline({"swift-testing::x": (3, ["timeout"])}, runs=3)
+        merged = gb.merge(base, gb.parse_run(log(st_fail_timeout("x"))),
+                          plan="PlayheadFastTests")
+        self.assertEqual(gb.TIER_DETERMINISTIC, gb.tier_of(merged["tests"]["swift-testing::x"]))
+        self.assertEqual(([], []), gb.tier_changes(base, merged))
+
+    def test_a_newly_added_entry_can_never_be_a_promotion(self):
+        # It enters at seen_runs=1, below MIN_RUNS_FOR_DETERMINISTIC.
+        base = baseline({}, runs=2)
+        merged = gb.merge(base, gb.parse_run(log(st_fail_timeout("fresh"))),
+                          plan="PlayheadFastTests")
+        self.assertIn("swift-testing::fresh", merged["tests"])
+        self.assertEqual(([], []), gb.tier_changes(base, merged))
+
+    def test_falling_out_of_deterministic_is_reported_as_a_demotion(self):
+        base = baseline({"swift-testing::x": (3, ["timeout"])}, runs=3)
+        merged = gb.merge(base, gb.parse_run(log(st_pass("x"))),
+                          plan="PlayheadFastTests")
+        promoted, demoted = gb.tier_changes(base, merged)
+        self.assertEqual([], promoted)
+        self.assertEqual(["swift-testing::x"], demoted)
+
+    def test_a_plan_change_resets_rather_than_reporting_phantom_promotions(self):
+        base = baseline({"swift-testing::x": (3, ["timeout"])}, runs=3,
+                        plan="PlayheadIntegrationTests")
+        merged = gb.merge(base, gb.parse_run(log(st_fail_timeout("x"))),
+                          plan="PlayheadFastTests")
+        self.assertEqual(([], []), gb.tier_changes(base, merged))
+
+    def test_the_kind_census_names_every_kind_not_just_the_majority(self):
+        entries = [
+            {"kinds": ["timeout"]},
+            {"kinds": ["timeout"]},
+            {"kinds": ["assertion"]},
+            {"kinds": ["assertion", "timeout"]},
+            {"kinds": []},
+        ]
+        self.assertEqual(
+            {"timeout": 2, "assertion": 1, "assertion+timeout": 1, "unknown": 1},
+            gb.kind_census(entries),
+        )
+
+
+class AcceptOutputTests(unittest.TestCase):
+    """The accept transcript is the operator's only view of what they accepted."""
+
+    def _accept(self, base_tests, base_runs, run_log):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "run.log").write_text(run_log, encoding="utf-8")
+            if base_tests is not None:
+                gb.save_baseline(d / "b.json", baseline(base_tests, runs=base_runs))
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = gb.main(["accept", "--log", str(d / "run.log"),
+                              "--baseline", str(d / "b.json")])
+            return rc, buffer.getvalue()
+
+    def test_every_added_entry_carries_its_KIND(self):
+        # The defect this closes: an accept whose added set was three quarters
+        # timeouts was justified as "all timeouts" because no kind was on screen.
+        rc, out = self._accept({}, 2, log(st_fail_timeout("slow"),
+                                          st_fail_expect("wrong")))
+        self.assertEqual(0, rc)
+        self.assertIn("+ [timeout] swift-testing::slow", out)
+        self.assertIn("+ [assertion] swift-testing::wrong", out)
+
+    def test_the_added_set_is_summarised_by_kind(self):
+        rc, out = self._accept({}, 2, log(st_fail_timeout("slow"),
+                                          st_fail_expect("wrong")))
+        self.assertEqual(0, rc)
+        self.assertIn("added 2: 1 assertion, 1 timeout", out)
+
+    def test_a_promotion_is_ANNOUNCED_and_named(self):
+        rc, out = self._accept({"swift-testing::x": (2, ["timeout"])}, 2,
+                               log(st_fail_timeout("x")))
+        self.assertEqual(0, rc)
+        self.assertIn("ARMED", out)
+        self.assertIn("now deterministic [timeout] 3/3  swift-testing::x", out)
+
+    def test_an_accept_that_promotes_NOTHING_stays_quiet(self):
+        rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
+                               log(st_fail_timeout("x")))
+        self.assertEqual(0, rc)
+        self.assertNotIn("ARMED", out)
+
+
 class CommittedBaselineTests(unittest.TestCase):
     """The file the gate actually reads must stay loadable and self-consistent."""
 
@@ -747,7 +854,14 @@ class FastGateWiringTests(unittest.TestCase):
     def _skeleton(self, tmp, log_text, xcodebuild_rc=65):
         tmp = pathlib.Path(tmp)
         (tmp / "scripts").mkdir()
-        for name in ("fast-gate.sh", "gate_baseline.py"):
+        # playhead-3nfa put `scripts/disk_preflight.py` in front of everything
+        # fast-gate.sh does, and this skeleton was not told. Every one of the
+        # eleven tests below then died at exit 28 — "no such file" reads to the
+        # shell exactly like "the volume is short" — so the rails certifying the
+        # gate's exit-code composition certified nothing, on main, for as long as
+        # nobody ran them. Copy it, and see the dedicated wiring test below for
+        # why the rest of the class then skips it deliberately.
+        for name in ("fast-gate.sh", "gate_baseline.py", "disk_preflight.py"):
             (tmp / "scripts" / name).write_bytes((ROOT / "scripts" / name).read_bytes())
         (tmp / "scripts" / "fast-gate.sh").chmod(0o755)
         # A scheme that already names the plan, so the xcodegen bootstrap — which
@@ -773,6 +887,13 @@ class FastGateWiringTests(unittest.TestCase):
         env = dict(os.environ)
         env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
         env["PLAYHEAD_SKIP_LINT"] = "1"
+        # These tests are about how the gate composes xcodebuild's exit code with
+        # the baseline verdict. Leaving the disk preflight armed would make all
+        # eleven of them depend on how much room the box happens to have, which
+        # is a different subject and a flake. The preflight's own wiring — that
+        # it runs, that a refusal is 28, that xcodebuild is never reached — is
+        # asserted once, explicitly, in `test_the_disk_preflight_runs_BEFORE_xcodebuild`.
+        env["PLAYHEAD_SKIP_DISK_PREFLIGHT"] = "1"
         env.pop("PLAYHEAD_SKIP_BASELINE", None)
         if extra_env:
             env.update(extra_env)
@@ -838,7 +959,7 @@ class FastGateWiringTests(unittest.TestCase):
                 tmp / "scripts" / "gate-baseline.PlayheadFastTests.json"
             )
             self.assertIn("swift-testing::fresh", written["tests"])
-            self.assertIn("+ swift-testing::fresh", proc.stdout)
+            self.assertIn("+ [timeout] swift-testing::fresh", proc.stdout)
 
     def test_accept_baseline_REFUSES_a_selective_run(self):
         # Accepting a filtered run would delete every entry the filter excluded
@@ -908,6 +1029,26 @@ class FastGateWiringTests(unittest.TestCase):
             proc = self._run(tmp, bindir, [])
             self.assertEqual(65, proc.returncode)
             self.assertIn("NOW PASSES", proc.stdout)
+
+    def test_the_disk_preflight_runs_BEFORE_xcodebuild(self):
+        """The one test in this class that leaves the preflight armed.
+
+        It is what makes skipping it in the other eleven honest. A refusal must
+        be exit 28 (POSIX ENOSPC — the error a wedged gate would otherwise have
+        hidden) and must happen before xcodebuild is reached at all; the stub
+        prints the run log, so an empty stdout is the proof that it never ran.
+        The threshold is forced impossibly high rather than depending on how
+        much room this box has.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(d, log(st_fail_timeout("known")))
+            self._with_baseline(tmp, {"swift-testing::known": (3, ["timeout"])})
+            proc = self._run(tmp, bindir, [], {
+                "PLAYHEAD_SKIP_DISK_PREFLIGHT": "0",
+                "PLAYHEAD_DISK_MIN_GIB": "999999",
+            })
+            self.assertEqual(28, proc.returncode, proc.stdout + proc.stderr)
+            self.assertNotIn("Test run with", proc.stdout)
 
 
 if __name__ == "__main__":

@@ -109,6 +109,26 @@ from the issue text (`Time limit was exceeded` -> timeout, anything else ->
 assertion), which is the direct evidence rather than a proxy; XCTest failures
 are always assertions, because XCTest has no time-limit issue to report.
 
+WHAT AN ACCEPT MUST SAY OUT LOUD
+--------------------------------
+`accept` reported membership and nothing else until playhead-26od R5, and both
+halves of that omission had already done damage on one branch.
+
+  * The KIND of each added entry was never printed, so the third accept — 28
+    entries, three of them assertion-ONLY and a fourth mixed — was justified in
+    its commit message as "all timeouts". Under this module's own identity rule
+    a load-sensitive entry means MAY TIME OUT, so that is a different claim, and
+    it was written from the count because the count was all the tool showed.
+  * TIER PROMOTIONS were never printed, so the same accept crossed fifteen
+    entries into `deterministic` — arming the pass-direction check, after which
+    each of them PASSING hard-fails the gate — and said nothing. A hard failure
+    armed silently is the exact species of quiet this file exists to remove.
+
+Both are now printed: a kind census plus a per-entry kind on every `+` line, and
+a loud `ARMED:` block naming every promotion with its `failed/seen` count. The
+POLICY is untouched — what is deterministic, and that its passing is fatal, is
+Dan's call and lives at `MIN_RUNS_FOR_DETERMINISTIC`. Only the reporting changed.
+
 USAGE
 -----
     gate_baseline.py check  --log RUN.log --baseline scripts/gate-baseline.json
@@ -349,6 +369,58 @@ def tier_of(entry):
             and entry["failed_runs"] == entry["seen_runs"]):
         return TIER_DETERMINISTIC
     return TIER_LOAD_SENSITIVE
+
+
+def tier_changes(baseline, merged):
+    """Which entries changed TIER in this merge: `(promoted, demoted)`.
+
+    Promotion is the one that matters. Crossing into `deterministic` ARMS the
+    pass-direction check — from that merge onward the entry PASSING hard-fails
+    the gate — and until playhead-26od R5 an accept reported only membership,
+    so an accept could arm fifteen hard failures and print nothing about any of
+    them. Arming a failure silently is the single thing this module exists not
+    to do; the whole point of `--accept-baseline` is that a human writes down
+    what changed, and a human cannot write down what they were never shown.
+
+    Pure, so the CLI only has to print it. A newly ADDED entry can never appear
+    here: it enters at `seen_runs = 1`, which is below
+    `MIN_RUNS_FOR_DETERMINISTIC` by construction, so promotion always takes at
+    least one further observation and is always a CHANGE to something already
+    recorded.
+    """
+    old = baseline.get("tests", {}) if baseline.get("plan") == merged.get("plan") else {}
+    promoted = []
+    demoted = []
+    for key, entry in merged.get("tests", {}).items():
+        now = tier_of(entry)
+        before = tier_of(old[key]) if key in old else None
+        if now == TIER_DETERMINISTIC and before != TIER_DETERMINISTIC:
+            promoted.append(key)
+        elif before == TIER_DETERMINISTIC and now != TIER_DETERMINISTIC:
+            demoted.append(key)
+    return sorted(promoted), sorted(demoted)
+
+
+def _kinds_label(entry):
+    """`timeout`, `assertion`, `assertion+timeout` — never blank."""
+    return "+".join(sorted(entry.get("kinds", []))) or KIND_UNKNOWN
+
+
+def kind_census(entries):
+    """`{kinds-label: count}` over a list of baseline entries.
+
+    Exists because of what it would have caught. playhead-26od's third accept
+    added 28 entries and was justified in the commit message as "all timeouts";
+    three were assertion-only and a fourth mixed, which under this module's own
+    identity rule ("a load-sensitive entry means MAY TIME OUT") is a different
+    claim entirely. Nothing in the accept output named a single entry's kind, so
+    the summary was written from the count. Print the census and it cannot be.
+    """
+    census = {}
+    for entry in entries:
+        label = _kinds_label(entry)
+        census[label] = census.get(label, 0) + 1
+    return census
 
 
 def merge(baseline, run, plan):
@@ -642,16 +714,40 @@ def main(argv=None):
             return EXIT_CANNOT_EVALUATE
         added = sorted(set(merged["tests"]) - set(base.get("tests", {})))
         removed = sorted(set(base.get("tests", {})) - set(merged["tests"]))
+        promoted, demoted = tier_changes(base, merged)
         save_baseline(baseline_path, merged)
         print("gate-baseline: wrote %s" % baseline_path)
         print("  plan=%s  observations=%d  known-broken=%d"
               % (merged["plan"], merged["runs_observed"], len(merged["tests"])))
+        if added:
+            census = kind_census([merged["tests"][key] for key in added])
+            print("  added %d: %s" % (
+                len(added),
+                ", ".join("%d %s" % (census[label], label) for label in sorted(census)),
+            ))
+        # The KIND rides on every added line. The justification an operator
+        # writes for this accept is a claim about these entries, and a claim
+        # about their kinds is only checkable if the kinds were on screen.
         for key in added:
-            print("  + %s" % key)
+            print("  + [%s] %s" % (_kinds_label(merged["tests"][key]), key))
         for key in removed:
             print("  - %s" % key)
         if not added and not removed:
             print("  (membership unchanged; counts updated)")
+        if promoted:
+            print(
+                "  ARMED: %d entr%s crossed into DETERMINISTIC — failed in every one "
+                "of their observations. Each of these PASSING now fails the gate, so "
+                "say in the commit message why that is the right reading."
+                % (len(promoted), "y" if len(promoted) == 1 else "ies")
+            )
+            for key in promoted:
+                entry = merged["tests"][key]
+                print("  ! now deterministic [%s] %d/%d  %s" % (
+                    _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,
+                ))
+        for key in demoted:
+            print("  ~ no longer deterministic  %s" % key)
         return EXIT_OK
 
     if not baseline_path.exists():

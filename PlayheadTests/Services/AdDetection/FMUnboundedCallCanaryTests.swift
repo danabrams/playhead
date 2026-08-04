@@ -147,9 +147,36 @@ final class FMUnboundedCallCanaryTests: XCTestCase {
 
         // And the observer has to actually refresh the lease. An observer that
         // only logged would satisfy the check above while changing nothing.
+        //
+        // playhead-26od RE-POINTED this THROUGH an extraction rather than
+        // relaxing it. The refresh used to be two lines inside the closure and
+        // this asserted the literal `markBackfillJobRunning(jobId: leaseJobId)`;
+        // it now lives behind `touchCoarseLeaseIfLive`, which exists so the
+        // job-lifetime guard riding with it is reachable from a test at all.
+        // A single literal grep cannot follow that, so BOTH links in the chain
+        // are asserted — and both are load-bearing, because either one alone is
+        // satisfied by an observer that only logs:
+        //
+        //   * the observer must REACH the helper (without this, a closure that
+        //     logs and calls nothing passes as long as the helper exists
+        //     somewhere in the file);
+        //   * the helper must REACH the store (without this, a helper that
+        //     logs and returns passes as long as the observer calls it).
         XCTAssertTrue(
-            lines.contains { $0.contains("markBackfillJobRunning(jobId: leaseJobId)") },
-            "\(path): the coarse-pass progress observer must refresh the `backfill_jobs` lease via `markBackfillJobRunning`."
+            lines.contains {
+                $0.contains("touchCoarseLeaseIfLive(box:") && $0.contains("leaseJobId")
+            },
+            "\(path): the coarse-pass progress observer must hand the lease job id to `touchCoarseLeaseIfLive`. Without that call the observer refreshes nothing and the job's `updatedAt` is frozen for the 12–45 minutes a coarse pass takes."
+        )
+
+        let helperIndex = try XCTUnwrap(
+            lines.firstIndex { $0.contains("func touchCoarseLeaseIfLive(") },
+            "\(path): `touchCoarseLeaseIfLive` is gone. It is the only thing the coarse-pass progress observer calls, so the lease is no longer refreshed at all."
+        )
+        let helperEnd = min(lines.count - 1, helperIndex + Self.lookbackLines)
+        XCTAssertTrue(
+            lines[helperIndex...helperEnd].contains { $0.contains("markBackfillJobRunning(") },
+            "\(path): `touchCoarseLeaseIfLive` must refresh the `backfill_jobs` lease via `markBackfillJobRunning`. A helper that only logged would satisfy every check above while changing nothing — which is the whole reason this assertion exists."
         )
     }
 }

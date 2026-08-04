@@ -12,10 +12,18 @@
 // Three separate properties had to hold before that state could be reached,
 // and each has a test here:
 //
-//   1. `coarsePassA` writes NOTHING until it returns, so a pass in flight is
+//   1. `coarsePassA` wrote NOTHING until it returned, so a pass in flight was
 //      invisible in the database. The pass now reports each unit of work it
 //      finishes, which is what gives both the in-process bound and the
 //      `backfill_jobs` lease something real to measure.
+//      **`zero semantic_scan_results` is no longer part of the signature**, as
+//      of playhead-26od: the pass now checkpoints each screened window while it
+//      runs, so a wedge that got past its first window leaves rows behind. That
+//      does not weaken this bound — a wedge in the PRE-WINDOW stretch (probe,
+//      tokenisation, `planPassA`), which is where the 2026-07-31 field case sat,
+//      still produces no row to observe, because there is no screened window
+//      yet. It does mean an operator triaging a future stall must read the LEASE
+//      and the cursor, not the row count.
 //   2. Nothing bounded a pass that produced no units at all. It does now, and
 //      the outcome is a named terminal rather than silence.
 //   3. Nothing swept a stranded row during a foregrounded session. The reaper

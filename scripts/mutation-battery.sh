@@ -186,6 +186,27 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   PARTIAL RE-RUN 2026-08-04 (playhead-26od). Batches 314-323, CK01-CK13 minus
+#   the withdrawn CK08 — 12 entries in 9 batches. Batches 1-313 were NOT re-run
+#   and carry the verdicts above. Recount: the array now holds 324 live entries.
+#
+#   One operational fault, recorded because it is not about a mutation and it
+#   cost an hour. Batch 320 WEDGED — its `batch-<n>.log` froze, xcodebuild stayed
+#   alive at 0.0 %% CPU and never exited. That is the disk-exhaustion wedge
+#   `scripts/disk_preflight.py` exists to refuse, and it was reached because the
+#   run set `PLAYHEAD_DISK_MIN_GIB=6`: the volume was at 10 GiB when the batch
+#   started and a selective run of FOCUSED_SUITES draws ~7. Recovery is the one
+#   in CLAUDE.md — TERM the script so its trap restores sources (it did, byte-
+#   exact), kill xcodebuild by PID, `simctl erase`, clear `$TMPDIR/Deleting-*`
+#   (3.0 GiB was stranded there), then re-run the outstanding batches at a floor
+#   HIGH enough to refuse rather than wedge. Do not lower this floor to make a
+#   battery fit; erase the sim between batches instead.
+#
+#   The second fault is worth as much as the first: the dirty-tree guard REFUSED
+#   the re-run because an unrelated edit was in flight, which is exactly right
+#   and is what stops `restore_sources` from eating uncommitted work. Commit
+#   before re-running; do not touch a mutated file while a battery is live.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-bllt). Batches 240-247 only (BL01-BL10,
 #   10 new entries, 8 batches — five of them edit ONE predicate in
 #   `HotPathExtentGate.gatedLabel` and so cannot be batched together at all).
@@ -1120,6 +1141,21 @@ FOCUSED_SUITES=(
   # The parentheses are quoted: bash parses a bare `()` inside an array literal
   # as a syntax error, which is a fast failure but a confusing one.
   '-only-testing:PlayheadTests/FoundationModelClassifierTests/coarsePassWindowGuardrailViolationEmitsDiagnostic()'
+  # playhead-26od: the mid-flight coarse checkpoint (CK series). Three suites —
+  # the end-to-end durability + lifetime claims, the box's own write-cost
+  # arithmetic, and the pure coverage walk. 36 tests, ~0.6 s. All three are
+  # needed: the walk cases hand-build their inputs so they pin the RULE and say
+  # nothing about whether the checkpoint supplies it, and the end-to-end suite
+  # cannot see a rule the store never rejects.
+  -only-testing:PlayheadTests/BackfillCoarseCheckpointTests
+  -only-testing:PlayheadTests/CoarseCheckpointBoxTests
+  -only-testing:PlayheadTests/CoarseCoverageWalkTests
+  # ...and the SOURCE canary that guards the lease refresh (CK13 names it as a
+  # second expectation). Three grep-only XCTest cases, 0.03 s. It is here
+  # because playhead-26od's own extraction is what proved a source canary can go
+  # stale while the behaviour is intact — so it has to be under the mutant that
+  # deletes the behaviour, not merely in the full gate.
+  -only-testing:PlayheadTests/FMUnboundedCallCanaryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -1858,6 +1894,27 @@ T_5N8K_NESTED="a nested binding shadows the outer one and then restores it"
 # The bd-34e test whose FAST failure was the tax this bead removes. It is the
 # consumer's-eye view: if the observer stops delivering, this is what breaks.
 T_5N8K_BD34E="coarse pass window submission and guardrail violation emit bd-34e diagnostics"
+
+# playhead-26od (CK series). The mid-flight coarse checkpoint: the rails that
+# make a killed pass's screened windows durable WITHOUT letting the resume
+# cursor claim audio no persisted row covers.
+T_26OD_PROD_SHAPE="the production runner shape checkpoints too — both coarse call sites carry the observer"
+T_26OD_MIDLOOP_DEFUSE="a defuse that lands mid-loop stops the checkpoint at that window"
+T_26OD_LATE_DEFUSE="a defuse that lands after the last row still withholds the cursor"
+T_26OD_WRITE_COST="a pass writes one row per window per checkpoint, not the whole prefix"
+T_26OD_EMPTY_REFS="an outcome with no line refs credits no plan"
+T_26OD_AMBIGUOUS_REFS="an outcome matching two plans credits neither"
+T_26OD_UNIQUE_REFS="a strict subset of exactly one plan still credits that plan"
+T_26OD_LEASE_GUARD="a defused lease touch cannot resurrect a deferred job — and a live one still leases"
+T_26OD_WIRED_PREFIX="the checkpoint's cursor is the contiguous prefix, not the furthest window banked"
+T_26OD_NO_REGRESS="a checkpoint never lowers a cursor an earlier run already reached"
+T_26OD_DISCRIMINATORS="a checkpointed row carries the job's own runMode and phase, not a constant"
+T_26OD_FAILED_WRITE="a checkpoint whose write failed does not advance the resume cursor"
+# The XCTest source canary. The battery reads `Test Case '-[Suite method]'` lines, so an
+# XCTest expectation is written Suite/method.
+# NO module prefix: `extract_failures` captures suite and method out of
+# `Test Case '-[PlayheadTests.Suite method]'` and joins them as `Suite/method`.
+T_26OD_LEASE_CANARY="FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3433,6 +3490,77 @@ MUTATIONS=(
   "TS02|311|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_SCOPE"
   "TS03|312|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
   "TS04|313|FMCLS|$T_5N8K_FOREIGN;$T_5N8K_CONCURRENT;$T_5N8K_SCOPE;$T_5N8K_NESTED;$T_5N8K_BD34E"
+
+  # ---- playhead-26od: the mid-flight coarse checkpoint (CK series) ----
+  #
+  # WHY THESE TWELVE. The bead's whole value is that a pass killed mid-flight
+  # keeps its screened windows, and every rail that makes that SAFE is invisible
+  # in the rows a healthy pass leaves: a full pass never defuses mid-flight,
+  # never fails only SOME of its writes, and never sees an ambiguous or empty
+  # line-ref list. Seven of the twelve were, at one review round or another,
+  # deletable with the entire suite green — CK01 most starkly, because the
+  # production factory always supplies a router, so the overload every test but
+  # one exercised was the one a shipped build never calls.
+  #
+  # ONE MUTATION PER BATCH wherever two edits share a function: CK02/CK03 are
+  # the two defuse guards inside `checkpointCoarseWindows`, and CK05/CK06 are two
+  # edits to `planIndex`, so running them together would let each be credited
+  # with the other's failures.
+  # CK07 and CK13 are likewise split: CK07 removes the lease touch's lifetime
+  # BOUND and CK13 removes the touch itself, and CK13 subsumes CK07's failure.
+  # CK04+CK07, CK09+CK10 and CK11+CK12 share a batch each: disjoint statements,
+  # disjoint expectations.
+  #
+  # CK05 IS ONLY KILLABLE WITH A ONE-PLAN FIXTURE, and that is not a fixture
+  # detail — it is the interaction between two rails. The empty needle is a
+  # subset of EVERY plan, so with two or more plans CK06's ambiguity guard
+  # already returns nil and the empty guard is redundant. Exactly one plan is the
+  # only shape where the empty set has a UNIQUE superset. The multi-plan fixture
+  # this test shipped with in R3 would have let CK05 SURVIVE.
+  #
+  # NOT REGISTERED, and MEASURED rather than inferred: the vacuity control for
+  # CK06. "Credit nobody when it is ambiguous" is one `guard` away from "credit
+  # nobody, ever", so the obvious control is `planIndex` returning nil
+  # unconditionally. That mutation DOES NOT TERMINATE, and the reason is now
+  # named rather than guessed: with no plan ever credited the coverage cursor
+  # never advances, and
+  # `the attempt budget counts CONSECUTIVE barren windows — a window that covers
+  # new audio RESETS it` (playhead-bkhc's re-drive bound) drives a runner until
+  # the cursor advances. Under this mutant it never does.
+  #
+  # Three observations, at 10, 17 and 17 GiB free, each freezing its batch log at
+  # the same ~1.159 MB with xcodebuild alive at 0.0 %% CPU — so NOT the disk wedge
+  # the first one was read as. The hung test was identified by diffing `started`
+  # against `passed|failed` in the frozen log; 15 cases were outstanding and that
+  # one is the only re-drive loop among them.
+  #
+  # A mutation that hangs is worse than one that survives, because it takes the
+  # tool down with it rather than reporting. The control itself is not lost —
+  # `a strict subset of exactly one plan still credits that plan` is in the suite
+  # and fails against a degrade-to-nothing implementation. What is lost is a
+  # REGISTERED mutant that kills it. Reviving it needs a terminating variant
+  # (bound the re-drive loop, or mutate only the SUCCESS attribution and leave
+  # the failure fallback intact), which is a test-harness change rather than a
+  # battery entry.
+  #
+  # NOT REGISTERED, deliberately: `defer { checkpointBox.defuse() }` itself.
+  # Deleting it is observable only from a pass that outlives `runJob`, which
+  # only `FMNoProgressWatchdog` produces and only on wall-clock, so the test
+  # that would kill it is PerfGate'd out of the plans this script runs. Naming
+  # it here would register a permanent SURVIVOR, which the KNOWN GAP note below
+  # explains is worse than not naming it.
+  "CK01|314|RUNNER|$T_26OD_PROD_SHAPE"
+  "CK02|315|RUNNER|$T_26OD_MIDLOOP_DEFUSE"
+  "CK03|316|RUNNER|$T_26OD_LATE_DEFUSE"
+  "CK04|317|RUNNER|$T_26OD_WRITE_COST"
+  "CK07|317|RUNNER|$T_26OD_LEASE_GUARD"
+  "CK05|318|RUNNER|$T_26OD_EMPTY_REFS"
+  "CK06|319|RUNNER|$T_26OD_AMBIGUOUS_REFS"
+  "CK09|321|RUNNER|$T_26OD_WIRED_PREFIX"
+  "CK10|321|RUNNER|$T_26OD_NO_REGRESS"
+  "CK11|322|RUNNER|$T_26OD_DISCRIMINATORS"
+  "CK12|322|RUNNER|$T_26OD_FAILED_WRITE"
+  "CK13|323|RUNNER|$T_26OD_LEASE_GUARD;$T_26OD_LEASE_CANARY"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -3733,6 +3861,18 @@ describe_mutation() {
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
     TS04) echo "5n8k: the emit moves onto a detached task, where the task-local binding is out of scope" ;;
+    CK01) echo "26od: the DISPATCHING coarse call site — the only one production takes — loses the checkpoint observer" ;;
+    CK02) echo "26od: the defuse flag is checked on entry only, so an orphaned pass writes the rest of its bank" ;;
+    CK03) echo "26od: the post-loop defuse guard goes, so a late checkpoint undoes t1kq's cursor rewind" ;;
+    CK04) echo "26od: every checkpoint rewrites the whole banked prefix — O(W^2) writes across a pass" ;;
+    CK05) echo "26od: a refless outcome is a subset of every plan, so it credits the episode's only plan" ;;
+    CK06) echo "26od: attribution returns to the FIRST superset, so a shared line ref credits an unscreened plan" ;;
+    CK07) echo "26od: the qk44 lease touch loses its lifetime bound and resurrects a deferred job" ;;
+    CK13) echo "26od: the lease REFRESH itself goes — the observer ticks and updates nothing" ;;
+    CK09) echo "26od: the mid-flight walk stops seeing failures, so a partially-recovered plan reads as covered" ;;
+    CK10) echo "26od: the monotonic merge goes, so a resumed pass can overwrite a higher cursor with a lower one" ;;
+    CK11) echo "26od: the checkpoint row hardcodes runMode, mislabelling the only row a killed pass leaves" ;;
+    CK12) echo "26od: the snapshot splits at the OFFERED count, crediting a window whose row never landed" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -8632,6 +8772,189 @@ EOF
     private static func emitCoarsePassDiagnostic(_ diagnostic: CoarsePassWindowDiagnostic) {
         Task.detached { Self.coarsePassDiagnosticObserver?(diagnostic) }
     }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-26od: the mid-flight coarse checkpoint (CK series) ----
+
+  # CK01 — delete the observer from the DISPATCHING call site. This is the one
+  # that mattered: `PlayheadRuntime` supplies a router and a permissive
+  # classifier unconditionally on iOS 26+, so this is the only overload a
+  # shipped build ever reaches, and `onWindowsBanked:` defaults to nil — so the
+  # edit compiles silently and the feature is simply dead on device.
+  CK01)
+    snippet OLD <<'EOF'
+                seeds: scanOrderSeeds,
+                onProgress: onCoarseProgress,
+                onWindowsBanked: onCoarseWindowsBanked
+            )
+        } else {
+EOF
+    snippet NEW <<'EOF'
+                seeds: scanOrderSeeds,
+                onProgress: onCoarseProgress
+            )
+        } else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK02 — check `isDefused` on ENTRY only, not per iteration. The row loop
+  # suspends on every write, so a checkpoint that entered while the job was
+  # alive resumes after `runJob` has exited and writes the whole remainder of
+  # its bank onto a row whose run is over.
+  CK02)
+    snippet OLD <<'EOF'
+                guard !box.isDefused else { return }
+                let result = makeScanResult(
+EOF
+    snippet NEW <<'EOF'
+                let result = makeScanResult(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK03 — delete the POST-LOOP guard. Separate rule from CK02's: it is the one
+  # protecting playhead-t1kq's rewind, which nulls the cursor on a
+  # fully-covered cancellation. A late checkpoint puts the partial cursor back
+  # and strands the refinement the rewind exists to preserve.
+  CK03)
+    snippet OLD <<'EOF'
+        guard !box.isDefused else { return }
+
+        // Coverage is computed from what LANDED, not from what the pass
+EOF
+    snippet NEW <<'EOF'
+        // Coverage is computed from what LANDED, not from what the pass
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK04 — rewrite the whole banked prefix on every checkpoint. Correct rows,
+  # O(W^2) writes and O(W^2) JSON encodings across a pass, on a thermally
+  # constrained phone, in the middle of the pass this bead keeps alive.
+  CK04)
+    snippet OLD <<'EOF'
+            for index in alreadyProcessed..<banked.windows.count {
+EOF
+    snippet NEW <<'EOF'
+            for index in 0..<banked.windows.count {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK05 — remove the EMPTY-needle guard. The empty set is a subset of every
+  # set, so a refless outcome attributes to the first plan. Only observable with
+  # exactly ONE plan, because CK06's ambiguity guard catches every larger case —
+  # which is why the test carries a one-plan fixture.
+  CK05)
+    snippet OLD <<'EOF'
+            guard !refs.isEmpty else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard refs.count >= 0 else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK06 — revert attribution to the FIRST superset. Two plans can share a line
+  # ref whenever `segmentIndex` repeats (which the classifier tolerates by
+  # design), and a shrunk sub-window of the later plan is then also a subset of
+  # the earlier one's refs — crediting a plan nobody screened.
+  CK06)
+    snippet OLD <<'EOF'
+            var unique: Int?
+            for candidate in planLineRefSets where needle.isSubset(of: candidate.lineRefs) {
+                guard unique == nil else { return nil }
+                unique = candidate.windowIndex
+            }
+            return unique
+EOF
+    snippet NEW <<'EOF'
+            return planLineRefSets.first(where: { needle.isSubset(of: $0.lineRefs) })?.windowIndex
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK07 — delete the lease guard. An orphaned pass keeps refreshing
+  # `updatedAt` on a jobId a LATER re-drive left `queued`/`deferred`, pulling it
+  # into `running` and pinning it where `resetStrandedBackfillJobs` will not
+  # sweep it. A `running` row nobody sweeps is the stall qk44 exists to prevent.
+  CK07)
+    snippet OLD <<'EOF'
+    func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
+        guard !box.isDefused else { return }
+EOF
+    snippet NEW <<'EOF'
+    func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK13 — delete the lease REFRESH itself, as opposed to CK07's lifetime bound
+  # on it. Without this entry the only thing standing between a silent
+  # regression and a 12-45 minute frozen `updatedAt` is a source-grep canary,
+  # and playhead-26od's own extraction is what proved that canary can go stale
+  # while the behaviour is intact.
+  CK13)
+    snippet OLD <<'EOF'
+        // `try?` matches the other heartbeat sites: a lease touch that loses a
+        // race with a terminal transition must not fail the pass.
+        try? await store.markBackfillJobRunning(jobId: jobId)
+EOF
+    snippet NEW <<'EOF'
+        logger.debug("coarse lease tick job=\(jobId, privacy: .public)")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK09 — drop the failure list from the MID-FLIGHT walk. playhead-qbib: a plan
+  # that produced both a recovered window and an un-recovered remainder is not
+  # covered, and without this argument the checkpoint credits it from the half
+  # that landed.
+  CK09)
+    snippet OLD <<'EOF'
+            failedWindows: banked.failedWindows,
+EOF
+    snippet NEW <<'EOF'
+            failedWindows: [],
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK10 — drop the monotonic merge. A resumed pass can plan a window that
+  # BEGINS below the cursor it resumed from (a plan's `startTime` is a MIN over
+  # its segments), the cap pulls the walk value down to that start, and the raw
+  # value then overwrites a higher cursor already in the database.
+  CK10)
+    snippet OLD <<'EOF'
+        let merged = priorCursor.map { honest.monotonic(from: $0) } ?? honest
+EOF
+    snippet NEW <<'EOF'
+        let merged = honest
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK11 — hardcode the checkpoint row's `runMode`. On a killed pass the
+  # checkpoint's row is the ONLY row that window will ever have, so a
+  # discriminator it gets wrong is wrong permanently — and the end-of-pass
+  # digest's re-write hides it on every pass that completes.
+  CK11)
+    snippet OLD <<'EOF'
+                    status: .success,
+                    runMode: runMode
+                )
+                var wrote = true
+EOF
+    snippet NEW <<'EOF'
+                    status: .success,
+                    runMode: .shadow
+                )
+                var wrote = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CK12 — split the snapshot at the OFFERED count instead of the DURABLE one.
+  # The cursor then credits a window whose row did not land, which tells the
+  # next run to skip audio nothing covers: pmp9's hole, reintroduced by the fix
+  # for a different bug.
+  CK12)
+    snippet OLD <<'EOF'
+            durableWindowCount: box.durableWindowCount
+EOF
+    snippet NEW <<'EOF'
+            durableWindowCount: box.processedWindowCount
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

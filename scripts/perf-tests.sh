@@ -67,6 +67,14 @@ MEASUREMENT_TESTS=(
   # timing guard is measured here.
   "PlayheadTests/PerformanceSmokeTests/tenKPairs()"
   "PlayheadTests/PerformanceSmokeTests/pairingScale()"
+  # playhead-26od: the one test that must SHRINK the FM no-progress bound, to
+  # make the watchdog actually abandon a wedged coarse pass. A shrunken silence
+  # bound is precisely what the parallel gate destroys — under ~10,000
+  # concurrent tests a healthy pass out-waits any budget small enough to be
+  # fast. Durability itself is asserted deterministically in the fast suite by
+  # reading the database from inside the running pass; only the real
+  # abandonment is measured here.
+  "PlayheadTests/BackfillCoarseCheckpointTests/abandonedPassLeavesItsScreenedWindowsBehind()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in
