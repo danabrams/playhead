@@ -128,9 +128,23 @@ The t1kq cancellation branch (`BackfillJobRunner.swift`, the retry arm) writes
 checkpoint writes the database directly, that can rewind a mid-flight
 checkpoint to nil.
 
-It looks like a bug and it is not. It fires only when the coarse pass was FULLY
-covered (that is the one case where `honestCursorBox` is deliberately left
-unset), and there the rewind is correct: keeping a partial cursor would make
+It looks like a bug and it is not. **R4 correction: "fires only when the coarse
+pass was fully covered" states a SUFFICIENT condition as a necessary one, and the
+difference matters because the other states are the common ones.** The arm runs
+whenever `cursorAdvanced` is false, which is four distinct states:
+
+| state | `salvagedCursor` | cursor in the DB | effect of the write |
+|---|---|---|---|
+| coarse pass FULLY covered (`honestCursorBox` deliberately unset) | nil | the last mid-flight checkpoint, positive | **a real rewind** — the case discussed below |
+| the pass produced no outcomes at all (`coverageFullyCovered` keeps its `true` initialiser) | nil | none — no checkpoint ever ran | no-op |
+| the walk's bound is nil because the FIRST plan is uncovered — the NORMAL state under lxkq promotion | nil | also nil, since the mid-flight covered set is a subset of this one | no-op |
+| the walk equals the prior cursor (bkhc's barren window) | prior, non-nil | ≤ prior | no-op |
+
+Only the first loses anything, so the substantive claim survives — but a reader
+checking "does the rewind fire here?" against the old wording would answer no for
+the third row, which is where most cancelled passes actually land.
+
+In that first state the rewind is correct: keeping a partial cursor would make
 `narrowedForResume` trim the resume to the last window, so the refinement for
 every earlier ad would never run and the job would then mark complete. That is
 precisely what `BackfillRateLimitDeferTests.fullCoverageCancellationDoesNotCheckpoint`
@@ -663,3 +677,69 @@ further down. The claim is now scoped to the default plans and names the excepti
   plans with equal `startTime` are walked in an unspecified-but-deterministic
   order. Both orders are SAFE — the cap collapses either to at most that shared
   start — so this is noted for the next reader rather than changed.
+
+### R4's adversarial pass — five more, three fixed and two recorded
+
+Run against the working tree after the three fixes above. It independently
+re-derived the duplicate-`segmentIndex` ambiguity and confirmed the fix (no-op
+when indices are distinct; every straddle/split case preserved; the failure-side
+fallback holds because every `CoarseWindowFailure` construction site passes the
+OUTER `plan.windowIndex`, never a sub-plan's `0`). It found no SEVENTH instance
+of the over-claim family. What it did find:
+
+* **The cursor rule was pinned against the WALK and not through the WIRING.**
+  `CoarseCoverageWalkTests` calls the static function directly, and both
+  end-to-end cursor tests use hole-free fixtures in episode order — where "the
+  contiguous prefix" and "the largest `endTime` banked" are the same number. So
+  replacing `coarseCheckpointWalk`'s result with
+  `banked.windows.prefix(durableWindowCount).map(\.endTime).max()` — the pmp9
+  defect verbatim — left every test green. R3's split, one level up.
+  `the checkpoint's cursor is the contiguous prefix, not the furthest window
+  banked` now drives three snapshots through `checkpointCoarseWindows` itself:
+  an lxkq-PROMOTED window (the shipped attempt order, where the first banked
+  window is routinely a late-episode one), a hole behind a success, and qbib's
+  partially-recovered plan — the last of which is the only thing that can see
+  `failedWindows:` dropped from the mid-flight walk.
+* **The `monotonic(from: priorCursor)` merge was unkilled**, because all four
+  direct calls passed `priorCursor: nil` and every end-to-end fixture starts
+  from a job with no cursor. It is not decorative: a plan's `startTime` is a MIN
+  over its segments and `narrowedForResume` keeps a segment whose `endTime`
+  exceeds the cursor even when its `startTime` does not, so a resumed pass can
+  plan a window BEGINNING below the cursor it resumed from, the cap pulls the
+  walk value down to that start, and the raw value would then overwrite a higher
+  cursor. `a checkpoint never lowers a cursor an earlier run already reached`.
+* **`makeProductionShapedRunner` was production-shaped in name only.**
+  `BackfillJobRunner`'s `adLikelihoodScanOrderEnabled` defaults to `false` and
+  `AdDetectionConfig` ships `true`, so the test written specifically to close
+  R3's production-shape gap still differed from `PlayheadRuntime`. Now set — with
+  the honest caveat in its doc that it does not permute THIS fixture (the
+  editorial filler fires no seed channel), which is why the permuted-order claim
+  is made where it can be made deterministic, in the wiring test above.
+* **RECORDED, not fixed: the cursor cap can now spend playhead-bkhc's retry
+  budget.** On an asset with overlapping plan ranges the cap holds the cursor at
+  the earliest uncovered plan's start; if that plan keeps failing across granted
+  windows, `cursorAdvanced` is false each time, `retryCount` climbs, and at
+  `AdmissionController.maxRetries` the job is marked
+  `expiredWithoutProgress-<phase>`. Before the cap the cursor jumped the hole and
+  the job progressed. This is bkhc's bound working as designed — "a job whose
+  granted windows keep ending with the covered prefix exactly where it started"
+  is precisely what it exists to stop — and a named terminal is a better outcome
+  than a silent permanent hole. Written down because it is a behaviour change on
+  non-time-monotone assets (csbq measured 27 of 30) that no note stated.
+* **RECORDED, not fixed: the checkpoint's granularity is the PLAN, so a
+  one-plan pass gets no checkpoint at all.** The callback fires at the top of
+  iteration N for N > 0, so the last plan is never checkpointed and a pass with a
+  single plan is unchanged by this bead. That is fine at the iOS 26 window count
+  the field evidence was measured at (AD5F3A0A banked 45 rows), but
+  playhead-xx7m.2 expects iOS 27's ~32k context to COLLAPSE the coarse window
+  count — and the smaller the plan count, the larger the fraction a mid-flight
+  death still costs. Worth re-measuring on iOS 27 before assuming the win holds
+  at that window count; sub-plan checkpointing would be the fix and is not one
+  this bead should make blind.
+* **RECORDED: the PerfGate'd abandonment test pins its store for the process's
+  life.** Its park is `withUnsafeContinuation { _ in }`, deliberately
+  unresumable, and that task strongly holds the runner and the `AnalysisStore` —
+  which is the `TestScratchReaper` owner, so the scratch directory survives to
+  the process-exit backstop rather than being reclaimed by ownership. One
+  directory per run of the perf plan. Bounded, and noted only because
+  playhead-cgka is what 15 GiB of stranded simulator trash looked like.

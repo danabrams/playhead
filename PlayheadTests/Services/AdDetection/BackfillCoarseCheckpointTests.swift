@@ -154,6 +154,17 @@ struct BackfillCoarseCheckpointTests {
     /// window routes `.sensitive` and the pass's per-window behaviour is
     /// identical to the plain path. The only thing this configuration changes is
     /// WHICH call site has to carry the observer.
+    ///
+    /// `adLikelihoodScanOrderEnabled` is set for the same reason and with the
+    /// same honesty about its reach: `BackfillJobRunner`'s default is `false`
+    /// while `AdDetectionConfig` ships `true`, so a runner built without it is
+    /// production-shaped in name only. It does NOT permute this fixture — the
+    /// editorial filler produces no acoustic breaks and no lexical candidates,
+    /// so `adLikelihoodScanOrderSeeds` returns empty and `planPassA` falls back
+    /// to episode order. What a permuted ATTEMPT order does to the cursor is
+    /// asserted where it can be made deterministic, in
+    /// `checkpointCursorStopsAtTheFirstUnscannedPlan`, rather than left to a
+    /// fixture that would have to fire a seed channel by accident.
     @available(iOS 26.0, *)
     private func makeProductionShapedRunner(
         store: AnalysisStore,
@@ -178,7 +189,8 @@ struct BackfillCoarseCheckpointTests {
             ),
             permissiveClassifier: BackfillJobRunner.PermissiveClassifierBox {
                 PermissiveAdClassifier()
-            }
+            },
+            adLikelihoodScanOrderEnabled: true
         )
     }
 
@@ -910,6 +922,42 @@ struct BackfillCoarseCheckpointTests {
         )
     }
 
+    /// One plan, one window, at a chosen episode position — the pieces a
+    /// snapshot in a NON-episode attempt order is built from.
+    private func planAt(_ idx: Int) -> CoarsePassWindowPlan {
+        CoarsePassWindowPlan(
+            windowIndex: idx,
+            lineRefs: [idx],
+            prompt: "p\(idx)",
+            promptTokenCount: 10,
+            startTime: Double(idx) * Self.segmentSeconds,
+            endTime: Double(idx + 1) * Self.segmentSeconds,
+            transcriptQuality: .good
+        )
+    }
+
+    private func windowAt(_ idx: Int) -> FMCoarseWindowOutput {
+        FMCoarseWindowOutput(
+            windowIndex: idx,
+            lineRefs: [idx],
+            startTime: Double(idx) * Self.segmentSeconds,
+            endTime: Double(idx + 1) * Self.segmentSeconds,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+    }
+
+    private func failureAt(_ idx: Int) -> CoarseWindowFailure {
+        CoarseWindowFailure(
+            planWindowIndex: idx,
+            lineRefs: [idx],
+            startTime: Double(idx) * Self.segmentSeconds,
+            endTime: Double(idx + 1) * Self.segmentSeconds,
+            status: .rateLimited
+        )
+    }
+
     private func seedRunningJob(
         _ store: AnalysisStore,
         assetId: String,
@@ -1135,6 +1183,200 @@ struct BackfillCoarseCheckpointTests {
             afterLive.status == .running,
             "a live pass stopped leasing — playhead-qk44's work clock is dead"
         )
+    }
+
+    /// The cursor rule, asserted through the WIRING rather than against the
+    /// static walk.
+    ///
+    /// `CoarseCoverageWalkTests` calls `coarseCoverageWalk` directly, so it pins
+    /// the RULE and says nothing about what `checkpointCoarseWindows` hands it —
+    /// the same "the rule is pinned, the wiring is not" split R3 closed one level
+    /// down at `coarseCheckpointWalk`. And the end-to-end tests cannot close it
+    /// either: their fixtures are hole-free and in episode order, so
+    /// "contiguous prefix" and "the largest `endTime` I have banked" are the same
+    /// number and a pmp9-shaped implementation passes both.
+    ///
+    /// Three snapshots, each a state a healthy production pass really reaches and
+    /// none of which an in-order fixture can produce:
+    ///
+    /// 1. **A PROMOTED window.** playhead-lxkq ships ON and reorders the attempt
+    ///    sequence by ad-likelihood, so the pass's FIRST banked window is
+    ///    routinely a late-episode one. Its row is durable; the cursor must still
+    ///    stop at the unscanned head.
+    /// 2. **A HOLE behind a success**, which is what a promoted order produces as
+    ///    soon as anything fails.
+    /// 3. **A FAILURE whose plan also produced a success** — playhead-qbib's
+    ///    partially-recovered window. This is the one that needs
+    ///    `coarseCheckpointWalk` to actually forward `banked.failedWindows`;
+    ///    dropping that argument is invisible in every other test here.
+    @Test("the checkpoint's cursor is the contiguous prefix, not the furthest window banked")
+    func checkpointCursorStopsAtTheFirstUnscannedPlan() async throws {
+        let store = try await makeTestStore()
+
+        /// Runs one snapshot against a fresh job and returns the cursor it left.
+        func cursorAfter(
+            _ label: String,
+            plans: [CoarsePassWindowPlan],
+            windows: [FMCoarseWindowOutput],
+            failedWindows: [CoarseWindowFailure]
+        ) async throws -> Double? {
+            let assetId = "asset-26od-wiring-\(label)"
+            let jobId = "job-26od-wiring-\(label)"
+            try await store.insertAsset(makeAsset(id: assetId))
+            try await seedRunningJob(store, assetId: assetId, jobId: jobId)
+            let box = CoarseCheckpointBox()
+            await makeProbedRunner(
+                store: store,
+                runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+                probe: RowWriteProbe()
+            ).checkpointCoarseWindows(
+                FMCoarseBankedWindows(plans: plans, windows: windows, failedWindows: failedWindows),
+                box: box,
+                inputs: makeInputs(assetId: assetId, lineCount: 8),
+                jobId: jobId,
+                jobPhase: .fullEpisodeScan,
+                priorCursor: nil,
+                runMode: .shadow
+            )
+            // Every window landed — otherwise the cursor is short for the wrong
+            // reason and the assertion below proves nothing.
+            #expect(box.durableWindowCount == windows.count, "\(label): a row failed to write")
+            let job = try #require(try await store.fetchBackfillJob(byId: jobId))
+            return job.progressCursor?.lastProcessedUpperBoundSec
+        }
+
+        let plans = (0..<4).map(planAt)
+
+        // 1. lxkq promoted plan 3 to the front. Banking it must not carry the
+        //    cursor over plans 1 and 2, which nobody has looked at.
+        let promoted = try await cursorAfter(
+            "promoted",
+            plans: plans,
+            windows: [windowAt(3), windowAt(0)],
+            failedWindows: []
+        )
+        #expect(
+            promoted == 30.0,
+            "the cursor followed the furthest window banked (\(promoted as Double?)) instead of the contiguous prefix"
+        )
+
+        // 2. A hole with a success behind it — the same claim, reached through a
+        //    recorded failure rather than through an unattempted plan.
+        let hole = try await cursorAfter(
+            "hole",
+            plans: plans,
+            windows: [windowAt(0), windowAt(2)],
+            failedWindows: [failureAt(1)]
+        )
+        #expect(hole == 30.0, "the cursor stepped over a failed window: \(hole as Double?)")
+
+        // 3. playhead-qbib: plan 0 produced BOTH a window and a failure, so it is
+        //    not covered and the cursor cannot start at all. Only reachable if the
+        //    checkpoint forwards `failedWindows` to the walk.
+        let partial = try await cursorAfter(
+            "partial",
+            plans: plans,
+            windows: [windowAt(0), windowAt(1)],
+            failedWindows: [failureAt(0)]
+        )
+        #expect(
+            partial == nil,
+            "a partially-recovered plan was credited: cursor \(partial as Double?)"
+        )
+    }
+
+    /// A checkpoint must never LOWER a cursor an earlier run already reached.
+    ///
+    /// The guard is the `monotonic(from: priorCursor)` merge, and it is reachable
+    /// for the same reason the cursor cap is: a plan's `startTime` is a MIN over
+    /// its segments, and `narrowedForResume` keeps a segment whose `endTime`
+    /// exceeds the cursor even when its `startTime` does not. So a resumed pass
+    /// can plan a window that BEGINS below the cursor it resumed from, the cap
+    /// pulls the walk value down to that start, and the raw walk output is behind
+    /// the database.
+    ///
+    /// Every other test in this suite passes `priorCursor: nil`, so deleting the
+    /// merge left them all green — and a regressed cursor is not merely wasted
+    /// work: it re-opens audio the previous run already certified, which is the
+    /// treadmill this bead exists to end.
+    @Test("a checkpoint never lowers a cursor an earlier run already reached")
+    func checkpointNeverRegressesAPriorCursor() async throws {
+        let assetId = "asset-26od-monotonic"
+        let jobId = "job-26od-monotonic"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await seedRunningJob(store, assetId: assetId, jobId: jobId)
+
+        // The walk over this snapshot reaches 30; the prior run reached 300.
+        await makeProbedRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            probe: RowWriteProbe()
+        ).checkpointCoarseWindows(
+            bankedSnapshot(windows: 1, plans: 4),
+            box: CoarseCheckpointBox(),
+            inputs: makeInputs(assetId: assetId, lineCount: 8),
+            jobId: jobId,
+            jobPhase: .fullEpisodeScan,
+            priorCursor: BackfillProgressCursor(
+                processedPhaseCount: 0,
+                lastProcessedUpperBoundSec: 300.0
+            ),
+            runMode: .shadow
+        )
+
+        let job = try #require(try await store.fetchBackfillJob(byId: jobId))
+        #expect(
+            job.progressCursor?.lastProcessedUpperBoundSec == 300.0,
+            "the checkpoint rewound the cursor to \(job.progressCursor?.lastProcessedUpperBoundSec as Double?)"
+        )
+    }
+
+    /// A checkpointed row must be the row the end-of-pass digest would have
+    /// written, column for column — because on a killed pass it is the ONLY row
+    /// that window will ever have.
+    ///
+    /// `normalPassPersistsExactlyOneRowPerWindow` cannot see this: there the
+    /// digest's `INSERT OR REPLACE` overwrites whatever the checkpoint wrote, so
+    /// every discriminator could be wrong and the final database still correct.
+    /// The three asserted here are the ones a checkpoint could plausibly get
+    /// wrong by hardcoding — `runMode` and `jobPhase` are arguments threaded from
+    /// `runJob`, and every other test in this suite passes the same
+    /// `.shadow`/`.fullEpisodeScan` pair, so a constant would satisfy them all.
+    @Test("a checkpointed row carries the job's own runMode and phase, not a constant")
+    func checkpointedRowsCarryTheirJobsDiscriminators() async throws {
+        let assetId = "asset-26od-columns"
+        let jobId = "job-26od-columns"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await seedRunningJob(store, assetId: assetId, jobId: jobId)
+
+        await makeProbedRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            probe: RowWriteProbe()
+        ).checkpointCoarseWindows(
+            bankedSnapshot(windows: 2, plans: 4),
+            box: CoarseCheckpointBox(),
+            inputs: makeInputs(assetId: assetId, lineCount: 8),
+            jobId: jobId,
+            // Deliberately NOT the pair every other test uses.
+            jobPhase: .scanLikelyAdSlots,
+            priorCursor: nil,
+            runMode: .targeted
+        )
+
+        let rows = try await passARows(store, assetId: assetId)
+        #expect(rows.count == 2)
+        for row in rows {
+            #expect(row.runMode == .targeted, "checkpoint row carries runMode \(row.runMode)")
+            #expect(row.jobPhase == BackfillJobPhase.scanLikelyAdSlots.rawValue,
+                    "checkpoint row carries jobPhase \(row.jobPhase as String?)")
+            #expect(row.status == .success)
+            #expect(row.scanPass == "passA")
+            #expect(row.analysisAssetId == assetId)
+            #expect(row.windowEndTime > row.windowStartTime)
+        }
     }
 
     // MARK: - 3c. The write COST, measured over a whole pass
@@ -2082,8 +2324,38 @@ struct CoarseCoverageWalkTests {
     /// against a refactor, not a live defect. The failure half is asserted too,
     /// because there the honest answer is not "nothing": `planWindowIndex` says
     /// which plan the attempt came from, and the fallback must still use it.
+    ///
+    /// **The ONE-PLAN case is what actually kills this guard, and it is asserted
+    /// first for that reason.** With two or more plans the empty needle is a
+    /// subset of ALL of them, so the ambiguity guard added alongside this one
+    /// already returns nil and the empty guard is redundant. Exactly one plan is
+    /// the only shape where the empty set has a UNIQUE superset — so a multi-plan
+    /// fixture, which is what this test used to be, would keep passing with the
+    /// empty guard deleted.
     @Test("an outcome with no line refs credits no plan")
     func emptyLineRefsAttributeToNothing() {
+        let lonePlan = [plan(0)]
+        let reflessAgainstOnePlan = FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: [],
+            startTime: 0.0,
+            endTime: 0.0,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+        let single = BackfillJobRunner.coarseCoverageWalk(
+            plans: lonePlan,
+            windows: [reflessAgainstOnePlan],
+            failedWindows: []
+        )
+        #expect(
+            single.succeededPlanIndices.isEmpty,
+            "the episode's only plan was certified as screened by an outcome that says nothing"
+        )
+        #expect(single.contiguousUpperBoundSec == nil)
+        #expect(single.fullyCovered == false)
+
         let plans = (0..<3).map(plan)
         let refless = FMCoarseWindowOutput(
             windowIndex: 0,
