@@ -563,6 +563,36 @@
 #   every other SC anchor was re-checked with `--dry-run --batch` and still
 #   applies exactly once.
 #
+#   BATCH 409/410/411 FINAL: 4 KILLED / 0 SURVIVED / 0 ERROR, one build each,
+#   2m06s + 2m09s + 2m04s. The three RE-ANCHORED entries were re-run alone to
+#   prove the rewrite did not cost their rails — SC25 KILLED (2m33s), SC21
+#   KILLED (1m56s), SC27 KILLED (1m58s). Batches 400-403 and 405-407 were NOT
+#   re-run and carry their earlier verdicts; SC21's batch (407) is represented
+#   by the isolated re-run above. Recount: 401 live entries.
+#
+#   THREE OPERATIONAL NOTES, all costing builds, none a mutation problem:
+#     • The first four attempts died on a WEDGED SIM (`Mach error -308`, then
+#       "Test crashed with signal kill before establishing connection"). The
+#       battery does not carry `fast-gate.sh`'s -308 recovery, so do it by hand:
+#       `simctl shutdown/erase/boot` with DEVELOPER_DIR set. The
+#       `xcrun: error: unable to find utility "simctl"` line that accompanies it
+#       is diagnostics collection failing through the GLOBAL xcode-select
+#       (playhead-ekpn) and is NOT the cause — do not chase it.
+#     • Then rc=28, the disk preflight, at 6.41 GiB free. What reclaimed it was
+#       `simctl erase` on the destination (3.7 GiB of device data), NOT the repo
+#       cleaner, which found 3.3 MB. `$TMPDIR/Deleting-*` was empty both before
+#       and after, so the erase reaped cleanly this time — check it anyway.
+#     • `PLAYHEAD_MB_SKIP_BASELINE=1` was used for all six runs on the strength
+#       of a scoped gate over the same 14 suites (151 tests, green) taken
+#       minutes earlier. That is the documented trade and it roughly halved both
+#       the builds and the disk drawdown; each run held steady at 17-20 GiB free
+#       where the un-skipped ones had been falling ~2 GiB per attempt.
+#
+#   ONE THING TO KNOW IF YOU EDIT SOURCE WHILE A BATTERY RUNS: it restores with
+#   `git checkout -- .`, so an uncommitted edit made mid-run is DISCARDED. Commit
+#   first. (Also: a working-tree read during a run shows MUTATED source. Read
+#   `git show HEAD:<path>` if you need the truth while one is in flight.)
+#
 #   Batch 409 is NOT a coverage-hole batch. SC30/SC31 restore a defect that was
 #   live on this branch: the sweep's transcript gate divided the RAW interval
 #   union of `pass='fast'` chunks by the episode duration and compared it to
