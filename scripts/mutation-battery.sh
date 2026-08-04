@@ -485,7 +485,29 @@
 #   this bead: SC01-SC22 (SC13 was drafted and dropped, see SC01), 21 entries,
 #   7 batches. FINAL 21 KILLED / 0 SURVIVED / 0 ERROR, 8 builds. Batches 1-323
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
-#   391 live entries.
+#   391 live entries. (Superseded by the R1 round below, which adds three.)
+#
+#   R1 REVIEW ROUND, same day. Batch 404 re-run with three entries ADDED —
+#   SC23, SC24, SC25 — bringing the SC series to 24 entries in the same 7
+#   batches. Batch 404 FINAL: 7 KILLED / 0 SURVIVED / 0 ERROR, 2 builds, 5m06s,
+#   each of the seven with a distinct victim. Batches 400-403 and 405-407 were
+#   NOT re-run and carry the verdicts above. Recount: 394 live entries.
+#
+#   All three additions were REVIEW FINDINGS, not padding, and two of them are
+#   the same shape: a correct line no test could observe.
+#     • SC23 — the mode-off guard INSIDE `runShadowFMPhase`. `runBackfill`
+#       answers `.off` itself now, so the guard's only remaining caller in a
+#       shipped build is the shadow-RETRY drain, which does not consult the mode
+#       before dispatching. Nothing drove that path with a demoted cohort, so
+#       deleting the recording call was invisible. A wire-in test through
+#       `retryShadowFMPhaseForSession` closed it.
+#     • SC24 — the mode-off gate in `runBackfill` had a test but no mutant while
+#       its three siblings (SC10/SC11/SC12) had both. Registration only.
+#     • SC25 — the sweep's transcript gate reads `fastTranscriptCoveredSec` (the
+#       interval UNION) and its doc claimed to apply the floor `finalizeBackfill`
+#       applies, which divides the `max(endTime)` WATERMARK. Same constant,
+#       different numerator, identical on every contiguous fixture in the series.
+#       A gappy-transcript test now pins the divergence across the floor.
 #
 #   ONE SURVIVOR ON THE WAY, and it was real rather than a mis-stated
 #   expectation: SC09 ("" persisted as if it were a podcast id) survived
