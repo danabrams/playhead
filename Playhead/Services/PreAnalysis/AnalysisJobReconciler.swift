@@ -1226,8 +1226,18 @@ actor AnalysisJobReconciler {
     /// claim this step writes removes the asset from its own candidate set on
     /// the first pass. From then on the asset is the re-drive sweep's problem,
     /// under that sweep's existing budget
-    /// (``AnalysisWorkScheduler/maxAdScanRedrives``). One claim per asset, ever,
-    /// per transcript version.
+    /// (``AnalysisWorkScheduler/maxAdScanRedrives``).
+    ///
+    /// **One claim per asset, EVER — not per transcript version.** The two
+    /// bounds are different and it matters which one this sweep has.
+    /// ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``
+    /// is keyed per `(asset, transcriptVersion)`, but this sweep's candidate
+    /// query excludes an asset that owns a row of ANY kind, so once the first
+    /// claim lands the asset never returns here regardless of what its
+    /// transcript does afterwards. That is deliberate: a re-transcription is
+    /// not a new strand, and an asset whose transcript version moves is by
+    /// definition being worked on by a lane that will reach the gates — and
+    /// the gates record for themselves.
     ///
     /// **Best-effort by contract**, exactly like ``mintAdScanRedrives``: `async`,
     /// not `async throws`, every store error logged and swallowed. A failure to
@@ -1248,6 +1258,22 @@ actor AnalysisJobReconciler {
         guard !assetIds.isEmpty else { return 0 }
 
         let summaries = try await store.fetchCoverageSummariesByAssetIds(Set(assetIds))
+        // playhead-fil5 R2: the SAME guard ``mintAdScanRedrives`` applies one
+        // step later, and it belongs here for a sharper reason than symmetry.
+        //
+        // The candidate query names "assets with no coverage-lane row", and this
+        // step reads that as "assets nobody will call `runBackfill` for again".
+        // Those are not the same set. `runPendingBackfill` is step 6 of a pass,
+        // so EVERY episode currently being analysed is a zero-row asset from the
+        // moment its transcript crosses the finalize floor until the shadow
+        // phase runs — and `reconcile()` runs on a BGProcessingTask wake, which
+        // `playhead-qk44` documents as happening inside the live app process
+        // while the foreground runner is mid-drain. Without this line a launch
+        // that overlaps analysis spends the mint budget on episodes that were
+        // about to request a scan on their own, ahead of the stranded ones that
+        // never will, and stamps them with a gate reason asserting nothing ever
+        // asked.
+        let episodesWithPendingWork = try await store.fetchActiveJobEpisodeIds()
         var minted = 0
         for assetId in assetIds {
             guard minted < Self.maxSemanticScanClaimsPerReconcile else { break }
@@ -1293,6 +1319,15 @@ actor AnalysisJobReconciler {
             // partial-wipe recovery path ever does strand scan rows without job
             // rows, this is the line to revisit.
 
+            // Resolved BEFORE the transcript read, which is the expensive step:
+            // the asset row is what names the episode, and the episode is what
+            // decides both of the next two questions. A candidate whose asset
+            // row cannot be read is skipped rather than claimed with a nil
+            // podcast — without it we cannot tell whether a pass is already in
+            // flight, and claiming then is a guess.
+            guard let asset = try await store.fetchAsset(id: assetId) else { continue }
+            guard !episodesWithPendingWork.contains(asset.episodeId) else { continue }
+
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
             guard !chunks.isEmpty else { continue }
 
@@ -1300,13 +1335,10 @@ actor AnalysisJobReconciler {
             // episode, or nil. Never "" — an empty id is the ABSENCE of a
             // podcast, and persisting it as one is the same defect that closes
             // the `podcastIdMissing` gate in the first place.
-            var podcastId: String?
-            if let episodeId = try await store.fetchAsset(id: assetId)?.episodeId {
-                podcastId = try await store.fetchLatestJobForEpisode(episodeId)?.podcastId
-            }
+            let podcastId = try await store.fetchLatestJobForEpisode(asset.episodeId)?.podcastId
 
             let outcome = await SemanticScanClaim.record(
-                gate: .neverRequested,
+                gate: .noCoverageLaneRow,
                 analysisAssetId: assetId,
                 podcastId: podcastId,
                 transcriptVersion: SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks),

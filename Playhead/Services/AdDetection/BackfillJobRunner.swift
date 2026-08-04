@@ -3957,6 +3957,27 @@ actor BackfillJobRunner {
 
     /// R7-Fix11: stable id for backfill jobs. Mirrors the scan-result
     /// helper so both id spaces are immune to asset-id hyphen drift.
+    ///
+    /// **The `ForTesting` suffix is a lie and the name is kept anyway.** This is
+    /// the PRODUCTION derivation of `backfill_jobs.jobId`, with three
+    /// non-test callers: `runPendingBackfill`'s plan loop (the FM phases) and
+    /// its specialist-phase append, both in this file, and
+    /// ``SemanticScanClaim/jobId(analysisAssetId:transcriptVersion:)``, which
+    /// re-derives the id so a claim row minted OUTSIDE the runner is the same
+    /// row the runner later re-drives. Elsewhere in this file a `ForTesting`
+    /// suffix means "a seam that exists for tests" (see the note on
+    /// ``checkpointCoarseWindows(_:box:inputs:jobId:jobPhase:priorCursor:runMode:)``),
+    /// so anyone applying that reading here would conclude this is dead outside
+    /// the test target — it is not, and removing or `#if DEBUG`-fencing it
+    /// breaks job identity for every asset on disk.
+    ///
+    /// Renaming it is the obvious fix and was deliberately NOT done in
+    /// playhead-fil5's review: the callers are 3 production and ~30 test sites
+    /// across 8 suites owned by other beads, so the rename is pure conflict
+    /// surface against open branches for zero behaviour change. It is a
+    /// standalone cleanup, not a rider. What that rename must NOT do is change
+    /// the canonical string below — the id is persisted, so a different
+    /// preimage orphans every existing row.
     nonisolated static func makeJobIdForTesting(
         analysisAssetId: String,
         transcriptVersion: String,

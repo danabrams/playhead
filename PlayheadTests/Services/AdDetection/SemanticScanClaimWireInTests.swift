@@ -277,7 +277,8 @@ struct SemanticScanClaimReconcilerTests {
     private func seedZeroRowAsset(
         _ store: AnalysisStore,
         transcriptEndSec: Double = durationSec,
-        scannedSec: Double? = nil
+        scannedSec: Double? = nil,
+        jobState: String = "complete"
     ) async throws {
         try await store.insertAsset(
             AnalysisAsset(
@@ -316,6 +317,56 @@ struct SemanticScanClaimReconcilerTests {
                     jobType: "preAnalysis"
                 ),
                 sourceFingerprint: Self.fingerprint,
+                desiredCoverageSec: Self.durationSec,
+                state: jobState
+            )
+        )
+    }
+
+    /// One more zero-row candidate, distinct from `seedZeroRowAsset`'s single
+    /// FCDDB309 fixture, for the tests that need a POPULATION rather than a
+    /// shape. `qualifying: false` gives it a half-length transcript, so it is
+    /// still a candidate the sweep must EXAMINE but never one it may claim —
+    /// which is what separates the candidate window from the mint cap.
+    private func seedExtraCandidate(
+        _ store: AnalysisStore,
+        ordinal: Int,
+        qualifying: Bool = true
+    ) async throws {
+        let id = String(format: "bulk-%03d", ordinal)
+        let transcriptEnd = qualifying ? Self.durationSec : 0.5 * Self.durationSec
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: id,
+                episodeId: "ep-\(id)",
+                assetFingerprint: "fp-\(id)",
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/\(id).m4a",
+                featureCoverageEndTime: transcriptEnd,
+                fastTranscriptCoverageEndTime: transcriptEnd,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.completeFull.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: Self.durationSec
+            )
+        )
+        _ = try await store.insertTranscriptChunks([
+            claimTestChunk(assetId: id, index: 0, start: 0, end: transcriptEnd)
+        ])
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-\(id)",
+                jobType: "preAnalysis",
+                episodeId: "ep-\(id)",
+                podcastId: "pod-\(id)",
+                analysisAssetId: id,
+                workKey: AnalysisJob.computeWorkKey(
+                    fingerprint: "fp-\(id)",
+                    analysisVersion: PreAnalysisConfig.analysisVersion,
+                    jobType: "preAnalysis"
+                ),
+                sourceFingerprint: "fp-\(id)",
                 desiredCoverageSec: Self.durationSec,
                 state: "complete"
             )
@@ -377,7 +428,7 @@ struct SemanticScanClaimReconcilerTests {
                 forPersistedChunks: try await store.fetchTranscriptChunks(assetId: Self.assetId)
             )
         )))
-        #expect(claim.deferReason == SemanticScanClaim.Gate.neverRequested.deferReason)
+        #expect(claim.deferReason == SemanticScanClaim.Gate.noCoverageLaneRow.deferReason)
         #expect(claim.podcastId == "pod-FCDDB309")
 
         let minted = try await redriveJobs(store)
@@ -530,6 +581,102 @@ struct SemanticScanClaimReconcilerTests {
         #expect(try await makeReconciler(
             store: store, downloads: cachedDownloads()
         ).reconcile().semanticScanClaimsMinted == 0)
+    }
+
+    /// **The candidate query names one set and this sweep reads it as another.**
+    /// "No coverage-lane row" is not "nobody will call `runBackfill` again":
+    /// `runPendingBackfill` is step 6 of a pass, so an episode being analysed
+    /// RIGHT NOW is a zero-row asset from the moment its transcript crosses the
+    /// finalize floor until the shadow phase runs. `reconcile()` reaches that
+    /// state for real — playhead-qk44 documents `BGProcessingTaskHandler`
+    /// running inside the live app process while the foreground runner drains.
+    ///
+    /// Claiming there is wrong twice over: it spends the per-pass mint budget on
+    /// an episode that was about to request a scan by itself, ahead of the
+    /// stranded ones that never will, and it stamps a gate reason asserting
+    /// nothing asked while a request is in flight.
+    @Test("an episode with an analysis pass in flight gets no claim")
+    func inFlightEpisodeGetsNoClaim() async throws {
+        let store = try await makeTestStore()
+        try await seedZeroRowAsset(store, jobState: "queued")
+
+        let firstPass = try await makeReconciler(
+            store: store, downloads: cachedDownloads()
+        ).reconcile()
+        #expect(firstPass.semanticScanClaimsMinted == 0,
+                "the pass that will mint this asset's rows has not run yet")
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10).isEmpty)
+
+        // The fixture is only meaningful if the SAME asset claims once its pass
+        // is terminal — otherwise this would pass for any unrelated reason.
+        try await store.updateJobState(
+            jobId: "job-terminal", state: "complete",
+            nextEligibleAt: nil, lastErrorCode: nil
+        )
+        #expect(try await makeReconciler(
+            store: store, downloads: cachedDownloads()
+        ).reconcile().semanticScanClaimsMinted == 1)
+    }
+
+    /// The MINT cap. Without it one `reconcile()` empties the whole candidate
+    /// window into a queue the very next step can only drain 8 of
+    /// (``AnalysisJobReconciler/maxAdScanRedrivesPerReconcile``), so the surplus
+    /// buys nothing and the claims would have been there next launch anyway.
+    ///
+    /// The second and third passes are the other half of the contract: a cap is
+    /// only a cap if the backlog DRAINS across launches rather than being
+    /// dropped.
+    @Test("one pass mints at most the cap, and the rest drain next launch")
+    func mintCapBoundsOnePass() async throws {
+        let store = try await makeTestStore()
+        let total = AnalysisJobReconciler.maxSemanticScanClaimsPerReconcile + 4
+        for ordinal in 0..<total {
+            try await seedExtraCandidate(store, ordinal: ordinal)
+        }
+        let reconciler = makeReconciler(store: store, downloads: StubDownloadProvider())
+
+        var minted: [Int] = []
+        for _ in 0..<3 {
+            minted.append(try await reconciler.reconcile().semanticScanClaimsMinted)
+        }
+        #expect(minted == [AnalysisJobReconciler.maxSemanticScanClaimsPerReconcile, 4, 0],
+                "claims minted per pass: \(minted)")
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 100).count == total,
+                "every candidate must end up visible to the re-drive sweep")
+    }
+
+    /// The CANDIDATE window, which is a different bound from the mint cap and
+    /// cannot be observed through it: the mint cap stops the loop at 8 MINTS, so
+    /// it never reaches the 24th candidate unless the ones ahead are all
+    /// REJECTED. That is the shape here — a wall of half-transcribed assets,
+    /// oldest-first, with the one claimable asset behind them.
+    ///
+    /// Both halves are needed. The first alone would pass if the sweep were
+    /// broken outright; the second proves the same asset claims the moment it
+    /// fits inside the window.
+    @Test("a claimable asset beyond the candidate window waits for the next pass")
+    func candidateWindowBoundsOnePass() async throws {
+        let window = AnalysisJobReconciler.maxSemanticScanClaimCandidatesPerReconcile
+
+        let blocked = try await makeTestStore()
+        for ordinal in 0..<window {
+            try await seedExtraCandidate(blocked, ordinal: ordinal, qualifying: false)
+        }
+        try await seedZeroRowAsset(blocked)
+        #expect(try await makeReconciler(
+            store: blocked, downloads: cachedDownloads()
+        ).reconcile().semanticScanClaimsMinted == 0,
+                "the claimable asset sorts behind a full window of rejects")
+
+        let reached = try await makeTestStore()
+        for ordinal in 0..<(window - 1) {
+            try await seedExtraCandidate(reached, ordinal: ordinal, qualifying: false)
+        }
+        try await seedZeroRowAsset(reached)
+        #expect(try await makeReconciler(
+            store: reached, downloads: cachedDownloads()
+        ).reconcile().semanticScanClaimsMinted == 1,
+                "one fewer reject and the same asset is inside the window")
     }
 
     /// A claim is a request, not a dispatchable row, and the pass it unblocks is

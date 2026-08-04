@@ -509,6 +509,32 @@
 #       different numerator, identical on every contiguous fixture in the series.
 #       A gappy-transcript test now pins the divergence across the floor.
 #
+#   R2 REVIEW ROUND, same day. A NEW batch 408 with three entries — SC26, SC27,
+#   SC28 — bringing the SC series to 27 entries in 8 batches. Batches 400-407
+#   were NOT re-run and carry the verdicts above.
+#
+#   All three are the R1 round's second family — a correct line nothing could
+#   observe — and this time all three are in ONE function, the reconciler sweep:
+#     • SC26 / SC27 — the sweep's two per-pass bounds
+#       (`maxSemanticScanClaimsPerReconcile` = 8,
+#       `maxSemanticScanClaimCandidatesPerReconcile` = 24) had no test and no
+#       mutant. Both constants carry load-bearing docs ("deliberately the same 8
+#       as maxAdScanRedrivesPerReconcile", "24 covers several times the largest
+#       library seen") and both could be deleted or widened with every suite
+#       green. They need SEPARATE mutants because the mint cap stops the loop
+#       before the window is ever reached — the window only bites behind a wall
+#       of REJECTED candidates, which is what its test builds.
+#     • SC28 — a genuine defect rather than a coverage hole, and the round's
+#       one instance of the "value that names one thing" family. The candidate
+#       query names "assets with no coverage-lane row"; the sweep read it as
+#       "assets nobody will call `runBackfill` for again". `runPendingBackfill`
+#       is step 6 of a pass, so every episode being analysed right now is a
+#       zero-row asset from the moment its transcript crosses the finalize floor
+#       — and `reconcile()` runs on a BGProcessingTask wake, which playhead-qk44
+#       documents as happening inside the live app process while the foreground
+#       runner drains. The sweep now applies the same `fetchActiveJobEpisodeIds`
+#       guard `mintAdScanRedrives` applies one step later.
+#
 #   ONE SURVIVOR ON THE WAY, and it was real rather than a mis-stated
 #   expectation: SC09 ("" persisted as if it were a podcast id) survived
 #   because `runBackfill`'s podcastId gate pre-converted "" to nil at the CALL
@@ -2040,6 +2066,10 @@ T_FIL5_STORED_POD="an empty podcastId reaches the database as NULL"
 # registration left unmutated.
 T_FIL5_GATE_OFF_RETRY="a mode-off bail on the shadow-RETRY path leaves a durable claim"
 T_FIL5_GAPPY="a GAPPY transcript whose watermark reads 100% still gets no claim"
+# playhead-fil5 R2 — the two per-pass bounds and the in-flight guard.
+T_FIL5_MINT_CAP="one pass mints at most the cap, and the rest drain next launch"
+T_FIL5_WINDOW="a claimable asset beyond the candidate window waits for the next pass"
+T_FIL5_IN_FLIGHT_EP="an episode with an analysis pass in flight gets no claim"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3843,6 +3873,32 @@ MUTATIONS=(
   # ledger test is named too: it loads every EXCLUDED counter and asserts the sum
   # is nothing, so it is the second thing this mutation breaks.
   "SC22|407|RECON|$T_FIL5_LEDGER;$T_FIL5_ONN6_LEDGER"
+
+  # Batch 408 — the sweep's BOUNDS and the population it is allowed to act on.
+  # Added in the R2 review round: all three lines could be deleted with every
+  # suite green, and each is on a shipped path.
+  #
+  # SC26 — the per-pass MINT cap goes. One `reconcile()` claims every candidate
+  # that clears the floors, into a queue whose very next step can only mint 8
+  # (`maxAdScanRedrivesPerReconcile`); the surplus buys nothing and would have
+  # been claimed on the next launch anyway. Nothing asserted the bound before,
+  # so the constant's own doc ("deliberately the same 8") was unchecked.
+  "SC26|408|RECON|$T_FIL5_MINT_CAP"
+  # SC27 — the CANDIDATE window widens to the re-drive sweep's 64. A separate
+  # bound with a separate cost: a candidate here is expensive to REJECT (a whole
+  # transcript read and a SHA-256 for one that clears the floors), which is why
+  # it is 24 and not 64. Unobservable through SC26's rail — the mint cap stops
+  # the loop at 8 mints, so the window only bites behind a wall of rejects.
+  "SC27|408|RECON|$T_FIL5_WINDOW"
+  # SC28 — the sweep stops asking whether a pass is already in flight. The
+  # candidate query names "assets with no coverage-lane row" and this step reads
+  # it as "assets nobody will call `runBackfill` for again"; those differ for
+  # every episode being analysed RIGHT NOW, because `runPendingBackfill` is step
+  # 6 of a pass. `reconcile()` genuinely reaches that state — playhead-qk44
+  # documents `BGProcessingTaskHandler` running in-process while the foreground
+  # runner drains — so the mint budget goes to episodes that were about to ask
+  # for themselves, stamped with a reason asserting nothing asked.
+  "SC28|408|RECON|$T_FIL5_IN_FLIGHT_EP"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4179,6 +4235,9 @@ describe_mutation() {
     SC23) echo "fil5: the mode-off guard inside runShadowFMPhase stops recording — the shadow-retry drain's only gate" ;;
     SC24) echo "fil5: the mode-off gate in runBackfill stops recording" ;;
     SC25) echo "fil5: the sweep's transcript gate reads the watermark, so a gappy transcript claims at 100%" ;;
+    SC26) echo "fil5: the sweep's per-pass mint cap goes, emptying the window into a queue that drains 8" ;;
+    SC27) echo "fil5: the candidate window widens to 64, paying a transcript read per reject" ;;
+    SC28) echo "fil5: the sweep claims episodes whose analysis pass is still in flight" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -9601,6 +9660,40 @@ EOF
             + capOutRetriesMinted
             + semanticScanClaimsMinted
     }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC26 — the sweep's per-pass MINT cap goes. Every candidate that clears the
+  # floors is claimed in one pass, into a queue the very next step drains 8 of.
+  SC26)
+    snippet OLD <<'EOF'
+            guard minted < Self.maxSemanticScanClaimsPerReconcile else { break }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC27 — the CANDIDATE window widens to the re-drive sweep's 64. A different
+  # bound from the mint cap, and invisible through it: the mint cap stops the
+  # loop at 8 MINTS, so the window only bites once the assets ahead are rejects.
+  SC27)
+    snippet OLD <<'EOF'
+            limit: Self.maxSemanticScanClaimCandidatesPerReconcile
+EOF
+    snippet NEW <<'EOF'
+            limit: Self.maxAdScanRedriveCandidatesPerReconcile
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC28 — the sweep stops asking whether a pass is already in flight, so every
+  # episode being analysed right now is claimed the moment its transcript
+  # crosses the floor and before step 6 of its own pass has run.
+  SC28)
+    snippet OLD <<'EOF'
+            guard !episodesWithPendingWork.contains(asset.episodeId) else { continue }
+EOF
+    snippet NEW <<'EOF'
+            _ = episodesWithPendingWork
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

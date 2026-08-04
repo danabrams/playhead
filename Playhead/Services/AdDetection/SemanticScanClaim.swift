@@ -72,12 +72,22 @@ enum SemanticScanClaim {
 
     /// The reason a semantic scan was owed but not dispatched.
     ///
-    /// Every case names a DROP that used to be invisible. `neverRequested` is
-    /// the one that is not a `runShadowFMPhase` gate: it is written by the
-    /// reconciler sweep for an asset that reached the finalize floor without
-    /// anything ever asking for a scan at all — the state the three field
-    /// assets are in right now, and the one that no `runShadowFMPhase` gate
-    /// can explain because `runShadowFMPhase` was never reached.
+    /// Every case names a DROP that used to be invisible. `noCoverageLaneRow`
+    /// is the one that is not a `runShadowFMPhase` gate: it is written by the
+    /// reconciler sweep, which does not observe a gate at all.
+    ///
+    /// **Each case is named for what its writer can OBSERVE.** The four gates
+    /// each sit on the line that refused, so they can assert a cause. The sweep
+    /// cannot: it sees an asset with no coverage-lane row and no way to know
+    /// whether that is because nothing ever asked or because something asked on
+    /// a build that had no way to record the refusal. `noCoverageLaneRow` says
+    /// the second thing, and the distinction is not academic — FCDDB309, the
+    /// asset this bead was measured on, provably ran `runBackfill` TWICE and
+    /// still owns zero rows, so a reason reading `never_requested` would be
+    /// false for the very episode the sweep exists to reach. On a build
+    /// carrying this bead a refusal writes its own gate, so a sweep-written row
+    /// means "no gate on any build ever recorded one here", which is what an
+    /// operator can act on.
     enum Gate: String, Sendable, CaseIterable, Equatable {
         /// `effectiveFMBackfillMode == .off`. Either the build asked for it or
         /// the cohort registry demoted a `knownBad` cohort.
@@ -94,10 +104,14 @@ enum SemanticScanClaim {
         /// final-pass hook, which passes `request.podcastId ?? ""` — an absent
         /// podcast id rendered as a podcast whose id is the empty string.
         case podcastIdMissing = "podcast_id_missing"
-        /// Nothing ever asked. Written by the reconciler for an asset whose
-        /// transcript cleared the finalize floor and whose measured ad scan is
-        /// short, with no coverage-lane row of any kind.
-        case neverRequested = "never_requested"
+        /// No coverage-lane row of ANY kind exists. Written by the reconciler
+        /// sweep for an asset whose transcript cleared the finalize floor,
+        /// whose measured ad scan is short, and whose episode has no analysis
+        /// pass in flight — so nothing is going to mint one on its own.
+        ///
+        /// Deliberately NOT `neverRequested`: the sweep observes the absence of
+        /// a row, never the absence of a request. See the note on ``Gate``.
+        case noCoverageLaneRow = "no_coverage_lane_row"
 
         /// The string persisted in `backfill_jobs.deferReason`.
         var deferReason: String { "\(SemanticScanClaim.deferReasonPrefix)\(rawValue)" }
