@@ -154,9 +154,10 @@ struct SemanticScanClaimPredicateTests {
             periodicFullRescanIntervalEpisodes: 10
         ))
         #expect(plan.policy == .fullCoverage)
-        #expect(plan.phases == [.fullEpisodeScan],
-                "the claim's hardcoded (.fullEpisodeScan, offset 0) is only the runner's id \
-                while this is the whole plan")
+        #expect(
+            plan.phases == [.fullEpisodeScan],
+            "the claim's hardcoded (.fullEpisodeScan, offset 0) is the runner's id only while this is the whole plan"
+        )
 
         // Derived exactly the way `runPendingBackfill` derives it: the phase and
         // its index in the plan.
