@@ -61,12 +61,27 @@ struct SemanticScanClaimPredicateTests {
         #expect(SemanticScanClaim.isOwed(adScanFraction: fraction))
     }
 
-    /// **The transcript floor is 0.95, not 0.98, and the difference decides a
-    /// real asset.** 48E903D7 is transcribed to 95 % and is one of the three
-    /// this bead exists for; borrowing the ad-scan floor
-    /// (`episodePreparationCompleteThreshold`, 0.98) would exclude it from its
-    /// own fix. 0.95 is `finalizeBackfillMinCoverageRatio` — the TRANSCRIPT
-    /// number, calibrated for the seconds a decoder chops off the end.
+    /// **The transcript floor is 0.95, not 0.98, and the difference decides
+    /// real assets.** 0.95 is `finalizeBackfillMinCoverageRatio` — the
+    /// TRANSCRIPT number, calibrated for the seconds a decoder chops off the
+    /// end. Borrowing the ad-scan floor (`episodePreparationCompleteThreshold`,
+    /// 0.98) would demand a transcript be more complete than the scan it is a
+    /// prerequisite for, and on the 2026-08-03 pull it would drop both stranded
+    /// assets the sweep actually reaches: FCDDB309 measures 98.8 % and
+    /// 4FF3A238 98.9 % of their duration as bridged transcript area, so 0.98 is
+    /// inside the noise of a decoder's tail while 0.95 is not.
+    ///
+    /// **What this floor does NOT admit, contrary to the claim it carried until
+    /// R3.** 48E903D7 was described here as "transcribed to 95 %" and named as
+    /// the asset the 0.95 choice rescues. 95 % is its `fastTranscriptCoverageEndTime`
+    /// WATERMARK; its fast-pass transcript area is 33.1 % raw / 36.9 % bridged,
+    /// because the 2010 s of reach comes from FINAL-pass chunks and its fast
+    /// pass covers 699 s of a 2113 s episode. No numerator this gate is allowed
+    /// to use admits it, at 0.95 or any other constant — which is correct, not
+    /// a regression: `adScanCoveredSec` is intersected with the same fast-pass
+    /// region, so a claim for 48E903D7 would mint a re-drive whose scan
+    /// fraction could never reach the floor that retires it. It stays
+    /// playhead-9y9e's problem.
     @Test("the transcript gate uses the finalize floor, which admits 95%")
     func transcriptFloorAdmits95Percent() {
         #expect(AnalysisCoordinator.finalizeBackfillMinCoverageRatio == 0.95)
@@ -79,6 +94,82 @@ struct SemanticScanClaimPredicateTests {
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
             coveredSec: 0.94 * 2_113, episodeDurationSec: 2_113
         ) == false)
+    }
+
+    /// A transcript whose chunks are speech runs separated by breaths — i.e.
+    /// every real transcript. Speech 0.75 s, gap 0.11 s, which is FCDDB309's
+    /// measured shape (2,240 chunks, 620 gaps, median gap 0.120 s).
+    static func speechRanges(
+        count: Int,
+        speech: Double = 0.75,
+        gap: Double = 0.11
+    ) -> [(start: Double, end: Double)] {
+        (0..<count).map { index in
+            let start = Double(index) * (speech + gap)
+            return (start: start, end: start + speech)
+        }
+    }
+
+    /// Duration of an episode exactly filled by ``speechRanges(count:speech:gap:)``.
+    static func speechSpan(count: Int, speech: Double = 0.75, gap: Double = 0.11) -> Double {
+        Double(count) * (speech + gap) - gap
+    }
+
+    /// **The defect that made this sweep mint nothing in the field, in one
+    /// test.** A `transcript_chunks` row spans first word to last word, so the
+    /// RAW interval union of a COMPLETE transcript is only its speech density —
+    /// 87 % here, and 87.3 % / 89.2 % for the two field assets the bead is named
+    /// after. Comparing that to a 0.95 wall-clock floor is not a strict gate, it
+    /// is an unreachable one: measured on the 2026-08-03 pull, **zero of twelve**
+    /// assets cleared it, maximum 93.8 %.
+    ///
+    /// Bridging sub-ad-width gaps (playhead-pz32's
+    /// ``AnalysisCoverageMath/adScanBridgeableGapSec``, the same 5 s the ad-scan
+    /// area already uses) restores the reach reading. Both halves are asserted:
+    /// without the raw expectation this passes for a fixture that was never
+    /// gappy, and without the bridged one it passes for a gate that admits
+    /// nothing.
+    @Test("a complete transcript reads under the floor RAW and over it bridged")
+    func interUtteranceGapsMustBeBridged() {
+        let ranges = Self.speechRanges(count: 400)
+        let duration = Self.speechSpan(count: 400)
+
+        let raw = AnalysisCoverageMath.unionedSeconds(ranges)
+        #expect(raw / duration < 0.95,
+                "fixture is not gappy enough to prove anything: \(raw / duration)")
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: raw, episodeDurationSec: duration
+        ) == false)
+
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(fastRanges: ranges)
+        #expect(bridged > raw)
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: bridged, episodeDurationSec: duration
+        ), "a fully transcribed episode must clear the transcript floor")
+    }
+
+    /// The other direction, and the reason bridging is safe: 5 s coalesces a
+    /// breath and nothing else. A genuine untranscribed BLOCK — a music bed, an
+    /// outro no pass read, the 720 s hole in 48E903D7's fast pass — survives it,
+    /// so the gate still refuses an asset whose transcript has real holes.
+    @Test("bridging closes breaths, not blocks")
+    func bridgingDoesNotConcealUntranscribedBlocks() {
+        // 200 speech runs, then a 400 s hole, then 200 more.
+        let head = Self.speechRanges(count: 200)
+        let holeEnd = Self.speechSpan(count: 200) + 400
+        let tail = Self.speechRanges(count: 200).map {
+            (start: $0.start + holeEnd, end: $0.end + holeEnd)
+        }
+        let duration = holeEnd + Self.speechSpan(count: 200)
+
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(fastRanges: head + tail)
+        #expect(bridged < 0.95 * duration,
+                "a 400 s hole must not be bridged away")
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: bridged, episodeDurationSec: duration
+        ) == false)
+        // …and the gap really is wider than the bridge, or this proves nothing.
+        #expect(400 > AnalysisCoverageMath.adScanBridgeableGapSec)
     }
 
     /// This gate SUPPRESSES a mint, so its unmeasurable direction is the

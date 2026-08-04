@@ -15768,7 +15768,15 @@ actor AnalysisStore {
     /// `analysis_assets.createdAt` defaults to `strftime('%s','now')` — whole
     /// SECONDS — so several assets registered in one launch share a timestamp
     /// and an id-alphabetical tiebreak would order them by a UUID.
-    func fetchAssetIdsMissingCoverageLaneJobs(limit: Int) throws -> [String] {
+    ///
+    /// `offset` exists because the caller's rejects are not removed from this
+    /// set — an asset the sweep can never claim stays a candidate, and on a
+    /// fixed `LIMIT` would hold the front of the queue forever. The total order
+    /// above is what makes paging well-defined; see
+    /// ``AnalysisJobReconciler/nextSemanticScanClaimCandidates()``. A negative
+    /// offset is clamped to 0 rather than handed to SQLite, which treats it as
+    /// no offset at all — same outcome, but stated here rather than inherited.
+    func fetchAssetIdsMissingCoverageLaneJobs(limit: Int, offset: Int = 0) throws -> [String] {
         guard limit > 0 else { return [] }
         let sql = """
             SELECT a.id
@@ -15780,11 +15788,12 @@ actor AnalysisStore {
                     SELECT 1 FROM transcript_chunks c WHERE c.analysisAssetId = a.id
                   )
             ORDER BY a.createdAt ASC, a.rowid ASC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, limit)
+        bind(stmt, 2, max(0, offset))
         var ids: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             ids.append(text(stmt, 0))

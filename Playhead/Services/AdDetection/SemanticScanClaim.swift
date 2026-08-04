@@ -148,29 +148,76 @@ enum SemanticScanClaim {
         return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
     }
 
+    /// The seconds of audio an asset's fast transcript actually backs, with
+    /// sub-ad-width gaps BRIDGED — the numerator
+    /// ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)`` is
+    /// meant to be handed.
+    ///
+    /// **The raw chunk union is not a reach measure and using it as one made
+    /// this sweep mint nothing at all.** A `transcript_chunks` row spans the
+    /// FIRST WORD's start to the LAST WORD's end, so every inter-utterance
+    /// breath is a hole in `union(chunks)`. Measured on the 2026-08-03 device
+    /// pull, across all 12 assets: raw union / duration runs 3.9 %–93.8 % and
+    /// **not one asset clears 0.95** — FCDDB309 and 4FF3A238, the two the bead
+    /// names as transcribed to ~100 %, read 87.3 % and 89.2 %, from 620 and
+    /// ~700 gaps whose MEDIAN width is 0.12 s. A raw-union gate against a
+    /// wall-clock floor is therefore not strict, it is unreachable: it measures
+    /// SPEECH DENSITY and compares it to a number calibrated for REACH.
+    ///
+    /// playhead-pz32 had already found and removed exactly this shape one layer
+    /// down (see ``AnalysisCoverageMath/bridgingShortGaps(_:upTo:)``, which
+    /// records 0.68–0.976 on the 2026-04-25 capture and the same conclusion:
+    /// "an under-claim so total it deletes the signal instead of correcting
+    /// it"). Bridging at ``AnalysisCoverageMath/adScanBridgeableGapSec`` (5 s)
+    /// restores the reach reading — FCDDB309 → 98.8 %, 4FF3A238 → 98.9 % — and
+    /// cannot conceal an ad, because 5 s is shorter than the shortest span any
+    /// detection lane will call one.
+    ///
+    /// It also makes this gate COMMENSURABLE with ``isOwed(adScanFraction:)``.
+    /// ``AnalysisCoverageSummary/adScanCoveredSec`` is intersected with this
+    /// very region, so the ad-scan fraction is bounded above by
+    /// `bridgedTranscript / duration`. Gating on the raw union while judging
+    /// sufficiency on the bridged one compares two different denominators —
+    /// and gating on something LARGER than the bridged region (the watermark)
+    /// would solicit passes whose scan fraction could never reach the floor
+    /// that retires them.
+    static func bridgedTranscriptCoveredSec(
+        fastRanges: [(start: Double, end: Double)]
+    ) -> Double {
+        AnalysisCoverageMath.unionedSeconds(
+            AnalysisCoverageMath.bridgingShortGaps(
+                fastRanges,
+                upTo: AnalysisCoverageMath.adScanBridgeableGapSec
+            )
+        )
+    }
+
     /// Has the transcript reached far enough that a scan has something to read?
     ///
     /// ``AnalysisCoordinator/finalizeBackfillMinCoverageRatio`` (0.95), NOT
     /// ``episodePreparationCompleteThreshold`` (0.98). The two are different
     /// numbers for different quantities: 0.95 is the TRANSCRIPT floor,
     /// calibrated to tolerate the few seconds a decoder chops off the end of an
-    /// episode. Using the ad-scan floor here would exclude 48E903D7 — one of
-    /// the three assets this bead exists for, transcribed to 95 % — from its
-    /// own fix.
+    /// episode; 0.98 is the floor a completed AD SCAN is measured against, and
+    /// borrowing it here would demand a transcript be more complete than the
+    /// scan it is a prerequisite for.
     ///
     /// **The CONSTANT is shared with `finalizeBackfill`; the NUMERATOR is
     /// deliberately not.** ``AnalysisCoordinator/finalizeBackfillVerdict(chunks:episodeDuration:)``
     /// divides `chunks.map(\.endTime).max()` — a WATERMARK — by the duration.
-    /// The caller here passes ``AnalysisCoverageSummary/fastTranscriptCoveredSec``,
-    /// the interval UNION. They agree on a contiguous transcript and diverge on
-    /// a gappy one, where the watermark reads 100 % over audio nobody
-    /// transcribed: the same watermark-vs-union antipattern playhead-sd71 fixed
-    /// on the Activity screen. The union is the right numerator for THIS
-    /// question — a semantic scan can only read text that exists, so a
-    /// transcript with holes has proportionally less for it to read — which
-    /// makes this gate strictly stricter than `finalizeBackfill`'s. An asset
-    /// that `finalizeBackfill` would complete can therefore fail here, on
-    /// purpose, and it stays the transcript lane's problem until the holes fill.
+    /// The caller here passes ``bridgedTranscriptCoveredSec(fastRanges:)``,
+    /// which is an AREA. They agree on a contiguous transcript and diverge on a
+    /// gappy one, where the watermark reads 100 % over audio nobody transcribed
+    /// (the watermark-vs-union antipattern playhead-sd71 fixed on the Activity
+    /// screen). On the 2026-08-03 pull the divergence is not theoretical:
+    /// 48E903D7's fast pass reads 68.1 % by watermark and 36.9 % bridged, and
+    /// AD5F3A0A reads 100 % by watermark and 44.0 % bridged.
+    ///
+    /// So this gate is strictly stricter than `finalizeBackfill`'s. An asset it
+    /// would complete can fail here, on purpose, and it stays the transcript
+    /// lane's problem until the holes fill. What the numerator must NOT be is
+    /// the RAW union — see ``bridgedTranscriptCoveredSec(fastRanges:)`` for the
+    /// measurement showing that reads 0/12 in the field.
     ///
     /// Unmeasurable inputs return `false`. This gate SUPPRESSES a mint, so the
     /// safe direction is the opposite of `isOwed`'s: an asset whose transcript

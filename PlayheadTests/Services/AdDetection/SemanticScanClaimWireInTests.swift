@@ -462,6 +462,81 @@ struct SemanticScanClaimReconcilerTests {
         #expect(try await store.countResumableBackfillJobs(assetId: Self.assetId) == 1)
     }
 
+    /// **The field shape, end to end, and the one the sweep silently refused
+    /// until R3.** Every previous fixture in this suite gives the asset ONE
+    /// chunk spanning the whole episode, which is the only kind of transcript
+    /// whose raw interval union equals its reach. A real one is thousands of
+    /// speech runs separated by breaths: FCDDB309 is 2,240 fast chunks with 620
+    /// gaps of median 0.120 s, and its raw union is 87.3 % of a duration it has
+    /// transcribed to 99.9 %.
+    ///
+    /// So a contiguous-chunk fixture cannot tell a correct gate from one that
+    /// mints nothing, and the sweep measured **0 of 12** assets over the floor
+    /// on the 2026-08-03 pull while every test in this file passed. This is the
+    /// test that fails when the numerator goes back to the raw union.
+    @Test("an asset transcribed in real speech runs — breaths, not blocks — is claimed")
+    func breathGappedTranscriptIsClaimed() async throws {
+        let runs = 400
+        let ranges = SemanticScanClaimPredicateTests.speechRanges(count: runs)
+        let duration = SemanticScanClaimPredicateTests.speechSpan(count: runs)
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: Self.assetId,
+                episodeId: Self.episodeId,
+                assetFingerprint: Self.fingerprint,
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/FCDDB309.m4a",
+                featureCoverageEndTime: duration,
+                fastTranscriptCoverageEndTime: duration,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.completeFull.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: duration
+            )
+        )
+        _ = try await store.insertTranscriptChunks(ranges.enumerated().map { index, range in
+            claimTestChunk(assetId: Self.assetId, index: index, start: range.start, end: range.end)
+        })
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-terminal",
+                jobType: "preAnalysis",
+                episodeId: Self.episodeId,
+                podcastId: "pod-FCDDB309",
+                analysisAssetId: Self.assetId,
+                workKey: AnalysisJob.computeWorkKey(
+                    fingerprint: Self.fingerprint,
+                    analysisVersion: PreAnalysisConfig.analysisVersion,
+                    jobType: "preAnalysis"
+                ),
+                sourceFingerprint: Self.fingerprint,
+                desiredCoverageSec: duration,
+                state: "complete"
+            )
+        )
+
+        // The fixture must genuinely straddle the floor, or it proves nothing:
+        // the store's own raw union has to read UNDER 0.95 while the transcript
+        // is complete. This is the assertion that makes the test non-vacuous.
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]
+        )
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: summary.fastTranscriptCoveredSec,
+            episodeDurationSec: summary.episodeDurationSec
+        ) == false, "the RAW union must fail the floor, else this fixture is contiguous")
+
+        let report = try await makeReconciler(
+            store: store, downloads: cachedDownloads()
+        ).reconcile()
+        #expect(report.semanticScanClaimsMinted == 1,
+                "a fully transcribed episode must be claimable")
+        #expect(report.adScanRedrivesMinted == 1)
+    }
+
     /// A half-transcribed asset belongs to the transcript lane. Claiming here
     /// would spend an ad-scan re-drive on a pass whose real job is
     /// transcription — and the ad-scan budget is only two.
@@ -679,6 +754,43 @@ struct SemanticScanClaimReconcilerTests {
                 "one fewer reject and the same asset is inside the window")
     }
 
+    /// **A window is a rate limit only if it MOVES.** A rejected candidate
+    /// writes nothing, so it is still a candidate — in the same oldest-first
+    /// position — next pass. A full window of assets the sweep can never accept
+    /// therefore starves everything behind it FOREVER on a fixed `LIMIT`, and
+    /// "never" is a real state rather than a limit case: on the 2026-08-03 pull
+    /// two of the four zero-row assets are half-transcribed with terminal
+    /// analysis jobs, so their transcripts will not grow and their rejection is
+    /// permanent.
+    ///
+    /// The same fixture `candidateWindowBoundsOnePass` proves is blocked on pass
+    /// one must therefore be REACHED on pass two. Deleting the cursor leaves
+    /// that suite green and this test red, which is the whole point of it being
+    /// a separate test: one asserts the bound, this asserts liveness.
+    @Test("a claimable asset behind a full window of permanent rejects is reached next pass")
+    func candidateWindowRotatesPastPermanentRejects() async throws {
+        let window = AnalysisJobReconciler.maxSemanticScanClaimCandidatesPerReconcile
+        let store = try await makeTestStore()
+        // Every one of these is half-transcribed with a `complete` analysis job:
+        // rejected this pass, rejected every pass, never removed from the set.
+        for ordinal in 0..<window {
+            try await seedExtraCandidate(store, ordinal: ordinal, qualifying: false)
+        }
+        try await seedZeroRowAsset(store)
+
+        // ONE reconciler across both passes — the cursor is its state, and a
+        // fresh instance would legitimately restart at the oldest candidate.
+        let reconciler = makeReconciler(store: store, downloads: cachedDownloads())
+        var minted: [Int] = []
+        for _ in 0..<3 {
+            minted.append(try await reconciler.reconcile().semanticScanClaimsMinted)
+        }
+        #expect(minted == [0, 1, 0], "claims minted per pass: \(minted)")
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 100)
+                == [Self.assetId],
+                "the one claimable asset, and only it, reached the re-drive sweep")
+    }
+
     /// A claim is a request, not a dispatchable row, and the pass it unblocks is
     /// already counted as `adScanRedrivesMinted`. Counting both would report the
     /// same repair twice to the background-task ledger.
@@ -784,5 +896,28 @@ struct MissingCoverageLaneSelectorTests {
         #expect(try await store.fetchAssetIdsMissingCoverageLaneJobs(limit: 2)
                 == ["zz-first", "mm-second"])
         #expect(try await store.fetchAssetIdsMissingCoverageLaneJobs(limit: 0).isEmpty)
+    }
+
+    /// The offset pages the SAME total order, so the caller can walk past
+    /// candidates it can never accept instead of re-reading them forever. Off
+    /// the end returns empty rather than wrapping — wrapping is the caller's
+    /// decision, and a query that silently restarted would make "I have seen
+    /// everything" unobservable.
+    @Test("the offset pages the candidate order and clamps a negative")
+    func offsetPagesTheOrder() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, id: "zz-first")
+        try await seedAsset(store, id: "mm-second")
+        try await seedAsset(store, id: "aa-third")
+        #expect(try await store.fetchAssetIdsMissingCoverageLaneJobs(limit: 2, offset: 1)
+                == ["mm-second", "aa-third"])
+        #expect(try await store.fetchAssetIdsMissingCoverageLaneJobs(limit: 2, offset: 2)
+                == ["aa-third"])
+        #expect(try await store.fetchAssetIdsMissingCoverageLaneJobs(limit: 2, offset: 3).isEmpty)
+        // A negative offset is clamped, not passed through: SQLite reads it as
+        // "no offset", and relying on that would be an invariant held by a
+        // dependency rather than by this function.
+        #expect(try await store.fetchAssetIdsMissingCoverageLaneJobs(limit: 1, offset: -5)
+                == ["zz-first"])
     }
 }

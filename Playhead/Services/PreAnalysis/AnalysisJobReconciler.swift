@@ -148,6 +148,11 @@ actor AnalysisJobReconciler {
     private var backlogScarcityRanking: (any BacklogScarcityRanking)?
     private let logger = Logger(subsystem: "com.playhead", category: "JobReconciler")
     private var isReconciling = false
+    /// playhead-fil5: rotating read cursor for the semantic-scan-claim sweep's
+    /// candidate window. See ``nextSemanticScanClaimCandidates()`` for why a
+    /// fixed `LIMIT` on an oldest-first query whose rejects never leave is a
+    /// wall rather than a rate limit.
+    private var semanticScanClaimSweepOffset = 0
 
     /// The current analysis version. Jobs whose workKey encodes a different
     /// version are considered stale and will be superseded.
@@ -196,9 +201,16 @@ actor AnalysisJobReconciler {
     /// candidate costs indexed reads, while a candidate that clears the
     /// transcript and coverage floors here costs a full
     /// `fetchTranscriptChunks` so the claim can name the transcript version the
-    /// runner would derive. 24 covers several times the largest library seen on
-    /// the device pulls, and the query's oldest-first ordering is stable, so a
-    /// larger backlog drains across launches rather than being dropped.
+    /// runner would derive. 24 covers six times the largest zero-row population
+    /// yet measured in the field (4 of 12 assets, 2026-08-03).
+    ///
+    /// **It is a window into the candidate list, not a prefix of it.** Rejects
+    /// write nothing and so stay candidates forever, which on a fixed
+    /// oldest-first `LIMIT` would let a full window of never-claimable assets
+    /// starve everything behind them permanently. ``nextSemanticScanClaimCandidates()``
+    /// rotates the read cursor for exactly that reason; without it "a larger
+    /// backlog drains across launches" would be a claim the mechanism cannot
+    /// make.
     static let maxSemanticScanClaimCandidatesPerReconcile = 24
 
     /// playhead-y8f3: time source for the cap-out retry cooldown and the
@@ -1251,13 +1263,58 @@ actor AnalysisJobReconciler {
         }
     }
 
-    private func mintSemanticScanClaimsThrowing() async throws -> Int {
-        let assetIds = try await store.fetchAssetIdsMissingCoverageLaneJobs(
-            limit: Self.maxSemanticScanClaimCandidatesPerReconcile
+    /// The next window of zero-row candidates, ROTATING so a candidate that can
+    /// never be claimed cannot hold the front of the queue forever.
+    ///
+    /// **Why a fixed `LIMIT` alone is not a rate limit but a wall.** The
+    /// candidate query is oldest-first and a rejected candidate writes nothing,
+    /// so it is still a candidate — in the same position — on the next pass.
+    /// Every reject the sweep can never accept is therefore a PERMANENT
+    /// occupant of the window: an asset whose transcript stalled below the
+    /// finalize floor and whose analysis jobs are terminal will never clear it
+    /// and will never leave. On the 2026-08-03 pull two of the four zero-row
+    /// assets are exactly that shape (48E903D7 at 36.9 % of its duration
+    /// transcribed, 2C5C3699 at 4.3 %, both with `complete` analysis jobs), so a
+    /// library only needs ``maxSemanticScanClaimCandidatesPerReconcile`` of them
+    /// ahead of a claimable asset for the sweep to be silently dead — the exact
+    /// failure this bead exists to remove, reintroduced one layer up.
+    ///
+    /// The cursor makes the per-pass bound a rate limit again: it advances by a
+    /// full window whenever the query filled one and resets when it did not, so
+    /// the sweep walks the whole candidate population across passes and wraps.
+    /// A population that fits in one window (every device pull so far: 4
+    /// candidates against a window of 24) never leaves offset 0, so this is
+    /// inert until it is needed.
+    ///
+    /// In-memory rather than persisted on purpose. The cursor is an ordering
+    /// fairness device, not state anything depends on being correct: a fresh
+    /// process restarts at the oldest candidate, which is the right place to
+    /// start and exactly what a persisted cursor would have to special-case.
+    private func nextSemanticScanClaimCandidates() async throws -> [String] {
+        let window = Self.maxSemanticScanClaimCandidatesPerReconcile
+        var candidates = try await store.fetchAssetIdsMissingCoverageLaneJobs(
+            limit: window,
+            offset: semanticScanClaimSweepOffset
         )
+        // The population shrank past the cursor (claims landed, assets were
+        // deleted). Wrap NOW rather than returning empty and skipping a whole
+        // pass — an empty read at a non-zero offset is not evidence there is
+        // nothing to do.
+        if candidates.isEmpty, semanticScanClaimSweepOffset > 0 {
+            semanticScanClaimSweepOffset = 0
+            candidates = try await store.fetchAssetIdsMissingCoverageLaneJobs(
+                limit: window, offset: 0
+            )
+        }
+        semanticScanClaimSweepOffset =
+            candidates.count < window ? 0 : semanticScanClaimSweepOffset + window
+        return candidates
+    }
+
+    private func mintSemanticScanClaimsThrowing() async throws -> Int {
+        let assetIds = try await nextSemanticScanClaimCandidates()
         guard !assetIds.isEmpty else { return 0 }
 
-        let summaries = try await store.fetchCoverageSummariesByAssetIds(Set(assetIds))
         // playhead-fil5 R2: the SAME guard ``mintAdScanRedrives`` applies one
         // step later, and it belongs here for a sharper reason than symmetry.
         //
@@ -1277,23 +1334,38 @@ actor AnalysisJobReconciler {
         var minted = 0
         for assetId in assetIds {
             guard minted < Self.maxSemanticScanClaimsPerReconcile else { break }
-            let summary = summaries[assetId]
+
+            // Resolved FIRST: the asset row names the episode and carries the
+            // duration every measure below is a fraction of, and the in-flight
+            // question is answered from an already-batched set, so a candidate
+            // whose pass is mid-drain is rejected before it costs a read. A
+            // candidate whose asset row cannot be read is skipped rather than
+            // claimed with a nil podcast — without it we cannot tell whether a
+            // pass is already in flight, and claiming then is a guess.
+            guard let asset = try await store.fetchAsset(id: assetId) else { continue }
+            guard !episodesWithPendingWork.contains(asset.episodeId) else { continue }
+
             // The transcript has to have reached the finalize floor first. A
             // half-transcribed asset is the transcript lane's work, and minting
             // here would spend an ad-scan re-drive on a pass whose real job is
             // transcription.
             //
-            // `fastTranscriptCoveredSec` is the interval UNION, not the
-            // `max(endTime)` watermark `AnalysisCoordinator.finalizeBackfillVerdict`
-            // divides. That is the load-bearing half of this line: a gappy
-            // transcript reads 100 % by watermark over audio nobody
-            // transcribed (the playhead-sd71 antipattern), and a semantic scan
-            // can only read text that exists. Passing the watermark here would
-            // claim — and spend a capped ad-scan re-drive on — episodes whose
-            // transcript is full of holes.
+            // The numerator is an AREA with sub-ad-width gaps bridged, and both
+            // halves of that are load-bearing in opposite directions. Against
+            // the `max(endTime)` WATERMARK `AnalysisCoordinator.finalizeBackfillVerdict`
+            // divides, a gappy transcript reads 100 % over audio nobody
+            // transcribed (the playhead-sd71 antipattern) — 48E903D7 reads
+            // 68.1 % by watermark and 36.9 % as an area. Against the RAW chunk
+            // union, a fully transcribed episode reads ~87 %, because a chunk
+            // spans first-word to last-word and every breath is a hole: on the
+            // 2026-08-03 pull the raw union cleared 0.95 for **zero of twelve**
+            // assets, which is a gate that mints nothing rather than a strict
+            // one. See ``SemanticScanClaim/bridgedTranscriptCoveredSec(fastRanges:)``.
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
-                coveredSec: summary?.fastTranscriptCoveredSec,
-                episodeDurationSec: summary?.episodeDurationSec
+                coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
+                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                ),
+                episodeDurationSec: asset.episodeDurationSec
             ) else { continue }
             // Whether a scan is OWED is deliberately not re-asked here.
             // ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``
@@ -1318,15 +1390,6 @@ actor AnalysisJobReconciler {
             // which takes the scan rows with it). If a future migration or a
             // partial-wipe recovery path ever does strand scan rows without job
             // rows, this is the line to revisit.
-
-            // Resolved BEFORE the transcript read, which is the expensive step:
-            // the asset row is what names the episode, and the episode is what
-            // decides both of the next two questions. A candidate whose asset
-            // row cannot be read is skipped rather than claimed with a nil
-            // podcast — without it we cannot tell whether a pass is already in
-            // flight, and claiming then is a guess.
-            guard let asset = try await store.fetchAsset(id: assetId) else { continue }
-            guard !episodesWithPendingWork.contains(asset.episodeId) else { continue }
 
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
             guard !chunks.isEmpty else { continue }

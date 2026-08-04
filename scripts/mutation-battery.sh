@@ -483,6 +483,7 @@
 #
 #   PARTIAL RE-RUN 2026-08-04 (playhead-fil5). Batches 400-407 only, added by
 #   this bead: SC01-SC22 (SC13 was drafted and dropped, see SC01), 21 entries,
+#   later 31 across 9 batches — see the R1/R2/R3 review-round notes below,
 #   7 batches. FINAL 21 KILLED / 0 SURVIVED / 0 ERROR, 8 builds. Batches 1-323
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   391 live entries. (Superseded by the R1 round below, which adds three.)
@@ -551,6 +552,46 @@
 #       documents as happening inside the live app process while the foreground
 #       runner drains. The sweep now applies the same `fetchActiveJobEpisodeIds`
 #       guard `mintAdScanRedrives` applies one step later.
+#
+#   R3 REVIEW ROUND, 2026-08-04. A NEW batch 409 with four entries — SC30,
+#   SC31, SC32, SC33 — bringing the SC series to 31 entries in 9 batches.
+#   SC21, SC25 and SC27 were RE-ANCHORED (the sweep's transcript gate and its
+#   candidate read were both rewritten); every other SC anchor was re-checked
+#   with `--dry-run --batch` and still applies exactly once.
+#
+#   Batch 409 is NOT a coverage-hole batch. SC30/SC31 restore a defect that was
+#   live on this branch: the sweep's transcript gate divided the RAW interval
+#   union of `pass='fast'` chunks by the episode duration and compared it to
+#   0.95. A `transcript_chunks` row spans FIRST WORD to LAST WORD, so that
+#   quantity is speech density, not reach — measured on the 2026-08-03 device
+#   pull it clears 0.95 for ZERO of 12 assets (max 93.8 %), with FCDDB309 at
+#   87.3 % and 4FF3A238 at 89.2 % despite both being transcribed to ~100 %. The
+#   P0's reconciler half therefore minted nothing at all in the field while
+#   every test in the suite passed, because every fixture gave its asset ONE
+#   chunk spanning the whole episode — the only transcript whose raw union
+#   equals its reach. playhead-pz32 had already found and removed the identical
+#   shape one layer down (`AnalysisCoverageMath.bridgingShortGaps`); the fix is
+#   to reuse it, which also makes the transcript floor commensurable with the
+#   ad-scan floor, since `adScanCoveredSec` is intersected with that same
+#   bridged region. SC33 is the direction control — bridging wide enough to
+#   close a real untranscribed BLOCK is the inverse failure.
+#
+#   SC32 is the round's second family (a bound that reads as a rate limit but
+#   is a wall). The candidate query is oldest-first and a rejected candidate
+#   writes nothing, so it stays a candidate in the same position forever: a full
+#   window of never-claimable assets starves everything behind it permanently,
+#   and "never" is a real state — two of the four zero-row assets on the pull
+#   are half-transcribed with terminal analysis jobs. A rotating read cursor
+#   makes the per-pass bound a rate limit again.
+#
+#   ONE THING DELIBERATELY NOT REGISTERED, on the record like SC29: the
+#   `max(0, offset)` clamp in `fetchAssetIdsMissingCoverageLaneJobs`. SQLite
+#   specifies a negative OFFSET as equivalent to zero, so removing the clamp is
+#   behaviourally identical and any mutant would SURVIVE by construction — a
+#   fabricated coverage hole, not a rail. The clamp stays as a boundary
+#   guarantee that does not depend on a dependency's coercion rule, and the test
+#   that pins the behaviour stays with it; neither is offered as mutation
+#   coverage.
 #
 #   ONE SURVIVOR ON THE WAY, and it was real rather than a mis-stated
 #   expectation: SC09 ("" persisted as if it were a podcast id) survived
@@ -2087,6 +2128,12 @@ T_FIL5_GAPPY="a GAPPY transcript whose watermark reads 100% still gets no claim"
 T_FIL5_MINT_CAP="one pass mints at most the cap, and the rest drain next launch"
 T_FIL5_WINDOW="a claimable asset beyond the candidate window waits for the next pass"
 T_FIL5_IN_FLIGHT_EP="an episode with an analysis pass in flight gets no claim"
+
+# playhead-fil5 R3 review round.
+T_FIL5_BRIDGED="a complete transcript reads under the floor RAW and over it bridged"
+T_FIL5_BLOCKS="bridging closes breaths, not blocks"
+T_FIL5_BREATH="an asset transcribed in real speech runs — breaths, not blocks — is claimed"
+T_FIL5_ROTATE="a claimable asset behind a full window of permanent rejects is reached next pass"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3916,6 +3963,34 @@ MUTATIONS=(
   # runner drains — so the mint budget goes to episodes that were about to ask
   # for themselves, stamped with a reason asserting nothing asked.
   "SC28|408|RECON|$T_FIL5_IN_FLIGHT_EP"
+
+  # Batch 409 — the NUMERATOR, and the window's liveness. Added in the R3 review
+  # round, and unlike batch 408 these are not coverage holes: SC30/SC31 restore a
+  # defect that was live on this branch and made the reconciler sweep mint
+  # NOTHING on the field data it was written for (0 of 12 assets over the floor,
+  # 2026-08-03 pull), and SC32 restores a wall that made the candidate window
+  # permanently starvable. Every existing fixture stayed green under both.
+  #
+  # SC30 — the sweep's numerator reverts to the RAW chunk union. A chunk spans
+  # first-word to last-word, so the raw union of a COMPLETE transcript is its
+  # speech density (87.3 % for FCDDB309, 89.2 % for 4FF3A238) and a 0.95
+  # wall-clock floor is unreachable rather than strict. playhead-pz32 found and
+  # removed the identical shape one layer down; this is it re-entering.
+  "SC30|409|RECON|$T_FIL5_BREATH"
+  # SC31 — the same defect where it reads as a constant rather than a choice: the
+  # bridge width goes to 0, so the helper silently becomes the raw union for
+  # every caller. Separate from SC30: one is the call site, one is the contract.
+  "SC31|409|CLAIM|$T_FIL5_BRIDGED;$T_FIL5_BREATH"
+  # SC32 — the candidate cursor stops advancing, restoring the fixed oldest-first
+  # prefix. Rejects write nothing and so keep their position forever, which makes
+  # a full window of never-claimable assets a permanent wall. Invisible to SC26
+  # and SC27, which both bound the window correctly while it stays stuck at 0.
+  "SC32|409|RECON|$T_FIL5_ROTATE"
+  # SC33 — the direction control for SC30/SC31. Bridging is only defensible while
+  # it is narrower than the shortest span any lane calls an ad; widen it and it
+  # conceals genuine untranscribed BLOCKS, claiming assets whose transcript a
+  # scan cannot read. Without this the suite would pin "bridge more" as free.
+  "SC33|409|CLAIM|$T_FIL5_BLOCKS"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4275,6 +4350,10 @@ describe_mutation() {
     SC23) echo "fil5: the mode-off guard inside runShadowFMPhase stops recording — the shadow-retry drain's only gate" ;;
     SC24) echo "fil5: the mode-off gate in runBackfill stops recording" ;;
     SC25) echo "fil5: the sweep's transcript gate reads the watermark, so a gappy transcript claims at 100%" ;;
+    SC30) echo "fil5: the sweep's numerator reverts to the RAW union — 0 of 12 field assets clear the floor" ;;
+    SC31) echo "fil5: the bridge width goes to 0, making the shared helper the raw union for every caller" ;;
+    SC32) echo "fil5: the candidate cursor stops advancing, so a window of permanent rejects walls off the rest" ;;
+    SC33) echo "fil5: bridging widens until it conceals a genuine untranscribed block" ;;
     SC26) echo "fil5: the sweep's per-pass mint cap goes, emptying the window into a queue that drains 8" ;;
     SC27) echo "fil5: the candidate window widens to 64, paying a transcript read per reject" ;;
     SC28) echo "fil5: the sweep claims episodes whose analysis pass is still in flight" ;;
@@ -9590,16 +9669,79 @@ EOF
   # interval union. Identical on a contiguous transcript; 100 % on a gappy one.
   SC25)
     snippet OLD <<'EOF'
-            guard SemanticScanClaim.transcriptClearsFinalizeFloor(
-                coveredSec: summary?.fastTranscriptCoveredSec,
-                episodeDurationSec: summary?.episodeDurationSec
-            ) else { continue }
+                coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
+                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                ),
 EOF
     snippet NEW <<'EOF'
-            guard SemanticScanClaim.transcriptClearsFinalizeFloor(
-                coveredSec: summary?.fastTranscriptCoverageEndSec,
-                episodeDurationSec: summary?.episodeDurationSec
-            ) else { continue }
+                coveredSec: asset.fastTranscriptCoverageEndTime,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC30 (R3) — THE defect this round found, restored in one edit: the sweep's
+  # numerator goes back to the RAW chunk union. Nothing breaks, no gate widens,
+  # every contiguous-chunk fixture in the suite still passes — and the sweep
+  # mints NOTHING in the field, because a `transcript_chunks` row spans
+  # first-word to last-word and a complete transcript's raw union is only its
+  # speech density. Measured on the 2026-08-03 pull: 0 of 12 assets over 0.95,
+  # maximum 93.8 %, with the two assets the bead is named after at 87.3 % and
+  # 89.2 %. Killed only by a fixture with real inter-utterance gaps.
+  SC30)
+    snippet OLD <<'EOF'
+                coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
+                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                ),
+EOF
+    snippet NEW <<'EOF'
+                coveredSec: AnalysisCoverageMath.unionedSeconds(
+                    try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                ),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC31 (R3) — the same defect one layer down, where it looks like a constant
+  # rather than a choice: the bridge width goes to zero, so
+  # `bridgedTranscriptCoveredSec` silently becomes the raw union for every
+  # caller. Distinct from SC30 because it survives SC30's rail being deleted and
+  # vice versa — one is the call site, one is the helper's contract.
+  SC31)
+    snippet OLD <<'EOF'
+                upTo: AnalysisCoverageMath.adScanBridgeableGapSec
+EOF
+    snippet NEW <<'EOF'
+                upTo: 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC32 (R3) — the candidate cursor stops advancing, i.e. the window becomes a
+  # fixed oldest-first prefix again. A reject writes nothing and so stays a
+  # candidate in the same position forever, which makes a full window of
+  # never-claimable assets a permanent wall in front of everything behind it.
+  # Invisible to every bound test: SC26's mint cap and SC27's window both still
+  # hold, and the sweep still mints for any library that fits in one window.
+  SC32)
+    snippet OLD <<'EOF'
+        semanticScanClaimSweepOffset =
+            candidates.count < window ? 0 : semanticScanClaimSweepOffset + window
+EOF
+    snippet NEW <<'EOF'
+        semanticScanClaimSweepOffset = 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC33 (R3) — bridging widens until it conceals real holes. The direction
+  # matters as much as the mechanism: a bridge wide enough to close an
+  # untranscribed BLOCK claims assets whose transcript a scan cannot read, which
+  # is the failure SC30 causes inverted. 5 s is defensible only because it is
+  # shorter than the shortest span any lane calls an ad; 500 s is not.
+  SC33)
+    snippet OLD <<'EOF'
+                fastRanges,
+                upTo: AnalysisCoverageMath.adScanBridgeableGapSec
+EOF
+    snippet NEW <<'EOF'
+                fastRanges,
+                upTo: 500
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -9679,12 +9821,13 @@ EOF
   SC21)
     snippet OLD <<'EOF'
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
-                coveredSec: summary?.fastTranscriptCoveredSec,
-                episodeDurationSec: summary?.episodeDurationSec
+                coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
+                    fastRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)
+                ),
+                episodeDurationSec: asset.episodeDurationSec
             ) else { continue }
 EOF
     snippet NEW <<'EOF'
-            _ = summary
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -9718,10 +9861,10 @@ EOF
   # loop at 8 MINTS, so the window only bites once the assets ahead are rejects.
   SC27)
     snippet OLD <<'EOF'
-            limit: Self.maxSemanticScanClaimCandidatesPerReconcile
+        let window = Self.maxSemanticScanClaimCandidatesPerReconcile
 EOF
     snippet NEW <<'EOF'
-            limit: Self.maxAdScanRedriveCandidatesPerReconcile
+        let window = Self.maxAdScanRedriveCandidatesPerReconcile
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
