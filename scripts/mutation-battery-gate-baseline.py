@@ -63,6 +63,8 @@ K = SUITE + ".ClassificationTests."
 M = SUITE + ".MergeTests."
 CLI = SUITE + ".CLITests."
 W = SUITE + ".FastGateWiringTests."
+TC = SUITE + ".TierChangeTests."
+T = SUITE + ".AcceptOutputTests."
 
 
 # name, file, description, old, new, expected-to-fail test ids
@@ -305,6 +307,47 @@ MUTATIONS = [
         "        if self.ok and self.total_failures == 0:",
         "        if self.total_failures == 0:",
         [V + "test_a_run_that_executed_NOTHING_is_never_called_GREEN"],
+    ),
+    # ---- playhead-26od R5: an accept has to SAY what it accepted ----
+    #
+    # Both of these defects shipped once. The accept that carried this bead's
+    # third observation added 28 entries and its commit message called them "all
+    # timeouts" — three were assertion-only and a fourth mixed — and the same
+    # accept crossed fifteen entries into `deterministic`, arming a hard failure
+    # on each of them, in silence. Neither is a policy question; both were
+    # unsayable because the tool printed only membership.
+    (
+        "R28", GB,
+        "a tier PROMOTION goes unannounced, so an accept arms the "
+        "pass-direction check on N entries and says nothing about any of them",
+        '        if promoted:\n            print(\n                "  ARMED:',
+        '        if False:\n            print(\n                "  ARMED:',
+        [T + "test_a_promotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        "R29", GB,
+        "every deterministic entry is re-announced as a promotion, not just the "
+        "ones that CHANGED — the loud line stops being read",
+        "        if now == TIER_DETERMINISTIC and before != TIER_DETERMINISTIC:",
+        "        if now == TIER_DETERMINISTIC:",
+        [TC + "test_an_ALREADY_deterministic_entry_is_not_re_announced"],
+    ),
+    (
+        "R30", GB,
+        "the added entries lose their KIND, which is exactly the state in which "
+        "28 entries were summarised as 'all timeouts'",
+        '            print("  + [%s] %s" % (_kinds_label(merged["tests"][key]), key))',
+        '            print("  + %s" % key)',
+        [T + "test_every_added_entry_carries_its_KIND",
+         W + "test_accept_baseline_writes_the_file"],
+    ),
+    (
+        "R31", FG,
+        "the disk preflight is dropped from the gate, so a run that should "
+        "refuse at exit 28 goes on to wedge with no output instead",
+        '  if ! python3 scripts/disk_preflight.py "${PREFLIGHT_ARGS[@]}"; then',
+        '  if ! true "${PREFLIGHT_ARGS[@]}"; then',
+        [W + "test_the_disk_preflight_runs_BEFORE_xcodebuild"],
     ),
     (
         "R99", GB,
