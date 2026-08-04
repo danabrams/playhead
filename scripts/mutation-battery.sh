@@ -664,6 +664,46 @@
 #   that pins the behaviour stays with it; neither is offered as mutation
 #   coverage.
 #
+#   R5 REVIEW ROUND, 2026-08-04. NO new entries — the series stays at 32 in 12
+#   batches, 402 live. The round's two findings were both stale MEASUREMENTS
+#   rather than behaviour (the zero-row population still stated as 3 in
+#   `ReconciliationReport`, and a test argument list labelled "the three field
+#   assets' measured shapes" whose 0.026 and 0.47 match nothing in the pull), so
+#   there is nothing new to mutate: a doc comment has no mutant, and the
+#   corrected arguments assert `isOwed` below the floor, which SC01 and SC02
+#   already rail.
+#
+#   ANCHOR RE-CHECK: `--dry-run --batch` over all twelve batches (400-412) —
+#   every anchor applied exactly once and the tree was restored, each time.
+#   BATCH 401 RE-RUN for real because the round's test edit lives in the file
+#   its victims do: 5 KILLED / 0 SURVIVED / 0 ERROR, two builds, 4m20s.
+#
+#   ONE THING THE RE-RUN REVEALED, worth having on the record: the corrected
+#   argument list STRENGTHENED SC02. The old list's largest value was 0.9, which
+#   is below BOTH the real floor (0.98) and SC02's mutated one (0.95), so "the
+#   device's unscanned assets are all owed a scan" could not see that mutation
+#   at all — it is not any entry's named victim, but the batch runs the focused
+#   suite and reports every failure it observes. Expressing the near-floor bound
+#   as `semanticBackfillSufficientAdScanFraction - 0.001` rather than a literal
+#   makes it move with the constant it probes, and it now appears in SC02's
+#   observed failures alongside `$T_FIL5_CLAIM_FLOOR`. A
+#   literal that happens to sit below both the real and the mutated threshold is
+#   a vacuous bound; deriving it from the constant is what makes it a rail.
+#
+#   DISK, SAMPLED A THIRD TIME. Batch 401 WITH its baseline (two builds):
+#   11.87 GiB free at start, 6.73 GiB minimum, 10.73 GiB at exit — 5.14 GiB of
+#   drawdown over 54 samples at 5 s. That sits between R2's 5.43 (two builds)
+#   and R4's 4.23 (one build, `PLAYHEAD_MB_SKIP_BASELINE=1`), which is the shape
+#   you would expect: the second build is most of the cost. The first attempt at
+#   `PLAYHEAD_DISK_MIN_GIB=10` refused the MUTATED run at 7.48 GiB with five
+#   ERRORs — the R4 note's rc=28 pattern exactly — and the retry used
+#   `PLAYHEAD_DISK_MIN_GIB=8`, justified by that same failed attempt having
+#   measured the baseline phase's own drawdown at 3.52 GiB (11.00 -> 7.48).
+#   The preflight stayed ARMED throughout; it is a START gate, so the 6.73 GiB
+#   minimum is expected and is not a breach of the 8.00 floor.
+#   `~/Library/Developer/CoreDevice`, 38 GB in R4, measured 1.4 MB this round —
+#   it drained on its own, so do not budget for reclaiming it.
+#
 #   ONE SURVIVOR ON THE WAY, and it was real rather than a mis-stated
 #   expectation: SC09 ("" persisted as if it were a podcast id) survived
 #   because `runBackfill`'s podcastId gate pre-converted "" to nil at the CALL
