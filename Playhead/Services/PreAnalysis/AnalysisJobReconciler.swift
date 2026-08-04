@@ -1256,6 +1256,15 @@ actor AnalysisJobReconciler {
             // half-transcribed asset is the transcript lane's work, and minting
             // here would spend an ad-scan re-drive on a pass whose real job is
             // transcription.
+            //
+            // `fastTranscriptCoveredSec` is the interval UNION, not the
+            // `max(endTime)` watermark `AnalysisCoordinator.finalizeBackfillVerdict`
+            // divides. That is the load-bearing half of this line: a gappy
+            // transcript reads 100 % by watermark over audio nobody
+            // transcribed (the playhead-sd71 antipattern), and a semantic scan
+            // can only read text that exists. Passing the watermark here would
+            // claim — and spend a capped ad-scan re-drive on — episodes whose
+            // transcript is full of holes.
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
                 coveredSec: summary?.fastTranscriptCoveredSec,
                 episodeDurationSec: summary?.episodeDurationSec
@@ -1268,6 +1277,21 @@ actor AnalysisJobReconciler {
             // no test could ever kill. The transcript floor above is different:
             // it is this sweep's own judgement about which assets are still the
             // transcript lane's problem, and nothing downstream makes it.
+            //
+            // The cost of that choice, stated so nobody has to re-derive it:
+            // a candidate that clears the transcript floor but turns out not to
+            // be owed a scan pays a whole-transcript read, a SHA-256 over it and
+            // two more store round-trips before `record` says `.notOwed`, and it
+            // pays them again on every `reconcile()` because no row is written
+            // and it stays a candidate. That is affordable because the state is
+            // near-unreachable in production rather than merely rare: reaching
+            // it needs `semantic_scan_results` rows covering >= 98 % of the
+            // episode with ZERO `backfill_jobs` rows, and nothing in the store
+            // ever deletes a `backfill_jobs` row (there is no `DELETE FROM
+            // backfill_jobs` — the only removal is the asset's own FK CASCADE,
+            // which takes the scan rows with it). If a future migration or a
+            // partial-wipe recovery path ever does strand scan rows without job
+            // rows, this is the line to revisit.
 
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
             guard !chunks.isEmpty else { continue }

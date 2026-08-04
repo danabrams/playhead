@@ -37,6 +37,26 @@ import os
 /// the runner's M-5 idempotency branch finds the claim, re-drives it, and
 /// completes it. A claim with a private id would linger `deferred` forever
 /// next to the row that actually did the work.
+///
+/// **Where that resolution does NOT happen, and why it is still safe.**
+/// `.fullEpisodeScan` at offset 0 is the whole of a `fullCoverage` or
+/// `periodicFullRescan` plan, but ``CoveragePlanner/plan(for:)`` returns
+/// `targetedWithAudit` once a podcast has been observed past the cold-start
+/// threshold with stable recall, and THAT plan's phases
+/// (`scanHarvesterProposals`, `scanLikelyAdSlots`, `scanRandomAuditWindows`)
+/// derive three different ids. On such a podcast the claim is never completed
+/// by the runner and stays `deferred` for the life of the asset.
+///
+/// That is a stale row, not a leak, and the bound is measured rather than
+/// hoped for: ``AnalysisStore/countResumableBackfillJobs(assetId:)`` — the
+/// authority `AnalysisJobReconciler.adScanRedriveCandidate` consults — scopes
+/// to the NEWEST enqueue batch (`createdAt >= MAX(createdAt) -
+/// ``AnalysisStore/backfillEnqueueBatchWindowSec``), so the moment the targeted
+/// plan's own rows land the older claim stops counting, and the re-drive chain
+/// stops on its own when those rows go terminal. The claim is still doing its
+/// job in the meantime: it is what made the asset visible to the sweep that
+/// minted the pass in the first place, and its `deferReason` is still the
+/// device-pull answer to "which gate refused this episode a scan?".
 enum SemanticScanClaim {
 
     // MARK: - Gates
@@ -120,9 +140,23 @@ enum SemanticScanClaim {
     /// ``episodePreparationCompleteThreshold`` (0.98). The two are different
     /// numbers for different quantities: 0.95 is the TRANSCRIPT floor,
     /// calibrated to tolerate the few seconds a decoder chops off the end of an
-    /// episode, and it is the floor `finalizeBackfill` itself applies. Using
-    /// the ad-scan floor here would exclude 48E903D7 — one of the three assets
-    /// this bead exists for, transcribed to 95 % — from its own fix.
+    /// episode. Using the ad-scan floor here would exclude 48E903D7 — one of
+    /// the three assets this bead exists for, transcribed to 95 % — from its
+    /// own fix.
+    ///
+    /// **The CONSTANT is shared with `finalizeBackfill`; the NUMERATOR is
+    /// deliberately not.** ``AnalysisCoordinator/finalizeBackfillVerdict(chunks:episodeDuration:)``
+    /// divides `chunks.map(\.endTime).max()` — a WATERMARK — by the duration.
+    /// The caller here passes ``AnalysisCoverageSummary/fastTranscriptCoveredSec``,
+    /// the interval UNION. They agree on a contiguous transcript and diverge on
+    /// a gappy one, where the watermark reads 100 % over audio nobody
+    /// transcribed: the same watermark-vs-union antipattern playhead-sd71 fixed
+    /// on the Activity screen. The union is the right numerator for THIS
+    /// question — a semantic scan can only read text that exists, so a
+    /// transcript with holes has proportionally less for it to read — which
+    /// makes this gate strictly stricter than `finalizeBackfill`'s. An asset
+    /// that `finalizeBackfill` would complete can therefore fail here, on
+    /// purpose, and it stays the transcript lane's problem until the holes fill.
     ///
     /// Unmeasurable inputs return `false`. This gate SUPPRESSES a mint, so the
     /// safe direction is the opposite of `isOwed`'s: an asset whose transcript

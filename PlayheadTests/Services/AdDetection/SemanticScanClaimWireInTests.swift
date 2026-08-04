@@ -153,6 +153,45 @@ struct SemanticScanClaimGateWireInTests {
         #expect(row.deferReason == SemanticScanClaim.Gate.fmModeOff.deferReason)
     }
 
+    /// **The OTHER mode-off site, and the only caller that can reach it.**
+    /// `runBackfill` now answers `.off` itself, before `runShadowFMPhase` is
+    /// ever called, so the guard inside the phase is reachable from exactly one
+    /// place in a shipped build: the shadow-retry drain, which does not consult
+    /// the mode before dispatching. A cohort demoted to `knownBad` between the
+    /// bail that flagged the session and the capability transition that drains
+    /// it lands precisely here — and without this test the recording call in
+    /// that guard could be deleted with every suite still green.
+    @Test("a mode-off bail on the shadow-RETRY path leaves a durable claim")
+    func fmModeOffOnRetryPathMintsClaim() async throws {
+        let store = try await seededStore()
+        _ = try await store.insertTranscriptChunks(chunks())
+        try await store.insertSession(
+            AnalysisSession(
+                id: "sess-fil5-off",
+                analysisAssetId: Self.assetId,
+                state: "complete",
+                startedAt: Date().timeIntervalSince1970,
+                updatedAt: Date().timeIntervalSince1970,
+                failureReason: nil,
+                needsShadowRetry: true,
+                shadowRetryPodcastId: "pod-1"
+            )
+        )
+        let service = makeService(
+            store: store, mode: .off, factory: liveFactory(), canUseFM: true
+        )
+
+        let didRun = await service.retryShadowFMPhaseForSession(sessionId: "sess-fil5-off")
+        #expect(didRun == false, "a mode-off phase does not execute")
+
+        let row = try #require(try await claimRow(store),
+                               "the retry drain's mode-off bail must still leave a claim")
+        #expect(row.deferReason == SemanticScanClaim.Gate.fmModeOff.deferReason)
+        #expect(row.status == .deferred)
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10)
+                == [Self.assetId])
+    }
+
     /// `request.podcastId ?? ""` at the final-pass hook renders an ABSENT
     /// podcast as a podcast whose id is the empty string, and the gate reads
     /// that emptiness as "skip". The claim records the absence rather than
@@ -379,6 +418,78 @@ struct SemanticScanClaimReconcilerTests {
     func shortTranscriptGetsNoClaim() async throws {
         let store = try await makeTestStore()
         try await seedZeroRowAsset(store, transcriptEndSec: 0.5 * Self.durationSec)
+        let report = try await makeReconciler(
+            store: store, downloads: cachedDownloads()
+        ).reconcile()
+        #expect(report.semanticScanClaimsMinted == 0)
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10).isEmpty)
+    }
+
+    /// **The numerator, not the constant.** `finalizeBackfill`'s own verdict
+    /// divides `max(endTime)` — a watermark — by the duration, and this
+    /// transcript's watermark is the full episode. The sweep divides the
+    /// interval UNION instead, which is 60 % here, so the asset is refused.
+    ///
+    /// That divergence is the whole point: a semantic scan can only read text
+    /// that exists, and the watermark-reads-100 %-over-holes shape is the same
+    /// one playhead-sd71 removed from the Activity screen. A fixture with a
+    /// contiguous transcript cannot tell the two apart, so without this test
+    /// the sweep could be switched to `fastTranscriptCoverageEndSec` with every
+    /// suite still green.
+    @Test("a GAPPY transcript whose watermark reads 100% still gets no claim")
+    func gappyTranscriptGetsNoClaim() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: Self.assetId,
+                episodeId: Self.episodeId,
+                assetFingerprint: Self.fingerprint,
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/FCDDB309.m4a",
+                featureCoverageEndTime: Self.durationSec,
+                fastTranscriptCoverageEndTime: Self.durationSec,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: SessionState.completeFull.rawValue,
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: Self.durationSec
+            )
+        )
+        // Union = 0.50 + 0.10 = 0.60 of the episode; watermark = 1.00 of it.
+        _ = try await store.insertTranscriptChunks([
+            claimTestChunk(assetId: Self.assetId, index: 0,
+                           start: 0, end: 0.50 * Self.durationSec),
+            claimTestChunk(assetId: Self.assetId, index: 1,
+                           start: 0.90 * Self.durationSec, end: Self.durationSec)
+        ])
+        try await store.insertJob(
+            makeAnalysisJob(
+                jobId: "job-terminal",
+                jobType: "preAnalysis",
+                episodeId: Self.episodeId,
+                podcastId: "pod-FCDDB309",
+                analysisAssetId: Self.assetId,
+                workKey: AnalysisJob.computeWorkKey(
+                    fingerprint: Self.fingerprint,
+                    analysisVersion: PreAnalysisConfig.analysisVersion,
+                    jobType: "preAnalysis"
+                ),
+                sourceFingerprint: Self.fingerprint,
+                desiredCoverageSec: Self.durationSec,
+                state: "complete"
+            )
+        )
+
+        // The fixture has to actually exercise the difference, or the test is
+        // vacuous: the two measures must disagree ACROSS the 0.95 floor.
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]
+        )
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: summary.fastTranscriptCoverageEndSec,
+            episodeDurationSec: summary.episodeDurationSec
+        ), "the watermark must clear the floor, else this proves nothing")
+
         let report = try await makeReconciler(
             store: store, downloads: cachedDownloads()
         ).reconcile()

@@ -2014,6 +2014,10 @@ T_FIL5_NO_TX="an asset with no transcript is not a candidate"
 T_FIL5_ORDER="candidates come back oldest-first and respect the limit"
 T_FIL5_ONN6_LEDGER="minted re-drives count as recovered work in the background ledger"
 T_FIL5_STORED_POD="an empty podcastId reaches the database as NULL"
+# R1 review round. Two recording sites and one numerator that the first
+# registration left unmutated.
+T_FIL5_GATE_OFF_RETRY="a mode-off bail on the shadow-RETRY path leaves a durable claim"
+T_FIL5_GAPPY="a GAPPY transcript whose watermark reads 100% still gets no claim"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -3764,6 +3768,25 @@ MUTATIONS=(
   # only thing that can see it is the assertion that both counters move in the
   # SAME pass, which is why that assertion is written as a conjunction.
   "SC14|404|RECON|$T_FIL5_REACHED"
+  # SC24 — the mode-off gate in `runBackfill` stops recording. Registered in the
+  # R1 review round: SC10/SC11/SC12 covered three of the four gates and this one
+  # was left out, so the only line of the four that could be deleted with every
+  # suite green was the one a `knownBad` cohort closes.
+  "SC24|404|ADSVC|$T_FIL5_GATE_OFF"
+  # SC23 — the OTHER mode-off site, the guard inside `runShadowFMPhase`. It is a
+  # separate mutation from SC24 because it is a separate line with a separate
+  # single caller: `runBackfill` now answers `.off` itself, so the only thing in
+  # a shipped build that reaches this guard is the shadow-RETRY drain, which
+  # does not consult the mode before dispatching. Before the R1 round no test
+  # drove that path with a demoted cohort, so deleting this call survived.
+  "SC23|404|ADSVC|$T_FIL5_GATE_OFF_RETRY"
+  # SC25 — the sweep's transcript gate reads the WATERMARK instead of the
+  # interval union. Same constant, different numerator, and on a contiguous
+  # fixture the two are identical — which is why every earlier test in this
+  # series is blind to it. A gappy transcript reads 100 % by watermark over
+  # audio nobody transcribed (the playhead-sd71 antipattern), so this claims —
+  # and spends a capped ad-scan re-drive on — episodes full of holes.
+  "SC25|404|RECON|$T_FIL5_GAPPY"
 
   # Batch 406 — the selector. Three edits, three disjoint exclusions.
   #
@@ -4131,6 +4154,9 @@ describe_mutation() {
     SC20) echo "fil5: a running row is rewritten under a pass that is mid-flight and owns its state machine" ;;
     SC21) echo "fil5: the sweep's transcript-floor guard goes, spending an ad-scan re-drive on transcription" ;;
     SC22) echo "fil5: claims are counted as recovered work, reporting one repair twice to the BG ledger" ;;
+    SC23) echo "fil5: the mode-off guard inside runShadowFMPhase stops recording — the shadow-retry drain's only gate" ;;
+    SC24) echo "fil5: the mode-off gate in runBackfill stops recording" ;;
+    SC25) echo "fil5: the sweep's transcript gate reads the watermark, so a gappy transcript claims at 100%" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -9396,6 +9422,63 @@ EOF
     snippet NEW <<'EOF'
         let stepAdScanRedrive = await mintAdScanRedrives()
         let stepScanClaims = await mintSemanticScanClaims()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC24 — the mode-off gate in `runBackfill` stops recording. `_ =
+  # canonicalChunks` keeps the branch non-empty so the edit is a deleted
+  # RECORDING rather than a deleted branch.
+  SC24)
+    snippet OLD <<'EOF'
+        if effectiveFMBackfillMode == .off {
+            await recordSemanticScanClaim(
+                gate: .fmModeOff,
+                chunks: canonicalChunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+        } else if podcastId.isEmpty {
+EOF
+    snippet NEW <<'EOF'
+        if effectiveFMBackfillMode == .off {
+            _ = canonicalChunks
+        } else if podcastId.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC23 — the mode-off guard INSIDE `runShadowFMPhase` stops recording. This is
+  # the pre-fil5 line, restored verbatim.
+  SC23)
+    snippet OLD <<'EOF'
+        guard resolvedMode != .off else {
+            await recordSemanticScanClaim(
+                gate: .fmModeOff,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+            return .skipped
+        }
+EOF
+    snippet NEW <<'EOF'
+        guard resolvedMode != .off else { return .skipped }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC25 — the sweep's transcript gate divides the WATERMARK rather than the
+  # interval union. Identical on a contiguous transcript; 100 % on a gappy one.
+  SC25)
+    snippet OLD <<'EOF'
+            guard SemanticScanClaim.transcriptClearsFinalizeFloor(
+                coveredSec: summary?.fastTranscriptCoveredSec,
+                episodeDurationSec: summary?.episodeDurationSec
+            ) else { continue }
+EOF
+    snippet NEW <<'EOF'
+            guard SemanticScanClaim.transcriptClearsFinalizeFloor(
+                coveredSec: summary?.fastTranscriptCoverageEndSec,
+                episodeDurationSec: summary?.episodeDurationSec
+            ) else { continue }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
