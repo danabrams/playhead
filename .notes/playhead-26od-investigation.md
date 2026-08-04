@@ -451,6 +451,28 @@ Plus two stale claims and one overclaim, all corrected in place:
   a nil cursor, both of which a build that planned zero windows satisfies. It now
   requires the pass to have screened something first.
 
+### R3's mutation evidence — measured, not argued
+
+Each rail below was probed by applying the edit, running
+`-only-testing:PlayheadTests/BackfillCoarseCheckpointTests` (plus the walk suite
+for M5), and checking WHICH tests went red. Every probe killed exactly its own
+expectation and nothing else; the tree was restored with `git checkout --` after
+each and verified clean.
+
+| # | mutation | killed by |
+|---|---|---|
+| M1 | drop `onWindowsBanked:` from the DISPATCHING (production) `coarsePassA` call site | `the production runner shape checkpoints too` — and, before R3, by nothing at all |
+| M2 | check `isDefused` only on ENTRY, not per iteration | `a defuse that lands mid-loop stops the checkpoint at that window` (3 assertions) |
+| M3 | delete the post-loop `isDefused` guard | `a defuse that lands after the last row still withholds the cursor` |
+| M4 | rewrite the whole banked prefix each checkpoint (`0..<count`) | `a pass writes one row per window per checkpoint` — 91 writes against the expected 25 |
+| M5 | remove the empty-needle guard in `planIndex` | `an outcome with no line refs credits no plan` (4 assertions: the refless success carried the cursor off nil, the refless failure moved it 60 → 90) |
+
+They are probes rather than entries in `scripts/mutation-battery.sh`: adding a
+series there means a per-ID edit case, file keys and test-name variables in a
+9,000-line script every open bead branch also touches, and the evidence is the
+same either way. Registering an S-series is a reasonable follow-up, not a
+prerequisite.
+
 ### Residual, reported rather than fixed
 
 * **`defer { checkpointBox.defuse() }` itself is unpinned**, and so is the lease
@@ -470,6 +492,18 @@ Plus two stale claims and one overclaim, all corrected in place:
   degrades to `.stoppedShort`, which is the more honest token. Contractually
   diagnostic-only (`AnalysisCoordinator`: "never changes the verdict, only the
   words in `terminalReason`"), but it retires a string a log scraper may read.
+* **`adScanFraction` becomes non-nil for a killed pass**, where it used to be
+  nil. Checked all five consumers of it (`shouldSkipSemanticBackfill`,
+  `AdScanCoverage.clearsFinalizeFloor`, the two re-drive minters,
+  `fullRescanReadEpisode`): every one gates on `>= 0.98`, and the numerator is
+  an interval UNION of examined windows rather than a count, so the number can
+  only move an asset from "unmeasured" to "measured at X" and a killed pass can
+  only clear that floor by genuinely having screened 98 % of the episode.
+* **`markBackfillJobComplete` still writes `segments.last?.endTime`**, not
+  `max(endTime)` — a fourth instance of the `first`/`last`-on-a-non-time-monotone
+  list shape playhead-csbq fixed in three other places. Pre-existing and inert
+  (the row is `.complete`, which M-5 never re-reads), but it is the site a reader
+  will find when the store's geometry backstop next fires.
 * The `salvagedCursor ?? job.progressCursor` rewind is confirmed correct and
   confirmed to be the ONLY path that can lower a mid-flight cursor. R3 checked
   the direction the note does not state: the end-of-pass walk sees a superset of
