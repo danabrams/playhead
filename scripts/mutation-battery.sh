@@ -2336,6 +2336,10 @@ T_9Y9E_UNSCANNED="a fully transcribed episode whose ad scan is short still gets 
 T_9Y9E_MONO="the widened ad-scan bound never measures LESS than the watermark fallback did"
 T_9Y9E_DEGEN="an all-degenerate final pass reports the watermark, not a zero-width row"
 T_9Y9E_REACHGUARD="a final-pass reach past the duration withholds the fraction too"
+# R3 review additions — the reconciler WIRE-IN, tested through reconcile().
+T_9Y9E_WIRE_MINT="reconcile mints the cap-out retry for a transcribed but unscanned episode"
+T_9Y9E_WIRE_DECLINE="reconcile mints nothing once the ad scan clears its floor"
+T_9Y9E_FINALSRC="a final-pass WATERMARK with no chunks behind it never withholds the fraction"
 T_9Y9E_LADDER="an outstanding transcript rung still wins over the ad-scan term"
 T_9Y9E_GUARDS="the ad-scan term does not bypass the terminal, budget or cooldown guards"
 # The vacuity control's victims. `pz32`'s own rails, which must stay green under
@@ -4349,6 +4353,14 @@ MUTATIONS=(
   # `overshootingNumeratorIsWithheldNotClamped` — a test the reviewed code
   # already passes, so that verdict would prove nothing about the widening.
   "RT14|420|STORE|$T_9Y9E_REACHGUARD"
+
+  # Batch 421 — RT15 (R3 review). THE WIRE-IN. The reconciler stops measuring and
+  # hands `capOutRetryDecision` a constant "fully scanned", so the ad-scan arm can
+  # never fire in production while every pure decision-matrix test stays green —
+  # RT01/RT09/RT10/RT11 all call the static decision directly and cannot see it.
+  # This is the "a correct mechanism production never invokes" family: the fix is
+  # right and nothing proves it is reached.
+  "RT15|421|RECON|$T_9Y9E_WIRE_MINT;$T_9Y9E_WIRE_DECLINE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4730,6 +4742,8 @@ describe_mutation() {
     RT12) echo "9y9e R1: the widened bound drops the watermark fallback, so the ad-scan area can DECREASE" ;;
     RT13) echo "9y9e R1: the final-pass loop keeps degenerate rows, so a zero-width chunk becomes a pass reach" ;;
     RT14) echo "9y9e R2: the duration-sanity guard reads the FAST reach while the numerator spans both passes" ;;
+    RT15) echo "9y9e R3: the reconciler stops MEASURING the ad scan and hands the decision a constant 1.0" ;;
+    RT16) echo "9y9e R3: the both-pass reach guard trusts a final WATERMARK with no chunks behind it" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10405,6 +10419,27 @@ EOF
            reach > episodeDurationSec + tolerance {
             return nil
         }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT15 (R3 review) — the reconciler stops measuring and asserts "fully scanned".
+  # The read is the only thing that carries the field's ad-scan coverage into
+  # `capOutRetryDecision`; a constant `1.0` makes `SemanticScanClaim.isOwed`
+  # false forever, so the arm this bead added is unreachable in production while
+  # every pure decision test still passes.
+  RT15)
+    snippet OLD <<'EOF'
+        var adScanFraction: Double?
+        if nextOrdinal != nil,
+           AnalysisWorkScheduler.capOutRetryCooldownElapsed(chainTail: tail, now: decidedAt),
+           let assetId = tail.analysisAssetId {
+            adScanFraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction
+        }
+EOF
+    snippet NEW <<'EOF'
+        let adScanFraction: Double? = 1.0
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
