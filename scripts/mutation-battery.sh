@@ -3931,6 +3931,29 @@ MUTATIONS=(
 #   census above `declineSuggestedSkip` it does not have yet (the only
 #   reference is a `NowPlayingView` closure PARAMETER of the same name, bound
 #   to `denyAutoSkippedBanner`). Its show ATTRIBUTION is covered: see N07.
+#
+#   SC29 (playhead-fil5, R2) — `CoveragePlanner.plan(for:)`'s fullCoverage arm
+#   gains a phase AHEAD of `.fullEpisodeScan`, e.g. `[.scanHarvesterProposals,
+#   .fullEpisodeScan]`. That is the real latent break behind
+#   `SemanticScanClaim.jobId`: the claim hardcodes `(.fullEpisodeScan, offset
+#   0)` while the runner derives its id from `plan.phases.enumerated()`, so the
+#   two agree only while that tuple IS the whole plan. Change the plan and every
+#   claim row already on disk orphans silently — invisible to the runner, still
+#   counted by both sweeps.
+#
+#   NOT ENCODED because of blast radius, the same reason the FusionWeightConfig
+#   arming above is excluded: `CoveragePlanner` is upstream of
+#   `BackfillJobRunnerTests` and `BackfillCoarseCheckpointTests`, both in
+#   FOCUSED_SUITES, so the mutation turns suites red across the whole focused
+#   set and any batchmate's verdict becomes noise.
+#
+#   Pinned by a TEST instead, which is the honest substitute here because the
+#   coupling is an assertion about production code rather than a missing rail:
+#   `the claim's id is the runner's fullCoverage job id` now DERIVES its
+#   expectation from `CoveragePlanner().plan(for:)` — it asserts `plan.phases ==
+#   [.fullEpisodeScan]` and then builds the id the way `runPendingBackfill`
+#   does. Change the plan and it goes red. The claim's own side of the coupling
+#   stays mutation-covered by SC05, which names this same test.
 
 # One-line description per mutation, for the report.
 describe_mutation() {

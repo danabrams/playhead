@@ -128,16 +128,47 @@ struct SemanticScanClaimPredicateTests {
     // MARK: - Identity
 
     /// **The claim must name the job the runner would derive**, or it is an
-    /// orphan sitting next to the row that actually did the work. This is the
-    /// `fullCoverage` plan's only phase at its only offset.
+    /// orphan sitting next to the row that actually did the work.
+    ///
+    /// The expectation is derived from ``CoveragePlanner/plan(for:)`` rather
+    /// than restating `(.fullEpisodeScan, 0)`, and that is the point of the
+    /// test rather than a flourish. `SemanticScanClaim.jobId` hardcodes that
+    /// tuple; the runner derives its own from `plan.phases.enumerated()`. The
+    /// two agree only because the `fullCoverage` plan happens to be exactly
+    /// `[.fullEpisodeScan]` today, and nothing else in the suite says so — a
+    /// version of this test that wrote the tuple on both sides would keep
+    /// passing while every claim row on disk silently orphaned the moment the
+    /// plan grew a phase ahead of `fullEpisodeScan`. Written this way, that
+    /// change lands here.
     @Test("the claim's id is the runner's fullCoverage job id")
-    func claimIdIsTheRunnersId() {
-        let expected = BackfillJobRunner.makeJobIdForTesting(
-            analysisAssetId: "asset-1",
-            transcriptVersion: "tv-1",
-            phase: .fullEpisodeScan,
-            offset: 0
-        )
+    func claimIdIsTheRunnersId() throws {
+        // A cold-start podcast, which is the branch that returns fullCoverage.
+        let plan = CoveragePlanner().plan(for: CoveragePlannerContext(
+            observedEpisodeCount: 0,
+            stableRecall: false,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 0,
+            periodicFullRescanIntervalEpisodes: 10
+        ))
+        #expect(plan.policy == .fullCoverage)
+        #expect(plan.phases == [.fullEpisodeScan],
+                "the claim's hardcoded (.fullEpisodeScan, offset 0) is only the runner's id \
+                while this is the whole plan")
+
+        // Derived exactly the way `runPendingBackfill` derives it: the phase and
+        // its index in the plan.
+        let planned = plan.phases.enumerated().map { offset, phase in
+            BackfillJobRunner.makeJobIdForTesting(
+                analysisAssetId: "asset-1",
+                transcriptVersion: "tv-1",
+                phase: phase,
+                offset: offset
+            )
+        }
+        let expected = try #require(planned.first)
         #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1", transcriptVersion: "tv-1")
                 == expected)
         // …and it is genuinely keyed on both halves.
