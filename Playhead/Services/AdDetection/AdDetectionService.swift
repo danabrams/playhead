@@ -4249,18 +4249,41 @@ actor AdDetectionService {
         var fmRefinementWindows: [FMRefinementWindowOutput] = []
         // Cycle 1 H2: gate on effective mode so a known-bad cohort short-circuits
         // before any FM input graph is built.
-        if effectiveFMBackfillMode != .off {
-            if podcastId.isEmpty {
-                logger.info("Backfill: skipping FM scan phase — missing podcastId for asset \(analysisAssetId)")
-            } else {
-                let shadowResult = await runShadowFMPhase(
-                    chunks: canonicalChunks,
-                    analysisAssetId: analysisAssetId,
-                    podcastId: podcastId,
-                    sessionIdOverride: sessionId
-                )
-                fmRefinementWindows = shadowResult.fmRefinementWindows
-            }
+        //
+        // playhead-fil5: both arms below used to drop the scan with nothing but
+        // a log line, which is why FCDDB309 could run `runBackfill` TWICE and
+        // leave zero `backfill_jobs` rows behind. Each now records a durable
+        // claim naming the gate that closed — see `SemanticScanClaim`.
+        if effectiveFMBackfillMode == .off {
+            await recordSemanticScanClaim(
+                gate: .fmModeOff,
+                chunks: canonicalChunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+        } else if podcastId.isEmpty {
+            logger.info("Backfill: skipping FM scan phase — missing podcastId for asset \(analysisAssetId)")
+            // The empty id is handed through VERBATIM rather than pre-converted
+            // to nil here. `SemanticScanClaim.claimRow` is the one place that
+            // decides an empty id is an absence, and a second copy of that
+            // decision at the call site is both a policy that can drift and —
+            // while it agrees — one no mutant can kill: the SC09 mutant
+            // survived against exactly this shape, because the row never saw
+            // the "" the normalization exists to catch.
+            await recordSemanticScanClaim(
+                gate: .podcastIdMissing,
+                chunks: canonicalChunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+        } else {
+            let shadowResult = await runShadowFMPhase(
+                chunks: canonicalChunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId,
+                sessionIdOverride: sessionId
+            )
+            fmRefinementWindows = shadowResult.fmRefinementWindows
         }
 
         // ── Steps 7–9: Region proposal + feature extraction ──────────────────
@@ -9201,6 +9224,40 @@ actor AdDetectionService {
         }
     }
 
+    /// playhead-fil5: persist the durable "this episode is owed a semantic ad
+    /// scan" claim for a gate that just refused to dispatch one.
+    ///
+    /// Every drop this covers used to be a `logger` call and nothing else, so a
+    /// device pull could not tell a scan that was never requested from one that
+    /// was requested and refused — and the sessionless callers skipped even the
+    /// bd-3bz retry marker, making the drop permanent. See ``SemanticScanClaim``.
+    ///
+    /// `chunks` must be the SAME array the phase would have atomized, because
+    /// the claim's job id is derived from its `transcriptVersion`. That is why
+    /// this takes the chunks rather than re-reading them: `runBackfill` passes
+    /// canonicalized chunks and `retryShadowFMPhaseForSession` passes its
+    /// final-pass-preferred replay set, and each claim must name the job ITS
+    /// caller would have minted.
+    ///
+    /// Empty chunks are a no-op: there is no transcript to scan, so there is
+    /// nothing to claim (and `runBackfill` has already returned in that case).
+    private func recordSemanticScanClaim(
+        gate: SemanticScanClaim.Gate,
+        chunks: [TranscriptChunk],
+        analysisAssetId: String,
+        podcastId: String?
+    ) async {
+        guard !chunks.isEmpty else { return }
+        await SemanticScanClaim.record(
+            gate: gate,
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId,
+            transcriptVersion: TranscriptAtomizer.transcriptVersionHash(chunks: chunks),
+            store: store,
+            logger: logger
+        )
+    }
+
     /// Invokes `BackfillJobRunner` to execute the Foundation Model backfill in
     /// shadow mode. Failures are logged but never propagated, because shadow
     /// mode must never affect cue computation or user-visible behavior. Reads
@@ -9215,10 +9272,24 @@ actor AdDetectionService {
         // the entire shadow phase rather than handing the runner a mode
         // that would have been demoted to .off downstream anyway.
         let resolvedMode = effectiveFMBackfillMode
-        guard resolvedMode != .off else { return .skipped }
+        guard resolvedMode != .off else {
+            await recordSemanticScanClaim(
+                gate: .fmModeOff,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
+            return .skipped
+        }
 
         guard let factory = backfillJobRunnerFactory else {
             logger.warning("Shadow FM phase skipped: no runner factory injected — FM evidence will be absent. Check PlayheadRuntime wiring.")
+            await recordSemanticScanClaim(
+                gate: .runnerFactoryMissing,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
             return .skipped
         }
         func wrap(_ outcome: ShadowFMPhaseOutcome, _ windows: [FMRefinementWindowOutput] = []) -> ShadowFMPhaseResult {
@@ -9264,6 +9335,18 @@ actor AdDetectionService {
             } else {
                 logger.debug("Shadow FM phase: no session id resolved, marker skipped")
             }
+            // playhead-fil5: the session marker is the SESSION lane's retry
+            // hook, and the two sessionless callers (the `AnalysisJobRunner`
+            // pre-roll warmup and the final-pass revalidation hook) pass nil —
+            // which made this drop permanent for exactly the paths that reach
+            // an already-transcribed episode. The claim is durable regardless
+            // of whether a session exists to be marked.
+            await recordSemanticScanClaim(
+                gate: .foundationModelsUnavailable,
+                chunks: chunks,
+                analysisAssetId: analysisAssetId,
+                podcastId: podcastId
+            )
             return wrap(.requeued)
         }
 

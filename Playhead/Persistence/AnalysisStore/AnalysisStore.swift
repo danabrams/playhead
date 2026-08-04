@@ -15739,6 +15739,80 @@ actor AnalysisStore {
         return ids
     }
 
+    /// playhead-fil5: transcribed assets that own NO coverage-lane row of any
+    /// kind, oldest first, capped at `limit`.
+    ///
+    /// **This is the population `playhead-onn6` cannot see, and the difference
+    /// is not a detail.** Its sweep starts from
+    /// ``fetchAssetIdsWithResumableBackfillJobs(limit:)``, which selects assets
+    /// by the STATE of their `backfill_jobs` rows — so an asset with zero rows
+    /// is excluded by construction, forever, no matter how short its ad scan
+    /// is. On the 2026-08-03 device pull this predicate returns 4 of the 12
+    /// assets — 48E903D7, FCDDB309, 4FF3A238, 2C5C3699. The bead names three of
+    /// them, counting only the ones it judged transcribed; the query's own set
+    /// is the larger one, because a candidate is anything with a transcript and
+    /// no coverage-lane row, and the transcript FLOOR is applied one layer up in
+    /// ``AnalysisJobReconciler/nextSemanticScanClaimCandidates()``'s caller.
+    /// Two of the four clear that floor (FCDDB309 98.8 %, 4FF3A238 98.9 %
+    /// bridged) and two never will (48E903D7 36.9 %, 2C5C3699 4.3 %).
+    ///
+    /// **`EXISTS` on `transcript_chunks`, not a coverage read.** An asset with
+    /// no transcript has nothing for a semantic scan to read, and the honest
+    /// coverage question (has the transcript reached the finalize floor, is the
+    /// ad scan actually short) needs the duration and the interval union — both
+    /// of which live in ``fetchCoverageSummariesByAssetIds(_:)``. Asking a
+    /// cheap structural question here and the expensive measured one per
+    /// candidate keeps this from being a full coverage sweep at every launch.
+    ///
+    /// Both sub-queries are index-served — `EXPLAIN QUERY PLAN` on the
+    /// 2026-08-03 pull reports `SEARCH b USING COVERING INDEX
+    /// idx_backfill_jobs_asset_phase` and `SEARCH c USING COVERING INDEX
+    /// idx_chunks_time` (the planner prefers `(analysisAssetId, startTime)` over
+    /// the narrower `idx_chunks_asset`; either serves the `EXISTS`). What is left
+    /// is one `SCAN a` of `analysis_assets` plus a `USE TEMP B-TREE FOR ORDER BY`,
+    /// because no index carries `(createdAt, rowid)`. Tens of rows on a device at
+    /// one call per `reconcile()`, so that is acceptable here for the same reason
+    /// it is in ``fetchAssetIdsWithResumableBackfillJobs(limit:)``; it would not
+    /// be on a hot path.
+    ///
+    /// Oldest first, so a backlog drains in the order it stranded. The tiebreak
+    /// is `rowid` (insertion order) rather than `id`, because
+    /// `analysis_assets.createdAt` defaults to `strftime('%s','now')` — whole
+    /// SECONDS — so several assets registered in one launch share a timestamp
+    /// and an id-alphabetical tiebreak would order them by a UUID.
+    ///
+    /// `offset` exists because the caller's rejects are not removed from this
+    /// set — an asset the sweep can never claim stays a candidate, and on a
+    /// fixed `LIMIT` would hold the front of the queue forever. The total order
+    /// above is what makes paging well-defined; see
+    /// ``AnalysisJobReconciler/nextSemanticScanClaimCandidates()``. A negative
+    /// offset is clamped to 0 rather than handed to SQLite, which treats it as
+    /// no offset at all — same outcome, but stated here rather than inherited.
+    func fetchAssetIdsMissingCoverageLaneJobs(limit: Int, offset: Int = 0) throws -> [String] {
+        guard limit > 0 else { return [] }
+        let sql = """
+            SELECT a.id
+            FROM analysis_assets a
+            WHERE NOT EXISTS (
+                    SELECT 1 FROM backfill_jobs b WHERE b.analysisAssetId = a.id
+                  )
+              AND EXISTS (
+                    SELECT 1 FROM transcript_chunks c WHERE c.analysisAssetId = a.id
+                  )
+            ORDER BY a.createdAt ASC, a.rowid ASC
+            LIMIT ? OFFSET ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, limit)
+        bind(stmt, 2, max(0, offset))
+        var ids: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            ids.append(text(stmt, 0))
+        }
+        return ids
+    }
+
     /// C3-2: small helper used by the guarded terminal transitions to
     /// distinguish "no row" from "row present in a disallowed state". Returns
     /// `nil` when no row exists for `jobId`.
