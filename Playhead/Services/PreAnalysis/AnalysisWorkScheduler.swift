@@ -6469,17 +6469,29 @@ actor AnalysisWorkScheduler {
     /// asset already holds. The ladder rung is by construction strictly deeper
     /// than the watermark, so the retry always has something left to read.
     ///
-    /// A CLAIM DELIBERATELY NOT MADE HERE, because it does not survive reading
-    /// the runner: that re-using the old target would fail the same way, via
-    /// `transcription:zeroCoverage`. It would not. The runner's reported
-    /// coverage comes from `persistedCoverage()`, which reads the ASSET
-    /// watermark (``AnalysisJobRunner`` `observeTranscriptEvents`), not the
-    /// pass's own delta — so a pass over already-covered audio reports the full
-    /// watermark and terminates `complete` through `tierAdvance`. Zero coverage
-    /// arises from an engine failure or the runner's silent-engine timeout.
-    /// Asking for a target the asset already covers wastes a pass; it does not
-    /// reproduce the observed terminal. The ladder rung is the right choice for
-    /// the first reason alone.
+    /// A CLAIM MADE HERE THAT WAS HALF WRONG, corrected by playhead-9y9e rather
+    /// than deleted, because the correction is the whole of that bead. It read:
+    /// re-using the old target would NOT fail via `transcription:zeroCoverage`,
+    /// because the runner's coverage comes from `persistedCoverage()` — the
+    /// ASSET watermark — so a pass over already-covered audio reports the full
+    /// watermark and terminates `complete` through `tierAdvance`.
+    ///
+    /// That is true of the `.completed` arm of `observeTranscriptEvents` and
+    /// only that arm. The SIBLING timeout arm — named in the same sentence as a
+    /// source of zero coverage — returns a hardcoded `(0, nil, false)` and never
+    /// consults `persistedCoverage()` at all, and on an already-covered asset
+    /// the timeout is the arm that wins: the 300 s stage cap is flat while the
+    /// ASR re-run under it scales with the episode. On the 2026-08-03 device
+    /// pull that is asset AD5F3A0A, 4,281 s and fully transcribed, whose re-drive
+    /// carries `maxAttemptsReached:transcription:zeroCoverage` after 5 attempts.
+    /// `AnalysisJobRunner` now carries the persisted coverage forward on that
+    /// path (see its `transcriptCoverageOfCompletedTranscript`), which makes the
+    /// original claim true of both arms.
+    ///
+    /// The CONCLUSION is unchanged and still rests on its first reason alone:
+    /// asking for a target the asset already covers wastes a pass, so the ladder
+    /// rung — strictly deeper than the watermark by construction — is what the
+    /// retry must ask for.
     ///
     /// **The slack, and why the comparison needs it.** The last rung is the
     /// asset's `episodeDurationSec`, which comes off the AVURLAsset CONTAINER
