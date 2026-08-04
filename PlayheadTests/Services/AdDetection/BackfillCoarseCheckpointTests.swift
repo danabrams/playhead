@@ -1136,6 +1136,17 @@ struct CoarseCheckpointBoxTests {
     /// audio rather than a coverage hole. It still costs the thing this bead is
     /// about — durable minutes — whenever the failure is transient and the pass
     /// dies before the prefix advances again.
+    ///
+    /// GAP, STATED RATHER THAN PAPERED OVER. This pins the box's contract, not
+    /// the call site: moving `box.noteCursorWritten` in `checkpointCoarseWindows`
+    /// to BEFORE the `store.checkpointBackfillJobProgress` it guards would pass
+    /// every test in this repo, because nothing can make that store call throw —
+    /// `BackfillJobRunner` holds a concrete `AnalysisStore`, not a protocol, and
+    /// `checkpointBackfillJobProgress` is a bare UPDATE with no reachable
+    /// rejection. Closing it means a store fault seam, which is an architecture
+    /// change this bead's non-goals exclude. The exposure is bounded to one
+    /// repeated `backfill_jobs` UPDATE: the cursor is never written AHEAD of what
+    /// rows cover either way, so no coverage claim depends on this ordering.
     @Test("a cursor whose write failed is offered again")
     func aFailedCursorWriteIsRetried() {
         let box = CoarseCheckpointBox()
@@ -1497,6 +1508,62 @@ struct CoarseCoverageWalkTests {
         #expect(walk.contiguousUpperBoundSec == nil)
         #expect(walk.fullyCovered == false)
         #expect(walk.unpersistedPlanIndices == [0])
+    }
+
+    /// The MID-FLIGHT composition itself, not just the rule it applies.
+    ///
+    /// The walk cases above all hand-build their `unpersistedWindows`, so they
+    /// pin the RULE and say nothing about whether the checkpoint supplies it.
+    /// `coarseCheckpointWalk` is the one place that splits a banked snapshot
+    /// into a durable prefix and an unpersisted tail, and dropping either half
+    /// is invisible in every row a test can read: pass only the prefix and a
+    /// plan whose sibling window is missing is credited; pass the whole list and
+    /// the window that failed to write is credited. Both cases are asserted here
+    /// from the same snapshot, so neither half can be deleted quietly.
+    @Test("the mid-flight walk splits the snapshot at the durable count")
+    func checkpointWalkSplitsAtTheDurableCount() {
+        // One plan, two windows — the shape `runCoarseRetry` produces when a
+        // shrunk plan is screened as two sub-prompts.
+        let split = CoarsePassWindowPlan(
+            windowIndex: 1,
+            lineRefs: [1, 2],
+            prompt: "p1",
+            promptTokenCount: 10,
+            startTime: 30.0,
+            endTime: 90.0,
+            transcriptQuality: .good
+        )
+        let banked = FMCoarseBankedWindows(
+            plans: [plan(0), split, plan(3)],
+            windows: [window(0), window(1), window(2)],
+            failedWindows: []
+        )
+
+        // Everything landed: the split plan is covered and the cursor clears it.
+        let allDurable = BackfillJobRunner.coarseCheckpointWalk(
+            banked: banked,
+            durableWindowCount: 3
+        )
+        #expect(allDurable.contiguousUpperBoundSec == 90.0)
+        #expect(allDurable.unpersistedPlanIndices.isEmpty)
+
+        // The second half of the split plan did not land. The TAIL is what says
+        // so — the prefix alone still shows a window for plan 1.
+        let straddled = BackfillJobRunner.coarseCheckpointWalk(
+            banked: banked,
+            durableWindowCount: 2
+        )
+        #expect(straddled.contiguousUpperBoundSec == 30.0)
+        #expect(straddled.unpersistedPlanIndices == [1])
+        #expect(straddled.succeededPlanIndices.contains(1))
+
+        // And nothing at all landed: no cursor, and the PREFIX is what says so.
+        let nothingDurable = BackfillJobRunner.coarseCheckpointWalk(
+            banked: banked,
+            durableWindowCount: 0
+        )
+        #expect(nothingDurable.contiguousUpperBoundSec == nil)
+        #expect(nothingDurable.succeededPlanIndices.isEmpty)
     }
 
     /// Attribution is structural (line-ref subset), not positional, so the walk

@@ -296,6 +296,36 @@ remaining assumption:
   path, and the bead's own field evidence is that the jetsam path is the dominant
   one (10 of 10 jobs in the 2026-08-03 pull).
 
+A third R2 pass asked the adversarial reviewer to break the two fixes above. It
+found the tests, not the code:
+
+* **The mid-flight WIRING was untested.** The walk cases hand-build their
+  `unpersistedWindows`, so they pinned the RULE and said nothing about whether
+  the checkpoint supplies it — deleting the argument at the call site left the
+  whole suite green, restoring the HIGH defect. Extracted as
+  `coarseCheckpointWalk(banked:durableWindowCount:)`, because the split of one
+  snapshot into a durable prefix and an unpersisted tail is the entire
+  correctness argument and it is invisible in every row a test can read. Both
+  halves are now mutation-killed from one snapshot: drop the tail and the
+  straddle case reads 90 instead of 30; ignore the prefix and the
+  nothing-durable case reports plans as succeeded.
+* **The "sufficient and exact" claim on the cap was off by one boundary.**
+  Nothing enforces `endTime > startTime` on a segment (`AdTranscriptSegment`
+  takes min/max over its atoms; an atom-less one reads 0/0), so a ZERO-DURATION
+  segment sitting exactly on the earliest uncovered plan's start is still
+  dropped. Left alone deliberately — it carries no audio and its plan-mates all
+  survive — but the comment now says so instead of claiming exactness.
+* **`noteCursorWritten` recorded the raw walk value, not what the store got.**
+  They differ when `priorCursor` was already ahead, and the box's stated job is
+  to remember what the DATABASE holds.
+* **One gap is stated rather than papered over.** Moving `noteCursorWritten`
+  back to before its store call passes every test in the repo: nothing can make
+  `checkpointBackfillJobProgress` throw, because the runner holds a concrete
+  `AnalysisStore` rather than a protocol. Closing it needs a store fault seam,
+  which is an architecture change this bead's non-goals exclude. Recorded in the
+  test's doc comment with its bound — one repeated `backfill_jobs` UPDATE, and
+  no coverage claim depends on the ordering in either direction.
+
 ## What R2 did NOT fix, and why — playhead-u99x (P1, filed)
 
 The same adversarial pass found a SECOND cursor hazard that this bead must not

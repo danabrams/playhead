@@ -1882,12 +1882,20 @@ actor BackfillJobRunner {
         // it would drop the uncovered plan's early segments and nothing would
         // ever plan them again.
         //
-        // Capping at the earliest uncovered plan's START is sufficient and
-        // exact: every segment of that plan has `endTime > startTime >= cursor`,
-        // so none of them can be dropped. On a time-monotone episode every
-        // uncovered plan starts at or after the covered prefix ends, so `min`
-        // picks the walked bound and this is a no-op — which is why it does not
-        // move the cursor pmp9, bkhc, qbib or t1kq compute on healthy assets.
+        // Capping at the earliest uncovered plan's START is sufficient: every
+        // segment of that plan has `endTime >= startTime >= cursor`, and the
+        // consumer keeps `endTime > cursor`, so the only segment it can still
+        // drop is a ZERO-DURATION one sitting exactly on the plan's start.
+        // Nothing enforces `endTime > startTime` on a segment — `AdTranscriptSegment`
+        // takes min/max over its atoms and an atom-less segment reads 0/0 — so that
+        // case is possible, and it is left alone deliberately: a zero-length segment
+        // carries no audio, its plan-mates all survive, and the alternative is
+        // epsilon arithmetic on a timeline.
+        //
+        // On a time-monotone episode every uncovered plan starts at or after the
+        // covered prefix ends, so `min` picks the walked bound and this is a
+        // no-op — which is why it does not move the cursor pmp9, bkhc, qbib or
+        // t1kq compute on healthy assets.
         let firstUncoveredStart = plans
             .filter { !fullyCoveredPlanIndices.contains($0.windowIndex) }
             .map(\.startTime)
@@ -1901,6 +1909,28 @@ actor BackfillJobRunner {
             succeededPlanIndices: succeededPlanIndices,
             failedPlanIndices: failedPlanIndices,
             unpersistedPlanIndices: unpersistedPlanIndices
+        )
+    }
+
+    /// The MID-FLIGHT walk: what a checkpoint may claim, given a snapshot of the
+    /// pass and how many of its windows actually reached the store.
+    ///
+    /// A named function rather than three arguments spelled out at the call site
+    /// because the split is the whole correctness argument and it is otherwise
+    /// untestable: the durable PREFIX and the unpersisted TAIL are two halves of
+    /// one list, and dropping either half is invisible in every row a test can
+    /// read. Passing only the prefix credits a plan whose sibling window is
+    /// missing (see `unpersistedWindows`); passing the whole list credits the
+    /// window that failed to write.
+    nonisolated static func coarseCheckpointWalk(
+        banked: FMCoarseBankedWindows,
+        durableWindowCount: Int
+    ) -> CoarseCoverageWalk {
+        coarseCoverageWalk(
+            plans: banked.plans,
+            windows: Array(banked.windows.prefix(durableWindowCount)),
+            failedWindows: banked.failedWindows,
+            unpersistedWindows: Array(banked.windows.dropFirst(durableWindowCount))
         )
     }
 
@@ -2007,16 +2037,12 @@ actor BackfillJobRunner {
         // screened. These are the same list until a write fails, and the whole
         // point of the distinction is the case where one did.
         //
-        // BOTH halves of the split are handed over, not just the durable prefix.
-        // A plan can produce several windows, so the plan straddling the end of
-        // the prefix has a sibling row that is missing, and only the tail can
-        // say which plan that is — see `unpersistedWindows`.
-        let durableCount = box.durableWindowCount
-        let walk = Self.coarseCoverageWalk(
-            plans: banked.plans,
-            windows: Array(banked.windows.prefix(durableCount)),
-            failedWindows: banked.failedWindows,
-            unpersistedWindows: Array(banked.windows.dropFirst(durableCount))
+        // `durableWindowCount`, never `processedWindowCount`: the walk must see
+        // what LANDED, and the split of the snapshot into a durable prefix and
+        // an unpersisted tail is `coarseCheckpointWalk`'s whole job.
+        let walk = Self.coarseCheckpointWalk(
+            banked: banked,
+            durableWindowCount: box.durableWindowCount
         )
         // Same guard as t1kq's: a fully-covered cursor is episode-end, which
         // `narrowedForResume` collapses to an empty resume. Unreachable while
@@ -2046,7 +2072,12 @@ actor BackfillJobRunner {
             // holds, so a cursor write that threw must be re-offered rather than
             // suppressed as "already checkpointed". Costs at most one repeated
             // `backfill_jobs` UPDATE after a transient store error.
-            box.noteCursorWritten(upperBound)
+            //
+            // What is recorded is what the STORE was given, not the raw walk
+            // value — they differ when `priorCursor` was already ahead, and
+            // recording the smaller number would re-offer a cursor the row
+            // already carries.
+            box.noteCursorWritten(merged.lastProcessedUpperBoundSec ?? upperBound)
         } catch {
             logger.warning(
                 "fm.coarse.checkpoint_cursor_failed job=\(jobId, privacy: .public) error=\(String(describing: error), privacy: .public)"
