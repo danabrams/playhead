@@ -1051,9 +1051,23 @@ Nothing this bead touches — `BackfillJobRunner`, `FoundationModelClassifier`,
 accepted observation the branch's only production change is comment-only.
 
 **What could NOT be established: the same measurement on `main`.** Two attempts to
-run `scripts/perf-tests.sh` from the primary checkout WEDGED — xcodebuild alive,
-0.0 % CPU, `.derivedData-perf` never created, the log frozen after the
-command-line header, at 14 GiB free. That is the silent-wedge signature
-playhead-3nfa's preflight exists to refuse, and **`perf-tests.sh` does not run
-that preflight** (only `fast-gate.sh` does). Worth closing: the perf pass is the
-one lane where a wedge is indistinguishable from a slow measurement run.
+run `scripts/perf-tests.sh` from the primary checkout produced no result. Both
+ended at **exit 143 — SIGTERM**, the first from a ten-minute tool timeout and the
+second while a watcher was being stopped. Each had, at the moment it died, an
+empty `.derivedData-perf` (never created), a log frozen after the command-line
+invocation header, and xcodebuild observed at 0.0 % CPU, on a box at 14 GiB free.
+
+**That is consistent with a stall and is NOT proof of one, and this note says so
+because R5 spent the round on exactly this distinction.** playhead-3nfa's wedge
+signature is a process that hangs INDEFINITELY on its own; both of these were
+KILLED before indefiniteness could be established, so the observation cannot
+carry that name. An earlier draft of this section wrote "WEDGED" — the same
+species of over-claim as the `all timeouts` commit message this round was sent to
+correct, made by the person correcting it.
+
+What survives independent of the interpretation is structural: `fast-gate.sh`
+runs `scripts/disk_preflight.py` before anything else and `perf-tests.sh` does
+not, so the perf lane has no refusal at all — and it is the lane where a genuine
+wedge is hardest to see, because a run with parallelism off and wall-clock
+measurement tests is SUPPOSED to sit quiet. Filed as playhead-jdmb, at the
+priority the evidence actually supports rather than the one the anecdote did.
