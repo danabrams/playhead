@@ -1493,9 +1493,12 @@ FOCUSED_SUITES=(
   # to be its own rather than folded into the pmp9 file above: every fixture
   # there deliberately omits `episodeDurationSec`, which is precisely the input
   # that makes the measured terminal UNREACHABLE, so a suite built on those
-  # assets could not observe this gate at all. The 15 tests split into pure
-  # decision/cursor rails and four end-to-end runs that are the only things able
-  # to see whether the terminal actually consults the measurement (UC01).
+  # assets could not observe this gate at all. The 16 tests split into pure
+  # decision/cursor rails and five end-to-end runs that are the only things able
+  # to see whether the terminal actually consults the measurement (UC01) and
+  # whether it consults it with the RUN's own segment list (UC09, R2) — the
+  # pure rails cannot see either, because both mutants leave the pure functions
+  # correct and change only what is handed to them.
   -only-testing:PlayheadTests/BackfillCoverageTerminalTests
   # playhead-fil5: the durable scan claim (SC series). Five suites, and all five
   # are needed because the claim has four separable failure modes and no suite
@@ -2392,6 +2395,7 @@ T_41MU_HOLE="a cursor is an assertion about the EPISODE, so a hole at the head f
 T_41MU_PREFIX="a run that starts at the head publishes the honest bound, and leading silence is not a hole"
 T_41MU_BRIDGE="the hole threshold is the coverage reader's own bridge tolerance, not a fresh constant"
 T_41MU_NONFINITE="R1 — a non-finite MEASUREMENT is an absence, and under-claims like every other reader of it"
+T_41MU_RESUMEHOLE="R2 — the head test measures the RESUME's own first plan, so a hole immediately above the prior cursor freezes it on attempt TWO as well as attempt one"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4502,6 +4506,15 @@ MUTATIONS=(
   # also change the finite path. It makes the terminal the ONLY consumer in the
   # pipeline that reads a non-finite fraction as evidence the episode was read.
   "UC08|437|RUNNER|$T_41MU_NONFINITE"
+
+  # Batch 438 — UC09 (R2 review). The cursor rule's head test goes back to
+  # reading the pre-`narrowedForResume` segment list, which is the pre-review
+  # implementation VERBATIM — one identifier, nothing else moved. It kills only
+  # the resume rail: on a first attempt the two lists are the same value, which
+  # is exactly why eight mutants and two review rounds could not see it. The
+  # narrowest possible cut for a defect whose whole signature is "agrees with
+  # the right answer until the second attempt".
+  "UC09|438|RUNNER|$T_41MU_RESUMEHOLE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4894,6 +4907,7 @@ describe_mutation() {
     UC06) echo "41mu: the cursor's hole test drops the bridge tolerance, so leading silence freezes a genuine prefix" ;;
     UC07) echo "41mu VACUITY CONTROL: the terminal refuses unconditionally, deferring episodes that were genuinely read" ;;
     UC08) echo "41mu R1: a non-finite measured fraction completes the job again — the terminal alone reads an absence as 'read'" ;;
+    UC09) echo "41mu R2: the cursor's head test reads the caller's PRE-narrowing segment list again, so no resume can ever detect a hole above its cursor" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10745,6 +10759,23 @@ EOF
     snippet NEW <<'EOF'
             guard fraction.isFinite else { return .complete }
             underCovered = fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC09 (R2 review) — the head test is fed the pre-`narrowedForResume` segment
+  # list again. Cut at the PRODUCER because that is where one identifier does it
+  # (`rootInputs` is the caller's `jobInputs`, verbatim); cutting at the consumer
+  # would have to re-add a parameter and would be broader than the fix. The pure
+  # rule is untouched, `CoverageOutcome` still exists, and every first-attempt
+  # fixture still passes — on a first attempt the two lists ARE the same value,
+  # which is precisely why this survived eight mutants and two review rounds.
+  # Only a RESUME can see it.
+  UC09)
+    snippet OLD <<'EOF'
+            firstPlannedSegmentStartSec: inputs.segments.first?.startTime
+EOF
+    snippet NEW <<'EOF'
+            firstPlannedSegmentStartSec: rootInputs.segments.first?.startTime
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

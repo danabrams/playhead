@@ -258,6 +258,54 @@ struct BackfillCoverageTerminalTests {
                 "2.8 s of leading silence is inside the coverage reader's bridge tolerance, so this IS a genuine episode prefix")
     }
 
+    @available(iOS 26.0, *)
+    @Test("R2 — the head test measures the RESUME's own first plan, so a hole immediately above the prior cursor freezes it on attempt TWO as well as attempt one")
+    func resumeDoesNotPublishACursorOverAHoleAboveThePriorCursor() async throws {
+        let assetId = "asset-41mu-resume-hole"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId, episodeDurationSec: 100))
+        // The transcript is [0,10] ∪ [80,100]: a 70 s untranscribed hole, which
+        // is AD5F3A0A's 900 → 3,270 s shape at test scale.
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: assetId, index: 0, start: 0, end: 10, pass: "fast"),
+            makeChunk(assetId: assetId, index: 1, start: 80, end: 100, pass: "fast")
+        ])
+
+        // Attempt 1 is dispatched with the head tier alone and defers with an
+        // honest cursor of 10 — a genuine episode prefix.
+        let first = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+            .runPendingBackfill(for: makeInputs(
+                assetId: assetId,
+                lines: [(0, 10, "Opening remarks before the first sponsor break.")]
+            ))
+        let jobId = try #require(first.admittedJobIds.first)
+        let afterFirst = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(afterFirst.progressCursor?.lastProcessedUpperBoundSec == 10)
+        #expect(afterFirst.retryCount == 1)
+
+        // Attempt 2 is dispatched with the WHOLE transcript. `narrowedForResume`
+        // drops [0,10], so the run's first PLAN starts at 80 — 70 s above the
+        // cursor. The pre-narrowing list still starts at 0, and reading THAT as
+        // "where the run began" is what made the head test unfirable on every
+        // resume: 0 - 10 is negative, so the cursor sailed to 100 and the next
+        // attempt would drop the entire episode.
+        let second = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+            .runPendingBackfill(for: makeInputs(
+                assetId: assetId,
+                lines: [
+                    (0, 10, "Opening remarks before the first sponsor break."),
+                    (80, 90, "Closing thoughts on the subject at hand today."),
+                    (90, 100, "Outro credits and the usual sign-off material.")
+                ]
+            ))
+        #expect(second.admittedJobIds.first == jobId, "the same row, re-driven by M-5")
+        let afterSecond = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(afterSecond.status == .deferred)
+        #expect(afterSecond.retryCount == 2)
+        #expect(afterSecond.progressCursor?.lastProcessedUpperBoundSec == 10,
+                "the 70 s hole above the cursor is unscanned audio — the cursor must not speak for it")
+    }
+
     // MARK: - 3. The payoff: the rescue is no longer blocked
 
     @available(iOS 26.0, *)

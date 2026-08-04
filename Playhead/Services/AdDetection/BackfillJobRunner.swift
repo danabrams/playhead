@@ -1020,7 +1020,6 @@ actor BackfillJobRunner {
                 case .deferUnderCoverage, .failUnderCoverage:
                     let outcome = try await recordUnderCoverageTerminal(
                         job: job,
-                        jobInputs: jobInputs,
                         coverage: coverage,
                         decision: terminalDecision
                     )
@@ -1684,16 +1683,29 @@ actor BackfillJobRunner {
     /// applying its own private copy of the same rule. Two rulers for one
     /// quantity is the defect family this entire queue keeps paying out on, and
     /// it had reproduced inside the fix for it.
+    ///
+    /// **R2 review: it had reproduced TWICE.** The cursor rule's other input —
+    /// where this run's plans began — was read off `jobInputs`, the caller's
+    /// PRE-``narrowedForResume`` segment list, while the rule's contract (and
+    /// its doc) is about the list `coarsePassA` was actually handed. The two
+    /// agree on a first attempt and disagree on every resume, by exactly the
+    /// hole the rule exists to detect. Both halves now come from
+    /// ``CoverageOutcome``, which is the only value in scope that the pass
+    /// itself produced. Mutation UC09.
     private func recordUnderCoverageTerminal(
         job: BackfillJob,
-        jobInputs: AssetInputs,
         coverage: CoverageOutcome,
         decision: CoverageTerminalDecision
     ) async throws -> UnderCoverageOutcome {
+        // playhead-41mu (R2 review): BOTH halves of the cursor rule are CONSUMED
+        // from the same producer. `jobInputs` is the PRE-`narrowedForResume`
+        // list, so reading its first segment as "where this run's plans began"
+        // is the UC04 shape one level down — two rulers for one quantity, and
+        // this one silently disagrees on every resume. Mutation UC09.
         let cursor = Self.underCoverageCursor(
             prior: job.progressCursor,
             scannedUpperBoundSec: coverage.lastCoveredUpperBoundSec,
-            firstSegmentStartSec: jobInputs.segments.first?.startTime
+            firstSegmentStartSec: coverage.firstPlannedSegmentStartSec
         )
         let attempts = job.retryCount + 1
         let terminal = decision == .failUnderCoverage
@@ -1876,6 +1888,23 @@ actor BackfillJobRunner {
         /// successfully-scanned coarse prefix for this run. `nil` ⇒ nothing was
         /// successfully scanned this run.
         let lastCoveredUpperBoundSec: Double?
+        /// playhead-41mu (R2 review): where THIS RUN's plans actually began —
+        /// `inputs.segments.first?.startTime` AFTER `narrowedForResume` has
+        /// trimmed the already-covered prefix, which is the segment list
+        /// `coarsePassA` is handed and therefore the list `planPassA`
+        /// partitions. `nil` ⇒ the run planned nothing (the empty-segments
+        /// short-circuit).
+        ///
+        /// It is carried here rather than recomputed by the caller because the
+        /// caller holds the PRE-narrowing inputs, and the two differ by exactly
+        /// the amount that matters: on a resume, `jobInputs.segments.first`
+        /// is the asset's first transcript segment (typically ~0 s) while the
+        /// run's first PLAN starts at the cursor. Reading the former as the
+        /// latter is what let ``underCoverageCursor(prior:scannedUpperBoundSec:firstSegmentStartSec:)``
+        /// publish a cursor across a transcript hole sitting immediately above
+        /// the prior cursor — see that function's doc for the field case and
+        /// mutation UC09.
+        let firstPlannedSegmentStartSec: Double?
     }
 
     /// playhead-bkhc: did this run cover audio the job had not already covered?
@@ -2086,8 +2115,25 @@ actor BackfillJobRunner {
     /// A cursor is not a note about this run — it is an assertion that `[0, x]`
     /// of the EPISODE is covered, because that is exactly how `narrowedForResume`
     /// reads it: every segment ending at or below `x` is dropped from the next
-    /// attempt. Publishing the end of the contiguous scanned prefix is only
-    /// honest when the run's own plans began at the head.
+    /// attempt. Publishing the end of the contiguous scanned prefix requires, at
+    /// minimum, that the run's own plans began at the head — `head` meaning "at
+    /// or within the bridge tolerance of `prior`", not "at zero".
+    ///
+    /// **`firstSegmentStartSec` is where THIS RUN's PLANS began**, i.e.
+    /// ``CoverageOutcome/firstPlannedSegmentStartSec``, which is
+    /// `inputs.segments.first?.startTime` *after* `narrowedForResume` has
+    /// trimmed the covered prefix. R2 review: the caller used to pass its
+    /// PRE-narrowing list instead. On a first attempt the two are the same
+    /// value, which is why every fixture agreed; on a RESUME the pre-narrowing
+    /// list starts at the asset's first transcript segment (~0 s) while the run
+    /// starts at the cursor, so the subtraction went negative and the head test
+    /// could never fire. A transcript hole sitting immediately above the prior
+    /// cursor was therefore invisible, and the cursor was published straight
+    /// across it — the same permanent stranding, reached on attempt 2 instead of
+    /// attempt 1. Measured on the 2026-08-03 pull: AD5F3A0A's cursor is 900 and
+    /// its fast transcript's next segment does not resume until 3,270 s, a
+    /// 2,370 s hole of which the final pass later fills 2,356 s — 55 % of a
+    /// 4,281 s episode, dropped by `narrowedForResume` on the following attempt.
     ///
     /// **The field case that makes this load-bearing.** 53FC53E3's job was handed
     /// segments starting at 2,490 s and scanned them all, so the coarse walk's
@@ -2117,7 +2163,46 @@ actor BackfillJobRunner {
     /// in-run checkpoint could have earned a higher cursor honestly — there is
     /// never anything legitimate to overwrite. That the walk publishes a
     /// plan-list prefix as an episode prefix at three OTHER call sites is
-    /// playhead-5pyq, filed separately; this bead fixes only its own terminal.
+    /// playhead-5pyq, filed separately.
+    ///
+    /// **WHAT THIS RULE STILL DOES NOT COVER, stated because "began at the head"
+    /// is a NECESSARY condition and not a sufficient one (R2 review).** The
+    /// coarse walk's contiguity is over the PLAN LIST, and `planPassA`
+    /// partitions the segments it is given — so a hole INSIDE the run's own
+    /// segments is invisible to it: two plans either side of a 400 s
+    /// untranscribed stretch are adjacent by index, and
+    /// `contiguousUpperBoundSec` strides over the stretch without any guard
+    /// firing. This rule tests only the boundary between `prior` and the run's
+    /// FIRST plan, so an interior hole still publishes a cursor over audio
+    /// nobody read.
+    ///
+    /// It is left that way deliberately, and both halves of the reasoning are
+    /// measured on the 2026-08-03 pull rather than argued:
+    ///
+    ///   * The residual is real. Nine of the twelve assets carry at least one
+    ///     interior fast-transcript gap wider than
+    ///     ``AnalysisCoverageMath/adScanBridgeableGapSec``, and the four widest
+    ///     (AD5F3A0A 2,395 s, D9B513CD 1,196 s, 83592353 150 s, 48E903D7 660 s)
+    ///     are ALSO the four the final pass later fills — 4,327 s of the 4,401 s
+    ///     total. That is recoverable audio, not permanently-untranscribable
+    ///     audio.
+    ///   * The obvious fix is mis-calibrated at this tolerance. Capping the
+    ///     cursor at the first gap wider than 5 s would, on the same pull, force
+    ///     attempts 2 and 3 to re-scan 96.9 % of 4FF3A238 to recover 20.9 s,
+    ///     95.4 % of FCDDB309 to recover 21.7 s and 92.4 % of 58882C47 to
+    ///     recover 41.0 s — because those assets' first 5–10 s gap lands at
+    ///     t = 38 s, 64 s and 89 s. Today those attempts cost ZERO FM inference
+    ///     (`narrowedForResume` empties them and the empty-segments
+    ///     short-circuit fires), which is the load-bearing half of this bead's
+    ///     accepted cost. Trading that for a rule whose own threshold is the
+    ///     wrong one is not an improvement, and picking the right threshold — a
+    ///     gap wide enough to hold an ad — is a new policy constant.
+    ///
+    /// So: filed as **playhead-a1x0** with both measurements, not decided here.
+    /// The decision it asks for is the THRESHOLD, not the mechanism: 5 s answers
+    /// "is this hole too small to have hidden an ad from a scan that ran?", which
+    /// is the right question for the coverage numerator and the wrong one for "is
+    /// this hole worth a re-scan?".
     nonisolated static func underCoverageCursor(
         prior: BackfillProgressCursor?,
         scannedUpperBoundSec: Double?,
@@ -2816,7 +2901,13 @@ actor BackfillJobRunner {
                 detectedAdLineRefs,
                 fmRefinementWindows,
                 counters,
-                CoverageOutcome(coarseIncompleteDeferReason: nil, lastCoveredUpperBoundSec: nil)
+                CoverageOutcome(
+                    coarseIncompleteDeferReason: nil,
+                    lastCoveredUpperBoundSec: nil,
+                    // The run planned nothing, so it began nowhere. Distinct
+                    // from "began at 0" — see `firstPlannedSegmentStartSec`.
+                    firstPlannedSegmentStartSec: nil
+                )
             )
         }
 
@@ -3455,7 +3546,11 @@ actor BackfillJobRunner {
         }
         let coverageOutcome = CoverageOutcome(
             coarseIncompleteDeferReason: coarseIncompleteDeferReason,
-            lastCoveredUpperBoundSec: coverageContiguousUpperBound
+            lastCoveredUpperBoundSec: coverageContiguousUpperBound,
+            // playhead-41mu (R2 review): `inputs` is the POST-`narrowedForResume`
+            // list — the same one handed to `coarsePassA` above and partitioned
+            // by `planPassA` — so this is literally where this run's plans begin.
+            firstPlannedSegmentStartSec: inputs.segments.first?.startTime
         )
         // playhead-y3ya: semantic-sweep mark compose. Turn the `containsAd`
         // verdicts this job just persisted into user-visible MARK-ONLY
