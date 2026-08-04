@@ -10210,16 +10210,29 @@ EOF
   # RT10 — the ad-scan term stops being a FALLBACK and becomes an override, so a
   # half-transcribed episode is asked for the whole thing and the ladder's
   # cheapest-probe-first ordering is gone.
+  # The whole chain is the anchor, not its head: prepending a second
+  # `isOwed(…)` arm to the existing chain is a `duplicate_conditions` lint
+  # ERROR, and a mutation that cannot compile is not a kill.
   RT10)
     snippet OLD <<'EOF'
         let target: Double
         if let outstanding = outstandingTranscriptTarget(
+            transcriptCoverageSec: transcriptCoverageSec,
+            tiers: tiers,
+            episodeDurationSec: episodeDurationSec
+        ) {
+            target = outstanding
+        } else if SemanticScanClaim.isOwed(adScanFraction: adScanFraction), let deepest = ladder.last {
 EOF
     snippet NEW <<'EOF'
         let target: Double
         if SemanticScanClaim.isOwed(adScanFraction: adScanFraction), let deepest = ladder.last {
             target = deepest
         } else if let outstanding = outstandingTranscriptTarget(
+            transcriptCoverageSec: transcriptCoverageSec,
+            tiers: tiers,
+            episodeDurationSec: episodeDurationSec
+        ), let deepest = Optional(outstanding) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
