@@ -3236,6 +3236,55 @@ struct AnalysisStoreCoverageRulerTests {
         ) == 500)
     }
 
+    /// RT14 (R2 review) — WIDENING THE BOUND WIDENED WHAT THE SANITY GUARD HAS
+    /// TO WATCH, and the guard was left reading one pass.
+    ///
+    /// `adScanFraction` withholds when the transcript's own reach has already
+    /// disproved the declared duration (the E8F0F867 shape: a numerator that
+    /// LOOKS proportionate divided by a denominator describing different audio).
+    /// That check read `fastTranscriptCoverageEndSec` — correct while
+    /// `adScanCoveredSec` was bounded by the fast union, and incoherent the
+    /// moment playhead-9y9e bounded it by BOTH passes: a final-pass-heavy asset
+    /// can now draw its numerator from audio the fast reach knows nothing about,
+    /// so a short fast reach keeps the guard silent over an arbitrarily wrong
+    /// duration.
+    ///
+    /// Here the fast pass backs `[0, 100]` and the final pass `[0, 4000]` of a
+    /// declared 600 s episode, with 610 s scanned. The overshoot check passes
+    /// (610 is inside 600 + 30), the fast reach is 100 and says nothing, and the
+    /// pre-review guard returns a confident `1.0` on a denominator six times
+    /// short. No asset on the 2026-08-03 pull exercises this — every
+    /// `finalPassCoverageEndTime` sits inside the tolerance — so this is a rail
+    /// for behaviour the change made reachable, not a repair of an observed
+    /// defect.
+    @Test("a final-pass reach past the duration withholds the fraction too")
+    func finalPassReachPastDurationWithholdsTheFraction() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-reach", episodeDurationSec: 600))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-reach", index: 0, start: 0, end: 100, pass: "fast"),
+            // The final pass runs to 4,000 s of a declared 600 s episode.
+            makePassChunk(assetId: "a-9y9e-reach", index: 1, start: 0, end: 4000, pass: "final")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-reach", index: 0, start: 0, end: 610)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-reach"])
+        let summary = try #require(summaries["a-9y9e-reach"])
+
+        // The premises, stated so fixture drift cannot make this vacuous.
+        #expect(summary.adScanCoveredSec == 610, "the numerator is drawn from the final pass")
+        let tolerance = AnalysisCoverageSummary.adScanDurationToleranceSec(episodeDurationSec: 600)
+        #expect(610 <= 600 + tolerance, "premise: the overshoot check does NOT fire")
+        #expect(summary.fastTranscriptCoverageEndSec == 100,
+                "premise: the FAST reach is short, so a fast-only guard stays silent")
+        #expect(summary.finalPassCoverageEndSec == 4000)
+
+        #expect(summary.adScanFraction == nil,
+                "the final pass has disproved the denominator; 610/600 must not read as a ✓")
+    }
+
     /// The bound, tested where it lives rather than only through the store, so
     /// a numerator that DOES exceed the denominator is exercised directly.
     /// `adScanFraction` must WITHHOLD — a numerator materially past the

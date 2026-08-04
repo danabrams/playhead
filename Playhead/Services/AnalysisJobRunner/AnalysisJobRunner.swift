@@ -1791,6 +1791,14 @@ actor AnalysisJobRunner {
     /// Stage 4 — the entire point — and then still terminates
     /// `coverageInsufficient:noProgress` rather than `complete`.
     ///
+    /// THREE of the twelve assets on that pull are in this shape, not one (R2
+    /// review; R1 named 48E903D7 as an example and the population was never
+    /// counted). Fast watermark versus duration, each short of the deepest rung
+    /// by more than the 30 s slack: 48E903D7 2,010 / 2,113.1, 53FC53E3
+    /// 2,490 / 2,528.4, 83592353 7,230 / 7,325.9. The two extra ones cleared the
+    /// 0.95 gate under the FAST-only ruler too, so they are not new eligibility
+    /// — they are the same residual, three times as wide as stated.
+    ///
     /// That is an IMPROVEMENT on what it replaces (`transcription:zeroCoverage`
     /// without reaching Stage 4 at all) and it is bounded — `noProgress` is not
     /// an attempt-cap terminal, so the cap-out rescue does not re-mint on it.

@@ -607,10 +607,15 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// inter-utterance breath from counting as unscanned.
     ///
     /// playhead-9y9e: "the transcribed region" means BOTH passes. It was the
-    /// fast pass alone, which on the 2026-08-03 device pull put an unreachable
-    /// ceiling under this fraction for four of twelve assets — see the
-    /// `transcribedIntervals` block in
-    /// ``fetchCoverageSummariesByAssetIds(_:)``.
+    /// fast pass alone, which on the 2026-08-03 device pull put a ceiling below
+    /// the 0.98 completion floor under this fraction for NINE of twelve assets,
+    /// of which this change lifts FOUR over it — see the `transcribedIntervals`
+    /// block in ``fetchCoverageSummariesByAssetIds(_:)`` for the split.
+    ///
+    /// (R2 review: this line read "four of twelve assets", which is the number
+    /// LIFTED, not the number capped. R1 corrected that count at the
+    /// `transcribedIntervals` block and this sentence — which points AT that
+    /// block — was left contradicting it.)
     ///
     /// This is the only persisted quantity that answers "how much of this
     /// episode has been read for ads?". It is deliberately NOT any of the
@@ -665,6 +670,21 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     ///     ``FastTranscriptCoverageInvariant`` already makes — so the fraction is
     ///     withheld until the duration is repaired (`PlayheadRuntime`'s
     ///     duration-backfill sweep).
+    ///
+    ///     playhead-9y9e (R2 review): **"the transcript's reach" here means the
+    ///     DEEPER of the two passes**, because playhead-9y9e widened
+    ///     ``adScanCoveredSec``'s bound from the fast union to both passes and
+    ///     this guard has to measure the same region the numerator is drawn
+    ///     from. Reading the FAST reach alone left the check incoherent in
+    ///     exactly the population this bead exists to serve: a final-pass-heavy
+    ///     asset whose final pass runs far past a wrong declared duration, and
+    ///     whose short fast reach keeps the guard silent, would divide a
+    ///     duration-sized numerator by that wrong duration and render a
+    ///     confident ✓ — the E8F0F867 shape reproduced through the other pass.
+    ///     No asset on the 2026-08-03 pull exercises it (every
+    ///     `finalPassCoverageEndSec` is inside the tolerance), so this is a rail,
+    ///     not a repair; the fixture is
+    ///     `finalPassReachPastDurationWithholdsTheFraction` and mutation RT14.
     var adScanFraction: Double? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
@@ -680,8 +700,17 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         // denominator describes different audio than the numerator, even when
         // their RATIO looks healthy. Under-claim rather than divide by a number
         // the transcript has already disproved.
-        if let reach = fastTranscriptCoverageEndSec, reach.isFinite,
-           reach > episodeDurationSec + tolerance {
+        //
+        // BOTH passes (playhead-9y9e R2 review): the numerator's bound spans
+        // both, so the reach this compares against the duration must too. See
+        // the `adScanFraction` doc above for the shape that made a fast-only
+        // read incoherent. A missing or non-finite reach on either side is
+        // simply absent from the max — it is not evidence of anything.
+        let transcriptReach = [fastTranscriptCoverageEndSec, finalPassCoverageEndSec]
+            .compactMap { $0 }
+            .filter { $0.isFinite }
+            .max()
+        if let transcriptReach, transcriptReach > episodeDurationSec + tolerance {
             return nil
         }
         return min(1, adScanCoveredSec / episodeDurationSec)

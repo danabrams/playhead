@@ -1392,10 +1392,12 @@ actor AnalysisJobReconciler {
             // the `max(endTime)` WATERMARK `AnalysisCoordinator.finalizeBackfillVerdict`
             // divides, a gappy transcript reads 100 % over audio nobody
             // transcribed (the playhead-sd71 antipattern) — a hazard the
-            // 2026-08-03 pull happens NOT to exhibit once the area spans both
-            // passes (every asset lands within 0.8 pp of its watermark; see
-            // ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``,
-            // which no longer claims otherwise). Against the RAW chunk
+            // 2026-08-03 pull STILL exhibits with the area spanning both passes,
+            // on five assets: 58882C47 reads 100.0 % by watermark against a
+            // 97.5 % two-pass area, which straddles the 0.98 ad-scan floor. See
+            // ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
+            // for the table and for the R2 review's correction of the "no field
+            // example left" claim that stood here. Against the RAW chunk
             // union, a fully transcribed episode reads ~87 %, because a chunk
             // spans first-word to last-word and every breath is a hole: on the
             // 2026-08-03 pull the raw union cleared 0.95 for **zero of twelve**

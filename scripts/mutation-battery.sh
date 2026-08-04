@@ -2335,6 +2335,7 @@ T_9Y9E_UNSCANNED="a fully transcribed episode whose ad scan is short still gets 
 # R1 review additions.
 T_9Y9E_MONO="the widened ad-scan bound never measures LESS than the watermark fallback did"
 T_9Y9E_DEGEN="an all-degenerate final pass reports the watermark, not a zero-width row"
+T_9Y9E_REACHGUARD="a final-pass reach past the duration withholds the fraction too"
 T_9Y9E_LADDER="an outstanding transcript rung still wins over the ad-scan term"
 T_9Y9E_GUARDS="the ad-scan term does not bypass the terminal, budget or cooldown guards"
 # The vacuity control's victims. `pz32`'s own rails, which must stay green under
@@ -4261,8 +4262,12 @@ MUTATIONS=(
   "RT01|413|AJRUN|$T_9Y9E_REACHES"
   # RT06 — the ad-scan area is bounded by the FAST union again. Nothing throws
   # and every number still prints; an episode whose transcript came from the
-  # final pass simply measures as unscanned forever. Six of twelve field assets,
-  # four of them below the sufficiency floor by construction.
+  # final pass simply measures as unscanned forever. Six of the twelve field
+  # assets move under this mutant, and under it ALL SIX sit below the 0.98
+  # sufficiency floor — four of them only because the mutant put them there.
+  # (R2 review: this line read "four of them below the sufficiency floor", which
+  # is the number the FIX lifts over it, not the number the mutant caps. Same
+  # confusion R1 corrected in the Swift and missed here.)
   "RT06|413|STORE|$T_9Y9E_FINALONLY;$T_9Y9E_CEILING"
   # RT09 — the cap-out rescue reverts to a transcript-only measure of
   # outstanding work, which is the one measure a fully transcribed, never
@@ -4333,6 +4338,17 @@ MUTATIONS=(
   # zero-width chunk becomes the pass's reported reach. The FAST loop has always
   # dropped them; this is the rail on the two staying symmetric.
   "RT13|419|STORE|$T_9Y9E_DEGEN"
+
+  # Batch 420 — RT14 (R2 review). `adScanFraction`'s duration-sanity guard goes
+  # back to reading the FAST reach alone while the NUMERATOR it guards is bounded
+  # by both passes. Cannot share 418/419: all three mutate
+  # `AnalysisStore.swift` and the battery applies a batch simultaneously.
+  #
+  # THE NEW TEXT IS THE PRE-REVIEW IMPLEMENTATION VERBATIM, the RT12 standard.
+  # The broad mutant here would be deleting the guard outright, which also kills
+  # `overshootingNumeratorIsWithheldNotClamped` — a test the reviewed code
+  # already passes, so that verdict would prove nothing about the widening.
+  "RT14|420|STORE|$T_9Y9E_REACHGUARD"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4713,6 +4729,7 @@ describe_mutation() {
     RT11) echo "9y9e: the ad-scan term jumps the terminal, budget and cooldown guards" ;;
     RT12) echo "9y9e R1: the widened bound drops the watermark fallback, so the ad-scan area can DECREASE" ;;
     RT13) echo "9y9e R1: the final-pass loop keeps degenerate rows, so a zero-width chunk becomes a pass reach" ;;
+    RT14) echo "9y9e R2: the duration-sanity guard reads the FAST reach while the numerator spans both passes" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10365,6 +10382,29 @@ EOF
 EOF
     snippet NEW <<'EOF'
                 let endTime = sqlite3_column_double(finalStmt, 2)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT14 (R2 review) — the duration-sanity guard reverts to the FAST reach while
+  # `adScanCoveredSec` keeps its widened both-pass bound. The two stop describing
+  # the same region, so a final-pass transcript running far past a wrong declared
+  # duration draws a proportionate-LOOKING numerator through a guard that cannot
+  # see it, and the fraction reads 1.0 instead of `nil`.
+  RT14)
+    snippet OLD <<'EOF'
+        let transcriptReach = [fastTranscriptCoverageEndSec, finalPassCoverageEndSec]
+            .compactMap { $0 }
+            .filter { $0.isFinite }
+            .max()
+        if let transcriptReach, transcriptReach > episodeDurationSec + tolerance {
+            return nil
+        }
+EOF
+    snippet NEW <<'EOF'
+        if let reach = fastTranscriptCoverageEndSec, reach.isFinite,
+           reach > episodeDurationSec + tolerance {
+            return nil
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

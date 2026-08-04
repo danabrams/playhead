@@ -25,10 +25,12 @@ import os
 /// bridged area, which agrees with the watermark. The measurement was wrong,
 /// not the watermark; see ``bridgedTranscriptCoveredSec(ranges:)``. The
 /// principle in ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
-/// stands unchanged — this gate divides an area and never a watermark — but it
-/// now stands on its fixtures rather than on the pull, because once the area
-/// spans both passes no asset on the 2026-08-03 pull diverges from its watermark
-/// by more than 0.8 pp.
+/// stands unchanged — this gate divides an area and never a watermark — and it
+/// still stands on the pull as well as on its fixtures. Widening the area to
+/// both passes removes 48E903D7 as an example; it does not empty the class.
+/// 58882C47 reads 100.0 % by watermark against a 97.5 % two-pass area, which
+/// straddles the 0.98 ad-scan floor. (R2 review: R1 wrote here that no asset
+/// diverges "by more than 0.8 pp", from a three-asset sample.)
 /// Every path that requests a scan funnels through
 /// `AdDetectionService.runShadowFMPhase`, which drops the work at four gates
 /// (cohort mode `.off`, missing runner factory, `canUseFoundationModels`
@@ -241,24 +243,42 @@ enum SemanticScanClaim {
     /// (the watermark-vs-union antipattern playhead-sd71 fixed on the Activity
     /// screen).
     ///
-    /// **STATED HONESTLY: on the 2026-08-03 pull, once the area is measured over
-    /// BOTH passes, the divergence has no field example left.** Every one of the
-    /// twelve assets reads within 0.8 percentage points of its watermark, and
-    /// the largest gap in the direction this paragraph warns about — watermark
-    /// ABOVE area — is 44F076BB at 81.9 % versus 81.1 %. (playhead-9y9e's own
-    /// first draft of this note cited 2C5C3699 as the proof, "900 s of a 6,925 s
-    /// episode against a 13.0 % area". 900 / 6,925.5 IS 13.0 %: the two numbers
-    /// agree exactly, so that example showed the opposite of what it was cited
-    /// for. Its predecessor cited 48E903D7 at 36.9 % and AD5F3A0A at 44.0 %,
-    /// which were the FAST pass alone — across both passes those read 95.1 % and
-    /// 99.0 %, i.e. they were instances of the measurement bug this bead fixed,
-    /// not of watermark-vs-area divergence.)
+    /// **STATED HONESTLY: the 2026-08-03 pull DOES still exhibit the divergence
+    /// with the area measured over both passes** — five assets, watermark ABOVE
+    /// area, in percentage points of the declared duration:
     ///
-    /// That the field no longer exhibits it is not a reason to stop dividing an
-    /// area: the fast-only ruler produced exactly this shape and the pull is a
-    /// single device over one fortnight. The rail is the fixture, not the
-    /// corpus — `AnalysisJobRunner`'s `fullWatermarkOverGappyTranscriptStillFails`
-    /// and mutation RT03 are what hold this, and they are synthetic on purpose.
+    ///     58882C47  100.00 %  vs  97.45 %   2.55 pp
+    ///     FCDDB309  100.00 %  vs  98.79 %   1.21 pp
+    ///     4FF3A238  100.00 %  vs  98.85 %   1.15 pp
+    ///     AD5F3A0A  100.00 %  vs  99.04 %   0.96 pp
+    ///     44F076BB   81.94 %  vs  81.09 %   0.85 pp
+    ///
+    /// 58882C47 is the one that bites: its watermark clears the 0.98 ad-scan
+    /// floor and its two-pass area does not, so on THAT floor the two rulers
+    /// return opposite verdicts for a real episode. (At this gate's own 0.95
+    /// floor no asset on the pull flips, which is a fact about the floor, not
+    /// about the divergence.)
+    ///
+    /// Three drafts of this note have been wrong, all in the same way — a
+    /// number nobody re-derived — so they are kept as the record. R2 review
+    /// corrected R1's "the divergence has no field example left … every one of
+    /// the twelve assets reads within 0.8 percentage points of its watermark …
+    /// the largest gap is 44F076BB at 81.9 % versus 81.1 %": that was measured
+    /// over a THREE-asset sample (2C5C3699, 44F076BB, 48E903D7) and generalised
+    /// to twelve, and four assets it did not look at exceed the bound it stated.
+    /// R1 in turn corrected playhead-9y9e's first draft, which cited 2C5C3699 as
+    /// the proof — "900 s of a 6,925 s episode against a 13.0 % area", where
+    /// 900 / 6,925.5 IS 13.0 %, so the two numbers agree exactly and the example
+    /// showed the opposite of what it was cited for. Its predecessor cited
+    /// 48E903D7 at 36.9 % and AD5F3A0A at 44.0 %, which were the FAST pass alone
+    /// — across both passes those read 95.1 % and 99.0 %, i.e. instances of the
+    /// measurement bug this bead fixed, not of watermark-vs-area divergence.
+    ///
+    /// The RAIL is still the fixture and not the corpus —
+    /// `AnalysisJobRunner`'s `fullWatermarkOverGappyTranscriptStillFails` and
+    /// mutation RT03 are what hold this, and they are synthetic on purpose. The
+    /// field rows above say the shape is real; they are not a substitute for a
+    /// fixture, because a single device over one fortnight never is.
     ///
     /// So this gate is strictly stricter than `finalizeBackfill`'s. An asset it
     /// would complete can fail here, on purpose, and it stays the transcript
