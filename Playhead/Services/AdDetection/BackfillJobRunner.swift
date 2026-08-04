@@ -1937,20 +1937,35 @@ actor BackfillJobRunner {
     ///
     /// **The defect this replaces.** `markBackfillJobComplete` used to fire
     /// whenever `runJob` returned without a rate-limit hole, where "done" means
-    /// "I swept the segments I was handed". The segments are atomized from
-    /// whatever transcript exists at dispatch, and the final-pass hook dispatches
-    /// the moment final chunks land — typically early. Measured on the
-    /// 2026-08-03 device pull, exactly two `fullEpisodeScan` rows ever reached
-    /// `complete`, and both were this bug:
+    /// "I swept the segments I was handed" — and what it was handed is whatever
+    /// chunk array its DISPATCHER chose, which is not the same thing as the
+    /// episode. Measured on the 2026-08-03 device pull, exactly two
+    /// `fullEpisodeScan` rows ever reached `complete`, and both were this bug —
+    /// **for two different reasons, and the R1 review had to separate them**:
     ///
     ///   * 53FC53E3 — a 2,528 s episode. Created 04:38:43, complete 04:39:06:
     ///     **23 seconds**, having durably examined ONE 36 s window
-    ///     (2,490–2,525.8, i.e. only the final-pass chunks, while 2,490 s of
-    ///     fast-pass transcript sat unscanned). Measured `adScanFraction`
-    ///     **0.0142**.
+    ///     (2,490–2,525.8). Measured `adScanFraction` **0.0142**. Its transcript
+    ///     was NOT early: 2,917 fast chunks over [0, 2490] were already on disk.
+    ///     The job's persisted `transcriptVersion` is
+    ///     `55afd3e8bb41833c004ee7d4b1be7589`, which is byte-exact the
+    ///     ``TranscriptAtomizer/transcriptVersionHash(chunks:)`` of the 32 FINAL
+    ///     chunks ALONE (the canonical fast+final set hashes to `61872a4d…`), so
+    ///     the dispatcher was
+    ///     `AdDetectionService.retryShadowFMPhaseForSession`, whose
+    ///     `chunksForReplay = finalChunks.isEmpty ? chunks : finalChunks` still
+    ///     carries the pre-playhead-hc7e `filter { pass == "final" }` collapse
+    ///     that hc7e removed from `runBackfill` — see the comment above
+    ///     `canonicalChunks` there. Filed as **playhead-3ort**; it is a
+    ///     DISCARDED transcript, not an unfinished one.
     ///   * AD5F3A0A — a 4,281 s episode, complete 08-03 08:23:05 with scan
-    ///     windows spanning 3–900 s: the transcript was the 900 s tier when the
-    ///     hook ran. Measured `adScanFraction` **0.2068**.
+    ///     windows spanning 3–900 s: this one IS the early-transcript shape (the
+    ///     900 s tier), filed as playhead-9new. Measured `adScanFraction`
+    ///     **0.2068**.
+    ///
+    /// The two causes matter because only this terminal is common to them: a
+    /// gate that trusted "the dispatcher handed me the episode" would have to be
+    /// right about every dispatcher, and it is not.
     ///
     /// Both numbers are the same ruler the library ✓ and the re-drive use
     /// (playhead-pz32's ``AnalysisCoverageSummary/adScanFraction``, never
@@ -1976,14 +1991,38 @@ actor BackfillJobRunner {
     /// episode — narrow phases judged against an episode-wide floor would defer
     /// forever, having done exactly what they were asked to do.
     ///
-    /// **`.notMeasurable` completes, and that is not a loophole.** A missing
-    /// denominator is a different bug with a different owner (`PlayheadRuntime`'s
-    /// duration-backfill sweep), and refusing to complete on it would strand
-    /// every legacy duration-less row. It is also empty in the field: all twelve
-    /// assets on the 2026-08-03 pull carry `episodeDurationSec`. Note that a job
-    /// which ran and screened nothing is NOT this case — the H13 short-circuit
-    /// persists a no-work sentinel and a failed window persists a failure row,
-    /// so `adScanRowSeen` is non-empty and the fraction reads a measured `0.0`.
+    /// **`.notMeasurable` completes, and it is the weakest line in this gate.**
+    /// A missing denominator is a different bug with a different owner
+    /// (`PlayheadRuntime`'s duration-backfill sweep); refusing to complete on it
+    /// would strand every legacy duration-less row, and retrying can never
+    /// repair it, so the pass would buy nothing. A job which ran and screened
+    /// nothing is NOT this case — the H13 short-circuit persists a no-work
+    /// sentinel and a failed window persists a failure row, so `adScanRowSeen`
+    /// is non-empty and the fraction reads a measured `0.0`.
+    ///
+    /// **R1 review: that argument covers ONE of the four ways
+    /// ``AnalysisCoverageSummary/adScanFraction`` returns `nil`, and the other
+    /// three are not "missing" — they are CONTRADICTED.** The fraction is also
+    /// withheld when coverage overshoots the declared duration, and when the
+    /// transcript's own reach disproves that duration. There the episode is real
+    /// and longer than declared, and the scan has provably read a small slice of
+    /// it, so completing is affirmatively false rather than merely uninformed.
+    /// Verified both directions against the field data: all twelve assets on the
+    /// 2026-08-03 pull carry `episodeDurationSec` and none hits any of the three
+    /// withholding guards, so the branch is inert TODAY — but on the 2026-04-25
+    /// capture three of the five assets that have scan rows reach 3.1–6.9× their
+    /// declared duration (3B96D187 2,181 s vs 704 s, 9C109975 3,960 s vs 573 s,
+    /// E8F0F867 3,810 s vs 553 s) and every one of them would complete here
+    /// unconditionally.
+    ///
+    /// It is also the one place in the pipeline that reads this `nil` as "read":
+    /// ``SemanticScanClaim/isOwed(adScanFraction:)`` and
+    /// ``AnalysisWorkScheduler/shouldMintAdScanRedrive(adScanFraction:resumableCoverageJobCount:)``
+    /// both return `true` on `nil`, and `fullRescanReadEpisode` returns `false`.
+    /// Splitting the case is **playhead-w4rd** rather than a change here: every
+    /// runner fixture that never inserts an `analysis_assets` row completes
+    /// through this branch today, so the direction is a policy call with a
+    /// corpus-wide blast radius, not a local repair.
     ///
     /// **`.unreadable` does NOT complete.** A read that threw is not evidence
     /// the episode was read, and the cost of being wrong is asymmetric: deferring
@@ -1995,6 +2034,21 @@ actor BackfillJobRunner {
     /// the floor (2C5C3699 on the pull has a CEILING of 0.130) terminates with a
     /// named cause after a bounded number of attempts instead of re-driving
     /// forever.
+    ///
+    /// **R1 review — the budget is FLAT, and that diverges from its own
+    /// contract.** `AdmissionController.maxRetries` is documented as "the number
+    /// of FAILED attempts allowed", and playhead-bkhc's expiry branch in this
+    /// same file resets it to zero whenever the cursor advanced, on the argument
+    /// that a lifetime counter would kill a converging job. This branch charges
+    /// every attempt, including one that scanned new audio. The mechanism that
+    /// reaches it with a stable transcript is real — a window-scoped failure the
+    /// pass tolerates leaves coverage short while the pass reports every plan
+    /// attempted, and DE0784D8 on the 2026-08-03 pull carries nine
+    /// `permissive_decoding_failure` coverage-lane rows against a 0.9956 ceiling
+    /// at a measured 0.3797. Not changed here, because the fix has to be
+    /// CONSUMED from this decision rather than re-derived at the write (the UC04
+    /// lesson below), which moves both this signature and the persisted
+    /// `retryCount` contract: **playhead-fs2h**.
     nonisolated static func coverageTerminalDecision(
         phase: BackfillJobPhase,
         measurement: AdScanMeasurement,
@@ -2004,8 +2058,18 @@ actor BackfillJobRunner {
         let underCovered: Bool
         switch measurement {
         case let .measured(fraction):
-            guard fraction.isFinite else { return .complete }
-            underCovered = fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+            // R1 review: a non-finite "measurement" is an ABSENCE wearing a
+            // quantity's clothes, so it under-claims like every other reader of
+            // the same value — `SemanticScanClaim.isOwed`,
+            // `AnalysisWorkScheduler.shouldMintAdScanRedrive` and
+            // `fullRescanReadEpisode` all treat a non-finite fraction as "not
+            // read". This arm used to return `.complete`, which made the
+            // terminal the only consumer in the pipeline that read it as "read".
+            // Unreachable today (`adScanFraction` is `min(1, finite / positive)`)
+            // — a rail, not a repair, and it costs one bounded pass if it ever
+            // fires.
+            underCovered = !fraction.isFinite
+                || fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
         case .notMeasurable:
             underCovered = false
         case .unreadable:

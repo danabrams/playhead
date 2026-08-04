@@ -2,20 +2,24 @@
 // playhead-41mu: a `fullEpisodeScan` job may call itself `complete` only when
 // the episode's MEASURED ad-scan coverage clears the sufficiency floor. Before
 // this bead the terminal fired whenever `runJob` returned without a rate-limit
-// hole, where "done" meant "I swept the segments I was handed" — and the
-// segments are whatever transcript existed at dispatch.
+// hole, where "done" meant "I swept the segments I was handed" — and what it
+// was handed is whatever chunk array its DISPATCHER chose.
 //
 // The two field witnesses, from the 2026-08-03 device pull, are the only two
-// `fullEpisodeScan` rows that ever reached `complete` on that device:
+// `fullEpisodeScan` rows that ever reached `complete` on that device. R1 review:
+// they have DIFFERENT causes, and only this terminal is common to both.
 //
 //   53FC53E3  2,528 s episode, complete 23 s after creation, ONE 36 s window
-//             durably examined (2,490–2,525.8 — the final-pass chunks only,
-//             while 2,490 s of fast-pass transcript sat unscanned).
-//             adScanFraction 0.0142. Its cursor reads 2,525.82, asserting the
-//             episode is read. Its `countResumableBackfillJobs` is ZERO, so the
-//             re-drive that would have rescued it cannot mint.
-//   AD5F3A0A  4,281 s episode, complete with windows spanning 3–900 s (the
-//             transcript was the 900 s tier when the final-pass hook ran).
+//             durably examined (2,490–2,525.8). adScanFraction 0.0142. Its
+//             cursor reads 2,525.82, asserting the episode is read. Its
+//             `countResumableBackfillJobs` is ZERO, so the re-drive that would
+//             have rescued it cannot mint. Its transcript was NOT early —
+//             2,917 fast chunks over [0, 2490] were already on disk, and the
+//             job's persisted transcriptVersion is byte-exact the hash of the
+//             32 FINAL chunks alone, i.e. the dispatcher DISCARDED the fast
+//             pass (`retryShadowFMPhaseForSession`, playhead-3ort).
+//   AD5F3A0A  4,281 s episode, complete with windows spanning 3–900 s — this
+//             one IS the early-transcript shape (the 900 s tier, playhead-9new).
 //             adScanFraction 0.2068. Its first segment starts at 2.8 s, so its
 //             cursor of 900 IS a genuine episode prefix.
 //
@@ -386,6 +390,22 @@ struct BackfillCoverageTerminalTests {
         #expect(BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan, measurement: .unreadable, retryCount: 0
         ) == .deferUnderCoverage)
+    }
+
+    @Test("R1 — a non-finite MEASUREMENT is an absence, and under-claims like every other reader of it")
+    func nonFiniteMeasurementDoesNotComplete() {
+        for garbage in [Double.nan, .infinity, -.infinity] {
+            #expect(BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan, measurement: .measured(garbage), retryCount: 0
+            ) == .deferUnderCoverage,
+            "\(garbage) is not evidence the episode was read")
+        }
+        // The three call sites this now agrees with, asserted rather than
+        // asserted-about: all of them read a non-finite fraction as NOT read.
+        #expect(SemanticScanClaim.isOwed(adScanFraction: .nan))
+        #expect(AnalysisWorkScheduler.shouldMintAdScanRedrive(
+            adScanFraction: .nan, resumableCoverageJobCount: 1
+        ))
     }
 
     @Test("the attempt budget is the shared one, and it terminates rather than deferring forever")

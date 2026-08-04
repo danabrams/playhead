@@ -2391,6 +2391,7 @@ T_41MU_BUDGET="the attempt budget is the shared one, and it terminates rather th
 T_41MU_HOLE="a cursor is an assertion about the EPISODE, so a hole at the head freezes it"
 T_41MU_PREFIX="a run that starts at the head publishes the honest bound, and leading silence is not a hole"
 T_41MU_BRIDGE="the hole threshold is the coverage reader's own bridge tolerance, not a fresh constant"
+T_41MU_NONFINITE="R1 — a non-finite MEASUREMENT is an absence, and under-claims like every other reader of it"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4447,9 +4448,19 @@ MUTATIONS=(
   # this queue keeps paying out on.
   "UC01|430|RUNNER|$T_41MU_DEFERS;$T_41MU_NOCURSOR;$T_41MU_CURSOR;$T_41MU_REDRIVE;$T_41MU_BOUNDED"
 
-  # Batch 431 — UC02. The phase scope is dropped, so the three narrow
-  # `targetedWithAudit` phases are judged against an episode-wide floor and
-  # defer forever having done exactly what they were asked to do.
+  # Batch 431 — UC02. The phase scope is dropped from the PURE decision, so a
+  # caller that reaches it with a narrow `targetedWithAudit` phase judges that
+  # phase against an episode-wide floor and defers forever having done exactly
+  # what it was asked to do.
+  #
+  # R1 review, stated because the earlier note here overclaimed: this mutant is
+  # NOT observable in production. `coverageTerminalDecision(for:)` short-circuits
+  # every non-`fullEpisodeScan` phase before the pure function is called, so the
+  # actor-side guard still saves the narrow phases under UC02 and its only victim
+  # is the pure test. The duplication is deliberate belt-and-braces — UC01 kills
+  # the actor-side guard's absence, this kills the pure one's — and the honest
+  # claim for UC02 is "the pure rule is load-bearing if anything ever calls it
+  # directly", not "narrow phases would defer forever on device".
   "UC02|431|RUNNER|$T_41MU_SCOPE"
 
   # Batch 432 — UC03. A coverage read that THREW is treated as evidence the
@@ -4484,6 +4495,13 @@ MUTATIONS=(
   # could be satisfied by a gate that refuses everything, which would strand the
   # whole library rather than the under-covered slice of it.
   "UC07|436|RUNNER|$T_41MU_VACUITY;$T_41MU_FLOOR;$T_41MU_ABSENCE"
+
+  # Batch 437 — UC08 (R1 review). The non-finite arm goes back to `.complete`,
+  # which is the pre-review code VERBATIM. Cut exactly that way rather than
+  # "delete the isFinite test", which would be broader than the fix and would
+  # also change the finite path. It makes the terminal the ONLY consumer in the
+  # pipeline that reads a non-finite fraction as evidence the episode was read.
+  "UC08|437|RUNNER|$T_41MU_NONFINITE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4875,6 +4893,7 @@ describe_mutation() {
     UC05) echo "41mu: the cursor is published over the unscanned head — 53FC53E3's 2,525.82-on-2,528 s row, verbatim" ;;
     UC06) echo "41mu: the cursor's hole test drops the bridge tolerance, so leading silence freezes a genuine prefix" ;;
     UC07) echo "41mu VACUITY CONTROL: the terminal refuses unconditionally, deferring episodes that were genuinely read" ;;
+    UC08) echo "41mu R1: a non-finite measured fraction completes the job again — the terminal alone reads an absence as 'read'" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10712,6 +10731,20 @@ EOF
     snippet NEW <<'EOF'
         _ = underCovered
         return retryCount + 1 >= AdmissionController.maxRetries
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UC08 (R1 review) — the non-finite arm returns `.complete` again. This is the
+  # pre-review implementation verbatim, so the mutant is exactly the size of the
+  # fix: the finite comparison below is untouched.
+  UC08)
+    snippet OLD <<'EOF'
+            underCovered = !fraction.isFinite
+                || fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+EOF
+    snippet NEW <<'EOF'
+            guard fraction.isFinite else { return .complete }
+            underCovered = fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
