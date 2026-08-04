@@ -355,3 +355,104 @@ The real fixes (narrow only for `.fullEpisodeScan`; or make the resume key off
 are all changes to a shipped contract. Filed with those three directions and the
 test a fix needs — one that runs a targeted phase twice with a DIFFERENT anchor
 set, which no existing test does.
+
+**R3 confirms that reasoning and corrects one word in it.** All three points hold
+— the writer is honest, the consumer is the unsound step, and no 26od-local
+change closes it. But "not made worse" is too strong and should not be carried
+into the PR: the mid-flight checkpoint is installed in `runJob` unconditionally,
+so it writes a cursor on every phase, on the JETSAM path, which the bead's own
+field evidence says is the dominant one (10 of 10 jobs in the 2026-08-03 pull).
+Before this diff those phases only got a cursor via pmp9's rate-limit defer or
+t1kq's graceful cancellation. The DEFECT is unchanged and no fix belongs here;
+its EXPOSURE RATE rises, and u99x should say so.
+
+## Review round R3 — what it changed
+
+Four defects, none in the cursor rule. R3 re-derived that rule from scratch
+rather than checking the four existing fixes look right, and it holds: for every
+segment the consumer drops (`endTime <= cursor`), its plan is fully covered by
+persisted rows, because an uncovered plan's start caps the cursor and every
+segment of that plan has `endTime >= startTime >= cursor`. The only residue is
+the zero-duration segment R2 already documented. What R3 found instead is that
+three of the rules the earlier rounds ADDED were invoked by nothing a test could
+see — the same shape as R2/L-5, one level up.
+
+* **The mid-flight checkpoint was untested on the call site PRODUCTION takes.**
+  `runJob` picks between two `coarsePassA` overloads: the bd-1en DISPATCHING one
+  when a `sensitiveRouter` AND a `permissiveClassifierBox` are both present, and
+  the legacy one otherwise. `PlayheadRuntime.backfillJobRunnerFactory` supplies
+  both unconditionally on iOS 26+, so the dispatching overload is the ONLY one a
+  shipped build ever calls — and every test in the suite built the runner
+  without a router. `onWindowsBanked:` defaults to nil at all three classifier
+  entry points, so deleting the argument from the production call site COMPILES
+  SILENTLY and left the whole suite green with the feature dead on device.
+  `productionShapedRunnerAlsoCheckpointsMidFlight` builds the runner exactly as
+  `PlayheadRuntime` does and makes the same exact in-flight claim.
+* **The defuse contract was a boolean round-trip.** `aDefusedBoxAcceptsNothing`
+  set a flag and read it back; all three guards in `checkpointCoarseWindows` —
+  the entry check, round I's per-suspension RE-check, and the post-loop one that
+  protects t1kq's rewind — were individually deletable with a green suite.
+  Testing it needed a deterministic mid-loop event, and there is one:
+  `attributed(_:jobId:)` calls the injectable `scenePhaseProvider` exactly once
+  per scan-row insert, so a probe both COUNTS the writes and can reach in
+  between two of them. `checkpointCoarseWindows` is internal rather than private
+  for the same reason `CoarseCheckpointBox` is — the properties that make it
+  safe leave no trace in any row a full-pass test can read, because a full pass
+  never defuses mid-flight and never fails only SOME of its writes.
+* **The write-cost claim was argued, not measured.** The suite named "checkpoint
+  write cost" asserted that a counter increments, which is true of an
+  implementation that ignores the counter. Counting `scenePhaseProvider` calls
+  counts INSERT attempts directly: at the 13 windows the fixture plans, the
+  linear implementation writes 25 rows and the prefix-rewriting one 91.
+* **The qk44 lease closure was the one observer with no lifetime bound.** Three
+  lines above the checkpoint, in the same function, `onCoarseProgress` touched
+  `markBackfillJobRunning` with no defuse guard — so an abandoned pass that later
+  resumes keeps refreshing `updatedAt` on a row whose run is over, and
+  `resetStrandedBackfillJobs` reads a fresh `updatedAt` as "alive" and will not
+  sweep it. A `running` row nobody sweeps is the stall qk44 exists to prevent.
+  Pre-existing, but this diff is what introduces the token that bounds it, and
+  leaving the asymmetry contradicts the reasoning printed beside it. Both
+  observers now share ONE box, so they can never disagree about whether the pass
+  is still the live one.
+
+Plus two stale claims and one overclaim, all corrected in place:
+
+* `BackfillStallBoundTests`'s header still asserted, as present-tense fact, that
+  "`coarsePassA` writes NOTHING until it returns, so a pass in flight is
+  invisible in the database" — the identical statement R2 corrected in
+  `FMInferenceDeadline.swift`, in the file that documents the stall bound. The
+  operational consequence is named too: `zero semantic_scan_results` is no longer
+  part of a wedge's signature, so triage reads the lease and the cursor.
+* `normalPassPersistsExactlyOneRowPerWindow`'s doc claimed it pinned the
+  DETERMINISTIC ROW ID. It does not: `UNIQUE(reuseKeyHash)` + `INSERT OR REPLACE`
+  collapses the second write on the reuse key whatever the id is, so a random id
+  passes. The comment now names the mechanism that is actually doing the work.
+* `aFailedCheckpointWriteDoesNotAdvanceTheCursor` asserted an empty database and
+  a nil cursor, both of which a build that planned zero windows satisfies. It now
+  requires the pass to have screened something first.
+
+### Residual, reported rather than fixed
+
+* **`defer { checkpointBox.defuse() }` itself is unpinned**, and so is the lease
+  guard that now rides it. Both are only observable from a pass that is still
+  firing callbacks after `runJob` exits, and the only test that produces one is
+  PerfGate'd out of both default plans. Bounded: deleting either restores a
+  pre-existing behaviour (a cursor/lease write from an orphaned pass), it cannot
+  make the cursor claim coverage no row supports, and the three in-function
+  guards are now killed.
+* **`checkpointCoarseWindows` does not bump `counters.persistedScanResultCount`.**
+  On a killed pass the rows are durable while the counter reads zero, so
+  `hasOperationalWork` suppresses the operational-metrics event for a job that
+  wrote real rows. Telemetry only — no production reader computes a ratio from
+  it — and closing it means plumbing a count across the `runJob`/drain-loop
+  boundary that the throw path deliberately does not cross.
+* **`AdScanLimit.neverRan` is no longer reachable for a killed pass** — it
+  degrades to `.stoppedShort`, which is the more honest token. Contractually
+  diagnostic-only (`AnalysisCoordinator`: "never changes the verdict, only the
+  words in `terminalReason`"), but it retires a string a log scraper may read.
+* The `salvagedCursor ?? job.progressCursor` rewind is confirmed correct and
+  confirmed to be the ONLY path that can lower a mid-flight cursor. R3 checked
+  the direction the note does not state: the end-of-pass walk sees a superset of
+  covered plans, and the walk's bound is monotone non-decreasing in that set, so
+  the rate-limit defer and the non-fully-covered cancellation arm can never
+  write a cursor BEHIND the mid-flight one.

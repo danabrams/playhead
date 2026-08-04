@@ -1969,7 +1969,16 @@ actor BackfillJobRunner {
     /// end-of-pass digest attempts every row again through the normal `try await`
     /// path, so a genuine persistence failure still surfaces exactly where it
     /// did before.
-    private func checkpointCoarseWindows(
+    ///
+    /// Internal rather than `private`, for the same reason
+    /// ``CoarseCheckpointBox`` is: the two properties that make this function
+    /// SAFE are invisible from outside it. Whether it stops at a `defuse()` that
+    /// arrives mid-loop, and whether it splits the snapshot at the DURABLE count
+    /// rather than the offered one, are both decided here and both leave no
+    /// trace in any row a full-pass test can read — a full pass never defuses
+    /// mid-flight and never fails only SOME of its writes. `runJob` remains the
+    /// only production caller.
+    func checkpointCoarseWindows(
         _ banked: FMCoarseBankedWindows,
         box: CoarseCheckpointBox,
         inputs: AssetInputs,
@@ -2207,6 +2216,19 @@ actor BackfillJobRunner {
             )
         }
 
+        // playhead-26od: the lifetime token for BOTH observers this function
+        // installs on the coarse pass. Declared first because the qk44 lease
+        // closure below captures it; its own rationale is at ``defuse()`` and
+        // at the checkpoint block further down.
+        //
+        // The pass can outlive this function: `FMNoProgressWatchdog` abandons a
+        // wedged pass rather than awaiting it, so a pass body may still fire
+        // either callback after `runJob` has thrown and the drain loop has put
+        // the job in a terminal state. Defusing on EVERY exit path bounds both
+        // observers' lifetimes to the job's.
+        let checkpointBox = CoarseCheckpointBox()
+        defer { checkpointBox.defuse() }
+
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
         // medical / mental-health / regulated tests) through the
         // permissive `SystemLanguageModel` path. The router and
@@ -2235,7 +2257,22 @@ actor BackfillJobRunner {
         // race with a terminal transition must not fail the pass.
         let leaseJobId = job.jobId
         let leaseStore = store
-        let onCoarseProgress: @Sendable (Int) async -> Void = { _ in
+        let onCoarseProgress: @Sendable (Int) async -> Void = { [checkpointBox] _ in
+            // playhead-26od: bounded by the JOB's life, for the same reason the
+            // checkpoint below is — and it is the same box, deliberately, so the
+            // two observers of one pass can never disagree about whether that
+            // pass is still the live one.
+            //
+            // `FMNoProgressWatchdog` abandons a wedged pass rather than awaiting
+            // it, so this closure can still fire after `runJob` has thrown and
+            // the drain loop has moved the row to a terminal state. Unbounded,
+            // an abandoned pass that later resumes keeps refreshing `updatedAt`
+            // on a row whose run is over — which is precisely the state qk44
+            // exists to make impossible, since `resetStrandedBackfillJobs` reads
+            // a fresh `updatedAt` as "this job is alive" and will not sweep it.
+            // A `running` row nobody sweeps is the stall this bead's field
+            // evidence is made of.
+            guard !checkpointBox.isDefused else { return }
             try? await leaseStore.markBackfillJobRunning(jobId: leaseJobId)
         }
 
@@ -2256,14 +2293,12 @@ actor BackfillJobRunner {
         // t1kq salvages the CURSOR on a graceful cancellation and does not help
         // here: it needs the pass to have returned, and it salvages where the
         // pass got to, not what it found.
-        let checkpointBox = CoarseCheckpointBox()
-        // The pass can outlive this function: `FMNoProgressWatchdog` abandons a
-        // wedged pass rather than awaiting it, so the pass body may still fire
-        // this callback after `runJob` has thrown and the drain loop has put the
-        // job in a terminal state. Defusing on EVERY exit path bounds the
-        // checkpoint's lifetime to the job's, so no orphaned pass can write a
-        // cursor onto a row whose run is over.
-        defer { checkpointBox.defuse() }
+        //
+        // `checkpointBox` — the lifetime token both this observer and the qk44
+        // lease closure above are bounded by — is declared at the top of this
+        // section, because the lease closure needs it first. Defusing it on
+        // every exit path is what stops an orphaned pass writing a cursor onto
+        // a row whose run is over.
         let checkpointJobId = job.jobId
         let checkpointJobPhase = job.phase
         let checkpointPriorCursor = job.progressCursor

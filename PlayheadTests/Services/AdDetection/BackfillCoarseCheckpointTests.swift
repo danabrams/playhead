@@ -598,7 +598,17 @@ struct BackfillCoarseCheckpointTests {
         // zero — it would be coverage claimed for audio nobody screened, which
         // is the failure qbib and pmp9 both exist to prevent.
         #expect(successes.count == answeringWindows)
+        // The premise, stated against the fixture rather than against itself: an
+        // earlier version compared two literals here and could not fail. What
+        // has to be true for the count above to mean anything is that the pass
+        // was cut SHORT — several windows durable, and the episode's later audio
+        // not among them. 40 lines x 30 s is 1200 s of episode.
         #expect(answeringWindows > 1, "a one-window pass cannot distinguish this from a final write")
+        let reached = successes.map(\.windowEndTime).max() ?? 0
+        #expect(
+            reached > 0 && reached < 40 * Self.segmentSeconds,
+            "the pass was not truncated (reached \(reached)s of 1200s), so nothing here is about an abandonment"
+        )
         for row in successes {
             #expect(row.windowEndTime > row.windowStartTime)
             #expect(row.analysisAssetId == assetId)
@@ -613,11 +623,21 @@ struct BackfillCoarseCheckpointTests {
     /// `UNIQUE(reuseKeyHash)` + `INSERT OR REPLACE` make the second write an
     /// exact replace.
     ///
-    /// This test is the proof, and it is deliberately three assertions rather
-    /// than one, because three different things could go wrong: a duplicate ROW
-    /// (id collision broken), a duplicate ENTRY in the returned id list (the
-    /// runner's own accounting), and an inflated `attemptCount` (the store's
-    /// non-success retry counter firing on a path it should not).
+    /// Two things this test can actually catch, stated precisely because a
+    /// looser claim was wrong. It catches a **duplicate row** — two rows where a
+    /// window should have one — and an **inflated `attemptCount`**, the store's
+    /// non-success retry counter firing on a path it should not. It also catches
+    /// a duplicate ENTRY in `result.scanResultIds`, which is the runner's own
+    /// in-memory accounting and genuinely can repeat.
+    ///
+    /// What it does NOT catch, despite an earlier version of this comment
+    /// claiming otherwise: a non-deterministic row id. `UNIQUE(reuseKeyHash)` +
+    /// `INSERT OR REPLACE` collapses the second write on the reuse key whatever
+    /// the id is, so a random id still yields one row per window here. The
+    /// deterministic id is load-bearing for OTHER reasons (an orphan row from a
+    /// crashed run, and the C-R3-2 transcriptVersion argument in
+    /// `makeScanResult`); it is not what this test measures, and pretending it
+    /// is would leave the real mechanism — the reuse key — unnamed.
     @Test("a pass that completes normally persists exactly one row per window")
     func normalPassPersistsExactlyOneRowPerWindow() async throws {
         let assetId = "asset-26od-normal"
@@ -771,6 +791,15 @@ struct BackfillCoarseCheckpointTests {
 
         _ = try? await runner.runPendingBackfill(for: inputs)
 
+        // The OTHER half of the premise, and the one an empty database cannot
+        // state: the pass really screened windows whose rows then failed to
+        // land. Without this a build whose planning produced nothing at all —
+        // no windows, no writes, no cursor — satisfies every assertion below
+        // while proving none of them.
+        #expect(
+            await fmRuntime.coarseCallCount > 1,
+            "the pass screened nothing, so 'a failed write earns no cursor' is untested here"
+        )
         // Nothing was persisted — the premise of the test.
         let rows = try await passARows(store, assetId: assetId)
         #expect(rows.isEmpty, "the injected failure did not actually stop the writes")
@@ -793,6 +822,304 @@ struct BackfillCoarseCheckpointTests {
                 )
             }
         }
+    }
+
+    // MARK: - 3b. The checkpoint's LIFETIME is the job's
+
+    /// `attributed(_:jobId:)` calls `scenePhaseProvider` exactly once per scan-row
+    /// insert attempt (`BackfillJobRunner.attributed`), so an injected provider is
+    /// two things at once: an exact COUNT of the row writes a checkpoint performs,
+    /// and a deterministic place to reach in BETWEEN two of them.
+    ///
+    /// That second property is what makes the defuse contract testable at all.
+    /// `defuse()` matters only when it lands mid-loop, and a real abandoned pass
+    /// arrives there by racing — which is exactly the kind of test this suite
+    /// refuses to write. Driving it from inside the write loop makes the same
+    /// event ordered rather than raced. Nothing here reads a clock.
+    private actor RowWriteProbe {
+        private(set) var writes = 0
+        private let onWrite: @Sendable (Int) -> Void
+
+        init(onWrite: @escaping @Sendable (Int) -> Void = { _ in }) {
+            self.onWrite = onWrite
+        }
+
+        func next() -> String {
+            writes += 1
+            onWrite(writes)
+            return "background"
+        }
+    }
+
+    private func makeProbedRunner(
+        store: AnalysisStore,
+        runtime: FoundationModelClassifier.Runtime,
+        probe: RowWriteProbe
+    ) -> BackfillJobRunner {
+        BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON(),
+            scenePhaseProvider: { await probe.next() }
+        )
+    }
+
+    /// A snapshot with `windows` screened out of `plans` planned, one window per
+    /// plan — the shape a healthy pass banks part-way through. `windows < plans`
+    /// so the walk is never `fullyCovered`, which is the state a mid-flight
+    /// checkpoint is only ever called in.
+    private func bankedSnapshot(windows: Int, plans: Int) -> FMCoarseBankedWindows {
+        FMCoarseBankedWindows(
+            plans: (0..<plans).map { idx in
+                CoarsePassWindowPlan(
+                    windowIndex: idx,
+                    lineRefs: [idx],
+                    prompt: "p\(idx)",
+                    promptTokenCount: 10,
+                    startTime: Double(idx) * Self.segmentSeconds,
+                    endTime: Double(idx + 1) * Self.segmentSeconds,
+                    transcriptQuality: .good
+                )
+            },
+            windows: (0..<windows).map { idx in
+                FMCoarseWindowOutput(
+                    windowIndex: idx,
+                    lineRefs: [idx],
+                    startTime: Double(idx) * Self.segmentSeconds,
+                    endTime: Double(idx + 1) * Self.segmentSeconds,
+                    transcriptQuality: .good,
+                    screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+                    latencyMillis: 1.0
+                )
+            },
+            failedWindows: []
+        )
+    }
+
+    private func seedRunningJob(
+        _ store: AnalysisStore,
+        assetId: String,
+        jobId: String
+    ) async throws {
+        try await store.insertBackfillJob(
+            BackfillJob(
+                jobId: jobId,
+                analysisAssetId: assetId,
+                podcastId: "podcast-26od",
+                phase: .fullEpisodeScan,
+                coveragePolicy: .targetedWithAudit,
+                priority: 0,
+                progressCursor: nil,
+                retryCount: 0,
+                deferReason: nil,
+                status: .running,
+                scanCohortJSON: makeTestScanCohortJSON(),
+                createdAt: Date().timeIntervalSince1970
+            )
+        )
+    }
+
+    /// A `defuse()` that arrives MID-LOOP stops the checkpoint where it is.
+    ///
+    /// This is the property review round I added and nothing pinned: the loop
+    /// suspends on every write, so a checkpoint that entered while the job was
+    /// alive can be resumed after `runJob` has already exited. Checking the flag
+    /// only on ENTRY would let an orphaned pass keep writing rows — and, worse,
+    /// keep writing a cursor — onto a row whose run is over, undoing the t1kq
+    /// rewind that same exit path may have just performed.
+    ///
+    /// `aDefusedBoxAcceptsNothing` cannot see any of that: it sets a flag and
+    /// reads it back. The three guards in `checkpointCoarseWindows` were all
+    /// individually deletable with a green suite.
+    @Test("a defuse that lands mid-loop stops the checkpoint at that window")
+    func aMidLoopDefuseStopsTheCheckpoint() async throws {
+        let assetId = "asset-26od-defuse-midloop"
+        let jobId = "job-26od-defuse-midloop"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await seedRunningJob(store, assetId: assetId, jobId: jobId)
+        let inputs = makeInputs(assetId: assetId, lineCount: 8)
+        let box = CoarseCheckpointBox()
+        // Defused while the FIRST row is being built — after that row's guard
+        // has already been passed, before the second window's.
+        let probe = RowWriteProbe { count in
+            if count == 1 { box.defuse() }
+        }
+        let runner = makeProbedRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            probe: probe
+        )
+
+        await runner.checkpointCoarseWindows(
+            bankedSnapshot(windows: 3, plans: 4),
+            box: box,
+            inputs: inputs,
+            jobId: jobId,
+            jobPhase: .fullEpisodeScan,
+            priorCursor: nil,
+            runMode: .shadow
+        )
+
+        let rows = try await passARows(store, assetId: assetId)
+        #expect(rows.count == 1, "the checkpoint kept writing after it was defused: \(rows.count) rows")
+        #expect(box.processedWindowCount == 1)
+        let job = try #require(try await store.fetchBackfillJob(byId: jobId))
+        #expect(job.progressCursor?.lastProcessedUpperBoundSec == nil)
+    }
+
+    /// A `defuse()` that arrives after the LAST row still stops the CURSOR.
+    ///
+    /// The cursor is the one thing this function writes that a terminal path may
+    /// deliberately have moved somewhere else — playhead-t1kq REWINDS it to the
+    /// admission-time value when a cancellation arrives with the coarse pass
+    /// fully covered. A late checkpoint landing after that rewind puts the
+    /// partial cursor back and strands the refinement the rewind exists to
+    /// preserve, so the guard AFTER the row loop is a separate rule from the one
+    /// inside it, and deleting it is invisible to the test above.
+    @Test("a defuse that lands after the last row still withholds the cursor")
+    func aLateDefuseStillWithholdsTheCursor() async throws {
+        let assetId = "asset-26od-defuse-late"
+        let jobId = "job-26od-defuse-late"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await seedRunningJob(store, assetId: assetId, jobId: jobId)
+        let inputs = makeInputs(assetId: assetId, lineCount: 8)
+        let box = CoarseCheckpointBox()
+        let probe = RowWriteProbe { count in
+            if count == 3 { box.defuse() }
+        }
+        let runner = makeProbedRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            probe: probe
+        )
+
+        await runner.checkpointCoarseWindows(
+            bankedSnapshot(windows: 3, plans: 4),
+            box: box,
+            inputs: inputs,
+            jobId: jobId,
+            jobPhase: .fullEpisodeScan,
+            priorCursor: nil,
+            runMode: .shadow
+        )
+
+        // Every row landed — the premise. The defuse arrived too late to stop
+        // any of them, which is exactly the case the post-loop guard is for.
+        let rows = try await passARows(store, assetId: assetId)
+        #expect(rows.count == 3)
+        let job = try #require(try await store.fetchBackfillJob(byId: jobId))
+        #expect(
+            job.progressCursor?.lastProcessedUpperBoundSec == nil,
+            "a defused checkpoint wrote a cursor onto a row whose run is over"
+        )
+
+        // The control, from the same fixture: an UNdefused box does advance the
+        // cursor here, so the assertion above is about the defuse and not about
+        // a checkpoint that never had a cursor to write.
+        let liveAssetId = "asset-26od-defuse-live"
+        let liveJobId = "job-26od-defuse-live"
+        try await store.insertAsset(makeAsset(id: liveAssetId))
+        try await seedRunningJob(store, assetId: liveAssetId, jobId: liveJobId)
+        let liveRunner = makeProbedRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            probe: RowWriteProbe()
+        )
+        await liveRunner.checkpointCoarseWindows(
+            bankedSnapshot(windows: 3, plans: 4),
+            box: CoarseCheckpointBox(),
+            inputs: makeInputs(assetId: liveAssetId, lineCount: 8),
+            jobId: liveJobId,
+            jobPhase: .fullEpisodeScan,
+            priorCursor: nil,
+            runMode: .shadow
+        )
+        let liveJob = try #require(try await store.fetchBackfillJob(byId: liveJobId))
+        #expect(liveJob.progressCursor?.lastProcessedUpperBoundSec == 90.0)
+    }
+
+    /// An already-defused box writes NOTHING — not even the first row.
+    @Test("a checkpoint on an already-defused box writes nothing at all")
+    func anAlreadyDefusedCheckpointWritesNothing() async throws {
+        let assetId = "asset-26od-defuse-entry"
+        let jobId = "job-26od-defuse-entry"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await seedRunningJob(store, assetId: assetId, jobId: jobId)
+        let probe = RowWriteProbe()
+        let box = CoarseCheckpointBox()
+        box.defuse()
+
+        await makeProbedRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            probe: probe
+        ).checkpointCoarseWindows(
+            bankedSnapshot(windows: 3, plans: 4),
+            box: box,
+            inputs: makeInputs(assetId: assetId, lineCount: 8),
+            jobId: jobId,
+            jobPhase: .fullEpisodeScan,
+            priorCursor: nil,
+            runMode: .shadow
+        )
+
+        #expect(await probe.writes == 0, "a defused checkpoint still built rows")
+        #expect(try await passARows(store, assetId: assetId).isEmpty)
+        let job = try #require(try await store.fetchBackfillJob(byId: jobId))
+        #expect(job.progressCursor?.lastProcessedUpperBoundSec == nil)
+    }
+
+    // MARK: - 3c. The write COST, measured over a whole pass
+
+    /// The bead's write-cost claim, asserted end to end instead of argued.
+    ///
+    /// Every checkpoint carries the whole banked PREFIX, not a delta. Without
+    /// the `processedWindowCount` slice the checkpoint rewrites every earlier
+    /// window on every window — O(W^2) row writes and O(W^2) JSON encodings
+    /// across a pass, on a thermally-constrained phone, in the middle of the
+    /// pass this bead exists to keep alive.
+    ///
+    /// `CoarseCheckpointBoxTests` cannot see that: it asserts a counter
+    /// increments, which is true of an implementation that ignores the counter
+    /// entirely. Counting `scenePhaseProvider` calls counts scan-row INSERT
+    /// attempts directly (`attributed` is on the path of every one of them), so
+    /// the quadratic implementation and the linear one differ by an
+    /// unmistakable margin — at the 13 windows this fixture plans, 25 writes
+    /// against 91.
+    ///
+    /// The count is exact, not a bound, and it is derived rather than observed:
+    /// W-1 checkpoints each contributing exactly the one window that resolved
+    /// since the last one, plus the end-of-pass digest's W. A `.noAds` fixture
+    /// plans no zoom windows, so passB adds nothing.
+    @Test("a pass writes one row per window per checkpoint, not the whole prefix")
+    func checkpointWriteCostIsLinearInTheWindowCount() async throws {
+        let assetId = "asset-26od-writecost"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let probe = RowWriteProbe()
+        let fmRuntime = TestFMRuntime(tokenCountRule: { $0.count })
+
+        _ = try await makeProbedRunner(store: store, runtime: fmRuntime.runtime, probe: probe)
+            .runPendingBackfill(for: makeInputs(assetId: assetId, lineCount: 40))
+
+        let windowCount = await fmRuntime.coarseCallCount
+        #expect(windowCount > 2, "too few windows for a quadratic cost to be distinguishable")
+        let writes = await probe.writes
+        #expect(
+            writes == 2 * windowCount - 1,
+            "expected \(2 * windowCount - 1) row writes for \(windowCount) windows, saw \(writes)"
+        )
+        // ... and the rows themselves are still one per window.
+        let successes = try await passARows(store, assetId: assetId).filter { $0.status == .success }
+        #expect(successes.count == windowCount)
     }
 
     // MARK: - 4. The classifier's half of the contract
