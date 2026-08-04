@@ -510,8 +510,12 @@
 #       A gappy-transcript test now pins the divergence across the floor.
 #
 #   R2 REVIEW ROUND, same day. A NEW batch 408 with three entries — SC26, SC27,
-#   SC28 — bringing the SC series to 27 entries in 8 batches. Batches 400-407
-#   were NOT re-run and carry the verdicts above.
+#   SC28 — bringing the SC series to 27 entries in 8 batches. Batch 408 FINAL:
+#   3 KILLED / 0 SURVIVED / 0 ERROR, 2 builds, 5m16s, baseline green, each of
+#   the three with a distinct victim. Batches 400-407 were NOT re-run and carry
+#   the verdicts above; every one of their anchors was re-checked by
+#   `--dry-run --batch` after the R2 edits and still applies exactly once.
+#   Recount: 397 live entries.
 #
 #   All three are the R1 round's second family — a correct line nothing could
 #   observe — and this time all three are in ONE function, the reconciler sweep:
