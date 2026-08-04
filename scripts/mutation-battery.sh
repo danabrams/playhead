@@ -553,11 +553,15 @@
 #       runner drains. The sweep now applies the same `fetchActiveJobEpisodeIds`
 #       guard `mintAdScanRedrives` applies one step later.
 #
-#   R3 REVIEW ROUND, 2026-08-04. A NEW batch 409 with four entries — SC30,
-#   SC31, SC32, SC33 — bringing the SC series to 31 entries in 9 batches.
-#   SC21, SC25 and SC27 were RE-ANCHORED (the sweep's transcript gate and its
-#   candidate read were both rewritten); every other SC anchor was re-checked
-#   with `--dry-run --batch` and still applies exactly once.
+#   R3 REVIEW ROUND, 2026-08-04. Four new entries — SC30 and SC32 in a new
+#   batch 409, SC31 alone in 410, SC33 alone in 411 — bringing the SC series to
+#   31 entries in 11 batches. SC31 and SC33 mutate the SAME LINE so they cannot
+#   share a batch, and SC31 cannot share with SC30 because both redden
+#   `$T_FIL5_BREATH` (a mutation credited KILLED off a batchmate's victim is a
+#   fabricated rail — the SC29 reasoning). SC21, SC25 and SC27 were RE-ANCHORED
+#   (the sweep's transcript gate and its candidate read were both rewritten);
+#   every other SC anchor was re-checked with `--dry-run --batch` and still
+#   applies exactly once.
 #
 #   Batch 409 is NOT a coverage-hole batch. SC30/SC31 restore a defect that was
 #   live on this branch: the sweep's transcript gate divided the RAW interval
@@ -3977,20 +3981,31 @@ MUTATIONS=(
   # wall-clock floor is unreachable rather than strict. playhead-pz32 found and
   # removed the identical shape one layer down; this is it re-entering.
   "SC30|409|RECON|$T_FIL5_BREATH"
-  # SC31 — the same defect where it reads as a constant rather than a choice: the
-  # bridge width goes to 0, so the helper silently becomes the raw union for
-  # every caller. Separate from SC30: one is the call site, one is the contract.
-  "SC31|409|CLAIM|$T_FIL5_BRIDGED;$T_FIL5_BREATH"
   # SC32 — the candidate cursor stops advancing, restoring the fixed oldest-first
   # prefix. Rejects write nothing and so keep their position forever, which makes
   # a full window of never-claimable assets a permanent wall. Invisible to SC26
   # and SC27, which both bound the window correctly while it stays stuck at 0.
+  # Batched with SC30: different functions, disjoint victims (SC30's fixture is
+  # one candidate, so the cursor never leaves 0; SC32's is contiguous-chunked, so
+  # the numerator never matters).
   "SC32|409|RECON|$T_FIL5_ROTATE"
+
+  # Batch 410 — SC31 ALONE, and 411 — SC33 alone. Both mutate the SAME LINE as
+  # each other, so they cannot share a batch (a batch applies its members
+  # simultaneously against one build). SC31 additionally cannot share with SC30:
+  # both would redden `$T_FIL5_BREATH`, and a mutation credited KILLED off a
+  # batchmate's victim is a fabricated rail — the reason SC29 is unregistered.
+  #
+  # SC31 — the SC30 defect where it reads as a constant rather than a choice: the
+  # bridge width goes to 0, so the helper silently becomes the raw union for
+  # every caller. Separate from SC30: one is the call site, one is the contract,
+  # and `$T_FIL5_BRIDGED` observes only this one.
+  "SC31|410|CLAIM|$T_FIL5_BRIDGED;$T_FIL5_BREATH"
   # SC33 — the direction control for SC30/SC31. Bridging is only defensible while
   # it is narrower than the shortest span any lane calls an ad; widen it and it
   # conceals genuine untranscribed BLOCKS, claiming assets whose transcript a
   # scan cannot read. Without this the suite would pin "bridge more" as free.
-  "SC33|409|CLAIM|$T_FIL5_BLOCKS"
+  "SC33|411|CLAIM|$T_FIL5_BLOCKS"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
