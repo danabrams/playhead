@@ -1014,6 +1014,26 @@ struct CapOutRetryTests {
 
     // MARK: - playhead-9y9e R3 review: THE WIRE-IN
 
+    /// `scanCohortJSON` is VALIDATED on insert — `AnalysisStore` decodes it as a
+    /// `ScanCohort` and throws `invalidScanCohortJSON` otherwise — so `"{}"` is
+    /// not a usable placeholder here.
+    private static let cohortJSON: String = {
+        let cohort = ScanCohort(
+            promptLabel: "y8f3-test",
+            promptHash: "prompt-v1",
+            schemaHash: "schema-v1",
+            scanPlanHash: "plan-v1",
+            normalizationHash: "norm-v1",
+            osBuild: "26A123",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(cohort)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }()
+
     /// One coverage-lane scan row tiling `[0, end]`, so the asset's MEASURED
     /// `adScanFraction` clears its floor. Deliberately minimal: this suite needs
     /// the fraction to come out of the store, not a realistic scan.
@@ -1036,7 +1056,7 @@ struct CapOutRetryTests {
             outputTokenCount: nil,
             latencyMs: nil,
             prewarmHit: false,
-            scanCohortJSON: "{}",
+            scanCohortJSON: Self.cohortJSON,
             transcriptVersion: "tx-v1"
         ))
     }
