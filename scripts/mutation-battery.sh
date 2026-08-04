@@ -186,6 +186,34 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   R1 REVIEW ADDITIONS 2026-08-04 (playhead-9y9e). Batches 418-419, RT12-RT13.
+#   Both KILLED, each on exactly ONE victim. RT02 was also re-run and KILLED on
+#   all three of its named victims, which is the vacuity audit doing its job.
+#   Recount: the array now holds 337 live entries.
+#
+#   RT12 WAS RE-CUT ONCE, and the reason is the most reusable thing here. Its
+#   first form was the obvious one-line revert — an unconditional
+#   `fastIntervals + finalIntervals`. It KILLED, on TWENTY victims, because it
+#   also deletes the watermark fallback for assets with no chunks of EITHER
+#   pass, a shape half the coverage suite rests on. That verdict was worthless:
+#   the code being reviewed would have failed those twenty too, so the mutant
+#   proved nothing about the fix. RT12 is now the pre-review implementation
+#   VERBATIM, branch and all, and reddens one test. **When a mutant's victim
+#   list is much larger than the behaviour you changed, suspect that the mutant
+#   is broader than the fix, not that the fix is well covered.**
+#
+#   THE OTHER FAULT WAS OPERATIONAL, and it is worth a line because it wastes
+#   builds silently. Two batteries running against the same `.derivedData`
+#   produce `unable to attach DB: … database is locked`, reported as
+#   "the baseline did not run tests (rc=65)" — which looks exactly like a broken
+#   anchor or a compile failure. Killing the loser then wedges the simulator,
+#   and the battery's own recovery path shells out to a bare `xcrun simctl`,
+#   which resolves against the GLOBAL xcode-select and dies with
+#   `unable to find utility "simctl"` (the 2026-07-16 gotcha, from a new
+#   direction). Export `DEVELOPER_DIR` for the whole invocation, and check
+#   `ps -Ao command | grep -c "[x]codebuild test -scheme Playhead"` is 0 before
+#   starting — CLAUDE.md's "ONE AT A TIME" is not only about memory.
+#
 #   PARTIAL RE-RUN 2026-08-04 (playhead-9y9e). Batches 413-417, RT01-RT11 — 11
 #   entries in 5 batches — plus batches 404, 407, 409, 410 and 411, whose EDITs
 #   this bead re-cut when it renamed `bridgedTranscriptCoveredSec(fastRanges:)`
