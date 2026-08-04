@@ -3,10 +3,15 @@
 // request for the semantic ad scan, and every gate that refuses to dispatch
 // one must say so in a row somebody can query.
 //
-// **The measurement.** 2026-08-03 device pull: 12 episodes, 9 transcribed to
-// ~100 %, only 3 with ANY semantic ad scan, ZERO at >=98 %. Three assets —
-// FCDDB309 (100 % transcript), 4FF3A238 (100 %), 48E903D7 (95 %) — had zero
-// `backfill_jobs` rows, and FCDDB309's `decision_events` prove `runBackfill`
+// **The measurement.** 2026-08-03 device pull: 12 assets, only 3 with ANY
+// semantic ad scan, ZERO at >=98 %. FOUR assets — 48E903D7, FCDDB309,
+// 4FF3A238, 2C5C3699 — had zero `backfill_jobs` rows. The bead names three of
+// them and gives 48E903D7 as "95 % transcript"; that figure is its
+// `fastTranscriptCoverageEndTime` WATERMARK (2010 s of 2113 s) and its chunks
+// disagree — they stop at 1440 s and cover 36.9 % as a bridged area, which is
+// why this suite's fixtures never treat it as claimable. The two assets that
+// are both transcribed and stranded are FCDDB309 (98.8 % bridged) and
+// 4FF3A238 (98.9 %), and FCDDB309's `decision_events` prove `runBackfill`
 // ran for it TWICE and minted nothing. Which of four gates dropped the work
 // was recorded nowhere, and `playhead-onn6`'s re-drive sweep starts from
 // assets that already HAVE resumable rows, so zero rows meant zero mints,

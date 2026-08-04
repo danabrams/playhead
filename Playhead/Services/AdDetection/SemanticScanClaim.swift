@@ -8,10 +8,21 @@ import os
 /// playhead-fil5: a persisted CLAIM to a semantic ad scan.
 ///
 /// **The defect this exists for.** Measured on the 2026-08-03 device pull: of
-/// 12 episodes, 9 were transcribed to ~100 % and only 3 had ANY semantic ad
-/// scan. Three assets (FCDDB309 at 100 % transcript, 4FF3A238 at 100 %,
-/// 48E903D7 at 95 %) had ZERO `backfill_jobs` rows — and FCDDB309's
-/// `decision_events` prove `runBackfill` ran for it TWICE and minted nothing.
+/// 12 assets, only 3 had ANY semantic ad scan and **4** had ZERO
+/// `backfill_jobs` rows — 48E903D7, FCDDB309, 4FF3A238, 2C5C3699. Two of those
+/// four are transcribed and stranded (FCDDB309 and 4FF3A238, 98.8 % and 98.9 %
+/// of their duration as a bridged AREA) and are what this type recovers;
+/// FCDDB309's `decision_events` prove `runBackfill` ran for it TWICE and minted
+/// nothing.
+///
+/// The bead states that population as three assets with "48E903D7 at 95 %
+/// transcript", and both halves are worth correcting here rather than
+/// inheriting. The count is four. And 95.1 % is 48E903D7's
+/// `analysis_assets.fastTranscriptCoverageEndTime` watermark (2010 s / 2113 s),
+/// which its own chunks contradict: they reach 1440 s (68.1 %) and cover 36.9 %
+/// as a bridged area. It is the shortest-transcribed asset of the four bar one,
+/// not the best — see ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
+/// for why this gate divides an area and never a watermark.
 /// Every path that requests a scan funnels through
 /// `AdDetectionService.runShadowFMPhase`, which drops the work at four gates
 /// (cohort mode `.off`, missing runner factory, `canUseFoundationModels`
@@ -27,8 +38,8 @@ import os
 /// ledger. It also lands the asset in
 /// ``AnalysisStore/fetchAssetIdsWithResumableBackfillJobs(limit:)``, which is
 /// where `playhead-onn6`'s re-drive sweep starts — an asset with zero rows is
-/// invisible to that sweep by construction, which is exactly why the three
-/// field assets have no recovery path at all.
+/// invisible to that sweep by construction, which is exactly why the four
+/// zero-row field assets have no recovery path at all.
 ///
 /// **Why the id is the runner's id.** ``jobId(analysisAssetId:transcriptVersion:)``
 /// re-derives `BackfillJobRunner`'s deterministic `(asset, transcriptVersion,
@@ -159,8 +170,8 @@ enum SemanticScanClaim {
     /// breath is a hole in `union(chunks)`. Measured on the 2026-08-03 device
     /// pull, across all 12 assets: raw union / duration runs 3.9 %–93.8 % and
     /// **not one asset clears 0.95** — FCDDB309 and 4FF3A238, the two the bead
-    /// names as transcribed to ~100 %, read 87.3 % and 89.2 %, from 620 and
-    /// ~700 gaps whose MEDIAN width is 0.12 s. A raw-union gate against a
+    /// names as transcribed to ~100 %, read 87.3 % and 89.2 %, from 620 and 573
+    /// gaps whose MEDIAN width is 0.12 s. A raw-union gate against a
     /// wall-clock floor is therefore not strict, it is unreachable: it measures
     /// SPEECH DENSITY and compares it to a number calibrated for REACH.
     ///

@@ -2169,6 +2169,9 @@ T_FIL5_BLOCKS="bridging closes breaths, not blocks"
 T_FIL5_BREATH="an asset transcribed in real speech runs — breaths, not blocks — is claimed"
 T_FIL5_ROTATE="a claimable asset behind a full window of permanent rejects is reached next pass"
 
+# playhead-fil5 R4 review round.
+T_FIL5_WRAP="a full window of claimable assets drains without an idle pass"
+
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
@@ -4036,6 +4039,22 @@ MUTATIONS=(
   # conceals genuine untranscribed BLOCKS, claiming assets whose transcript a
   # scan cannot read. Without this the suite would pin "bridge more" as free.
   "SC33|411|CLAIM|$T_FIL5_BLOCKS"
+
+  # Batch 412 — SC34, added in the R4 review round. A coverage hole, not a live
+  # defect: the OTHER half of the cursor. SC32 pins that it ADVANCES; nothing
+  # pinned that it WRAPS, and the two are reached by different states. Removing
+  # the wrap leaves `$T_FIL5_ROTATE` green because that fixture always finds its
+  # 25th asset waiting at offset 24 — the empty read only happens when the
+  # population SHRANK past the cursor, which the mint cap manufactures on its
+  # own (a window of 24 claimable assets leaves the cursor at 24 and 16 rows
+  # behind it). The cost is a whole `reconcile()` spent idle with work
+  # outstanding, and on a BGProcessingTask wake that is a launch.
+  #
+  # Alone in its own batch only because 409 is already recorded; it is
+  # line-disjoint from SC32 and their victims do not overlap in either
+  # direction (SC32 leaves the cursor at 0, so `$T_FIL5_WRAP`'s reads are never
+  # empty; SC34 never fires in `$T_FIL5_ROTATE`'s fixture).
+  "SC34|412|RECON|$T_FIL5_WRAP"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4399,6 +4418,7 @@ describe_mutation() {
     SC31) echo "fil5: the bridge width goes to 0, making the shared helper the raw union for every caller" ;;
     SC32) echo "fil5: the candidate cursor stops advancing, so a window of permanent rejects walls off the rest" ;;
     SC33) echo "fil5: bridging widens until it conceals a genuine untranscribed block" ;;
+    SC34) echo "fil5: the candidate cursor stops wrapping, so a shrunken population costs a whole idle pass" ;;
     SC26) echo "fil5: the sweep's per-pass mint cap goes, emptying the window into a queue that drains 8" ;;
     SC27) echo "fil5: the candidate window widens to 64, paying a transcript read per reject" ;;
     SC28) echo "fil5: the sweep claims episodes whose analysis pass is still in flight" ;;
@@ -9771,6 +9791,26 @@ EOF
 EOF
     snippet NEW <<'EOF'
         semanticScanClaimSweepOffset = 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SC34 (R4) — the cursor stops WRAPPING. `> 0` becomes `< 0`, so the recovery
+  # block is dead while everything around it is untouched: an empty read at a
+  # non-zero offset now returns nothing and skips the pass instead of restarting
+  # at the oldest candidate. Deliberately a dead CONDITION rather than a deleted
+  # block, so `candidates` stays a legitimately-mutated `var` and the mutant is
+  # a behaviour change rather than a compiler warning.
+  #
+  # Distinct from SC32 (which pins the ADVANCE) because the two are reached by
+  # different states: SC32's fixture keeps a claimable asset waiting at the
+  # cursor, so the read is never empty; this one has the mint cap leave the
+  # cursor past a population that shrank under it.
+  SC34)
+    snippet OLD <<'EOF'
+        if candidates.isEmpty, semanticScanClaimSweepOffset > 0 {
+EOF
+    snippet NEW <<'EOF'
+        if candidates.isEmpty, semanticScanClaimSweepOffset < 0 {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

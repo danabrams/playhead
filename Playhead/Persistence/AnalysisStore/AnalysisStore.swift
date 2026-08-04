@@ -15747,8 +15747,14 @@ actor AnalysisStore {
     /// ``fetchAssetIdsWithResumableBackfillJobs(limit:)``, which selects assets
     /// by the STATE of their `backfill_jobs` rows — so an asset with zero rows
     /// is excluded by construction, forever, no matter how short its ad scan
-    /// is. On the 2026-08-03 device pull that was 3 of 12 episodes, two of them
-    /// transcribed to 100 %.
+    /// is. On the 2026-08-03 device pull this predicate returns 4 of the 12
+    /// assets — 48E903D7, FCDDB309, 4FF3A238, 2C5C3699. The bead names three of
+    /// them, counting only the ones it judged transcribed; the query's own set
+    /// is the larger one, because a candidate is anything with a transcript and
+    /// no coverage-lane row, and the transcript FLOOR is applied one layer up in
+    /// ``AnalysisJobReconciler/nextSemanticScanClaimCandidates()``'s caller.
+    /// Two of the four clear that floor (FCDDB309 98.8 %, 4FF3A238 98.9 %
+    /// bridged) and two never will (48E903D7 36.9 %, 2C5C3699 4.3 %).
     ///
     /// **`EXISTS` on `transcript_chunks`, not a coverage read.** An asset with
     /// no transcript has nothing for a semantic scan to read, and the honest
@@ -15758,10 +15764,16 @@ actor AnalysisStore {
     /// cheap structural question here and the expensive measured one per
     /// candidate keeps this from being a full coverage sweep at every launch.
     ///
-    /// Both sub-queries are index-served (`idx_backfill_jobs_asset_phase` on
-    /// `(analysisAssetId, phase)`, `idx_chunks_asset` on `analysisAssetId`), so
-    /// the cost is one scan of `analysis_assets` — tens of rows on a device —
-    /// at one call per `reconcile()`.
+    /// Both sub-queries are index-served — `EXPLAIN QUERY PLAN` on the
+    /// 2026-08-03 pull reports `SEARCH b USING COVERING INDEX
+    /// idx_backfill_jobs_asset_phase` and `SEARCH c USING COVERING INDEX
+    /// idx_chunks_time` (the planner prefers `(analysisAssetId, startTime)` over
+    /// the narrower `idx_chunks_asset`; either serves the `EXISTS`). What is left
+    /// is one `SCAN a` of `analysis_assets` plus a `USE TEMP B-TREE FOR ORDER BY`,
+    /// because no index carries `(createdAt, rowid)`. Tens of rows on a device at
+    /// one call per `reconcile()`, so that is acceptable here for the same reason
+    /// it is in ``fetchAssetIdsWithResumableBackfillJobs(limit:)``; it would not
+    /// be on a hot path.
     ///
     /// Oldest first, so a backlog drains in the order it stranded. The tiebreak
     /// is `rowid` (insertion order) rather than `id`, because

@@ -6,11 +6,15 @@
 // Two populations, two mechanisms:
 //   * Episodes being analysed NOW — one of four `runShadowFMPhase` gates
 //     closes, and the bail leaves a named row instead of a log line.
-//   * Episodes ALREADY stranded — FCDDB309, 4FF3A238 and 48E903D7 have zero
-//     coverage-lane rows and terminal analysis jobs, so nothing calls
-//     `runBackfill` for them ever again. The reconciler sweep is the only
-//     thing that can reach them, and `playhead-onn6`'s could not: it selects
-//     assets by the state of rows they do not have.
+//   * Episodes ALREADY stranded — four assets on the 2026-08-03 pull
+//     (48E903D7, FCDDB309, 4FF3A238, 2C5C3699) have zero coverage-lane rows
+//     and terminal analysis jobs, so nothing calls `runBackfill` for them ever
+//     again. The reconciler sweep is the only thing that can reach them, and
+//     `playhead-onn6`'s could not: it selects assets by the state of rows they
+//     do not have. Only TWO of the four are claimable — FCDDB309 and 4FF3A238,
+//     at 98.8 % and 98.9 % of their duration as a bridged transcript area;
+//     48E903D7 (36.9 %) and 2C5C3699 (4.3 %) are permanent rejects, which is
+//     why the candidate window has to rotate rather than be a prefix.
 
 import Foundation
 import Testing
@@ -789,6 +793,53 @@ struct SemanticScanClaimReconcilerTests {
         #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 100)
                 == [Self.assetId],
                 "the one claimable asset, and only it, reached the re-drive sweep")
+    }
+
+    /// **The cursor must WRAP, not just advance, and the mint cap is what makes
+    /// that reachable rather than a limit case.**
+    ///
+    /// `candidateWindowRotatesPastPermanentRejects` exercises the cursor moving
+    /// FORWARD off a full window. It cannot exercise the other half — an empty
+    /// read at a non-zero offset — because there it always finds the 25th asset
+    /// waiting at offset 24. The empty read happens when the population SHRANK
+    /// past the cursor, and the sweep manufactures exactly that state on its
+    /// own: the mint cap stops the loop at 8 claims, so a window of 24 claimable
+    /// assets leaves the cursor at 24 while the population falls to 16.
+    ///
+    /// Without the wrap the next pass reads off the end, mints nothing, and
+    /// resets — a whole `reconcile()` spent idle with work outstanding, and on
+    /// a background-task wake that is a launch. Every bound test stays green
+    /// through it, because the claims are all eventually minted; only the
+    /// per-pass sequence changes, from `[8, 8, 8]` to `[8, 0, 8]`.
+    @Test("a full window of claimable assets drains without an idle pass")
+    func claimableBacklogDrainsWithoutAnIdlePass() async throws {
+        let window = AnalysisJobReconciler.maxSemanticScanClaimCandidatesPerReconcile
+        let cap = AnalysisJobReconciler.maxSemanticScanClaimsPerReconcile
+        let store = try await makeTestStore()
+        for ordinal in 0..<window {
+            try await seedExtraCandidate(store, ordinal: ordinal)
+        }
+
+        // Derived, not hard-coded: every pass mints its cap until the backlog
+        // runs out, and no pass in between is allowed to be empty.
+        var expected: [Int] = []
+        var remaining = window
+        while remaining > 0 {
+            expected.append(min(cap, remaining))
+            remaining -= min(cap, remaining)
+        }
+        #expect(expected.count > 1 && expected.allSatisfy { $0 > 0 },
+                "the fixture must need more than one pass: \(expected)")
+
+        // ONE reconciler across the passes — the cursor is its state.
+        let reconciler = makeReconciler(store: store, downloads: StubDownloadProvider())
+        var minted: [Int] = []
+        for _ in 0..<expected.count {
+            minted.append(try await reconciler.reconcile().semanticScanClaimsMinted)
+        }
+        #expect(minted == expected, "claims minted per pass: \(minted)")
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 100).count == window,
+                "every candidate must end up visible to the re-drive sweep")
     }
 
     /// A claim is a request, not a dispatchable row, and the pass it unblocks is
