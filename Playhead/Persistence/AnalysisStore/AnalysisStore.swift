@@ -606,6 +606,17 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// its prompt never contained; the bridging is what stops every
     /// inter-utterance breath from counting as unscanned.
     ///
+    /// playhead-9y9e: "the transcribed region" means BOTH passes. It was the
+    /// fast pass alone, which on the 2026-08-03 device pull put a ceiling below
+    /// the 0.98 completion floor under this fraction for NINE of twelve assets,
+    /// of which this change lifts FOUR over it — see the `transcribedIntervals`
+    /// block in ``fetchCoverageSummariesByAssetIds(_:)`` for the split.
+    ///
+    /// (R2 review: this line read "four of twelve assets", which is the number
+    /// LIFTED, not the number capped. R1 corrected that count at the
+    /// `transcribedIntervals` block and this sentence — which points AT that
+    /// block — was left contradicting it.)
+    ///
     /// This is the only persisted quantity that answers "how much of this
     /// episode has been read for ads?". It is deliberately NOT any of the
     /// other scalars on this summary:
@@ -659,6 +670,27 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     ///     ``FastTranscriptCoverageInvariant`` already makes — so the fraction is
     ///     withheld until the duration is repaired (`PlayheadRuntime`'s
     ///     duration-backfill sweep).
+    ///
+    ///     playhead-9y9e (R2 review): **"the transcript's reach" here means the
+    ///     DEEPER of the two passes**, because playhead-9y9e widened
+    ///     ``adScanCoveredSec``'s bound from the fast union to both passes and
+    ///     this guard has to measure the same region the numerator is drawn
+    ///     from. Reading the FAST reach alone left the check incoherent in
+    ///     exactly the population this bead exists to serve: a final-pass-heavy
+    ///     asset whose final pass runs far past a wrong declared duration, and
+    ///     whose short fast reach keeps the guard silent, would divide a
+    ///     duration-sized numerator by that wrong duration and render a
+    ///     confident ✓ — the E8F0F867 shape reproduced through the other pass.
+    ///     No asset on the 2026-08-03 pull exercises it (every
+    ///     `finalPassCoverageEndSec` is inside the tolerance), so this is a rail,
+    ///     not a repair; the fixture is
+    ///     `finalPassReachPastDurationWithholdsTheFraction` and mutation RT14.
+    ///
+    ///     playhead-9y9e (R3 review): the final term counts only when its
+    ///     provenance is `.finalPassChunks`. A final WATERMARK with no chunks
+    ///     behind it must not withhold anything — see the comment at the guard
+    ///     itself, and `finalPassWatermarkWithoutChunksDoesNotWithhold` /
+    ///     mutation RT16.
     var adScanFraction: Double? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
@@ -674,8 +706,36 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         // denominator describes different audio than the numerator, even when
         // their RATIO looks healthy. Under-claim rather than divide by a number
         // the transcript has already disproved.
-        if let reach = fastTranscriptCoverageEndSec, reach.isFinite,
-           reach > episodeDurationSec + tolerance {
+        //
+        // BOTH passes (playhead-9y9e R2 review): the numerator's bound spans
+        // both, so the reach this compares against the duration must too. See
+        // the `adScanFraction` doc above for the shape that made a fast-only
+        // read incoherent. A missing or non-finite reach on either side is
+        // simply absent from the max — it is not evidence of anything.
+        //
+        // THE FINAL TERM IS ADMITTED ONLY ON CHUNK EVIDENCE (playhead-9y9e R3
+        // review), and the asymmetry with the fast term is deliberate.
+        // `finalPassCoverageEndSec` falls back to the
+        // `analysis_assets.finalPassCoverageEndTime` COLUMN when no final chunk
+        // is on disk — playhead-0sro's "watermark outliving the rows it claims"
+        // shape, the same one `transcribedIntervals` and
+        // `watermarkWithoutChunksStillFails` are built around, and reachable
+        // because playhead-wvdz's chunk deletion outlives the asset row. A stale
+        // column would then WITHHOLD a fraction that is fine, i.e. make an
+        // episode less ready — the one direction this bead's widening promised
+        // never to move. The fast term keeps its existing behaviour: it was
+        // already load-bearing before this bead and changing it is not this
+        // bead's business. Every asset on the 2026-08-03 pull that has a final
+        // watermark also has final chunks, and chunks win, so this guard is
+        // latent there — a rail, not a repair.
+        let finalReach = finalPassCoverageEndSource == .finalPassChunks
+            ? finalPassCoverageEndSec
+            : nil
+        let transcriptReach = [fastTranscriptCoverageEndSec, finalReach]
+            .compactMap { $0 }
+            .filter { $0.isFinite }
+            .max()
+        if let transcriptReach, transcriptReach > episodeDurationSec + tolerance {
             return nil
         }
         return min(1, adScanCoveredSec / episodeDurationSec)
@@ -10355,6 +10415,47 @@ actor AnalysisStore {
         return results
     }
 
+    /// playhead-9y9e: the time ranges an asset's transcript backs across BOTH
+    /// passes, ascending by start. The companion to
+    /// ``fetchFastTranscriptCoveredRanges(assetId:)`` for callers whose question
+    /// is "what can a semantic scan read?" rather than "how far has the fast
+    /// pass got?".
+    ///
+    /// **Why the union of both passes IS the canonical region.**
+    /// `TranscriptChunkCanonicalizer.canonicalize` drops exactly those fast
+    /// chunks a final chunk FULLY contains, and its `coverageRetained`
+    /// diagnostic asserts that this removes no coverage. So
+    /// `union(canonical) == union(fast) ∪ union(final)`, and this query answers
+    /// it without materialising the text of every chunk in the episode.
+    ///
+    /// The two passes are not nested in the field: on the 2026-08-03 device pull
+    /// asset 0C2FC22E's final chunks hold `[0, 930]` and its fast chunks hold
+    /// `[930, 2086]` — DISJOINT — so a fast-only read of that asset reports
+    /// 55.4 % of a fully transcribed episode.
+    ///
+    /// Same filters and same index (`idx_chunks_time`) as the fast-only sibling;
+    /// a degenerate row covers no time and is dropped.
+    func fetchTranscriptCoveredRanges(
+        assetId: String
+    ) throws -> [(start: Double, end: Double)] {
+        let sql = """
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND endTime > startTime
+            ORDER BY startTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        var results: [(start: Double, end: Double)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(
+                (start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1))
+            )
+        }
+        return results
+    }
+
     /// playhead-hygc.1.2: canonical pipeline-progress read model for
     /// Activity rows and the dogfood diagnostics snapshot.
     ///
@@ -10469,7 +10570,11 @@ actor AnalysisStore {
         //              algorithm's correctness.
         var fastIntervals: [String: [(start: Double, end: Double)]] = [:]
         var fastMaxEnd: [String: Double] = [:]
-        // ---- Pass 3 (fold into one query): final-pass chunk MAX(endTime).
+        // ---- Pass 3 (fold into one query): final-pass chunk intervals + MAX(endTime).
+        // playhead-9y9e: the INTERVALS are new. They were not collected before,
+        // and that omission is what capped the ad-scan bound below — see
+        // `transcribedIntervals`.
+        var finalIntervals: [String: [(start: Double, end: Double)]] = [:]
         var finalMaxEnd: [String: Double] = [:]
         // ---- Pass 4 (playhead-pz32): coverage-lane semantic-scan windows
         //      that produced a verdict, for the ad-scan AREA.
@@ -10510,13 +10615,17 @@ actor AnalysisStore {
             }
             sqlite3_finalize(fastStmt)
 
-            // Final pass: only `MAX(endTime)` is useful for display today.
+            // Final pass: interval ranges for the transcribed-region bound +
+            // max. playhead-9y9e: this used to project `MAX(endTime)` alone,
+            // "because only MAX(endTime) is useful for display today" — true of
+            // the display fields, and false of the ad-scan bound that later
+            // reused `transcriptIntervals`. Same shape as the fast query above.
             let finalSQL = """
-                SELECT analysisAssetId, MAX(endTime) AS maxEnd
+                SELECT analysisAssetId, startTime, endTime
                 FROM transcript_chunks
                 WHERE pass = 'final'
                   AND analysisAssetId IN (\(placeholders))
-                GROUP BY analysisAssetId
+                ORDER BY analysisAssetId, startTime, endTime
                 """
             let finalStmt = try prepare(finalSQL)
             for (i, id) in slice.enumerated() {
@@ -10524,8 +10633,15 @@ actor AnalysisStore {
             }
             while sqlite3_step(finalStmt) == SQLITE_ROW {
                 let assetId = text(finalStmt, 0)
-                guard sqlite3_column_type(finalStmt, 1) != SQLITE_NULL else { continue }
-                finalMaxEnd[assetId] = sqlite3_column_double(finalStmt, 1)
+                let startTime = sqlite3_column_double(finalStmt, 1)
+                let endTime = sqlite3_column_double(finalStmt, 2)
+                guard endTime > startTime else { continue }
+                finalIntervals[assetId, default: []].append((start: startTime, end: endTime))
+                if let prior = finalMaxEnd[assetId] {
+                    finalMaxEnd[assetId] = max(prior, endTime)
+                } else {
+                    finalMaxEnd[assetId] = endTime
+                }
             }
             sqlite3_finalize(finalStmt)
 
@@ -10668,6 +10784,69 @@ actor AnalysisStore {
                 transcriptIntervals = []
             }
 
+            // playhead-9y9e: the region a semantic scan can actually READ, which
+            // is the whole transcript — both passes — not the fast pass alone.
+            //
+            // WHY THIS IS A SEPARATE QUANTITY FROM `transcriptIntervals`. The
+            // scan is planned over the CANONICAL chunk stream
+            // (`AdDetectionService.runBackfill` hands `runShadowFMPhase` the
+            // output of `TranscriptChunkCanonicalizer.canonicalize`), where a
+            // final-pass chunk REPLACES the fast coverage it fully contains and
+            // every other chunk of either pass is retained. The canonicalizer's
+            // own `coverageRetained` invariant is that dropping a fully-covered
+            // fast chunk removes no coverage, so the canonical union is exactly
+            // `union(fast) ∪ union(final)` — which is what this builds, without
+            // needing the text.
+            //
+            // Bounding the ad-scan area by the FAST union alone therefore
+            // discarded audio the scan genuinely read. Measured on the
+            // 2026-08-03 device pull, as a bridged AREA over the declared
+            // duration: 0C2FC22E 55.4 % fast vs 100.0 % canonical (its two
+            // passes are DISJOINT — final holds [0, 930] and fast holds
+            // [930, 2086]), 48E903D7 36.9 % vs 95.1 %, AD5F3A0A 44.0 % vs
+            // 99.0 %, D9B513CD 57.2 % vs 88.3 %, 83592353 96.6 % vs 99.5 %,
+            // 53FC53E3 97.9 % vs 99.3 %.
+            //
+            // WHAT THAT BUYS, counted exactly (R1 review re-derived all of it
+            // from the pull; the pre-review note said "four of those twelve
+            // assets had a CEILING below the floor", which is the wrong four
+            // and the wrong claim). Against
+            // `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction`
+            // (0.98), NINE of the twelve had a fast-only ceiling below the
+            // floor — no scan, however complete, could retire them, so every
+            // re-drive and every claim minted for them was work that could not
+            // satisfy itself. This change lifts FOUR of the nine over it —
+            // 0C2FC22E (0.554 → 1.000), AD5F3A0A (0.440 → 0.990), 83592353
+            // (0.966 → 0.995) and 53FC53E3 (0.979 → 0.993). FIVE stay capped
+            // and stay the transcript lane's problem, which is the honest half:
+            // 48E903D7 (0.369 → 0.951), D9B513CD (0.572 → 0.883), 44F076BB
+            // (0.811, unmoved), 58882C47 (0.975, unmoved) and 2C5C3699
+            // (0.043 → 0.130).
+            //
+            // Deliberately NOT applied to `fastTranscriptCoveredSec` (the TX
+            // figure, which names the fast pass and must keep naming it) or to
+            // `analysisCoveredSec` (documented as the fast-transcript area
+            // clipped to the analysis frontier). Only the ad-scan bound changes.
+            //
+            // THE BOUND IS `transcriptIntervals` PLUS THE FINAL PASS, and the
+            // `transcriptIntervals` term is not redundant — it is what makes the
+            // widening MONOTONE. It looks like it can be dropped, since it is
+            // `fastIntervals[id]` whenever any fast chunk landed. But when NO
+            // fast chunk landed and the asset still carries a
+            // `fastTranscriptCoverageEndTime`, `transcriptIntervals` is the
+            // watermark modelled as one contiguous `[0, watermark]` span, and
+            // the final-pass intervals alone are neither contiguous nor
+            // guaranteed to reach it — so a bound built from the final pass
+            // alone would be SMALLER than the bound this replaced, and an
+            // episode could measure less scanned than it did before. That shape
+            // (a watermark outliving the chunks it claims) is playhead-0sro's,
+            // and `AnalysisJobRunner`'s own
+            // `watermarkWithoutChunksStillFails` fixture is built on it. Adding
+            // to `transcriptIntervals` rather than replacing it makes the new
+            // bound a SUPERSET of the old one in every branch, so the measured
+            // area can only ever move UP and no episode becomes less ready.
+            let transcribedIntervals = transcriptIntervals + (finalIntervals[id] ?? [])
+
             let analysisCoveredSec: Double?
             if let frontier = analysisFrontierSec, fastCoveredSec != nil {
                 // Gap-aware clip of the transcribed region to the frontier.
@@ -10706,7 +10885,7 @@ actor AnalysisStore {
                 adScanCoveredSec = AnalysisCoverageMath.unionedSecondsIntersecting(
                     adScanIntervals[id] ?? [],
                     within: AnalysisCoverageMath.bridgingShortGaps(
-                        transcriptIntervals,
+                        transcribedIntervals,
                         upTo: AnalysisCoverageMath.adScanBridgeableGapSec
                     )
                 )

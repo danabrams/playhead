@@ -16,13 +16,23 @@ import os
 /// nothing.
 ///
 /// The bead states that population as three assets with "48E903D7 at 95 %
-/// transcript", and both halves are worth correcting here rather than
-/// inheriting. The count is four. And 95.1 % is 48E903D7's
-/// `analysis_assets.fastTranscriptCoverageEndTime` watermark (2010 s / 2113 s),
-/// which its own chunks contradict: they reach 1440 s (68.1 %) and cover 36.9 %
-/// as a bridged area. It is the shortest-transcribed asset of the four bar one,
-/// not the best — see ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
-/// for why this gate divides an area and never a watermark.
+/// transcript", and the count is four.
+///
+/// playhead-9y9e CORRECTS the second half of that note. It read 48E903D7's
+/// 95.1 % as a watermark artifact, on the strength of a 36.9 % bridged area —
+/// but that area was measured over the FAST pass alone, and 48E903D7's
+/// transcript is mostly final-pass. Across both passes it covers 95.1 % as a
+/// bridged area, which agrees with the watermark. The measurement was wrong,
+/// not the watermark; see ``bridgedTranscriptCoveredSec(ranges:)``. The
+/// principle in ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
+/// stands unchanged — this gate divides an area and never a watermark — and it
+/// still stands on the pull as well as on its fixtures. Widening the area to
+/// both passes removes 48E903D7 as an example; it does not empty the class.
+/// D9B513CD reads 100.0 % by chunk-max watermark against an 88.3 % two-pass
+/// area and flips THIS gate's own 0.95 floor. (R3 review: R2 wrote 58882C47
+/// here, from the fast-pass COLUMN rather than the chunk max the gate divides;
+/// R1 before it wrote that no asset diverges "by more than 0.8 pp", from a
+/// three-asset sample.)
 /// Every path that requests a scan funnels through
 /// `AdDetectionService.runShadowFMPhase`, which drops the work at four gates
 /// (cohort mode `.off`, missing runner factory, `canUseFoundationModels`
@@ -159,10 +169,23 @@ enum SemanticScanClaim {
         return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
     }
 
-    /// The seconds of audio an asset's fast transcript actually backs, with
+    /// The seconds of audio an asset's transcript actually backs, with
     /// sub-ad-width gaps BRIDGED — the numerator
     /// ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)`` is
     /// meant to be handed.
+    ///
+    /// **playhead-9y9e: the ranges must span BOTH passes**
+    /// (``AnalysisStore/fetchTranscriptCoveredRanges(assetId:)``), because the
+    /// region this gate measures has to be the region
+    /// ``AnalysisCoverageSummary/adScanCoveredSec`` is intersected with — that
+    /// is the whole commensurability argument below. It was handed
+    /// `fetchFastTranscriptCoveredRanges`, and on the 2026-08-03 device pull
+    /// 48E903D7 read 36.9 % against a 0.95 floor while its two passes together
+    /// cover 95.1 %: the sweep was refusing to claim a transcribed episode
+    /// because most of its transcript came from the final pass. 0C2FC22E is the
+    /// same shape and more extreme — its passes are DISJOINT, final `[0, 930]`
+    /// and fast `[930, 2086]`, so the fast-only reading is 55.4 % of an episode
+    /// transcribed end to end.
     ///
     /// **The raw chunk union is not a reach measure and using it as one made
     /// this sweep mint nothing at all.** A `transcript_chunks` row spans the
@@ -193,11 +216,11 @@ enum SemanticScanClaim {
     /// would solicit passes whose scan fraction could never reach the floor
     /// that retires them.
     static func bridgedTranscriptCoveredSec(
-        fastRanges: [(start: Double, end: Double)]
+        ranges: [(start: Double, end: Double)]
     ) -> Double {
         AnalysisCoverageMath.unionedSeconds(
             AnalysisCoverageMath.bridgingShortGaps(
-                fastRanges,
+                ranges,
                 upTo: AnalysisCoverageMath.adScanBridgeableGapSec
             )
         )
@@ -216,18 +239,73 @@ enum SemanticScanClaim {
     /// **The CONSTANT is shared with `finalizeBackfill`; the NUMERATOR is
     /// deliberately not.** ``AnalysisCoordinator/finalizeBackfillVerdict(chunks:episodeDuration:)``
     /// divides `chunks.map(\.endTime).max()` — a WATERMARK — by the duration.
-    /// The caller here passes ``bridgedTranscriptCoveredSec(fastRanges:)``,
+    /// The caller here passes ``bridgedTranscriptCoveredSec(ranges:)``,
     /// which is an AREA. They agree on a contiguous transcript and diverge on a
     /// gappy one, where the watermark reads 100 % over audio nobody transcribed
     /// (the watermark-vs-union antipattern playhead-sd71 fixed on the Activity
-    /// screen). On the 2026-08-03 pull the divergence is not theoretical:
-    /// 48E903D7's fast pass reads 68.1 % by watermark and 36.9 % bridged, and
-    /// AD5F3A0A reads 100 % by watermark and 44.0 % bridged.
+    /// screen).
+    ///
+    /// **STATED HONESTLY: the 2026-08-03 pull DOES still exhibit the divergence
+    /// with the area measured over both passes, and it flips THIS GATE.** NINE
+    /// of the twelve assets read watermark ABOVE area, in percentage points of
+    /// the declared duration:
+    ///
+    ///     D9B513CD  100.00 %  vs  88.33 %   11.66 pp   ← flips at 0.95 AND 0.98
+    ///     58882C47   99.99 %  vs  97.45 %    2.54 pp   ← flips at 0.98
+    ///     FCDDB309   99.92 %  vs  98.79 %    1.13 pp
+    ///     4FF3A238   99.94 %  vs  98.85 %    1.08 pp
+    ///     AD5F3A0A   99.99 %  vs  99.04 %    0.95 pp
+    ///     44F076BB   81.91 %  vs  81.09 %    0.82 pp
+    ///     53FC53E3   99.90 %  vs  99.29 %    0.61 pp
+    ///     83592353  100.00 %  vs  99.50 %    0.49 pp
+    ///     DE0784D8  100.00 %  vs  99.56 %    0.44 pp
+    ///
+    /// **D9B513CD is the one that bites, and it bites HERE**: 100.00 % by
+    /// watermark clears this gate's own 0.95 floor and its 88.33 % two-pass area
+    /// does not, so the two rulers return opposite verdicts for a real episode
+    /// at the exact threshold this function applies. That is what makes dividing
+    /// an area a live decision and not a stylistic one.
+    ///
+    /// **THE WATERMARK HERE IS `chunks.map(\.endTime).max()`, NOT
+    /// `analysis_assets.fastTranscriptCoverageEndTime`** — the column is a
+    /// FAST-pass field, and this paragraph is about the quantity
+    /// `AnalysisCoordinator.classifyBackfillTerminal` actually divides, which it
+    /// takes from the unfiltered `fetchTranscriptChunks` (both passes). Getting
+    /// that wrong is what hid D9B513CD: by the fast column it reads 87.79 %,
+    /// BELOW its own area, so it drops out of a "watermark above area" table
+    /// altogether — the biggest divergence on the pull, invisible.
+    ///
+    /// Four drafts of this note have been wrong, every one of them the same
+    /// defect this bead is about — a quantity read as though it named something
+    /// else — so they are kept as the record rather than tidied away:
+    ///
+    ///  * R3 review corrected R2's five-asset table and its claim that "at this
+    ///    gate's own 0.95 floor no asset on the pull flips". Both came from
+    ///    measuring the FAST column instead of the chunk max. One asset flips,
+    ///    and it flips by 11.66 pp.
+    ///  * R2 review corrected R1's "the divergence has no field example left …
+    ///    every one of the twelve assets reads within 0.8 percentage points of
+    ///    its watermark": that was a THREE-asset sample (2C5C3699, 44F076BB,
+    ///    48E903D7) generalised to twelve.
+    ///  * R1 corrected playhead-9y9e's first draft, which cited 2C5C3699 as the
+    ///    proof — "900 s of a 6,925 s episode against a 13.0 % area", where
+    ///    900 / 6,925.5 IS 13.0 %, so the two numbers agree exactly and the
+    ///    example showed the opposite of what it was cited for.
+    ///  * Its predecessor cited 48E903D7 at 36.9 % and AD5F3A0A at 44.0 %, which
+    ///    were the FAST pass alone — across both passes those read 95.1 % and
+    ///    99.0 %, i.e. instances of the measurement bug this bead fixed, not of
+    ///    watermark-vs-area divergence.
+    ///
+    /// The RAIL is still the fixture and not the corpus —
+    /// `AnalysisJobRunner`'s `fullWatermarkOverGappyTranscriptStillFails` and
+    /// mutation RT03 are what hold this, and they are synthetic on purpose. The
+    /// field rows above say the shape is real; they are not a substitute for a
+    /// fixture, because a single device over one fortnight never is.
     ///
     /// So this gate is strictly stricter than `finalizeBackfill`'s. An asset it
     /// would complete can fail here, on purpose, and it stays the transcript
     /// lane's problem until the holes fill. What the numerator must NOT be is
-    /// the RAW union — see ``bridgedTranscriptCoveredSec(fastRanges:)`` for the
+    /// the RAW union — see ``bridgedTranscriptCoveredSec(ranges:)`` for the
     /// measurement showing that reads 0/12 in the field.
     ///
     /// Unmeasurable inputs return `false`. This gate SUPPRESSES a mint, so the

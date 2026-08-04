@@ -2620,7 +2620,11 @@ struct AnalysisStoreCoverageRulerTests {
         return String(decoding: data, as: UTF8.self)
     }()
 
-    private func makeAsset(id: String, episodeDurationSec: Double) -> AnalysisAsset {
+    private func makeAsset(
+        id: String,
+        episodeDurationSec: Double,
+        finalPassCoverageEndTime: Double? = nil
+    ) -> AnalysisAsset {
         AnalysisAsset(
             id: id,
             episodeId: "ep-\(id)",
@@ -2633,7 +2637,8 @@ struct AnalysisStoreCoverageRulerTests {
             analysisState: "backfill",
             analysisVersion: 1,
             capabilitySnapshot: nil,
-            episodeDurationSec: episodeDurationSec
+            episodeDurationSec: episodeDurationSec,
+            finalPassCoverageEndTime: finalPassCoverageEndTime
         )
     }
 
@@ -2996,6 +3001,335 @@ struct AnalysisStoreCoverageRulerTests {
         let fraction = try #require(summary.adScanFraction)
         #expect(fraction <= 1.0)
         #expect(fraction == 1.0)
+    }
+
+    // MARK: - playhead-9y9e: the bound is BOTH transcript passes
+
+    private func makePassChunk(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        pass: String
+    ) -> TranscriptChunk {
+        TranscriptChunk(
+            id: "\(assetId)-chunk-\(pass)-\(index)",
+            analysisAssetId: assetId,
+            segmentFingerprint: "\(assetId)-fp-\(pass)-\(index)",
+            chunkIndex: index,
+            startTime: start,
+            endTime: end,
+            text: "t",
+            normalizedText: "t",
+            pass: pass,
+            modelVersion: "test-asr",
+            transcriptVersion: nil,
+            atomOrdinal: nil
+        )
+    }
+
+    /// RT04 — THE FIELD SHAPE, asset 0C2FC22E on the 2026-08-03 device pull. Its
+    /// two transcript passes are DISJOINT: final chunks hold `[0, 930]` and fast
+    /// chunks hold `[930, 2086]` of a 2,086 s episode. The asset's terminal
+    /// reason reads `transcript 1.000`, and every other watermark agrees — but
+    /// the ad-scan bound was the FAST union alone, so a scan of the first half
+    /// of that episode measured ZERO seconds examined.
+    ///
+    /// Scaled down here; the geometry (disjoint passes, scan window inside the
+    /// final-only region) is the field's.
+    @Test("a scan window inside FINAL-pass-only transcript is counted, not discarded")
+    func adScanAreaCountsFinalPassOnlyRegions() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-disjoint", episodeDurationSec: 1000))
+        // Final pass backs [0, 400]; fast pass backs [400, 1000]. Nothing is
+        // transcribed twice, which is what makes the fast-only reading 60%.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-disjoint", index: 0, start: 0, end: 400, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-disjoint", index: 1, start: 400, end: 1000, pass: "fast")
+        ])
+        // The scan examined the first 400 s — entirely inside the final-only
+        // region, i.e. exactly the audio a fast-only bound throws away.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-disjoint", index: 0, start: 0, end: 400)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-disjoint"])
+        let summary = try #require(summaries["a-9y9e-disjoint"])
+
+        #expect(summary.adScanCoveredSec == 400,
+                "the scan read 400 s of real transcript; a fast-only bound reports 0")
+        #expect(summary.adScanFraction == 0.4)
+
+        // The TX figure is untouched. It names the FAST pass and must keep
+        // naming it — this bead moved the ad-scan bound only.
+        #expect(summary.fastTranscriptCoveredSec == 600)
+        #expect(summary.fastTranscriptCoveredSource == .fastTranscriptChunks)
+    }
+
+    /// RT05 — the CEILING, which is the reach consequence. Under a fast-only
+    /// bound, an asset whose transcript is mostly final-pass has an
+    /// `adScanFraction` maximum below
+    /// `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction`, so NO scan,
+    /// however complete, can ever retire it: every re-drive and every claim it
+    /// mints is work that cannot satisfy itself, and the library ✓ is
+    /// unreachable by construction.
+    ///
+    /// **The counts, re-derived on the 2026-08-03 pull (R1 review).** NINE of
+    /// the twelve assets had a fast-only ceiling under the 0.98 floor. This
+    /// change lifts FOUR of them over it — 0C2FC22E (0.554 → 1.000), AD5F3A0A
+    /// (0.440 → 0.990), 83592353 (0.966 → 0.995), 53FC53E3 (0.979 → 0.993) —
+    /// and leaves FIVE capped: 48E903D7 (0.369 → 0.951), D9B513CD
+    /// (0.572 → 0.883), 44F076BB (0.811), 58882C47 (0.975), 2C5C3699
+    /// (0.043 → 0.130). 48E903D7 is the trap: it is the most dramatic
+    /// fast-vs-both movement on the pull and it still does NOT clear the floor,
+    /// so it belongs in the second list, not the first.
+    @Test("a fully scanned, mostly-final-pass episode can now reach the sufficiency floor")
+    func fullyScannedFinalPassEpisodeReachesTheFloor() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-ceiling", episodeDurationSec: 1000))
+        // 90% of the transcript is final-pass. Fast alone caps the fraction at
+        // 0.10 — far under the 0.98 floor.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-ceiling", index: 0, start: 0, end: 900, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-ceiling", index: 1, start: 900, end: 1000, pass: "fast")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-ceiling", index: 0, start: 0, end: 1000)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-ceiling"])
+        let summary = try #require(summaries["a-9y9e-ceiling"])
+        let fraction = try #require(summary.adScanFraction)
+        #expect(fraction == 1.0)
+        #expect(fraction >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
+        // And the fast-only reading, stated so the test names what it replaced.
+        #expect(summary.fastTranscriptCoveredSec == 100)
+    }
+
+    /// RT06 — the bound still BINDS. Widening it to both passes must not turn it
+    /// into "take the window's bounds at face value": a window whose span
+    /// straddles audio NEITHER pass transcribed is still clipped, which is the
+    /// whole reason playhead-pz32 intersects at all.
+    @Test("widening the bound to both passes does not stop it clipping untranscribed audio")
+    func bothPassBoundStillClipsUntranscribedAudio() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-clip", episodeDurationSec: 1000))
+        // A 300 s hole neither pass covers — wider than
+        // `adScanBridgeableGapSec`, so bridging cannot close it.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-clip", index: 0, start: 0, end: 300, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-clip", index: 1, start: 600, end: 1000, pass: "fast")
+        ])
+        // One window whose BOUNDS span the whole episode.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-clip", index: 0, start: 0, end: 1000)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-clip"])
+        let summary = try #require(summaries["a-9y9e-clip"])
+        #expect(summary.adScanCoveredSec == 700, "the 300 s hole must not be claimed as scanned")
+        #expect(try #require(summary.adScanFraction) < episodePreparationCompleteThreshold)
+        #expect(300 > AnalysisCoverageMath.adScanBridgeableGapSec,
+                "fixture premise: the hole is wider than the bridge")
+    }
+
+    /// RT07 — `fetchTranscriptCoveredRanges` is what every caller outside this
+    /// summary uses to ask the same question, so it must agree: both passes, and
+    /// degenerate rows dropped (a zero-width row covers no time and must not be
+    /// able to authorise anything).
+    @Test("fetchTranscriptCoveredRanges spans both passes and drops degenerate rows")
+    func transcriptCoveredRangesSpanBothPasses() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-ranges", episodeDurationSec: 1000))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-ranges", index: 0, start: 0, end: 400, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-ranges", index: 1, start: 400, end: 900, pass: "fast"),
+            // Degenerate: end == start.
+            makePassChunk(assetId: "a-9y9e-ranges", index: 2, start: 950, end: 950, pass: "fast")
+        ])
+
+        let all = try await store.fetchTranscriptCoveredRanges(assetId: "a-9y9e-ranges")
+        #expect(all.count == 2)
+        #expect(AnalysisCoverageMath.unionedSeconds(all) == 900)
+
+        // The fast-only sibling is unchanged and still answers the narrower
+        // question the transcript engine asks it.
+        let fastOnly = try await store.fetchFastTranscriptCoveredRanges(assetId: "a-9y9e-ranges")
+        #expect(AnalysisCoverageMath.unionedSeconds(fastOnly) == 500)
+    }
+
+    /// RT12 (R1 review) — WIDENING A BOUND IS NOT AUTOMATICALLY MONOTONE, and
+    /// this is the shape where it is not.
+    ///
+    /// The ad-scan bound has always had a WATERMARK fallback: with no fast
+    /// chunks on disk but a `fastTranscriptCoverageEndTime` on the asset, the
+    /// transcribed region is modelled as one contiguous `[0, watermark]` span.
+    /// Building the widened bound out of the two CHUNK sets alone discards that
+    /// span — so on an asset whose watermark outlives its chunks (playhead-0sro's
+    /// shape) the "widened" bound is the final-pass chunks only, which are
+    /// neither contiguous nor obliged to reach the watermark, and the measured
+    /// ad-scan area goes DOWN. Here: 1,000 s before, 300 s after.
+    ///
+    /// `adScanCoveredSec` feeds the library ✓ and every "is this owed?" gate, so
+    /// an episode silently measuring less scanned than it did yesterday is the
+    /// same class of defect as the one this bead fixed, pointing the other way.
+    @Test("the widened ad-scan bound never measures LESS than the watermark fallback did")
+    func widenedBoundNeverShrinksTheWatermarkFallback() async throws {
+        let store = try await makeTestStore()
+        // Watermark = duration (this suite's `makeAsset`), and NO fast chunks —
+        // so the watermark fallback is the only thing describing [300, 1000].
+        try await store.insertAsset(makeAsset(id: "a-9y9e-mono", episodeDurationSec: 1000))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-mono", index: 0, start: 0, end: 300, pass: "final")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-mono", index: 0, start: 0, end: 1000)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-mono"])
+        let summary = try #require(summaries["a-9y9e-mono"])
+        #expect(summary.adScanCoveredSec == 1000,
+                "the watermark fallback bound the whole episode before this bead and must still")
+        #expect(summary.adScanFraction == 1.0)
+
+        // The premise, stated so a fixture drift cannot make this vacuous: the
+        // fallback really is in play, i.e. no fast chunk backs any of it.
+        #expect(summary.fastTranscriptCoveredSource == .assetWatermark)
+        #expect(summary.fastTranscriptCoveredSec == 1000)
+    }
+
+    /// RT13 (R1 review) — the final-pass query now drops degenerate rows from
+    /// `MAX(endTime)` as well as from the intervals, which is the FAST query's
+    /// long-standing rule finally applied to its sibling. The consequence worth
+    /// pinning is the one nothing else reaches: when EVERY final row is
+    /// degenerate there is no final-pass chunk evidence at all, so
+    /// `finalPassCoverageEndSec` must fall back to the asset watermark and SAY
+    /// SO, rather than reporting a zero-width row's timestamp as a pass reach.
+    ///
+    /// (On the 2026-08-03 device pull this changes no asset — 16 of 37,498
+    /// chunks are degenerate, all `endTime == startTime`, all ordinary
+    /// single-token ASR output like `"Oh"` and `"their"`, and none is any
+    /// asset's `MAX(endTime)`. The rail exists because the behaviour is new,
+    /// not because the field exercises it.)
+    @Test("an all-degenerate final pass reports the watermark, not a zero-width row")
+    func allDegenerateFinalPassFallsBackToWatermark() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-9y9e-degen", episodeDurationSec: 1000, finalPassCoverageEndTime: 640
+        ))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-degen", index: 0, start: 0, end: 500, pass: "fast"),
+            // The whole final pass is zero-width. It covers no time, so it is
+            // not evidence the final pass reached 950 s.
+            makePassChunk(assetId: "a-9y9e-degen", index: 1, start: 950, end: 950, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-degen", index: 2, start: 300, end: 300, pass: "final")
+        ])
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-degen"])
+        let summary = try #require(summaries["a-9y9e-degen"])
+        #expect(summary.finalPassCoverageEndSec == 640)
+        #expect(summary.finalPassCoverageEndSource == .assetWatermark)
+        // And the degenerate rows widen no bound either: the fast pass backs
+        // [0, 500] and nothing claims [500, 1000].
+        #expect(AnalysisCoverageMath.unionedSeconds(
+            try await store.fetchTranscriptCoveredRanges(assetId: "a-9y9e-degen")
+        ) == 500)
+    }
+
+    /// RT14 (R2 review) — WIDENING THE BOUND WIDENED WHAT THE SANITY GUARD HAS
+    /// TO WATCH, and the guard was left reading one pass.
+    ///
+    /// `adScanFraction` withholds when the transcript's own reach has already
+    /// disproved the declared duration (the E8F0F867 shape: a numerator that
+    /// LOOKS proportionate divided by a denominator describing different audio).
+    /// That check read `fastTranscriptCoverageEndSec` — correct while
+    /// `adScanCoveredSec` was bounded by the fast union, and incoherent the
+    /// moment playhead-9y9e bounded it by BOTH passes: a final-pass-heavy asset
+    /// can now draw its numerator from audio the fast reach knows nothing about,
+    /// so a short fast reach keeps the guard silent over an arbitrarily wrong
+    /// duration.
+    ///
+    /// Here the fast pass backs `[0, 100]` and the final pass `[0, 4000]` of a
+    /// declared 600 s episode, with 610 s scanned. The overshoot check passes
+    /// (610 is inside 600 + 30), the fast reach is 100 and says nothing, and the
+    /// pre-review guard returns a confident `1.0` on a denominator six times
+    /// short. No asset on the 2026-08-03 pull exercises this — every
+    /// `finalPassCoverageEndTime` sits inside the tolerance — so this is a rail
+    /// for behaviour the change made reachable, not a repair of an observed
+    /// defect.
+    @Test("a final-pass reach past the duration withholds the fraction too")
+    func finalPassReachPastDurationWithholdsTheFraction() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-9y9e-reach", episodeDurationSec: 600))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-reach", index: 0, start: 0, end: 100, pass: "fast"),
+            // The final pass runs to 4,000 s of a declared 600 s episode.
+            makePassChunk(assetId: "a-9y9e-reach", index: 1, start: 0, end: 4000, pass: "final")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-reach", index: 0, start: 0, end: 610)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-reach"])
+        let summary = try #require(summaries["a-9y9e-reach"])
+
+        // The premises, stated so fixture drift cannot make this vacuous.
+        #expect(summary.adScanCoveredSec == 610, "the numerator is drawn from the final pass")
+        let tolerance = AnalysisCoverageSummary.adScanDurationToleranceSec(episodeDurationSec: 600)
+        #expect(610 <= 600 + tolerance, "premise: the overshoot check does NOT fire")
+        #expect(summary.fastTranscriptCoverageEndSec == 100,
+                "premise: the FAST reach is short, so a fast-only guard stays silent")
+        #expect(summary.finalPassCoverageEndSec == 4000)
+
+        #expect(summary.adScanFraction == nil,
+                "the final pass has disproved the denominator; 610/600 must not read as a ✓")
+    }
+
+    /// RT16 (R3 review) — the OTHER direction of RT14's guard, and the one that
+    /// can make an episode LESS ready.
+    ///
+    /// `finalPassCoverageEndSec` is chunks-first with a fallback to the
+    /// `analysis_assets.finalPassCoverageEndTime` COLUMN. When no final chunk is
+    /// on disk the column is all that is left — playhead-0sro's "watermark
+    /// outliving the rows it claims" shape, reachable because playhead-wvdz's
+    /// chunk deletion outlives the asset row, and the same shape RT12 and
+    /// `watermarkWithoutChunksStillFails` exist for. Admitting it into the
+    /// duration-sanity max lets a STALE column withhold a fraction that is
+    /// perfectly fine.
+    ///
+    /// Here the fast pass backs the whole 600 s episode and 590 s are scanned —
+    /// a healthy ✓ — while a stale final column claims 4,000 s with not one
+    /// final chunk behind it. The fraction must still be produced. This is the
+    /// direction the bead's own monotonicity argument forbids moving.
+    @Test("a final-pass WATERMARK with no chunks behind it never withholds the fraction")
+    func finalPassWatermarkWithoutChunksDoesNotWithhold() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-9y9e-stalefinal", episodeDurationSec: 600, finalPassCoverageEndTime: 4000
+        ))
+        // Fast chunks only. Nothing final on disk.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-stalefinal", index: 0, start: 0, end: 600, pass: "fast")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-stalefinal", index: 0, start: 0, end: 590)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-stalefinal"])
+        let summary = try #require(summaries["a-9y9e-stalefinal"])
+
+        // The premises, so fixture drift cannot make this vacuous: the stale
+        // column IS what `finalPassCoverageEndSec` reports, it IS past the
+        // tolerance, and its provenance is the watermark rather than chunks.
+        #expect(summary.finalPassCoverageEndSec == 4000)
+        #expect(summary.finalPassCoverageEndSource == .assetWatermark)
+        #expect(4000 > 600 + AnalysisCoverageSummary.adScanDurationToleranceSec(
+            episodeDurationSec: 600
+        ), "premise: the stale column would trip the guard if it were admitted")
+
+        #expect(summary.adScanCoveredSec == 590)
+        #expect(summary.adScanFraction != nil,
+                "a watermark with no chunks behind it is not evidence, and must not withhold a ✓")
     }
 
     /// The bound, tested where it lives rather than only through the store, so

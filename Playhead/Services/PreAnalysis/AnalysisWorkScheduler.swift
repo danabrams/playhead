@@ -6340,10 +6340,23 @@ actor AnalysisWorkScheduler {
         case budgetSpent
         /// The terminal is younger than ``capOutRetryCooldownSeconds``.
         case cooling
-        /// The transcript already reaches the top of the coverage ladder, so a
-        /// retry would read no audio it has not already read. Refusing here is
-        /// what keeps this from being "a job that runs and achieves nothing".
-        case noOutstandingTranscript
+        /// The transcript already reaches the top of the coverage ladder AND the
+        /// measured ad scan already clears its floor, so a retry would read no
+        /// audio it has not already read and screen nothing it has not already
+        /// screened. Refusing here is what keeps this from being "a job that
+        /// runs and achieves nothing".
+        ///
+        /// **playhead-9y9e renamed this from `noOutstandingTranscript`, and the
+        /// rename is the fix.** The transcript ladder was the ONLY term, which
+        /// made a fully transcribed but never-scanned episode the one shape this
+        /// rescue systematically refused — precisely the shape that needs it.
+        /// Measured on the 2026-08-03 device pull: AD5F3A0A is transcribed to
+        /// 4,281 s of 4,281 s and its ad scan covers 20.7 %, and its
+        /// `…:adScanRedrive:1` is an attempt-cap terminal
+        /// (`maxAttemptsReached:transcription:zeroCoverage`) — i.e. a row this
+        /// mechanism was built to rescue, declined on a measure of the one
+        /// resource it was not short of.
+        case noOutstandingWork
     }
 
     /// playhead-y8f3: mint a bounded retry, or decline with a named reason.
@@ -6370,26 +6383,53 @@ actor AnalysisWorkScheduler {
     ///   the assets behind them are 69–100% transcribed. Reading the job column
     ///   here would conclude "no progress ever" for an episode that is nearly
     ///   done.
+    /// - Parameter adScanFraction: MEASURED semantic ad-scan coverage
+    ///   (``AnalysisCoverageSummary/adScanFraction``), or `nil` when
+    ///   unmeasurable. playhead-9y9e: the SECOND kind of outstanding work, and
+    ///   the reason this rescue reached none of the episodes it exists for. A
+    ///   cap-out terminal on a fully transcribed episode had no outstanding
+    ///   TRANSCRIPT by construction, so the ladder term declined every one of
+    ///   them — while the thing the retry actually buys is a pass that reaches
+    ///   the ad-detection stage. `nil` reads as OWED, the same direction
+    ///   ``shouldMintAdScanRedrive(adScanFraction:resumableCoverageJobCount:)``
+    ///   and ``SemanticScanClaim/isOwed(adScanFraction:)`` take, and for the same
+    ///   reason: a never-scanned asset has no `semantic_scan_results` rows and so
+    ///   measures `nil` rather than a synthetic 0.
     static func capOutRetryDecision(
         baseWorkKey: String,
         chainTail: AnalysisJob,
         nextOrdinal: Int?,
         transcriptCoverageSec: Double,
         episodeDurationSec: Double?,
+        adScanFraction: Double?,
         tiers: [Double],
         now: Double
     ) -> CapOutRetryDecision {
         guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
         guard let nextOrdinal else { return .declined(.budgetSpent) }
-        guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
+        guard capOutRetryCooldownElapsed(chainTail: chainTail, now: now) else {
             return .declined(.cooling)
         }
-        guard let target = outstandingTranscriptTarget(
+        let ladder = coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
+        let target: Double
+        if let outstanding = outstandingTranscriptTarget(
             transcriptCoverageSec: transcriptCoverageSec,
             tiers: tiers,
             episodeDurationSec: episodeDurationSec
-        ) else {
-            return .declined(.noOutstandingTranscript)
+        ) {
+            target = outstanding
+        } else if SemanticScanClaim.isOwed(adScanFraction: adScanFraction), let deepest = ladder.last {
+            // Nothing left to transcribe, but the audio has not been read for
+            // ads. Ask for the DEEPEST rung: the pass must reach the
+            // ad-detection stage over the whole episode, and any shallower
+            // target would bound the shard set it decodes. The transcription
+            // stage itself is a no-op on this asset — playhead-9y9e's
+            // short-circuit in `AnalysisJobRunner` is what makes that true
+            // rather than a 300 s timeout — so the cost is the scan, which is
+            // the point.
+            target = deepest
+        } else {
+            return .declined(.noOutstandingWork)
         }
         return .mint(CapOutRetryPlan(
             workKey: capOutRetryWorkKey(baseWorkKey: baseWorkKey, ordinal: nextOrdinal),
@@ -6398,7 +6438,23 @@ actor AnalysisWorkScheduler {
         ))
     }
 
-    /// playhead-y8f3: the outcome of ``capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:tiers:now:)``.
+    /// playhead-9y9e (R1 review): has `chainTail`'s terminal cooled enough for a
+    /// cap-out retry?
+    ///
+    /// Extracted so the CALLER can ask the question before paying for the inputs
+    /// ``capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:adScanFraction:tiers:now:)``
+    /// needs. `adScanFraction` costs a full coverage-summary read — four
+    /// prepared statements and every transcript chunk of BOTH passes for the
+    /// asset — and it is discarded on the `budgetSpent` and `cooling` arms,
+    /// which is where a spent or freshly-terminated episode lands on EVERY
+    /// sweep, forever. One expression, used by the caller's pre-check and by the
+    /// decision itself, so the two cannot drift into disagreeing about when the
+    /// read is safe to skip.
+    static func capOutRetryCooldownElapsed(chainTail: AnalysisJob, now: Double) -> Bool {
+        now - chainTail.updatedAt >= capOutRetryCooldownSeconds
+    }
+
+    /// playhead-y8f3: the outcome of ``capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:adScanFraction:tiers:now:)``.
     enum CapOutRetryDecision: Sendable, Equatable {
         case mint(CapOutRetryPlan)
         case declined(CapOutRetryDeclineReason)
@@ -6429,17 +6485,29 @@ actor AnalysisWorkScheduler {
     /// asset already holds. The ladder rung is by construction strictly deeper
     /// than the watermark, so the retry always has something left to read.
     ///
-    /// A CLAIM DELIBERATELY NOT MADE HERE, because it does not survive reading
-    /// the runner: that re-using the old target would fail the same way, via
-    /// `transcription:zeroCoverage`. It would not. The runner's reported
-    /// coverage comes from `persistedCoverage()`, which reads the ASSET
-    /// watermark (``AnalysisJobRunner`` `observeTranscriptEvents`), not the
-    /// pass's own delta — so a pass over already-covered audio reports the full
-    /// watermark and terminates `complete` through `tierAdvance`. Zero coverage
-    /// arises from an engine failure or the runner's silent-engine timeout.
-    /// Asking for a target the asset already covers wastes a pass; it does not
-    /// reproduce the observed terminal. The ladder rung is the right choice for
-    /// the first reason alone.
+    /// A CLAIM MADE HERE THAT WAS HALF WRONG, corrected by playhead-9y9e rather
+    /// than deleted, because the correction is the whole of that bead. It read:
+    /// re-using the old target would NOT fail via `transcription:zeroCoverage`,
+    /// because the runner's coverage comes from `persistedCoverage()` — the
+    /// ASSET watermark — so a pass over already-covered audio reports the full
+    /// watermark and terminates `complete` through `tierAdvance`.
+    ///
+    /// That is true of the `.completed` arm of `observeTranscriptEvents` and
+    /// only that arm. The SIBLING timeout arm — named in the same sentence as a
+    /// source of zero coverage — returns a hardcoded `(0, nil, false)` and never
+    /// consults `persistedCoverage()` at all, and on an already-covered asset
+    /// the timeout is the arm that wins: the 300 s stage cap is flat while the
+    /// ASR re-run under it scales with the episode. On the 2026-08-03 device
+    /// pull that is asset AD5F3A0A, 4,281 s and fully transcribed, whose re-drive
+    /// carries `maxAttemptsReached:transcription:zeroCoverage` after 5 attempts.
+    /// `AnalysisJobRunner` now carries the persisted coverage forward on that
+    /// path (see its `transcriptCoverageOfCompletedTranscript`), which makes the
+    /// original claim true of both arms.
+    ///
+    /// The CONCLUSION is unchanged and still rests on its first reason alone:
+    /// asking for a target the asset already covers wastes a pass, so the ladder
+    /// rung — strictly deeper than the watermark by construction — is what the
+    /// retry must ask for.
     ///
     /// **The slack, and why the comparison needs it.** The last rung is the
     /// asset's `episodeDurationSec`, which comes off the AVURLAsset CONTAINER

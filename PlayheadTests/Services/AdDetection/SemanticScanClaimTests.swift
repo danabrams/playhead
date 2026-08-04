@@ -165,7 +165,7 @@ struct SemanticScanClaimPredicateTests {
             coveredSec: raw, episodeDurationSec: duration
         ) == false)
 
-        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(fastRanges: ranges)
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: ranges)
         #expect(bridged > raw)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
             coveredSec: bridged, episodeDurationSec: duration
@@ -174,7 +174,7 @@ struct SemanticScanClaimPredicateTests {
 
     /// The other direction, and the reason bridging is safe: 5 s coalesces a
     /// breath and nothing else. A genuine untranscribed BLOCK — a music bed, an
-    /// outro no pass read, the 720 s hole in 48E903D7's fast pass — survives it,
+    /// outro no pass read, a real untranscribed block — survives it,
     /// so the gate still refuses an asset whose transcript has real holes.
     @Test("bridging closes breaths, not blocks")
     func bridgingDoesNotConcealUntranscribedBlocks() {
@@ -186,7 +186,7 @@ struct SemanticScanClaimPredicateTests {
         }
         let duration = holeEnd + Self.speechSpan(count: 200)
 
-        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(fastRanges: head + tail)
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: head + tail)
         #expect(bridged < 0.95 * duration,
                 "a 400 s hole must not be bridged away")
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
