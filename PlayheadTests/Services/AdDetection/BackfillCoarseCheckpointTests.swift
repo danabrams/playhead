@@ -131,6 +131,48 @@ struct BackfillCoarseCheckpointTests {
         )
     }
 
+    /// The runner as PRODUCTION builds it: with a `SensitiveWindowRouter` and a
+    /// `PermissiveClassifierBox` (`PlayheadRuntime`, the
+    /// `backfillJobRunnerFactory`, passes both unconditionally on iOS 26+).
+    ///
+    /// That combination is not cosmetic — it selects a DIFFERENT `coarsePassA`
+    /// overload inside `runJob`, and therefore a different argument list, which
+    /// is where the mid-flight checkpoint is handed to the pass. `makeRunner`
+    /// above takes the other branch, so every other test in this suite exercises
+    /// the one production never runs.
+    ///
+    /// The trigger rule deliberately matches nothing in the fixture text, so no
+    /// window routes `.sensitive` and the pass's per-window behaviour is
+    /// identical to the plain path. The only thing this configuration changes is
+    /// WHICH call site has to carry the observer.
+    @available(iOS 26.0, *)
+    private func makeProductionShapedRunner(
+        store: AnalysisStore,
+        runtime: FoundationModelClassifier.Runtime
+    ) -> BackfillJobRunner {
+        BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON(),
+            sensitiveRouter: SensitiveWindowRouter(
+                triggerRules: [
+                    PromptRedactor.RedactionRule(
+                        pattern: "ZZTHISNEVERAPPEARSZZ",
+                        isRegex: true
+                    )
+                ]
+            ),
+            permissiveClassifier: BackfillJobRunner.PermissiveClassifierBox {
+                PermissiveAdClassifier()
+            }
+        )
+    }
+
     private func passARows(
         _ store: AnalysisStore,
         assetId: String
@@ -259,6 +301,62 @@ struct BackfillCoarseCheckpointTests {
         // were in the database while the pass was still running.
         let lastInFlight = try #require(samples.last)
         #expect(lastInFlight.durableSuccessRows > 0)
+    }
+
+    /// The same claim, on the call site production actually takes.
+    ///
+    /// `runJob` chooses between two `coarsePassA` overloads: the bd-1en
+    /// DISPATCHING one when a `sensitiveRouter` AND a `permissiveClassifierBox`
+    /// are both present, and the legacy one otherwise. `PlayheadRuntime` supplies
+    /// both on iOS 26+, so the dispatching overload is the only one a shipped
+    /// build ever calls — and the observer has to be threaded through BOTH.
+    ///
+    /// Every other test in this suite builds the runner without a router, so all
+    /// of them ride the legacy branch. Deleting `onWindowsBanked:` from the
+    /// dispatching call site therefore left the whole suite green while the
+    /// feature was dead in production: a correct rule nothing invokes, which is
+    /// the same defect shape playhead-26od's review round II caught one level
+    /// down in the coverage walk.
+    ///
+    /// The assertion is deliberately the exact sequence the headline test makes,
+    /// not a weaker "some rows exist": a lower bound would still pass if the
+    /// dispatching branch checkpointed only at the end.
+    @available(iOS 26.0, *)
+    @Test("the production runner shape checkpoints too — both coarse call sites carry the observer")
+    func productionShapedRunnerAlsoCheckpointsMidFlight() async throws {
+        let assetId = "asset-26od-dispatching"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        let inputs = makeInputs(assetId: assetId, lineCount: 40)
+        let observer = CoarseInFlightObserver(
+            store: store,
+            assetId: assetId,
+            transcriptVersion: inputs.transcriptVersion
+        )
+        let fmRuntime = TestFMRuntime(
+            tokenCountRule: { $0.count },
+            onCoarseRespond: { ordinal in await observer.sample(respondOrdinal: ordinal) }
+        )
+
+        _ = try await makeProductionShapedRunner(store: store, runtime: fmRuntime.runtime)
+            .runPendingBackfill(for: inputs)
+
+        let samples = await observer.samples
+        #expect(samples.count > 2, "need several windows for an in-flight claim to mean anything")
+        for sample in samples {
+            #expect(
+                sample.durableSuccessRows == sample.respondOrdinal - 1,
+                "at coarse call \(sample.respondOrdinal) expected \(sample.respondOrdinal - 1) durable rows, saw \(sample.durableSuccessRows)"
+            )
+        }
+        let lastInFlight = try #require(samples.last)
+        #expect(lastInFlight.durableSuccessRows > 0)
+        // The router/permissive pair must not have changed what the pass did:
+        // this is the same episode the legacy-branch test screens, so the same
+        // windows must end up in the database.
+        let successes = try await passARows(store, assetId: assetId)
+            .filter { $0.status == .success }
+        #expect(successes.count == (await fmRuntime.coarseCallCount))
     }
 
     /// The other half of "a subsequent run does not re-do them": the durable rows
