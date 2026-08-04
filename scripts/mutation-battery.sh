@@ -618,6 +618,43 @@
 #   are half-transcribed with terminal analysis jobs. A rotating read cursor
 #   makes the per-pass bound a rate limit again.
 #
+#   R4 REVIEW ROUND, 2026-08-04. ONE new entry — SC34 alone in a new batch 412,
+#   bringing the SC series to 32 entries in 12 batches. Recount: 402 live
+#   entries.
+#
+#   BATCH 412 FINAL: 1 KILLED / 0 SURVIVED / 0 ERROR, one build, 2m12s. Its
+#   ONLY observed victim was `$T_FIL5_WRAP`, which is the point: nothing that
+#   already existed could see the mutation, so the hole it fills was real rather
+#   than notional. Batches 400-411 were NOT re-run — the R4 round changed only
+#   doc comments in the three mutated files plus one added test — and every
+#   anchor was re-checked with `--dry-run --only`/`--batch` and still applies
+#   exactly once.
+#
+#   SC34 is the OTHER HALF of the cursor SC32 introduced. SC32 pins that
+#   `semanticScanClaimSweepOffset` ADVANCES past a full window; nothing pinned
+#   that it WRAPS when the read comes back empty at a non-zero offset, and the
+#   two states are disjoint. `$T_FIL5_ROTATE`'s fixture always leaves a
+#   claimable asset waiting at offset 24, so its read is never empty. The empty
+#   read arrives when the population SHRINKS under the cursor — which the mint
+#   cap manufactures unaided, since a window of 24 claimable assets is claimed
+#   8 at a time and leaves the cursor at 24 with 16 rows behind it. The cost of
+#   losing the wrap is one whole `reconcile()` spent idle with work
+#   outstanding, and on a BGProcessingTask wake that is a launch: the per-pass
+#   sequence goes [8, 8, 8] to [8, 0, 8]. Every bound test stays green through
+#   it, because the claims are all eventually minted.
+#
+#   DISK, SAMPLED AGAIN because the box was tighter than R3's runs. Batch 412
+#   with `PLAYHEAD_MB_SKIP_BASELINE=1`: 12.75 GiB free at start, 8.52 GiB
+#   minimum, 11.61 GiB at exit — a drawdown of 4.23 GiB over 30 samples at 5 s.
+#   That is close to R2's 5.43 GiB for a selective batch and nowhere near the
+#   12.15 GiB a full plan draws, so `PLAYHEAD_DISK_MIN_GIB=11` was the lever
+#   (never PLAYHEAD_SKIP_DISK_PREFLIGHT — the preflight stays ARMED, just at a
+#   floor measured for this run's size). Worth knowing for the next round: the
+#   largest reservoir on this box is now `~/Library/Developer/CoreDevice` at
+#   38 GB, which is device-build state and OUTSIDE every rail in CLAUDE.md's
+#   safety list — do not reach for it, `simctl erase` on the destination is
+#   still the sanctioned 2-3 GiB.
+#
 #   ONE THING DELIBERATELY NOT REGISTERED, on the record like SC29: the
 #   `max(0, offset)` clamp in `fetchAssetIdsMissingCoverageLaneJobs`. SQLite
 #   specifies a negative OFFSET as equivalent to zero, so removing the clamp is
