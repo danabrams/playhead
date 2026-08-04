@@ -685,6 +685,12 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     ///     `finalPassCoverageEndSec` is inside the tolerance), so this is a rail,
     ///     not a repair; the fixture is
     ///     `finalPassReachPastDurationWithholdsTheFraction` and mutation RT14.
+    ///
+    ///     playhead-9y9e (R3 review): the final term counts only when its
+    ///     provenance is `.finalPassChunks`. A final WATERMARK with no chunks
+    ///     behind it must not withhold anything — see the comment at the guard
+    ///     itself, and `finalPassWatermarkWithoutChunksDoesNotWithhold` /
+    ///     mutation RT16.
     var adScanFraction: Double? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
@@ -706,7 +712,26 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         // the `adScanFraction` doc above for the shape that made a fast-only
         // read incoherent. A missing or non-finite reach on either side is
         // simply absent from the max — it is not evidence of anything.
-        let transcriptReach = [fastTranscriptCoverageEndSec, finalPassCoverageEndSec]
+        //
+        // THE FINAL TERM IS ADMITTED ONLY ON CHUNK EVIDENCE (playhead-9y9e R3
+        // review), and the asymmetry with the fast term is deliberate.
+        // `finalPassCoverageEndSec` falls back to the
+        // `analysis_assets.finalPassCoverageEndTime` COLUMN when no final chunk
+        // is on disk — playhead-0sro's "watermark outliving the rows it claims"
+        // shape, the same one `transcribedIntervals` and
+        // `watermarkWithoutChunksStillFails` are built around, and reachable
+        // because playhead-wvdz's chunk deletion outlives the asset row. A stale
+        // column would then WITHHOLD a fraction that is fine, i.e. make an
+        // episode less ready — the one direction this bead's widening promised
+        // never to move. The fast term keeps its existing behaviour: it was
+        // already load-bearing before this bead and changing it is not this
+        // bead's business. Every asset on the 2026-08-03 pull that has a final
+        // watermark also has final chunks, and chunks win, so this guard is
+        // latent there — a rail, not a repair.
+        let finalReach = finalPassCoverageEndSource == .finalPassChunks
+            ? finalPassCoverageEndSec
+            : nil
+        let transcriptReach = [fastTranscriptCoverageEndSec, finalReach]
             .compactMap { $0 }
             .filter { $0.isFinite }
             .max()

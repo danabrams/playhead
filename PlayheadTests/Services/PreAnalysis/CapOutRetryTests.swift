@@ -1011,4 +1011,106 @@ struct CapOutRetryTests {
             nextOrdinal: 1
         ) == .declined(.cooling))
     }
+
+    // MARK: - playhead-9y9e R3 review: THE WIRE-IN
+
+    /// One coverage-lane scan row tiling `[0, end]`, so the asset's MEASURED
+    /// `adScanFraction` clears its floor. Deliberately minimal: this suite needs
+    /// the fraction to come out of the store, not a realistic scan.
+    private func seedFullAdScan(_ store: AnalysisStore, end: Double) async throws {
+        try await store.insertSemanticScanResult(SemanticScanResult(
+            id: "\(Self.assetId)-scan-0",
+            analysisAssetId: Self.assetId,
+            windowFirstAtomOrdinal: 0,
+            windowLastAtomOrdinal: 9,
+            windowStartTime: 0,
+            windowEndTime: end,
+            scanPass: SemanticScanCoverage.coverageScanPass,
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: "{}",
+            transcriptVersion: "tx-v1"
+        ))
+    }
+
+    /// RT15 — **THE WIRE-IN, and the reason this test had to be written.**
+    ///
+    /// Every other test of the ad-scan arm calls
+    /// `AnalysisWorkScheduler.capOutRetryDecision` DIRECTLY, so every one of them
+    /// stays green if the reconciler stops measuring and hands the decision a
+    /// constant "fully scanned". That is the second failure family this queue
+    /// keeps paying for — a correct mechanism production never invokes — and a
+    /// decision-matrix test cannot see it by construction. Only a `reconcile()`
+    /// can.
+    ///
+    /// The field case is AD5F3A0A on the 2026-08-03 pull: transcribed 4,281 s of
+    /// 4,281 s, ad scan 20.7 %, `…:adScanRedrive:1` an attempt-cap terminal.
+    /// Here: fully transcribed, so `outstandingTranscriptTarget` is nil and the
+    /// ad-scan arm is the ONLY thing that can mint; and never scanned, so
+    /// `adScanFraction` is `nil`, which reads as owed.
+    @Test("reconcile mints the cap-out retry for a transcribed but unscanned episode")
+    func reconcileMintsForTranscribedButUnscannedEpisode() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: Self.durationSec,
+            supersededAt: clock.value.timeIntervalSince1970 - 86_400
+        )
+        let reconciler = makeReconciler(store: store, downloads: downloads, clock: clock)
+
+        #expect(try await reconciler.reconcile().capOutRetriesMinted == 1,
+                "a fully transcribed, never-scanned episode is outstanding WORK")
+
+        // And it asks for the DEEPEST rung, because the pass's job here is to
+        // reach the ad-detection stage over the whole episode.
+        let minted = try #require(try await store.fetchJob(byWorkKey: Self.retryKey(1)))
+        let ladder = AnalysisWorkScheduler.coverageTierLadder(
+            tiers: Self.defaultTiers,
+            episodeDurationSec: Self.durationSec
+        )
+        #expect(minted.desiredCoverageSec == ladder.last)
+    }
+
+    /// RT17 — the TERMINATION BOUND of the same wire-in, and the direction the
+    /// mint test cannot see.
+    ///
+    /// If the reconciler simply stopped reading and left `nil`, `isOwed(nil)` is
+    /// true and this rescue would mint on a finished episode forever — an
+    /// unbounded retry wearing a floor. So the read has to be able to say NO as
+    /// well as YES, and only a `reconcile()`-level test proves it does.
+    @Test("reconcile mints nothing once the ad scan clears its floor")
+    func reconcileMintsNothingOnceAdScanClearsTheFloor() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: Self.durationSec,
+            supersededAt: clock.value.timeIntervalSince1970 - 86_400
+        )
+        try await seedFullAdScan(store, end: Self.durationSec)
+
+        // The premise, stated so fixture drift cannot make this vacuous.
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]
+        )
+        let fraction = try #require(summary.adScanFraction)
+        #expect(fraction >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction,
+                "premise: this asset's measured ad scan clears the floor")
+
+        let reconciler = makeReconciler(store: store, downloads: downloads, clock: clock)
+        #expect(try await reconciler.reconcile().capOutRetriesMinted == 0,
+                "nothing is owed, so the rescue must decline — otherwise it mints forever")
+        #expect(try await store.fetchJob(byWorkKey: Self.retryKey(1)) == nil)
+    }
 }

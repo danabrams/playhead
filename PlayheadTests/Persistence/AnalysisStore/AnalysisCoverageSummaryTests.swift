@@ -3285,6 +3285,53 @@ struct AnalysisStoreCoverageRulerTests {
                 "the final pass has disproved the denominator; 610/600 must not read as a ✓")
     }
 
+    /// RT16 (R3 review) — the OTHER direction of RT14's guard, and the one that
+    /// can make an episode LESS ready.
+    ///
+    /// `finalPassCoverageEndSec` is chunks-first with a fallback to the
+    /// `analysis_assets.finalPassCoverageEndTime` COLUMN. When no final chunk is
+    /// on disk the column is all that is left — playhead-0sro's "watermark
+    /// outliving the rows it claims" shape, reachable because playhead-wvdz's
+    /// chunk deletion outlives the asset row, and the same shape RT12 and
+    /// `watermarkWithoutChunksStillFails` exist for. Admitting it into the
+    /// duration-sanity max lets a STALE column withhold a fraction that is
+    /// perfectly fine.
+    ///
+    /// Here the fast pass backs the whole 600 s episode and 590 s are scanned —
+    /// a healthy ✓ — while a stale final column claims 4,000 s with not one
+    /// final chunk behind it. The fraction must still be produced. This is the
+    /// direction the bead's own monotonicity argument forbids moving.
+    @Test("a final-pass WATERMARK with no chunks behind it never withholds the fraction")
+    func finalPassWatermarkWithoutChunksDoesNotWithhold() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-9y9e-stalefinal", episodeDurationSec: 600, finalPassCoverageEndTime: 4000
+        ))
+        // Fast chunks only. Nothing final on disk.
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-stalefinal", index: 0, start: 0, end: 600, pass: "fast")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-stalefinal", index: 0, start: 0, end: 590)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-stalefinal"])
+        let summary = try #require(summaries["a-9y9e-stalefinal"])
+
+        // The premises, so fixture drift cannot make this vacuous: the stale
+        // column IS what `finalPassCoverageEndSec` reports, it IS past the
+        // tolerance, and its provenance is the watermark rather than chunks.
+        #expect(summary.finalPassCoverageEndSec == 4000)
+        #expect(summary.finalPassCoverageEndSource == .assetWatermark)
+        #expect(4000 > 600 + AnalysisCoverageSummary.adScanDurationToleranceSec(
+            episodeDurationSec: 600
+        ), "premise: the stale column would trip the guard if it were admitted")
+
+        #expect(summary.adScanCoveredSec == 590)
+        #expect(summary.adScanFraction != nil,
+                "a watermark with no chunks behind it is not evidence, and must not withhold a ✓")
+    }
+
     /// The bound, tested where it lives rather than only through the store, so
     /// a numerator that DOES exceed the denominator is exercised directly.
     /// `adScanFraction` must WITHHOLD — a numerator materially past the

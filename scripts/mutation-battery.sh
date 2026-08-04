@@ -4383,7 +4383,21 @@ MUTATIONS=(
   # RT01/RT09/RT10/RT11 all call the static decision directly and cannot see it.
   # This is the "a correct mechanism production never invokes" family: the fix is
   # right and nothing proves it is reached.
-  "RT15|421|RECON|$T_9Y9E_WIRE_MINT;$T_9Y9E_WIRE_DECLINE"
+  "RT15|421|RECON|$T_9Y9E_WIRE_MINT"
+
+  # Batch 422 — RT16 (R3 review). The both-pass duration guard admits a final
+  # WATERMARK with no chunks behind it, so a stale `finalPassCoverageEndTime`
+  # withholds a fraction that is fine — an episode made LESS ready, the one
+  # direction this bead's widening promised never to move. Its own batch:
+  # RT14/RT16 both mutate `AnalysisStore.swift` and a batch applies at once.
+  "RT16|422|STORE|$T_9Y9E_FINALSRC"
+
+  # Batch 423 — RT17. The wire-in's OTHER direction: the reconciler skips the
+  # read entirely, so `adScanFraction` is always `nil`, `isOwed` is always true,
+  # and the rescue mints on a finished episode forever. RT15 cannot see this
+  # (a constant 1.0 declines correctly here); RT17 cannot see RT15 (a nil owes
+  # correctly there). Two mutants because it is two directions of one wire.
+  "RT17|423|RECON|$T_9Y9E_WIRE_DECLINE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4767,6 +4781,7 @@ describe_mutation() {
     RT14) echo "9y9e R2: the duration-sanity guard reads the FAST reach while the numerator spans both passes" ;;
     RT15) echo "9y9e R3: the reconciler stops MEASURING the ad scan and hands the decision a constant 1.0" ;;
     RT16) echo "9y9e R3: the both-pass reach guard trusts a final WATERMARK with no chunks behind it" ;;
+    RT17) echo "9y9e R3: the reconciler skips the ad-scan read, so the rescue mints on a finished episode forever" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10463,6 +10478,45 @@ EOF
 EOF
     snippet NEW <<'EOF'
         let adScanFraction: Double? = 1.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT16 (R3 review) — the duration guard admits the final WATERMARK as well as
+  # final CHUNKS. `finalPassCoverageEndSec` falls back to the
+  # `analysis_assets.finalPassCoverageEndTime` column when no final chunk is on
+  # disk (playhead-0sro's shape), so a stale column withholds a fraction that is
+  # fine and the episode goes BACKWARDS in readiness.
+  RT16)
+    snippet OLD <<'EOF'
+        let finalReach = finalPassCoverageEndSource == .finalPassChunks
+            ? finalPassCoverageEndSec
+            : nil
+        let transcriptReach = [fastTranscriptCoverageEndSec, finalReach]
+EOF
+    snippet NEW <<'EOF'
+        let finalReach = finalPassCoverageEndSec
+        let transcriptReach = [fastTranscriptCoverageEndSec, finalReach]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT17 (R3 review) — the reconciler skips the coverage read entirely, so
+  # `adScanFraction` is always `nil`. `SemanticScanClaim.isOwed(nil)` is TRUE by
+  # design, so the rescue mints on an episode whose scan is finished, on every
+  # sweep, until the ordinal budget is gone. The mirror of RT15: a constant 1.0
+  # never mints, a constant nil always does, and only one test sees each.
+  RT17)
+    snippet OLD <<'EOF'
+        var adScanFraction: Double?
+        if nextOrdinal != nil,
+           AnalysisWorkScheduler.capOutRetryCooldownElapsed(chainTail: tail, now: decidedAt),
+           let assetId = tail.analysisAssetId {
+            adScanFraction = try await store
+                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
+                .adScanFraction
+        }
+EOF
+    snippet NEW <<'EOF'
+        let adScanFraction: Double? = nil
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
