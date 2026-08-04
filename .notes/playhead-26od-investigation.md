@@ -743,3 +743,64 @@ of the over-claim family. What it did find:
   the process-exit backstop rather than being reclaimed by ownership. One
   directory per run of the perf plan. Bounded, and noted only because
   playhead-cgka is what 15 GiB of stranded simulator trash looked like.
+
+### R4's mutation evidence — the CK series, RUN
+
+Registered in `scripts/mutation-battery.sh` (batches 314-323) rather than left as
+probes in this file, so the rails survive a refactor that nobody remembers to
+re-probe. Run 2026-08-04. **12 registered, 12 KILLED, 0 SURVIVED.**
+
+| # | mutation | killed by |
+|---|---|---|
+| CK01 | drop the observer from the DISPATCHING (production) `coarsePassA` call site | `the production runner shape checkpoints too` |
+| CK02 | check `isDefused` on ENTRY only, not per iteration | `a defuse that lands mid-loop stops the checkpoint at that window` |
+| CK03 | delete the post-loop `isDefused` guard | `a defuse that lands after the last row still withholds the cursor` |
+| CK04 | rewrite the whole banked prefix each checkpoint | `a pass writes one row per window per checkpoint` |
+| CK05 | remove the empty-needle guard in `planIndex` | `an outcome with no line refs credits no plan` |
+| CK06 | revert attribution to the FIRST superset | `an outcome matching two plans credits neither` |
+| CK07 | delete the lease touch's lifetime bound | `a defused lease touch cannot resurrect a deferred job` |
+| CK09 | drop `failedWindows` from the mid-flight walk | `the checkpoint's cursor is the contiguous prefix` |
+| CK10 | drop the `monotonic(from: priorCursor)` merge | `a checkpoint never lowers a cursor an earlier run already reached` |
+| CK11 | hardcode the checkpoint row's `runMode` | `a checkpointed row carries the job's own runMode and phase` |
+| CK12 | split the snapshot at the OFFERED count | `a checkpoint whose write failed does not advance the resume cursor` |
+| CK13 | delete the lease REFRESH itself | `a defused lease touch cannot resurrect a deferred job` AND the source canary |
+
+Three things the run taught that the table cannot show:
+
+* **CK05 is only killable with a ONE-PLAN fixture, and that is a rail
+  interaction rather than a fixture detail.** The empty needle is a subset of
+  EVERY plan, so with two or more plans CK06's ambiguity guard already returns
+  nil and the empty guard is redundant. Exactly one plan is the only shape where
+  the empty set has a UNIQUE superset. The multi-plan fixture R3 shipped would
+  have let CK05 SURVIVE — the guard would have looked pinned and been dead.
+* **CK13 exists because CK07 does not cover what it looks like it covers.** CK07
+  removes the lifetime BOUND on the lease touch; nothing removed the touch. The
+  full gate is what exposed that, by breaking the source canary that was the only
+  thing standing there. CK13 now kills through a BEHAVIOURAL rail as well as the
+  canary — the live half of `a defused lease touch…` asserts the row reaches
+  `.running` — so the refresh is no longer canary-only.
+* **CK08, the vacuity control for CK06, DOES NOT TERMINATE and is withdrawn with
+  the cause named.** With no plan ever credited the cursor never advances, and
+  `the attempt budget counts CONSECUTIVE barren windows — a window that covers
+  new audio RESETS it` (playhead-bkhc's re-drive bound) drives a runner until it
+  does. Measured three times at 10, 17 and 17 GiB free, each freezing its batch
+  log at the same ~1.159 MB with xcodebuild alive at 0.0 % CPU — so the first,
+  which was read as the disk wedge, was not one. The hung case was identified by
+  diffing `started` against `passed|failed` in the frozen log. A mutation that
+  hangs is worse than one that survives: it takes the tool down instead of
+  reporting. The control is still asserted by `a strict subset of exactly one
+  plan still credits that plan`; what is missing is a registered mutant that
+  kills it, and reviving one needs a TERMINATING variant.
+
+Operationally, three faults worth more than the verdicts:
+
+* **Do not touch a mutated file while a battery is live.** An edit made mid-run
+  was reverted by `restore_sources`, and the next run's dirty-tree guard then
+  refused outright — correctly, because that guard is what stops the restore
+  from eating uncommitted work. Commit first.
+* **A selective FOCUSED_SUITES run draws ~7 GiB.** Starting one at 10 GiB with
+  `PLAYHEAD_DISK_MIN_GIB=6` reaches exactly the silent wedge the preflight exists
+  to refuse. Erase the sim between batches; never lower the floor to fit.
+* **An XCTest expectation carries no module prefix.** `extract_failures` joins
+  the captured suite and method as `Suite/method`, so `PlayheadTests.Suite/method`
+  is unmatchable and reports ERROR while every named test really did fail.
