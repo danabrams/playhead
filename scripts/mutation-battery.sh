@@ -512,10 +512,23 @@
 #   R2 REVIEW ROUND, same day. A NEW batch 408 with three entries — SC26, SC27,
 #   SC28 — bringing the SC series to 27 entries in 8 batches. Batch 408 FINAL:
 #   3 KILLED / 0 SURVIVED / 0 ERROR, 2 builds, 5m16s, baseline green, each of
-#   the three with a distinct victim. Batches 400-407 were NOT re-run and carry
-#   the verdicts above; every one of their anchors was re-checked by
+#   the three with a distinct victim. Batch 402 was RE-RUN because the R2 round
+#   rewrote a test it names — FINAL 2 KILLED / 0 SURVIVED / 0 ERROR, 2 builds,
+#   4m22s, with `the claim's id is the runner's fullCoverage job id` still
+#   among SC05's observed victims after being rebuilt on top of
+#   `CoveragePlanner.plan(for:)`. Batches 400-401 and 403-407 were NOT re-run
+#   and carry the verdicts above; every one of their anchors was re-checked by
 #   `--dry-run --batch` after the R2 edits and still applies exactly once.
 #   Recount: 397 live entries.
+#
+#   ONE ERROR ON THE WAY, twice, and neither was a mutation problem. The first
+#   batch-402 attempt failed to BUILD: a backslash line-continuation inside a
+#   single-line Swift string literal in the rewritten test. The battery reports
+#   that as ERROR rather than KILLED, which is the point — the edit gets fixed,
+#   not the expectation. The second attempt came back rc=28: the DISK PREFLIGHT
+#   refusing, the failure mode already documented above. `simctl erase` on the
+#   destination plus clearing `$TMPDIR/Deleting-*` (`chmod -R u+rwx` first)
+#   took the volume from 14.43 to 18.13 GiB and the batch then ran clean.
 #
 #   All three are the R1 round's second family — a correct line nothing could
 #   observe — and this time all three are in ONE function, the reconciler sweep:
