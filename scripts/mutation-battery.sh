@@ -1912,7 +1912,9 @@ T_26OD_DISCRIMINATORS="a checkpointed row carries the job's own runMode and phas
 T_26OD_FAILED_WRITE="a checkpoint whose write failed does not advance the resume cursor"
 # The XCTest source canary. The battery reads `Test Case '-[Suite method]'` lines, so an
 # XCTest expectation is written Suite/method.
-T_26OD_LEASE_CANARY="PlayheadTests.FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
+# NO module prefix: `extract_failures` captures suite and method out of
+# `Test Case '-[PlayheadTests.Suite method]'` and joins them as `Suite/method`.
+T_26OD_LEASE_CANARY="FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
