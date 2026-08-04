@@ -1395,9 +1395,15 @@ actor AnalysisJobReconciler {
             guard !chunks.isEmpty else { continue }
 
             // The podcast id the analysis lane recorded for this asset's
-            // episode, or nil. Never "" — an empty id is the ABSENCE of a
-            // podcast, and persisting it as one is the same defect that closes
-            // the `podcastIdMissing` gate in the first place.
+            // episode — which is very often the EMPTY STRING rather than nil,
+            // and on the 2026-08-03 pull is `''` for both of the stranded
+            // assets this sweep actually reaches. Handed on verbatim: an empty
+            // id is the ABSENCE of a podcast, and
+            // ``SemanticScanClaim/claimRow(analysisAssetId:podcastId:transcriptVersion:gate:createdAt:)``
+            // is the ONE place that decides so. Normalizing here as well is the
+            // shape that let the SC09 mutant survive in R2 — a duplicate policy
+            // that no test can kill while it agrees, because the constructor it
+            // guards never sees the value it exists to catch.
             let podcastId = try await store.fetchLatestJobForEpisode(asset.episodeId)?.podcastId
 
             let outcome = await SemanticScanClaim.record(
