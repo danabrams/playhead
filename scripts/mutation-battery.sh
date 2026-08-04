@@ -2304,6 +2304,9 @@ T_9Y9E_CEILING="a fully scanned, mostly-final-pass episode can now reach the suf
 T_9Y9E_CLIPS="widening the bound to both passes does not stop it clipping untranscribed audio"
 T_9Y9E_RANGES="fetchTranscriptCoveredRanges spans both passes and drops degenerate rows"
 T_9Y9E_UNSCANNED="a fully transcribed episode whose ad scan is short still gets a retry"
+# R1 review additions.
+T_9Y9E_MONO="the widened ad-scan bound never measures LESS than the watermark fallback did"
+T_9Y9E_DEGEN="an all-degenerate final pass reports the watermark, not a zero-width row"
 T_9Y9E_LADDER="an outstanding transcript rung still wins over the ad-scan term"
 T_9Y9E_GUARDS="the ad-scan term does not bypass the terminal, budget or cooldown guards"
 # The vacuity control's victims. `pz32`'s own rails, which must stay green under
@@ -4290,6 +4293,18 @@ MUTATIONS=(
   # transcribed). Cannot share 413 with RT01: both redden `$T_9Y9E_REACHES`, and
   # a mutation credited KILLED off a batchmate's victim is a fabricated rail.
   "RT05|417|AJRUN|$T_9Y9E_REACHES"
+
+  # Batch 418 — RT12, the R1 review's finding. The widened bound is built from
+  # the two CHUNK sets instead of from the bound it replaced, which silently
+  # drops the watermark fallback. Monotonicity was ASSERTED in a comment
+  # ("the intersection is taken against a superset") and was false for an asset
+  # whose watermark outlives its chunks.
+  "RT12|418|STORE|$T_9Y9E_MONO"
+
+  # Batch 419 — RT13. The final-pass loop stops dropping degenerate rows, so a
+  # zero-width chunk becomes the pass's reported reach. The FAST loop has always
+  # dropped them; this is the rail on the two staying symmetric.
+  "RT13|419|STORE|$T_9Y9E_DEGEN"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4668,6 +4683,8 @@ describe_mutation() {
     RT09) echo "9y9e: the cap-out rescue measures outstanding TRANSCRIPT only — the one thing an unscanned episode has none of" ;;
     RT10) echo "9y9e: the ad-scan term overrides the transcript ladder instead of falling back to it" ;;
     RT11) echo "9y9e: the ad-scan term jumps the terminal, budget and cooldown guards" ;;
+    RT12) echo "9y9e R1: the widened bound drops the watermark fallback, so the ad-scan area can DECREASE" ;;
+    RT13) echo "9y9e R1: the final-pass loop keeps degenerate rows, so a zero-width chunk becomes a pass reach" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10260,7 +10277,7 @@ EOF
     snippet OLD <<'EOF'
         guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
         guard let nextOrdinal else { return .declined(.budgetSpent) }
-        guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
+        guard capOutRetryCooldownElapsed(chainTail: chainTail, now: now) else {
             return .declined(.cooling)
         }
         let ladder = coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
@@ -10276,9 +10293,36 @@ EOF
         }
         guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
         guard let nextOrdinal else { return .declined(.budgetSpent) }
-        guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
+        guard capOutRetryCooldownElapsed(chainTail: chainTail, now: now) else {
             return .declined(.cooling)
         }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT12 (R1 review) — the widened bound is rebuilt from the two CHUNK sets,
+  # dropping the `transcriptIntervals` term that carries the watermark fallback.
+  # On an asset whose watermark outlives its chunks the measured ad-scan area
+  # goes DOWN, which is the exact claim the surrounding comment makes impossible.
+  RT12)
+    snippet OLD <<'EOF'
+            let transcribedIntervals = transcriptIntervals + (finalIntervals[id] ?? [])
+EOF
+    snippet NEW <<'EOF'
+            let transcribedIntervals = (fastIntervals[id] ?? []) + (finalIntervals[id] ?? [])
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RT13 (R1 review) — the final-pass loop keeps degenerate rows, so a zero-width
+  # chunk supplies `MAX(endTime)` and an all-degenerate final pass reports a
+  # reach it never had. The FAST loop's identical guard is left alone, which is
+  # what makes this a rail on the two staying symmetric.
+  RT13)
+    snippet OLD <<'EOF'
+                let endTime = sqlite3_column_double(finalStmt, 2)
+                guard endTime > startTime else { continue }
+EOF
+    snippet NEW <<'EOF'
+                let endTime = sqlite3_column_double(finalStmt, 2)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

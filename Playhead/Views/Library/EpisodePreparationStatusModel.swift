@@ -126,8 +126,12 @@ final class EpisodePreparationStatusModel {
         // COST, stated honestly: this is new work on this path (the pre-pz32
         // fraction came free off the already-fetched asset row) and
         // `fetchCoverageSummariesByAssetIds` runs four prepared statements per
-        // 500-id chunk, including every fast transcript chunk for the assets in
-        // scope. It is bounded by the number of episodes that have an
+        // 500-id chunk, including every transcript chunk of BOTH passes for the
+        // assets in scope (playhead-9y9e made the final-pass query project rows
+        // rather than `MAX(endTime)`, because the ad-scan bound needs its
+        // intervals; on the 2026-08-03 device pull that is 8,251 extra rows
+        // across twelve assets, +28 % on the 29,247 fast rows already read).
+        // It is bounded by the number of episodes that have an
         // `analysis_assets` row — NOT by the list length — which is why the id
         // set is built by `compactMap`ping the assets rather than from
         // `episodeIds`. Most library rows have never been analysed and cost

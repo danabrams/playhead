@@ -6407,7 +6407,7 @@ actor AnalysisWorkScheduler {
     ) -> CapOutRetryDecision {
         guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
         guard let nextOrdinal else { return .declined(.budgetSpent) }
-        guard now - chainTail.updatedAt >= capOutRetryCooldownSeconds else {
+        guard capOutRetryCooldownElapsed(chainTail: chainTail, now: now) else {
             return .declined(.cooling)
         }
         let ladder = coverageTierLadder(tiers: tiers, episodeDurationSec: episodeDurationSec)
@@ -6438,7 +6438,23 @@ actor AnalysisWorkScheduler {
         ))
     }
 
-    /// playhead-y8f3: the outcome of ``capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:tiers:now:)``.
+    /// playhead-9y9e (R1 review): has `chainTail`'s terminal cooled enough for a
+    /// cap-out retry?
+    ///
+    /// Extracted so the CALLER can ask the question before paying for the inputs
+    /// ``capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:adScanFraction:tiers:now:)``
+    /// needs. `adScanFraction` costs a full coverage-summary read — four
+    /// prepared statements and every transcript chunk of BOTH passes for the
+    /// asset — and it is discarded on the `budgetSpent` and `cooling` arms,
+    /// which is where a spent or freshly-terminated episode lands on EVERY
+    /// sweep, forever. One expression, used by the caller's pre-check and by the
+    /// decision itself, so the two cannot drift into disagreeing about when the
+    /// read is safe to skip.
+    static func capOutRetryCooldownElapsed(chainTail: AnalysisJob, now: Double) -> Bool {
+        now - chainTail.updatedAt >= capOutRetryCooldownSeconds
+    }
+
+    /// playhead-y8f3: the outcome of ``capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:adScanFraction:tiers:now:)``.
     enum CapOutRetryDecision: Sendable, Equatable {
         case mint(CapOutRetryPlan)
         case declined(CapOutRetryDeclineReason)

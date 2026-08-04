@@ -25,8 +25,10 @@ import os
 /// bridged area, which agrees with the watermark. The measurement was wrong,
 /// not the watermark; see ``bridgedTranscriptCoveredSec(ranges:)``. The
 /// principle in ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
-/// stands unchanged — this gate divides an area and never a watermark, and
-/// 2C5C3699 (13.0 % area against a 900 s watermark) is the asset that shows why.
+/// stands unchanged — this gate divides an area and never a watermark — but it
+/// now stands on its fixtures rather than on the pull, because once the area
+/// spans both passes no asset on the 2026-08-03 pull diverges from its watermark
+/// by more than 0.8 pp.
 /// Every path that requests a scan funnels through
 /// `AdDetectionService.runShadowFMPhase`, which drops the work at four gates
 /// (cohort mode `.off`, missing runner factory, `canUseFoundationModels`
@@ -237,14 +239,26 @@ enum SemanticScanClaim {
     /// which is an AREA. They agree on a contiguous transcript and diverge on a
     /// gappy one, where the watermark reads 100 % over audio nobody transcribed
     /// (the watermark-vs-union antipattern playhead-sd71 fixed on the Activity
-    /// screen). On the 2026-08-03 pull the divergence is not theoretical:
-    /// 2C5C3699's watermark reads 900 s of a 6,925 s episode while its bridged
-    /// two-pass area is 13.0 %, and 44F076BB reads 81.9 % by watermark against
-    /// 81.1 % bridged. (playhead-9y9e: the pre-9y9e version of this note cited
-    /// 48E903D7 at 36.9 % and AD5F3A0A at 44.0 %. Both figures were the FAST
-    /// pass alone; across both passes those assets read 95.1 % and 99.0 %, and
-    /// they are examples of the measurement bug this bead fixed, not of the
-    /// watermark-vs-area divergence this paragraph is about.)
+    /// screen).
+    ///
+    /// **STATED HONESTLY: on the 2026-08-03 pull, once the area is measured over
+    /// BOTH passes, the divergence has no field example left.** Every one of the
+    /// twelve assets reads within 0.8 percentage points of its watermark, and
+    /// the largest gap in the direction this paragraph warns about — watermark
+    /// ABOVE area — is 44F076BB at 81.9 % versus 81.1 %. (playhead-9y9e's own
+    /// first draft of this note cited 2C5C3699 as the proof, "900 s of a 6,925 s
+    /// episode against a 13.0 % area". 900 / 6,925.5 IS 13.0 %: the two numbers
+    /// agree exactly, so that example showed the opposite of what it was cited
+    /// for. Its predecessor cited 48E903D7 at 36.9 % and AD5F3A0A at 44.0 %,
+    /// which were the FAST pass alone — across both passes those read 95.1 % and
+    /// 99.0 %, i.e. they were instances of the measurement bug this bead fixed,
+    /// not of watermark-vs-area divergence.)
+    ///
+    /// That the field no longer exhibits it is not a reason to stop dividing an
+    /// area: the fast-only ruler produced exactly this shape and the pull is a
+    /// single device over one fortnight. The rail is the fixture, not the
+    /// corpus — `AnalysisJobRunner`'s `fullWatermarkOverGappyTranscriptStillFails`
+    /// and mutation RT03 are what hold this, and they are synthetic on purpose.
     ///
     /// So this gate is strictly stricter than `finalizeBackfill`'s. An asset it
     /// would complete can fail here, on purpose, and it stays the transcript

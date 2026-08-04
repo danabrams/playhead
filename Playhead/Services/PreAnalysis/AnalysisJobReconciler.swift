@@ -870,9 +870,10 @@ actor AnalysisJobReconciler {
     ///     inside the `cachedIds.subtracting(activeJobIds)` loop), so a live or
     ///     queued row can never be double-dispatched, and the budget cannot be
     ///     spent faster than jobs actually reach the cap.
-    ///  3. ``AnalysisWorkScheduler/capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:tiers:now:)``
-    ///     declines with a NAMED reason on a cooling terminal, on a fully
-    ///     transcribed episode, and on a genuine supersession.
+    ///  3. ``AnalysisWorkScheduler/capOutRetryDecision(baseWorkKey:chainTail:nextOrdinal:transcriptCoverageSec:episodeDurationSec:adScanFraction:tiers:now:)``
+    ///     declines with a NAMED reason on a cooling terminal, on an episode
+    ///     with neither transcript nor ad scan outstanding, and on a genuine
+    ///     supersession.
     ///
     /// **Best-effort by contract**, like `mintAdScanRedrives`: a store failure
     /// here is logged and swallowed rather than failing `reconcile()`, whose
@@ -969,12 +970,29 @@ actor AnalysisJobReconciler {
         if let assetId = tail.analysisAssetId {
             asset = try await store.fetchAsset(id: assetId)
         }
-        // playhead-9y9e: the third coverage input. Read only when there IS an
-        // asset — an unresolved asset has nothing to measure, and `nil` already
-        // reads as owed. Paid after the three cheap guards above, same
-        // cheapest-first ordering as `adScanRedriveCandidate`.
+        let decidedAt = clock().timeIntervalSince1970
+        // playhead-9y9e: the third coverage input, and the most expensive thing
+        // this method can do — a full coverage-summary read (four prepared
+        // statements, plus every transcript chunk of BOTH passes for the asset;
+        // 5,167 rows for AD5F3A0A on the 2026-08-03 pull).
+        //
+        // GATED ON THE ARMS THAT WOULD DISCARD IT, which is the same
+        // cheapest-first discipline the `isAttemptCapTerminal` guard above is
+        // written for (R1 review). A spent budget and a cooling terminal are the
+        // steady state — a capped episode reaches this method on every sweep for
+        // the rest of the episode's life — so reading coverage before those two
+        // arms would make an opportunistic top-up the most expensive step in the
+        // sweep, permanently. `nil` from a skipped read is never seen by a mint:
+        // `capOutRetryDecision` re-checks both conditions and returns
+        // `.declined` before `adScanFraction` is consulted, and the cooldown
+        // predicate is literally the same expression on both sides.
+        //
+        // An unresolved asset is also skipped: nothing to measure, and `nil`
+        // already reads as owed.
         var adScanFraction: Double?
-        if let assetId = tail.analysisAssetId {
+        if nextOrdinal != nil,
+           AnalysisWorkScheduler.capOutRetryCooldownElapsed(chainTail: tail, now: decidedAt),
+           let assetId = tail.analysisAssetId {
             adScanFraction = try await store
                 .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
                 .adScanFraction
@@ -987,7 +1005,7 @@ actor AnalysisJobReconciler {
             episodeDurationSec: asset?.episodeDurationSec,
             adScanFraction: adScanFraction,
             tiers: [config.defaultT0DepthSeconds, config.t1DepthSeconds, config.t2DepthSeconds],
-            now: clock().timeIntervalSince1970
+            now: decidedAt
         )
 
         let plan: AnalysisWorkScheduler.CapOutRetryPlan
@@ -1373,8 +1391,11 @@ actor AnalysisJobReconciler {
             // halves of that are load-bearing in opposite directions. Against
             // the `max(endTime)` WATERMARK `AnalysisCoordinator.finalizeBackfillVerdict`
             // divides, a gappy transcript reads 100 % over audio nobody
-            // transcribed (the playhead-sd71 antipattern) — 2C5C3699 reads
-            // 13.0 % as an area against a 900 s fast watermark. Against the RAW chunk
+            // transcribed (the playhead-sd71 antipattern) — a hazard the
+            // 2026-08-03 pull happens NOT to exhibit once the area spans both
+            // passes (every asset lands within 0.8 pp of its watermark; see
+            // ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``,
+            // which no longer claims otherwise). Against the RAW chunk
             // union, a fully transcribed episode reads ~87 %, because a chunk
             // spans first-word to last-word and every breath is a hole: on the
             // 2026-08-03 pull the raw union cleared 0.95 for **zero of twelve**

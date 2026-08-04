@@ -10751,25 +10751,47 @@ actor AnalysisStore {
             // passes are DISJOINT — final holds [0, 930] and fast holds
             // [930, 2086]), 48E903D7 36.9 % vs 95.1 %, AD5F3A0A 44.0 % vs
             // 99.0 %, D9B513CD 57.2 % vs 88.3 %, 83592353 96.6 % vs 99.5 %,
-            // 53FC53E3 97.9 % vs 99.3 %. Four of those twelve assets therefore
-            // had an `adScanFraction` CEILING below
-            // `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction`: no
-            // scan, however complete, could ever retire them, so every re-drive
-            // and every claim minted for them was work that could not satisfy
-            // itself, and the library ✓ was unreachable by construction.
+            // 53FC53E3 97.9 % vs 99.3 %.
+            //
+            // WHAT THAT BUYS, counted exactly (R1 review re-derived all of it
+            // from the pull; the pre-review note said "four of those twelve
+            // assets had a CEILING below the floor", which is the wrong four
+            // and the wrong claim). Against
+            // `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction`
+            // (0.98), NINE of the twelve had a fast-only ceiling below the
+            // floor — no scan, however complete, could retire them, so every
+            // re-drive and every claim minted for them was work that could not
+            // satisfy itself. This change lifts FOUR of the nine over it —
+            // 0C2FC22E (0.554 → 1.000), AD5F3A0A (0.440 → 0.990), 83592353
+            // (0.966 → 0.995) and 53FC53E3 (0.979 → 0.993). FIVE stay capped
+            // and stay the transcript lane's problem, which is the honest half:
+            // 48E903D7 (0.369 → 0.951), D9B513CD (0.572 → 0.883), 44F076BB
+            // (0.811, unmoved), 58882C47 (0.975, unmoved) and 2C5C3699
+            // (0.043 → 0.130).
             //
             // Deliberately NOT applied to `fastTranscriptCoveredSec` (the TX
             // figure, which names the fast pass and must keep naming it) or to
             // `analysisCoveredSec` (documented as the fast-transcript area
-            // clipped to the analysis frontier). Only the ad-scan bound changes,
-            // and it can only ever move the measured area UP — the intersection
-            // is taken against a superset — so no episode becomes less ready.
-            let transcribedIntervals: [(start: Double, end: Double)]
-            if chunkMaxEnd != nil || finalMaxEnd[id] != nil {
-                transcribedIntervals = (fastIntervals[id] ?? []) + (finalIntervals[id] ?? [])
-            } else {
-                transcribedIntervals = transcriptIntervals
-            }
+            // clipped to the analysis frontier). Only the ad-scan bound changes.
+            //
+            // THE BOUND IS `transcriptIntervals` PLUS THE FINAL PASS, and the
+            // `transcriptIntervals` term is not redundant — it is what makes the
+            // widening MONOTONE. It looks like it can be dropped, since it is
+            // `fastIntervals[id]` whenever any fast chunk landed. But when NO
+            // fast chunk landed and the asset still carries a
+            // `fastTranscriptCoverageEndTime`, `transcriptIntervals` is the
+            // watermark modelled as one contiguous `[0, watermark]` span, and
+            // the final-pass intervals alone are neither contiguous nor
+            // guaranteed to reach it — so a bound built from the final pass
+            // alone would be SMALLER than the bound this replaced, and an
+            // episode could measure less scanned than it did before. That shape
+            // (a watermark outliving the chunks it claims) is playhead-0sro's,
+            // and `AnalysisJobRunner`'s own
+            // `watermarkWithoutChunksStillFails` fixture is built on it. Adding
+            // to `transcriptIntervals` rather than replacing it makes the new
+            // bound a SUPERSET of the old one in every branch, so the measured
+            // area can only ever move UP and no episode becomes less ready.
+            let transcribedIntervals = transcriptIntervals + (finalIntervals[id] ?? [])
 
             let analysisCoveredSec: Double?
             if let frontier = analysisFrontierSec, fastCoveredSec != nil {

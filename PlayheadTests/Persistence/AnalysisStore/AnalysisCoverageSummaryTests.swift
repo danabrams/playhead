@@ -2620,7 +2620,11 @@ struct AnalysisStoreCoverageRulerTests {
         return String(decoding: data, as: UTF8.self)
     }()
 
-    private func makeAsset(id: String, episodeDurationSec: Double) -> AnalysisAsset {
+    private func makeAsset(
+        id: String,
+        episodeDurationSec: Double,
+        finalPassCoverageEndTime: Double? = nil
+    ) -> AnalysisAsset {
         AnalysisAsset(
             id: id,
             episodeId: "ep-\(id)",
@@ -2633,7 +2637,8 @@ struct AnalysisStoreCoverageRulerTests {
             analysisState: "backfill",
             analysisVersion: 1,
             capabilitySnapshot: nil,
-            episodeDurationSec: episodeDurationSec
+            episodeDurationSec: episodeDurationSec,
+            finalPassCoverageEndTime: finalPassCoverageEndTime
         )
     }
 
@@ -3067,8 +3072,17 @@ struct AnalysisStoreCoverageRulerTests {
     /// `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction`, so NO scan,
     /// however complete, can ever retire it: every re-drive and every claim it
     /// mints is work that cannot satisfy itself, and the library ✓ is
-    /// unreachable by construction. Four of the twelve assets on the 2026-08-03
-    /// pull were in that state (0C2FC22E, 48E903D7, AD5F3A0A, 83592353).
+    /// unreachable by construction.
+    ///
+    /// **The counts, re-derived on the 2026-08-03 pull (R1 review).** NINE of
+    /// the twelve assets had a fast-only ceiling under the 0.98 floor. This
+    /// change lifts FOUR of them over it — 0C2FC22E (0.554 → 1.000), AD5F3A0A
+    /// (0.440 → 0.990), 83592353 (0.966 → 0.995), 53FC53E3 (0.979 → 0.993) —
+    /// and leaves FIVE capped: 48E903D7 (0.369 → 0.951), D9B513CD
+    /// (0.572 → 0.883), 44F076BB (0.811), 58882C47 (0.975), 2C5C3699
+    /// (0.043 → 0.130). 48E903D7 is the trap: it is the most dramatic
+    /// fast-vs-both movement on the pull and it still does NOT clear the floor,
+    /// so it belongs in the second list, not the first.
     @Test("a fully scanned, mostly-final-pass episode can now reach the sufficiency floor")
     func fullyScannedFinalPassEpisodeReachesTheFloor() async throws {
         let store = try await makeTestStore()
@@ -3142,6 +3156,84 @@ struct AnalysisStoreCoverageRulerTests {
         // question the transcript engine asks it.
         let fastOnly = try await store.fetchFastTranscriptCoveredRanges(assetId: "a-9y9e-ranges")
         #expect(AnalysisCoverageMath.unionedSeconds(fastOnly) == 500)
+    }
+
+    /// RT12 (R1 review) — WIDENING A BOUND IS NOT AUTOMATICALLY MONOTONE, and
+    /// this is the shape where it is not.
+    ///
+    /// The ad-scan bound has always had a WATERMARK fallback: with no fast
+    /// chunks on disk but a `fastTranscriptCoverageEndTime` on the asset, the
+    /// transcribed region is modelled as one contiguous `[0, watermark]` span.
+    /// Building the widened bound out of the two CHUNK sets alone discards that
+    /// span — so on an asset whose watermark outlives its chunks (playhead-0sro's
+    /// shape) the "widened" bound is the final-pass chunks only, which are
+    /// neither contiguous nor obliged to reach the watermark, and the measured
+    /// ad-scan area goes DOWN. Here: 1,000 s before, 300 s after.
+    ///
+    /// `adScanCoveredSec` feeds the library ✓ and every "is this owed?" gate, so
+    /// an episode silently measuring less scanned than it did yesterday is the
+    /// same class of defect as the one this bead fixed, pointing the other way.
+    @Test("the widened ad-scan bound never measures LESS than the watermark fallback did")
+    func widenedBoundNeverShrinksTheWatermarkFallback() async throws {
+        let store = try await makeTestStore()
+        // Watermark = duration (this suite's `makeAsset`), and NO fast chunks —
+        // so the watermark fallback is the only thing describing [300, 1000].
+        try await store.insertAsset(makeAsset(id: "a-9y9e-mono", episodeDurationSec: 1000))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-mono", index: 0, start: 0, end: 300, pass: "final")
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-9y9e-mono", index: 0, start: 0, end: 1000)
+        )
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-mono"])
+        let summary = try #require(summaries["a-9y9e-mono"])
+        #expect(summary.adScanCoveredSec == 1000,
+                "the watermark fallback bound the whole episode before this bead and must still")
+        #expect(summary.adScanFraction == 1.0)
+
+        // The premise, stated so a fixture drift cannot make this vacuous: the
+        // fallback really is in play, i.e. no fast chunk backs any of it.
+        #expect(summary.fastTranscriptCoveredSource == .assetWatermark)
+        #expect(summary.fastTranscriptCoveredSec == 1000)
+    }
+
+    /// RT13 (R1 review) — the final-pass query now drops degenerate rows from
+    /// `MAX(endTime)` as well as from the intervals, which is the FAST query's
+    /// long-standing rule finally applied to its sibling. The consequence worth
+    /// pinning is the one nothing else reaches: when EVERY final row is
+    /// degenerate there is no final-pass chunk evidence at all, so
+    /// `finalPassCoverageEndSec` must fall back to the asset watermark and SAY
+    /// SO, rather than reporting a zero-width row's timestamp as a pass reach.
+    ///
+    /// (On the 2026-08-03 device pull this changes no asset — 16 of 37,498
+    /// chunks are degenerate, all `endTime == startTime`, all ordinary
+    /// single-token ASR output like `"Oh"` and `"their"`, and none is any
+    /// asset's `MAX(endTime)`. The rail exists because the behaviour is new,
+    /// not because the field exercises it.)
+    @Test("an all-degenerate final pass reports the watermark, not a zero-width row")
+    func allDegenerateFinalPassFallsBackToWatermark() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-9y9e-degen", episodeDurationSec: 1000, finalPassCoverageEndTime: 640
+        ))
+        try await store.insertTranscriptChunks([
+            makePassChunk(assetId: "a-9y9e-degen", index: 0, start: 0, end: 500, pass: "fast"),
+            // The whole final pass is zero-width. It covers no time, so it is
+            // not evidence the final pass reached 950 s.
+            makePassChunk(assetId: "a-9y9e-degen", index: 1, start: 950, end: 950, pass: "final"),
+            makePassChunk(assetId: "a-9y9e-degen", index: 2, start: 300, end: 300, pass: "final")
+        ])
+
+        let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-9y9e-degen"])
+        let summary = try #require(summaries["a-9y9e-degen"])
+        #expect(summary.finalPassCoverageEndSec == 640)
+        #expect(summary.finalPassCoverageEndSource == .assetWatermark)
+        // And the degenerate rows widen no bound either: the fast pass backs
+        // [0, 500] and nothing claims [500, 1000].
+        #expect(AnalysisCoverageMath.unionedSeconds(
+            try await store.fetchTranscriptCoveredRanges(assetId: "a-9y9e-degen")
+        ) == 500)
     }
 
     /// The bound, tested where it lives rather than only through the store, so
