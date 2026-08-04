@@ -83,12 +83,13 @@ enum SemanticScanClaim {
         var deferReason: String { "\(SemanticScanClaim.deferReasonPrefix)\(rawValue)" }
     }
 
-    /// The gate a persisted `deferReason` names, or `nil` when the reason did
-    /// not come from here (an admission-controller defer, or no reason at all).
-    static func gate(fromDeferReason reason: String?) -> Gate? {
-        guard let reason, reason.hasPrefix(deferReasonPrefix) else { return nil }
-        return Gate(rawValue: String(reason.dropFirst(deferReasonPrefix.count)))
-    }
+    // There is deliberately NO Swift parser for a persisted `deferReason`.
+    // Nothing in a shipped build reads one back — the consumer is the device
+    // pull, and it is one line of SQL (`WHERE deferReason LIKE 'scan_claim:%'`).
+    // A `gate(fromDeferReason:)` helper was written and removed: its only
+    // callers were tests, which are stronger for comparing against
+    // ``Gate/deferReason`` directly, since that is the value production
+    // actually writes and cannot drift from itself.
 
     // MARK: - Is a scan actually owed?
 

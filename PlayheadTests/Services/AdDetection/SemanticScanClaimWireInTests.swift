@@ -130,8 +130,7 @@ struct SemanticScanClaimGateWireInTests {
         )
 
         let row = try #require(try await claimRow(store))
-        #expect(SemanticScanClaim.gate(fromDeferReason: row.deferReason)
-                == .foundationModelsUnavailable)
+        #expect(row.deferReason == SemanticScanClaim.Gate.foundationModelsUnavailable.deferReason)
         #expect(row.status == .deferred)
         #expect(row.podcastId == "pod-1")
         // The structural payoff: the asset is now a re-drive candidate.
@@ -151,7 +150,7 @@ struct SemanticScanClaimGateWireInTests {
             podcastId: "pod-1", episodeDuration: Self.episodeDuration, sessionId: nil
         )
         let row = try #require(try await claimRow(store))
-        #expect(SemanticScanClaim.gate(fromDeferReason: row.deferReason) == .fmModeOff)
+        #expect(row.deferReason == SemanticScanClaim.Gate.fmModeOff.deferReason)
     }
 
     /// `request.podcastId ?? ""` at the final-pass hook renders an ABSENT
@@ -169,7 +168,7 @@ struct SemanticScanClaimGateWireInTests {
             podcastId: "", episodeDuration: Self.episodeDuration, sessionId: nil
         )
         let row = try #require(try await claimRow(store))
-        #expect(SemanticScanClaim.gate(fromDeferReason: row.deferReason) == .podcastIdMissing)
+        #expect(row.deferReason == SemanticScanClaim.Gate.podcastIdMissing.deferReason)
         #expect(row.podcastId == nil, "an absent podcast must not persist as an empty-string id")
     }
 
@@ -186,7 +185,7 @@ struct SemanticScanClaimGateWireInTests {
             podcastId: "pod-1", episodeDuration: Self.episodeDuration, sessionId: nil
         )
         let row = try #require(try await claimRow(store))
-        #expect(SemanticScanClaim.gate(fromDeferReason: row.deferReason) == .runnerFactoryMissing)
+        #expect(row.deferReason == SemanticScanClaim.Gate.runnerFactoryMissing.deferReason)
     }
 
     /// **The vacuity control.** When every gate is open the runner mints its own
@@ -207,7 +206,7 @@ struct SemanticScanClaimGateWireInTests {
         )
         let row = try #require(try await claimRow(store),
                                "the runner must still have minted its fullCoverage row")
-        #expect(SemanticScanClaim.gate(fromDeferReason: row.deferReason) == nil,
+        #expect((row.deferReason ?? "").hasPrefix(SemanticScanClaim.deferReasonPrefix) == false,
                 "a row on the happy path must not carry a scan-claim reason")
         #expect(row.status != .deferred || row.deferReason != nil)
     }
@@ -339,7 +338,7 @@ struct SemanticScanClaimReconcilerTests {
                 forPersistedChunks: try await store.fetchTranscriptChunks(assetId: Self.assetId)
             )
         )))
-        #expect(SemanticScanClaim.gate(fromDeferReason: claim.deferReason) == .neverRequested)
+        #expect(claim.deferReason == SemanticScanClaim.Gate.neverRequested.deferReason)
         #expect(claim.podcastId == "pod-FCDDB309")
 
         let minted = try await redriveJobs(store)

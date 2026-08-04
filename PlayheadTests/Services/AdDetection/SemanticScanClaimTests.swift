@@ -100,32 +100,27 @@ struct SemanticScanClaimPredicateTests {
             coveredSec: -5, episodeDurationSec: 2_113) == false)
     }
 
-    /// Every gate round-trips through the persisted string, and the prefix is
-    /// the one query a device pull runs. A gate whose reason did not parse back
-    /// would be an unattributable missing scan — the exact state this replaces.
-    @Test("every gate round-trips through its persisted deferReason")
-    func gatesRoundTrip() {
+    /// The prefix IS the device-pull query (`deferReason LIKE 'scan_claim:%'`),
+    /// so every gate has to carry it and no two may share a string — a
+    /// collision is an unattributable missing scan, the exact state this
+    /// replaces.
+    @Test("every gate carries the query prefix and a distinct reason")
+    func gatesCarryDistinctPrefixedReasons() {
         for gate in SemanticScanClaim.Gate.allCases {
             #expect(gate.deferReason.hasPrefix(SemanticScanClaim.deferReasonPrefix))
-            #expect(SemanticScanClaim.gate(fromDeferReason: gate.deferReason) == gate)
         }
         #expect(SemanticScanClaim.Gate.allCases.count == 5)
-        // Distinct reasons: two gates sharing a string would be unattributable.
         #expect(Set(SemanticScanClaim.Gate.allCases.map(\.deferReason)).count == 5)
     }
 
-    /// An admission-controller defer is not a claim, and neither is no reason
-    /// at all. Confusing the two would make `thermal` read as a gate bail.
-    @Test("foreign defer reasons do not parse as a claim gate")
-    func foreignReasonsDoNotParse() {
-        #expect(SemanticScanClaim.gate(fromDeferReason: nil) == nil)
-        #expect(SemanticScanClaim.gate(fromDeferReason: "") == nil)
-        #expect(SemanticScanClaim.gate(fromDeferReason: "thermal") == nil)
-        #expect(SemanticScanClaim.gate(fromDeferReason: "fm_mode_off") == nil)
-        #expect(SemanticScanClaim.gate(
-            fromDeferReason: SemanticScanClaim.deferReasonPrefix + "not_a_gate") == nil)
+    /// The prefix has to own its namespace. `backfill_jobs.deferReason` is also
+    /// written by the admission controller, and if one of ITS reasons began
+    /// with `scan_claim:` the device-pull query would report a thermal defer as
+    /// a closed gate.
+    @Test("no admission defer reason collides with the claim prefix")
+    func admissionReasonsDoNotCollide() {
         for reason in AdmissionDeferReason.allCases {
-            #expect(SemanticScanClaim.gate(fromDeferReason: reason.rawValue) == nil,
+            #expect(reason.rawValue.hasPrefix(SemanticScanClaim.deferReasonPrefix) == false,
                     "\(reason.rawValue) is an admission defer, not a scan claim")
         }
     }
@@ -305,8 +300,7 @@ struct SemanticScanClaimPersistenceTests {
         let jobId = SemanticScanClaim.jobId(analysisAssetId: "a-mint", transcriptVersion: "tv-1")
         let row = try #require(try await store.fetchBackfillJob(byId: jobId))
         #expect(row.status == .deferred)
-        #expect(SemanticScanClaim.gate(fromDeferReason: row.deferReason)
-                == .foundationModelsUnavailable)
+        #expect(row.deferReason == SemanticScanClaim.Gate.foundationModelsUnavailable.deferReason)
         #expect(row.createdAt == 5_000)
         // And the asset is now visible to the re-drive sweep, which is the
         // structural fix: it selects on rows that used not to exist.
@@ -337,8 +331,7 @@ struct SemanticScanClaimPersistenceTests {
         let row = try #require(try await store.fetchBackfillJob(byId: jobId))
         #expect(row.retryCount == 0, "a closed gate is not a failed attempt")
         // The most recent cause is the one visible.
-        #expect(SemanticScanClaim.gate(fromDeferReason: row.deferReason)
-                == .foundationModelsUnavailable)
+        #expect(row.deferReason == SemanticScanClaim.Gate.foundationModelsUnavailable.deferReason)
     }
 
     /// The third rail on the empty-podcast normalization, added because the
