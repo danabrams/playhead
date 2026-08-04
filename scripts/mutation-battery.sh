@@ -10714,13 +10714,13 @@ EOF
   UC05)
     snippet OLD <<'EOF'
         let priorUpper = prior?.lastProcessedUpperBoundSec ?? 0
-        if let firstSegmentStartSec, firstSegmentStartSec.isFinite,
-           firstSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
+        if let firstPlannedSegmentStartSec, firstPlannedSegmentStartSec.isFinite,
+           firstPlannedSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
             return prior
         }
 EOF
     snippet NEW <<'EOF'
-        _ = firstSegmentStartSec
+        _ = firstPlannedSegmentStartSec
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -10729,10 +10729,10 @@ EOF
   # and freezes a cursor that is a genuine prefix.
   UC06)
     snippet OLD <<'EOF'
-           firstSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
+           firstPlannedSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
 EOF
     snippet NEW <<'EOF'
-           firstSegmentStartSec - priorUpper > 0 {
+           firstPlannedSegmentStartSec - priorUpper > 0 {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

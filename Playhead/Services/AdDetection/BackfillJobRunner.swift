@@ -1705,7 +1705,7 @@ actor BackfillJobRunner {
         let cursor = Self.underCoverageCursor(
             prior: job.progressCursor,
             scannedUpperBoundSec: coverage.lastCoveredUpperBoundSec,
-            firstSegmentStartSec: coverage.firstPlannedSegmentStartSec
+            firstPlannedSegmentStartSec: coverage.firstPlannedSegmentStartSec
         )
         let attempts = job.retryCount + 1
         let terminal = decision == .failUnderCoverage
@@ -1900,7 +1900,7 @@ actor BackfillJobRunner {
         /// the amount that matters: on a resume, `jobInputs.segments.first`
         /// is the asset's first transcript segment (typically ~0 s) while the
         /// run's first PLAN starts at the cursor. Reading the former as the
-        /// latter is what let ``underCoverageCursor(prior:scannedUpperBoundSec:firstSegmentStartSec:)``
+        /// latter is what let ``underCoverageCursor(prior:scannedUpperBoundSec:firstPlannedSegmentStartSec:)``
         /// publish a cursor across a transcript hole sitting immediately above
         /// the prior cursor — see that function's doc for the field case and
         /// mutation UC09.
@@ -2119,7 +2119,7 @@ actor BackfillJobRunner {
     /// minimum, that the run's own plans began at the head — `head` meaning "at
     /// or within the bridge tolerance of `prior`", not "at zero".
     ///
-    /// **`firstSegmentStartSec` is where THIS RUN's PLANS began**, i.e.
+    /// **`firstPlannedSegmentStartSec` is where THIS RUN's PLANS began**, i.e.
     /// ``CoverageOutcome/firstPlannedSegmentStartSec``, which is
     /// `inputs.segments.first?.startTime` *after* `narrowedForResume` has
     /// trimmed the covered prefix. R2 review: the caller used to pass its
@@ -2206,12 +2206,12 @@ actor BackfillJobRunner {
     nonisolated static func underCoverageCursor(
         prior: BackfillProgressCursor?,
         scannedUpperBoundSec: Double?,
-        firstSegmentStartSec: Double?
+        firstPlannedSegmentStartSec: Double?
     ) -> BackfillProgressCursor? {
         guard let scannedUpperBoundSec, scannedUpperBoundSec.isFinite else { return prior }
         let priorUpper = prior?.lastProcessedUpperBoundSec ?? 0
-        if let firstSegmentStartSec, firstSegmentStartSec.isFinite,
-           firstSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
+        if let firstPlannedSegmentStartSec, firstPlannedSegmentStartSec.isFinite,
+           firstPlannedSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
             return prior
         }
         let honest = BackfillProgressCursor(

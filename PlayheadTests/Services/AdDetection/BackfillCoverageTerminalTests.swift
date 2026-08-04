@@ -477,12 +477,12 @@ struct BackfillCoverageTerminalTests {
         // 53FC53E3, verbatim: nothing banked, plans start at 2,490, walk reaches
         // 2,525.82 on a 2,528 s episode.
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 2525.82, firstSegmentStartSec: 2490
+            prior: nil, scannedUpperBoundSec: 2525.82, firstPlannedSegmentStartSec: 2490
         ) == nil)
         // A prior cursor is preserved, never regressed and never inflated.
         let prior = BackfillProgressCursor(processedPhaseCount: 0, lastProcessedUpperBoundSec: 100)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: 2525.82, firstSegmentStartSec: 2490
+            prior: prior, scannedUpperBoundSec: 2525.82, firstPlannedSegmentStartSec: 2490
         ) == prior)
     }
 
@@ -490,16 +490,16 @@ struct BackfillCoverageTerminalTests {
     func cursorAdvancesWhenTheRunIsAGenuinePrefix() {
         // AD5F3A0A, verbatim: first segment at 2.8 s, walk reaches 900.
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 900, firstSegmentStartSec: 2.8
+            prior: nil, scannedUpperBoundSec: 900, firstPlannedSegmentStartSec: 2.8
         )?.lastProcessedUpperBoundSec == 900)
         // Resuming from a prior cursor is a prefix too: the head is already read.
         let prior = BackfillProgressCursor(processedPhaseCount: 0, lastProcessedUpperBoundSec: 900)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: 1800, firstSegmentStartSec: 900
+            prior: prior, scannedUpperBoundSec: 1800, firstPlannedSegmentStartSec: 900
         )?.lastProcessedUpperBoundSec == 1800)
         // …and it is MONOTONIC: a stale walk can never drag the row backwards.
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: 300, firstSegmentStartSec: 0
+            prior: prior, scannedUpperBoundSec: 300, firstPlannedSegmentStartSec: 0
         )?.lastProcessedUpperBoundSec == 900)
     }
 
@@ -507,10 +507,10 @@ struct BackfillCoverageTerminalTests {
     func cursorHoleUsesTheSharedBridgeTolerance() {
         let gap = AnalysisCoverageMath.adScanBridgeableGapSec
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 500, firstSegmentStartSec: gap
+            prior: nil, scannedUpperBoundSec: 500, firstPlannedSegmentStartSec: gap
         )?.lastProcessedUpperBoundSec == 500, "a gap AT the tolerance is bridged, exactly as the numerator's own reader bridges it")
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 500, firstSegmentStartSec: gap + 0.001
+            prior: nil, scannedUpperBoundSec: 500, firstPlannedSegmentStartSec: gap + 0.001
         ) == nil, "past it, the audio is genuinely unscanned and the cursor must not speak for it")
     }
 
@@ -518,10 +518,10 @@ struct BackfillCoverageTerminalTests {
     func cursorIsUnchangedWhenNothingWasScanned() {
         let prior = BackfillProgressCursor(processedPhaseCount: 0, lastProcessedUpperBoundSec: 42)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: nil, firstSegmentStartSec: 0
+            prior: prior, scannedUpperBoundSec: nil, firstPlannedSegmentStartSec: 0
         ) == prior)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: nil, firstSegmentStartSec: 0
+            prior: nil, scannedUpperBoundSec: nil, firstPlannedSegmentStartSec: 0
         ) == nil)
     }
 }
