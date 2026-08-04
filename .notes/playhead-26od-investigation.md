@@ -389,9 +389,13 @@ see — the same shape as R2/L-5, one level up.
   `productionShapedRunnerAlsoCheckpointsMidFlight` builds the runner exactly as
   `PlayheadRuntime` does and makes the same exact in-flight claim.
 * **The defuse contract was a boolean round-trip.** `aDefusedBoxAcceptsNothing`
-  set a flag and read it back; all three guards in `checkpointCoarseWindows` —
-  the entry check, round I's per-suspension RE-check, and the post-loop one that
-  protects t1kq's rewind — were individually deletable with a green suite.
+  set a flag and read it back; the two LOAD-BEARING guards in
+  `checkpointCoarseWindows` — round I's per-suspension RE-check and the
+  post-loop one that protects t1kq's rewind — were both deletable with a green
+  suite. (The third, the entry check, is a fast path rather than a rule: every
+  input it rejects is also rejected by one of the other two, so no test kills it
+  and the comment now says so instead of implying otherwise. R3's first draft of
+  this section claimed all three were pinned; that was wrong.)
   Testing it needed a deterministic mid-loop event, and there is one:
   `attributed(_:jobId:)` calls the injectable `scenePhaseProvider` exactly once
   per scan-row insert, so a probe both COUNTS the writes and can reach in
@@ -414,6 +418,22 @@ see — the same shape as R2/L-5, one level up.
   leaving the asymmetry contradicts the reasoning printed beside it. Both
   observers now share ONE box, so they can never disagree about whether the pass
   is still the live one.
+
+* **An empty line-ref list matched the FIRST plan.** Attribution is
+  `needle.isSubset(of: planRefs)`, and the empty set is a subset of every set —
+  so an outcome carrying no line refs attributed to `plans.first`, windowIndex 0
+  in episode order. As a SUCCESS that certifies the head of the episode as
+  screened on the strength of an outcome that says nothing, and the contiguous
+  walk starts from there: the cursor claims audio nobody looked at. That is the
+  fifth instance of this bead's recurring defect, found latent rather than live
+  — no constructor can emit a refless outcome today, all four build from a
+  plan's own refs and one has an explicit `isEmpty` fallback. Fixed anyway,
+  because the guarantee lives in four constructors in another file and the
+  damage would land here: `planIndex` now returns nil for an empty needle, which
+  sends a failure to its own `planWindowIndex` (honest) and drops a success's
+  attribution (conservative). The premise the whole cap rests on — that
+  `planPassA` PARTITIONS the segments, disjointly and totally — is now stated in
+  the walk's doc rather than assumed from another file.
 
 Plus two stale claims and one overclaim, all corrected in place:
 
@@ -456,3 +476,20 @@ Plus two stale claims and one overclaim, all corrected in place:
   covered plans, and the walk's bound is monotone non-decreasing in that set, so
   the rate-limit defer and the non-fully-covered cancellation arm can never
   write a cursor BEHIND the mid-flight one.
+
+  The superset is not free, and the reason is worth writing down because it is
+  the same premise the cap rests on. `fullyCovered = succeeded − failed −
+  unpersisted`, and `failed` GROWS over the pass — so a plan credited at
+  checkpoint k could in principle be disqualified by a failure recorded later.
+  It cannot, because `planPassA` partitions the segments and a plan's outcomes
+  are ALL appended within its own loop iteration, while the checkpoint fires at
+  the top of the NEXT one. Every plan in the mid-flight covered set is therefore
+  already fully resolved when it is credited.
+
+  What is NOT confirmed, and should be said plainly rather than filed as a win:
+  on the fully-covered-then-cancelled path the rewind now discards a cursor that
+  IS fully backed by durable rows, so the next run re-pays FM for coarse work
+  already on disk. Pre-26od it discarded nothing, because nothing was on disk.
+  The rewind is still right — a partial cursor there strands the refinement —
+  but it is a new missed opportunity on a common path, and the fix is the
+  resume-key change already sketched under playhead-u99x, not a change here.

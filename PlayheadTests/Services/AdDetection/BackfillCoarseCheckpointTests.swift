@@ -1107,9 +1107,14 @@ struct BackfillCoarseCheckpointTests {
         let probe = RowWriteProbe()
         let fmRuntime = TestFMRuntime(tokenCountRule: { $0.count })
 
-        _ = try await makeProbedRunner(store: store, runtime: fmRuntime.runtime, probe: probe)
+        let result = try await makeProbedRunner(store: store, runtime: fmRuntime.runtime, probe: probe)
             .runPendingBackfill(for: makeInputs(assetId: assetId, lineCount: 40))
 
+        // The identity below is per-JOB: two jobs would spend two digests and
+        // two checkpoint runs and read `2W - 2`, blaming the checkpoint for a
+        // planner change. One-job-ness is decided three files away by
+        // `observedEpisodeCount: 0`, so pin it where the arithmetic depends on it.
+        #expect(result.admittedJobIds.count == 1, "the write-cost identity assumes exactly one job")
         let windowCount = await fmRuntime.coarseCallCount
         #expect(windowCount > 2, "too few windows for a quadratic cost to be distinguishable")
         let writes = await probe.writes
@@ -1428,7 +1433,18 @@ struct BackfillCoarseCheckpointTests {
         #expect(
             await orchestrator.adWindowIngestOutcomeCount(.armedSuggest) == marks.count
         )
-        // Mark-only by construction, so nothing here can cut show.
+        // What this actually proves is that nothing here AUTO-skips: the marks
+        // are `markOnly`/`.candidate` with both edges `.unanchored`, so none of
+        // them is admitted as managed and no cut happens without a tap.
+        //
+        // It is NOT the stronger claim that nothing here can cost show. A
+        // suggest banner is a skip affordance — a listener who taps it on an
+        // unrefined coarse extent loses whatever show that extent overhangs.
+        // Bounded, not eliminated: `SemanticSweepMarkComposer` caps a mark at
+        // `maximumMarkDurationSeconds` (300 s) and refuses to emit over an
+        // existing window. That exposure is the settled product decision
+        // recorded in `.notes/playhead-26od-investigation.md`, with the
+        // refinement side filed as playhead-o98e.
         #expect(await orchestrator.adWindowIngestOutcomeCount(.admittedManaged) == 0)
     }
 
@@ -1989,6 +2005,62 @@ struct CoarseCoverageWalkTests {
         )
         #expect(nothingDurable.contiguousUpperBoundSec == nil)
         #expect(nothingDurable.succeededPlanIndices.isEmpty)
+    }
+
+    /// An outcome with NO line refs attributes to NO plan.
+    ///
+    /// The rail is worth a test because the arithmetic runs the wrong way by
+    /// default: attribution is `needle.isSubset(of: planRefs)`, and the empty set
+    /// is a subset of every set — so an empty needle matches `plans.first`, i.e.
+    /// windowIndex 0, the FIRST plan of the episode. A success carrying no refs
+    /// would therefore certify the head of the episode as screened on the
+    /// strength of an outcome that says nothing, and the contiguous walk starts
+    /// from there: the cursor claims audio nobody looked at.
+    ///
+    /// No `FMCoarseWindowOutput` or `CoarseWindowFailure` constructor can emit
+    /// one today — all four build from a plan's own refs — so this pins a rail
+    /// against a refactor, not a live defect. The failure half is asserted too,
+    /// because there the honest answer is not "nothing": `planWindowIndex` says
+    /// which plan the attempt came from, and the fallback must still use it.
+    @Test("an outcome with no line refs credits no plan")
+    func emptyLineRefsAttributeToNothing() {
+        let plans = (0..<3).map(plan)
+        let refless = FMCoarseWindowOutput(
+            windowIndex: 0,
+            lineRefs: [],
+            startTime: 0.0,
+            endTime: 0.0,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [refless],
+            failedWindows: []
+        )
+        #expect(walk.succeededPlanIndices.isEmpty, "an empty needle was credited to a plan")
+        #expect(walk.contiguousUpperBoundSec == nil, "the cursor advanced on an outcome that says nothing")
+        #expect(walk.fullyCovered == false)
+
+        // A refless FAILURE still lands on the plan it came from, because
+        // `CoarseWindowFailure` carries that plan's index explicitly.
+        let reflessFailure = CoarseWindowFailure(
+            planWindowIndex: 2,
+            lineRefs: [],
+            startTime: 60.0,
+            endTime: 90.0,
+            status: .rateLimited
+        )
+        let withFailure = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [window(0), window(1)],
+            failedWindows: [reflessFailure]
+        )
+        #expect(withFailure.failedPlanIndices == [2], "a refless failure lost its plan")
+        #expect(withFailure.contiguousUpperBoundSec == 60.0)
+        #expect(withFailure.fullyCovered == false)
     }
 
     /// Attribution is structural (line-ref subset), not positional, so the walk
