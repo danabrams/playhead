@@ -619,12 +619,14 @@ struct BackfillCoarseCheckpointTests {
         // zero — it would be coverage claimed for audio nobody screened, which
         // is the failure qbib and pmp9 both exist to prevent.
         #expect(successes.count == answeringWindows)
-        // The premise, stated against the fixture rather than against itself: an
-        // earlier version compared two literals here and could not fail. What
-        // has to be true for the count above to mean anything is that the pass
-        // was cut SHORT — several windows durable, and the episode's later audio
-        // not among them. 40 lines x 30 s is 1200 s of episode.
-        #expect(answeringWindows > 1, "a one-window pass cannot distinguish this from a final write")
+        // The premise, read back out of the DATABASE rather than restated from
+        // the fixture. R5: an earlier version compared two literals here and
+        // could not fail — and the comment announcing that fix shipped WITH the
+        // tautology still in place, `answeringWindows > 1` against
+        // `let answeringWindows = 3`. What has to be true for the count above to
+        // mean anything is that SEVERAL windows are durable and the episode's
+        // later audio is not among them. 40 lines x 30 s is 1200 s of episode.
+        #expect(successes.count > 1, "a one-window pass cannot distinguish this from a final write")
         let reached = successes.map(\.windowEndTime).max() ?? 0
         #expect(
             reached > 0 && reached < 40 * Self.segmentSeconds,
@@ -644,12 +646,22 @@ struct BackfillCoarseCheckpointTests {
     /// `UNIQUE(reuseKeyHash)` + `INSERT OR REPLACE` make the second write an
     /// exact replace.
     ///
-    /// Two things this test can actually catch, stated precisely because a
-    /// looser claim was wrong. It catches a **duplicate row** — two rows where a
-    /// window should have one — and an **inflated `attemptCount`**, the store's
-    /// non-success retry counter firing on a path it should not. It also catches
-    /// a duplicate ENTRY in `result.scanResultIds`, which is the runner's own
-    /// in-memory accounting and genuinely can repeat.
+    /// What this test can actually catch, stated precisely because two looser
+    /// claims were wrong. It catches a **duplicate row** — two rows where a
+    /// window should have one — and a duplicate ENTRY in `result.scanResultIds`,
+    /// which is the runner's own in-memory accounting and genuinely can repeat.
+    ///
+    /// It does NOT catch an inflated `attemptCount`, and R5 removed the loop that
+    /// claimed to. `insertSemanticScanResult` probes the existing row only when
+    /// the INCOMING row is non-success (`if result.status != .success`), so on a
+    /// success row `effectiveAttemptCount` is whatever the caller passed and
+    /// `makeScanResult` hardcodes `1`. Asserting `attemptCount == 1` over rows
+    /// already filtered to `.success` therefore reads back a literal that no
+    /// production path can move, however many times the row is written — an
+    /// assertion that cannot fail, guarding the mechanism this bead most needed
+    /// guarded. The double-write-inflates-the-counter rule is real and is pinned
+    /// where it can bite, on FAILURE rows, by
+    /// `failedWindowsAreNotDoubleWritten`.
     ///
     /// What it does NOT catch, despite an earlier version of this comment
     /// claiming otherwise: a non-deterministic row id. `UNIQUE(reuseKeyHash)` +
@@ -665,10 +677,7 @@ struct BackfillCoarseCheckpointTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: assetId))
         let fmRuntime = TestFMRuntime(tokenCountRule: { $0.count })
-        let runner = makeRunner(
-            store: store,
-            runtime: fmRuntime.runtime,
-        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
 
         let result = try await runner.runPendingBackfill(
             for: makeInputs(assetId: assetId, lineCount: 40)
@@ -682,12 +691,6 @@ struct BackfillCoarseCheckpointTests {
         // One row per screened window — not two.
         #expect(successes.count == windowCount)
         #expect(Set(successes.map(\.id)).count == successes.count)
-        // The double write must not read as a retry. `insertSemanticScanResult`
-        // bumps `attemptCount` for NON-success rows only, which is precisely why
-        // the checkpoint banks successes and leaves failure rows to the digest.
-        for row in successes {
-            #expect(row.attemptCount == 1)
-        }
         // The runner's own accounting stays exact: the ids it reports are the
         // ids in the database, once each.
         let reportedPassAIds = Set(result.scanResultIds).intersection(Set(rows.map(\.id)))
@@ -827,6 +830,14 @@ struct BackfillCoarseCheckpointTests {
 
         // ... so no cursor may claim any audio. A cursor here would send the
         // next run past windows that were screened but never stored.
+        //
+        // R5: the loop is `guard let job = … else { continue }`, so if job-id
+        // derivation ever drifts — a new phase, a changed offset range, a
+        // renamed `makeJobIdForTesting` — every iteration skips and the headline
+        // claim of this test executes ZERO expectations while still reporting
+        // green. Count what was inspected and require at least one, so an empty
+        // sweep fails loudly instead of passing silently.
+        var jobsInspected = 0
         for phase in BackfillJobPhase.allCases {
             for offset in 0..<4 {
                 let jobId = BackfillJobRunner.makeJobIdForTesting(
@@ -836,6 +847,7 @@ struct BackfillCoarseCheckpointTests {
                     offset: offset
                 )
                 guard let job = try await store.fetchBackfillJob(byId: jobId) else { continue }
+                jobsInspected += 1
                 let cursor = job.progressCursor?.lastProcessedUpperBoundSec ?? 0
                 #expect(
                     cursor == 0,
@@ -843,6 +855,10 @@ struct BackfillCoarseCheckpointTests {
                 )
             }
         }
+        #expect(
+            jobsInspected > 0,
+            "no backfill job row was found for \(assetId) — the cursor claim above inspected nothing"
+        )
     }
 
     // MARK: - 3b. The checkpoint's LIFETIME is the job's
@@ -1458,8 +1474,22 @@ struct BackfillCoarseCheckpointTests {
         // `onProgress` does, taken at the top of iteration N once window N-1 has
         // resolved.
         #expect(snapshots.count == output.plans.count - 1)
-        // Strictly growing, append-only prefixes of the final window list.
-        var previousCount = -1
+        // Append-only prefixes of the final window list, each strictly longer
+        // than the last.
+        //
+        // R5, two corrections. The seed was `-1`, so the first snapshot was
+        // asserted `count > -1` and could not fail — the one snapshot where an
+        // observer firing BEFORE any window resolved would show up. And strict
+        // growth is not a property of the mechanism, only of this fixture: a
+        // window that FAILED appends nothing to `windows`, so two consecutive
+        // snapshots of a pass with failures are the same length. Assert the
+        // fixture has none rather than letting the stronger claim quietly rest
+        // on it.
+        #expect(
+            output.failedWindows.isEmpty,
+            "a failed window leaves two snapshots the same length, which makes the strict-growth claim below wrong rather than merely weaker"
+        )
+        var previousCount = 0
         for snapshot in snapshots {
             #expect(snapshot.windows.count > previousCount)
             previousCount = snapshot.windows.count
@@ -1683,6 +1713,19 @@ struct BackfillCoarseCheckpointTests {
     /// this test is where that decision becomes visible: the expected outcome
     /// flips from `.armedSuggest` to no mark at all, and the control row's drop
     /// is what proves the door still ran.
+    ///
+    /// **The composer is invoked DIRECTLY here, on purpose, and R5 says so
+    /// rather than leaving it to be discovered.** `runJob` reaches
+    /// `SemanticSweepMarkComposer` only behind
+    /// `if semanticSweepMarkEnabled, mode.canProposeNewRegions`, and every runner
+    /// in this suite is `mode: .shadow`, whose `canProposeNewRegions` is `false`
+    /// — shadow mode inserting `AdWindow`s is the thing `BackfillJobRunner` is
+    /// elsewhere asserted never to do. So the rows are produced by the runner and
+    /// then handed to the composer by hand. That makes this a measurement of the
+    /// DOWNSTREAM consequence of a durable coarse row, not a claim that this
+    /// runner composes; the wiring from runner to composer is
+    /// `SemanticSweepMarkSurfacingTests`' subject, and switching this suite to a
+    /// mode that composes would change what every other test here is about.
     @Test("a coarse-only row banked mid-flight reaches the suggest tier at coarse extent")
     func midFlightCoarseOnlyRowsReachTheSuggestTier() async throws {
         let assetId = "asset-26od-surface"

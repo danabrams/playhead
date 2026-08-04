@@ -804,3 +804,206 @@ Operationally, three faults worth more than the verdicts:
 * **An XCTest expectation carries no module prefix.** `extract_failures` joins
   the captured suite and method as `Suite/method`, so `PlayheadTests.Suite/method`
   is unmatchable and reports ERROR while every named test really did fail.
+
+## Review round R5 — what it changed
+
+Seven findings, four of them outside the Swift diff. The two the round was handed
+were both real, and one of the two adversarial reads produced a HIGH that turned
+out to be wrong — recorded below with the counter-argument, because the mutation
+battery is what refuted it and the next reader will otherwise re-derive it.
+
+### The baseline record said something the file does not (finding a)
+
+`68cbea88`'s message reads *accept the third baseline observation — 41 -> 69, all
+timeouts*. Measured against the file: **28 added, and they are 24 `timeout`, 3
+`assertion`, 1 `assertion+timeout`.** The three assertion-only ones are
+
+* `delegate staging failure releases ownership and permits retry` (BackgroundURLSessionTests)
+* `scheduleBackfillIfNeeded emits a 'submit' row with success=true` (BackgroundProcessingServiceTelemetryTests)
+* `scheduleBackfillIfNeeded emits a 'submit' row with success=false on throw` (same)
+
+and by this repo's own identity rule — a load-sensitive entry means *may TIME
+OUT* — an assertion failure is not evidence of load, so the summary asserted more
+than the observation supports. Two of the three are backfill telemetry, this
+bead's own domain.
+
+**Isolated, and they are not regressions.** A selective run (exempt from the
+baseline check, so the raw exit code stands) of
+`BackgroundProcessingServiceTelemetryTests`, `DelegateWorkJournalTests` and
+`TranscriptEngineFailureEventTests` was **27 tests / 3 suites / all passed / exit
+0** on a quiet box.
+
+**Why they fail as `assertion` when the cause is load, which is the part worth
+keeping.** Both helpers own their wait budget and return a FALSY VALUE when it
+expires rather than throwing: `pollUntil` (TestHelpers.swift, 30 s default)
+returns `false`, and `eventsMatching` (BackgroundProcessingServiceTelemetryTests)
+returns an empty array. Neither test carries a `.timeLimit` trait, so Swift
+Testing never records `Time limit was exceeded` and `_kind_of_issue` — which
+classifies on exactly that string — has no way to call it a timeout. The gate's
+taxonomy is two-valued over a three-valued world: (1) the framework's time limit
+tripped, (2) an in-test wait budget expired, (3) an expectation about a value
+that really arrived was wrong. (2) is load evidence and is currently spelled the
+same as (3). That is repo-wide (`pollUntil` has dozens of callers) and is left
+alone deliberately; what is fixed is that an accept can no longer be summarised
+without the kinds being on screen.
+
+### An accept armed fifteen hard failures and said nothing (finding b)
+
+At `runs_observed: 3`, **15 entries now have `failed_runs == seen_runs`**, which
+promotes them to `deterministic` and arms the pass-direction check: from now on
+each of them PASSING hard-fails the gate. Their kinds are 9
+`assertion+timeout`, 5 `timeout`, 1 `assertion` — i.e. twelve of the fifteen have
+timed out at least once, and the families are the ones CLAUDE.md already names as
+load-sensitive (`Phone call interruption…`, `Siri activation…`, `Headphone
+disconnect…`, `Full interruption cycle…`).
+
+**Judgement: the promotion is defensible and the silence was not.** `failed ==
+seen` measures determinism *within this harness under full-plan load*, which is
+not the same claim as "the test is broken independent of load" — all three
+observations were full-plan runs on the same loaded box, so the evidence is not
+independent of the confound. But the promotion RULE is Dan's call, recorded at
+`MIN_RUNS_FOR_DETERMINISTIC`, and changing it is not a reviewer's to make. What a
+reviewer can fix is that `--accept-baseline` printed membership and nothing else,
+so neither the kinds nor the promotions were ever put in front of the person
+writing the justification. Both are now printed:
+
+```
+  added 28: 3 assertion, 1 assertion+timeout, 24 timeout
+  + [assertion] swift-testing::…
+  ARMED: 15 entries crossed into DETERMINISTIC — … Each of these PASSING now
+  fails the gate, so say in the commit message why that is the right reading.
+  ! now deterministic [assertion+timeout] 3/3  swift-testing::…
+```
+
+`tier_changes` and `kind_census` are pure and unit-tested; the CLI only prints
+them. Policy untouched.
+
+### Eleven rails certifying the gate itself had been dead on `main`
+
+`FastGateWiringTests` — the only thing that checks how `fast-gate.sh` composes
+xcodebuild's exit code with the baseline verdict — builds a temp skeleton and
+copies `fast-gate.sh` and `gate_baseline.py` into it. playhead-3nfa put
+`scripts/disk_preflight.py` in front of everything the gate does and nobody told
+the skeleton, so every one of those eleven tests died at **exit 28**: "no such
+file" reads to the shell exactly like "the volume is short". Measured on `main`
+as well as on this branch — `python3 -m unittest scripts.tests.test_gate_baseline`
+was **70 ran, 11 failed**.
+
+Downstream, `scripts/mutation-battery-gate-baseline.py` REFUSED to run at all
+(`the rails are RED before any mutation`), which took rails R19–R23 with it. The
+refusal is the harness working correctly; the point is that nobody had run it.
+Fixed by copying the preflight in and skipping it by env var in the ten tests
+that are about exit-code composition, plus one new test that leaves it armed and
+pins the refusal itself (exit 28, and xcodebuild never reached). Now **81 ran, 0
+failed**.
+
+### The HIGH that was wrong — a cursor salvage, investigated and REJECTED
+
+An adversarial read of the production diff proposed, and this round implemented,
+carrying `checkpointBox.lastCheckpointedUpperBoundSec` into `honestCursorBox`
+when the coverage block leaves it empty. The observation behind it is correct: on
+a FULLY COVERED coarse pass the box stays empty (t1kq), `cursorAdvanced` reads
+false, and the drain loop's not-advanced arm writes `job.progressCursor` — the
+ADMISSION-time value, nil on a first run — straight over the cursor the
+checkpoint had made durable, so a whole coarse pass is paid for again.
+
+**It was refuted by the mutation battery's pre-mutation baseline**, which turned
+`a task cancellation after FULL coarse coverage does NOT checkpoint an
+episode-end cursor` red. The reason: `planAdaptiveZoom` plans refinement from the
+IN-MEMORY `FMCoarseScanOutput` of the executing run, never from persisted rows,
+so any coarse window a resume does not re-scan is a window **no later run ever
+refines**. A partial cursor resumes the coarse SCAN perfectly and strands the
+REFINEMENT of everything below it, permanently — leaving those ad windows at
+coarse extent, where an unrefined suggest banner's inner edges eat show. t1kq
+chose the re-scan and chose right. Reverted; the counter-argument now lives at
+the site, because two independent passes reached the same wrong answer.
+
+What genuinely survives is narrower and is filed as **playhead-0yah**: a
+fully-covered pass with NO `containsAd` window has no refinement to protect, so
+the rewind costs a whole coarse pass and buys nothing.
+
+### Four vacuous or self-defeating assertions in the new suite
+
+* `abandonedPassLeavesItsScreenedWindowsBehind` guarded its premise with
+  `#expect(answeringWindows > 1)` against `let answeringWindows = 3` — two
+  literals, unable to fail. The comment directly above it announced that an
+  earlier version had done exactly this and had been fixed. Now reads
+  `successes.count > 1`, out of the database.
+* `normalPassPersistsExactlyOneRowPerWindow` asserted `attemptCount == 1` over
+  rows already filtered to `.success`, sold as catching an inflated counter.
+  `insertSemanticScanResult` probes the existing row only when the INCOMING row
+  is non-success, so on a success row the value is whatever the caller passed and
+  `makeScanResult` hardcodes 1: unfalsifiable. Removed, with the doc redirected
+  to `failedWindowsAreNotDoubleWritten`, where the rule can actually bite.
+* `aFailedCheckpointWriteDoesNotAdvanceTheCursor` swept jobs with
+  `guard let job = … else { continue }` and no assertion that any were found, so
+  a drift in job-id derivation would make its headline claim execute ZERO
+  expectations and still report green. Counts and requires ≥ 1 now.
+* `coarsePassReportsBankedWindowsBeforeReturning` seeded `previousCount = -1`, so
+  the first snapshot was asserted `count > -1` — the one snapshot where an
+  observer firing before any window resolved would show up. Seeded 0, and the
+  strict-growth claim (false in general: a FAILED window appends nothing, so two
+  snapshots can be the same length) is now guarded by an explicit
+  `output.failedWindows.isEmpty`.
+
+### Three assertive comments that outran the code
+
+* *"`insertSemanticScanResult` leaves `attemptCount` alone for a `.success` row"*
+  — it OVERWRITES with the caller's value, which is the same thing only while
+  every success constructor passes 1.
+* *"an exact `INSERT OR REPLACE` … the database is unchanged"* — `attributed`
+  stamps `createdAt` and `scenePhase` at every write, so the digest moves the
+  row's `createdAt` from the screening instant to the digest instant. Pre-26od
+  behaviour (one write, at digest time), so nothing regressed — but a killed pass
+  keeps the truer timestamp and a completed one does not.
+* *"Nothing is lost by that"* about deferring failure rows to the digest — true
+  for the CURSOR, false for the MEASUREMENT. A killed pass leaves its successes
+  and none of its refusals/timeouts/rate-limits, so qbib's denominator and 8d5r's
+  `SUM(latencyMs)` read cleaner than the run was. Filed as **playhead-zl5s**.
+
+Plus one naming gap named rather than renamed: `planIndices(overlappingLineRefs:)`
+implements `isSubset`, and the two differ in the UNSAFE direction — a window
+matching no plan disqualifies nothing, where `planIndex`'s equivalent miss merely
+credits nothing. Unreachable today (all four constructor families derive an
+outcome's refs from a plan's own); the comment now says what would break it.
+
+### R5 on the four residuals R4 reported
+
+1. **The attempt cap vs bkhc's retry budget** — genuinely out of scope, and now
+   **playhead-ggki** rather than a paragraph in this file. The cap is right (it
+   is what closes pmp9's hole); what nobody has is a count of how often a job
+   dies at `expiredWithoutProgress` because of it.
+2. **One-plan passes get no checkpoint** — judged NOT a deferred finding. The
+   callback fires at the top of iteration N for N > 0, so a one-plan pass never
+   checkpoints; but with one plan there is nothing banked to save until the pass
+   returns, and it returns immediately after. The loss window is the microseconds
+   between the last window resolving and `return`. The iOS 27 worry is about
+   plan COUNT collapsing, which shrinks the win proportionally — real, already
+   stated, and needs the iOS 27 measurement it asks for. No fix available here.
+3. **Duplicate `segmentIndex` collides row keys** — genuinely out of scope (it is
+   a persistence-identity change and the end-of-pass digest has the identical
+   exposure through the same helper), filed as **playhead-v9kf**. One honest gap
+   goes with it: `durableWindowCount` is documented as "how many banked windows
+   are actually IN the store" and measures how many inserts did not throw, and a
+   colliding insert does not throw — it replaces.
+4. **The PerfGate'd test pins its store** — confirmed, bounded (one parked task
+   and its fixtures per run of the perf plan), correctly not fixed. The park has
+   to be unresumable or the test stops being about a pass that never returns.
+
+### Considered and rejected
+
+* **Per-window SQLite reads inside `onCoarseRespond` make the non-PerfGate'd
+  tests load-sensitive.** They are reads against a local store, and the bound
+  they would have to beat is the PRODUCTION no-progress budget (180 s x 3) which
+  every test in the suite leaves at its shipped value. No entry from this suite
+  appears anywhere in the three accepted baseline observations. The suite's own
+  header already records that SHRINKING the bound is what broke it.
+* **The surfacing tests call `SemanticSweepMarkComposer.compose` directly.** True,
+  and deliberate: `runJob` reaches the composer only behind
+  `mode.canProposeNewRegions`, which is `false` for the `.shadow` runners this
+  suite uses, because shadow mode inserting `AdWindow`s is a thing the runner is
+  elsewhere asserted never to do. They measure the downstream consequence of a
+  durable coarse row, not the wiring. Now said in the test's own doc instead of
+  left to be rediscovered.
+* **`guard !walk.fullyCovered` in `checkpointCoarseWindows` is unreachable.**
+  True, and its comment already says so and says why it is stated anyway.

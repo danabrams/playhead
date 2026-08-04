@@ -1928,6 +1928,16 @@ actor BackfillJobRunner {
         ///
         /// Empty for an empty needle, for the reason above: an outcome that says
         /// nothing is evidence about no plan, in either direction.
+        ///
+        /// The label says `overlapping` and the test is `isSubset`, and R5 keeps
+        /// the label while naming the gap, because the two differ in the UNSAFE
+        /// direction: a window whose refs are not a subset of ANY plan
+        /// disqualifies nothing, where `planIndex`'s equivalent miss merely
+        /// credits nothing. Every construction site today derives an outcome's
+        /// refs from a plan's own (verified across all four constructor families),
+        /// so the sets are subsets by construction and there is nothing to
+        /// repair. A future site that MERGED refs across plans would be the thing
+        /// that breaks it, and would need a true overlap test here.
         func planIndices(overlappingLineRefs refs: [Int]) -> [Int] {
             guard !refs.isEmpty else { return [] }
             let needle = Set(refs)
@@ -2100,16 +2110,37 @@ actor BackfillJobRunner {
     ///    promotes ad-likely windows to the front of the ATTEMPT order) costs no
     ///    `backfill_jobs` write at all.
     ///
-    /// **Why successes only.** `insertSemanticScanResult` leaves `attemptCount`
-    /// alone for a `.success` row but, for a NON-success row, sets it to
-    /// `max(existing + 1, incoming)`. So writing a success row here and again at
-    /// end of pass is an exact `INSERT OR REPLACE` under the same deterministic
-    /// id — the database is unchanged — while writing a FAILURE row twice would
-    /// silently inflate its attempt counter and make a single failed window read
-    /// as two. Failure rows stay where they are, at end of pass. Nothing is lost
-    /// by that: the covered prefix stops at the first plan that is not a clean
-    /// success, so every failed window is at or after the cursor and a resume
-    /// re-attempts it anyway.
+    /// **Why successes only.** `insertSemanticScanResult` probes the existing row
+    /// and sets `attemptCount = max(existing + 1, incoming)` only when the
+    /// INCOMING row is non-success; for a `.success` row it skips the probe and
+    /// binds the caller's value, which `makeScanResult` always sets to 1. So
+    /// writing a success row here and again at end of pass leaves the counter at
+    /// 1 both times, while writing a FAILURE row twice would silently inflate it
+    /// and make a single failed window read as two.
+    ///
+    /// R5 corrected two overstatements here, because the mechanism matters more
+    /// than the conclusion. The store does not "leave `attemptCount` alone" for a
+    /// success — it OVERWRITES with the caller's 1, which is the same thing only
+    /// while every success-row constructor passes 1. And the second write is not
+    /// an "exact `INSERT OR REPLACE`, the database unchanged": `attributed`
+    /// stamps `createdAt` and `scenePhase` at every write, both bound
+    /// unconditionally, so the digest moves the row's `createdAt` from the
+    /// instant the window was screened to the instant of the digest. That is
+    /// pre-26od behaviour (there used to be exactly one write, at digest time) so
+    /// nothing regressed — but a killed pass leaves the earlier, truer timestamp,
+    /// and a completed one does not.
+    ///
+    /// Failure rows stay where they are, at end of pass. Nothing is lost by that
+    /// FOR THE CURSOR — the covered prefix stops at the first plan that is not a
+    /// clean success, so every failed window is at or after the cursor and a
+    /// resume re-attempts it anyway. Something IS lost for the MEASUREMENT, and
+    /// R5 says so rather than leaving the broader claim standing: a pass killed
+    /// mid-flight leaves its successes and none of its refusals, timeouts or
+    /// rate-limits, so on exactly the degraded devices this bead targets
+    /// playhead-qbib's honest scanned-duration denominator and playhead-8d5r's
+    /// `SUM(latencyMs)` read cleaner than the run really was. Filed rather than
+    /// fixed: writing failure rows here needs an idempotent attempt-count path in
+    /// the store, which is a store API change this bead's non-goals exclude.
     ///
     /// **Best effort, and deliberately so.** A store error here is logged and
     /// stepped over rather than retried or rethrown. This callback runs inside
@@ -2747,6 +2778,47 @@ actor BackfillJobRunner {
         }
 
         logCoarseCoverage(passARows: passARows, inputs: inputs, jobId: job.jobId)
+
+        // playhead-26od R5, INVESTIGATED AND REJECTED — written down because two
+        // independent adversarial passes reached the same wrong answer here, and
+        // the third one will too unless the counter-argument is at the site.
+        //
+        // The observation is correct: on a FULLY COVERED coarse pass this block
+        // deliberately leaves `honestCursorBox` empty, so a cancellation arriving
+        // afterwards finds nothing to salvage, `cursorAdvanced` reads false, and
+        // the drain loop's not-advanced arm writes `job.progressCursor` — the
+        // ADMISSION-time value, nil on a first run — straight over the cursor the
+        // mid-flight checkpoint had already made durable. A whole coarse pass is
+        // paid for again. `checkpointBackfillJobProgress` really is a bare
+        // `SET progressCursor = ?` with no `WHERE cursor < ?`, so nothing stops
+        // it.
+        //
+        // The fix that suggests itself — carry
+        // `checkpointBox.lastCheckpointedUpperBoundSec` into the box here, since
+        // it is a PARTIAL prefix and not the episode-end value t1kq's rule names
+        // — is wrong, and the mutation battery's pre-mutation baseline is what
+        // proved it: it turns
+        // `a task cancellation after FULL coarse coverage does NOT checkpoint an
+        // episode-end cursor` red. t1kq's rule is not really about the VALUE
+        // being episode-end. `planAdaptiveZoom` plans refinement from the
+        // IN-MEMORY `coarse` output of the run that is executing, never from
+        // persisted rows, so any coarse window a resume does not re-scan is a
+        // window that never gets refined. A cursor of plan[N-2].endTime resumes
+        // the coarse SCAN perfectly and strands the REFINEMENT of everything
+        // below it — permanently, since no later run will re-derive it.
+        //
+        // So the trade is: pay the coarse pass again (12-45 min of FM, and its
+        // rows are now idempotent thanks to this bead) versus keep ad windows at
+        // coarse extent forever. t1kq chose the re-scan, and on Dan's fidelity
+        // ladder that is the right way round — an unrefined mark is a suggest
+        // banner at coarse width, and its INNER edges eat show.
+        //
+        // What is genuinely unhandled is narrower and is filed rather than fixed
+        // here: a fully-covered pass with NO `containsAd` window has no
+        // refinement to protect, so the rewind costs a whole coarse pass and buys
+        // nothing. Knowing that requires `planAdaptiveZoom`, which runs after the
+        // cancellation check below, so it is a t1kq-shaped change rather than a
+        // 26od one.
 
         // playhead-bkhc: the cancellation check the passA digest loop used to
         // make, moved here — after every coarse window this run paid for is
