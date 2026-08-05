@@ -1112,6 +1112,102 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// R6-Fix1: each log line's DURABLE-TOKEN field must name the token the
+    /// write beside it actually persisted.
+    ///
+    /// R4-Fix1 found that "both properties are READ" says nothing about WHICH
+    /// SITE reads WHICH, and probe CN-A1 simply SWAPPED `logEvent` and
+    /// `drainStoppedEvent` between the two log lines — no literal anywhere,
+    /// every rail green, and every daemon-refused JOB counted as a drain stop in
+    /// a support bundle. That fix pinned the EVENT pair. The same two log lines
+    /// carry a second pair of exactly that shape and it was pinned by nothing:
+    /// the per-job line's `cause=` (`passPrologueCause`, the token written to
+    /// THIS job's row) and the drain-stop line's `siblingCause=`
+    /// (`batchSiblingCause`, the token written to the jobs the sweep touched).
+    /// Probe R6-PB1 gave `cause=` the SIBLING token and R6-PB2 gave
+    /// `siblingCause=` the refused job's token; both SURVIVED every suite in
+    /// this bead's scope, because the durable columns are asserted by the runner
+    /// tests and the log fields are asserted by nobody. On a device that is an
+    /// operator reading, off a line whose event name already survived being
+    /// wrong once, that a job refused on its own run carried the token reserved
+    /// for jobs that were never asked.
+    ///
+    /// DERIVED, not pinned. The test names neither property. It extracts the
+    /// `reason:` argument of every `markBackfillJobDeferred` in the runner that
+    /// writes an `FMDaemonRefusal` cause, and requires each log field to be
+    /// TEXTUALLY the argument of the write it describes. So a rename moves the
+    /// rule with the code, and the check fails rather than silently emptying.
+    ///
+    /// The one structural assumption is stated rather than hidden: the refused
+    /// job's OWN defer precedes the sibling sweep in the source because it is
+    /// emitted inside the drain loop's catch arm and the sweep runs after the
+    /// loop breaks — the same control-flow consequence R4-Fix1 relies on for the
+    /// event ordering, not an accident being frozen.
+    func testDaemonRefusalCauseFieldsNameTheTokenTheyDescribe() throws {
+        let lines = try runnerSource()
+        XCTAssertGreaterThan(lines.count, 1_000, "source read found only \(lines.count) code lines")
+
+        let dense = Self.denseCode(lines)
+
+        // The durable writes, in source order. Every `reason:` label in the
+        // runner is scanned and only those naming an `FMDaemonRefusal` cause
+        // property are kept, so nothing here is a list of expected spellings.
+        let refusalWrites = Self.firstArguments(after: "reason:", in: dense)
+            .filter { $0.hasSuffix("Cause") }
+        XCTAssertEqual(
+            refusalWrites.count,
+            2,
+            """
+            Expected exactly two durable writes of an `FMDaemonRefusal` cause in BackfillJobRunner — \
+            the refused job's own defer and the sibling sweep. Found \(refusalWrites). A third means \
+            this rule no longer knows which write each log field describes; zero means the tokens \
+            stopped reaching the store through the enum.
+            """
+        )
+        let ownDeferToken = try XCTUnwrap(refusalWrites.first)
+        let sweepToken = try XCTUnwrap(refusalWrites.last)
+        XCTAssertNotEqual(
+            ownDeferToken,
+            sweepToken,
+            "the refused job and the swept siblings must not be deferred with the same token"
+        )
+
+        // `cause=` is matched case-sensitively, so it cannot also match
+        // `siblingCause=`; the two fields are extracted independently.
+        let causeFields = Self.firstArguments(after: "cause=\\(", in: dense)
+        let siblingCauseFields = Self.firstArguments(after: "siblingCause=\\(", in: dense)
+        XCTAssertEqual(
+            causeFields.count,
+            1,
+            "expected exactly one `cause=` field, on the per-job refusal line; found \(causeFields)"
+        )
+        XCTAssertEqual(
+            siblingCauseFields.count,
+            1,
+            "expected exactly one `siblingCause=` field, on the drain-stop line; found \(siblingCauseFields)"
+        )
+
+        XCTAssertEqual(
+            causeFields.first,
+            ownDeferToken,
+            """
+            The per-job refusal line reports `cause=\\(\(causeFields.first ?? "<none>"))` while the \
+            defer beside it persists `\(ownDeferToken)`. The field names the token written to THIS \
+            job's row; naming the sibling token instead reports, for a job the daemon refused on its \
+            own run, the cause reserved for jobs that were never asked.
+            """
+        )
+        XCTAssertEqual(
+            siblingCauseFields.first,
+            sweepToken,
+            """
+            The drain-stop line reports `siblingCause=\\(\(siblingCauseFields.first ?? "<none>"))` \
+            while the sweep beside it persists `\(sweepToken)`. The field names the token the SWEPT \
+            jobs carry; naming the refused job's token instead reports a cause no swept row holds.
+            """
+        )
+    }
+
     /// R5-Fix1: the drain-stop line's `deferredSiblings=` must count THE SWEEP.
     ///
     /// It counted `deferred.count`, and `deferred` is the drain-WIDE
@@ -1181,6 +1277,45 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
             reports it. More than three means the quantity is shared with something other than the \
             sibling sweep, which is exactly how a field named for the sweep comes to hold the \
             drain's total. Sites: \(reads.map(\.number))
+            """
+        )
+
+        // R6-Fix2: three sites in the right places is not three sites. The claim
+        // R5 wrote into the runner is "incremented only on a SUCCESSFUL defer,
+        // so a sibling skipped by the terminal-row guard is correctly not
+        // counted as swept" — and that claim lives entirely in WHERE the
+        // increment sits. Probe R6-PB3 moved it above the `do` and SURVIVED: the
+        // count is still declared once, incremented once and read once, and no
+        // fixture can make the sweep's store write throw, so nothing runtime can
+        // see it either. It is reachable in the field — the M-5 path re-enqueues
+        // `.failed` rows under the retry budget, and the sweep's
+        // `invalidStateTransition` guard exists precisely because that happens —
+        // and the result is `deferredSiblings=` counting siblings that were NOT
+        // deferred, which is the defect R5 had just removed from this field.
+        let increment = try XCTUnwrap(
+            reads.first { $0.text.contains("+=") },
+            "no `\(argument) +=` site found; the sweep is not counting anything"
+        )
+        // The sweep's own durable write, located by the two things that are true
+        // only of it: it passes a `reason:` and the token is the sibling cause.
+        let sweepWrite = lines.filter {
+            $0.text.contains("reason:") && $0.text.contains("batchSiblingCause")
+        }
+        XCTAssertEqual(
+            sweepWrite.count,
+            1,
+            "expected exactly one sibling-sweep defer write to order the increment against; found \(sweepWrite.map(\.number))"
+        )
+        let sweepWriteLine = try XCTUnwrap(sweepWrite.first).number
+        XCTAssertGreaterThan(
+            increment.number,
+            sweepWriteLine,
+            """
+            `\(argument)` is incremented at line \(increment.number), BEFORE the sibling defer write \
+            at line \(sweepWriteLine). A `throws` call cannot skip an increment that already \
+            happened, so a sibling rejected by the terminal-row guard would be counted as swept and \
+            `deferredSiblings=` would over-report the sweep — the same "a value that names one thing \
+            read as though it named another" this field was fixed for one round ago.
             """
         )
     }

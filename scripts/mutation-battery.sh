@@ -2581,6 +2581,12 @@ T_DR_SIBCOUNT="FMDaemonRefusalSourceCanaryTests/testDrainStopSiblingCountIsTheSw
 # R5 review: the swept-sibling token on the THROTTLE path. DR04 proved "not always
 # the throttle's"; until R5 nothing proved "not always the stall's".
 T_DR_THROTTLEBATCH="a THROTTLE-terminated drain sweeps its siblings with kvs8's rateLimited-batchSibling"
+# R6 review: the DURABLE-TOKEN field on each of the two log lines must name the
+# token the write beside it persisted. R4-Fix1 pinned the EVENT pair on these same
+# two lines after probe CN-A1 swapped them; the CAUSE pair was pinned by nothing,
+# and probes R6-PB1 / R6-PB2 confirmed both directions survive. XCTest — a log
+# line's argument is not observable from any runtime assertion on this harness.
+T_DR_CAUSEFIELDS="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCauseFieldsNameTheTokenTheyDescribe"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5088,6 +5094,38 @@ MUTATIONS=(
   # WRITES, and one batch would let either be credited for the other the moment
   # an expectation set grows — the R3 lesson that moved DR02 out of batch 500.
   "DR18|514|RUNNER|$T_DR_THROTTLEBATCH"
+
+  # ---------------------------------------------------------------------------
+  # R6 review — the DR19-DR21 group. Same discipline as R5's: planted against
+  # production verbatim, in one build, each PREDICTED TO SURVIVE so a green run
+  # attributes. All three SURVIVED, and each is a claim the shipped code makes
+  # correctly today with nothing holding it there.
+
+  # DR19 — the per-job refusal line's `cause=` field takes the SIBLING token.
+  # R4-Fix1 established that "both properties are read" says nothing about which
+  # SITE reads which, and pinned the EVENT pair on these two lines after probe
+  # CN-A1 swapped them. The CAUSE pair on the SAME two lines was pinned by
+  # nothing: the durable columns are asserted by the runner tests, the log fields
+  # by no one. On a device this reports, for a job the daemon refused on its own
+  # run, the token reserved for jobs that were never asked.
+  "DR19|515|RUNNER|$T_DR_CAUSEFIELDS"
+
+  # DR20 — the mirror, and its own batch for the R3 reason: DR19 alone kills the
+  # same test, so one batch could credit either for the other. The drain-stop
+  # line's `siblingCause=` takes the refused job's token, so the field naming
+  # what the SWEPT rows carry names a cause no swept row holds.
+  "DR20|516|RUNNER|$T_DR_CAUSEFIELDS"
+
+  # DR21 — `sweptSiblingCount` incremented ABOVE the `do` rather than after the
+  # defer returns. The declaration, increment and read all survive, so R5's
+  # "exactly three occurrences" rule is not what catches it; the ORDER is. The
+  # claim it breaks is R5's own — "incremented only on a SUCCESSFUL defer, so a
+  # sibling skipped by the terminal-row guard is correctly not counted" — and
+  # that guard is reachable in the field, because M-5 re-enqueues `.failed` rows
+  # under the retry budget. `deferredSiblings=` would then count siblings that
+  # were never deferred: the defect R5 removed from this field, returning by a
+  # different door.
+  "DR21|517|RUNNER|$T_DR_SIBCOUNT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5532,6 +5570,9 @@ describe_mutation() {
     DR16) echo "e75l R5: deferredSiblings= reverts to deferred.count — the drain-WIDE total under a name that says siblings, and it can never read zero" ;;
     DR17) echo "e75l R5: kvs8's per-job event name is renamed inside the enum — the support-bundle grep that counts throttles reads zero" ;;
     DR18) echo "e75l R5: the sibling sweep hard-codes the STALL's token — a rate-limited drain records a wedged tokenizer that never happened" ;;
+    DR19) echo "e75l R6: the per-job refusal line's cause= field takes the SIBLING token — a job refused on its own run reports the cause reserved for jobs never asked" ;;
+    DR20) echo "e75l R6: the drain-stop line's siblingCause= field takes the refused job's token — the field naming what the swept rows carry names a cause no swept row holds" ;;
+    DR21) echo "e75l R6: sweptSiblingCount is incremented ABOVE the defer — a sibling rejected by the terminal-row guard is counted as swept and deferredSiblings= over-reports" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -12000,6 +12041,52 @@ EOF
 EOF
     snippet NEW <<'EOF'
                         reason: FMDaemonRefusal.metadataStall.batchSiblingCause
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR19 — R6 review. Probe R6-PB1 made a record: the per-job refusal line's
+  # `cause=` field reads the SIBLING token. No literal, no count change, both
+  # properties still read — DR11's shape one pair over. SURVIVED on first plant.
+  DR19)
+    snippet OLD <<'EOF'
+                        cause=\(refusal.passPrologueCause, privacy: .public)
+EOF
+    snippet NEW <<'EOF'
+                        cause=\(refusal.batchSiblingCause, privacy: .public)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR20 — R6 review. Probe R6-PB2 made a record: the mirror, on the drain-stop
+  # line. SURVIVED on first plant.
+  DR20)
+    snippet OLD <<'EOF'
+                siblingCause=\(refusalThatStoppedUs.batchSiblingCause, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                siblingCause=\(refusalThatStoppedUs.passPrologueCause, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR21 — R6 review. Probe R6-PB3 made a record: the sweep's counter
+  # incremented before the write it is counting. SURVIVED on first plant.
+  DR21)
+    snippet OLD <<'EOF'
+                do {
+                    try await store.markBackfillJobDeferred(
+                        jobId: candidate.jobId,
+                        reason: refusalThatStoppedUs.batchSiblingCause
+                    )
+                    deferred.append(candidate.jobId)
+                    sweptSiblingCount += 1
+EOF
+    snippet NEW <<'EOF'
+                sweptSiblingCount += 1
+                do {
+                    try await store.markBackfillJobDeferred(
+                        jobId: candidate.jobId,
+                        reason: refusalThatStoppedUs.batchSiblingCause
+                    )
+                    deferred.append(candidate.jobId)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
