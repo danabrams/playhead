@@ -412,3 +412,98 @@ extension EpisodeSeconds {
         return bound.map { EpisodeSeconds($0.rawValue) }
     }
 }
+
+// MARK: - THE AUDIT (playhead-x0lb deliverable 4)
+//
+// Every `Double`/`Int` crossing a module boundary in the coverage/reach path,
+// with its numerator, its denominator and its unit. The rule the bead sets is
+// that **anything that cannot be stated in one line is a latent instance**, and
+// the sections below are ordered by what that rule produced: stated and typed,
+// stated and deliberately untyped, and stated but WRONG — which is where the
+// audit earned its keep.
+//
+// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY08).
+//
+//   AnalysisCoverageSummary.episodeDurationSec        EpisodeSeconds       s   position of the episode's end, DECLARED (feed or decode probe), not measured
+//   AnalysisCoverageSummary.fastTranscriptCoveredSec  CoveredSeconds       s   AREA: interval union of pass='fast' transcript_chunks
+//   AnalysisCoverageSummary.analysisCoveredSec        CoveredSeconds       s   AREA: that union clipped to the DSP frontier
+//   AnalysisCoverageSummary.adScanCoveredSec          CoveredSeconds       s   AREA: coverage-lane scan windows that examined, ∩ the bridged transcript
+//   AnalysisCoverageSummary.fastTranscriptCoverageEndSec  WatermarkSeconds s   REACH: MAX(endTime) of fast chunks, watermark fallback
+//   AnalysisCoverageSummary.featureCoverageEndSec     WatermarkSeconds     s   REACH: the DSP feature-extraction watermark
+//   AnalysisCoverageSummary.confirmedAdCoverageEndSec WatermarkSeconds     s   REACH: MAX(endTime) of DETECTED ad windows — not coverage at all
+//   AnalysisCoverageSummary.finalPassCoverageEndSec   WatermarkSeconds     s   REACH: MAX(endTime) of final chunks, watermark fallback
+//   AnalysisCoverageSummary.adScanFraction            ReachRatio      [0,1]    adScanCoveredSec ÷ episodeDurationSec
+//   AnalysisCoverageSummary.transcriptDensity         DensityRatio    [0,1]    fastTranscriptCoveredSec ÷ episodeDurationSec
+//   BackfillProgressCursor.lastProcessedUpperBoundSec EpisodeSeconds       s   position; asserts [0, x] OF THE EPISODE is covered
+//   CoarseCoverageWalk.contiguousUpperBoundSec        PlanListSeconds      s   position; asserts a prefix OF THE HANDED-OVER LIST
+//   CoverageOutcome.lastCoveredUpperBoundSec          PlanListSeconds      s   same, as the pass reports it
+//   CoverageOutcome.firstPlannedSegmentStartSec       PlanListSeconds      s   where the handed-over list begins
+//   AnalysisCoverageMath.adScanBridgeableGapSec       BridgeToleranceSec   s   width; "small enough to bridge WHEN MEASURING"
+//   RescanThresholdSec.adScanRescanWorthyGapSec       RescanThresholdSec   s   width; "big enough to be worth RE-SCANNING" (a1x0, inert)
+//   AnalysisJobRunner.semanticBackfillSufficientAdScanFraction  ReachRatio     the floor a completed ad scan is judged by
+//   episodePreparationCompleteThreshold               ReachRatio      [0,1]    the same number, the same quantity, one definition
+//   AnalysisCoordinator.AdScanCoverage.fraction       ReachRatio      [0,1]    the terminal's copy of adScanFraction
+//
+// ── STATED AND DELIBERATELY UNTYPED. Each is one line, so none is latent; a
+//    type is withheld because nothing else would share it or because typing it
+//    would drag in a layer this bead is not converting.
+//
+//   AnalysisCoverageSummary.adScanDurationToleranceSec(episodeDurationSec:) -> Double
+//       A WIDTH in seconds, min(one shard, 5 % of the duration). It is compared
+//       against an AREA in one guard and a REACH in the next, deliberately, so a
+//       type would have to be laundered at one of the two.
+//   AnalysisCoverageMath.unionedSeconds / unionedSecondsClipped /
+//   unionedSecondsIntersecting / bridgingShortGaps  ->  Double over [(start, end)]
+//       Generic interval arithmetic. These PRODUCE CoveredSeconds; typing their
+//       tuples would type every transcript-chunk timestamp in the app. The
+//       conversion happens once, where the summary is built.
+//   EpisodePreparationReadiness.analysisFraction / .downloadFraction -> Double
+//       Post-clamp BAR FILLS in [0, 1], provenance deliberately discarded. Note
+//       the two are adjacent fields with different units underneath: the analyze
+//       zone's numerator is seconds and the download zone's is BYTES.
+//   ActivitySnapshotProvider's analysis fraction -> Double
+//       analysisCoveredSec ÷ episodeDurationSec — a THIRD ratio over the same
+//       denominator as reach and density. Left untyped because one producer and
+//       one consumer share it; recorded here so the next reader does not have to
+//       re-derive which area it is.
+//
+// ── LATENT INSTANCES. Found by writing the line. Each is filed; none is fixed
+//    here, because each is a behaviour or wire change with its own blast radius.
+//
+//   L1  SemanticScanClaim.transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)
+//       `coveredSec: Double` accepts an AREA or a WATERMARK indistinguishably.
+//       Production hands it the 5 s-bridged AREA; `SemanticScanClaimWireInTests`
+//       hands it a WATERMARK at one site and an area at another ON PURPOSE, to
+//       show they differ. Two callers, ~14 test sites — playhead-fpnt.
+//   L2  SemanticScanCoverage.examinedFraction
+//       examinedSeconds ÷ (examinedSeconds + unexaminedSeconds) — the span the
+//       PASS ATTEMPTED, NOT the episode. Same name-shape as `adScanFraction`,
+//       different denominator, and they already diverge by 30x in the suite's own
+//       `a-diverge` fixture (breadcrumb 3,600 s vs summary 120 s) — playhead-dehs.
+//   L3  AnalysisCoordinator.classifyBackfillTerminal's transcript ratio
+//       `coverageEnd = chunks.map(\.endTime).max()` — a WATERMARK — is passed to
+//       `contradictedCoverageDenominator(transcriptCoveredSec:)`, an AREA name,
+//       and divided by the duration to make `transcriptRatio`. The VALUE is
+//       arguably right (the 0.95 floor is calibrated for reach, "the few seconds
+//       a decoder chops off the end"); the NAME is not. On AD5F3A0A the two
+//       readings differ by 2.6x — playhead-pwsu.
+//   L4  AnalysisWorkScheduler.capOutRetryDecision(transcriptCoverageSec:)
+//       Fed `asset?.fastTranscriptCoverageEndTime` — a WATERMARK — under a
+//       parameter named for coverage seconds — playhead-ps9j.
+//   L5  DogfoodDiagnosticsPipelineSnapshot.transcriptWatermarkSec
+//       The wire field named for a watermark carries the transcript AREA — the
+//       same value as `transcript_covered_sec` one line above it — while the real
+//       reach ships separately as `fast_transcript_watermark_sec`. Found by these
+//       types; behaviour deliberately unchanged — playhead-vkwr.
+//
+// ── THE MECHANISM'S OWN LIMIT, stated because a claim of completeness that is
+//    not complete is instance 18 of the catalogue.
+//
+//   A ``CoveredSeconds`` can still be carrying a REACH. When no chunk landed,
+//   `fastTranscriptCoveredSec` falls back to the `fastTranscriptCoverageEndTime`
+//   COLUMN, which is a watermark, and the only thing that says so is the
+//   `CoverageProvenance` tag beside it. The types stop a watermark being handed
+//   ACROSS a boundary as an area; they cannot stop one being put in the box at
+//   the bottom. That fallback is playhead-0sro's shape and it is load-bearing —
+//   `AnalysisJobRunner`'s `watermarkWithoutChunksStillFails` fixture is built on
+//   it — so it is documented rather than removed.

@@ -590,7 +590,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                         // reach ships separately as
                         // `fast_transcript_watermark_sec`. Behaviour is
                         // UNCHANGED here (a dogfood wire field is not this
-                        // bead's to renegotiate); filed as playhead-tw1r.
+                        // bead's to renegotiate); filed as playhead-vkwr.
                         transcriptWatermarkSec: transcriptCoveredSec,
                         fastTranscriptWatermarkSec: fastTranscriptWatermarkSec,
                         analysisWatermarkSec: analysisWatermark,
