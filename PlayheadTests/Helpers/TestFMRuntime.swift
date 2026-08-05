@@ -40,6 +40,17 @@ actor TestFMRuntime {
     /// express that, which is why the runner's terminal-`failed` handling of it
     /// went unnoticed until the device pull.
     private let coarseSchemaTokenCountFailureValue: TestFMRuntimeFailure?
+    /// playhead-e75l R1: per-CALL prologue failures, consumed before
+    /// ``coarseSchemaTokenCountFailureValue`` is consulted.
+    ///
+    /// A queue rather than a second constant because the thing under test is a
+    /// counter shared across jobs in ONE drain: proving that a throttle and a
+    /// metadata stall advance the SAME `consecutiveDaemonRefusals` requires two
+    /// different refusals from two different jobs against one runtime, and a
+    /// single-valued failure cannot express that. Each refused job makes
+    /// exactly one prologue round trip (the throw escapes `coarsePassA`), so
+    /// one queue entry is one job.
+    private var coarseSchemaTokenCountFailureQueue: [TestFMRuntimeFailure?]
     private let refinementSchemaTokenCountValue: Int
     private let boundarySchemaTokenCountValue: Int
     private let tokenCountRule: @Sendable (String) -> Int
@@ -76,6 +87,7 @@ actor TestFMRuntime {
         contextSize: Int = 4_096,
         coarseSchemaTokenCount: Int = 16,
         coarseSchemaTokenCountFailure: TestFMRuntimeFailure? = nil,
+        coarseSchemaTokenCountFailures: [TestFMRuntimeFailure?] = [],
         refinementSchemaTokenCount: Int = 32,
         boundarySchemaTokenCount: Int = 32,
         backoffSleep: @escaping @Sendable (UInt64) async -> Void = { _ in },
@@ -102,6 +114,7 @@ actor TestFMRuntime {
         self.contextSizeValue = contextSize
         self.coarseSchemaTokenCountValue = coarseSchemaTokenCount
         self.coarseSchemaTokenCountFailureValue = coarseSchemaTokenCountFailure
+        self.coarseSchemaTokenCountFailureQueue = coarseSchemaTokenCountFailures
         self.refinementSchemaTokenCountValue = refinementSchemaTokenCount
         self.boundarySchemaTokenCountValue = boundarySchemaTokenCount
         self.tokenCountRule = tokenCountRule
@@ -119,10 +132,7 @@ actor TestFMRuntime {
                 self.tokenCountRule(prompt)
             },
             coarseSchemaTokenCount: {
-                if let failure = self.coarseSchemaTokenCountFailureValue {
-                    throw failure.error
-                }
-                return self.coarseSchemaTokenCountValue
+                try await self.nextCoarseSchemaTokenCount()
             },
             refinementSchemaTokenCount: { self.refinementSchemaTokenCountValue },
             boundarySchemaTokenCount: { self.boundarySchemaTokenCountValue },
@@ -143,6 +153,21 @@ actor TestFMRuntime {
 
     func snapshotSubmittedCoarseLineRefs() -> [[Int]] {
         coarsePrompts.map(Self.submittedLineRefs(from:))
+    }
+
+    /// The coarse pass's PROLOGUE round trip. Queue first, then the constant,
+    /// so an existing single-valued caller is byte-identical to pre-R1.
+    private func nextCoarseSchemaTokenCount() throws -> Int {
+        if !coarseSchemaTokenCountFailureQueue.isEmpty {
+            if let failure = coarseSchemaTokenCountFailureQueue.removeFirst() {
+                throw failure.error
+            }
+            return coarseSchemaTokenCountValue
+        }
+        if let failure = coarseSchemaTokenCountFailureValue {
+            throw failure.error
+        }
+        return coarseSchemaTokenCountValue
     }
 
     private func nextCoarse(prompt: String) async throws -> CoarseScreeningSchema {
@@ -261,8 +286,16 @@ enum TestFMRuntimeFailure: Sendable {
 
     var error: Error {
         // playhead-8d5r: not a FoundationModels error — the deadline is ours.
+        //
+        // R1-Fix2 (playhead-e75l): `FMInferenceDeadline.standard`, never a
+        // literal 300. The one consumer that can tell these two cases apart —
+        // `FMDaemonRefusal` — discriminates on WHICH BUDGET elapsed, so a
+        // fixture carrying a bare number is asserting about a quantity it does
+        // not name: `standardDeadlineTimeoutThroughTheSameSeamStillFails` would
+        // keep passing while no longer exercising `standard` at all if the
+        // constant moved.
         if case .inferenceTimeout = self {
-            return FMInferenceTimeoutError(deadline: .seconds(300))
+            return FMInferenceTimeoutError(deadline: FMInferenceDeadline.standard)
         }
         // playhead-e75l: derived from the production constant, never a literal
         // 30. A test that hard-codes the number keeps passing if the constant

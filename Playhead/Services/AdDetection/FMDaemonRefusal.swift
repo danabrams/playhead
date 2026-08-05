@@ -129,8 +129,20 @@ enum FMDaemonRefusal: Sendable, Equatable, CaseIterable {
         return timeout.deadline == FMInferenceDeadline.metadata
     }
 
-    /// Written verbatim to `backfill_jobs.deferReason` when THIS job was
-    /// refused in its pass prologue.
+    /// Written verbatim to `backfill_jobs.deferReason` when THIS job's own run
+    /// was refused by the daemon.
+    ///
+    /// NAMED FOR THE CONDITION, NOT FOR A POSITION IN THE PASS, and the
+    /// distinction is not pedantic: the throw does not only come from the
+    /// prologue. `BackfillJobRunner.runJob` also awaits `planAdaptiveZoom`
+    /// (which makes its own `tokenCount` round trips) AFTER `coarsePassA` has
+    /// screened and checkpointed windows, so a refusal can arrive with a real
+    /// cursor and real scan rows already banked. The property name is
+    /// historical — kvs8's `rateLimited-prologue` token is preserved
+    /// byte-for-byte because device pulls grep for it — but the reading an
+    /// operator should take is "this job's run was refused", never "nothing had
+    /// been scanned yet". The same latitude is why the metadata token is named
+    /// for the BOUND that elapsed. See playhead-e75l's follow-up note.
     ///
     /// playhead-v7q6: `deferReason` is the durable audit trail a device pull
     /// actually reads, so every stop-short cause in this runner is a named,
@@ -178,6 +190,28 @@ enum FMDaemonRefusal: Sendable, Equatable, CaseIterable {
             "fm.backfill.job_throttled"
         case .metadataStall:
             "fm.backfill.job_daemon_metadata_stalled"
+        }
+    }
+
+    /// The log event name for the drain STOPPING because the daemon is not
+    /// serving this batch.
+    ///
+    /// Split per kind for exactly the reason ``logEvent`` is, and the omission
+    /// was a real defect: `fm.backfill.drain_stopped_by_throttle` predates this
+    /// file and is what a support-bundle grep counts, so a drain stopped by two
+    /// wedged tokenizer round trips emitting it would inflate the very number an
+    /// operator reads to decide whether the device is being rate-limited. A
+    /// `cause=` field on the line does not fix that — an event NAME is the unit
+    /// a log grep counts, and this one would have answered to a population it
+    /// does not belong to.
+    ///
+    /// kvs8's spelling is preserved byte-for-byte for the throttle.
+    var drainStoppedEvent: String {
+        switch self {
+        case .throttle:
+            "fm.backfill.drain_stopped_by_throttle"
+        case .metadataStall:
+            "fm.backfill.drain_stopped_by_daemon_metadata_stall"
         }
     }
 

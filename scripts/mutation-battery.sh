@@ -1020,6 +1020,10 @@ MPTRIDX="Playhead/Services/TranscriptEngine/FastTranscriptCoverageIndex.swift"
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
 # readiness cache guard.
 THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
+# playhead-e75l: the daemon-refusal CLASS — kvs8's throttle plus the metadata
+# stall — and the per-kind tokens and log events that keep the two countable
+# apart in a device pull. Added for the DR series.
+FMREF="Playhead/Services/AdDetection/FMDaemonRefusal.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
@@ -1188,7 +1192,7 @@ ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swi
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$THROT" "$FMREF" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
@@ -1223,6 +1227,16 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AnchorRefRediffSlotTests
   -only-testing:PlayheadTests/RediffByteFirstEndToEndTests
   -only-testing:PlayheadTests/RediffSlotOwnershipEndToEndTests
+  # playhead-e75l: the daemon-refusal rails (DR series). Three suites, because
+  # the claim spans three layers and no one of them can see the others: the
+  # enum's per-kind tokens and events (pure, instant); the runner's DISPOSITION
+  # for a metadata-deadline timeout (defer, retryCount preserved, named cause,
+  # one shared consecutive counter); and a SOURCE canary, because a log event
+  # name is not observable from a test on this harness and the drain-stop line
+  # shipped kvs8's literal for a condition that is not a throttle.
+  -only-testing:PlayheadTests/FMDaemonRefusalDefinitionTests
+  -only-testing:PlayheadTests/FMDaemonMetadataStallRunnerTests
+  -only-testing:PlayheadTests/FMDaemonRefusalEventWiringCanaryTests
   # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
@@ -2466,6 +2480,17 @@ T_IU0T_COLUMN="TranscriptCanonicalizationRuleCanaryTests/testNoProductionConsume
 # when the tree does.
 T_IU0T_SPLITLINE="TranscriptCanonicalizationRuleCanaryTests/testTheSiteFinderSeesACallSplitAcrossLines"
 T_IU0T_LAUNDER="TranscriptCanonicalizationRuleCanaryTests/testCanonicalizingAndThenCollapsingIsNotCanonicalized"
+
+# --- playhead-e75l: the daemon-refusal rails (DR series) -------------------
+T_DR_DEFERS="a metadata-deadline timeout in the PROLOGUE defers the job — it must not mark it failed"
+T_DR_COST="THE COST, DIRECTLY: three metadata stalls must not disqualify an episode forever"
+T_DR_CAUSE="a metadata stall records a NAMED cause, not the error's Swift description"
+T_DR_BUDGET="a metadata-deadline timeout is a refusal; a standard-deadline one is not"
+T_DR_STANDARD="DISCRIMINATOR: a STANDARD-deadline timeout through the same seam still fails and burns a retry"
+T_DR_ONECOUNTER="ONE counter: a throttle then a metadata stall stops the drain, and the sibling names the stall"
+T_DR_BATCH="a stalled batch leaves no job stranded in queued and none marked failed"
+# The wiring canary. XCTest, so `Suite/method`.
+T_DR_WIRING="FMDaemonRefusalEventWiringCanaryTests/testDaemonRefusalLogEventsAreNotHardCodedInTheRunner"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4812,6 +4837,44 @@ MUTATIONS=(
   # below still let it through, which is how the fix's own reintroduction was
   # caught.
   "CN12|450|ACOORD|$T_IU0T_RULE"
+
+  # --- playhead-e75l: daemon-refusal disposition (DR series) ---------------
+  #
+  # Batches 500-504. The series is deliberately spread thin: four of the seven
+  # mutants make a metadata stall stop being a refusal, so any two of them in
+  # one batch would each be credited for the other's kill. Batch membership
+  # here means "these two cannot mask each other", never "these fit".
+  #
+  # DR01 is THE mutant: the pre-e75l production line, verbatim. Everything else
+  # is one substitution inside the fix.
+
+  # Batch 500. DR01 reverts the classification to kvs8's throttle-only
+  # predicate — the shipped code this bead was filed against. DR02 is in the
+  # enum and its expectation is a PURE test, so DR01 (which cannot reach the
+  # enum) leaves it observable.
+  "DR01|500|RUNNER|$T_DR_DEFERS;$T_DR_COST"
+  "DR02|500|FMREF|$T_DR_BUDGET"
+
+  # Batch 501. DR03 is the reviewer's probe made concrete: the predicate reads
+  # the OTHER budget. It is in the same anchor as DR02, so it cannot share a
+  # batch with it regardless of masking.
+  "DR03|501|FMREF|$T_DR_BUDGET;$T_DR_DEFERS"
+
+  # Batch 502. DR04 collapses the SIBLING token back to kvs8's literal — a rate
+  # limit recorded for a batch the daemon stopped serving for another reason.
+  # DR06 restores the hard-coded drain-stop event name, and only the source
+  # canary can see it: no test on this harness reads a log line.
+  "DR04|502|RUNNER|$T_DR_ONECOUNTER;$T_DR_BATCH"
+  "DR06|502|RUNNER|$T_DR_WIRING"
+
+  # Batch 503. DR05 collapses the PER-JOB token. Alone because it also breaks
+  # the mixed-population test, which is DR04's and DR07's expectation.
+  "DR05|503|RUNNER|$T_DR_CAUSE"
+
+  # Batch 504. DR07 is the "two counters" defect the shared type exists to
+  # prevent: only throttles advance the consecutive counter, so a drain the
+  # daemon refused twice by two different means never stops.
+  "DR07|504|RUNNER|$T_DR_ONECOUNTER"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5238,6 +5301,13 @@ describe_mutation() {
     CN10) echo "iu0t R5: an uncanonicalized atomize call SPLIT ACROSS LINES — the site finder was a literal substring, so one line break removed the call site from the walk" ;;
     CN11) echo "iu0t R5: CN06 spelled as a NEGATION (pass != fast) — the same collapse as instance #5, which the collapse-shape pattern required == to see" ;;
     CN12) echo "iu0t R5: LAUNDERING — the site canonicalizes and then filters to final anyway, which passed because the check tested for the TOKEN canonicalize( rather than the value" ;;
+    DR01) echo "e75l: the drain classifies only THROTTLES again — the pre-e75l line verbatim, so a wedged tokenizer is marked failed and spends a lifetime retry" ;;
+    DR02) echo "e75l: the discriminator keys on the TYPE, not the budget — every FMInferenceTimeoutError becomes a daemon refusal, including the 300s inference one" ;;
+    DR03) echo "e75l: the discriminator reads the OTHER budget — a standard-deadline timeout defers and a metadata stall fails" ;;
+    DR04) echo "e75l: swept siblings carry kvs8's rateLimited-batchSibling again — a rate limit recorded for a batch stopped by a wedged tokenizer" ;;
+    DR05) echo "e75l: the per-job cause is kvs8's rateLimited-prologue again — the stall answers to the prefix an operator counts rate limits with" ;;
+    DR06) echo "e75l: the drain-stop log EVENT is the hard-coded ..._by_throttle again — the name fires for a condition that is not a throttle" ;;
+    DR07) echo "e75l: only throttles advance the consecutive counter — two counters that can disagree about whether the daemon is serving us" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11455,6 +11525,95 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-e75l: daemon-refusal disposition (DR series) ----
+
+  # DR01 — THE mutant: the shipped pre-e75l line, verbatim. Only a throttle is
+  # a daemon condition, so a tokenizer round trip that outlived the 30 s
+  # metadata bound falls to the genuine-failure disposition and spends one of
+  # three LIFETIME retries. Three of those and the episode is never scanned.
+  DR01)
+    snippet OLD <<'EOF'
+                if let refusal = FMDaemonRefusal.classify(error) {
+EOF
+    snippet NEW <<'EOF'
+                if let refusal: FMDaemonRefusal = FMDaemonThrottle.isThrottle(error) ? .throttle : nil {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR02 — the discriminator keys on the TYPE rather than on which BUDGET
+  # elapsed. The 300 s inference timeout is the same Swift type, so it becomes
+  # a daemon refusal too: an unbounded retry at 300 s per window per drain, and
+  # evidence about the MODEL read as evidence about the daemon.
+  DR02)
+    snippet OLD <<'EOF'
+        return timeout.deadline == FMInferenceDeadline.metadata
+EOF
+    snippet NEW <<'EOF'
+        return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR03 — the same predicate reading the OTHER budget. Two Durations, one
+  # comparison, and nothing in the type system distinguishes them: this is the
+  # substitution the whole `deadline ==` form is exposed to.
+  DR03)
+    snippet OLD <<'EOF'
+        return timeout.deadline == FMInferenceDeadline.metadata
+EOF
+    snippet NEW <<'EOF'
+        return timeout.deadline == FMInferenceDeadline.standard
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR04 — the swept siblings carry kvs8's literal again. Nothing about those
+  # jobs was rate-limited and nothing about the drain that stopped was either;
+  # an operator counting `rateLimited-` gets an event the daemon never
+  # described that way.
+  DR04)
+    snippet OLD <<'EOF'
+                        reason: refusalThatStoppedUs.batchSiblingCause
+EOF
+    snippet NEW <<'EOF'
+                        reason: FMDaemonThrottle.DeferCause.batchSibling.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR05 — the same substitution one level in: the REFUSED job's own cause.
+  DR05)
+    snippet OLD <<'EOF'
+                            reason: refusal.passPrologueCause
+EOF
+    snippet NEW <<'EOF'
+                            reason: FMDaemonThrottle.DeferCause.passPrologue.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR06 — the drain-stop log EVENT reverts to the hard-coded name. This is the
+  # defect R1 found: the durable tokens were split per kind but the event name
+  # was not, so a drain stopped by two wedged tokenizer round trips emitted
+  # `..._by_throttle` verbatim. No runtime test can see a log line, which is
+  # why the killer is a source canary.
+  DR06)
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                fm.backfill.drain_stopped_by_throttle \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR07 — two counters instead of one. Only throttles advance the consecutive
+  # count, so a daemon refusing one job by rate limit and the next by a wedged
+  # tokenizer never reaches the stop threshold and the drain keeps asking.
+  DR07)
+    snippet OLD <<'EOF'
+                    consecutiveDaemonRefusals += 1
+EOF
+    snippet NEW <<'EOF'
+                    if refusal == .throttle { consecutiveDaemonRefusals += 1 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -11489,6 +11648,7 @@ rec_file()   {
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
     THROT) printf '%s' "$THROT" ;;
+    FMREF) printf '%s' "$FMREF" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;

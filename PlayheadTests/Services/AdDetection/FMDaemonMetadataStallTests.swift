@@ -53,6 +53,7 @@
 
 import Foundation
 import Testing
+import XCTest
 
 @testable import Playhead
 
@@ -122,6 +123,23 @@ struct FMDaemonRefusalDefinitionTests {
         #expect(!FMDaemonRefusal.metadataStall.passPrologueCause.hasPrefix("rateLimited-"))
         #expect(!FMDaemonRefusal.metadataStall.batchSiblingCause.hasPrefix("rateLimited-"))
         #expect(FMDaemonRefusal.metadataStall.logEvent != FMDaemonRefusal.throttle.logEvent)
+    }
+
+    @Test("R1-Fix1: the DRAIN-STOP event is named per kind too, and kvs8's spelling is preserved")
+    func drainStopEventIsNamedPerKind() {
+        // A log EVENT NAME is the unit a support-bundle grep counts, so it is
+        // subject to exactly the rule the defer tokens are: an operator
+        // counting `drain_stopped_by_throttle` is counting rate limits. Before
+        // this fix a drain stopped by two wedged tokenizer round trips emitted
+        // kvs8's event verbatim, with only a `cause=` field to disagree with
+        // its own name.
+        #expect(FMDaemonRefusal.throttle.drainStoppedEvent == "fm.backfill.drain_stopped_by_throttle")
+        #expect(FMDaemonRefusal.metadataStall.drainStoppedEvent
+            == "fm.backfill.drain_stopped_by_daemon_metadata_stall")
+        #expect(!FMDaemonRefusal.metadataStall.drainStoppedEvent.contains("throttle"))
+
+        let events = FMDaemonRefusal.allCases.flatMap { [$0.logEvent, $0.drainStoppedEvent] }
+        #expect(Set(events).count == events.count, "two events share a name: \(events)")
     }
 
     @Test("the drain-stop rule is kvs8's rule, shared rather than duplicated")
@@ -205,6 +223,96 @@ struct FMDaemonMetadataStallRunnerTests {
                 episodesSinceLastFullRescan: 0,
                 periodicFullRescanIntervalEpisodes: 10
             )
+        )
+    }
+
+    /// A `targetedWithAudit` fixture whose THREE phases all reach the daemon.
+    ///
+    /// R1: the batch fixture inherited from kvs8 passes an EMPTY
+    /// `EvidenceCatalog`, and `TargetedWindowNarrower` narrows
+    /// `.scanHarvesterProposals` on `evidenceLineRefs` — so that phase planned
+    /// zero windows, never made a prologue round trip, and COMPLETED. A job
+    /// that reached the daemon successfully resets `consecutiveDaemonRefusals`,
+    /// so the drain could only ever reach the stop threshold on its LAST job,
+    /// where there is no sibling left to sweep. The sibling-token assertions
+    /// were therefore running against an empty array. Building a real catalog
+    /// from sponsor-bearing lines gives the harvester phase windows, which puts
+    /// a third refusable job ahead of the threshold and makes the sweep
+    /// observable.
+    private func makeBatchInputs(assetId: String, transcriptVersion: String) -> BackfillJobRunner.AssetInputs {
+        let verbose = Array(
+            repeating: "Detailed editorial discussion without sponsor language.",
+            count: 60
+        ).joined(separator: "\n")
+        let segments = makeFMSegments(
+            analysisAssetId: assetId,
+            transcriptVersion: transcriptVersion,
+            lines: (0..<40).map { index in
+                let start = Double(index) * 10
+                let sponsor = index % 4 == 0
+                    ? "\nThis episode is brought to you by our sponsor — use promo code SAVE at checkout."
+                    : ""
+                return (start, start + 10, "\(verbose)\nSegment \(index).\(sponsor)")
+            }
+        )
+        return BackfillJobRunner.AssetInputs(
+            analysisAssetId: assetId,
+            podcastId: "podcast-e75l-batch",
+            segments: segments,
+            evidenceCatalog: EvidenceCatalogBuilder.build(
+                atoms: segments.flatMap(\.atoms),
+                analysisAssetId: assetId,
+                transcriptVersion: transcriptVersion
+            ),
+            transcriptVersion: transcriptVersion,
+            plannerContext: CoveragePlannerContext(
+                observedEpisodeCount: 20,
+                stableRecall: true,
+                isFirstEpisodeAfterCohortInvalidation: false,
+                recallDegrading: false,
+                sponsorDriftDetected: false,
+                auditMissDetected: false,
+                episodesSinceLastFullRescan: 1,
+                periodicFullRescanIntervalEpisodes: 10
+            )
+        )
+    }
+
+    /// The three `targetedWithAudit` phases, in the order they are enqueued.
+    private static let batchPhases: [BackfillJobPhase] = [
+        .scanHarvesterProposals, .scanLikelyAdSlots, .scanRandomAuditWindows
+    ]
+
+    private func fetchBatchRows(
+        store: AnalysisStore,
+        assetId: String,
+        transcriptVersion: String
+    ) async throws -> [BackfillJob] {
+        var rows: [BackfillJob] = []
+        for (offset, phase) in Self.batchPhases.enumerated() {
+            let jobId = BackfillJobRunner.makeJobIdForTesting(
+                analysisAssetId: assetId,
+                transcriptVersion: transcriptVersion,
+                phase: phase,
+                offset: offset
+            )
+            if let row = try await store.fetchBackfillJob(byId: jobId) {
+                rows.append(row)
+            }
+        }
+        return rows
+    }
+
+    private func makeBatchRunner(store: AnalysisStore, runtime: FoundationModelClassifier.Runtime) -> BackfillJobRunner {
+        BackfillJobRunner(
+            store: store,
+            admissionController: AdmissionController(),
+            classifier: FoundationModelClassifier(runtime: runtime),
+            coveragePlanner: CoveragePlanner(),
+            mode: .shadow,
+            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
+            batteryLevelProvider: { 1.0 },
+            scanCohortJSON: makeTestScanCohortJSON()
         )
     }
 
@@ -499,73 +607,21 @@ struct FMDaemonMetadataStallRunnerTests {
         let transcriptVersion = "tx-e75l-batch"
         try await store.insertAsset(makeAsset(id: assetId))
 
-        let verbose = Array(
-            repeating: "Detailed editorial discussion without sponsor language.",
-            count: 60
-        ).joined(separator: "\n")
-        let segments = makeFMSegments(
-            analysisAssetId: assetId,
-            transcriptVersion: transcriptVersion,
-            lines: (0..<40).map { index in
-                let start = Double(index) * 10
-                return (start, start + 10, "\(verbose)\nSegment \(index).")
-            }
-        )
-        let inputs = BackfillJobRunner.AssetInputs(
-            analysisAssetId: assetId,
-            podcastId: "podcast-e75l-batch",
-            segments: segments,
-            evidenceCatalog: EvidenceCatalog(
-                analysisAssetId: assetId,
-                transcriptVersion: transcriptVersion,
-                entries: []
-            ),
-            transcriptVersion: transcriptVersion,
-            plannerContext: CoveragePlannerContext(
-                observedEpisodeCount: 20,
-                stableRecall: true,
-                isFirstEpisodeAfterCohortInvalidation: false,
-                recallDegrading: false,
-                sponsorDriftDetected: false,
-                auditMissDetected: false,
-                episodesSinceLastFullRescan: 1,
-                periodicFullRescanIntervalEpisodes: 10
-            )
-        )
-
+        let inputs = makeBatchInputs(assetId: assetId, transcriptVersion: transcriptVersion)
         let fmRuntime = TestFMRuntime(coarseSchemaTokenCountFailure: .metadataTimeout)
-        let runner = BackfillJobRunner(
-            store: store,
-            admissionController: AdmissionController(),
-            classifier: FoundationModelClassifier(runtime: fmRuntime.runtime),
-            coveragePlanner: CoveragePlanner(),
-            mode: .shadow,
-            capabilitySnapshotProvider: { makePermissiveCapabilitySnapshot() },
-            batteryLevelProvider: { 1.0 },
-            scanCohortJSON: makeTestScanCohortJSON()
-        )
+        let runner = makeBatchRunner(store: store, runtime: fmRuntime.runtime)
 
         _ = try await runner.runPendingBackfill(for: inputs)
 
         // The plan is `targetedWithAudit`, whose three phases are enqueued with
         // deterministic ids; enumerate them rather than trusting the RunResult,
         // which is precisely the accounting under test.
-        let phases: [BackfillJobPhase] = [
-            .scanHarvesterProposals, .scanLikelyAdSlots, .scanRandomAuditWindows
-        ]
-        var rows: [BackfillJob] = []
-        for (offset, phase) in phases.enumerated() {
-            let jobId = BackfillJobRunner.makeJobIdForTesting(
-                analysisAssetId: assetId,
-                transcriptVersion: transcriptVersion,
-                phase: phase,
-                offset: offset
-            )
-            if let row = try await store.fetchBackfillJob(byId: jobId) {
-                rows.append(row)
-            }
-        }
-        #expect(rows.count == phases.count, "vacuity: the plan must have enqueued all three phases")
+        let rows = try await fetchBatchRows(
+            store: store,
+            assetId: assetId,
+            transcriptVersion: transcriptVersion
+        )
+        #expect(rows.count == Self.batchPhases.count, "vacuity: the plan must have enqueued all three phases")
         #expect(rows.allSatisfy { $0.status != .failed },
                 "a metadata stall marked a job failed: \(rows.map { "\($0.phase.rawValue)=\($0.status.rawValue)" })")
         #expect(rows.allSatisfy { $0.status != .queued },
@@ -575,7 +631,124 @@ struct FMDaemonMetadataStallRunnerTests {
         // actually stopped the drain. `rateLimited-batchSibling` here would say
         // the daemon rate-limited us, which it did not.
         let siblingReasons = rows.compactMap(\.deferReason).filter { $0.contains("batchSibling") }
+        // R1-Fix3: `allSatisfy` is TRUE on an empty array, so without this the
+        // token assertion below would pass on a build where the drain never
+        // stopped and no sibling was ever swept — i.e. exactly the build where
+        // the sweep it is testing does not run.
+        #expect(!siblingReasons.isEmpty,
+                "vacuity: no sibling was swept, so the token assertion proves nothing")
         #expect(siblingReasons.allSatisfy { !$0.hasPrefix("rateLimited-") },
                 "a metadata stall deferred siblings as rate-limited: \(siblingReasons)")
+    }
+
+    @available(iOS 26.0, *)
+    @Test("ONE counter: a throttle then a metadata stall stops the drain, and the sibling names the stall")
+    func aThrottleAndAStallShareOneConsecutiveCounter() async throws {
+        // The load-bearing test for "kvs8's arm was GENERALIZED, not copied".
+        // `FMDaemonThrottle.consecutiveDeferStopThreshold` is 2, so with two
+        // per-kind counters neither would ever reach it here — job 1 is a
+        // throttle and job 2 is a metadata stall, one apiece — and job 3 would
+        // be dispatched rather than swept. Reaching the sweep at all is the
+        // proof that both populations advance the SAME counter.
+        //
+        // It also pins the "most recent refusal wins" rule: the sibling token
+        // must name the STALL, which is what crossed the threshold.
+        // `rateLimited-batchSibling` here would record a rate limit for a batch
+        // the daemon stopped serving for a different reason.
+        let store = try await makeTestStore()
+        let assetId = "asset-e75l-mixed"
+        let transcriptVersion = "tx-e75l-mixed"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let inputs = makeBatchInputs(assetId: assetId, transcriptVersion: transcriptVersion)
+
+        // First prologue round trip is a throttle; every later one is a stall.
+        let fmRuntime = TestFMRuntime(
+            coarseSchemaTokenCountFailure: .metadataTimeout,
+            coarseSchemaTokenCountFailures: [.rateLimited]
+        )
+        let runner = makeBatchRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let rows = try await fetchBatchRows(
+            store: store,
+            assetId: assetId,
+            transcriptVersion: transcriptVersion
+        )
+        #expect(rows.count == Self.batchPhases.count, "vacuity: the plan must have enqueued all three phases")
+        var reasons: [String] = []
+        for row in rows {
+            #expect(row.status == .deferred, "\(row.phase.rawValue) is \(row.status.rawValue)")
+            reasons.append(try #require(row.deferReason))
+        }
+
+        #expect(reasons.contains(FMDaemonRefusal.throttle.passPrologueCause),
+                "the throttled job did not record kvs8's cause: \(reasons)")
+        #expect(reasons.contains(FMDaemonRefusal.metadataStall.passPrologueCause),
+                "the stalled job did not record the stall cause: \(reasons)")
+
+        let siblings = reasons.filter { $0.contains("batchSibling") }
+        #expect(siblings == [FMDaemonRefusal.metadataStall.batchSiblingCause],
+                "the swept sibling must name the refusal that crossed the threshold: \(reasons)")
+    }
+}
+
+// MARK: - Source canary
+
+/// R1-Fix1's WIRING, which no runtime assertion in this file can observe.
+///
+/// A log line is not readable from a test on this harness, so the enum test
+/// above can prove `drainStoppedEvent` returns two names and still say nothing
+/// about whether the runner emits them. It did not: the drain-stop line carried
+/// kvs8's `fm.backfill.drain_stopped_by_throttle` as a hard-coded literal and
+/// fired verbatim for a batch stopped by a wedged tokenizer. Same technique and
+/// same rationale as `FMDaemonThrottleCanaryTests`.
+final class FMDaemonRefusalEventWiringCanaryTests: XCTestCase {
+
+    private func runnerSource() throws -> [String] {
+        var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<3 {
+            root.deleteLastPathComponent()
+        }
+        let url = root
+            .appendingPathComponent("Playhead/Services/AdDetection/BackfillJobRunner.swift")
+        return try String(contentsOf: url, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+    }
+
+    /// Both daemon-refusal event names must reach the log through the enum. A
+    /// literal here is how the name and the condition drift apart.
+    func testDaemonRefusalLogEventsAreNotHardCodedInTheRunner() throws {
+        let lines = try runnerSource()
+
+        // Vacuity guard: the file must have been found and be the real one.
+        XCTAssertGreaterThan(lines.count, 1_000, "source read found only \(lines.count) code lines")
+        XCTAssertTrue(
+            lines.contains { $0.contains("FMDaemonRefusal.classify(") },
+            "BackfillJobRunner no longer classifies daemon refusals; move this canary with the code."
+        )
+
+        let offenders = lines.enumerated()
+            .filter { $0.element.contains("fm.backfill.drain_stopped_by") || $0.element.contains("fm.backfill.job_throttled") }
+            .map { "\($0.offset + 1): \($0.element.trimmingCharacters(in: .whitespaces))" }
+
+        XCTAssertTrue(
+            offenders.isEmpty,
+            """
+            A daemon-refusal log EVENT NAME is hard-coded in BackfillJobRunner. It must come from \
+            `FMDaemonRefusal.logEvent` / `.drainStoppedEvent`, because an event name is the unit a \
+            support-bundle grep counts: a literal `..._by_throttle` fires for a drain stopped by a \
+            metadata stall and inflates the rate-limit count with an event that never happened.
+            \(offenders.joined(separator: "\n"))
+            """
+        )
+
+        XCTAssertTrue(
+            lines.contains { $0.contains("drainStoppedEvent") },
+            "the drain-stop line no longer reads `drainStoppedEvent`; it cannot be naming the refusal that stopped it."
+        )
     }
 }
