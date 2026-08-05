@@ -1009,8 +1009,18 @@ extension EpisodeSeconds {
 //            — one typed parameter, sole quantity in scope.
 //        That is the shape of every real clearance in this bead: not "the
 //        expression looks careful" but "there is no second quantity in scope to
-//        write". Five of twenty-six. The other twenty-one are either closed by
-//        a named function (TY15–TY25) or measured open above.
+//        write". FIVE of twenty-six, and that is the whole cleared set.
+//
+//        WHERE THE OTHER TWENTY-ONE WENT, re-counted after the R4 fixes rather
+//        than inferred: SIX lines stopped existing, because moving a demotion
+//        inside a named function removes the `.rawValue` rather than guarding
+//        it — the two guards at `adScanFraction` and the four that made up the
+//        two `fraction` helpers. The surface outside this file is now 20 lines
+//        carrying 20 reads (measured, not derived: it was 26 lines / 30 reads,
+//        four of which read two quantities on one line). FIFTEEN of those 20
+//        are measured OPEN by the probes above; five are the cleared set. So
+//        the census shrank by closing, not by re-labelling, which is the only
+//        direction that means anything.
 //
 //        THE CORRECTED RULE. `.rawValue` is where a type stops applying on the
 //        way OUT; it is not the only place types stop applying. A quantity is
