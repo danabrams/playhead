@@ -151,6 +151,24 @@ struct FMDaemonRefusalDefinitionTests {
             == "fm.backfill.drain_stopped_by_daemon_metadata_stall")
         #expect(!FMDaemonRefusal.metadataStall.drainStoppedEvent.contains("throttle"))
 
+        // R5-Fix2: the PER-JOB event names are pinned as literals too, and until
+        // R5 neither was. `drainStoppedEvent` was pinned for BOTH kinds three
+        // lines up while `logEvent` had only
+        // `metadataStall.logEvent != throttle.logEvent` a few lines down — which
+        // a rename satisfies, because renaming one still leaves them different.
+        //
+        // The asymmetry mattered because this bead MOVED `fm.backfill.job_throttled`
+        // out of a hard-coded literal in `BackfillJobRunner`'s log line and into
+        // this enum. It is kvs8's shipped event name and what an existing
+        // support-bundle grep counts, so a mis-spelling in the move makes that
+        // grep read zero with nothing anywhere going red — the source canary
+        // below derives its forbidden set from `allCases`, so it dutifully
+        // forbids whatever the NEW spelling happens to be. Probe PB1 renamed
+        // this to `fm.backfill.job_daemon_throttled` and all eight suites in
+        // this bead's scope passed. Mutation DR17.
+        #expect(FMDaemonRefusal.throttle.logEvent == "fm.backfill.job_throttled")
+        #expect(FMDaemonRefusal.metadataStall.logEvent == "fm.backfill.job_daemon_metadata_stalled")
+
         let events = FMDaemonRefusal.allCases.flatMap { [$0.logEvent, $0.drainStoppedEvent] }
         #expect(Set(events).count == events.count, "two events share a name: \(events)")
     }
@@ -745,6 +763,66 @@ struct FMDaemonMetadataStallRunnerTests {
         #expect(siblings == [FMDaemonRefusal.metadataStall.batchSiblingCause],
                 "the swept sibling must name the refusal that crossed the threshold: \(reasons)")
     }
+
+    @available(iOS 26.0, *)
+    @Test("a THROTTLE-terminated drain sweeps its siblings with kvs8's rateLimited-batchSibling")
+    func aThrottleTerminatedDrainSweepsWithTheThrottleToken() async throws {
+        // R5-Fix3, and it is the mirror that was missing. This bead moved kvs8's
+        // swept-sibling token out of a literal
+        // (`FMDaemonThrottle.DeferCause.batchSibling.rawValue`) and behind a
+        // per-kind property on `FMDaemonRefusal`. Both e75l batch tests are
+        // STALL-terminated and both expect the stall's token, so every rail on
+        // that property proved only "not always the THROTTLE's" — which is
+        // mutation DR04. Nothing proved "not always the STALL's", and probe PB5
+        // hard-coded `FMDaemonRefusal.metadataStall.batchSiblingCause` at the
+        // sweep and every suite in this bead's scope stayed green. On a device
+        // that is a drain the daemon RATE-LIMITED recording a wedged tokenizer
+        // that never happened, in the durable column an operator greps — the
+        // exact substitution the per-kind tokens exist to prevent, running in
+        // the direction nobody had run it.
+        //
+        // kvs8's own `throttledBatchStrandsNothing` cannot cover it and it is
+        // worth saying why rather than assuming: it passes an EMPTY
+        // `EvidenceCatalog`, so `.scanHarvesterProposals` narrows to zero
+        // windows and COMPLETES, which resets the consecutive counter, so the
+        // drain never reaches the stop threshold and no sibling is ever swept.
+        // This bead's R1 found exactly that and built `makeBatchInputs` to fix
+        // it — the fixture that makes the sweep observable already existed here
+        // and had only ever been pointed at a stall.
+        let store = try await makeTestStore()
+        let assetId = "asset-e75l-throttle-batch"
+        let transcriptVersion = "tx-e75l-throttle-batch"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let inputs = makeBatchInputs(assetId: assetId, transcriptVersion: transcriptVersion)
+        let fmRuntime = TestFMRuntime(coarseSchemaTokenCountFailure: .rateLimited)
+        let runner = makeBatchRunner(store: store, runtime: fmRuntime.runtime)
+
+        _ = try await runner.runPendingBackfill(for: inputs)
+
+        let rows = try await fetchBatchRows(
+            store: store,
+            assetId: assetId,
+            transcriptVersion: transcriptVersion
+        )
+        #expect(rows.count == Self.batchPhases.count, "vacuity: the plan must have enqueued all three phases")
+        var reasons: [String] = []
+        for row in rows {
+            #expect(row.status == .deferred, "\(row.phase.rawValue) is \(row.status.rawValue)")
+            reasons.append(try #require(row.deferReason))
+        }
+
+        let siblings = reasons.filter { $0.contains("batchSibling") }
+        // The R1-Fix3 guard, for the same reason it exists next door: an empty
+        // array makes the token assertion prove nothing, and an empty array is
+        // exactly what a build where the drain never stops produces.
+        #expect(!siblings.isEmpty,
+                "vacuity: no sibling was swept, so the token assertion proves nothing")
+        #expect(Set(siblings) == [FMDaemonRefusal.throttle.batchSiblingCause],
+                "a throttle-stopped drain must sweep with kvs8's token: \(reasons)")
+        #expect(reasons.contains(FMDaemonRefusal.throttle.passPrologueCause),
+                "the throttled jobs did not record kvs8's own cause: \(reasons)")
+    }
 }
 
 // MARK: - Source canaries
@@ -1034,6 +1112,79 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// R5-Fix1: the drain-stop line's `deferredSiblings=` must count THE SWEEP.
+    ///
+    /// It counted `deferred.count`, and `deferred` is the drain-WIDE
+    /// accumulator — the admission-defer branch, the rate-limited
+    /// coarse-coverage-hole defer, playhead-41mu's under-coverage terminal and
+    /// the refused job's OWN defer have all appended to it before the drain-stop
+    /// line runs. So the field named for the siblings reported every job the
+    /// sweep did not touch: measured on the mixed-refusal fixture, 3 for one
+    /// swept sibling.
+    ///
+    /// The sharpest form of it is that the old value could never read ZERO.
+    /// Reaching that line requires `consecutiveDaemonRefusals >= 2` and each of
+    /// those refusals appended, so the one thing an operator most wants the
+    /// field to be able to say — the stop landed on the last job and cost the
+    /// batch nothing — was unrepresentable. This is the fourth field on the line
+    /// whose event name R1 corrected and whose `siblingCause=` R2 corrected, and
+    /// it is the same defect class all three times.
+    ///
+    /// A log line's argument is not observable from any runtime assertion on
+    /// this harness, which is why it is checked here rather than in the runner
+    /// suite. The rule is deliberately not "do not write `deferred.count`" — a
+    /// blacklist of the spelling that was wrong is the shape R2-Fix2, R3-Fix1
+    /// and R4-Fix8 each had to replace. It judges the ARGUMENT, extracted by
+    /// balanced-paren scan over the dense read so a spelling split across lines
+    /// is the same argument, and then requires the identifier it names to occur
+    /// EXACTLY THREE times in the runner's code: declared, incremented, read. No
+    /// drain-wide accumulator can satisfy that — `deferred` occurs nine times.
+    func testDrainStopSiblingCountIsTheSweepNotTheDrainTotal() throws {
+        let lines = try runnerSource()
+        XCTAssertGreaterThan(lines.count, 1_000, "source read found only \(lines.count) code lines")
+
+        let dense = Self.denseCode(lines)
+        let arguments = Self.firstArguments(after: "deferredSiblings=\\(", in: dense)
+        // Vacuity: the field must exist, and exactly once, or this test would
+        // pass by looking at nothing — the failure direction a count FLOOR alone
+        // cannot cover (R4's DR14 lesson).
+        XCTAssertEqual(
+            arguments.count,
+            1,
+            "expected exactly one `deferredSiblings=` field on the drain-stop line; found \(arguments)"
+        )
+        let argument = try XCTUnwrap(arguments.first)
+
+        // Every collection in scope at that line spans the whole drain rather
+        // than the sweep, so a `.count` of any of them is the defect.
+        XCTAssertFalse(
+            argument.hasSuffix(".count"),
+            """
+            The drain-stop line reports `deferredSiblings=\\(\(argument))`. Every collection in \
+            scope there is drain-WIDE — `deferred` also holds admission defers, rate-limited \
+            coverage-hole defers, under-coverage terminals and the refused job's own defer — so a \
+            field named for the sweep would be holding the drain's total, and could never read \
+            zero. Count the sweep.
+            """
+        )
+
+        // And what it does name must be a counter local to the sweep: declared
+        // once, incremented once, read once. This is what makes the check a rule
+        // about the QUANTITY rather than a memory of the spelling that was wrong.
+        let reads = lines.filter { $0.text.contains(argument) }
+        XCTAssertEqual(
+            reads.count,
+            3,
+            """
+            `\(argument)` appears on \(reads.count) code lines in BackfillJobRunner; expected 3 — \
+            the declaration, the increment inside the sweep loop, and the drain-stop line that \
+            reports it. More than three means the quantity is shared with something other than the \
+            sibling sweep, which is exactly how a field named for the sweep comes to hold the \
+            drain's total. Sites: \(reads.map(\.number))
+            """
+        )
+    }
+
     /// R2-Fix1: the durable cause tokens must not join a FOREIGN prefix family.
     ///
     /// The runner writes `inferenceTimeout-noProgress` (playhead-8d5r) when the
@@ -1256,10 +1407,17 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
     /// the first argument is extracted by balanced-paren scan and matched
     /// EXACTLY. `.seconds(30)`, `shortBudget` and `FMInferenceDeadline.standard/10`
     /// are all offenders; nothing that merely mentions an allowed name passes.
-    private static func inferenceBudgetArguments(in dense: String) -> [String] {
+    /// The FIRST argument of every `marker`-introduced call or interpolation in a
+    /// dense read, by balanced-paren scan.
+    ///
+    /// R4-Fix3 wrote this scan for the budget canary. R5 lifted it out rather
+    /// than writing a second copy for the sibling-count canary below: judging the
+    /// ARGUMENT — not the line, and not whether the line merely mentions
+    /// something — is what four R4 probes bought, and it should be bought once.
+    static func firstArguments(after marker: String, in dense: String) -> [String] {
         var arguments: [String] = []
         var searchRange = dense.startIndex..<dense.endIndex
-        while let call = dense.range(of: "FMInferenceDeadline.run(", range: searchRange) {
+        while let call = dense.range(of: marker, range: searchRange) {
             var depth = 1
             var index = call.upperBound
             let start = index
@@ -1281,6 +1439,10 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
             searchRange = call.upperBound..<dense.endIndex
         }
         return arguments
+    }
+
+    private static func inferenceBudgetArguments(in dense: String) -> [String] {
+        firstArguments(after: "FMInferenceDeadline.run(", in: dense)
     }
 
     func testEveryProductionInferenceBudgetIsEnumerated() throws {

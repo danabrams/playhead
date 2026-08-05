@@ -1471,6 +1471,25 @@ actor BackfillJobRunner {
             // so on a line whose name already carries the condition, reading it
             // as "why the drain stopped" is reading a value that names
             // something else. The event NAME is the answer to that question.
+            //
+            // R5-Fix1: and `deferredSiblings=` counts THE SWEEP, not `deferred`.
+            // `deferred` is the drain-WIDE accumulator: the admission-defer
+            // branch, the rate-limited coarse-coverage-hole defer, playhead-41mu's
+            // under-coverage terminal and the refused job's OWN defer have all
+            // appended to it before this line runs, so a field named for the
+            // siblings was reporting every job the sweep did not touch. The
+            // sharpest way to see it is that reaching this line requires
+            // `consecutiveDaemonRefusals >= 2` and each of those refusals
+            // appended, so the old value could never read ZERO — the one thing an
+            // operator most wants it to be able to say, which is that the stop
+            // landed on the last job and cost the batch nothing. Measured on the
+            // mixed-refusal fixture it printed 3 for one swept sibling. Same line
+            // and same defect class as R1's event name and R2's `siblingCause=`:
+            // a value that names one thing read as though it named another.
+            //
+            // Incremented only on a SUCCESSFUL defer, so a sibling skipped by the
+            // terminal-row guard below is correctly not counted as swept.
+            var sweptSiblingCount = 0
             for candidate in enqueuedJobs where
                 !admitted.contains(candidate.jobId)
                 && !deferred.contains(candidate.jobId)
@@ -1481,6 +1500,7 @@ actor BackfillJobRunner {
                         reason: refusalThatStoppedUs.batchSiblingCause
                     )
                     deferred.append(candidate.jobId)
+                    sweptSiblingCount += 1
                 } catch let error as AnalysisStoreError {
                     // R4-Fix1's reasoning: the M-5 idempotency path re-enqueues
                     // terminal rows, and the C-R3-1 status guard rejects the
@@ -1499,7 +1519,7 @@ actor BackfillJobRunner {
                 \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
                 consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
                 siblingCause=\(refusalThatStoppedUs.batchSiblingCause, privacy: .public) \
-                deferredSiblings=\(deferred.count, privacy: .public)
+                deferredSiblings=\(sweptSiblingCount, privacy: .public)
                 """
             )
             break
