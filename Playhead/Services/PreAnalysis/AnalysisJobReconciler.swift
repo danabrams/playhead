@@ -1393,9 +1393,22 @@ actor AnalysisJobReconciler {
             // divides, a gappy transcript reads 100 % over audio nobody
             // transcribed (the playhead-sd71 antipattern) — a hazard the
             // 2026-08-03 pull STILL exhibits with the area spanning both passes,
-            // on NINE of twelve assets: D9B513CD reads 100.0 % by chunk-max
-            // watermark against an 88.3 % two-pass area — an 11.7 pp gap that
-            // flips the 0.95 floor this very guard applies. See
+            // on NINE of twelve assets — and R6 review re-derived that nine and
+            // NAMED it, because the pull carries three different nines-of-twelve
+            // and this sentence identified none of them. THIS nine is "chunk-max
+            // watermark strictly above the bridged two-pass area": 44F076BB,
+            // 4FF3A238, 53FC53E3, 58882C47, 83592353, AD5F3A0A, D9B513CD,
+            // DE0784D8, FCDDB309. It is NOT the nine at
+            // `AnalysisStore.fetchCoverageSummariesByAssetIds` ("fast-only
+            // ceiling below the 0.98 sufficiency floor"), with which it shares
+            // only six members, and it is NOT the nine with no coverage-lane row
+            // at all (`adScanFraction` ABSENT, not zero). Quoting a count without
+            // its population is instances 15/16/17 of this bead's own catalogue.
+            //
+            // Only ONE member of this nine actually flips the 0.95 floor, and it
+            // is the one worth naming: D9B513CD reads 100.0 % by chunk-max
+            // watermark against an 88.3 % two-pass area — an 11.7 pp gap, where
+            // the other eight are 0.4–2.5 pp and land the same side of it. See
             // ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
             // for the table, for why the watermark is `chunks.map(\.endTime).max()`
             // and not the fast-pass COLUMN, and for the four successive drafts of
