@@ -67,7 +67,7 @@ struct AdScanRedriveDecisionTests {
             (0.000, 2),  // 4E4730D8 — scan examined nothing
         ]
     )
-    func strandedDeviceAssetsMint(adScanFraction: Double, resumable: Int) {
+    func strandedDeviceAssetsMint(adScanFraction: ReachRatio, resumable: Int) {
         #expect(
             AnalysisWorkScheduler.shouldMintAdScanRedrive(
                 adScanFraction: adScanFraction,
@@ -84,7 +84,7 @@ struct AdScanRedriveDecisionTests {
     /// fix — so a low fraction alone must never license a pass.
     @Test("a drained coverage lane never mints, however low the coverage")
     func drainedCoverageLaneNeverMints() {
-        for fraction in [0.0, 0.067, 0.5, 0.9] {
+        for fraction: ReachRatio in [0.0, 0.067, 0.5, 0.9] {
             #expect(
                 AnalysisWorkScheduler.shouldMintAdScanRedrive(
                     adScanFraction: fraction,
@@ -113,7 +113,7 @@ struct AdScanRedriveDecisionTests {
         )
         #expect(
             AnalysisWorkScheduler.shouldMintAdScanRedrive(
-                adScanFraction: episodePreparationCompleteThreshold - 0.001,
+                adScanFraction: ReachRatio(episodePreparationCompleteThreshold.rawValue - 0.001),
                 resumableCoverageJobCount: 1
             )
         )
@@ -125,7 +125,7 @@ struct AdScanRedriveDecisionTests {
     @Test("mint and skip are complementary across the coverage range")
     func mintAndSkipAreComplementary() {
         for step in 0...100 {
-            let fraction = Double(step) / 100.0
+            let fraction = ReachRatio(Double(step) / 100.0)
             let mints = AnalysisWorkScheduler.shouldMintAdScanRedrive(
                 adScanFraction: fraction,
                 resumableCoverageJobCount: 1
@@ -153,7 +153,7 @@ struct AdScanRedriveDecisionTests {
                 resumableCoverageJobCount: 1
             )
         )
-        for poisoned in [Double.nan, .infinity, -.infinity] {
+        for poisoned: ReachRatio in [ReachRatio(.nan), ReachRatio(.infinity), ReachRatio(-.infinity)] {
             #expect(
                 AnalysisWorkScheduler.shouldMintAdScanRedrive(
                     adScanFraction: poisoned,
@@ -1115,7 +1115,7 @@ struct AdScanRedriveSchedulerTests {
         return keys
     }
 
-    private func adScanFraction(_ store: AnalysisStore) async throws -> Double? {
+    private func adScanFraction(_ store: AnalysisStore) async throws -> ReachRatio? {
         try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]?
             .adScanFraction
     }

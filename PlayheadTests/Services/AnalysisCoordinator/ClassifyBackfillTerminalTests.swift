@@ -267,7 +267,9 @@ struct ClassifyBackfillTerminalTests {
             budgetCancelled: false,
             transcriptFailed: false,
             featureFailed: false,
-            adScan: .init(fraction: 90.0 / 3468.0, limit: .stoppedShort)
+            adScan: AnalysisCoordinator.AdScanCoverage(
+                fraction: ReachRatio(90.0 / 3468.0), limit: .stoppedShort
+            )
         )
         #expect(verdict.state != .completeFull)
         #expect(verdict.state == .completeAdScanPartial)
@@ -300,7 +302,7 @@ struct ClassifyBackfillTerminalTests {
         duration: Double,
         transcriptEnd: Double,
         featureEnd: Double,
-        adScanFraction: Double
+        adScanFraction: ReachRatio
     ) {
         let verdict = AnalysisCoordinator.classifyBackfillTerminal(
             chunks: [chunk(startTime: 0, endTime: transcriptEnd)],
@@ -309,7 +311,7 @@ struct ClassifyBackfillTerminalTests {
             budgetCancelled: false,
             transcriptFailed: false,
             featureFailed: false,
-            adScan: .init(fraction: adScanFraction, limit: .stoppedShort)
+            adScan: AnalysisCoordinator.AdScanCoverage(fraction: adScanFraction, limit: .stoppedShort)
         )
         #expect(verdict.state == .completeAdScanPartial)
     }
@@ -335,7 +337,7 @@ struct ClassifyBackfillTerminalTests {
     /// A non-finite fraction must not sneak past the comparison.
     @Test("non-finite ad-scan fractions do not satisfy the clean terminal")
     func nonFiniteAdScanIsNotCompleteFull() {
-        for poisoned in [Double.nan, .infinity, -.infinity] {
+        for poisoned: ReachRatio in [ReachRatio(.nan), ReachRatio(.infinity), ReachRatio(-.infinity)] {
             let verdict = AnalysisCoordinator.classifyBackfillTerminal(
                 chunks: [chunk(startTime: 0, endTime: 3600)],
                 episodeDuration: 3600,
@@ -343,7 +345,7 @@ struct ClassifyBackfillTerminalTests {
                 budgetCancelled: false,
                 transcriptFailed: false,
                 featureFailed: false,
-                adScan: .init(fraction: poisoned, limit: .stoppedShort)
+                adScan: AnalysisCoordinator.AdScanCoverage(fraction: poisoned, limit: .stoppedShort)
             )
             #expect(verdict.state == .completeAdScanPartial, "\(poisoned) must not clean-complete")
         }
@@ -397,8 +399,10 @@ struct ClassifyBackfillTerminalTests {
             budgetCancelled: false,
             transcriptFailed: false,
             featureFailed: false,
-            adScan: .init(
-                fraction: AnalysisCoordinator.AdScanCoverage.sufficientFraction - 0.01,
+            adScan: AnalysisCoordinator.AdScanCoverage(
+                fraction: ReachRatio(
+                    AnalysisCoordinator.AdScanCoverage.sufficientFraction.rawValue - 0.01
+                ),
                 limit: .refusal
             )
         )
@@ -425,7 +429,7 @@ struct ClassifyBackfillTerminalTests {
                 == AnalysisCoordinator.AdScanCoverage.sufficientFraction
         )
         #expect(
-            AnalysisCoordinator.AdScanCoverage.sufficientFraction
+            AnalysisCoordinator.AdScanCoverage.sufficientFraction.rawValue
                 != AnalysisCoordinator.finalizeBackfillMinCoverageRatio,
             "the ad-scan floor must not silently inherit the transcript's floor"
         )

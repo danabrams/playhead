@@ -216,7 +216,7 @@ struct BackfillCoarseCheckpointTests {
         struct Sample: Sendable {
             let respondOrdinal: Int
             let durableSuccessRows: Int
-            let durableCursor: Double?
+            let durableCursor: EpisodeSeconds?
             let maxDurableWindowEndTime: Double?
         }
 
@@ -258,7 +258,7 @@ struct BackfillCoarseCheckpointTests {
         func sample(respondOrdinal: Int) async {
             let rows = (try? await store.fetchSemanticScanResults(analysisAssetId: assetId)) ?? []
             let successes = rows.filter { $0.scanPass == "passA" && $0.status == .success }
-            var cursor: Double?
+            var cursor: EpisodeSeconds?
             if let jobId = await runningJobId(),
                let job = try? await store.fetchBackfillJob(byId: jobId) {
                 cursor = job.progressCursor?.lastProcessedUpperBoundSec
@@ -411,19 +411,19 @@ struct BackfillCoarseCheckpointTests {
 
         let samples = await observer.samples
         #expect(samples.count > 2)
-        var previousCursor = 0.0
+        var previousCursor = EpisodeSeconds(0)
         var sawAPositiveCursor = false
         for sample in samples {
             guard let cursor = sample.durableCursor else { continue }
             // Never past audio nobody screened. This is the invariant the whole
             // coverage walk exists to hold.
             let covered = try #require(sample.maxDurableWindowEndTime)
-            #expect(cursor <= covered)
+            #expect(cursor.rawValue <= covered)
             // Monotonic: a resume must never be told to go back and re-scan, and
             // must never be told to skip forward over a hole.
             #expect(cursor >= previousCursor)
             previousCursor = cursor
-            if cursor > 0 { sawAPositiveCursor = true }
+            if cursor.rawValue > 0 { sawAPositiveCursor = true }
         }
         // `cursorAdvanced` treats a cursor of 0 as no progress, so a cursor that
         // never becomes positive would narrow nothing on the next run.
@@ -533,7 +533,7 @@ struct BackfillCoarseCheckpointTests {
         #expect(!resubmitted.isEmpty, "run 2 did no work at all — the assertion below would be vacuous")
         // Line ref `i` covers `[30i, 30i+30)`, so every ref whose window ends at
         // or below the cursor is audio run 1 already screened and banked.
-        let coveredRefs = resubmitted.filter { Double($0 + 1) * Self.segmentSeconds <= cursor }
+        let coveredRefs = resubmitted.filter { Double($0 + 1) * Self.segmentSeconds <= cursor.rawValue }
         #expect(coveredRefs.isEmpty, "run 2 re-scanned already-durable audio: \(coveredRefs.sorted())")
 
         // The work run 1 banked is still there, once each, after run 2 wrote its
@@ -1235,7 +1235,7 @@ struct BackfillCoarseCheckpointTests {
             plans: [CoarsePassWindowPlan],
             windows: [FMCoarseWindowOutput],
             failedWindows: [CoarseWindowFailure]
-        ) async throws -> Double? {
+        ) async throws -> EpisodeSeconds? {
             let assetId = "asset-26od-wiring-\(label)"
             let jobId = "job-26od-wiring-\(label)"
             try await store.insertAsset(makeAsset(id: assetId))
@@ -1273,7 +1273,7 @@ struct BackfillCoarseCheckpointTests {
         )
         #expect(
             promoted == 30.0,
-            "the cursor followed the furthest window banked (\(promoted as Double?)) instead of the contiguous prefix"
+            "the cursor followed the furthest window banked (\(promoted as EpisodeSeconds?)) instead of the contiguous prefix"
         )
 
         // 2. A hole with a success behind it — the same claim, reached through a
@@ -1284,7 +1284,7 @@ struct BackfillCoarseCheckpointTests {
             windows: [windowAt(0), windowAt(2)],
             failedWindows: [failureAt(1)]
         )
-        #expect(hole == 30.0, "the cursor stepped over a failed window: \(hole as Double?)")
+        #expect(hole == 30.0, "the cursor stepped over a failed window: \(hole as EpisodeSeconds?)")
 
         // 3. playhead-qbib: plan 0 produced BOTH a window and a failure, so it is
         //    not covered and the cursor cannot start at all. Only reachable if the
@@ -1297,7 +1297,7 @@ struct BackfillCoarseCheckpointTests {
         )
         #expect(
             partial == nil,
-            "a partially-recovered plan was credited: cursor \(partial as Double?)"
+            "a partially-recovered plan was credited: cursor \(partial as EpisodeSeconds?)"
         )
     }
 
@@ -1344,7 +1344,7 @@ struct BackfillCoarseCheckpointTests {
         let job = try #require(try await store.fetchBackfillJob(byId: jobId))
         #expect(
             job.progressCursor?.lastProcessedUpperBoundSec == 300.0,
-            "the checkpoint rewound the cursor to \(job.progressCursor?.lastProcessedUpperBoundSec as Double?)"
+            "the checkpoint rewound the cursor to \(job.progressCursor?.lastProcessedUpperBoundSec as EpisodeSeconds?)"
         )
     }
 
@@ -2257,7 +2257,7 @@ struct CoarseCoverageWalkTests {
         let cursor = walk.contiguousUpperBoundSec ?? 0
         for unscannedSegmentEnd in [95.0, 125.0] {
             #expect(
-                unscannedSegmentEnd > cursor,
+                unscannedSegmentEnd > cursor.rawValue,
                 "a resume at cursor \(cursor) drops unscanned audio ending at \(unscannedSegmentEnd)"
             )
         }

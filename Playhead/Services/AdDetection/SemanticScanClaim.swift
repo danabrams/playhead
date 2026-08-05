@@ -23,7 +23,7 @@ import os
 /// but that area was measured over the FAST pass alone, and 48E903D7's
 /// transcript is mostly final-pass. Across both passes it covers 95.1 % as a
 /// bridged area, which agrees with the watermark. The measurement was wrong,
-/// not the watermark; see ``bridgedTranscriptCoveredSec(ranges:)``. The
+/// not the watermark; see ``bridgedTranscriptCoveredSec(region:)``. The
 /// principle in ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
 /// stands unchanged — this gate divides an area and never a watermark — and it
 /// still stands on the pull as well as on its fixtures. Widening the area to
@@ -164,8 +164,10 @@ enum SemanticScanClaim {
     /// so ``AnalysisCoverageSummary/adScanFraction`` is `nil` — never a
     /// synthetic 0. Reading `nil` as "covered" would make the never-scanned
     /// asset the one case a claim is never minted for.
-    static func isOwed(adScanFraction: Double?) -> Bool {
-        guard let adScanFraction, adScanFraction.isFinite else { return true }
+    static func isOwed(adScanFraction: ReachRatio?) -> Bool {
+        // playhead-x0lb: `finiteValue` is absence and non-finiteness stated as
+        // one fact, because every consumer of this quantity treats them as one.
+        guard let adScanFraction = adScanFraction.finiteValue else { return true }
         return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
     }
 
@@ -174,8 +176,8 @@ enum SemanticScanClaim {
     /// ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)`` is
     /// meant to be handed.
     ///
-    /// **playhead-9y9e: the ranges must span BOTH passes**
-    /// (``AnalysisStore/fetchTranscriptCoveredRanges(assetId:)``), because the
+    /// **playhead-9y9e: the region must span BOTH passes**
+    /// (``AnalysisStore/fetchTranscribedRegion(assetId:)``), because the
     /// region this gate measures has to be the region
     /// ``AnalysisCoverageSummary/adScanCoveredSec`` is intersected with — that
     /// is the whole commensurability argument below. It was handed
@@ -186,6 +188,15 @@ enum SemanticScanClaim {
     /// same shape and more extreme — its passes are DISJOINT, final `[0, 930]`
     /// and fast `[930, 2086]`, so the fast-only reading is 55.4 % of an episode
     /// transcribed end to end.
+    ///
+    /// **playhead-x0lb R5 review: that paragraph is now a TYPE.** It was still
+    /// only a paragraph — the parameter took a bare
+    /// `[(start: Double, end: Double)]`, and `fetchFastTranscriptCoveredRanges`
+    /// returned the identical type, so the substitution the sentence forbids was
+    /// writable at both of this function's production call sites. Both probes
+    /// COMPILED before this change (rails TY32 / TY34), which is the same shape
+    /// as every other finding on this bead: a sentence forbidding a substitution
+    /// next to an expression that permits it.
     ///
     /// **The raw chunk union is not a reach measure and using it as one made
     /// this sweep mint nothing at all.** A `transcript_chunks` row spans the
@@ -215,15 +226,16 @@ enum SemanticScanClaim {
     /// and gating on something LARGER than the bridged region (the watermark)
     /// would solicit passes whose scan fraction could never reach the floor
     /// that retires them.
-    static func bridgedTranscriptCoveredSec(
-        ranges: [(start: Double, end: Double)]
-    ) -> Double {
-        AnalysisCoverageMath.unionedSeconds(
-            AnalysisCoverageMath.bridgingShortGaps(
-                ranges,
-                upTo: AnalysisCoverageMath.adScanBridgeableGapSec
-            )
-        )
+    ///
+    /// **playhead-x0lb R6 review: the RETURN type is now a
+    /// ``BridgedTranscriptSeconds`` too, and R5 typing only the argument is why
+    /// it had to be.** R5 closed which REGION goes in and left what comes out a
+    /// bare `Double`, so at the call site the correct expression sat beside a
+    /// watermark and a raw union of the same type — three probes, three
+    /// COMPILED. That is R4's lesson at one more layer: a typed INPUT is not a
+    /// typed OPERATION. Rails TY35–TY37.
+    static func bridgedTranscriptCoveredSec(region: TranscribedRegion) -> BridgedTranscriptSeconds {
+        region.bridgedSeconds(bridging: AnalysisCoverageMath.adScanBridgeableGapSec)
     }
 
     /// Has the transcript reached far enough that a scan has something to read?
@@ -239,7 +251,7 @@ enum SemanticScanClaim {
     /// **The CONSTANT is shared with `finalizeBackfill`; the NUMERATOR is
     /// deliberately not.** ``AnalysisCoordinator/finalizeBackfillVerdict(chunks:episodeDuration:)``
     /// divides `chunks.map(\.endTime).max()` — a WATERMARK — by the duration.
-    /// The caller here passes ``bridgedTranscriptCoveredSec(ranges:)``,
+    /// The caller here passes ``bridgedTranscriptCoveredSec(region:)``,
     /// which is an AREA. They agree on a contiguous transcript and diverge on a
     /// gappy one, where the watermark reads 100 % over audio nobody transcribed
     /// (the watermark-vs-union antipattern playhead-sd71 fixed on the Activity
@@ -305,22 +317,47 @@ enum SemanticScanClaim {
     /// So this gate is strictly stricter than `finalizeBackfill`'s. An asset it
     /// would complete can fail here, on purpose, and it stays the transcript
     /// lane's problem until the holes fill. What the numerator must NOT be is
-    /// the RAW union — see ``bridgedTranscriptCoveredSec(ranges:)`` for the
+    /// the RAW union — see ``bridgedTranscriptCoveredSec(region:)`` for the
     /// measurement showing that reads 0/12 in the field.
     ///
     /// Unmeasurable inputs return `false`. This gate SUPPRESSES a mint, so the
     /// safe direction is the opposite of `isOwed`'s: an asset whose transcript
     /// reach cannot be established has not been shown to be ready for a scan,
     /// and the transcript lane will come back to it.
+    ///
+    /// **playhead-x0lb R6 review: BOTH parameters carry types, and this was the
+    /// round's largest finding.** They were `Double?` and `Double?`, and the
+    /// audit cleared them as latent instance L1 (playhead-fpnt) with an argument
+    /// rather than a probe. Three substitutions were planted at
+    /// `AnalysisJobRunner.transcriptCoverageOfCompletedTranscript` and all three
+    /// COMPILED: the RAW union off the same region (playhead-fil5 R3's P0, and
+    /// zero of twelve field assets clear 0.95 raw), the fast WATERMARK from three
+    /// lines above (D9B513CD reads 100.0 % against an 88.3 % area — across this
+    /// very floor), and the numerator and denominator EXCHANGED. See
+    /// ``BridgedTranscriptSeconds``; rails TY35–TY37.
+    ///
+    /// **The arithmetic is unchanged and the guards are the same guards**, moved
+    /// into ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)`` so the
+    /// division is written once with the numerator as the receiver — R4's
+    /// TY24/TY25 fix, applied here because a typed pair is not a typed operation.
+    /// A negative numerator clamps to 0 and fails the floor exactly as
+    /// `coveredSec >= 0` refused it; an absent or non-positive duration yields
+    /// `nil` exactly as `episodeDurationSec > 0` refused it.
+    ///
+    /// **`finiteValue` on both terms is load-bearing and is NOT decoration.**
+    /// ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)`` clamps into
+    /// `[0, 1]`, and a `+∞` numerator clamps to `1.0` — which would CLEAR this
+    /// floor, where `coveredSec.isFinite` refused it. Delegating the division
+    /// without re-stating the finiteness guard was a behaviour change written
+    /// while removing one, so it is spelled out rather than inherited.
     static func transcriptClearsFinalizeFloor(
-        coveredSec: Double?,
-        episodeDurationSec: Double?
+        coveredSec: BridgedTranscriptSeconds?,
+        episodeDurationSec: EpisodeSeconds?
     ) -> Bool {
-        guard let coveredSec, coveredSec.isFinite, coveredSec >= 0,
-              let episodeDurationSec, episodeDurationSec.isFinite, episodeDurationSec > 0 else {
+        guard let ratio = coveredSec.finiteValue?
+            .fractionOfDeclaredDuration(episodeDurationSec.finiteValue) else {
             return false
         }
-        let ratio = coveredSec / episodeDurationSec
         return ratio + 1e-9 >= AnalysisCoordinator.finalizeBackfillMinCoverageRatio
     }
 

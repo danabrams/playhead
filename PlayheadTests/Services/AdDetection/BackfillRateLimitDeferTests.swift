@@ -903,7 +903,7 @@ struct BackfillRateLimitDeferTests {
     /// row — `deferReason` is the discriminator between the cancellation
     /// branch, the rate-limit defer, and a terminal transition.
     private static func describe(_ row: BackfillJob) -> String {
-        let cursor: Double = row.progressCursor?.lastProcessedUpperBoundSec ?? -1
+        let cursor: EpisodeSeconds = row.progressCursor?.lastProcessedUpperBoundSec ?? -1
         let reason: String = row.deferReason ?? "nil"
         let status: String = row.status.rawValue
         return "[status=\(status) retry=\(row.retryCount) cursor=\(cursor) reason=\(reason)]"

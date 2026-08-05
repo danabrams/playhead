@@ -564,22 +564,33 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     }
 
     let assetId: String
-    let episodeDurationSec: Double?
-    /// Interval-unioned seconds of fast transcript actually present.
+    /// The episode's DECLARED duration — `analysis_assets.episodeDurationSec`,
+    /// which comes off the feed or a decode probe, not off the transcript.
+    /// playhead-x0lb: typed as ``EpisodeSeconds`` because it is the denominator
+    /// of every ratio on this struct, and a ratio whose denominator can be
+    /// swapped for a watermark is instance 9 of the defect catalogue.
+    let episodeDurationSec: EpisodeSeconds?
+    /// Interval-unioned seconds of fast transcript actually present — an AREA.
     /// `nil` when no fast chunks landed AND no watermark is recorded.
-    let fastTranscriptCoveredSec: Double?
+    let fastTranscriptCoveredSec: CoveredSeconds?
     let fastTranscriptCoveredSource: CoverageProvenance
     /// `MAX(endTime)` of fast chunks, or the asset watermark when no chunks
-    /// landed yet. `nil` when both signals are absent.
-    let fastTranscriptCoverageEndSec: Double?
+    /// landed yet — a REACH, not an area. `nil` when both signals are absent.
+    let fastTranscriptCoverageEndSec: WatermarkSeconds?
     let fastTranscriptCoverageEndSource: CoverageProvenance
-    let featureCoverageEndSec: Double?
+    /// playhead-x0lb R1: ``FrontierSeconds``, not the transcript's watermark.
+    /// Feature extraction sweeps the whole episode independently of the
+    /// semantic scan, so this reaches 100 % while most audio has never been
+    /// screened — instance 9's own ingredient.
+    let featureCoverageEndSec: FrontierSeconds?
     let featureCoverageEndSource: CoverageProvenance
-    let confirmedAdCoverageEndSec: Double?
+    /// playhead-x0lb R1: ``FrontierSeconds``. Not coverage at all — see the
+    /// ``adScanCoveredSec`` doc below, which had to say so in prose.
+    let confirmedAdCoverageEndSec: FrontierSeconds?
     let confirmedAdCoverageEndSource: CoverageProvenance
     /// `MAX(endTime)` over `pass='final'` chunks, falling back to the asset
     /// watermark column when chunks are absent. `nil` when both are absent.
-    let finalPassCoverageEndSec: Double?
+    let finalPassCoverageEndSec: WatermarkSeconds?
     let finalPassCoverageEndSource: CoverageProvenance
     /// playhead-sd71: gap-aware **analyzed-coverage AREA** — the
     /// interval-unioned fast-transcript seconds that fall at or before the
@@ -593,7 +604,7 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// the analysis frontier is unknown OR the transcript coverage is
     /// unknown (mirrors ``fastTranscriptCoveredSec``'s nil semantics), so
     /// AN renders as `--%` rather than a synthetic 0%.
-    let analysisCoveredSec: Double?
+    let analysisCoveredSec: AnalyzedSeconds?
     /// playhead-pz32: seconds of audio a **semantic ad scan actually examined**.
     ///
     /// Precisely: the interval union of `semantic_scan_results` windows on the
@@ -609,12 +620,12 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// playhead-9y9e: "the transcribed region" means BOTH passes. It was the
     /// fast pass alone, which on the 2026-08-03 device pull put a ceiling below
     /// the 0.98 completion floor under this fraction for NINE of twelve assets,
-    /// of which this change lifts FOUR over it — see the `transcribedIntervals`
+    /// of which this change lifts FOUR over it — see the `transcribedRegion`
     /// block in ``fetchCoverageSummariesByAssetIds(_:)`` for the split.
     ///
     /// (R2 review: this line read "four of twelve assets", which is the number
     /// LIFTED, not the number capped. R1 corrected that count at the
-    /// `transcribedIntervals` block and this sentence — which points AT that
+    /// `transcribedRegion` block and this sentence — which points AT that
     /// block — was left contradicting it.)
     ///
     /// This is the only persisted quantity that answers "how much of this
@@ -636,7 +647,7 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// (the scan has not started, or its rows were invalidated by a cohort
     /// bump) — never a synthetic 0, so a caller can distinguish "measured
     /// zero" from "no measurement". Both must render as not-ready.
-    let adScanCoveredSec: Double?
+    let adScanCoveredSec: AdScanSeconds?
     let adScanCoveredSource: CoverageProvenance
 
     /// playhead-pz32: ``adScanCoveredSec`` as a fraction of the episode's
@@ -691,17 +702,38 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     ///     behind it must not withhold anything — see the comment at the guard
     ///     itself, and `finalPassWatermarkWithoutChunksDoesNotWithhold` /
     ///     mutation RT16.
-    var adScanFraction: Double? {
+    ///
+    /// playhead-x0lb: the return type is ``ReachRatio``, not `Double`. Its
+    /// numerator is an ``AdScanSeconds`` AREA and its denominator is the
+    /// DECLARED ``EpisodeSeconds`` duration, both named at the only constructor
+    /// (``ReachRatio/init(examined:ofDeclaredDuration:)``), so a
+    /// ``DensityRatio`` — the transcribed area over the same duration, which is
+    /// what playhead-fil5 R3 divided and called reach — can no longer be
+    /// supplied to any consumer that wants this one. The two coincide on
+    /// single-chunk fixtures, which is why every test passed while nought of
+    /// twelve field assets cleared the gate.
+    var adScanFraction: ReachRatio? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
-              adScanCoveredSec >= 0,
+              adScanCoveredSec.rawValue >= 0,
               let episodeDurationSec,
               episodeDurationSec.isFinite,
-              episodeDurationSec > 0 else {
+              episodeDurationSec.rawValue > 0 else {
             return nil
         }
         let tolerance = Self.adScanDurationToleranceSec(episodeDurationSec: episodeDurationSec)
-        guard adScanCoveredSec <= episodeDurationSec + tolerance else { return nil }
+        // playhead-x0lb: an AREA compared against a DURATION, deliberately —
+        // this is the one place the comparison is meaningful, because an area
+        // that exceeds the whole declared duration is proof the two describe
+        // different audio.
+        //
+        // R4 review: through ``AdScanSeconds/exceeds(_:byMoreThan:)``, not in
+        // raw values. Written inline the comparison accepted every area on the
+        // summary: probe PA2 drove it from `fastTranscriptCoveredSec` — an area
+        // this guard is not protecting — and it COMPILED, so the check meant to
+        // catch a numerator describing different audio could be pointed away
+        // from the numerator entirely. Rail TY22.
+        guard !adScanCoveredSec.exceeds(episodeDurationSec, byMoreThan: tolerance) else { return nil }
         // A transcript reaching far past the declared duration means the
         // denominator describes different audio than the numerator, even when
         // their RATIO looks healthy. Under-claim rather than divide by a number
@@ -718,7 +750,7 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         // `finalPassCoverageEndSec` falls back to the
         // `analysis_assets.finalPassCoverageEndTime` COLUMN when no final chunk
         // is on disk — playhead-0sro's "watermark outliving the rows it claims"
-        // shape, the same one `transcribedIntervals` and
+        // shape, the same one `transcribedRegion` and
         // `watermarkWithoutChunksStillFails` are built around, and reachable
         // because playhead-wvdz's chunk deletion outlives the asset row. A stale
         // column would then WITHHOLD a fraction that is fine, i.e. make an
@@ -731,14 +763,47 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         let finalReach = finalPassCoverageEndSource == .finalPassChunks
             ? finalPassCoverageEndSec
             : nil
-        let transcriptReach = [fastTranscriptCoverageEndSec, finalReach]
+        // playhead-x0lb: these are ``WatermarkSeconds`` — REACH, not area — and
+        // that is exactly the property this guard needs. An AREA can never
+        // disprove a duration (a gappy transcript's area is legitimately small);
+        // only a reach PAST the declared end can.
+        // playhead-x0lb R1: the element type is written out. Without it a
+        // substitution into this literal makes the type-checker give up
+        // ('failed to produce diagnostic'), and a compile failure nobody can
+        // name is not a kill the UNTYPEABLE battery is allowed to credit.
+        let transcriptReach: WatermarkSeconds? = [fastTranscriptCoverageEndSec, finalReach]
             .compactMap { $0 }
             .filter { $0.isFinite }
             .max()
-        if let transcriptReach, transcriptReach > episodeDurationSec + tolerance {
+        // R4 review: through ``WatermarkSeconds/reaches(past:byMoreThan:)``.
+        // The paragraph above ASSERTS that an area can never disprove a
+        // duration; written in raw values the guard did not enforce it — probe
+        // PA3 substituted `adScanCoveredSec.rawValue` for the reach here and it
+        // COMPILED. A sentence forbidding a substitution beside an expression
+        // that permits it is instance 18's own shape. Rail TY23.
+        if let transcriptReach, transcriptReach.reaches(past: episodeDurationSec, byMoreThan: tolerance) {
             return nil
         }
-        return min(1, adScanCoveredSec / episodeDurationSec)
+        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)
+    }
+
+    /// playhead-x0lb: the episode's transcript DENSITY — deliberately adjacent
+    /// to ``adScanFraction`` so the contrast is unmissable, and typed so the two
+    /// cannot be swapped.
+    ///
+    /// * numerator: ``fastTranscriptCoveredSec`` — the interval-unioned seconds
+    ///   of fast transcript actually present.
+    /// * denominator: ``episodeDurationSec`` — the same declared duration
+    ///   ``adScanFraction`` uses.
+    ///
+    /// **A high density is not reach.** Measured on the 2026-08-03 device pull:
+    /// 4FF3A238 has a fast density of 0.892 and NO coverage-lane scan row at
+    /// all, so its ``adScanFraction`` is absent — nine of the twelve assets on
+    /// that pull are in the same position. playhead-fil5 R3 computed this
+    /// quantity and read it as the other one; nought of twelve assets cleared
+    /// the gate and the feature was dead while every test passed.
+    var transcriptDensity: DensityRatio? {
+        DensityRatio(transcribed: fastTranscriptCoveredSec, ofDeclaredDuration: episodeDurationSec)
     }
 
     /// playhead-pz32: how far measured coverage may exceed the declared duration
@@ -753,8 +818,8 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// every scale; the shard cap keeps long episodes from acquiring a large
     /// absolute allowance (mirroring
     /// ``FastTranscriptCoverageInvariant/Tolerances/watermarkPastDurationSec``).
-    static func adScanDurationToleranceSec(episodeDurationSec: Double) -> Double {
-        min(AnalysisAudioService.defaultShardDuration, 0.05 * episodeDurationSec)
+    static func adScanDurationToleranceSec(episodeDurationSec: EpisodeSeconds) -> Double {
+        min(AnalysisAudioService.defaultShardDuration, 0.05 * episodeDurationSec.rawValue)
     }
 }
 
@@ -892,7 +957,11 @@ enum AnalysisCoverageMath {
     /// segment aggregator's floor is 30 s, six times larger). A bridged gap is
     /// therefore always shorter than the shortest span this app will ever call
     /// an ad, so bridging cannot conceal one.
-    static let adScanBridgeableGapSec: Double = 5.0
+    /// playhead-x0lb: a ``BridgeToleranceSec``, not a bare `Double`, so it
+    /// cannot be interchanged with ``RescanThresholdSec/adScanRescanWorthyGapSec``
+    /// (60 s, playhead-a1x0) — two gap widths in seconds answering opposite
+    /// questions, which Dan called out on a1x0 as instance 19 pre-loaded.
+    static let adScanBridgeableGapSec = BridgeToleranceSec(5.0)
 
     /// playhead-pz32: coalesce intervals across gaps no wider than `maxGapSec`,
     /// returning a disjoint ascending set.
@@ -916,9 +985,9 @@ enum AnalysisCoverageMath {
     /// ready) while the three well-transcribed ones reach 0.983–1.0.
     static func bridgingShortGaps(
         _ intervals: [(start: Double, end: Double)],
-        upTo maxGapSec: Double
+        upTo maxGapSec: BridgeToleranceSec
     ) -> [(start: Double, end: Double)] {
-        mergedIntervals(normalize(intervals), bridging: max(0, maxGapSec))
+        mergedIntervals(normalize(intervals), bridging: max(0, maxGapSec.rawValue))
     }
 
     /// Sort + coalesce ALREADY-NORMALIZED intervals into a disjoint ascending
@@ -10448,9 +10517,26 @@ actor AnalysisStore {
     ///
     /// Same filters and same index (`idx_chunks_time`) as the fast-only sibling;
     /// a degenerate row covers no time and is dropped.
-    func fetchTranscriptCoveredRanges(
-        assetId: String
-    ) throws -> [(start: Double, end: Double)] {
+    ///
+    /// **playhead-x0lb R5 review: it returns a ``TranscribedRegion``, and it was
+    /// renamed from `fetchTranscriptCoveredRanges` to say so.** This getter and
+    /// ``fetchFastTranscriptCoveredRanges(assetId:)`` are a FIFTH and SIXTH
+    /// producer of the interval populations R5 typed inside
+    /// ``fetchCoverageSummariesByAssetIds(_:)`` — the same two regions, across the
+    /// store's own API, and until this change both returned the identical bare
+    /// `[(start: Double, end: Double)]`. Three probes were planted against the
+    /// three production consumers and ALL THREE COMPILED: the fast-only ranges fed
+    /// to ``SemanticScanClaim/bridgedTranscriptCoveredSec(region:)`` from
+    /// `AnalysisJobReconciler` and from `AnalysisJobRunner` — which is
+    /// playhead-9y9e's SHIPPED defect verbatim, 48E903D7 reading 36.9 % against a
+    /// 0.95 floor while its two passes cover 95.1 % — and the both-pass ranges fed
+    /// to the transcript engine's fast-only shard-skip index. Rails TY32–TY34.
+    ///
+    /// Typing THIS one closes the substitution in both directions, so the fast
+    /// sibling deliberately keeps its bare array: its only consumer is in
+    /// `TranscriptEngineService`, outside this bead's named scope, and with the
+    /// lookalike gone there is no second interval population in scope to write.
+    func fetchTranscribedRegion(assetId: String) throws -> TranscribedRegion {
         let sql = """
             SELECT startTime, endTime FROM transcript_chunks
             WHERE analysisAssetId = ?
@@ -10460,13 +10546,155 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
-        var results: [(start: Double, end: Double)] = []
+        var region = TranscribedRegion()
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(
-                (start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1))
+            region.append(
+                start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1),
+                door: .openedByCoverageReader
             )
         }
-        return results
+        return region
+    }
+
+    /// playhead-x0lb R5: read the FAST-pass chunk intervals for one id slice.
+    ///
+    /// **Why this is a function and not four lines inline.** See the note at
+    /// the call site: probe PF2 wrote the fast query's rows into
+    /// `finalIntervals` and it compiled. A body with exactly one region in
+    /// scope is the only clearance this bead has ever been able to demonstrate
+    /// — "there is no second quantity in scope to write", not "the expression
+    /// looks careful".
+    ///
+    /// `maxEnd` is the high-water mark, kept alongside because it is the same
+    /// scan of the same rows. It is a `[String: Double]` and so is the final
+    /// pass's, so THAT pair is a same-type swap (limit L-J) and no type
+    /// separates them; the region dictionaries are what this closes.
+    private func readFastTranscriptRegions(
+        ids: [String],
+        into regions: inout [String: FastTranscriptRegion],
+        maxEnd: inout [String: Double]
+    ) throws {
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+            SELECT analysisAssetId, startTime, endTime
+            FROM transcript_chunks
+            WHERE pass = 'fast'
+              AND analysisAssetId IN (\(placeholders))
+            ORDER BY analysisAssetId, startTime, endTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for (i, id) in ids.enumerated() {
+            bind(stmt, Int32(i + 1), id)
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let assetId = text(stmt, 0)
+            let startTime = sqlite3_column_double(stmt, 1)
+            let endTime = sqlite3_column_double(stmt, 2)
+            // Skip degenerate / inverted rows so they don't poison either the
+            // union or the high-water max.
+            guard endTime > startTime else { continue }
+            regions[assetId, default: FastTranscriptRegion()]
+                .append(start: startTime, end: endTime, door: .openedByCoverageReader)
+            if let prior = maxEnd[assetId] {
+                maxEnd[assetId] = max(prior, endTime)
+            } else {
+                maxEnd[assetId] = endTime
+            }
+        }
+    }
+
+    /// playhead-x0lb R5: read the FINAL-pass chunk intervals for one id slice.
+    ///
+    /// playhead-9y9e: the INTERVALS are the new part. This query used to
+    /// project `MAX(endTime)` alone, "because only MAX(endTime) is useful for
+    /// display today" — true of the display fields, and false of the ad-scan
+    /// bound that then had to make do with the fast pass. See
+    /// ``TranscribedRegion``.
+    private func readFinalTranscriptRegions(
+        ids: [String],
+        into regions: inout [String: FinalTranscriptRegion],
+        maxEnd: inout [String: Double]
+    ) throws {
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+            SELECT analysisAssetId, startTime, endTime
+            FROM transcript_chunks
+            WHERE pass = 'final'
+              AND analysisAssetId IN (\(placeholders))
+            ORDER BY analysisAssetId, startTime, endTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for (i, id) in ids.enumerated() {
+            bind(stmt, Int32(i + 1), id)
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let assetId = text(stmt, 0)
+            let startTime = sqlite3_column_double(stmt, 1)
+            let endTime = sqlite3_column_double(stmt, 2)
+            guard endTime > startTime else { continue }
+            regions[assetId, default: FinalTranscriptRegion()]
+                .append(start: startTime, end: endTime, door: .openedByCoverageReader)
+            if let prior = maxEnd[assetId] {
+                maxEnd[assetId] = max(prior, endTime)
+            } else {
+                maxEnd[assetId] = endTime
+            }
+        }
+    }
+
+    /// playhead-x0lb R5: read the coverage-lane semantic-scan windows for one
+    /// id slice (playhead-pz32). Hits `idx_semantic_scan_results_asset_pass`.
+    ///
+    /// `rowSeen` records an asset regardless of status, so a scan that only
+    /// ever refused reports a MEASURED zero (0 examined seconds) rather than
+    /// "unknown" — both render not-ready, but the provenance tag stays honest
+    /// about which one it is.
+    private func readScannedRegions(
+        ids: [String],
+        into regions: inout [String: ScannedRegion],
+        rowSeen: inout Set<String>
+    ) throws {
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+            SELECT analysisAssetId, windowStartTime, windowEndTime, status, errorContext
+            FROM semantic_scan_results
+            WHERE scanPass = ?
+              AND analysisAssetId IN (\(placeholders))
+            ORDER BY analysisAssetId, windowStartTime, windowEndTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, SemanticScanCoverage.coverageScanPass)
+        for (i, id) in ids.enumerated() {
+            bind(stmt, Int32(i + 2), id)
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let assetId = text(stmt, 0)
+            rowSeen.insert(assetId)
+            let startTime = sqlite3_column_double(stmt, 1)
+            let endTime = sqlite3_column_double(stmt, 2)
+            guard endTime > startTime else { continue }
+            // A window only counts as scanned when a verdict was actually
+            // obtained. A refused / guardrailed / cancelled window is NOT audio
+            // we screened and found clean, and a NO-WORK SENTINEL row (`.noAds`
+            // spanning the whole attempted range, meaning "no work performed")
+            // is not either — counting them would silently inflate coverage,
+            // which is the failure mode this whole read exists to prevent. The
+            // condition lives in
+            // `SemanticScanResult.didExamineWindow(status:errorContext:)` so
+            // this narrow projection and the pipeline's own breadcrumb apply the
+            // same definition.
+            guard SemanticScanResult.didExamineWindow(
+                status: SemanticScanStatus(rawValue: text(stmt, 3)),
+                errorContext: optionalText(stmt, 4)
+            ) else {
+                continue
+            }
+            regions[assetId, default: ScannedRegion()]
+                .append(start: startTime, end: endTime, door: .openedByCoverageReader)
+        }
     }
 
     /// playhead-hygc.1.2: canonical pipeline-progress read model for
@@ -10581,127 +10809,40 @@ actor AnalysisStore {
         //              `ORDER BY` is purely for deterministic output order
         //              (helps debugging / explain plans), not for the merge
         //              algorithm's correctness.
-        var fastIntervals: [String: [(start: Double, end: Double)]] = [:]
+        // playhead-x0lb R5: the three interval collections carry DISTINCT TYPES.
+        // They were all `[(start: Double, end: Double)]`, live in one scope, and
+        // R4 planted four substitutions between them — PA5, PA7, PA8, PA9 — and
+        // all four compiled. See the REGIONS section of `CoverageQuantities.swift`.
+        var fastIntervals: [String: FastTranscriptRegion] = [:]
         var fastMaxEnd: [String: Double] = [:]
         // ---- Pass 3 (fold into one query): final-pass chunk intervals + MAX(endTime).
         // playhead-9y9e: the INTERVALS are new. They were not collected before,
         // and that omission is what capped the ad-scan bound below — see
-        // `transcribedIntervals`.
-        var finalIntervals: [String: [(start: Double, end: Double)]] = [:]
+        // `transcribedRegion`.
+        var finalIntervals: [String: FinalTranscriptRegion] = [:]
         var finalMaxEnd: [String: Double] = [:]
         // ---- Pass 4 (playhead-pz32): coverage-lane semantic-scan windows
         //      that produced a verdict, for the ad-scan AREA.
-        var adScanIntervals: [String: [(start: Double, end: Double)]] = [:]
+        var adScanIntervals: [String: ScannedRegion] = [:]
         var adScanRowSeen: Set<String> = []
 
+        // playhead-x0lb R5: each population is READ BY ITS OWN FUNCTION, and
+        // that is not tidying — it is the only fix shape this bead has found to
+        // work. Probes PF2 and PF4 poured one query's rows into another
+        // region's dictionary and both COMPILED, because three dictionaries of
+        // three types were live in one scope and every region answers
+        // `append(start:end:)`. PF4 is PA7's confusion — scan windows read as
+        // transcript — moved to the PRODUCER, which is the same "one layer
+        // below the rail" shape PA7 itself was. Inside each helper there is
+        // exactly ONE region in scope and nothing else to write, and at the
+        // call site the `inout` argument is typed.
         index = 0
         while index < allIds.count {
             let end = min(index + chunkSize, allIds.count)
             let slice = Array(allIds[index..<end])
-            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
-
-            // Fast pass: interval ranges for union + max.
-            let fastSQL = """
-                SELECT analysisAssetId, startTime, endTime
-                FROM transcript_chunks
-                WHERE pass = 'fast'
-                  AND analysisAssetId IN (\(placeholders))
-                ORDER BY analysisAssetId, startTime, endTime
-                """
-            let fastStmt = try prepare(fastSQL)
-            for (i, id) in slice.enumerated() {
-                bind(fastStmt, Int32(i + 1), id)
-            }
-            while sqlite3_step(fastStmt) == SQLITE_ROW {
-                let assetId = text(fastStmt, 0)
-                let startTime = sqlite3_column_double(fastStmt, 1)
-                let endTime = sqlite3_column_double(fastStmt, 2)
-                // Skip degenerate / inverted rows so they don't poison
-                // either the union or the high-water max.
-                guard endTime > startTime else { continue }
-                fastIntervals[assetId, default: []].append((start: startTime, end: endTime))
-                if let prior = fastMaxEnd[assetId] {
-                    fastMaxEnd[assetId] = max(prior, endTime)
-                } else {
-                    fastMaxEnd[assetId] = endTime
-                }
-            }
-            sqlite3_finalize(fastStmt)
-
-            // Final pass: interval ranges for the transcribed-region bound +
-            // max. playhead-9y9e: this used to project `MAX(endTime)` alone,
-            // "because only MAX(endTime) is useful for display today" — true of
-            // the display fields, and false of the ad-scan bound that later
-            // reused `transcriptIntervals`. Same shape as the fast query above.
-            let finalSQL = """
-                SELECT analysisAssetId, startTime, endTime
-                FROM transcript_chunks
-                WHERE pass = 'final'
-                  AND analysisAssetId IN (\(placeholders))
-                ORDER BY analysisAssetId, startTime, endTime
-                """
-            let finalStmt = try prepare(finalSQL)
-            for (i, id) in slice.enumerated() {
-                bind(finalStmt, Int32(i + 1), id)
-            }
-            while sqlite3_step(finalStmt) == SQLITE_ROW {
-                let assetId = text(finalStmt, 0)
-                let startTime = sqlite3_column_double(finalStmt, 1)
-                let endTime = sqlite3_column_double(finalStmt, 2)
-                guard endTime > startTime else { continue }
-                finalIntervals[assetId, default: []].append((start: startTime, end: endTime))
-                if let prior = finalMaxEnd[assetId] {
-                    finalMaxEnd[assetId] = max(prior, endTime)
-                } else {
-                    finalMaxEnd[assetId] = endTime
-                }
-            }
-            sqlite3_finalize(finalStmt)
-
-            // playhead-pz32: coverage-lane semantic-scan windows. Hits
-            // `idx_semantic_scan_results_asset_pass`. Rows are recorded as
-            // "seen" regardless of status so a scan that only ever refused
-            // reports a MEASURED zero (0 examined seconds) rather than
-            // "unknown" — both render not-ready, but the provenance tag stays
-            // honest about which one it is.
-            let scanSQL = """
-                SELECT analysisAssetId, windowStartTime, windowEndTime, status, errorContext
-                FROM semantic_scan_results
-                WHERE scanPass = ?
-                  AND analysisAssetId IN (\(placeholders))
-                ORDER BY analysisAssetId, windowStartTime, windowEndTime
-                """
-            let scanStmt = try prepare(scanSQL)
-            bind(scanStmt, 1, SemanticScanCoverage.coverageScanPass)
-            for (i, id) in slice.enumerated() {
-                bind(scanStmt, Int32(i + 2), id)
-            }
-            while sqlite3_step(scanStmt) == SQLITE_ROW {
-                let assetId = text(scanStmt, 0)
-                adScanRowSeen.insert(assetId)
-                let startTime = sqlite3_column_double(scanStmt, 1)
-                let endTime = sqlite3_column_double(scanStmt, 2)
-                guard endTime > startTime else { continue }
-                // A window only counts as scanned when a verdict was actually
-                // obtained. A refused / guardrailed / cancelled window is NOT
-                // audio we screened and found clean, and a NO-WORK SENTINEL row
-                // (`.noAds` spanning the whole attempted range, meaning "no work
-                // performed") is not either — counting them would silently
-                // inflate coverage, which is the failure mode this whole read
-                // exists to prevent. The condition lives in
-                // `SemanticScanResult.didExamineWindow(status:errorContext:)` so
-                // this narrow projection and the pipeline's own breadcrumb apply
-                // the same definition.
-                guard SemanticScanResult.didExamineWindow(
-                    status: SemanticScanStatus(rawValue: text(scanStmt, 3)),
-                    errorContext: optionalText(scanStmt, 4)
-                ) else {
-                    continue
-                }
-                adScanIntervals[assetId, default: []].append((start: startTime, end: endTime))
-            }
-            sqlite3_finalize(scanStmt)
-
+            try readFastTranscriptRegions(ids: slice, into: &fastIntervals, maxEnd: &fastMaxEnd)
+            try readFinalTranscriptRegions(ids: slice, into: &finalIntervals, maxEnd: &finalMaxEnd)
+            try readScannedRegions(ids: slice, into: &adScanIntervals, rowSeen: &adScanRowSeen)
             index = end
         }
 
@@ -10716,20 +10857,27 @@ actor AnalysisStore {
         summaries.reserveCapacity(allIds.count)
         for id in allIds {
             let assetRow = assetRows[id]
-            let chunkUnionedSec = AnalysisCoverageMath.unionedSeconds(
-                fastIntervals[id] ?? []
-            )
+            // playhead-x0lb R5: the area comes off the REGION, which names both
+            // which intervals were unioned and which quantity the result is.
+            // This used to be `CoveredSeconds(unionedSeconds(fastIntervals[id]))`
+            // — a hand-picked array and a hand-named box, limit L-I's own shape.
+            let fastRegion = fastIntervals[id] ?? FastTranscriptRegion()
             let chunkMaxEnd = fastMaxEnd[id]
 
             // Fast covered seconds: prefer interval-unioned seconds when
             // any chunk landed; otherwise fall back to the asset watermark.
-            let fastCoveredSec: Double?
+            let fastCoveredSec: CoveredSeconds?
             let fastCoveredSource: AnalysisCoverageSummary.CoverageProvenance
             if chunkMaxEnd != nil {
-                fastCoveredSec = chunkUnionedSec
+                fastCoveredSec = fastRegion.unionedSeconds
                 fastCoveredSource = .fastTranscriptChunks
             } else if let watermark = assetRow?.fastTranscriptCoverageEndTime {
-                fastCoveredSec = watermark
+                // A watermark standing in for an area: it is a REACH, so this
+                // over-reports the moment the transcript has a hole. Kept
+                // (playhead-x0lb changes no behaviour here) and stated, because
+                // the conversion is exactly the substitution this file's types
+                // exist to make visible.
+                fastCoveredSec = CoveredSeconds(watermark)
                 fastCoveredSource = .assetWatermark
             } else {
                 fastCoveredSec = nil
@@ -10737,13 +10885,13 @@ actor AnalysisStore {
             }
 
             // Fast high-water end: chunks first, watermark fallback.
-            let fastEndSec: Double?
+            let fastEndSec: WatermarkSeconds?
             let fastEndSource: AnalysisCoverageSummary.CoverageProvenance
             if let chunkMaxEnd {
-                fastEndSec = chunkMaxEnd
+                fastEndSec = WatermarkSeconds(chunkMaxEnd)
                 fastEndSource = .fastTranscriptChunks
             } else if let watermark = assetRow?.fastTranscriptCoverageEndTime {
-                fastEndSec = watermark
+                fastEndSec = WatermarkSeconds(watermark)
                 fastEndSource = .assetWatermark
             } else {
                 fastEndSec = nil
@@ -10751,21 +10899,21 @@ actor AnalysisStore {
             }
 
             // Final-pass: chunks first, watermark fallback.
-            let finalEndSec: Double?
+            let finalEndSec: WatermarkSeconds?
             let finalEndSource: AnalysisCoverageSummary.CoverageProvenance
             if let chunkFinalMax = finalMaxEnd[id] {
-                finalEndSec = chunkFinalMax
+                finalEndSec = WatermarkSeconds(chunkFinalMax)
                 finalEndSource = .finalPassChunks
             } else if let watermark = assetRow?.finalPassCoverageEndTime {
-                finalEndSec = watermark
+                finalEndSec = WatermarkSeconds(watermark)
                 finalEndSource = .assetWatermark
             } else {
                 finalEndSec = nil
                 finalEndSource = .unknown
             }
 
-            let featureSec = assetRow?.featureCoverageEndTime
-            let confirmedAdSec = assetRow?.confirmedAdCoverageEndTime
+            let featureSec = assetRow?.featureCoverageEndTime.map { FrontierSeconds($0) }
+            let confirmedAdSec = assetRow?.confirmedAdCoverageEndTime.map { FrontierSeconds($0) }
 
             // playhead-sd71: gap-aware analyzed-coverage AREA. The analysis
             // frontier is the broad feature/confirmed-ad watermark; the
@@ -10776,7 +10924,7 @@ actor AnalysisStore {
             // watermark-vs-union antipattern this bead fixes). `nil` when the
             // frontier is unknown OR transcript coverage is unknown, matching
             // `fastTranscriptCoveredSec`'s nil semantics.
-            let analysisFrontierSec: Double?
+            let analysisFrontierSec: FrontierSeconds?
             switch (featureSec, confirmedAdSec) {
             case let (feature?, confirmed?): analysisFrontierSec = max(feature, confirmed)
             case let (feature?, nil): analysisFrontierSec = feature
@@ -10788,19 +10936,28 @@ actor AnalysisStore {
             // `[0, watermark]` span (so a clip degrades to
             // `min(transcriptWatermark, …)`); empty when transcript coverage is
             // entirely unknown.
-            let transcriptIntervals: [(start: Double, end: Double)]
+            //
+            // playhead-x0lb R5: a ``FastTranscriptRegion``, not a bare interval
+            // array. Probe PA5 built this span from `analysisFrontierSec` — the
+            // DSP sweep, which reaches the end of the episode on audio nothing
+            // ever transcribed — and it compiled, poisoning the AN clip and the
+            // ad-scan bound in one edit. Rail TY26.
+            let transcriptRegion: FastTranscriptRegion
             if chunkMaxEnd != nil {
-                transcriptIntervals = fastIntervals[id] ?? []
+                transcriptRegion = fastRegion
             } else if let transcriptCovered = fastCoveredSec {
-                transcriptIntervals = [(start: 0, end: transcriptCovered)]
+                transcriptRegion = FastTranscriptRegion(
+                    spanningFromZeroTo: transcriptCovered,
+                    door: .openedByCoverageReader
+                )
             } else {
-                transcriptIntervals = []
+                transcriptRegion = FastTranscriptRegion()
             }
 
             // playhead-9y9e: the region a semantic scan can actually READ, which
             // is the whole transcript — both passes — not the fast pass alone.
             //
-            // WHY THIS IS A SEPARATE QUANTITY FROM `transcriptIntervals`. The
+            // WHY THIS IS A SEPARATE QUANTITY FROM `transcriptRegion`. The
             // scan is planned over the CANONICAL chunk stream
             // (`AdDetectionService.runBackfill` hands `runShadowFMPhase` the
             // output of `TranscriptChunkCanonicalizer.canonicalize`), where a
@@ -10841,12 +10998,12 @@ actor AnalysisStore {
             // `analysisCoveredSec` (documented as the fast-transcript area
             // clipped to the analysis frontier). Only the ad-scan bound changes.
             //
-            // THE BOUND IS `transcriptIntervals` PLUS THE FINAL PASS, and the
-            // `transcriptIntervals` term is not redundant — it is what makes the
+            // THE BOUND IS `transcriptRegion` PLUS THE FINAL PASS, and the
+            // `transcriptRegion` term is not redundant — it is what makes the
             // widening MONOTONE. It looks like it can be dropped, since it is
             // `fastIntervals[id]` whenever any fast chunk landed. But when NO
             // fast chunk landed and the asset still carries a
-            // `fastTranscriptCoverageEndTime`, `transcriptIntervals` is the
+            // `fastTranscriptCoverageEndTime`, `transcriptRegion` is the
             // watermark modelled as one contiguous `[0, watermark]` span, and
             // the final-pass intervals alone are neither contiguous nor
             // guaranteed to reach it — so a bound built from the final pass
@@ -10855,17 +11012,44 @@ actor AnalysisStore {
             // (a watermark outliving the chunks it claims) is playhead-0sro's,
             // and `AnalysisJobRunner`'s own
             // `watermarkWithoutChunksStillFails` fixture is built on it. Adding
-            // to `transcriptIntervals` rather than replacing it makes the new
+            // to `transcriptRegion` rather than replacing it makes the new
             // bound a SUPERSET of the old one in every branch, so the measured
             // area can only ever move UP and no episode becomes less ready.
-            let transcribedIntervals = transcriptIntervals + (finalIntervals[id] ?? [])
+            //
+            // playhead-x0lb R5: a ``TranscribedRegion``, whose only constructor
+            // names BOTH passes. It was `transcriptIntervals + (finalIntervals[id]
+            // ?? [])` — an array concatenation of two arrays of the same type, so
+            // either term accepted either population and the result accepted
+            // both. Rail TY28 pins the consumer.
+            let transcribedRegion = TranscribedRegion(
+                fastPass: transcriptRegion,
+                finalPass: finalIntervals[id] ?? FinalTranscriptRegion(),
+                door: .openedByCoverageReader
+            )
 
-            let analysisCoveredSec: Double?
+            let analysisCoveredSec: AnalyzedSeconds?
             if let frontier = analysisFrontierSec, fastCoveredSec != nil {
-                // Gap-aware clip of the transcribed region to the frontier.
-                analysisCoveredSec = AnalysisCoverageMath.unionedSecondsClipped(
-                    transcriptIntervals,
-                    upperBound: frontier
+                // Gap-aware clip of the transcribed region to the frontier: a
+                // FRONTIER bounding an AREA, which is what makes the result a
+                // subset of the transcript union rather than the frontier
+                // itself. playhead-sd71's whole point, now stated in the types.
+                //
+                // R3 review: through ``AnalyzedSeconds/init(clipping:to:)``
+                // rather than `unionedSecondsClipped(_:upperBound:)` directly.
+                // The generic helper's bound is a bare `Double`, and probe PC2
+                // put the TRANSCRIPT's watermark in it — AN would then equal TX
+                // on every episode and the two bars would simply agree, which
+                // is the one shape of this family a reader cannot spot. Rail
+                // TY20.
+                //
+                // R5: and the INTERVALS are typed too. TY20 pins which BOUND
+                // clips; probe PA9 widened what IS clipped to both passes and it
+                // compiled, which is the substitution playhead-9y9e deliberately
+                // did NOT make here when it made it to the ad-scan bound below.
+                // Rail TY29.
+                analysisCoveredSec = AnalyzedSeconds(
+                    clipping: transcriptRegion,
+                    to: frontier
                 )
             } else {
                 analysisCoveredSec = nil
@@ -10892,15 +11076,20 @@ actor AnalysisStore {
             //
             // `nil` only when no coverage-lane row exists at all; a scan that
             // ran and examined nothing reports a measured 0.
-            let adScanCoveredSec: Double?
+            let adScanCoveredSec: AdScanSeconds?
             let adScanCoveredSource: AnalysisCoverageSummary.CoverageProvenance
+            //
+            // playhead-x0lb R5: ONE typed operation, three named operands. It
+            // was three nested generic calls over four interchangeable interval
+            // arrays: probe PA7 measured the area from `fastIntervals` (fil5's
+            // P0, one layer below every rail that looks for it) and probe PA8
+            // narrowed the bound to the fast pass (9y9e verbatim). Rails TY27 /
+            // TY28, and TY07 still pins the tolerance.
             if adScanRowSeen.contains(id) {
-                adScanCoveredSec = AnalysisCoverageMath.unionedSecondsIntersecting(
-                    adScanIntervals[id] ?? [],
-                    within: AnalysisCoverageMath.bridgingShortGaps(
-                        transcribedIntervals,
-                        upTo: AnalysisCoverageMath.adScanBridgeableGapSec
-                    )
+                adScanCoveredSec = AdScanSeconds(
+                    examined: adScanIntervals[id] ?? ScannedRegion(),
+                    within: transcribedRegion,
+                    bridging: AnalysisCoverageMath.adScanBridgeableGapSec
                 )
                 adScanCoveredSource = .semanticScanResults
             } else {
@@ -10910,7 +11099,7 @@ actor AnalysisStore {
 
             summaries[id] = AnalysisCoverageSummary(
                 assetId: id,
-                episodeDurationSec: assetRow?.episodeDurationSec,
+                episodeDurationSec: assetRow?.episodeDurationSec.map { EpisodeSeconds($0) },
                 fastTranscriptCoveredSec: fastCoveredSec,
                 fastTranscriptCoveredSource: fastCoveredSource,
                 fastTranscriptCoverageEndSec: fastEndSec,

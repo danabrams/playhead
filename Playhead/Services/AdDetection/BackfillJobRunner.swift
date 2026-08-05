@@ -19,7 +19,12 @@ import OSLog
 /// Actor-internal; never escapes `BackfillJobRunner`'s isolation, so it does
 /// not need to be `Sendable`.
 private final class BackfillHonestCursorBox {
-    var lastCoveredUpperBoundSec: Double?
+    /// playhead-x0lb: a ``PlanListSeconds``. This is the coarse walk's
+    /// contiguous bound over the list `coarsePassA` was handed, and it becomes
+    /// an episode cursor only through
+    /// ``EpisodeSeconds/unsoundPlanListPromotion(_:site:)`` at the salvage site
+    /// below — named, because playhead-5pyq says it is not yet sound.
+    var lastCoveredUpperBoundSec: PlanListSeconds?
 }
 
 /// playhead-26od: what the mid-flight coarse checkpoint has already made
@@ -47,7 +52,9 @@ final class CoarseCheckpointBox: Sendable {
     private struct State {
         var processedWindowCount = 0
         var durableWindowCount = 0
-        var lastCheckpointedUpperBoundSec: Double?
+        /// playhead-x0lb: a ``PlanListSeconds`` — the box remembers walk
+        /// bounds, which are contiguity over the plan list, not over the episode.
+        var lastCheckpointedUpperBoundSec: PlanListSeconds?
         var defused = false
     }
 
@@ -109,7 +116,7 @@ final class CoarseCheckpointBox: Sendable {
     /// prefix — playhead-lxkq attempts ad-likely windows first, so most early
     /// ones will not — which is what keeps the cursor write off those windows
     /// entirely.
-    func shouldAdvanceCursor(to upperBound: Double) -> Bool {
+    func shouldAdvanceCursor(to upperBound: PlanListSeconds) -> Bool {
         state.withLock { upperBound > ($0.lastCheckpointedUpperBoundSec ?? 0) }
     }
 
@@ -117,7 +124,7 @@ final class CoarseCheckpointBox: Sendable {
     /// same reason `noteWrite` separates offered from durable: remembering a
     /// cursor whose write threw would suppress every later attempt to re-offer
     /// it, and the box exists to track what the database holds.
-    func noteCursorWritten(_ upperBound: Double) {
+    func noteCursorWritten(_ upperBound: PlanListSeconds) {
         state.withLock {
             $0.lastCheckpointedUpperBoundSec = max($0.lastCheckpointedUpperBoundSec ?? 0, upperBound)
         }
@@ -873,7 +880,17 @@ actor BackfillJobRunner {
                         jobId: job.jobId,
                         progressCursor: BackfillProgressCursor(
                             processedPhaseCount: 1,
-                            lastProcessedUpperBoundSec: inputs.segments.last?.endTime
+                            // playhead-x0lb: `inputs` is the PRE-`narrowedForResume`
+                            // root list, so this is a SEGMENT-list bound published
+                            // as an episode cursor — the fifth site of the shape
+                            // playhead-5pyq counts four of. Named, not fixed:
+                            // making it sound is 5pyq's blast radius, and this
+                            // phase is two-key gated and inert on the shipped
+                            // defaults.
+                            lastProcessedUpperBoundSec: EpisodeSeconds.unsoundPlanListPromotion(
+                                inputs.segments.last.map { PlanListSeconds($0.endTime) },
+                                site: .specialistScanCompletion
+                            )
                         )
                     )
                     await admissionController.finish(jobId: job.jobId)
@@ -967,7 +984,14 @@ actor BackfillJobRunner {
                 if let coarseDeferReason = coverage.coarseIncompleteDeferReason {
                     let honest = BackfillProgressCursor(
                         processedPhaseCount: 0,
-                        lastProcessedUpperBoundSec: coverage.lastCoveredUpperBoundSec
+                        // playhead-x0lb: a PLAN-list bound published as an
+                        // EPISODE cursor — playhead-5pyq's rate-limit writer.
+                        // Named here rather than repaired, because the repair
+                        // is a behaviour change 5pyq owns.
+                        lastProcessedUpperBoundSec: EpisodeSeconds.unsoundPlanListPromotion(
+                            coverage.lastCoveredUpperBoundSec,
+                            site: .rateLimitDefer
+                        )
                     )
                     // Never regress below a cursor an earlier deferred run
                     // already reached (a re-drive that rate-limits again before
@@ -1051,7 +1075,31 @@ actor BackfillJobRunner {
                     jobId: job.jobId,
                     progressCursor: BackfillProgressCursor(
                         processedPhaseCount: 1,
-                        lastProcessedUpperBoundSec: jobInputs.segments.last?.endTime
+                        // playhead-x0lb: the completion cursor — a SEGMENT-list
+                        // bound over the POST-narrowing list, published as an
+                        // episode cursor. THIS is the expression that wrote
+                        // 53FC53E3's `{"processedUnitCount":1,
+                        // "lastProcessedUpperBoundSec":2525.82}` on a 2,528 s
+                        // episode whose measured adScanFraction is 0.0142.
+                        //
+                        // R1 review: an earlier draft justified that attribution
+                        // with "`processedPhaseCount: 1` is written by this path
+                        // alone", which is not true — the
+                        // `specialistHostReadScan` completion above writes 1 too,
+                        // and `monotonic(from:)` propagates it. What actually
+                        // pins the row to THIS expression is the pair: the row's
+                        // `phase` is `fullEpisodeScan`, which the specialist
+                        // branch cannot reach, and its `status` is `complete`,
+                        // which only `markBackfillJobComplete` sets. This
+                        // completion path serves every non-specialist phase, not
+                        // `fullEpisodeScan` alone.
+                        // playhead-41mu's measured terminal defuses it
+                        // for `.fullEpisodeScan`; the expression is still the
+                        // unsound one, so it is named.
+                        lastProcessedUpperBoundSec: EpisodeSeconds.unsoundPlanListPromotion(
+                            jobInputs.segments.last.map { PlanListSeconds($0.endTime) },
+                            site: .segmentListCompletion
+                        )
                     )
                 )
                 let counters = operationalCounters(
@@ -1095,7 +1143,12 @@ actor BackfillJobRunner {
                         .map { honest in
                             let honestCursor = BackfillProgressCursor(
                                 processedPhaseCount: 0,
-                                lastProcessedUpperBoundSec: honest
+                                // playhead-x0lb: playhead-5pyq's cancellation
+                                // writer — the walk's PLAN-list bound again.
+                                lastProcessedUpperBoundSec: EpisodeSeconds.unsoundPlanListPromotion(
+                                    honest,
+                                    site: .cancellationSalvage
+                                )
                             )
                             return job.progressCursor.map { honestCursor.monotonic(from: $0) } ?? honestCursor
                         }
@@ -1702,11 +1755,7 @@ actor BackfillJobRunner {
         // list, so reading its first segment as "where this run's plans began"
         // is the UC04 shape one level down — two rulers for one quantity, and
         // this one silently disagrees on every resume. Mutation UC09.
-        let cursor = Self.underCoverageCursor(
-            prior: job.progressCursor,
-            scannedUpperBoundSec: coverage.lastCoveredUpperBoundSec,
-            firstPlannedSegmentStartSec: coverage.firstPlannedSegmentStartSec
-        )
+        let cursor = Self.underCoverageCursor(prior: job.progressCursor, coverage: coverage)
         let attempts = job.retryCount + 1
         let terminal = decision == .failUnderCoverage
         try await store.checkpointBackfillJobProgress(
@@ -1884,10 +1933,14 @@ actor BackfillJobRunner {
         /// (complete + M-5 idempotency = the unscanned audio is skipped
         /// forever).
         let coarseIncompleteDeferReason: String?
-        /// Honest upper bound (seconds, absolute timeline) of the CONTIGUOUS
-        /// successfully-scanned coarse prefix for this run. `nil` ⇒ nothing was
-        /// successfully scanned this run.
-        let lastCoveredUpperBoundSec: Double?
+        /// Honest upper bound of the CONTIGUOUS successfully-scanned coarse
+        /// prefix for this run. `nil` ⇒ nothing was successfully scanned.
+        ///
+        /// playhead-x0lb: a ``PlanListSeconds``. It is contiguity over the list
+        /// `coarsePassA` was handed, which is `narrowedForResume`'s output and
+        /// need not begin at 0. Publishing it as an episode cursor is
+        /// playhead-5pyq and every such site now says so by name.
+        let lastCoveredUpperBoundSec: PlanListSeconds?
         /// playhead-41mu (R2 review): where THIS RUN's plans actually began —
         /// `inputs.segments.first?.startTime` AFTER `narrowedForResume` has
         /// trimmed the already-covered prefix, which is the segment list
@@ -1904,7 +1957,10 @@ actor BackfillJobRunner {
         /// publish a cursor across a transcript hole sitting immediately above
         /// the prior cursor — see that function's doc for the field case and
         /// mutation UC09.
-        let firstPlannedSegmentStartSec: Double?
+        ///
+        /// playhead-x0lb: also a ``PlanListSeconds``, and for the same reason —
+        /// it is where the HANDED-OVER list begins, not where the episode does.
+        let firstPlannedSegmentStartSec: PlanListSeconds?
     }
 
     /// playhead-bkhc: did this run cover audio the job had not already covered?
@@ -1944,7 +2000,7 @@ actor BackfillJobRunner {
     /// absence, read as though it named a quantity.
     enum AdScanMeasurement: Sendable, Equatable {
         /// ``AnalysisCoverageSummary/adScanFraction`` returned a number.
-        case measured(Double)
+        case measured(ReachRatio)
         /// The store answered and the quantity is not honestly measurable: no
         /// coverage-lane row at all, no episode duration, or a denominator the
         /// transcript's own reach disproves. See `adScanFraction`'s doc.
@@ -2221,20 +2277,39 @@ actor BackfillJobRunner {
     /// "is this hole too small to have hidden an ad from a scan that ran?", which
     /// is the right question for the coverage numerator and the wrong one for "is
     /// this hole worth a re-scan?".
+    ///
+    /// **playhead-x0lb: it takes the whole ``CoverageOutcome``, not two loose
+    /// `Double`s.** The 41mu R2 defect above was a caller supplying one of the
+    /// two halves from a DIFFERENT list; with the pass's own outcome as the only
+    /// parameter there is no other list in scope to draw from, so that mistake
+    /// is now a compile error rather than a review finding. The arithmetic
+    /// itself moved to
+    /// ``EpisodeSeconds/promoting(_:priorEpisodeCursor:firstPlannedStart:bridge:)``,
+    /// which is the one licensed conversion from a list-relative bound to an
+    /// episode cursor.
+    ///
+    /// **What that does NOT close** (x0lb R2 review; an earlier draft of this
+    /// paragraph said flatly that "that mistake is now a compile error", which
+    /// overstated it and contradicted limit L-B in `CoverageQuantities.swift`).
+    /// The outcome's own two plan-list halves are the SAME TYPE, so supplying
+    /// them the wrong way round type-checks — probe PR3 planted the swap and it
+    /// built. What refuses it is the coherence guard inside `promoting`, a value
+    /// check, not the signature.
     nonisolated static func underCoverageCursor(
         prior: BackfillProgressCursor?,
-        scannedUpperBoundSec: Double?,
-        firstPlannedSegmentStartSec: Double?
+        coverage: CoverageOutcome
     ) -> BackfillProgressCursor? {
-        guard let scannedUpperBoundSec, scannedUpperBoundSec.isFinite else { return prior }
-        let priorUpper = prior?.lastProcessedUpperBoundSec ?? 0
-        if let firstPlannedSegmentStartSec, firstPlannedSegmentStartSec.isFinite,
-           firstPlannedSegmentStartSec - priorUpper > AnalysisCoverageMath.adScanBridgeableGapSec {
+        guard let promoted = EpisodeSeconds.promoting(
+            coverage.lastCoveredUpperBoundSec,
+            priorEpisodeCursor: prior?.lastProcessedUpperBoundSec,
+            firstPlannedStart: coverage.firstPlannedSegmentStartSec,
+            bridge: AnalysisCoverageMath.adScanBridgeableGapSec
+        ) else {
             return prior
         }
         let honest = BackfillProgressCursor(
             processedPhaseCount: 0,
-            lastProcessedUpperBoundSec: scannedUpperBoundSec
+            lastProcessedUpperBoundSec: promoted
         )
         return prior.map { honest.monotonic(from: $0) } ?? honest
     }
@@ -2298,9 +2373,14 @@ actor BackfillJobRunner {
         /// of those windows is durable.
         let fullyCovered: Bool
         /// End time of the last plan in the unbroken run of fully-covered plans
-        /// from the start of the episode; nil when the very first plan is not
+        /// from the start of the PLAN LIST; nil when the very first plan is not
         /// covered.
-        let contiguousUpperBoundSec: Double?
+        ///
+        /// playhead-x0lb: the type is ``PlanListSeconds`` and the doc no longer
+        /// says "from the start of the episode", which is what it said and what
+        /// it never was — the plan list is `narrowedForResume`'s output and
+        /// begins wherever the dispatcher's transcript began. playhead-5pyq.
+        let contiguousUpperBoundSec: PlanListSeconds?
         /// Plans that produced at least one successfully screened window.
         let succeededPlanIndices: Set<Int>
         /// Plans that recorded at least one failure.
@@ -2480,10 +2560,10 @@ actor BackfillJobRunner {
         // run of successes from the start and STOP at the first window that was
         // not successfully scanned. This guarantees a resume never skips
         // unscanned audio even if a later window succeeded past an earlier hole.
-        var walkedUpperBound: Double? = nil
+        var walkedUpperBound: PlanListSeconds? = nil
         for plan in plans.sorted(by: { $0.startTime < $1.startTime }) {
             guard fullyCoveredPlanIndices.contains(plan.windowIndex) else { break }
-            walkedUpperBound = plan.endTime
+            walkedUpperBound = PlanListSeconds(plan.endTime)
         }
         // playhead-26od: and never past where an UNCOVERED plan begins.
         //
@@ -2518,7 +2598,7 @@ actor BackfillJobRunner {
             .map(\.startTime)
             .min()
         if let walked = walkedUpperBound, let firstUncoveredStart {
-            walkedUpperBound = min(walked, firstUncoveredStart)
+            walkedUpperBound = min(walked, PlanListSeconds(firstUncoveredStart))
         }
         return CoarseCoverageWalk(
             fullyCovered: fullyCovered,
@@ -2775,7 +2855,12 @@ actor BackfillJobRunner {
         }
         let honest = BackfillProgressCursor(
             processedPhaseCount: 0,
-            lastProcessedUpperBoundSec: upperBound
+            // playhead-x0lb: playhead-5pyq's incremental-checkpoint writer —
+            // `walk.contiguousUpperBoundSec` is contiguity over the PLAN LIST.
+            lastProcessedUpperBoundSec: EpisodeSeconds.unsoundPlanListPromotion(
+                upperBound,
+                site: .coarseCheckpoint
+            )
         )
         // Never regress below a cursor an earlier deferred run already reached
         // — the same monotonic merge the rate-limit and cancellation branches
@@ -2796,7 +2881,27 @@ actor BackfillJobRunner {
             // value — they differ when `priorCursor` was already ahead, and
             // recording the smaller number would re-offer a cursor the row
             // already carries.
-            box.noteCursorWritten(merged.lastProcessedUpperBoundSec ?? upperBound)
+            // playhead-x0lb: the box remembers PLAN-list bounds (that is what
+            // `shouldAdvanceCursor` compares the walk against), so the merged
+            // EPISODE cursor is converted back explicitly, and stating the
+            // conversion is what stops the box quietly acquiring episode
+            // semantics it does not have.
+            //
+            // R1 review: an earlier draft of this comment said the two values
+            // are "equal by construction", which contradicts the paragraph
+            // directly above — they DIFFER exactly when `priorCursor` was
+            // already ahead, and taking the larger is the whole point. What is
+            // true is weaker and sufficient: every value `merged` can hold
+            // originated as a walk or segment-list bound (this pass's own, or
+            // one an earlier deferred/salvaged run published through
+            // ``UnsoundCursorPromotionSite``), so the demotion invents no claim
+            // the box did not already hold. It is the one Episode→PlanList
+            // crossing in the tree and is deliberately NOT enumerable the way
+            // the promotions are: the inventory exists to be SHRUNK by
+            // playhead-5pyq, and this site disappears with it.
+            box.noteCursorWritten(
+                merged.lastProcessedUpperBoundSec.map { PlanListSeconds($0.rawValue) } ?? upperBound
+            )
         } catch {
             logger.warning(
                 "fm.coarse.checkpoint_cursor_failed job=\(jobId, privacy: .public) error=\(String(describing: error), privacy: .public)"
@@ -2811,9 +2916,14 @@ actor BackfillJobRunner {
     /// re-drive only needs to scan `segment.endTime > cursor`. With no cursor
     /// (the first-run case) or when nothing is trimmed, returns `inputs`
     /// unchanged — byte-identical to the pre-pmp9 path.
-    private static func narrowedForResume(_ inputs: AssetInputs, cursor: Double?) -> AssetInputs {
-        guard let cursor, cursor > 0 else { return inputs }
-        let remaining = inputs.segments.filter { $0.endTime > cursor }
+    ///
+    /// playhead-x0lb: the parameter is an ``EpisodeSeconds`` because this
+    /// function is where a cursor's claim is CASHED — every segment ending at or
+    /// below it is deleted from the attempt, so a bound that only ever spoke for
+    /// a handed-over list deletes audio nobody read.
+    private static func narrowedForResume(_ inputs: AssetInputs, cursor: EpisodeSeconds?) -> AssetInputs {
+        guard let cursor, cursor.rawValue > 0 else { return inputs }
+        let remaining = inputs.segments.filter { $0.endTime > cursor.rawValue }
         guard remaining.count != inputs.segments.count else { return inputs }
         return AssetInputs(
             analysisAssetId: inputs.analysisAssetId,
@@ -3086,7 +3196,7 @@ actor BackfillJobRunner {
         // marking it complete with permanent holes.
         let coarseHitRateLimit = coarse.status == .rateLimited
             || coarse.failedWindowStatuses.contains(.rateLimited)
-        var coverageContiguousUpperBound: Double? = nil
+        var coverageContiguousUpperBound: PlanListSeconds? = nil
         var coverageFullyCovered = true
         // playhead-qbib: every passA row this job writes, kept so the run can
         // report an HONEST scanned-duration denominator at the end. A window
@@ -3568,7 +3678,7 @@ actor BackfillJobRunner {
             // playhead-41mu (R2 review): `inputs` is the POST-`narrowedForResume`
             // list — the same one handed to `coarsePassA` above and partitioned
             // by `planPassA` — so this is literally where this run's plans begin.
-            firstPlannedSegmentStartSec: inputs.segments.first?.startTime
+            firstPlannedSegmentStartSec: inputs.segments.first.map { PlanListSeconds($0.startTime) }
         )
         // playhead-y3ya: semantic-sweep mark compose. Turn the `containsAd`
         // verdicts this job just persisted into user-visible MARK-ONLY

@@ -989,7 +989,7 @@ actor AnalysisJobReconciler {
         //
         // An unresolved asset is also skipped: nothing to measure, and `nil`
         // already reads as owed.
-        var adScanFraction: Double?
+        var adScanFraction: ReachRatio?
         if nextOrdinal != nil,
            AnalysisWorkScheduler.capOutRetryCooldownElapsed(chainTail: tail, now: decidedAt),
            let assetId = tail.analysisAssetId {
@@ -1393,9 +1393,22 @@ actor AnalysisJobReconciler {
             // divides, a gappy transcript reads 100 % over audio nobody
             // transcribed (the playhead-sd71 antipattern) — a hazard the
             // 2026-08-03 pull STILL exhibits with the area spanning both passes,
-            // on NINE of twelve assets: D9B513CD reads 100.0 % by chunk-max
-            // watermark against an 88.3 % two-pass area — an 11.7 pp gap that
-            // flips the 0.95 floor this very guard applies. See
+            // on NINE of twelve assets — and R6 review re-derived that nine and
+            // NAMED it, because the pull carries three different nines-of-twelve
+            // and this sentence identified none of them. THIS nine is "chunk-max
+            // watermark strictly above the bridged two-pass area": 44F076BB,
+            // 4FF3A238, 53FC53E3, 58882C47, 83592353, AD5F3A0A, D9B513CD,
+            // DE0784D8, FCDDB309. It is NOT the nine at
+            // `AnalysisStore.fetchCoverageSummariesByAssetIds` ("fast-only
+            // ceiling below the 0.98 sufficiency floor"), with which it shares
+            // only six members, and it is NOT the nine with no coverage-lane row
+            // at all (`adScanFraction` ABSENT, not zero). Quoting a count without
+            // its population is instances 15/16/17 of this bead's own catalogue.
+            //
+            // Only ONE member of this nine actually flips the 0.95 floor, and it
+            // is the one worth naming: D9B513CD reads 100.0 % by chunk-max
+            // watermark against an 88.3 % two-pass area — an 11.7 pp gap, where
+            // the other eight are 0.4–2.5 pp and land the same side of it. See
             // ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
             // for the table, for why the watermark is `chunks.map(\.endTime).max()`
             // and not the fast-pass COLUMN, and for the four successive drafts of
@@ -1404,17 +1417,23 @@ actor AnalysisJobReconciler {
             // spans first-word to last-word and every breath is a hole: on the
             // 2026-08-03 pull the raw union cleared 0.95 for **zero of twelve**
             // assets, which is a gate that mints nothing rather than a strict
-            // one. See ``SemanticScanClaim/bridgedTranscriptCoveredSec(ranges:)``.
+            // one. See ``SemanticScanClaim/bridgedTranscriptCoveredSec(region:)``.
             //
             // playhead-9y9e: the ranges span BOTH transcript passes. Reading the
             // fast pass alone made this gate refuse 48E903D7 at 36.9 % when its
             // transcript covers 95.1 %, and 0C2FC22E at 55.4 % when its two
             // passes tile the episode end to end between them.
+            //
+            // playhead-x0lb R6: both parameters carry types. They were `Double?`
+            // and `Double?`, so probe PJ5 exchanged the numerator and the
+            // denominator here and it COMPILED — R4's PB1/PB2 reciprocal shape,
+            // which R4 closed for the Activity bars and which was still writable
+            // at this gate. Rail TY37.
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
                 coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
-                    ranges: try await store.fetchTranscriptCoveredRanges(assetId: assetId)
+                    region: try await store.fetchTranscribedRegion(assetId: assetId)
                 ),
-                episodeDurationSec: asset.episodeDurationSec
+                episodeDurationSec: asset.episodeDurationSec.map { EpisodeSeconds($0) }
             ) else { continue }
             // Whether a scan is OWED is deliberately not re-asked here.
             // ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``

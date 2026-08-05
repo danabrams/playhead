@@ -42,8 +42,8 @@ struct SemanticScanClaimPredicateTests {
     @Test("an unmeasured ad scan is owed a scan")
     func unmeasuredIsOwed() {
         #expect(SemanticScanClaim.isOwed(adScanFraction: nil))
-        #expect(SemanticScanClaim.isOwed(adScanFraction: .nan))
-        #expect(SemanticScanClaim.isOwed(adScanFraction: .infinity))
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(.nan)))
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(.infinity)))
     }
 
     /// The floor is the runner's own skip floor. If the two diverge, claims
@@ -53,8 +53,8 @@ struct SemanticScanClaimPredicateTests {
         let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
         #expect(floor == episodePreparationCompleteThreshold)
         #expect(SemanticScanClaim.isOwed(adScanFraction: floor) == false)
-        #expect(SemanticScanClaim.isOwed(adScanFraction: floor + 0.01) == false)
-        #expect(SemanticScanClaim.isOwed(adScanFraction: floor - 0.001))
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(floor.rawValue + 0.01)) == false)
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(floor.rawValue - 0.001)))
     }
 
     /// **The three MEASURED field shapes, plus two synthetic bounds — and the
@@ -62,26 +62,47 @@ struct SemanticScanClaimPredicateTests {
     /// 2026-08-03 pull in R5: exactly three of the twelve assets own any
     /// `semantic_scan_results` row, and their `adScanFraction` (coverage-lane
     /// `passA` windows that examined, intersected with the 5 s-bridged
-    /// fast-transcript region, over the declared duration) is
-    /// **0.000** (53FC53E3 — one 35.8 s window at 2490–2525.8 s, entirely
-    /// outside its fast transcript, so the intersection is genuinely zero),
+    /// TRANSCRIBED region, over the declared duration) is
+    /// **0.014** (53FC53E3 — one 35.8 s window at 2490–2525.8 s),
     /// **0.207** (AD5F3A0A, 885.3 s of 4280.9 s) and **0.380** (DE0784D8,
-    /// 2097.2 s of 5522.7 s). The last is not just a replication: the device
-    /// wrote `ad scan 0.380 < 0.980 (decodeFailure)` into that asset's own
+    /// 2097.2 s of 5522.7 s).
+    ///
+    /// The last is not just a replication: the device wrote
+    /// `ad scan 0.380 < 0.980 (decodeFailure)` into that asset's own
     /// `analysis_assets.terminalReason`, so the number has a witness in the
     /// pull rather than only in this file. The values this list carried before
     /// R5 — `0.026` and `0.47` — match nothing in the pull.
+    ///
+    /// playhead-x0lb: 53FC53E3's figure read **0.000** here, and that number was
+    /// correct under the definition in force when it was written — the bound was
+    /// the FAST union alone, and this window lies entirely outside 53FC53E3's
+    /// fast transcript, which stops dead at 2490.0 s. playhead-9y9e widened the
+    /// bound to BOTH passes, and the asset has 32 final chunks spanning
+    /// 2490.0–2525.82 s — exactly the window — so the intersection is now
+    /// 35.82 s and the fraction is 0.0142, the figure playhead-41mu and
+    /// playhead-5pyq both quote. (R1 review: this said the final chunks span
+    /// 2490–**2493.4** s, which is the same defect one layer down — a 3.4 s span
+    /// cannot produce a 35.82 s intersection, so the stated evidence
+    /// contradicted the corrected number it was there to justify. Re-derived
+    /// from `transcript_chunks`: `MIN(startTime)=2490.0`, `MAX(endTime)=2525.82`,
+    /// 32 rows.) Re-derived both ways against
+    /// `scratchpad/db-aug3-work/analysis.sqlite`: fast-only 0.0000, canonical
+    /// 0.0142. A number computed under one definition and quoted under another is
+    /// instance 7 of playhead-x0lb's catalogue, so it is corrected rather than
+    /// left to be re-discovered. The argument list keeps `0.0` — it is a
+    /// legitimate synthetic bound, and every value here is owed either way.
     ///
     /// `0.9` and `floor - epsilon` are deliberately synthetic: they pin the
     /// approach to the floor, which no field asset is anywhere near.
     @Test(
         "the device's unscanned assets are all owed a scan",
         arguments: [
-            0.0, 0.207, 0.380,
-            0.9, AnalysisJobRunner.semanticBackfillSufficientAdScanFraction - 0.001
+            ReachRatio(0.0), ReachRatio(0.207), ReachRatio(0.380),
+            ReachRatio(0.9),
+            ReachRatio(AnalysisJobRunner.semanticBackfillSufficientAdScanFraction.rawValue - 0.001)
         ]
     )
-    func fieldShapesAreOwed(fraction: Double) {
+    func fieldShapesAreOwed(fraction: ReachRatio) {
         #expect(SemanticScanClaim.isOwed(adScanFraction: fraction))
     }
 
@@ -110,13 +131,16 @@ struct SemanticScanClaimPredicateTests {
     func transcriptFloorAdmits95Percent() {
         #expect(AnalysisCoordinator.finalizeBackfillMinCoverageRatio == 0.95)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 0.95 * 2_113, episodeDurationSec: 2_113
+            coveredSec: BridgedTranscriptSeconds(0.95 * 2_113),
+            episodeDurationSec: EpisodeSeconds(2_113)
         ))
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: 2_113
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(2_113)
         ))
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 0.94 * 2_113, episodeDurationSec: 2_113
+            coveredSec: BridgedTranscriptSeconds(0.94 * 2_113),
+            episodeDurationSec: EpisodeSeconds(2_113)
         ) == false)
     }
 
@@ -161,14 +185,21 @@ struct SemanticScanClaimPredicateTests {
         let raw = AnalysisCoverageMath.unionedSeconds(ranges)
         #expect(raw / duration < 0.95,
                 "fixture is not gappy enough to prove anything: \(raw / duration)")
+        // playhead-x0lb R6: the RAW union has to be BOXED to reach this gate now,
+        // and that is the point — probe PJ3 wrote `coveredSec:
+        // region.unionedSeconds` at the production call site and it compiled.
+        // Here the box is deliberate and states which quantity is on trial.
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: raw, episodeDurationSec: duration
+            coveredSec: BridgedTranscriptSeconds(raw),
+            episodeDurationSec: EpisodeSeconds(duration)
         ) == false)
 
-        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: ranges)
-        #expect(bridged > raw)
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(
+            region: CoverageRegionFixtures.transcribed(ranges)
+        )
+        #expect(bridged.rawValue > raw)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: bridged, episodeDurationSec: duration
+            coveredSec: bridged, episodeDurationSec: EpisodeSeconds(duration)
         ), "a fully transcribed episode must clear the transcript floor")
     }
 
@@ -186,11 +217,13 @@ struct SemanticScanClaimPredicateTests {
         }
         let duration = holeEnd + Self.speechSpan(count: 200)
 
-        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: head + tail)
-        #expect(bridged < 0.95 * duration,
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(
+            region: CoverageRegionFixtures.transcribed(head + tail)
+        )
+        #expect(bridged.rawValue < 0.95 * duration,
                 "a 400 s hole must not be bridged away")
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: bridged, episodeDurationSec: duration
+            coveredSec: bridged, episodeDurationSec: EpisodeSeconds(duration)
         ) == false)
         // …and the gap really is wider than the bridge, or this proves nothing.
         #expect(400 > AnalysisCoverageMath.adScanBridgeableGapSec)
@@ -202,17 +235,33 @@ struct SemanticScanClaimPredicateTests {
     @Test("an unmeasurable transcript never clears the floor")
     func unmeasurableTranscriptDoesNotClear() {
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: nil, episodeDurationSec: 2_113) == false)
+            coveredSec: nil, episodeDurationSec: EpisodeSeconds(2_113)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: nil) == false)
+            coveredSec: BridgedTranscriptSeconds(2_113), episodeDurationSec: nil) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: 0) == false)
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(0)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: -1) == false)
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(-1)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: .nan, episodeDurationSec: 2_113) == false)
+            coveredSec: BridgedTranscriptSeconds(.nan),
+            episodeDurationSec: EpisodeSeconds(2_113)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: -5, episodeDurationSec: 2_113) == false)
+            coveredSec: BridgedTranscriptSeconds(-5),
+            episodeDurationSec: EpisodeSeconds(2_113)) == false)
+        // playhead-x0lb R6: the `+∞` numerator. It is not decoration — the R6 fix
+        // routes the division through
+        // ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)``, which
+        // CLAMPS into [0, 1], so an infinite area clamps to 1.0 and would clear
+        // this floor if the finiteness guard were merely inherited rather than
+        // re-stated. This assertion is what makes that guard non-removable.
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(.infinity),
+            episodeDurationSec: EpisodeSeconds(2_113)) == false)
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(.infinity)) == false)
     }
 
     /// The prefix IS the device-pull query (`deferReason LIKE 'scan_claim:%'`),

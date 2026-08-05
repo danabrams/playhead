@@ -258,9 +258,40 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         // `nil` when either the watermark is missing or the duration
         // is non-positive (legacy / placeholder rows pre-decode); a
         // non-nil result is already clamped into `[0, 1]`.
-        func fraction(_ watermark: Double?, durationSec: Double) -> Double? {
-            guard let watermark, durationSec > 0 else { return nil }
-            return min(1.0, max(0.0, watermark / durationSec))
+        // playhead-x0lb: the parameter was named `watermark` and is only ever
+        // handed an AREA (`fastTranscriptCoveredSec`, `analysisCoveredSec`).
+        // A watermark is a REACH and over-reports a gappy transcript by 2.6x on
+        // the 2026-08-03 pull's AD5F3A0A, so the name asserted the wrong
+        // quantity at both call sites. Renamed; the arithmetic is untouched.
+        //
+        // R2 review: the parameter is an ``AnalyzedSeconds``, not a `Double`,
+        // and that is load-bearing. R1's audit claimed "its NUMERATOR is typed
+        // even though the ratio is not, which is what stops the ad-scan area or
+        // the transcript area being substituted into it" — which was FALSE
+        // while the call site read `?.rawValue` off the summary: probe PR2
+        // substituted `summary?.adScanCoveredSec?.rawValue` here and it
+        // COMPILED. The demotion now happens INSIDE, so the substitution is a
+        // compile error (mutation rail TY15).
+        //
+        // R3 review: the DENOMINATOR was still a bare `Double`, and R2 fixing
+        // only the numerator left this ratio the one pair in the path with a
+        // half-typed denominator — ``ReachRatio/init(examined:ofDeclaredDuration:)``
+        // and ``DensityRatio/init(transcribed:ofDeclaredDuration:)`` both name
+        // BOTH terms. Probe PC1 passed `summary?.fastTranscriptCoverageEndSec?.rawValue`
+        // — the transcript WATERMARK — as the AN bar's denominator and it
+        // COMPILED. Both terms are named now (rails TY18/TY19), and the guard is
+        // behaviour-identical: the old `?? 0` collapsed an absent duration to a
+        // number that fails `> 0`, which is what `let duration` does directly.
+        // R4 review: the DIVISION moved into
+        // ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``. R3 typed both
+        // TERMS, which stops the wrong quantity arriving; it does not stop the
+        // two that arrive correctly from being divided the wrong way round.
+        // Probe PB1 wrote `duration.rawValue / area.rawValue` right here and it
+        // COMPILED — a reciprocal renders in the same [0, 1] bar and clamps to
+        // 1.0 on every episode whose analyzed area is under its duration, i.e.
+        // a FULL bar on an episode nothing analyzed. Rail TY24.
+        func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+            area?.fractionOfDeclaredDuration(duration)
         }
 
         for episode in episodes {
@@ -317,19 +348,36 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // `analysis_fraction` disagreement) means the displayed
             // fractions never come from a contradictory source either.
             let summary = coverageSummariesByAssetId[asset.id]
-            let durationSec = summary?.episodeDurationSec ?? 0
-            let transcriptFraction = fraction(
-                summary?.fastTranscriptCoveredSec,
-                durationSec: durationSec
-            )
+            // playhead-x0lb: TX is the transcript DENSITY, and it now says so —
+            // one ruler on the summary rather than a local copy of the division.
+            //
+            // R1 review: NOT input-identical, and the earlier claim that it was
+            // ("the numerator is an interval union, so the extra guards cannot
+            // fire") is not complete — `fastTranscriptCoveredSec` is the union
+            // only when a fast chunk landed; otherwise it is the
+            // `fastTranscriptCoverageEndTime` COLUMN, which nothing validates.
+            // The honest statement is the DIRECTION of the difference:
+            // ``DensityRatio/init(transcribed:ofDeclaredDuration:)`` withholds a
+            // number where the local `fraction(...)` manufactured one — a NaN
+            // numerator clamped to 0.0, an infinite one to 1.0, a negative one
+            // to 0.0, and a non-finite DURATION divided into 0.0. All four now
+            // render `--%` instead of a fabricated bar, which is the same
+            // direction every other consumer of this quantity already takes
+            // (`finiteValue`: absence and non-finiteness are one fact).
+            let transcriptFraction = transcriptBarFill(summary?.transcriptDensity)
             // playhead-sd71: AN is the gap-aware analyzed-coverage AREA
             // (transcript union clipped to the analysis frontier), NOT the
             // raw frontier watermark. `analysisCoveredSec` is a subset of
             // `fastTranscriptCoveredSec`, so AN can never exceed TX — the
             // "AN 100% / TX 39%" antipattern this bead removes.
+            // NOT a ``DensityRatio`` and NOT a ``ReachRatio``: its numerator is
+            // the ANALYZED area (transcript union clipped to the DSP frontier),
+            // a third quantity over the same denominator. Left as a `Double`
+            // deliberately and recorded in playhead-x0lb's audit rather than
+            // given a type nothing else would share.
             let analysisFraction = fraction(
-                summary?.analysisCoveredSec,
-                durationSec: durationSec
+                area: summary?.analysisCoveredSec,
+                ofDeclaredDuration: summary?.episodeDurationSec
             )
             // Download fraction comes from the (already-snapshotted)
             // `DownloadManager` live-progress map. Completed cached
@@ -342,8 +390,13 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // totalBytes` but a brief race where `totalBytes` falls
             // back to a smaller value than `bytesWritten` could in
             // principle yield > 1 mid-tick.
+            //
+            // R7: this was a SECOND, unguarded copy of `clampFraction` written
+            // inline. Two copies of a clamp is how R2 came to split TY15 from
+            // TY16, and the copies had already diverged — the named helper is the
+            // one that now refuses a non-finite input.
             let downloadFraction = downloadFractions[episodeId]
-                .map { min(1.0, max(0.0, $0)) }
+                .map(clampFraction)
                 ?? (downloadedEpisodeIds.contains(episodeId) ? 1.0 : nil)
             let latestSession = latestSessionsByAssetId[asset.id]
             let latestJob = latestJobsByEpisodeId[episodeId]
@@ -507,20 +560,22 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // contract, so this only matters when the SQLite read
             // itself throws — rare but the wire must stay self-consistent.)
             let summary = coverageSummariesByAssetId[asset.id]
-            let durationSec = summary?.episodeDurationSec ?? 0
-            let transcriptCoveredSec = summary?.fastTranscriptCoveredSec
-            let transcriptFraction = fraction(transcriptCoveredSec, durationSec: durationSec)
-            let featureCoverageEndSec = summary?.featureCoverageEndSec
-            let confirmedAdCoverageEndSec = summary?.confirmedAdCoverageEndSec
+            let transcriptCoveredSec = summary?.fastTranscriptCoveredSec?.rawValue
+            let transcriptFraction = transcriptBarFill(summary?.transcriptDensity)
+            let featureCoverageEndSec = summary?.featureCoverageEndSec?.rawValue
+            let confirmedAdCoverageEndSec = summary?.confirmedAdCoverageEndSec?.rawValue
             let analysisWatermark = maxKnown(featureCoverageEndSec, confirmedAdCoverageEndSec)
             // playhead-sd71: only the FRACTION changes — AN is now the
             // gap-aware analyzed-coverage AREA (transcript union clipped to
             // the analysis frontier), a subset of TX so it can never exceed
             // it. The raw `analysisWatermark` stays exposed below in the
             // `analysisWatermarkSec` wire field for debugging.
-            let analysisFraction = fraction(summary?.analysisCoveredSec, durationSec: durationSec)
-            let fastTranscriptWatermarkSec = summary?.fastTranscriptCoverageEndSec
-            let finalPassCoverageEndSec = summary?.finalPassCoverageEndSec
+            let analysisFraction = fraction(
+                area: summary?.analysisCoveredSec,
+                ofDeclaredDuration: summary?.episodeDurationSec
+            )
+            let fastTranscriptWatermarkSec = summary?.fastTranscriptCoverageEndSec?.rawValue
+            let finalPassCoverageEndSec = summary?.finalPassCoverageEndSec?.rawValue
             let liveDownloadFraction = downloadFractions[episodeId].map(clampFraction)
             let cachedAudioPresent = downloadedEpisodeIds.contains(episodeId)
             let downloadFraction = liveDownloadFraction ?? (cachedAudioPresent ? 1.0 : nil)
@@ -565,8 +620,16 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                         analysisFraction: analysisFraction,
                         analysisPercent: formatPercent(analysisFraction),
                         analysisSource: analysisSource,
-                        episodeDurationSec: summary?.episodeDurationSec,
+                        episodeDurationSec: summary?.episodeDurationSec?.rawValue,
                         transcriptCoveredSec: transcriptCoveredSec,
+                        // playhead-x0lb, FOUND BY THE TYPES: the wire field
+                        // `transcript_watermark_sec` is fed the transcript AREA,
+                        // not a watermark — the same value as
+                        // `transcript_covered_sec` one line up, while the real
+                        // reach ships separately as
+                        // `fast_transcript_watermark_sec`. Behaviour is
+                        // UNCHANGED here (a dogfood wire field is not this
+                        // bead's to renegotiate); filed as playhead-vkwr.
                         transcriptWatermarkSec: transcriptCoveredSec,
                         fastTranscriptWatermarkSec: fastTranscriptWatermarkSec,
                         analysisWatermarkSec: analysisWatermark,
@@ -697,13 +760,46 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         }
     }
 
-    private func fraction(_ watermark: Double?, durationSec: Double) -> Double? {
-        guard let watermark, durationSec > 0 else { return nil }
-        return clampFraction(watermark / durationSec)
+    // playhead-x0lb: same rename as the local copy above, same reason; R2
+    // review typed the NUMERATOR for the same reason too (rail TY16), and R3
+    // typed the DENOMINATOR — see the local copy's doc for the probe that
+    // walked a WATERMARK into this slot while the numerator's type looked
+    // like it had closed the family.
+    /// R4 review: same delegation as the local copy, and a rail per copy for
+    /// the reason R2 gave when it split TY15 from TY16 — probe PB2 inverted
+    /// THIS one independently and it compiled too. Rail TY25.
+    private func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+        area?.fractionOfDeclaredDuration(duration)
     }
 
+    /// playhead-x0lb R2 review: the TX bar's demotion point, named.
+    ///
+    /// Both bar sites used to read `summary?.transcriptDensity?.rawValue`
+    /// inline, and probe PR1 substituted `summary?.adScanFraction?.rawValue` —
+    /// the ad-scan REACH rendered as the transcript-density bar, which is
+    /// instance 5's own shape — and it COMPILED, because `?.rawValue` makes
+    /// every ratio on the summary interchangeable at the point of use. Taking a
+    /// ``DensityRatio`` and demoting it here is what makes that substitution a
+    /// compile error (rail TY17).
+    ///
+    /// It is deliberately not an ``AnalysisCoverageSummary`` accessor: the
+    /// quantity is a BAR FILL and its provenance is discarded on purpose one
+    /// line later — this function is where that discarding is stated.
+    private func transcriptBarFill(_ density: DensityRatio?) -> Double? {
+        density?.rawValue
+    }
+
+    /// playhead-x0lb R7, the clamp class: a non-finite input reads as 0, not as a
+    /// full bar.
+    ///
+    /// `min(1.0, max(0.0, .infinity))` is `1.0`, so without the guard a download
+    /// whose `totalBytes` briefly reads 0 renders **DL 100 %** — the clamp turning
+    /// "we cannot measure this" into "it is finished". `clampUnit` in
+    /// `EpisodePreparationReadiness` already made this exact choice ("`isFinite`,
+    /// not `!= nil`: a NaN clamps to 0"); this is the sibling that had not.
     private func clampFraction(_ fraction: Double) -> Double {
-        min(1.0, max(0.0, fraction))
+        guard fraction.isFinite else { return 0 }
+        return min(1.0, max(0.0, fraction))
     }
 
     private func maxKnown(_ lhs: Double?, _ rhs: Double?) -> Double? {

@@ -112,7 +112,7 @@ struct EpisodePreparationInputs: Equatable, Sendable {
     /// detected ad windows (so one late detection lit the ✓ with almost
     /// nothing scanned — meaning AN EPISODE WHERE DETECTION DID WORSE COULD
     /// LOOK MORE COMPLETE). Neither is a measure of audio read for ads.
-    var adScanFraction: Double?
+    var adScanFraction: ReachRatio?
     /// The user tapped the control this session (explicit intent). Makes
     /// the control show the working bar immediately, before the first
     /// progress tick arrives.
@@ -198,7 +198,15 @@ func deriveEpisodePreparationReadiness(
     _ inputs: EpisodePreparationInputs
 ) -> EpisodePreparationReadiness {
     let download = clampUnit(inputs.downloadFraction)
-    let analysis = clampUnit(inputs.adScanFraction)
+    // playhead-x0lb R3: through ``analyzeZoneFill(_:)``, not
+    // `clampUnit(inputs.adScanFraction?.rawValue)`. That spelling is the third
+    // instance of the one R2 review found twice in `ActivitySnapshotProvider` —
+    // a `?.rawValue` at the CALL SITE hands the helper a bare `Double`, so the
+    // type has already stopped applying by the time the argument is read. Probe
+    // PC3 wrote `clampUnit(inputs.downloadFraction)` here — the DOWNLOAD
+    // fraction, whose numerator is BYTES, driving the analyze zone — and it
+    // COMPILED. Rail TY21.
+    let analysis = analyzeZoneFill(inputs.adScanFraction)
 
     // 1. Honestly fully ad-scanned — the calm ✓. Highest precedence.
     if inputs.analysisComplete {
@@ -363,7 +371,16 @@ func episodePreparationAccessibilityValue(
 
 /// Format a `[0, 1]` fraction as an integer percent for the functional
 /// progress caption. Never a vanity metric — pure progress only.
+///
+/// **playhead-x0lb R7, the clamp class.** The guard is here rather than assumed
+/// from the callers. Every caller today passes a value that went through
+/// `clampUnit`, which already refuses a non-finite input — but that is a SURVEY of
+/// three call sites, and it goes stale the moment someone formats a fourth
+/// fraction. Without it `min(1, max(0, .infinity))` is `1`, so an unmeasurable
+/// fraction reads **"100% scanned for ads"**: the clamp turning "we cannot measure
+/// this" into the most reassuring caption the surface can print.
 func episodePreparationPercent(_ fraction: Double) -> String {
+    guard fraction.isFinite else { return "0%" }
     let clamped = min(1, max(0, fraction))
     return "\(Int((clamped * 100).rounded()))%"
 }
@@ -385,7 +402,7 @@ func episodePreparationPercent(_ fraction: Double) -> String {
 /// transcript chunk spans first-word to last-word and its union tops out around
 /// 0.93–0.98 of real audio. If this threshold is ever revisited, revisit the
 /// bridging in the same breath — the pair has to be calibrated together.
-let episodePreparationCompleteThreshold: Double = 0.98
+let episodePreparationCompleteThreshold = ReachRatio(0.98)
 
 /// Whether the (canonical, projected) analysis status indicates a job is
 /// queued or actively running. Drives the "auto-analyzing shows the
@@ -430,7 +447,7 @@ func episodePreparationAnalysisActive(status: AnalysisState.PersistedStatus?) ->
 /// not-ready rather than ready.
 func episodePreparationAnalysisComplete(
     status: AnalysisState.PersistedStatus?,
-    adScanFraction: Double?,
+    adScanFraction: ReachRatio?,
     isDegradedTerminal: Bool
 ) -> Bool {
     // A failed / cancelled job never reads as ready, even at full coverage —
@@ -442,7 +459,7 @@ func episodePreparationAnalysisComplete(
     // statement from the pipeline that it stopped short, and it must not be
     // possible for a coverage-measurement bug to override it.
     if isDegradedTerminal { return false }
-    guard let adScanFraction, adScanFraction.isFinite else { return false }
+    guard let adScanFraction = adScanFraction.finiteValue else { return false }
     return adScanFraction >= episodePreparationCompleteThreshold
 }
 
@@ -478,7 +495,7 @@ struct EpisodePreparationAnalysisInputs: Equatable, Sendable {
     var analysisComplete: Bool = false
     var analysisTerminatedComplete: Bool = false
     var analysisFailed: Bool = false
-    var adScanFraction: Double?
+    var adScanFraction: ReachRatio?
 }
 
 /// playhead-pz32: project the two persisted artifacts an episode row consults —
@@ -520,4 +537,16 @@ func episodePreparationAnalysisInputs(
 private func clampUnit(_ value: Double?) -> Double {
     guard let value, value.isFinite else { return 0 }
     return min(1, max(0, value))
+}
+
+/// playhead-x0lb R3: the analyze zone's demotion point, named.
+///
+/// The download zone next to it is a genuine `Double` — its numerator is BYTES
+/// — so `clampUnit` cannot be given a type, and while the analyze zone called
+/// `clampUnit` too the two were interchangeable at the point of use. This is
+/// the same fix, in the same shape, as `ActivitySnapshotProvider`'s
+/// `transcriptBarFill(_:)`: take the quantity, discard the provenance HERE, and
+/// the substitution stops being writable (rail TY21).
+private func analyzeZoneFill(_ fraction: ReachRatio?) -> Double {
+    clampUnit(fraction?.rawValue)
 }

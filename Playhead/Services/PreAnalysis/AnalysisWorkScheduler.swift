@@ -5544,7 +5544,7 @@ actor AnalysisWorkScheduler {
         }
         guard resumableCount > 0 else { return nil }
 
-        let adScanFraction: Double?
+        let adScanFraction: ReachRatio?
         do {
             adScanFraction = try await store
                 .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
@@ -6221,11 +6221,11 @@ actor AnalysisWorkScheduler {
     ///   produce no coverage at all. Refusing to mint there is what keeps this
     ///   from being "a job that runs and achieves nothing".
     static func shouldMintAdScanRedrive(
-        adScanFraction: Double?,
+        adScanFraction: ReachRatio?,
         resumableCoverageJobCount: Int
     ) -> Bool {
         guard resumableCoverageJobCount > 0 else { return false }
-        guard let adScanFraction, adScanFraction.isFinite else { return true }
+        guard let adScanFraction = adScanFraction.finiteValue else { return true }
         // The SAME floor the runner uses to decide it may skip the semantic
         // backfill. If this were lower, the scheduler would mint passes the
         // runner then declines to run.
@@ -6401,7 +6401,7 @@ actor AnalysisWorkScheduler {
         nextOrdinal: Int?,
         transcriptCoverageSec: Double,
         episodeDurationSec: Double?,
-        adScanFraction: Double?,
+        adScanFraction: ReachRatio?,
         tiers: [Double],
         now: Double
     ) -> CapOutRetryDecision {

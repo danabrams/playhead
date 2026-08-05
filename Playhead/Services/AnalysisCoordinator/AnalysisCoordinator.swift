@@ -2488,7 +2488,7 @@ actor AnalysisCoordinator {
     /// cost is a degraded terminal on an episode that may in fact be fully
     /// scanned; the alternative cost is a clean ✓ on an episode nobody read.
     private func measuredAdScanCoverage(assetId: String) async -> AdScanCoverage {
-        var fraction: Double?
+        var fraction: ReachRatio?
         do {
             fraction = try await store
                 .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
@@ -2672,7 +2672,7 @@ actor AnalysisCoordinator {
         /// is not honestly measurable (no coverage-lane rows, unknown or
         /// contradicted duration). `nil` is NOT treated as covered — an
         /// unmeasurable episode must under-claim.
-        let fraction: Double?
+        let fraction: ReachRatio?
         /// Why coverage is short. Ignored when `fraction` clears the floor.
         let limit: AdScanLimit
 
@@ -2703,24 +2703,24 @@ actor AnalysisCoordinator {
         /// (``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction``). A
         /// lower floor here would mint clean terminals the UI still renders ◐
         /// and the runner still tries to extend.
-        static var sufficientFraction: Double { episodePreparationCompleteThreshold }
+        static var sufficientFraction: ReachRatio { episodePreparationCompleteThreshold }
 
         /// True when measured coverage clears ``sufficientFraction``. `nil` is
         /// false — see the property doc.
         var clearsFinalizeFloor: Bool {
-            guard let fraction, fraction.isFinite else { return false }
-            return fraction + 1e-9 >= Self.sufficientFraction
+            guard let fraction = fraction.finiteValue else { return false }
+            return ReachRatio(fraction.rawValue + 1e-9) >= Self.sufficientFraction
         }
 
         /// Human+machine readable rendering for `terminalReason`.
         var diagnostic: String {
-            guard let fraction, fraction.isFinite else {
+            guard let fraction = fraction.finiteValue else {
                 return "ad scan unmeasured (\(limit.rawValue))"
             }
             return String(
                 format: "ad scan %.3f < %.3f (%@)",
-                fraction,
-                Self.sufficientFraction,
+                fraction.rawValue,
+                Self.sufficientFraction.rawValue,
                 limit.rawValue
             )
         }
@@ -2866,7 +2866,7 @@ actor AnalysisCoordinator {
     ) -> String? {
         guard episodeDuration.isFinite, episodeDuration > 0 else { return nil }
         let tolerance = AnalysisCoverageSummary.adScanDurationToleranceSec(
-            episodeDurationSec: episodeDuration
+            episodeDurationSec: EpisodeSeconds(episodeDuration)
         )
         let limit = episodeDuration + tolerance
         var faults: [String] = []
@@ -3066,7 +3066,7 @@ actor AnalysisCoordinator {
                 state: .completeFull,
                 reason: String(
                     format: "full coverage: transcript %.3f, feature %.3f, ad scan %.3f",
-                    transcriptRatio, featureRatio, adScan.fraction ?? 0
+                    transcriptRatio, featureRatio, adScan.fraction?.rawValue ?? 0
                 )
             )
         }

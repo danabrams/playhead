@@ -208,7 +208,7 @@ struct BackfillCoverageTerminalTests {
             try await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]
         )
         let fraction = try #require(summary.adScanFraction)
-        #expect(abs(fraction - 0.10) < 0.001, "10 s of a 100 s episode")
+        #expect(abs(fraction.rawValue - 0.10) < 0.001, "10 s of a 100 s episode")
         #expect(fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
     }
 
@@ -412,7 +412,7 @@ struct BackfillCoverageTerminalTests {
             phase: .fullEpisodeScan, measurement: .measured(floor), retryCount: 0
         ) == .complete)
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(floor - 0.001), retryCount: 0
+            phase: .fullEpisodeScan, measurement: .measured(ReachRatio(floor.rawValue - 0.001)), retryCount: 0
         ) == .deferUnderCoverage)
         // The two field fractions, verbatim.
         #expect(BackfillJobRunner.coverageTerminalDecision(
@@ -449,15 +449,15 @@ struct BackfillCoverageTerminalTests {
     func nonFiniteMeasurementDoesNotComplete() {
         for garbage in [Double.nan, .infinity, -.infinity] {
             #expect(BackfillJobRunner.coverageTerminalDecision(
-                phase: .fullEpisodeScan, measurement: .measured(garbage), retryCount: 0
+                phase: .fullEpisodeScan, measurement: .measured(ReachRatio(garbage)), retryCount: 0
             ) == .deferUnderCoverage,
             "\(garbage) is not evidence the episode was read")
         }
         // The three call sites this now agrees with, asserted rather than
         // asserted-about: all of them read a non-finite fraction as NOT read.
-        #expect(SemanticScanClaim.isOwed(adScanFraction: .nan))
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(.nan)))
         #expect(AnalysisWorkScheduler.shouldMintAdScanRedrive(
-            adScanFraction: .nan, resumableCoverageJobCount: 1
+            adScanFraction: ReachRatio(.nan), resumableCoverageJobCount: 1
         ))
     }
 
@@ -482,12 +482,12 @@ struct BackfillCoverageTerminalTests {
         // 53FC53E3, verbatim: nothing banked, plans start at 2,490, walk reaches
         // 2,525.82 on a 2,528 s episode.
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 2525.82, firstPlannedSegmentStartSec: 2490
+            prior: nil, coverage: outcome(scanned: 2525.82, firstPlanned: 2490)
         ) == nil)
         // A prior cursor is preserved, never regressed and never inflated.
         let prior = BackfillProgressCursor(processedPhaseCount: 0, lastProcessedUpperBoundSec: 100)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: 2525.82, firstPlannedSegmentStartSec: 2490
+            prior: prior, coverage: outcome(scanned: 2525.82, firstPlanned: 2490)
         ) == prior)
     }
 
@@ -495,16 +495,16 @@ struct BackfillCoverageTerminalTests {
     func cursorAdvancesWhenTheRunIsAGenuinePrefix() {
         // AD5F3A0A, verbatim: first segment at 2.8 s, walk reaches 900.
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 900, firstPlannedSegmentStartSec: 2.8
+            prior: nil, coverage: outcome(scanned: 900, firstPlanned: 2.8)
         )?.lastProcessedUpperBoundSec == 900)
         // Resuming from a prior cursor is a prefix too: the head is already read.
         let prior = BackfillProgressCursor(processedPhaseCount: 0, lastProcessedUpperBoundSec: 900)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: 1800, firstPlannedSegmentStartSec: 900
+            prior: prior, coverage: outcome(scanned: 1800, firstPlanned: 900)
         )?.lastProcessedUpperBoundSec == 1800)
         // …and it is MONOTONIC: a stale walk can never drag the row backwards.
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: 300, firstPlannedSegmentStartSec: 0
+            prior: prior, coverage: outcome(scanned: 300, firstPlanned: 0)
         )?.lastProcessedUpperBoundSec == 900)
     }
 
@@ -512,10 +512,10 @@ struct BackfillCoverageTerminalTests {
     func cursorHoleUsesTheSharedBridgeTolerance() {
         let gap = AnalysisCoverageMath.adScanBridgeableGapSec
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 500, firstPlannedSegmentStartSec: gap
+            prior: nil, coverage: outcome(scanned: 500, firstPlanned: PlanListSeconds(gap.rawValue))
         )?.lastProcessedUpperBoundSec == 500, "a gap AT the tolerance is bridged, exactly as the numerator's own reader bridges it")
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: 500, firstPlannedSegmentStartSec: gap + 0.001
+            prior: nil, coverage: outcome(scanned: 500, firstPlanned: PlanListSeconds(gap.rawValue + 0.001))
         ) == nil, "past it, the audio is genuinely unscanned and the cursor must not speak for it")
     }
 
@@ -523,10 +523,24 @@ struct BackfillCoverageTerminalTests {
     func cursorIsUnchangedWhenNothingWasScanned() {
         let prior = BackfillProgressCursor(processedPhaseCount: 0, lastProcessedUpperBoundSec: 42)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: prior, scannedUpperBoundSec: nil, firstPlannedSegmentStartSec: 0
+            prior: prior, coverage: outcome(scanned: nil, firstPlanned: 0)
         ) == prior)
         #expect(BackfillJobRunner.underCoverageCursor(
-            prior: nil, scannedUpperBoundSec: nil, firstPlannedSegmentStartSec: 0
+            prior: nil, coverage: outcome(scanned: nil, firstPlanned: 0)
         ) == nil)
+    }
+
+    /// playhead-x0lb: both halves of the cursor rule now come from the pass's
+    /// own ``BackfillJobRunner/CoverageOutcome``, so a test cannot supply them
+    /// from two different lists any more than production can.
+    private func outcome(
+        scanned: PlanListSeconds?,
+        firstPlanned: PlanListSeconds?
+    ) -> BackfillJobRunner.CoverageOutcome {
+        BackfillJobRunner.CoverageOutcome(
+            coarseIncompleteDeferReason: nil,
+            lastCoveredUpperBoundSec: scanned,
+            firstPlannedSegmentStartSec: firstPlanned
+        )
     }
 }

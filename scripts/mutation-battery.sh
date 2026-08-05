@@ -74,6 +74,23 @@
 # SURVIVED / a survivor is a coverage hole), same pre-flight check that every
 # expectation names a test that actually runs — see that file's header.
 #
+# THE TY SERIES IS A DIFFERENT VERDICT, NOT A DIFFERENT RUNNER (playhead-x0lb)
+# ---------------------------------------------------------------------------
+# `scripts/mutation-battery-untypeable.py` mutates SWIFT, like this script, and
+# still cannot live here — because its kill is `UNTYPEABLE`: the mutated source
+# must FAIL TO COMPILE. This script reads its verdict out of Swift Testing
+# console glyphs, and a build that never produced a test binary emits none, so a
+# compile failure is indistinguishable here from an infrastructure error.
+#
+# It exists because the defect class it covers is invisible to any test: two
+# quantities share a unit and one is read as the other, and they are EQUAL on
+# every fixture a test author would write. playhead-fil5 R3 divided the
+# transcript union by the duration and called it reach — nought of twelve field
+# assets cleared the gate and every test passed, because every fixture was
+# single-chunk. A compile failure is the strongest kill available; TY rails also
+# check the diagnostic KIND, so a build that breaks for a syntax reason reports
+# WRONG-ERROR rather than being credited.
+#
 # HOW TO ADD A MUTATION
 # ---------------------
 #   1. Add a record to MUTATIONS: "NAME|BATCH|FILE_KEY|Expected Test Name;..."

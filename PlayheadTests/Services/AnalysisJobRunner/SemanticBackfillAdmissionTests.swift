@@ -48,16 +48,16 @@ struct SemanticBackfillAdmissionTests {
     /// candidates" signature, so every one of them was unreachable.
     @Test(
         "every stalled device row is admitted",
-        arguments: [
+        arguments: [ReachRatio]([
             0.095,  // 1A9616D1 — transcript 100%, 3 passA rows
             0.542,  // B5786B41 — transcript 100%
             0.275,  // 144C8A80 — completeFull at 27.5%
             0.187,  // 8FECFDDE — completeFull at 18.7%
             0.026,  // B10C7BC8 — completeFull at 2.6%
             0.0,    // 7A481794 — passA rows exist, examined nothing
-        ]
+        ])
     )
-    func stalledDeviceRowsAreAdmitted(adScanFraction: Double) {
+    func stalledDeviceRowsAreAdmitted(adScanFraction: ReachRatio) {
         #expect(
             AnalysisJobRunner.shouldSkipSemanticBackfill(
                 wroteNewChunks: false,
@@ -107,7 +107,7 @@ struct SemanticBackfillAdmissionTests {
                 wroteNewChunks: false,
                 hasExistingWindows: true,
                 hasCandidateWindows: false,
-                adScanFraction: episodePreparationCompleteThreshold - 0.001
+                adScanFraction: ReachRatio(episodePreparationCompleteThreshold.rawValue - 0.001)
             ) == false
         )
     }
@@ -132,7 +132,7 @@ struct SemanticBackfillAdmissionTests {
 
     @Test("non-finite ad-scan fractions never license a skip")
     func nonFiniteCoverageNeverSkips() {
-        for poisoned in [Double.nan, .infinity, -.infinity] {
+        for poisoned: ReachRatio in [ReachRatio(.nan), ReachRatio(.infinity), ReachRatio(-.infinity)] {
             #expect(
                 AnalysisJobRunner.shouldSkipSemanticBackfill(
                     wroteNewChunks: false,
@@ -181,11 +181,11 @@ struct SemanticBackfillAdmissionTests {
     /// re-ordering of the guards cannot quietly widen the skip.
     @Test("exactly one combination skips")
     func onlyOneCombinationSkips() {
-        var skipped: [(Bool, Bool, Bool, Double)] = []
+        var skipped: [(Bool, Bool, Bool, ReachRatio)] = []
         for wroteNewChunks in [false, true] {
             for hasExistingWindows in [false, true] {
                 for hasCandidateWindows in [false, true] {
-                    for fraction in [0.388, 1.0] {
+                    for fraction: ReachRatio in [0.388, 1.0] {
                         if AnalysisJobRunner.shouldSkipSemanticBackfill(
                             wroteNewChunks: wroteNewChunks,
                             hasExistingWindows: hasExistingWindows,

@@ -528,8 +528,14 @@ struct SemanticScanClaimReconcilerTests {
         let summary = try #require(
             try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]
         )
+        // playhead-x0lb R6: the box is EXPLICIT and it is the assertion. Feeding
+        // the fast-pass AREA to a gate whose numerator is the BRIDGED both-pass
+        // area is a deliberate substitution here — the point of the line is that
+        // the two disagree across the floor — and after R6 it cannot be written
+        // by accident, only stated. Rails TY35–TY37.
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: summary.fastTranscriptCoveredSec,
+            coveredSec: (summary.fastTranscriptCoveredSec?.rawValue)
+                .map { BridgedTranscriptSeconds($0) },
             episodeDurationSec: summary.episodeDurationSec
         ) == false, "the RAW union must fail the floor, else this fixture is contiguous")
 
@@ -615,8 +621,13 @@ struct SemanticScanClaimReconcilerTests {
         let summary = try #require(
             try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]
         )
+        // playhead-x0lb R6: the WATERMARK, boxed deliberately. This is latent
+        // instance L1 (playhead-fpnt) written on purpose to prove the fixture
+        // straddles the floor; probe PJ4 wrote the same substitution in
+        // PRODUCTION, at `AnalysisJobRunner`, and it compiled. Rail TY36.
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: summary.fastTranscriptCoverageEndSec,
+            coveredSec: (summary.fastTranscriptCoverageEndSec?.rawValue)
+                .map { BridgedTranscriptSeconds($0) },
             episodeDurationSec: summary.episodeDurationSec
         ), "the watermark must clear the floor, else this proves nothing")
 
