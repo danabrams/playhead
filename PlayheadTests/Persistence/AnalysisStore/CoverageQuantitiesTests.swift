@@ -165,6 +165,64 @@ struct EpisodeSecondsPromotionTests {
         ) == EpisodeSeconds(500))
     }
 
+    /// playhead-x0lb R2 review, closing limit L-B. `promoting` takes TWO
+    /// ``PlanListSeconds`` and the compiler cannot tell them apart, so the one
+    /// caller can hand them over swapped and it type-checks — R2 probe PR3
+    /// planted exactly that and the tree built. Left alone the swap is silent
+    /// and conservative (it promotes the list's START instead of its END), and
+    /// "silent and conservative" is how six of this bead's eighteen instances
+    /// survived review. The coherence guard makes it a refusal.
+    ///
+    /// The second pair is the one that earns the guard: on a first attempt the
+    /// existing hole check happens to refuse a swap anyway, and on a RESUME it
+    /// does not.
+    @Test("the run's own two plan-list operands, swapped, are refused")
+    func swappedOperandsAreRefused() {
+        // AD5F3A0A on a first attempt: bound 900 (a genuine episode prefix),
+        // first plan at 2.82 s. Right way round it promotes; swapped, both the
+        // guard and the pre-existing hole check refuse it.
+        #expect(EpisodeSeconds.promoting(
+            900, priorEpisodeCursor: nil, firstPlannedStart: 2.82, bridge: bridge
+        ) == EpisodeSeconds(900))
+        #expect(EpisodeSeconds.promoting(
+            2.82, priorEpisodeCursor: nil, firstPlannedStart: 900, bridge: bridge
+        ) == nil)
+
+        // THE SHAPE THE HOLE CHECK CANNOT SEE. `narrowedForResume` keeps every
+        // segment ENDING past the cursor, so a resumed run's first plan
+        // legitimately STARTS below it: prior 900, first plan at 898, walk
+        // reaches 902. Right way round that promotes 902. Swapped, the hole
+        // check is satisfied (902 − 900 = 2 s, inside the 5 s bridge) and only
+        // the coherence guard refuses — without it `promoting` returns 898, a
+        // cursor BELOW the prior one, and the caller's `monotonic(from:)` merge
+        // then silently discards the run's whole 2 s of progress.
+        #expect(EpisodeSeconds.promoting(
+            902, priorEpisodeCursor: 900, firstPlannedStart: 898, bridge: bridge
+        ) == EpisodeSeconds(902))
+        #expect(EpisodeSeconds.promoting(
+            898, priorEpisodeCursor: 900, firstPlannedStart: 902, bridge: bridge
+        ) == nil)
+    }
+
+    /// The guard must not fire on anything production produces. A walk's
+    /// contiguous upper bound is the END of a plan that was covered and the
+    /// first planned start is the FIRST segment's start, so `bound >= start`
+    /// always holds — including the degenerate equal case, which is what a
+    /// single-plan run whose plan is zero-width would look like.
+    @Test("the coherence guard is vacuous on well-ordered operands")
+    func coherenceGuardIsVacuousWhenOrdered() {
+        #expect(EpisodeSeconds.promoting(
+            500, priorEpisodeCursor: nil, firstPlannedStart: 500, bridge: bridge
+        ) == nil, "a 500 s hole at the head is still a hole")
+        #expect(EpisodeSeconds.promoting(
+            500, priorEpisodeCursor: 500, firstPlannedStart: 500, bridge: bridge
+        ) == EpisodeSeconds(500), "bound == start, resumed exactly at the cursor")
+        // A bound one ulp below its start is still a swap.
+        #expect(EpisodeSeconds.promoting(
+            PlanListSeconds(499.999), priorEpisodeCursor: 500, firstPlannedStart: 500, bridge: bridge
+        ) == nil)
+    }
+
     /// The unsound promotions are an INVENTORY, not a claim. playhead-hc7e's
     /// *"Every consumer now reads `canonicalChunks`"* was a completeness claim
     /// that was not complete and hid a P0 for months; this one is a
@@ -173,6 +231,14 @@ struct EpisodeSecondsPromotionTests {
     /// playhead-5pyq names four of these. The fifth —
     /// `specialistScanCompletion` — was found by this bead while typing the
     /// sites, and it is the same shape over the PRE-narrowing root list.
+    ///
+    /// **What this test proves, exactly** (R2 review). It reads `allCases`, so
+    /// it is a property of the ENUM and says nothing whatever about the SOURCE
+    /// — on its own it is the tautology the hc7e comparison was reaching for.
+    /// Tying the enum to the sites is `--check-inventory` in
+    /// `scripts/mutation-battery-untypeable.py`, and even that is lexical: R2
+    /// probe PR5 wrote a promotion as `bound.map { EpisodeSeconds($0.rawValue) }`
+    /// with this test still green. Limit L-F states that residue.
     @Test("the unsound-promotion inventory is exactly the five filed sites")
     func unsoundPromotionInventoryIsPinned() {
         #expect(Set(UnsoundCursorPromotionSite.allCases) == [

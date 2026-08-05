@@ -2279,13 +2279,22 @@ actor BackfillJobRunner {
     /// this hole worth a re-scan?".
     ///
     /// **playhead-x0lb: it takes the whole ``CoverageOutcome``, not two loose
-    /// `Double`s.** The R2 defect above was a caller supplying one of the two
-    /// halves from a DIFFERENT list; with the pass's own outcome as the only
-    /// parameter there is nothing else in scope to supply, so that mistake is
-    /// now a compile error rather than a review finding. The arithmetic itself
-    /// moved to ``EpisodeSeconds/promoting(_:priorEpisodeCursor:firstPlannedStart:bridge:)``,
+    /// `Double`s.** The 41mu R2 defect above was a caller supplying one of the
+    /// two halves from a DIFFERENT list; with the pass's own outcome as the only
+    /// parameter there is no other list in scope to draw from, so that mistake
+    /// is now a compile error rather than a review finding. The arithmetic
+    /// itself moved to
+    /// ``EpisodeSeconds/promoting(_:priorEpisodeCursor:firstPlannedStart:bridge:)``,
     /// which is the one licensed conversion from a list-relative bound to an
     /// episode cursor.
+    ///
+    /// **What that does NOT close** (x0lb R2 review; an earlier draft of this
+    /// paragraph said flatly that "that mistake is now a compile error", which
+    /// overstated it and contradicted limit L-B in `CoverageQuantities.swift`).
+    /// The outcome's own two plan-list halves are the SAME TYPE, so supplying
+    /// them the wrong way round type-checks — probe PR3 planted the swap and it
+    /// built. What refuses it is the coherence guard inside `promoting`, a value
+    /// check, not the signature.
     nonisolated static func underCoverageCursor(
         prior: BackfillProgressCursor?,
         coverage: CoverageOutcome

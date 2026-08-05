@@ -165,9 +165,18 @@ struct PlanListSeconds: CoverageQuantity {
 /// on a gapless transcript, and real transcripts are not gapless: a
 /// `transcript_chunks` row spans first word to last word, so the raw union is
 /// riddled with inter-utterance holes. On the 2026-08-03 pull AD5F3A0A's fast
-/// watermark is 4,280.9 s while its fast AREA is 1,645.9 s — the watermark
+/// watermark is 4,280.7 s while its fast AREA is 1,645.9 s — the watermark
 /// over-reports by 2.6x. Reading one as the other is the
 /// "AN 100 % / TX 39 %" antipattern (playhead-sd71).
+///
+/// R2 review: that witness is 4,280.**7** — `MAX(endTime)` over the asset's
+/// fast `transcript_chunks`, which is what this type carries when any chunk
+/// landed. An earlier draft said 4,280.9, which is the
+/// `analysis_assets.fastTranscriptCoverageEndTime` COLUMN (4,280.8947, and it
+/// does NOT stand in here because chunks exist) rounded — and is also within
+/// 0.03 s of the DECLARED duration (4,280.9208). Three near-identical numbers
+/// in one unit, and the sentence named the wrong one; the 2.6x is unaffected
+/// (4,280.70 ÷ 1,645.92 = 2.60).
 ///
 /// **It is the TRANSCRIPT's reach and no other producer's** (R1 review). The
 /// DSP feature frontier and `max(endTime)` of DETECTED ads are also high-water
@@ -404,6 +413,18 @@ struct RescanThresholdSec: CoverageQuantity {
 /// a completeness claim that was not complete and hid a P0 for months; a claim
 /// that is a `CaseIterable` enum can be checked by a test instead of believed.
 ///
+/// **What that check actually proves, stated exactly** (R2 review, because the
+/// earlier wording overclaimed it). `CoverageQuantitiesTests` reads
+/// `allCases` and so proves a property of the ENUM, not of the SOURCE — a
+/// tautology on its own. What ties the enum to the sites is the
+/// `--check-inventory` preflight in `scripts/mutation-battery-untypeable.py`:
+/// every case must be written at exactly one `site:` argument, the number of
+/// `unsoundPlanListPromotion(` calls must equal the number of cases, and
+/// `BackfillJobRunner.swift` must contain no bare `EpisodeSeconds(`
+/// construction. That last clause is the one that matters, and L-F says why:
+/// a sixth site can be written as `planListBound.map { EpisodeSeconds($0.rawValue) }`
+/// with this enum untouched, and R2 probe PR5 confirmed it compiles.
+///
 /// Adding a case is the deliberate act. Removing one is what playhead-5pyq and
 /// playhead-a1x0 do when they make the site sound.
 enum UnsoundCursorPromotionSite: String, CaseIterable, Sendable {
@@ -456,6 +477,14 @@ extension EpisodeSeconds {
     /// twelve assets on the pull carry at least one interior fast gap wider than
     /// the bridge tolerance. Closing that is playhead-a1x0 and it needs
     /// ``RescanThresholdSec``, not this one.
+    ///
+    /// **The two ``PlanListSeconds`` cannot be told apart by the compiler, so
+    /// they are told apart by a coherence guard** (R2 review, closing L-B): an
+    /// upper bound BELOW the list's own start is not a bound, it is the two
+    /// operands swapped. The swap type-checks — both are the same type, and R2
+    /// probe PR3 confirmed it builds — and without the guard it fails SILENTLY
+    /// and conservatively, promoting the start instead of the end. Now it is
+    /// refused and `swappedOperandsAreRefused` pins it.
     static func promoting(
         _ bound: PlanListSeconds?,
         priorEpisodeCursor prior: EpisodeSeconds?,
@@ -463,6 +492,15 @@ extension EpisodeSeconds {
         bridge: BridgeToleranceSec
     ) -> EpisodeSeconds? {
         guard let bound, bound.isFinite else { return nil }
+        // Vacuous on real inputs: `lastCoveredUpperBoundSec` is the end of a
+        // plan that was COVERED and `firstPlannedSegmentStartSec` is the first
+        // segment's start, so the former is never below the latter. When it does
+        // fire the caller keeps the prior cursor, which re-scans audio already
+        // read — the only direction this bead is permitted to move.
+        if let firstPlannedStart, firstPlannedStart.isFinite,
+           bound.rawValue < firstPlannedStart.rawValue {
+            return nil
+        }
         let priorUpper = prior?.rawValue ?? 0
         if let firstPlannedStart, firstPlannedStart.isFinite,
            !bridge.bridges(gapSec: firstPlannedStart.rawValue - priorUpper) {
@@ -546,13 +584,28 @@ extension EpisodeSeconds {
 //       Post-clamp BAR FILLS in [0, 1], provenance deliberately discarded. Note
 //       the two are adjacent fields with different units underneath: the analyze
 //       zone's numerator is seconds and the download zone's is BYTES.
-//   ActivitySnapshotProvider's analysis fraction -> Double
+//   ActivitySnapshotProvider's AN fraction -> Double
 //       analysisCoveredSec ÷ episodeDurationSec — a THIRD ratio over the same
 //       denominator as reach and density. Left untyped because one producer and
 //       one consumer share it; recorded here so the next reader does not have to
 //       re-derive which area it is. Its NUMERATOR is typed (``AnalyzedSeconds``)
 //       even though the ratio is not, which is what stops the ad-scan area or
 //       the transcript area being substituted into it.
+//       R2 review: that last sentence was FALSE when it was written, and the
+//       fix is what makes it true. The two `fraction(area:durationSec:)` helpers
+//       took a `Double?` and each call site read `?.rawValue` off the summary,
+//       so probe PR2 substituted `summary?.adScanCoveredSec?.rawValue` and it
+//       BUILT. The helpers now take an ``AnalyzedSeconds?`` and demote inside —
+//       rails TY15/TY16.
+//   ActivitySnapshotProvider's TX fraction -> Double
+//       transcriptDensity, demoted to a bar fill. R2 review ADDED this line: it
+//       is the AN fraction's sibling, it was in neither list, and probe PR1
+//       rendered `summary?.adScanFraction` — the REACH — as the transcript bar
+//       with no complaint from the compiler. It now goes through
+//       `transcriptBarFill(_: DensityRatio?)`, which is where the provenance is
+//       deliberately discarded, and rail TY17 pins it. Two adjacent bar fills
+//       whose underlying quantities differ is the same shape as the analyze /
+//       download pair noted above, and it is why neither is left inline.
 //
 // ── LATENT INSTANCES. Found by writing the line. Each is filed; none is fixed
 //    here, because each is a behaviour or wire change with its own blast radius.
@@ -583,12 +636,17 @@ extension EpisodeSeconds {
 //       reach ships separately as `fast_transcript_watermark_sec`. Found by these
 //       types; behaviour deliberately unchanged — playhead-vkwr.
 //
-// ── THE MECHANISM'S OWN LIMIT, stated because a claim of completeness that is
+// ── THE MECHANISM'S OWN LIMITS, stated because a claim of completeness that is
 //    not complete is instance 18 of the catalogue. R1 review found the first
 //    version of this section incomplete BY PLANTING SUBSTITUTIONS AND WATCHING
 //    THEM BUILD, which is why the list below is longer than the one it replaces
 //    and why `scripts/mutation-battery-untypeable.py` now carries a rail for
-//    each closed hole rather than an argument that it is closed.
+//    each closed hole rather than an argument that it is closed. R2 review did
+//    the same again and the list grew from five to seven: L-F and L-G are both
+//    survivors of planted substitutions (probes PR5 and PR6), and L-B moved
+//    from "documented" to "guarded". THE HONEST READING OF THAT TRAJECTORY is
+//    that this section is a measurement, not a proof — every round that has
+//    planted has found one, so assume the eighth exists.
 //
 //   L-A  A ``CoveredSeconds`` can still be carrying a REACH. When no chunk
 //        landed, `fastTranscriptCoveredSec` falls back to the
@@ -600,11 +658,15 @@ extension EpisodeSeconds {
 //        `AnalysisJobRunner`'s `watermarkWithoutChunksStillFails` fixture is
 //        built on it — so it is documented rather than removed.
 //   L-B  ``EpisodeSeconds/promoting(_:priorEpisodeCursor:firstPlannedStart:bridge:)``
-//        takes TWO ``PlanListSeconds``, so the R2 defect (one operand from a
-//        different list) is a compile error but SWAPPING the run's own two
-//        operands is not. There is one caller and it is `underCoverageCursor`,
-//        whose own parameter list no longer offers a second list to draw from;
-//        a second caller would reopen the exposure.
+//        takes TWO ``PlanListSeconds``, so the 41mu R2 defect (one operand from
+//        a different list) is a compile error but SWAPPING the run's own two
+//        operands is not — R2 probe PR3 planted the swap and it built. THE TYPE
+//        STILL CANNOT SEE IT; what closes it is a coherence guard inside
+//        `promoting` (an upper bound below its own list's start is refused),
+//        pinned by `swappedOperandsAreRefused`. Recorded as a limit rather than
+//        deleted because the guard is a VALUE check that happens to catch this
+//        shape, not a type that forbids it: a swap between two plan-list
+//        positions that satisfy `bound >= start` anyway is still writable.
 //   L-C  ``FrontierSeconds`` deliberately carries BOTH the DSP feature
 //        watermark and the detected-ad maximum, because `analysisFrontierSec`
 //        is their `max`. Reading one as the other is therefore still typeable.
@@ -621,3 +683,31 @@ extension EpisodeSeconds {
 //        its field has exactly one type. A second persisted quantity would make
 //        it live, and the guard is that decoding names the target type
 //        explicitly at the call site.
+//        R2 review RE-DERIVED "the only Codable carrier" rather than believing
+//        it: `AnalysisCoverageSummary`, `CoverageOutcome`, `CoarseCoverageWalk`,
+//        `EpisodePreparationInputs` and `EpisodePreparationAnalysisInputs` are
+//        all `Sendable, Equatable` and none is `Codable`. The claim holds.
+//   L-F  **A promotion can bypass the inventory entirely.** ``PlanListSeconds``
+//        → ``EpisodeSeconds`` has two named doors (``EpisodeSeconds/promoting``
+//        and ``EpisodeSeconds/unsoundPlanListPromotion(_:site:)``) and one
+//        unnamed one: `bound.map { EpisodeSeconds($0.rawValue) }`. R2 probe PR5
+//        replaced the rate-limit site with exactly that and it COMPILED, with
+//        ``UnsoundCursorPromotionSite`` and its test both still green — so a
+//        SIXTH unsound promotion could land while the "inventory" said five.
+//        No type can close this: `.rawValue` is a `RawRepresentable`
+//        requirement and `EpisodeSeconds(_:)` is a `CoverageQuantity` one. What
+//        stands in its place is the `--check-inventory` preflight in
+//        `scripts/mutation-battery-untypeable.py`, which is a LEXICAL check and
+//        therefore exactly the kind of thing this bead exists to distrust —
+//        it is a tripwire on one file, not a proof, and it is stated here as
+//        such rather than sold as one.
+//   L-G  **Literal expressibility admits the OTHER threshold's value.**
+//        `ExpressibleByFloatLiteral` is deliberate (see the file header: a
+//        literal has no provenance to lose), and it is nonetheless a hole for
+//        the one pair whose values are themselves measurements —
+//        `bridgingShortGaps(…, upTo: 60.0)` compiles, which is instance 19 in
+//        the spelling that skips the constant altogether. R2 probe PR6
+//        confirmed it. Withdrawing the conformance would cost every
+//        `#expect(bridge == 5.0)` and every `ReachRatio(0.98)` in the tree for a
+//        hole a magic number already advertises, so the trade is taken
+//        knowingly and written down instead.

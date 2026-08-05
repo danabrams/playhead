@@ -51,6 +51,23 @@ type — so the control also states this battery's honest limit: the tag records
 which filed defect a laundering site belongs to, and nothing type-checks that it
 records the right one.
 
+**The control is not optional and `--only` cannot drop it** (R2 review). The
+first version let `--only TY05` print `control not run` and exit 0 — a partial
+run reporting success with nothing holding it up, which is precisely how the
+previous bead's lexical canary passed for five consecutive rounds. Any selection
+that omits the control now has it appended, and a run that somehow reaches the
+summary without one exits non-zero rather than printing a word.
+
+`--check-inventory` is a SECOND, buildless preflight and it is deliberately
+modest about itself. `UnsoundCursorPromotionSite` is presented in the source as
+an inventory of the laundering sites, but the Swift test can only read
+`allCases` — a property of the enum, not of the code. This ties the two
+together: every case written exactly once as a `site:` argument, the number of
+`unsoundPlanListPromotion(` calls equal to the number of cases, and no bare
+`EpisodeSeconds(` construction in the runner (which is how R2 probe PR5 wrote a
+sixth promotion with the enum untouched). It is a LEXICAL tripwire on one file
+and can be out-spelled like any other; see limit L-F in `CoverageQuantities.swift`.
+
 COST
 ----
 Each rail is one incremental `xcodebuild build` (no tests, no simulator boot).
@@ -72,6 +89,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 STORE = "Playhead/Persistence/AnalysisStore/AnalysisStore.swift"
 RUNNER = "Playhead/Services/AdDetection/BackfillJobRunner.swift"
 CLAIM = "Playhead/Services/AdDetection/SemanticScanClaim.swift"
+ACTIVITY = "Playhead/Services/Activity/ActivitySnapshotProvider.swift"
+QUANTITIES = "Playhead/Persistence/AnalysisStore/CoverageQuantities.swift"
 
 # name, file, description, old, new, diagnostic fragments the build MUST print
 MUTATIONS = [
@@ -131,8 +150,9 @@ MUTATIONS = [
         "TY06", STORE,
         "instance 9: the reach numerator taken from a WATERMARK instead of an "
         "AREA — the shape that made an episode where detection did WORSE read as "
-        "MORE complete (AD5F3A0A's fast watermark is 4,280.9 s against a fast "
-        "area of 1,645.9 s, a 2.6x over-report)",
+        "MORE complete (AD5F3A0A's fast watermark is 4,280.7 s against a fast "
+        "area of 1,645.9 s, a 2.6x over-report; R2 review re-derived the "
+        "watermark — 4,280.9 was the asset COLUMN, which does not stand in here)",
         "        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)",
         "        return ReachRatio(examined: fastTranscriptCoverageEndSec, ofDeclaredDuration: episodeDurationSec)",
         # R1: the numerator type is now AdScanSeconds, so the diagnostic names it
@@ -217,6 +237,53 @@ MUTATIONS = [
         ["RescanThresholdSec", "BridgeToleranceSec"],
     ),
     (
+        "TY15", ACTIVITY,
+        "R2 review, planted and SURVIVED before the fix: the AD-SCAN area as "
+        "the Activity AN bar's numerator. The audit CLAIMED the typed numerator "
+        "stopped this; the call site read `?.rawValue` off the summary, so every "
+        "area on it fitted the `Double?` parameter",
+        """            let analysisFraction = fraction(
+                area: summary?.analysisCoveredSec,
+                durationSec: durationSec
+            )
+            // Download fraction comes from the (already-snapshotted)""",
+        """            let analysisFraction = fraction(
+                area: summary?.adScanCoveredSec,
+                durationSec: durationSec
+            )
+            // Download fraction comes from the (already-snapshotted)""",
+        ["AdScanSeconds", "AnalyzedSeconds"],
+    ),
+    (
+        "TY16", ACTIVITY,
+        "R2 review: the same substitution at the DOGFOOD WIRE copy of the AN "
+        "fraction. Two call sites, two helpers, one defect — a rail per site "
+        "because fixing one and not the other is how this family survives",
+        """            let analysisFraction = fraction(
+                area: summary?.analysisCoveredSec,
+                durationSec: durationSec
+            )
+            let fastTranscriptWatermarkSec""",
+        """            let analysisFraction = fraction(
+                area: summary?.fastTranscriptCoveredSec,
+                durationSec: durationSec
+            )
+            let fastTranscriptWatermarkSec""",
+        ["CoveredSeconds", "AnalyzedSeconds"],
+    ),
+    (
+        "TY17", ACTIVITY,
+        "R2 review, planted and SURVIVED before the fix: the ad-scan REACH "
+        "rendered as the transcript-DENSITY bar. Instance 5's own shape at the "
+        "surface the user reads, and it was one `?.rawValue` away from being "
+        "unwritable",
+        "            let transcriptFraction = transcriptBarFill(summary?.transcriptDensity)\n"
+        "            let featureCoverageEndSec",
+        "            let transcriptFraction = transcriptBarFill(summary?.adScanFraction)\n"
+        "            let featureCoverageEndSec",
+        ["ReachRatio", "DensityRatio"],
+    ),
+    (
         "TY99", RUNNER,
         "VACUITY CONTROL: the laundering site's inventory TAG changed to a "
         "different filed defect. This MUST still compile — the tag records which "
@@ -266,16 +333,88 @@ def diagnostics(output):
     return [line.strip() for line in output.splitlines() if "error:" in line]
 
 
+def check_inventory():
+    """Tie ``UnsoundCursorPromotionSite`` to the SITES. Returns a list of faults.
+
+    The Swift test can only read `allCases`, which is a property of the enum and
+    proves nothing about the source; this is what makes the inventory a claim
+    about the code. It is LEXICAL and therefore out-spellable — that is stated,
+    not hidden, and limit L-F in `CoverageQuantities.swift` says so too.
+
+    The third clause is the one with teeth. R2 probe PR5 wrote a sixth unsound
+    promotion as `bound.map { EpisodeSeconds($0.rawValue) }`: it compiled, the
+    enum was untouched and the Swift test stayed green, so a bare
+    `EpisodeSeconds(` construction anywhere in the runner is treated as an
+    unlogged promotion until proven otherwise.
+    """
+    faults = []
+    quantities = (ROOT / QUANTITIES).read_text(encoding="utf-8")
+    runner = (ROOT / RUNNER).read_text(encoding="utf-8")
+
+    block = quantities.split("enum UnsoundCursorPromotionSite", 1)
+    if len(block) != 2:
+        return ["UnsoundCursorPromotionSite not found in %s" % QUANTITIES]
+    body = block[1].split("\n}", 1)[0]
+    cases = [line.split("case ", 1)[1].strip()
+             for line in body.splitlines() if line.strip().startswith("case ")]
+    if not cases:
+        return ["UnsoundCursorPromotionSite has no cases — parse failed"]
+
+    for case in cases:
+        used = runner.count("site: .%s" % case)
+        if used != 1:
+            faults.append("case .%s is written at %d site(s), expected exactly 1"
+                          % (case, used))
+
+    calls = runner.count("EpisodeSeconds.unsoundPlanListPromotion(")
+    if calls != len(cases):
+        faults.append("%d unsoundPlanListPromotion( call(s) against %d case(s) — "
+                      "the inventory and the sites have drifted apart"
+                      % (calls, len(cases)))
+
+    # `EpisodeSeconds.` (the two named promotions) is fine; `EpisodeSeconds(`
+    # is a raw construction and is the bypass L-F describes.
+    raw = runner.count("EpisodeSeconds(")
+    if raw:
+        faults.append("%d bare `EpisodeSeconds(` construction(s) in %s — a "
+                      "PlanList→Episode promotion that no site tag records"
+                      % (raw, RUNNER))
+    return faults
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--only", default=None)
+    parser.add_argument("--check-inventory", action="store_true",
+                        help="run the buildless inventory preflight and stop")
     args = parser.parse_args(argv)
+
+    faults = check_inventory()
+    if faults:
+        sys.stderr.write("untypeable-battery: the unsound-promotion inventory does "
+                         "not match the sites.\n")
+        for fault in faults:
+            sys.stderr.write("    %s\n" % fault)
+        sys.stderr.write("Add the case, or route the site through "
+                         "EpisodeSeconds.unsoundPlanListPromotion(_:site:).\n")
+        return 2
+    print("=== inventory: every promotion site is tagged, and only tagged sites promote ===")
+    if args.check_inventory:
+        return 0
 
     selected = [m for m in MUTATIONS if args.only in (None, m[0])]
     if not selected:
         sys.stderr.write("no mutation named %r\n" % args.only)
         return 2
+
+    # THE CONTROL IS NOT OPTIONAL. A selection that omits it used to print
+    # "control not run" and exit 0 — a partial run reporting success with
+    # nothing holding it up, which is the vacuity this battery exists to
+    # replace. Appending it costs one build and buys the only evidence that a
+    # verdict of UNTYPEABLE means anything at all.
+    if not any(m[0] in EXPECT_COMPILES for m in selected):
+        selected += [m for m in MUTATIONS if m[0] in EXPECT_COMPILES]
 
     if args.list:
         for name, path, desc, _, _, fragments in selected:
@@ -360,12 +499,20 @@ def main(argv=None):
             return 4
 
     bad = [r for r in results if r[1] in ("SURVIVED", "ERROR", "WRONG-ERROR", "CONTROL-FAILED")]
+    control = next((r[1] for r in results if r[0] in EXPECT_COMPILES), None)
     print("\n%d mutation(s): %d untypeable, %d survived, %d wrong-error, control %s"
           % (len(results),
              sum(1 for r in results if r[1] == "UNTYPEABLE"),
              sum(1 for r in results if r[1] == "SURVIVED"),
              sum(1 for r in results if r[1] == "WRONG-ERROR"),
-             next((r[1] for r in results if r[0] in EXPECT_COMPILES), "not run")))
+             control or "NOT RUN"))
+    if control is None:
+        sys.stderr.write(
+            "\nNO VACUITY CONTROL RAN. Every UNTYPEABLE above is unbacked — a "
+            "harness that fails unconditionally reports exactly the same thing. "
+            "This is a harness bug, not a result; do not read the verdicts.\n"
+        )
+        return 3
     if bad:
         sys.stderr.write(
             "\nA SURVIVOR HERE IS A TYPE HOLE, not merely a coverage hole: the "
