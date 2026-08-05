@@ -796,13 +796,22 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
     /// in a canary. This exercises the parser on synthetic source instead of
     /// waiting for production to grow the shape.
     ///
-    /// Three properties, each of which was false before R4:
-    ///   1. a guarded call with no `chunks:` inside its own parentheses is
-    ///      RECORDED (as ``missingChunksArgument``), not skipped;
-    ///   2. it does not steal the `chunks:` of a later call;
-    ///   3. the sentinel resolves to nothing and is on no allow-list, so it
-    ///      reaches ``testEveryTranscriptVersionCallSiteCanonicalizes()`` as a
-    ///      violation rather than as silence.
+    /// Both consequences are covered, because the finding is that R3 recorded
+    /// only one of them:
+    ///   * **STEAL** — a later call's `chunks:` is adopted by an earlier call
+    ///     that has none. Measured against the R3 parser on the source below:
+    ///     the first call reported the argument
+    ///     `TranscriptChunkCanonicalizer.canonicalize(raw).chunks`, so a site
+    ///     that canonicalizes NOTHING read as canonical and passed rule 1. That
+    ///     is worse than a missed site — it launders a violation into a pass.
+    ///   * **DROP** — with no later `chunks:` anywhere in the file, the old
+    ///     `guard … else { continue }` skipped the site entirely: unaudited,
+    ///     uncounted against the `audited` floor, unreported.
+    ///
+    /// And the sentinel that replaces both resolves to nothing and is on no
+    /// allow-list, so it reaches
+    /// ``testEveryTranscriptVersionCallSiteCanonicalizes()`` as a violation
+    /// rather than as silence.
     func testTheArgumentParserRecordsAGuardedCallThatHasNoChunksArgument() {
         // `atomize` here takes no `chunks:` at all; the only `chunks:` in the
         // string belongs to the SECOND call, 200 characters later.
@@ -834,6 +843,22 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             "TranscriptChunkCanonicalizer.canonicalize(raw).chunks",
             "and a well-formed call must still parse exactly as before"
         )
+
+        // The DROP consequence: nothing later in the file supplies a `chunks:`
+        // for the parser to borrow, so R3's `guard … else { continue }` removed
+        // this site from the walk altogether.
+        let lone = """
+            func c() {
+                _ = TranscriptAtomizer.transcriptVersionHash(atoms: someAtoms)
+            }
+            """
+        let parsedLone = guardedArguments(inStripped: lone)
+        XCTAssertEqual(parsedLone.count, 1, """
+            a guarded call with no `chunks:` anywhere after it must still be \
+            recorded. Dropping it is the fail-OPEN direction: the site is \
+            unaudited, uncounted against the `audited` floor, and unreported.
+            """)
+        XCTAssertEqual(parsedLone.first?.argument, Self.missingChunksArgument)
 
         // Property 3: the sentinel is inert to every escape the rule offers.
         XCTAssertFalse(Self.missingChunksArgument.contains("canonicalize("),
