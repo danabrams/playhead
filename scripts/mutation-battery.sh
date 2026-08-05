@@ -2587,6 +2587,12 @@ T_DR_THROTTLEBATCH="a THROTTLE-terminated drain sweeps its siblings with kvs8's 
 # and probes R6-PB1 / R6-PB2 confirmed both directions survive. XCTest — a log
 # line's argument is not observable from any runtime assertion on this harness.
 T_DR_CAUSEFIELDS="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCauseFieldsNameTheTokenTheyDescribe"
+# R7 review: both refusal log lines' `consecutive=` must name the counter the STOP
+# RULE reads. Fifth field on the drain-stop line to be examined and the first with
+# no rule at all — R1 corrected the event NAME, R2 `cause=` -> `siblingCause=`, R5
+# `deferredSiblings=`, R6 the cause pair's binding, and this one rode through all
+# four untouched on BOTH lines. XCTest, same reason as the two above.
+T_DR_CONSECFIELD="FMDaemonRefusalSourceCanaryTests/testConsecutiveFieldsNameTheCounterTheStopRuleReads"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5126,6 +5132,37 @@ MUTATIONS=(
   # were never deferred: the defect R5 removed from this field, returning by a
   # different door.
   "DR21|517|RUNNER|$T_DR_SIBCOUNT"
+
+  # ---------------------------------------------------------------------------
+  # R7 review — the DR22-DR24 group. Same discipline again: planted against
+  # production verbatim, in ONE build, each PREDICTED TO SURVIVE, alongside an
+  # observer control that was KILLED BY NAME so the survivals attribute. All
+  # three SURVIVED. Zero production defects this round.
+
+  # DR22 — the drain-stop EVENT bound to a fixed kind rather than to the refusal
+  # that stopped the drain. This is R1's PRODUCTION defect re-emitted with no
+  # literal anywhere: `fm.backfill.drain_stopped_by_throttle` for a drain stopped
+  # by two wedged tokenizer round trips, which is byte-identical to what R1
+  # removed. The hard-coding rail derives its forbidden set from `allCases`
+  # (R2-Fix2) and so only ever sees a literal; the ordering rail (R4-Fix1) sees a
+  # read that is still exactly once and still after `logEvent`. Fixing a value by
+  # forbidding its SPELLING is the shape R2-Fix2, R3-Fix1 and R4-Fix8 each had to
+  # replace — and a support-bundle grep counts the value.
+  "DR22|518|RUNNER|$T_DR_CAUSEFIELDS"
+
+  # DR23 — the drain-stop line's `consecutive=` takes `deferred.count`: the
+  # drain-WIDE accumulator R5 had just removed from `deferredSiblings=` ON THE
+  # SAME LINE, one field to the left.
+  "DR23|519|RUNNER|$T_DR_CONSECFIELD"
+
+  # DR24 — the per-job line's `consecutive=` takes `job.retryCount`, and this is
+  # the standing defect class at its sharpest: `retryCount` is the quantity THIS
+  # BEAD EXISTS TO HOLD CONSTANT, preserved across every daemon refusal, so the
+  # field reads the same number whether the daemon refused this job once or four
+  # times running. What would it read if the run of refusals had never happened?
+  # The same value, and normally zero. Its own batch rather than sharing 519 for
+  # the R3 reason: either alone kills the same test.
+  "DR24|520|RUNNER|$T_DR_CONSECFIELD"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5573,6 +5610,9 @@ describe_mutation() {
     DR19) echo "e75l R6: the per-job refusal line's cause= field takes the SIBLING token — a job refused on its own run reports the cause reserved for jobs never asked" ;;
     DR20) echo "e75l R6: the drain-stop line's siblingCause= field takes the refused job's token — the field naming what the swept rows carry names a cause no swept row holds" ;;
     DR21) echo "e75l R6: sweptSiblingCount is incremented ABOVE the defer — a sibling rejected by the terminal-row guard is counted as swept and deferredSiblings= over-reports" ;;
+    DR22) echo "e75l R7: the drain-stop EVENT is bound to a fixed kind, so a drain stopped by metadata stalls emits kvs8's throttle event — R1's defect with no literal for the hard-coding rail to see" ;;
+    DR23) echo "e75l R7: the drain-stop line's consecutive= reports the drain-wide deferred.count instead of the run of back-to-back refusals" ;;
+    DR24) echo "e75l R7: the per-job line's consecutive= reports job.retryCount — the quantity this bead PRESERVES, so the field can never move" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -12087,6 +12127,47 @@ EOF
                         reason: refusalThatStoppedUs.batchSiblingCause
                     )
                     deferred.append(candidate.jobId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR22 — R7 review. Probe R7-PC3 made a record: the drain-stop EVENT bound to a
+  # fixed kind. R1's production defect re-emitted with no literal anywhere — the
+  # name on the wire is byte-identical to the one R1 removed. SURVIVED on first
+  # plant.
+  DR22)
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                \(FMDaemonRefusal.throttle.drainStoppedEvent, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR23 — R7 review. Probe R7-PC1 made a record: the drain-stop line's
+  # `consecutive=` takes the drain-wide accumulator R5 removed from
+  # `deferredSiblings=` one field to its right. SURVIVED on first plant.
+  DR23)
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+                consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+                consecutive=\(deferred.count, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR24 — R7 review. Probe R7-PC2 made a record: the per-job line's
+  # `consecutive=` takes `job.retryCount`, the quantity this bead exists to hold
+  # CONSTANT, so the field can never move. SURVIVED on first plant.
+  DR24)
+    snippet OLD <<'EOF'
+                        phase=\(job.phase.rawValue, privacy: .public) \
+                        consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                        phase=\(job.phase.rawValue, privacy: .public) \
+                        consecutive=\(job.retryCount, privacy: .public) \
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
