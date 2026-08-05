@@ -2444,6 +2444,11 @@ T_IU0T_SHAPE="TranscriptCanonicalizationRuleCanaryTests/testThePreHc7eFinalOnlyC
 # R2 — the THIRD sink: the persisted `transcript_chunks.transcriptVersion`
 # column, which no call-site walk can see because there is no call.
 T_IU0T_COLUMN="TranscriptCanonicalizationRuleCanaryTests/testNoProductionConsumerReadsThePersistedChunkTranscriptVersion"
+# R5 — the walk's own rails. Synthetic source, so they are the tests that go red
+# when the SITE FINDER or the canonicalization predicate regresses, as opposed to
+# when the tree does.
+T_IU0T_SPLITLINE="TranscriptCanonicalizationRuleCanaryTests/testTheSiteFinderSeesACallSplitAcrossLines"
+T_IU0T_LAUNDER="TranscriptCanonicalizationRuleCanaryTests/testCanonicalizingAndThenCollapsingIsNotCanonicalized"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4731,6 +4736,65 @@ MUTATIONS=(
   # R3's literal half-one the SHAPE rail stayed green and the battery would
   # report CN09 SURVIVED on that victim; under R4's pattern both die.
   "CN09|447|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 448 — CN10 (playhead-iu0t R5). CN06 RESPELLED A THIRD TIME, and this
+  # one is not about the closure at all: the collapse is gone and the ONLY
+  # change is that the call itself is split across two lines.
+  #
+  #     TranscriptAtomizer
+  #         .atomize(chunks: chunks, …)
+  #
+  # Before R5 that made the call site VANISH — `guardedCalls` held two literal
+  # substrings, so one line break removed it from the walk entirely: not
+  # reported, not counted against the `audited` floor, indistinguishable from a
+  # clean tree. Measured directly rather than reasoned about: the identical
+  # uncanonicalized argument planted INLINE reddened rule 1 and named the site;
+  # planted SPLIT it passed. CN09 is to CN06 what this is to CN01-style raw
+  # replay — the pair differing only in spelling is what proves the rule is
+  # about the defect rather than about one way of writing it.
+  #
+  # `$T_IU0T_RULE` is the discriminating victim. `$T_IU0T_SHAPE` is NOT named:
+  # this mutant contains no final-pass filter, so rule 2 is correct to stay
+  # green and naming it would be an expectation the mutant cannot meet.
+  "CN10|448|ACOORD|$T_IU0T_RULE"
+
+  # Batch 449 — CN11 (playhead-iu0t R5). The collapse spelled as a NEGATION:
+  # `filter { $0.pass != "fast" }` with the same `.isEmpty ? chunks :` fallback.
+  # Semantically CN06 exactly — "keep the final pass" and "drop the fast pass"
+  # are one instruction — and it is not a hypothetical spelling: instance #5 of
+  # this bead's five IS the negation (`AnalysisStore
+  # .backfillLegacyTranscriptChunksPhase1IfNeeded`, `WHERE pass != 'fast'`), and
+  # this file's own header already calls it "the collapse spelled as a
+  # negation". R4's pattern was receiver-agnostic but still required `==`
+  # against one of three final literals, so it did not see this.
+  #
+  # `$T_IU0T_SHAPE` is the discriminating victim — under R4's pattern it stayed
+  # green. `$T_IU0T_RULE` reddens either way, because rule 1 judges the
+  # ARGUMENT and `preferred` resolves to no canonicalizing binding whatever the
+  # filter says. Naming both is what makes this a measurement rather than a
+  # duplicate of CN06.
+  "CN11|449|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 450 — CN12 (playhead-iu0t R5). LAUNDERING: the site canonicalizes and
+  # then collapses the result anyway.
+  #
+  #     chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+  #         .filter { $0.pass == "final" }
+  #
+  # This passed rule 1 before R5 because the check named `isCanonicalized`
+  # actually tested whether the token `canonicalize(` APPEARS — the bead's own
+  # defect class (a value that names one thing, read as though it named
+  # another) committed inside the check named for it, failing OPEN. Rule 2
+  # cannot cover it either: its conjunction needs the `X.isEmpty ? chunks : X`
+  # fallback and a bare `.filter` has none.
+  #
+  # Worth its own batch rather than folding into CN06 because it is the mutant
+  # that separates "the argument mentions canonicalize" from "the argument IS
+  # the canonical set" — and because fixing `isCanonicalized` alone did NOT
+  # kill it: a duplicated bare `argument.contains("canonicalize(")` one line
+  # below still let it through, which is how the fix's own reintroduction was
+  # caught.
+  "CN12|450|ACOORD|$T_IU0T_RULE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5154,6 +5218,9 @@ describe_mutation() {
     CN07) echo "iu0t R2: the FIFTH collapse — the episode-summary invalidation key read back out of the final-only persisted transcriptVersion column" ;;
     CN08) echo "iu0t R3: CN07 RESPELLED with a closure instead of a keypath — the same read of the same column, which survived while CN07 died" ;;
     CN09) echo "iu0t R4: CN06 RESPELLED with a named closure parameter — the collapse shape rule matched two literal spellings and not this one" ;;
+    CN10) echo "iu0t R5: an uncanonicalized atomize call SPLIT ACROSS LINES — the site finder was a literal substring, so one line break removed the call site from the walk" ;;
+    CN11) echo "iu0t R5: CN06 spelled as a NEGATION (pass != fast) — the same collapse as instance #5, which the collapse-shape pattern required == to see" ;;
+    CN12) echo "iu0t R5: LAUNDERING — the site canonicalizes and then filters to final anyway, which passed because the check tested for the TOKEN canonicalize( rather than the value" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11170,6 +11237,69 @@ EOF
         }()
         let (atoms, version) = TranscriptAtomizer.atomize(
             chunks: preferred,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN10 — playhead-iu0t R5. The NARROWEST possible cut for the site-finder
+  # defect: the argument becomes the raw `chunks` AND the call is split across
+  # two lines. No collapse, no ternary, no closure — the whole point is that
+  # the line break alone is what used to make it invisible, so anything more
+  # elaborate would be a different mutant that happens to also be split.
+  # The anchor is the whole call rather than its first two lines, unlike CN06 /
+  # CN09 / CN11 / CN12: splitting the receiver from the member re-indents every
+  # argument, and leaving the tail at the old indent would make the mutant's
+  # own formatting, rather than its semantics, the thing a reader notices.
+  CN10)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+            analysisAssetId: assetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+EOF
+    snippet NEW <<'EOF'
+        let (atoms, version) = TranscriptAtomizer
+            .atomize(
+                chunks: chunks,
+                analysisAssetId: assetId,
+                normalizationHash: "norm-v1",
+                sourceHash: "asr-v1"
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN11 — playhead-iu0t R5. CN06's collapse spelled as a negation against the
+  # FAST pass instead of an equality against the FINAL one. Identical semantics,
+  # identical line; only the operator and the literal differ. This is instance
+  # #5's spelling, lifted out of SQL into Swift.
+  CN11)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let preferred: [TranscriptChunk] = {
+            let finals = chunks.filter { $0.pass != "fast" }
+            return finals.isEmpty ? chunks : finals
+        }()
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: preferred,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN12 — playhead-iu0t R5. The site canonicalizes and then collapses the
+  # result anyway. The `canonicalize(` call is KEPT deliberately: a mutant that
+  # removed it would be CN03's shape and would prove nothing about laundering.
+  # What is added is the `.filter`, and it is the whole mutation.
+  CN12)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks.filter { $0.pass == "final" },
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
