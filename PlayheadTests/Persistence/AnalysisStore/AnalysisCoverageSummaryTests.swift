@@ -901,7 +901,10 @@ struct AnalysisStoreFetchCoverageSummariesTests {
         // Invariant: analyzed area is a subset of the transcript union.
         let analyzed = try #require(summary.analysisCoveredSec)
         let transcript = try #require(summary.fastTranscriptCoveredSec)
-        #expect(analyzed <= transcript)
+        // playhead-x0lb R1: an AnalyzedSeconds against a CoveredSeconds — two
+        // different areas, so the comparison is in raw values by hand. That is
+        // the boundary the split exists to make visible.
+        #expect(analyzed.rawValue <= transcript.rawValue)
         // Both fractions land at 39% — NOT the old 100%.
         let duration = try #require(summary.episodeDurationSec)
         #expect(analyzed.rawValue / duration.rawValue == 390.0 / 1000.0)
@@ -929,7 +932,7 @@ struct AnalysisStoreFetchCoverageSummariesTests {
         #expect(summary.fastTranscriptCoveredSec == 400)
         // Analyzed area: [0,200] whole (200) + [400,500] truncated (100) = 300.
         #expect(summary.analysisCoveredSec == 300)
-        #expect((summary.analysisCoveredSec ?? 0) < (summary.fastTranscriptCoveredSec ?? 0))
+        #expect((summary.analysisCoveredSec ?? 0).rawValue < (summary.fastTranscriptCoveredSec ?? 0).rawValue)
     }
 
     /// No analysis frontier (no feature / confirmed-ad coverage) → analyzed
@@ -985,12 +988,12 @@ struct AnalysisStoreFetchCoverageSummariesTests {
         #expect(ahead.fastTranscriptCoveredSec == 200)
         #expect(ahead.fastTranscriptCoveredSource == .assetWatermark)
         #expect(ahead.analysisCoveredSec == 200) // min(200, 500)
-        #expect((ahead.analysisCoveredSec ?? 0) <= (ahead.fastTranscriptCoveredSec ?? 0))
+        #expect((ahead.analysisCoveredSec ?? 0).rawValue <= (ahead.fastTranscriptCoveredSec ?? 0).rawValue)
 
         let behind = try #require(summaries["a-sd71-wm-behind"])
         #expect(behind.fastTranscriptCoveredSec == 300)
         #expect(behind.analysisCoveredSec == 120) // min(300, 120)
-        #expect((behind.analysisCoveredSec ?? 0) <= (behind.fastTranscriptCoveredSec ?? 0))
+        #expect((behind.analysisCoveredSec ?? 0).rawValue <= (behind.fastTranscriptCoveredSec ?? 0).rawValue)
     }
 }
 
@@ -2375,7 +2378,7 @@ struct AnalysisStoreAdScanCoverageTests {
         // The bound is the transcript, so the ad-scan area cannot exceed the
         // transcript union by more than the bridged sub-ad-width gaps (none here:
         // the single hole is 3,480 s wide).
-        #expect(summary.adScanCoveredSec! <= summary.fastTranscriptCoveredSec!)
+        #expect(summary.adScanCoveredSec!.rawValue <= summary.fastTranscriptCoveredSec!.rawValue)
     }
 
     /// The intersection must be GAP-AWARE, not a `[0, transcriptSeconds]` PREFIX
@@ -2457,7 +2460,7 @@ struct AnalysisStoreAdScanCoverageTests {
         #expect(abs(fraction - 0.939) < 0.0001)
         // The bridged area legitimately exceeds the raw transcript union — that is
         // the point — but never the transcript SPAN (0 … 939).
-        #expect(summary.adScanCoveredSec! > summary.fastTranscriptCoveredSec!)
+        #expect(summary.adScanCoveredSec!.rawValue > summary.fastTranscriptCoveredSec!.rawValue)
     }
 
     /// The bridge width must be strictly under the shortest span any lane will
@@ -3345,7 +3348,7 @@ struct AnalysisStoreCoverageRulerTests {
     @Test("a numerator past the denominator is withheld, never clamped to 1.0")
     func overshootingNumeratorIsWithheldNotClamped() {
         func summary(
-            adScanCoveredSec: CoveredSeconds?,
+            adScanCoveredSec: AdScanSeconds?,
             episodeDurationSec: EpisodeSeconds?,
             transcriptReach: Double?
         ) -> AnalysisCoverageSummary {
@@ -3356,7 +3359,7 @@ struct AnalysisStoreCoverageRulerTests {
                 fastTranscriptCoveredSource: .fastTranscriptChunks,
                 fastTranscriptCoverageEndSec: transcriptReach.map { WatermarkSeconds($0) },
                 fastTranscriptCoverageEndSource: .fastTranscriptChunks,
-                featureCoverageEndSec: episodeDurationSec.map { WatermarkSeconds($0.rawValue) },
+                featureCoverageEndSec: episodeDurationSec.map { FrontierSeconds($0.rawValue) },
                 featureCoverageEndSource: .assetWatermark,
                 confirmedAdCoverageEndSec: nil,
                 confirmedAdCoverageEndSource: .unknown,

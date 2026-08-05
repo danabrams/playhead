@@ -325,10 +325,20 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             let durationSec = summary?.episodeDurationSec?.rawValue ?? 0
             // playhead-x0lb: TX is the transcript DENSITY, and it now says so —
             // one ruler on the summary rather than a local copy of the division.
-            // Reachable-input identical to the previous `fraction(...)` call:
-            // the numerator is an interval union (finite, >= 0) so the extra
-            // guards on ``DensityRatio/init(transcribed:ofDeclaredDuration:)``
-            // cannot fire, and `max(0, ...)` is unreachable for the same reason.
+            //
+            // R1 review: NOT input-identical, and the earlier claim that it was
+            // ("the numerator is an interval union, so the extra guards cannot
+            // fire") is not complete — `fastTranscriptCoveredSec` is the union
+            // only when a fast chunk landed; otherwise it is the
+            // `fastTranscriptCoverageEndTime` COLUMN, which nothing validates.
+            // The honest statement is the DIRECTION of the difference:
+            // ``DensityRatio/init(transcribed:ofDeclaredDuration:)`` withholds a
+            // number where the local `fraction(...)` manufactured one — a NaN
+            // numerator clamped to 0.0, an infinite one to 1.0, a negative one
+            // to 0.0, and a non-finite DURATION divided into 0.0. All four now
+            // render `--%` instead of a fabricated bar, which is the same
+            // direction every other consumer of this quantity already takes
+            // (`finiteValue`: absence and non-finiteness are one fact).
             let transcriptFraction = summary?.transcriptDensity?.rawValue
             // playhead-sd71: AN is the gap-aware analyzed-coverage AREA
             // (transcript union clipped to the analysis frontier), NOT the

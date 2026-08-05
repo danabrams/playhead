@@ -1080,9 +1080,20 @@ actor BackfillJobRunner {
                         // episode cursor. THIS is the expression that wrote
                         // 53FC53E3's `{"processedUnitCount":1,
                         // "lastProcessedUpperBoundSec":2525.82}` on a 2,528 s
-                        // episode whose measured adScanFraction is 0.0142
-                        // (`processedPhaseCount: 1` is written by this path
-                        // alone). playhead-41mu's measured terminal defuses it
+                        // episode whose measured adScanFraction is 0.0142.
+                        //
+                        // R1 review: an earlier draft justified that attribution
+                        // with "`processedPhaseCount: 1` is written by this path
+                        // alone", which is not true — the
+                        // `specialistHostReadScan` completion above writes 1 too,
+                        // and `monotonic(from:)` propagates it. What actually
+                        // pins the row to THIS expression is the pair: the row's
+                        // `phase` is `fullEpisodeScan`, which the specialist
+                        // branch cannot reach, and its `status` is `complete`,
+                        // which only `markBackfillJobComplete` sets. This
+                        // completion path serves every non-specialist phase, not
+                        // `fullEpisodeScan` alone.
+                        // playhead-41mu's measured terminal defuses it
                         // for `.fullEpisodeScan`; the expression is still the
                         // unsound one, so it is named.
                         lastProcessedUpperBoundSec: EpisodeSeconds.unsoundPlanListPromotion(
@@ -2863,11 +2874,22 @@ actor BackfillJobRunner {
             // already carries.
             // playhead-x0lb: the box remembers PLAN-list bounds (that is what
             // `shouldAdvanceCursor` compares the walk against), so the merged
-            // EPISODE cursor is converted back explicitly. The two are equal by
-            // construction here — `merged` is `upperBound` promoted, or a prior
-            // cursor that was itself promoted from a walk bound — and stating
-            // the conversion is what stops the box quietly acquiring episode
+            // EPISODE cursor is converted back explicitly, and stating the
+            // conversion is what stops the box quietly acquiring episode
             // semantics it does not have.
+            //
+            // R1 review: an earlier draft of this comment said the two values
+            // are "equal by construction", which contradicts the paragraph
+            // directly above — they DIFFER exactly when `priorCursor` was
+            // already ahead, and taking the larger is the whole point. What is
+            // true is weaker and sufficient: every value `merged` can hold
+            // originated as a walk or segment-list bound (this pass's own, or
+            // one an earlier deferred/salvaged run published through
+            // ``UnsoundCursorPromotionSite``), so the demotion invents no claim
+            // the box did not already hold. It is the one Episode→PlanList
+            // crossing in the tree and is deliberately NOT enumerable the way
+            // the promotions are: the inventory exists to be SHRUNK by
+            // playhead-5pyq, and this site disappears with it.
             box.noteCursorWritten(
                 merged.lastProcessedUpperBoundSec.map { PlanListSeconds($0.rawValue) } ?? upperBound
             )

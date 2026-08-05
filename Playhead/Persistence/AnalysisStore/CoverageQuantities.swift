@@ -154,8 +154,9 @@ struct PlanListSeconds: CoverageQuantity {
     init(_ rawValue: Double) { self.rawValue = rawValue }
 }
 
-/// playhead-x0lb: a HIGH-WATER MARK — the greatest end time some producer has
-/// reached. A position, never an area.
+/// playhead-x0lb: the TRANSCRIPT's high-water mark — `MAX(endTime)` over
+/// `transcript_chunks`, or the asset watermark column standing in for it. A
+/// position, never an area.
 ///
 /// * numerator / denominator: none — a position.
 /// * unit: seconds of episode audio.
@@ -166,10 +167,16 @@ struct PlanListSeconds: CoverageQuantity {
 /// riddled with inter-utterance holes. On the 2026-08-03 pull AD5F3A0A's fast
 /// watermark is 4,280.9 s while its fast AREA is 1,645.9 s — the watermark
 /// over-reports by 2.6x. Reading one as the other is the
-/// "AN 100 % / TX 39 %" antipattern (playhead-sd71), and instance 9 of this
-/// bead's catalogue in its most expensive form: the readiness ✓ keyed on the DSP
-/// watermark and `max(endTime)` of DETECTED ads, so an episode where detection
-/// did WORSE read as MORE complete.
+/// "AN 100 % / TX 39 %" antipattern (playhead-sd71).
+///
+/// **It is the TRANSCRIPT's reach and no other producer's** (R1 review). The
+/// DSP feature frontier and `max(endTime)` of DETECTED ads are also high-water
+/// marks in the same unit, and instance 9 of this bead's catalogue is exactly
+/// those two being read as this one — the readiness ✓ keyed on the DSP
+/// watermark and the detected-ad maximum, so an episode where detection did
+/// WORSE read as MORE complete. They carry ``FrontierSeconds``; substituting
+/// one for the other was a compile-clean edit until R1 planted it and watched
+/// it build.
 ///
 /// A `ReachRatio` cannot be built from one of these; that is the point.
 struct WatermarkSeconds: CoverageQuantity {
@@ -177,17 +184,80 @@ struct WatermarkSeconds: CoverageQuantity {
     init(_ rawValue: Double) { self.rawValue = rawValue }
 }
 
-/// playhead-x0lb: an AREA — de-overlapped seconds of audio. Never a position.
+/// playhead-x0lb: the ANALYSIS FRONTIER — how far the acoustic/DSP pipeline has
+/// swept, or how far the latest DETECTED ad window ends. A position, never an
+/// area, and never the transcript's reach.
 ///
-/// * numerator / denominator: none — an area, and usually somebody else's
-///   numerator.
+/// * numerator / denominator: none — a position.
+/// * unit: seconds of episode audio.
+///
+/// **R1 review: separated from ``WatermarkSeconds`` because instance 9 IS this
+/// substitution.** Feature extraction sweeps the whole episode independently of
+/// the semantic scan, so it reaches 100 % while most audio has never been
+/// screened; and `confirmedAdCoverageEndSec` is not coverage at all — one
+/// late-placed detection pushes it to the end of the episode. Both are
+/// legitimately `max`ed with EACH OTHER to form the frontier that clips
+/// ``AnalyzedSeconds``, and that is the only arithmetic they take part in.
+struct FrontierSeconds: CoverageQuantity {
+    let rawValue: Double
+    init(_ rawValue: Double) { self.rawValue = rawValue }
+}
+
+/// playhead-x0lb: the TRANSCRIPT AREA — de-overlapped seconds of audio that
+/// carry transcript text. Never a position.
+///
+/// * numerator / denominator: none — an area, and ``DensityRatio``'s numerator.
 /// * unit: seconds of episode audio.
 ///
 /// Overlapping spans count once and gaps are excluded, which is what makes it
 /// the honest numerator for a coverage ratio and what makes it strictly smaller
 /// than the corresponding ``WatermarkSeconds`` whenever the transcript has a
 /// hole.
+///
+/// **R1 review: it is the transcript's area and no other lane's.** Three areas
+/// live on `AnalysisCoverageSummary` — this one, ``AnalyzedSeconds`` and
+/// ``AdScanSeconds`` — and until R1 they shared this type, so
+/// `ReachRatio(examined: fastTranscriptCoveredSec, …)` compiled. That
+/// expression IS playhead-fil5 R3: the transcript union over the duration,
+/// published as ad-scan reach, with nought of twelve field assets clearing the
+/// gate and every test green.
 struct CoveredSeconds: CoverageQuantity {
+    let rawValue: Double
+    init(_ rawValue: Double) { self.rawValue = rawValue }
+}
+
+/// playhead-x0lb: the ANALYZED AREA — the transcript union CLIPPED to the
+/// analysis frontier. An area, and a subset of ``CoveredSeconds``.
+///
+/// * numerator / denominator: none — an area.
+/// * unit: seconds of episode audio.
+///
+/// It is not ad-scan reach and never was: it inherits the frontier's problems
+/// in a gap-aware form (see ``FrontierSeconds``), so an episode whose DSP sweep
+/// finished but whose semantic scan never ran carries a large one. R1 separated
+/// it from ``AdScanSeconds`` after planting the substitution and watching it
+/// build.
+struct AnalyzedSeconds: CoverageQuantity {
+    let rawValue: Double
+    init(_ rawValue: Double) { self.rawValue = rawValue }
+}
+
+/// playhead-x0lb: the AD-SCAN AREA — audio a semantic ad scan actually READ.
+/// The only quantity that answers "how much of this episode has been read for
+/// ads?", and ``ReachRatio``'s only numerator.
+///
+/// * numerator / denominator: none — an area.
+/// * unit: seconds of episode audio.
+///
+/// Precisely: the interval union of coverage-lane `semantic_scan_results`
+/// windows that produced a verdict, INTERSECTED with the transcribed region
+/// (both passes, sub-``BridgeToleranceSec`` gaps bridged).
+///
+/// **R1 review: its own type, because the summary's own doc already had to say
+/// in prose that it "is deliberately NOT any of the other scalars on this
+/// summary" — and prose is what this bead exists to replace.** Every one of the
+/// alternatives it warns about type-checked as this quantity until R1.
+struct AdScanSeconds: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
 }
@@ -197,7 +267,7 @@ struct CoveredSeconds: CoverageQuantity {
 /// playhead-x0lb: **REACH** — how much of the episode a semantic ad scan has
 /// actually READ.
 ///
-/// * numerator: ``CoveredSeconds`` — the interval union of coverage-lane
+/// * numerator: ``AdScanSeconds`` — the interval union of coverage-lane
 ///   `semantic_scan_results` windows that produced a verdict, INTERSECTED with
 ///   the transcribed region (both passes, sub-ad-width gaps bridged).
 /// * denominator: ``EpisodeSeconds`` — the episode's DECLARED duration
@@ -209,6 +279,11 @@ struct CoveredSeconds: CoverageQuantity {
 /// union by the duration and called the result reach. That is density. Nought of
 /// twelve field assets cleared the gate and every test passed, because every
 /// fixture was single-chunk — the one shape where the two are equal.
+///
+/// R1 review: the numerator is ``AdScanSeconds`` and not the shared area type,
+/// because with a shared area type fil5 R3's expression still compiled — the
+/// defect had two spellings and only the one that goes through
+/// ``AnalysisCoverageSummary/transcriptDensity`` was closed.
 struct ReachRatio: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
@@ -220,7 +295,7 @@ struct ReachRatio: CoverageQuantity {
     ///
     /// Guards, in order: a non-finite or negative numerator; a missing,
     /// non-finite or non-positive denominator.
-    init?(examined: CoveredSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) {
+    init?(examined: AdScanSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) {
         guard let examined, examined.isFinite, examined.rawValue >= 0,
               let duration, duration.isFinite, duration.rawValue > 0 else {
             return nil
@@ -341,11 +416,15 @@ enum UnsoundCursorPromotionSite: String, CaseIterable, Sendable {
     /// playhead-t1kq's cancellation salvage. Same walk bound, via the honest
     /// cursor box.
     case cancellationSalvage
-    /// The `fullEpisodeScan` completion cursor — `segments.last?.endTime` over
-    /// the POST-narrowing list. A SEGMENT-list bound rather than a plan-list
-    /// one, same defect shape. This is the expression that actually wrote
-    /// 53FC53E3's `2525.82` row (`processedPhaseCount: 1` is written by the
-    /// completion path alone).
+    /// The completion cursor for every NON-SPECIALIST phase —
+    /// `segments.last?.endTime` over the POST-narrowing list. A SEGMENT-list
+    /// bound rather than a plan-list one, same defect shape. This is the
+    /// expression that actually wrote 53FC53E3's `2525.82` row: that row's
+    /// `phase` is `fullEpisodeScan` (which the specialist completion below
+    /// cannot reach) and its `status` is `complete` (which only
+    /// `markBackfillJobComplete` sets). R1 review: it is NOT pinned by
+    /// `processedPhaseCount == 1`, which the specialist completion also writes
+    /// and which `monotonic(from:)` propagates.
     case segmentListCompletion
     /// The `specialistHostReadScan` completion cursor —
     /// `segments.last?.endTime` over the PRE-narrowing root inputs. Inert with
@@ -422,15 +501,19 @@ extension EpisodeSeconds {
 // stated and deliberately untyped, and stated but WRONG — which is where the
 // audit earned its keep.
 //
-// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY08).
+// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY14).
+//    R1 review added TY09–TY14 and the three types the first six of them
+//    needed: the rails were PLANTED FIRST and three of them SURVIVED, which is
+//    how the area/watermark conflations below were found rather than argued
+//    about.
 //
 //   AnalysisCoverageSummary.episodeDurationSec        EpisodeSeconds       s   position of the episode's end, DECLARED (feed or decode probe), not measured
 //   AnalysisCoverageSummary.fastTranscriptCoveredSec  CoveredSeconds       s   AREA: interval union of pass='fast' transcript_chunks
-//   AnalysisCoverageSummary.analysisCoveredSec        CoveredSeconds       s   AREA: that union clipped to the DSP frontier
-//   AnalysisCoverageSummary.adScanCoveredSec          CoveredSeconds       s   AREA: coverage-lane scan windows that examined, ∩ the bridged transcript
+//   AnalysisCoverageSummary.analysisCoveredSec        AnalyzedSeconds      s   AREA: that union clipped to the DSP frontier
+//   AnalysisCoverageSummary.adScanCoveredSec          AdScanSeconds        s   AREA: coverage-lane scan windows that examined, ∩ the bridged transcript
 //   AnalysisCoverageSummary.fastTranscriptCoverageEndSec  WatermarkSeconds s   REACH: MAX(endTime) of fast chunks, watermark fallback
-//   AnalysisCoverageSummary.featureCoverageEndSec     WatermarkSeconds     s   REACH: the DSP feature-extraction watermark
-//   AnalysisCoverageSummary.confirmedAdCoverageEndSec WatermarkSeconds     s   REACH: MAX(endTime) of DETECTED ad windows — not coverage at all
+//   AnalysisCoverageSummary.featureCoverageEndSec     FrontierSeconds      s   REACH: the DSP feature-extraction watermark
+//   AnalysisCoverageSummary.confirmedAdCoverageEndSec FrontierSeconds      s   REACH: MAX(endTime) of DETECTED ad windows — not coverage at all
 //   AnalysisCoverageSummary.finalPassCoverageEndSec   WatermarkSeconds     s   REACH: MAX(endTime) of final chunks, watermark fallback
 //   AnalysisCoverageSummary.adScanFraction            ReachRatio      [0,1]    adScanCoveredSec ÷ episodeDurationSec
 //   AnalysisCoverageSummary.transcriptDensity         DensityRatio    [0,1]    fastTranscriptCoveredSec ÷ episodeDurationSec
@@ -454,9 +537,11 @@ extension EpisodeSeconds {
 //       type would have to be laundered at one of the two.
 //   AnalysisCoverageMath.unionedSeconds / unionedSecondsClipped /
 //   unionedSecondsIntersecting / bridgingShortGaps  ->  Double over [(start, end)]
-//       Generic interval arithmetic. These PRODUCE CoveredSeconds; typing their
-//       tuples would type every transcript-chunk timestamp in the app. The
-//       conversion happens once, where the summary is built.
+//       Generic interval arithmetic. These PRODUCE the area types; typing their
+//       tuples would type every transcript-chunk timestamp in the app. Which
+//       area a call produces is decided at the ONE site that boxes the result
+//       — `fetchCoverageSummariesByAssetIds` — and the boxing is what the R1
+//       rails TY09/TY10 pin.
 //   EpisodePreparationReadiness.analysisFraction / .downloadFraction -> Double
 //       Post-clamp BAR FILLS in [0, 1], provenance deliberately discarded. Note
 //       the two are adjacent fields with different units underneath: the analyze
@@ -465,7 +550,9 @@ extension EpisodeSeconds {
 //       analysisCoveredSec ÷ episodeDurationSec — a THIRD ratio over the same
 //       denominator as reach and density. Left untyped because one producer and
 //       one consumer share it; recorded here so the next reader does not have to
-//       re-derive which area it is.
+//       re-derive which area it is. Its NUMERATOR is typed (``AnalyzedSeconds``)
+//       even though the ratio is not, which is what stops the ad-scan area or
+//       the transcript area being substituted into it.
 //
 // ── LATENT INSTANCES. Found by writing the line. Each is filed; none is fixed
 //    here, because each is a behaviour or wire change with its own blast radius.
@@ -497,13 +584,40 @@ extension EpisodeSeconds {
 //       types; behaviour deliberately unchanged — playhead-vkwr.
 //
 // ── THE MECHANISM'S OWN LIMIT, stated because a claim of completeness that is
-//    not complete is instance 18 of the catalogue.
+//    not complete is instance 18 of the catalogue. R1 review found the first
+//    version of this section incomplete BY PLANTING SUBSTITUTIONS AND WATCHING
+//    THEM BUILD, which is why the list below is longer than the one it replaces
+//    and why `scripts/mutation-battery-untypeable.py` now carries a rail for
+//    each closed hole rather than an argument that it is closed.
 //
-//   A ``CoveredSeconds`` can still be carrying a REACH. When no chunk landed,
-//   `fastTranscriptCoveredSec` falls back to the `fastTranscriptCoverageEndTime`
-//   COLUMN, which is a watermark, and the only thing that says so is the
-//   `CoverageProvenance` tag beside it. The types stop a watermark being handed
-//   ACROSS a boundary as an area; they cannot stop one being put in the box at
-//   the bottom. That fallback is playhead-0sro's shape and it is load-bearing —
-//   `AnalysisJobRunner`'s `watermarkWithoutChunksStillFails` fixture is built on
-//   it — so it is documented rather than removed.
+//   L-A  A ``CoveredSeconds`` can still be carrying a REACH. When no chunk
+//        landed, `fastTranscriptCoveredSec` falls back to the
+//        `fastTranscriptCoverageEndTime` COLUMN, which is a watermark, and the
+//        only thing that says so is the `CoverageProvenance` tag beside it. The
+//        types stop a watermark being handed ACROSS a boundary as an area; they
+//        cannot stop one being put in the box at the bottom. That fallback is
+//        playhead-0sro's shape and it is load-bearing —
+//        `AnalysisJobRunner`'s `watermarkWithoutChunksStillFails` fixture is
+//        built on it — so it is documented rather than removed.
+//   L-B  ``EpisodeSeconds/promoting(_:priorEpisodeCursor:firstPlannedStart:bridge:)``
+//        takes TWO ``PlanListSeconds``, so the R2 defect (one operand from a
+//        different list) is a compile error but SWAPPING the run's own two
+//        operands is not. There is one caller and it is `underCoverageCursor`,
+//        whose own parameter list no longer offers a second list to draw from;
+//        a second caller would reopen the exposure.
+//   L-C  ``FrontierSeconds`` deliberately carries BOTH the DSP feature
+//        watermark and the detected-ad maximum, because `analysisFrontierSec`
+//        is their `max`. Reading one as the other is therefore still typeable.
+//        The substitution that cost money — either of them read as the
+//        TRANSCRIPT's reach — is not.
+//   L-D  Nothing type-checks the ``UnsoundCursorPromotionSite`` tag against the
+//        site it is written at; that is what `TY99` states as this battery's
+//        vacuity control.
+//   L-E  Every quantity codes as a BARE NUMBER, so the `Codable` conformance is
+//        a laundering channel by construction: bytes written by one type decode
+//        into any other. That is not a defect to fix — it is what keeps the
+//        persisted cursor readable — and it is inert today because
+//        `BackfillProgressCursor` is the only Codable carrier in this path and
+//        its field has exactly one type. A second persisted quantity would make
+//        it live, and the guard is that decoding names the target type
+//        explicitly at the call site.

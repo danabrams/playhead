@@ -135,7 +135,9 @@ MUTATIONS = [
         "area of 1,645.9 s, a 2.6x over-report)",
         "        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)",
         "        return ReachRatio(examined: fastTranscriptCoverageEndSec, ofDeclaredDuration: episodeDurationSec)",
-        ["WatermarkSeconds", "CoveredSeconds"],
+        # R1: the numerator type is now AdScanSeconds, so the diagnostic names it
+        # rather than the shared area type it used to name.
+        ["WatermarkSeconds", "AdScanSeconds"],
     ),
     (
         "TY07", STORE,
@@ -155,6 +157,64 @@ MUTATIONS = [
         "        return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction",
         "        return adScanFraction < DensityRatio(0.98)",
         ["ReachRatio", "DensityRatio"],
+    ),
+    (
+        "TY09", STORE,
+        "R1 review, planted and SURVIVED before the fix: playhead-fil5 R3 in its "
+        "OTHER spelling — the transcript AREA divided by the duration inline, "
+        "without going through `transcriptDensity`. Three areas shared one type, "
+        "so the expression that killed the feature still compiled",
+        "        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)",
+        "        return ReachRatio(examined: fastTranscriptCoveredSec, ofDeclaredDuration: episodeDurationSec)",
+        ["CoveredSeconds", "AdScanSeconds"],
+    ),
+    (
+        "TY10", STORE,
+        "R1 review, planted and SURVIVED before the fix: the ANALYZED area as "
+        "the reach numerator. `analysisCoveredSec` is the transcript union "
+        "clipped to the DSP frontier, so it is large on an episode no semantic "
+        "scan ever read",
+        "        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)",
+        "        return ReachRatio(examined: analysisCoveredSec, ofDeclaredDuration: episodeDurationSec)",
+        ["AnalyzedSeconds", "AdScanSeconds"],
+    ),
+    (
+        "TY11", STORE,
+        "R1 review, planted and SURVIVED before the fix: instance 9's own shape "
+        "— `max(endTime)` of DETECTED ads substituted for the TRANSCRIPT's reach "
+        "in the denominator-contradiction guard, so an episode where detection "
+        "did worse reads as more complete",
+        "        let transcriptReach: WatermarkSeconds? = [fastTranscriptCoverageEndSec, finalReach]",
+        "        let transcriptReach: WatermarkSeconds? = [confirmedAdCoverageEndSec, finalReach]",
+        ["FrontierSeconds", "WatermarkSeconds"],
+    ),
+    (
+        "TY12", RUNNER,
+        "R1 review: the cursor CASHED as a bare `Double`. `narrowedForResume` "
+        "deletes every segment ending at or below its argument, permanently, so "
+        "this is the single most consequential crossing in the bead",
+        "        let inputs = Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec)",
+        "        let inputs = Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec?.rawValue)",
+        ["Double", "EpisodeSeconds"],
+    ),
+    (
+        "TY13", RUNNER,
+        "R1 review: the promotion rule's PRIOR-CURSOR slot fed this run's own "
+        "plan-list bound — the other half of the 41mu R2 family, and the one "
+        "TY04 does not cover",
+        "            priorEpisodeCursor: prior?.lastProcessedUpperBoundSec,",
+        "            priorEpisodeCursor: coverage.lastCoveredUpperBoundSec,",
+        ["PlanListSeconds", "EpisodeSeconds"],
+    ),
+    (
+        "TY14", RUNNER,
+        "R1 review: the CURSOR RULE bridged at playhead-a1x0's 60 s re-scan "
+        "threshold instead of the 5 s measuring tolerance. TY07 is the same "
+        "confusion in the coverage numerator; this is it in the rule that "
+        "decides what a resume may skip",
+        "            bridge: AnalysisCoverageMath.adScanBridgeableGapSec",
+        "            bridge: RescanThresholdSec.adScanRescanWorthyGapSec",
+        ["RescanThresholdSec", "BridgeToleranceSec"],
     ),
     (
         "TY99", RUNNER,

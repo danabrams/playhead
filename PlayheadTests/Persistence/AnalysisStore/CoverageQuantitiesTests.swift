@@ -90,6 +90,10 @@ struct CoverageQuantityWireFormatTests {
         #expect(String(decoding: try JSONEncoder().encode(PlanListSeconds(12.5)), as: UTF8.self) == "12.5")
         #expect(String(decoding: try JSONEncoder().encode(CoveredSeconds(12.5)), as: UTF8.self) == "12.5")
         #expect(String(decoding: try JSONEncoder().encode(WatermarkSeconds(12.5)), as: UTF8.self) == "12.5")
+        // playhead-x0lb R1: the three types the area/watermark split added.
+        #expect(String(decoding: try JSONEncoder().encode(AnalyzedSeconds(12.5)), as: UTF8.self) == "12.5")
+        #expect(String(decoding: try JSONEncoder().encode(AdScanSeconds(12.5)), as: UTF8.self) == "12.5")
+        #expect(String(decoding: try JSONEncoder().encode(FrontierSeconds(12.5)), as: UTF8.self) == "12.5")
         #expect(String(decoding: try JSONEncoder().encode(ReachRatio(0.5)), as: UTF8.self) == "0.5")
         #expect(String(decoding: try JSONEncoder().encode(DensityRatio(0.5)), as: UTF8.self) == "0.5")
     }
@@ -207,7 +211,7 @@ struct CoverageRatioTests {
         #expect(ReachRatio(examined: 500, ofDeclaredDuration: -1) == nil)
         #expect(ReachRatio(examined: 500, ofDeclaredDuration: CoveredNaN.duration) == nil)
         // A numerator that is not a measurement.
-        #expect(ReachRatio(examined: CoveredNaN.area, ofDeclaredDuration: 1000) == nil)
+        #expect(ReachRatio(examined: CoveredNaN.adScanArea, ofDeclaredDuration: 1000) == nil)
         #expect(ReachRatio(examined: -1, ofDeclaredDuration: 1000) == nil)
         // Clamped at full: an overshoot is a different problem, handled by
         // `adScanFraction`'s tolerance guard before it ever reaches here.
@@ -217,6 +221,7 @@ struct CoverageRatioTests {
     @Test("the density constructor applies the same guards to its own terms")
     func densityGuards() {
         #expect(DensityRatio(transcribed: 500, ofDeclaredDuration: 1000) == DensityRatio(0.5))
+        #expect(DensityRatio(transcribed: CoveredNaN.transcriptArea, ofDeclaredDuration: 1000) == nil)
         #expect(DensityRatio(transcribed: nil, ofDeclaredDuration: 1000) == nil)
         #expect(DensityRatio(transcribed: 500, ofDeclaredDuration: 0) == nil)
         #expect(DensityRatio(transcribed: 2000, ofDeclaredDuration: 1000) == DensityRatio(1))
@@ -273,7 +278,8 @@ struct CoverageRatioTests {
     /// Non-finite inputs written as named constants so the guard tests read as
     /// intent rather than as arithmetic.
     private enum CoveredNaN {
-        static let area = CoveredSeconds(.nan)
+        static let adScanArea = AdScanSeconds(.nan)
+        static let transcriptArea = CoveredSeconds(.nan)
         static let duration = EpisodeSeconds(.nan)
     }
 }

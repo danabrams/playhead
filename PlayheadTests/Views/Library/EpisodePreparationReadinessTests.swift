@@ -587,7 +587,7 @@ struct EpisodePreparationReadinessTests {
     /// screen shows. So a mutation that swaps the readiness predicate onto any
     /// other scalar of this same read model is caught, not just one that reverts
     /// to the raw asset watermarks.
-    private func coverage(assetId: String = assetId, adScanCoveredSec: CoveredSeconds?) -> AnalysisCoverageSummary {
+    private func coverage(assetId: String = assetId, adScanCoveredSec: AdScanSeconds?) -> AnalysisCoverageSummary {
         AnalysisCoverageSummary(
             assetId: assetId,
             episodeDurationSec: EpisodeSeconds(Self.episodeDuration),
@@ -595,13 +595,13 @@ struct EpisodePreparationReadinessTests {
             fastTranscriptCoveredSource: .fastTranscriptChunks,
             fastTranscriptCoverageEndSec: WatermarkSeconds(Self.episodeDuration),
             fastTranscriptCoverageEndSource: .fastTranscriptChunks,
-            featureCoverageEndSec: WatermarkSeconds(Self.episodeDuration),
+            featureCoverageEndSec: FrontierSeconds(Self.episodeDuration),
             featureCoverageEndSource: .assetWatermark,
-            confirmedAdCoverageEndSec: WatermarkSeconds(Self.episodeDuration),
+            confirmedAdCoverageEndSec: FrontierSeconds(Self.episodeDuration),
             confirmedAdCoverageEndSource: .assetWatermark,
             finalPassCoverageEndSec: WatermarkSeconds(Self.episodeDuration),
             finalPassCoverageEndSource: .finalPassChunks,
-            analysisCoveredSec: CoveredSeconds(Self.episodeDuration),
+            analysisCoveredSec: AnalyzedSeconds(Self.episodeDuration),
             adScanCoveredSec: adScanCoveredSec,
             adScanCoveredSource: adScanCoveredSec == nil ? .unknown : .semanticScanResults
         )
@@ -627,7 +627,7 @@ struct EpisodePreparationReadinessTests {
         let analysis = episodePreparationAnalysisInputs(
             asset: asset(state: sessionState),
             coverage: coverage(
-                adScanCoveredSec: adScanFraction.map { CoveredSeconds($0.rawValue * Self.episodeDuration) }
+                adScanCoveredSec: adScanFraction.map { AdScanSeconds($0.rawValue * Self.episodeDuration) }
             )
         )
         #expect(analysis.adScanFraction == adScanFraction, sourceLocation: sourceLocation)
@@ -670,7 +670,7 @@ struct EpisodePreparationReadinessTests {
         for state in SessionState.allCases {
             let analysis = episodePreparationAnalysisInputs(
                 asset: asset(state: state),
-                coverage: coverage(adScanCoveredSec: CoveredSeconds(Self.episodeDuration))
+                coverage: coverage(adScanCoveredSec: AdScanSeconds(Self.episodeDuration))
             )
             #expect(
                 analysis.analysisTerminatedComplete == state.isTerminalCompletion,
@@ -690,7 +690,7 @@ struct EpisodePreparationReadinessTests {
     func testProjectionWithoutAssetClaimsNothing() {
         let analysis = episodePreparationAnalysisInputs(
             asset: nil,
-            coverage: coverage(adScanCoveredSec: CoveredSeconds(Self.episodeDuration))
+            coverage: coverage(adScanCoveredSec: AdScanSeconds(Self.episodeDuration))
         )
         #expect(analysis == EpisodePreparationAnalysisInputs())
         #expect(analysis.adScanFraction == nil)
@@ -703,7 +703,7 @@ struct EpisodePreparationReadinessTests {
         // episode's coverage to another and light every row's ✓ at once.
         let analysis = episodePreparationAnalysisInputs(
             asset: asset(state: .completeFull),
-            coverage: coverage(assetId: "some-other-asset", adScanCoveredSec: CoveredSeconds(Self.episodeDuration))
+            coverage: coverage(assetId: "some-other-asset", adScanCoveredSec: AdScanSeconds(Self.episodeDuration))
         )
         #expect(analysis.adScanFraction == nil)
         #expect(!analysis.analysisComplete)
