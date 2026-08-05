@@ -1163,6 +1163,11 @@ AJRUN="Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift"
 # session lifecycle and pushes the evidence catalog onto the SkipOrchestrator.
 # Added for CN06, the fourth instance of the pre-hc7e final-only collapse.
 ACOORD="Playhead/Services/AnalysisCoordinator/AnalysisCoordinator.swift"
+# playhead-iu0t R2: the episode-summary backfill coordinator — the FIFTH
+# instance of the collapse, and the one that reached it through the persisted
+# `transcript_chunks.transcriptVersion` column rather than through a call.
+# Added for CN07.
+ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -1171,7 +1176,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
-  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD"
+  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF"
 )
 
 FOCUSED_SUITES=(
@@ -2436,6 +2441,9 @@ T_IU0T_RETRYRUNS="Test B: retry path runs only the shadow phase and clears the f
 # R1 — the rule canary. XCTest, so `Suite/method`.
 T_IU0T_RULE="TranscriptCanonicalizationRuleCanaryTests/testEveryTranscriptVersionCallSiteCanonicalizes"
 T_IU0T_SHAPE="TranscriptCanonicalizationRuleCanaryTests/testThePreHc7eFinalOnlyCollapseAppearsNowhereInProduction"
+# R2 — the THIRD sink: the persisted `transcript_chunks.transcriptVersion`
+# column, which no call-site walk can see because there is no call.
+T_IU0T_COLUMN="TranscriptCanonicalizationRuleCanaryTests/testNoProductionConsumerReadsThePersistedChunkTranscriptVersion"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4651,6 +4659,44 @@ MUTATIONS=(
   # production-dead). The number is skipped rather than reused so the gap note
   # and the battery agree.
   "CN06|443|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 444 — CN05 (playhead-iu0t R2). The THIRD instance, restored verbatim
+  # in `runPhase5ProjectorPhase`. It was a KNOWN GAP in R1 and is no longer one,
+  # and the reason it stopped being one is itself the R2 finding.
+  #
+  # R1 declined to encode it on the grounds that a mutant on production-dead
+  # code "can only ever be red or meaningless". That was right about a
+  # BEHAVIOURAL rail — the method's only two call sites are tests passing an
+  # all-`final` fixture that canonicalize returns unchanged, so the mutation is
+  # a literal no-op there — but it is wrong about a SOURCE canary, which reads
+  # the call site rather than running it. The reason CN05 nevertheless could not
+  # be encoded in R1 is that the canary's allow-list was keyed
+  # `File.swift|expression`, so `AdDetectionService.swift|chunks` licensed the
+  # collapse in every one of that file's 13,331 lines and the mutant SURVIVED.
+  # R2 re-keyed it `File.swift|declaration|expression`; the entry now licenses
+  # `runShadowFMPhase` and `recordSemanticScanClaim` only, and this mutant dies.
+  #
+  # So CN05 is the mutant that proves the scoping change bites, and it converts
+  # a documented hole into a killed mutant. Both canary tests are named: the
+  # restored expression is both an uncanonicalized ARGUMENT and the literal
+  # COLLAPSE SHAPE.
+  "CN05|444|ADSVC|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 445 — CN07 (playhead-iu0t R2). THE FIFTH INSTANCE, restored verbatim:
+  # the episode-summary invalidation key read back out of the persisted
+  # `transcript_chunks.transcriptVersion` column, which
+  # `backfillLegacyTranscriptChunksPhase1IfNeeded` fills `WHERE pass != 'fast'`
+  # — the collapse spelled as a negation, in SQL, and therefore invisible to
+  # both greps that found the first four AND to the call-site walk, because
+  # reading a column is not a call.
+  #
+  # Its victim is the third canary test only. `hydrate` has no behavioural rail
+  # that could see this: nothing reads `episode_summaries.transcriptVersion`
+  # back (the candidate selector's only staleness test is `schemaVersion < ?`),
+  # which is filed separately — and that absence is precisely why a source pin
+  # is the instrument that can see it. Same lesson as CN06, by a different
+  # route: the sites this defect family survives at are the ones no test runs.
+  "CN07|445|ESUMBF|$T_IU0T_COLUMN"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4703,21 +4749,26 @@ MUTATIONS=(
 #   does. Change the plan and it goes red. The claim's own side of the coupling
 #   stays mutation-covered by SC05, which names this same test.
 #
-#   CN05 (playhead-iu0t) — restore `filter { $0.pass == "final" }` inside
-#   `AdDetectionService.runPhase5ProjectorPhase`, the THIRD instance of the same
-#   collapse, which iu0t also converted. It would survive, and not because a
-#   test is missing: the method has no production caller at all. Its only two
-#   call sites are `SpliceSlotOwnershipPhase5GuardTests`, both of which pass an
-#   all-`final` fixture that canonicalize returns unchanged, so the mutation is
-#   a literal no-op there. Production's Phase-5 projection is a separate inline
-#   block in `runBackfill`.
+#   CN05 (playhead-iu0t) — RESOLVED in R2; it is encoded above as batch 444 and
+#   this entry is kept only because the reasoning that closed it is worth more
+#   than the hole was.
 #
-#   NOT ENCODED because a mutant on unreachable code can only ever be red or
-#   meaningless, and the honest fix is not a test — it is deciding whether the
-#   method should exist. Filed as **playhead-tqqu** with the three options. This
-#   is the "a correct mechanism production never invokes" family, and the note
-#   is here so the next person to grep for it finds the reason rather than the
-#   hole.
+#   R1 left it out: restoring `filter { $0.pass == "final" }` inside
+#   `AdDetectionService.runPhase5ProjectorPhase` changes nothing observable,
+#   because the method has no production caller at all — its only two call sites
+#   are `SpliceSlotOwnershipPhase5GuardTests`, both passing an all-`final`
+#   fixture that canonicalize returns unchanged. That argument is sound for a
+#   BEHAVIOURAL rail and it is what "a mutant on unreachable code can only ever
+#   be red or meaningless" meant.
+#
+#   It stops being sound the moment the victim is a SOURCE canary, which reads
+#   the call site instead of running it. The real reason CN05 could not be
+#   encoded in R1 was narrower and fixable: the canary's allow-list was keyed
+#   `File.swift|expression`, so one entry (`AdDetectionService.swift|chunks`)
+#   licensed the collapse anywhere in a 13,331-line file. R2 re-keyed it to
+#   `File.swift|declaration|expression` and the mutant dies. The dead-code
+#   question is still open and still filed as **playhead-tqqu** — encoding CN05
+#   pins the call site, it does not decide whether the method should exist.
 
 # One-line description per mutation, for the report.
 describe_mutation() {
@@ -5065,6 +5116,8 @@ describe_mutation() {
     CN03) echo "iu0t: the drain replays the RAW rows, so overlapped audio is scanned twice and the version drifts from runBackfill's" ;;
     CN04) echo "iu0t VACUITY CONTROL: the replay set is empty, so the drain never runs at all" ;;
     CN06) echo "iu0t R1: the FOURTH collapse — pushEvidenceCatalog builds the banner evidence catalog from the final-only slice again" ;;
+    CN05) echo "iu0t R2: the THIRD collapse restored at runPhase5ProjectorPhase — killable only once the allow-list is keyed per DECLARATION, not per file" ;;
+    CN07) echo "iu0t R2: the FIFTH collapse — the episode-summary invalidation key read back out of the final-only persisted transcriptVersion column" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11018,6 +11071,37 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # CN05 — the THIRD instance, restored exactly as it stood before playhead-iu0t
+  # in `runPhase5ProjectorPhase`, ternary and all. The victim is the rule canary,
+  # not a behavioural rail: nothing in production calls this method. It is
+  # encodable at all only because the allow-list is keyed per DECLARATION —
+  # under the file-scoped key this mutant survived. See the batch-444 note.
+  CN05)
+    snippet OLD <<'EOF'
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: chunks.filter { $0.pass == "final" }.isEmpty ? chunks : chunks.filter { $0.pass == "final" },
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN07 — the FIFTH instance, restored exactly as it stood before
+  # playhead-iu0t R2: the episode-summary invalidation key read out of the
+  # persisted `transcript_chunks.transcriptVersion` column, which is populated
+  # `WHERE pass != 'fast'` and therefore holds a final-only version.
+  CN07)
+    snippet OLD <<'EOF'
+        let transcriptVersion = SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)
+EOF
+    snippet NEW <<'EOF'
+        let transcriptVersion = chunks
+            .compactMap(\.transcriptVersion)
+            .last
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # SC15 — the selector drops the transcript requirement.
   SC15)
     snippet OLD <<'EOF'
@@ -11182,6 +11266,7 @@ rec_file()   {
     ACT)   printf '%s' "$ACT" ;;
     ADSVC) printf '%s' "$ADSVC" ;;
     ACOORD) printf '%s' "$ACOORD" ;;
+    ESUMBF) printf '%s' "$ESUMBF" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;

@@ -11,7 +11,7 @@
 // derives.
 //
 // WHY THIS FILE EXISTS RATHER THAN A PARAGRAPH. The rule has now been broken
-// four separate times by the pre-hc7e collapse
+// five separate times by the pre-hc7e collapse
 // `filter { pass == "final" }.isEmpty ? chunks : filtered`, and every previous
 // attempt to police it was a PROSE SURVEY of call sites, which failed:
 //
@@ -27,6 +27,16 @@
 //     collapsed catalog covered 7,295.6 s of 29,817.2 s of canonical transcript
 //     coverage (24.5 %; worst 1.5 %, on 53FC53E3).
 //
+//   * iu0t's R2 review found the FIFTH, and it was not a call site at all:
+//     `EpisodeSummaryBackfillCoordinator.hydrate` read the PERSISTED
+//     `transcript_chunks.transcriptVersion` column as an episode summary's
+//     invalidation key. That column's only writer selects `WHERE pass !=
+//     'fast'` — the collapse spelled as a negation, in SQL — so it holds a
+//     final-only version and nothing else. Measured on the 2026-08-03 pull:
+//     all 29,247 `fast` rows NULL, all 8,251 `final` rows stamped, and on
+//     53FC53E3 the stamp is `55afd3e8bb41833c004ee7d4b1be7589`, this bead's
+//     own field-proof hash.
+//
 // A survey of call sites decays the instant somebody adds a call site, and
 // nothing tells you when it did. This canary reads the source instead: it
 // enumerates every `.swift` file under `Playhead/`, finds every call to the two
@@ -34,8 +44,17 @@
 // unless that expression canonicalizes inline or appears on the allow-list
 // below with a written reason. Adding an uncanonicalized caller is a red test.
 //
+// THREE tests, because there are three ways to get a `transcriptVersion` and a
+// call-site walk sees only one of them:
+//   1. `testEveryTranscriptVersionCallSiteCanonicalizes` — the ARGUMENT at each
+//      call of the two computing functions.
+//   2. `testThePreHc7eFinalOnlyCollapseAppearsNowhereInProduction` — the
+//      collapse SHAPE, banned by name, one step earlier than (1).
+//   3. `testNoProductionConsumerReadsThePersistedChunkTranscriptVersion` — the
+//      persisted COLUMN, which (1) cannot see because reading it is not a call.
+//
 // It is deliberately NARROW. It does not check that the whole program is
-// correct about transcripts; it checks exactly the one predicate the four
+// correct about transcripts; it checks exactly the one predicate the five
 // defects violated. Two escape hatches are honest and named: a parameter that
 // its callers canonicalize, and a consumer that mints nothing.
 //
@@ -72,30 +91,52 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
     /// which of the two it is, canonicalize instead — it is one call, it is
     /// idempotent, and single-pass input passes through byte-identically.
     ///
-    /// Keys are `"<FileName>.swift|<argument expression>"`, NOT the expression
-    /// alone. That matters: `chunks` is the most ordinary parameter name in the
-    /// codebase, so an expression-only key would silently pre-approve every
-    /// future `atomize(chunks: chunks)` in a file nobody has looked at — which
-    /// is the same "approve by category, discover the instance later" mistake
-    /// the prose survey made. Scoping to the file means a new call site is
-    /// flagged even when it is spelled exactly like an allowed one.
+    /// Keys are `"<FileName>.swift|<enclosing declaration>|<argument
+    /// expression>"`, NOT the expression alone and NOT file-plus-expression.
+    ///
+    /// **playhead-iu0t R2 narrowed this from file scope to declaration scope,
+    /// and the reason is that file scope was demonstrably the very hole this
+    /// comment warned about.** The warning was right — `chunks` is the most
+    /// ordinary parameter name in the codebase, so an expression-only key
+    /// pre-approves every future `atomize(chunks: chunks)` anywhere — but
+    /// FILE scope did not fix it for the only file that matters. Measured:
+    /// `AdDetectionService.swift` is 13,300 lines and hosted two of the four
+    /// collapse instances, and the key `AdDetectionService.swift|chunks`
+    /// approved the expression `chunks` in every one of its declarations. A
+    /// brand-new uncanonicalized `atomize(chunks: chunks)` added anywhere in
+    /// that file passed silently — verified by restoring exactly that at
+    /// `runPhase5ProjectorPhase` (mutant CN05), which the file-scoped canary
+    /// did not see and the declaration-scoped one kills.
+    ///
+    /// Declaration scope is what makes each entry's written reason true of the
+    /// thing it is written about: "a parameter; audited at the CALLERS" is a
+    /// claim about ONE function, and it should license exactly that function.
     private static let allowedUncanonicalizedArguments: [String: String] = [
-        // (1) `runShadowFMPhase(chunks:)` and `recordSemanticScanClaim(chunks:)`
-        // — both parameters, both reached only from `runBackfill` (which passes
-        // `canonicalChunks`) and `retryShadowFMPhaseForSession` (which passes
+        // (1) `runShadowFMPhase(chunks:)` — a parameter, reached only from
+        // `runBackfill` (which passes `canonicalChunks`) and
+        // `retryShadowFMPhaseForSession` (which passes
         // `canonicalize(chunks).chunks` since playhead-iu0t). This is the frame
         // the shipped defect lived one level above.
-        "AdDetectionService.swift|chunks": """
-            a parameter; audited at the CALLERS. `runShadowFMPhase` and \
-            `recordSemanticScanClaim` are reached only from `runBackfill` \
-            (canonicalChunks) and `retryShadowFMPhaseForSession` \
-            (canonicalize(chunks).chunks).
+        "AdDetectionService.swift|runShadowFMPhase|chunks": """
+            a parameter; audited at the CALLERS. `runShadowFMPhase` is reached \
+            only from `runBackfill` (canonicalChunks) and \
+            `retryShadowFMPhaseForSession` (canonicalize(chunks).chunks).
+            """,
+
+        // (1) `recordSemanticScanClaim(chunks:)` — the same parameter one frame
+        // further in. Its own doc is explicit that the claim must name the job
+        // ITS caller would have minted, which is why it takes the array rather
+        // than re-reading the store.
+        "AdDetectionService.swift|recordSemanticScanClaim|chunks": """
+            a parameter; audited at the CALLERS. Every call site is inside \
+            `runShadowFMPhase`, which is itself allow-listed on the same \
+            grounds and whose two callers both canonicalize.
             """,
 
         // (1) `RegionShadowPhase.run(_:)` — a parameter on a value type. Its
         // sole production call site is `AdDetectionService.runBackfill`, which
         // builds `RegionShadowPhase.Input(chunks: canonicalChunks, …)`.
-        "RegionShadowPhase.swift|input.chunks": """
+        "RegionShadowPhase.swift|run|input.chunks": """
             a parameter; `RegionShadowPhase.run`'s only production caller is \
             `AdDetectionService.runBackfill`, which passes `canonicalChunks`.
             """,
@@ -104,7 +145,7 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
         // catalog is rendered into the export and discarded; no row, no job id,
         // no persisted `transcriptVersion`. It also stamps a deliberately
         // distinct `normalizationHash` of "debug-export".
-        "DebugEpisodeExportService.swift|chunks": """
+        "DebugEpisodeExportService.swift|formatExport|chunks": """
             mints nothing — the catalog is rendered into a text export and \
             thrown away. No backfill_jobs row, no semantic_scan_results row, no \
             persisted transcriptVersion, so a drifted version cannot orphan \
@@ -139,13 +180,21 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             .sorted { $0.path < $1.path }
     }
 
-    /// The `chunks:` argument expression at each guarded call site in `source`,
-    /// paired with the call it belongs to. Comments are stripped first so a
+    /// The `chunks:` argument expression at each guarded call site, paired with
+    /// the call it belongs to and the index the call starts at.
+    ///
+    /// Takes the ALREADY comment-stripped source — stripping is what stops a
     /// call written inside a comment (this file's own prose, the rule's
-    /// explanatory blocks) is never mistaken for a real one.
-    private func guardedArguments(in rawSource: String) -> [(call: String, argument: String)] {
-        let source = SwiftSourceInspector.strippingComments(rawSource)
-        var found: [(String, String)] = []
+    /// explanatory blocks) being mistaken for a real one, and taking it as a
+    /// parameter rather than re-stripping internally means the returned
+    /// `site` index belongs to the same string instance the caller then
+    /// resolves scopes in. Two separately-produced but equal Strings would
+    /// compare equal and index compatibly today; relying on that is a
+    /// correctness footgun this signature removes.
+    private func guardedArguments(
+        inStripped source: String
+    ) -> [(call: String, argument: String, site: String.Index)] {
+        var found: [(String, String, String.Index)] = []
         for call in Self.guardedCalls {
             var searchStart = source.startIndex
             while let callRange = source.range(of: call, range: searchStart..<source.endIndex) {
@@ -173,15 +222,99 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
                     expression.append(character)
                     index = source.index(after: index)
                 }
-                found.append((call, expression.trimmingCharacters(in: .whitespacesAndNewlines)))
+                found.append((
+                    call,
+                    expression.trimmingCharacters(in: .whitespacesAndNewlines),
+                    callRange.lowerBound
+                ))
             }
         }
         return found
     }
 
+    // MARK: - Declaration scoping
+
+    /// The name and body of the `func`/`init` whose body contains `site`.
+    ///
+    /// This is what turns a file-wide question ("is there a canonicalizing
+    /// `let chunks =` SOMEWHERE in these 13,000 lines?") into the question the
+    /// rule actually means ("is the value handed to THIS call canonicalized?").
+    /// Both of the resolver's demonstrated escapes were file-wide lookups:
+    ///
+    ///   * a `let x = canonicalize(…)` in one function silently vouched for an
+    ///     unrelated raw parameter also called `x` in another, and
+    ///   * an allow-list entry written about one function licensed the same
+    ///     expression in every other function in the file.
+    ///
+    /// Nested and local functions are why this walks candidates in reverse
+    /// rather than trusting the nearest preceding `func`: `runShadowFMPhase`
+    /// declares a local `func wrap(…)` ABOVE its `atomize` call, so the nearest
+    /// preceding declaration is `wrap`, whose body does not contain the call at
+    /// all. The containment check rejects it and the walk continues outward,
+    /// which also gives the correct answer — the innermost ENCLOSING
+    /// declaration — for a call genuinely inside a nested function.
+    ///
+    /// Returns nil for a call at file/type scope (a property initialiser, say),
+    /// which the caller treats as "no local scope to resolve in" — i.e. the
+    /// argument must canonicalize inline or be allow-listed. Failing closed is
+    /// the right direction for a canary.
+    private func enclosingDeclaration(
+        containing site: String.Index,
+        in source: String
+    ) -> (name: String, body: String)? {
+        // Every declaration start before the call site, in source order.
+        //
+        // The preceding character must be whitespace (or nothing), which is
+        // what separates a DECLARATION from a call: `Foo.init(`, `self.init(`
+        // and `.init(` all contain "init(" and none of them opens a body. Left
+        // unguarded, a `.init(` a few lines above a guarded call would name the
+        // next `{` block — an `if`, a closure — as the enclosing declaration
+        // and report a correct call site as a violation under the key
+        // `File.swift|init|…`. Same guard for `func `: it stops `myfunc ` and
+        // any identifier ending in "func".
+        var starts: [(index: String.Index, keyword: String)] = []
+        for keyword in ["func ", "init("] {
+            var searchStart = source.startIndex
+            while let range = source.range(of: keyword, range: searchStart..<site) {
+                searchStart = range.upperBound
+                let isDeclarationPosition = range.lowerBound == source.startIndex
+                    || source[source.index(before: range.lowerBound)].isWhitespace
+                if isDeclarationPosition {
+                    starts.append((range.lowerBound, keyword))
+                }
+            }
+        }
+        starts.sort { $0.index < $1.index }
+
+        for start in starts.reversed() {
+            guard let brace = SwiftSourceInspector.findOpenBrace(in: source, after: start.index)
+            else { continue }
+            let body = SwiftSourceInspector.bracedBody(in: source, startingAt: brace)
+            guard !body.isEmpty else { continue }
+            // `bracedBody` returns the text between the braces; the call is
+            // inside this declaration iff it lies within that span.
+            let bodyStart = source.index(after: brace)
+            guard let bodyEnd = source.index(
+                bodyStart, offsetBy: body.count, limitedBy: source.endIndex
+            ) else { continue }
+            guard site >= bodyStart, site < bodyEnd else { continue }
+
+            let nameStart = source.index(start.index, offsetBy: start.keyword == "func " ? 5 : 0)
+            let name = start.keyword == "func "
+                ? String(source[nameStart...].prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+                : "init"
+            return (name.isEmpty ? "init" : name, body)
+        }
+        return nil
+    }
+
     // MARK: - Local-binding resolution
 
-    /// The text immediately following `let <name> =` in `source`, or nil.
+    /// The text immediately following `let <name> =` in `scope`, or nil.
+    ///
+    /// `scope` is the enclosing declaration's body, never the whole file —
+    /// see ``enclosingDeclaration(containing:in:)`` for why that distinction
+    /// is the difference between enforcing the rule and appearing to.
     ///
     /// A 300-character window rather than a statement parse: the question is
     /// only "does this binding come out of `canonicalize`", and the answer is
@@ -212,6 +345,13 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
     /// unreadable at the call site, which is the property this rule is really
     /// about, and the honest fix for a third hop is to canonicalize inline or
     /// to allow-list the site with a reason.
+    ///
+    /// Measured escapes, and which direction each fails in (playhead-iu0t R2):
+    ///   * three hops — reported as a VIOLATION. Fails closed; correct.
+    ///   * `var` reassigned after a canonicalizing initialiser — reported as a
+    ///     VIOLATION, because only `let` bindings resolve. Fails closed.
+    ///   * a same-named binding in a DIFFERENT function — used to pass. That is
+    ///     what `scope` being the enclosing body now prevents.
     private func isCanonicalized(_ argument: String, in source: String) -> Bool {
         if argument.contains("canonicalize(") { return true }
         guard let first = definition(of: argument, in: source) else { return false }
@@ -237,13 +377,21 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             let rawSource = try String(contentsOf: file, encoding: .utf8)
             guard Self.guardedCalls.contains(where: { rawSource.contains($0) }) else { continue }
             let source = SwiftSourceInspector.strippingComments(rawSource)
-            for (call, argument) in guardedArguments(in: rawSource) {
+            for (call, argument, site) in guardedArguments(inStripped: source) {
                 audited += 1
-                if isCanonicalized(argument, in: source) { continue }
-                let key = "\(file.lastPathComponent)|\(argument)"
+                // The declaration the call sits in is BOTH the scope a local
+                // binding may be resolved in and the scope an allow-list entry
+                // licenses. A call with no enclosing declaration resolves
+                // nothing and is licensed by nothing — it must canonicalize
+                // inline.
+                let scope = enclosingDeclaration(containing: site, in: source)
+                if let scope, isCanonicalized(argument, in: scope.body) { continue }
+                if argument.contains("canonicalize(") { continue }
+                let key = "\(file.lastPathComponent)|\(scope?.name ?? "<file-scope>")|\(argument)"
                 if Self.allowedUncanonicalizedArguments[key] != nil { continue }
                 violations.append(
-                    "\(file.lastPathComponent): \(call)chunks: \(argument), …)"
+                    "\(file.lastPathComponent) in \(scope?.name ?? "<file-scope>"): " +
+                    "\(call)chunks: \(argument), …)  [allow-list key: \(key)]"
                 )
             }
         }
@@ -339,6 +487,73 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             `TranscriptChunkCanonicalizer.canonicalize(chunks).chunks`, which \
             uses final text in the intervals the final pass covered and keeps \
             fast text everywhere else.
+            """)
+    }
+
+    /// **The THIRD sink** (playhead-iu0t R2).
+    ///
+    /// The rule above walks call sites of `atomize` / `transcriptVersionHash`,
+    /// because those are the two functions that COMPUTE a `transcriptVersion`.
+    /// They are not the only two ways to obtain one. `transcript_chunks` has a
+    /// persisted `transcriptVersion` column, and reading it is a third route to
+    /// the same value — one that no call-site walk can see, because there is no
+    /// call.
+    ///
+    /// That column is a final-only collapse by construction. Its only writer is
+    /// `AnalysisStore.backfillLegacyTranscriptChunksPhase1IfNeeded`, whose
+    /// SELECT is `WHERE pass != 'fast'` — a final-pass filter spelled as a
+    /// negation, which is why neither the `TranscriptPassType` grep nor the
+    /// raw-`"final"` grep that found the first four instances could see it.
+    /// Measured on the 2026-08-03 device pull: 29,247 `fast` rows all NULL,
+    /// 8,251 `final` rows carrying exactly one value per asset, and on 53FC53E3
+    /// that value is `55afd3e8bb41833c004ee7d4b1be7589` — this bead's field
+    /// proof, the hash of the 32 final chunks alone.
+    ///
+    /// `EpisodeSummaryBackfillCoordinator.hydrate` was reading it as an
+    /// episode summary's invalidation key. That was the FIFTH instance.
+    ///
+    /// The ban is on the READ, not the column: the store must still hydrate and
+    /// persist the field, and `TranscriptEngineService` must still carry it
+    /// through when it rebuilds a row. Both are exempt by file, with reasons.
+    /// Everything else derives the version instead —
+    /// `SemanticScanClaim.transcriptVersion(forPersistedChunks:)` is one call.
+    func testNoProductionConsumerReadsThePersistedChunkTranscriptVersion() throws {
+        // Files that legitimately touch the column, and why.
+        let exempt: [String: String] = [
+            "AnalysisStore.swift": "defines the column: hydrates the row and binds it on insert",
+            "TranscriptEngineService.swift":
+                "field-preserving copy when an existing row is rebuilt — carries the value through, never reads its meaning",
+        ]
+
+        var violations: [String] = []
+        for file in try productionSwiftFiles() {
+            let name = file.lastPathComponent
+            if exempt[name] != nil { continue }
+            let source = SwiftSourceInspector.strippingComments(
+                try String(contentsOf: file, encoding: .utf8)
+            )
+            // The three spellings that reach the persisted field: the keypath
+            // form a `map`/`compactMap` uses, and member access off a receiver
+            // whose name ends in `chunk`/`Chunk` (case-insensitively covered by
+            // the two literals below, which is every receiver name in the tree).
+            for needle in [#"\.transcriptVersion"#, "chunk.transcriptVersion", "Chunk.transcriptVersion"]
+            where source.contains(needle) {
+                violations.append("\(name): \(needle)")
+            }
+        }
+
+        XCTAssertTrue(violations.isEmpty, """
+            \(violations.count) production site(s) read the PERSISTED \
+            `transcript_chunks.transcriptVersion`:
+
+            \(violations.joined(separator: "\n            "))
+
+            That column is written only by \
+            `AnalysisStore.backfillLegacyTranscriptChunksPhase1IfNeeded`, whose \
+            SELECT is `WHERE pass != 'fast'` — so it holds a FINAL-ONLY \
+            version, the pre-hc7e collapse in persisted form, and it is stale \
+            for any asset transcribed since. Derive instead: \
+            `SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)`.
             """)
     }
 }
