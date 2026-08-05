@@ -1313,15 +1313,83 @@ struct CapOutRetryTests {
         ) == .declined(.budgetSpent))
     }
 
+    /// The MIXED chain — an episode that reaches BOTH dead ends gets
+    /// ``AnalysisWorkScheduler/maxCapOutRetries`` passes IN TOTAL, not that many
+    /// per reason.
+    ///
+    /// **R1 review added this, because the claim was stated and not probed.**
+    /// `noProgressChainSharesTheBoundedBudget` drives ONE class end to end, so an
+    /// implementation keeping a separate ledger per terminal class passes it
+    /// unchanged — the double-count the docs promise to prevent is the one shape
+    /// that test cannot see. What makes the promise true is that both classes
+    /// derive their ordinal from the same `baseWorkKey` (the reconciler computes
+    /// it from `(fingerprint, analysisVersion, jobType)` and never from the
+    /// terminal), so the ledger answers "how many times has this EPISODE been
+    /// rescued". A per-reason ledger mints three rows here instead of two.
+    ///
+    /// The sequence is the realistic one rather than a contrivance: a retry
+    /// minted for an attempt-cap terminal runs, reaches its tier having moved no
+    /// coverage measure, and terminates through the
+    /// `coverageInsufficient.noProgress` arm — arriving at the second dead end by
+    /// way of the first.
+    @Test("an episode that reaches both dead ends still gets one budget, not two")
+    func bothDeadEndsShareOneCapOutBudget() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        // Road one: the y8f3 shape — `superseded`, attempt cap spent.
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: 90,
+            supersededAt: clock.value.timeIntervalSince1970 - 86_400
+        )
+        let reconciler = makeReconciler(store: store, downloads: downloads, clock: clock)
+
+        // The positive control for road one. Without it every count below is
+        // satisfied by an implementation that mints nothing at all.
+        var minted = try await reconciler.reconcile().capOutRetriesMinted
+        #expect(minted == 1, "the attempt-cap terminal mints ordinal 1")
+
+        // Road two, on the very row road one minted, once per ordinal — so the
+        // last iteration is the one that must be refused.
+        for ordinal in 1...AnalysisWorkScheduler.maxCapOutRetries {
+            let row = try #require(try await store.fetchJob(byWorkKey: Self.retryKey(ordinal)))
+            try await store.updateJobState(
+                jobId: row.jobId,
+                state: "complete",
+                nextEligibleAt: nil,
+                lastErrorCode: AnalysisWorkScheduler.noProgressTerminalErrorCode
+            )
+            clock.advance(by: AnalysisWorkScheduler.capOutRetryCooldownSeconds + 60)
+            minted += try await reconciler.reconcile().capOutRetriesMinted
+        }
+
+        #expect(minted == AnalysisWorkScheduler.maxCapOutRetries,
+                "one budget across both roads, not one each: got \(minted)")
+        #expect(try await allJobs(store).count == AnalysisWorkScheduler.maxCapOutRetries + 1)
+        let pastTheBudget = try await store.fetchJob(
+            byWorkKey: Self.retryKey(AnalysisWorkScheduler.maxCapOutRetries + 1)
+        )
+        #expect(pastTheBudget == nil, "no ordinal past the budget was ever minted")
+    }
+
     /// The discrimination matrix for the widened terminal class, in one table.
     ///
     /// **The whole risk of this bead is over-matching**, because the new class
     /// is a `complete` row and `complete` is also how every HEALTHY episode
     /// ends. So the boundary is asserted from both sides: the no-progress
-    /// terminal mints, and the four neighbours that must not are named
-    /// individually. `maxAttemptsReached:coverageInsufficient` is the sharpest —
-    /// playhead-gqx4's degraded terminal is ALSO `complete`, ALSO a
-    /// coverage-insufficient give-up, and is another bead's to remedy.
+    /// terminal mints, and the neighbours that must not are named individually.
+    ///
+    /// **R1 review corrected which neighbour is the sharp one.** This table
+    /// originally called `maxAttemptsReached:coverageInsufficient` — gqx4's
+    /// degraded terminal — the case that justifies matching the code EXACTLY
+    /// rather than by prefix. It is not: that string carries the
+    /// `maxAttemptsReached:` prefix, so a `hasPrefix("coverageInsufficient")`
+    /// implementation excludes it too and this row discriminates nothing about
+    /// the exact/prefix choice. (It still belongs here — it is a real `complete`
+    /// terminal that must stay out — just not for that reason.) The row that
+    /// does discriminate is a SIBLING of the give-up family, and it is the last
+    /// entry below; mutation rail DL09 is the prefix implementation it kills.
     @Test("only the no-progress terminal joins the rescuable class")
     func rescuableTerminalDiscrimination() {
         func job(state: String, lastErrorCode: String?) -> AnalysisJob {
@@ -1348,6 +1416,18 @@ struct CapOutRetryTests {
             ("superseded", nil as String?, "a genuine supersession stays retired"),
             ("queued", "coverageInsufficient:noProgress", "a live row is already dispatchable"),
             ("running", "coverageInsufficient:noProgress", "ditto, mid-flight"),
+            // THE exact-vs-prefix row. `coverageInsufficient:` is a give-up
+            // FAMILY; this predicate names one member of it, and the retry
+            // target, the shared budget and the productivity argument were all
+            // sized for that member. A prefix match would enrol every future
+            // sibling into a rescue nobody reasoned about — so a sibling that
+            // does not exist yet is exactly what has to be asserted, and it is
+            // the only row here a prefix implementation gets wrong.
+            (
+                "complete",
+                "coverageInsufficient:someFutureGiveUp",
+                "a sibling of the give-up family is not this bead's terminal"
+            ),
         ] {
             let neighbour = job(state: state, lastErrorCode: code)
             #expect(!AnalysisWorkScheduler.isRescuableTerminal(neighbour),

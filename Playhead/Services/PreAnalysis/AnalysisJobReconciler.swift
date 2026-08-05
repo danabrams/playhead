@@ -852,16 +852,50 @@ actor AnalysisJobReconciler {
     /// terminal, every one with a `coverageInsufficient:noProgress` tail, and no
     /// path back to a dispatchable row short of the 7-day GC.
     ///
-    /// **Why the retry is productive now and was not before.** A no-progress
-    /// terminal means a pass ran and moved none of the four coverage measures,
-    /// so re-requesting the same target used to be a guaranteed repeat: the run
-    /// re-read the covered prefix first and spent the whole 300 s stage cap
-    /// before reaching anything new. playhead-mptr (#335) inverted that ordering
-    /// (`FastTranscriptCoverageIndex.orderingUncoveredFirst`), which is what
-    /// makes "uncovered audio exists" — the condition
+    /// **Why the retry is more productive than it was — stated as the CONDITION
+    /// it actually is, because R1 review measured it and it does not hold
+    /// everywhere.** A no-progress terminal means a pass ran and moved none of
+    /// the four coverage measures, so re-requesting the same target used to be a
+    /// guaranteed repeat: the run re-read the covered prefix first and spent the
+    /// whole 300 s stage cap before reaching anything new. playhead-mptr (#335)
+    /// re-ordered that pass (`FastTranscriptCoverageIndex.orderingUncoveredFirst`)
+    /// so unread audio goes first.
+    ///
+    /// **But "unread" there means "no `pass = 'fast'` chunk overlaps it", not
+    /// "never transcribed".** `AnalysisStore.fetchFastTranscriptCoveredRanges`
+    /// selects `pass = 'fast'` alone, so a region a FINAL pass covers — whether
+    /// because the two passes ran over disjoint spans or because
+    /// `TranscriptChunkCanonicalizer` dropped the fast chunks a final chunk fully
+    /// contains — has no fast artifact to point at and sorts as UNREAD. The
+    /// partition is stable over playhead-proximity order, so that already-read
+    /// audio floats to the FRONT, ahead of the audio the retry was minted for.
+    /// This is the same fast-only-under-report playhead-9y9e fixed for the
+    /// ad-scan bound and did not fix for this index.
+    ///
+    /// Measured on the 2026-08-03 pull, at 30 s shards, over the three assets
+    /// this rescue admits — shards below the watermark that nonetheless sort
+    /// UNREAD, against the genuinely-new audio behind them:
+    ///
+    /// | asset | phantom-unread below watermark | new audio | premise |
+    /// |---|---|---|---|
+    /// | `44F076BB` | 0 of 54 shards (0 s) | 357 s | holds |
+    /// | `2C5C3699` | 20 of 30 shards (600 s) | 6,025 s | weakened |
+    /// | `48E903D7` | 41 of 67 shards (1,230 s) | 103 s | inverted, 12:1 |
+    ///
+    /// So the honest claim is: mptr made the retry productive on assets whose
+    /// fast artifacts survive, and left it re-reading a prefix on assets that
+    /// have had a final pass. The rescue is still strictly better than the status
+    /// quo — the alternative for all three is stranded until the 7-day GC — and
+    /// the cost of being wrong is bounded by ``AnalysisWorkScheduler/maxCapOutRetries``
+    /// passes, not an unbounded loop. Fixing the index to read the canonical
+    /// union of both passes is playhead-6r4z, not this bead: it changes what the
+    /// transcription stage decodes, which is a behaviour decision of its own.
+    ///
+    /// What this bead still owns unconditionally is the VEHICLE: "uncovered audio
+    /// exists" — the condition
     /// ``AnalysisWorkScheduler/outstandingTranscriptTarget(transcriptCoverageSec:tiers:episodeDurationSec:)``
-    /// already tests — sufficient. This bead is the vehicle for a mechanism that
-    /// landed without one.
+    /// already tests — is what gates the mint, and before this change no pass was
+    /// minted at all for these rows however productive it would have been.
     ///
     /// **The trap this opens.** A job that exhausts ``AnalysisWorkScheduler``'s
     /// five attempts is written `state = 'superseded'` with `nextEligibleAt =

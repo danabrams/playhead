@@ -2608,6 +2608,9 @@ T_DL_BUDGET="the no-progress chain shares the cap-out budget and terminates"
 T_DL_DISCRIM="only the no-progress terminal joins the rescuable class"
 T_DL_GUARDS="the no-progress terminal does not bypass the budget, cooldown or work floor"
 T_DL_CONST="the no-progress terminal arm writes the shared constant, not a literal"
+# R1 review. The MIXED chain — one budget across both dead ends, not one each.
+# The single-class budget test cannot see a per-reason ledger; this can.
+T_DL_MIXED="an episode that reaches both dead ends still gets one budget, not two"
 # y8f3's own tests, named here because DL05 must prove the widening is ADDITIVE
 # and DL02 must prove it did not swallow a neighbouring bead's terminal.
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
@@ -5186,10 +5189,13 @@ MUTATIONS=(
 
   # ---- playhead-dl9k (DL series) ----
   #
-  # BATCHING: one per batch, and not from caution. Six of the eight redden
+  # BATCHING: one per batch, and not from caution. Seven of the nine redden
   # `T_DL_DISCRIM`, which is the discrimination table and is by design the test
-  # every predicate edit reaches — so the contested-test floor IS eight. The two
+  # every predicate edit reaches — so the contested-test floor IS nine. The two
   # that do not (DL08, and DL06's wire-in) redden sets that overlap each other.
+  # Four of them (DL01/02/03/09) also patch the SAME source line, which is the
+  # second reason no two may share a batch: a batch cannot plant two edits at one
+  # site, and a batch that tried would mask its own control (playhead-7n7u).
 
   # DL01 — the no-progress terminal's STATE reverts to y8f3's `superseded`. This
   # is the bug as it shipped: the arm writes `complete`, so the whole stranded
@@ -5217,14 +5223,14 @@ MUTATIONS=(
   # DL04 — the union collapses to `isAttemptCapTerminal` alone: the predicate
   # exists, is named, is called, and does nothing. The "correct mechanism with
   # no vehicle" shape this bead was filed for, reproduced one layer down.
-  "DL04|524|SCHED|$T_DL_REACH;$T_DL_BUDGET;$T_DL_DISCRIM;$T_DL_GUARDS"
+  "DL04|524|SCHED|$T_DL_REACH;$T_DL_BUDGET;$T_DL_DISCRIM;$T_DL_GUARDS;$T_DL_MIXED"
 
   # DL05 — the union collapses the OTHER way, to `isNoProgressTerminal` alone.
   # The widening must be ADDITIVE, and only y8f3's own reach test can see that
   # it stopped being so. Without this entry a future simplification that reads
   # "the no-progress case is the one we care about" costs the attempt-cap rescue
   # silently.
-  "DL05|525|SCHED|$T_DL_DISCRIM;$T_Y8F3_REACH"
+  "DL05|525|SCHED|$T_DL_DISCRIM;$T_Y8F3_REACH;$T_DL_MIXED"
 
   # DL06 — the RECONCILER's cheap guard reverts to the narrow predicate while
   # the decision keeps the wide one. Both call sites had to move; this proves
@@ -5247,6 +5253,17 @@ MUTATIONS=(
   # quietly stranding again. Only the source canary can kill it, which is what
   # makes the canary worth its cost.
   "DL08|528|SCHED|$T_DL_CONST"
+
+  # DL09 — R1 review. The code match becomes a PREFIX over the give-up family
+  # (`coverageInsufficient`). This is the implementation the original comment
+  # claimed gqx4's degraded terminal ruled out, and it does not: that arm writes
+  # `maxAttemptsReached:coverageInsufficient`, which carries the other prefix, so
+  # before this rail every test in the series passed under the prefix and the
+  # exact match was an unpinned preference. What the prefix really costs is
+  # forward-looking — every FUTURE `coverageInsufficient:` sibling is enrolled
+  # into a rescue whose target, budget and productivity argument were sized for
+  # one member — so the killing row is a sibling that does not exist yet.
+  "DL09|529|SCHED|$T_DL_DISCRIM"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -12304,6 +12321,12 @@ EOF
     patch "$file" \
       "                                lastErrorCode: Self.noProgressTerminalErrorCode" \
       '                                lastErrorCode: "coverageInsufficient:noProgress"' ;;
+
+  # The give-up FAMILY is adopted wholesale instead of the one member.
+  DL09)
+    patch "$file" \
+      '        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode' \
+      '        job.state == "complete" && job.lastErrorCode?.hasPrefix("coverageInsufficient") == true' ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2

@@ -6344,12 +6344,30 @@ actor AnalysisWorkScheduler {
     /// Widening it in place would have made a named claim false wherever it is
     /// asked, which is this repo's recurring defect exactly.
     ///
-    /// **Exact match, not a prefix.** The neighbouring
+    /// **Exact match, not a prefix — and the reason first written here was
+    /// FALSE** (R1 review, playhead-dl9k). It read: a
+    /// `hasPrefix("coverageInsufficient")` would swallow the neighbouring
     /// `coverageInsufficient.maxAttempts` arm (playhead-gqx4's degraded
-    /// terminal) also terminates `state = 'complete'`, is also a
-    /// coverage-insufficient give-up, and is another bead's to remedy — a
-    /// `hasPrefix("coverageInsufficient")` here would swallow it. Pinned from
-    /// both sides by `rescuableTerminalDiscrimination`.
+    /// terminal), which is also `state = 'complete'` and is another bead's to
+    /// remedy. It would not. That arm is NAMED `coverageInsufficient.maxAttempts`
+    /// — the tag it passes to `commitOutcomeArm` — but the value it WRITES is
+    /// `"\(maxAttemptsReachedPrefix)coverageInsufficient"`, i.e.
+    /// `maxAttemptsReached:coverageInsufficient`, which carries the OTHER prefix
+    /// entirely and no prefix rule stated over `"coverageInsufficient"` can ever
+    /// match it. An arm's NAME was read as though it were the value that arm
+    /// produces — this repo's recurring defect, inside the sentence claiming to
+    /// avoid it. (`isAttemptCapTerminal` does not match that row either: it is
+    /// `complete`, not `superseded`. Nothing rescues gqx4's terminal today, which
+    /// is the intended scope and not an accident of this predicate's shape.)
+    ///
+    /// **The real reason, which is forward-looking.** `coverageInsufficient:` is
+    /// a give-up FAMILY and this predicate names ONE member of it — the arm that
+    /// completed having moved no coverage measure. Everything downstream (the
+    /// retry target, the shared budget, the "a retry is productive now" argument)
+    /// was reasoned about that member alone, so a prefix would silently enrol
+    /// every future sibling into a rescue nobody sized for it. Pinned from both
+    /// sides by `rescuableTerminalDiscrimination`, which asserts a sibling code
+    /// the prefix WOULD swallow, and by mutation rail DL09, which is that prefix.
     static func isNoProgressTerminal(_ job: AnalysisJob) -> Bool {
         job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode
     }
