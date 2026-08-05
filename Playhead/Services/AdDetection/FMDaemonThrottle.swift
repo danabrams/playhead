@@ -153,7 +153,20 @@ enum FMDaemonThrottle {
         case batchSibling = "rateLimited-batchSibling"
     }
 
-    /// How many CONSECUTIVE throttled jobs end the drain.
+    /// How many CONSECUTIVE daemon-refused jobs end the drain.
+    ///
+    /// **playhead-e75l broadened the population this number governs**, and the
+    /// argument below survives the broadening but not unchanged. It was written
+    /// for a throttle, where the daemon SAID something ("try again later"), and
+    /// half of what now reaches it is a `FMDaemonRefusal.metadataStall`, where a
+    /// tokenizer round trip outlived thirty seconds and the daemon said nothing
+    /// at all. What carries over is the part about the DEVICE rather than the
+    /// message: one refusal is an event on a daemon shared with the rest of the
+    /// OS, two back-to-back with nothing succeeding in between is a fact about
+    /// its current disposition, and stopping is the only useful response either
+    /// way. What does NOT carry over is the wording below about what the daemon
+    /// said — a wedged tokenizer says nothing, so "the daemon said try again
+    /// later" is now true of only one of the two conditions counted here.
     ///
     /// Consecutive, not lifetime, and for the same reason
     /// `consecutiveInferenceTimeoutAbortThreshold` is: one throttle is an
@@ -174,7 +187,15 @@ enum FMDaemonThrottle {
     ///
     /// Pure, so the rule is assertable without a fixture that has to be lucky
     /// enough to enqueue several FM-reaching jobs.
-    static func shouldStopDraining(consecutiveThrottles: Int) -> Bool {
-        consecutiveThrottles >= consecutiveDeferStopThreshold
+    ///
+    /// playhead-e75l R4: the label was `consecutiveThrottles:`, and after this
+    /// bead the value passed to it is `consecutiveDaemonRefusals` — throttles
+    /// AND metadata stalls. The runner's own counters were renamed at R1 for
+    /// exactly that reason; the shared rule they delegate to kept the narrow
+    /// name, so the delegation site read as though a refusal count were a
+    /// throttle count. A parameter label is not a durable token and nothing
+    /// greps it, so unlike the four `DeferCause` strings it is safe to correct.
+    static func shouldStopDraining(consecutiveDaemonRefusals: Int) -> Bool {
+        consecutiveDaemonRefusals >= consecutiveDeferStopThreshold
     }
 }

@@ -203,6 +203,69 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   R4 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batches 507-510 — DR11
+#   through DR14, one mutation each because DR11/DR12 both redden the wiring
+#   canary and DR13/DR14 both redden the budget canary.
+#
+#   THE LESSON, and it is one lesson wearing four spellings: EVERY source
+#   canary in this bead found its sites by literal substring over ONE LINE, and
+#   no round had tried respelling one ACROSS lines. R4 planted eight and SEVEN
+#   walked past — two hard-coded event names split by a `\` continuation or a
+#   `+` join, one that SWAPPED the two event properties and used no literal at
+#   all, and four ways to spell a third 30 s budget (`standard / 10`, a site
+#   split over two lines, `Type . run(`, and a budget in a local with the
+#   allowed name in a trailing comment). The single evasion that FAILED was
+#   killed by SwiftLint's `no_space_in_method_call`, not by any rail here.
+#
+#   Two shapes are worth carrying forward. DR11 is the sharpest: R2's rule was
+#   "both properties must be READ", which says nothing about WHICH SITE reads
+#   which, so swapping them satisfied every assertion. A rail that checks a
+#   name is present is not checking that the name is in the right place. And
+#   DR14 is why a count FLOOR is only half a vacuity guard: a site that
+#   DISAPPEARS is red, a site nobody can see is not, so adding an unreadable
+#   one is free. The fix in both cases was to stop reading lines — the finders
+#   now run over a collapsed / whitespace-free read of the file and judge the
+#   ARGUMENT rather than the line it sits on.
+#
+#   R3 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batch 506 — DR10 added and
+#   DR02 MOVED here out of batch 500. Batch 506 run WITH a green baseline, then
+#   500-505 re-run behind it with PLAYHEAD_MB_SKIP_BASELINE=1 on the same
+#   commit. FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 8 builds, ~17m. Batches
+#   1-499 were NOT re-run and carry the verdicts below.
+#
+#   TWO LESSONS, and the first is the same one DR08 taught wearing a different
+#   hat. R2 fixed the log-EVENT canary to derive its forbidden set from
+#   `FMDaemonRefusal.allCases` and left the TOKEN-FAMILY canary next to it as a
+#   hand-written list of two families — the two it had just looked at.
+#   `BackfillJobRunner` writes six. DR10 names the token into `underCoverage-`
+#   (playhead-41mu), which the old list passes by arithmetic. When you fix one
+#   list-shaped rail, the next one is usually in the same file.
+#
+#   The second is about BATCHES, not rails. DR02's expectation set grew to
+#   include `$T_DR_STANDARD` — a variable DEFINED at R1 and referenced by no
+#   mutation at all, so the runner-level "a 300 s timeout still fails and still
+#   spends a retry" control had a test and no mutant. DR02 could not stay in
+#   batch 500: DR01 reduces `classify` to the throttle-only ternary, under which
+#   that control stays GREEN, so the batch would have reported SURVIVED for a
+#   mutation DR02 kills on its own. Growing an expectation set can invalidate a
+#   batch that was sound when it was written.
+#
+#   R2 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batches 500-505, the DR
+#   series: DR01-DR07 added at R1, DR08-DR09 added here. Batch 505 run WITH a
+#   green baseline, batches 500-504 re-run behind it with
+#   PLAYHEAD_MB_SKIP_BASELINE=1 on the same commit. FINAL 9 KILLED / 0 SURVIVED
+#   / 0 ERROR, 7 builds, ~19m. Batches 1-499 were NOT re-run and carry the
+#   verdicts above.
+#
+#   DR08 IS WHY THIS RE-RUN EXISTS, and it is the reusable lesson. R1 added a
+#   SOURCE canary forbidding two log-event literals BY NAME — the two kvs8-era
+#   spellings it had just watched go wrong. DR08 plants a literal of the event
+#   THIS BEAD ADDED, one line up from DR06's anchor, and it SURVIVED: a
+#   blacklist covers the mistakes already made and is blind by construction to
+#   the next one. The canary now derives its forbidden set from
+#   `FMDaemonRefusal.allCases`. When a rail is a list of known-bad strings, the
+#   mutation worth planting is the string that is not on the list yet.
+#
 #   R2 REVIEW ADDITIONS 2026-08-04 (playhead-9y9e). Batch 420, RT14 — one entry,
 #   KILLED on exactly ONE victim, baseline green. Its EDIT is the pre-review
 #   implementation verbatim, the standard RT12 set: the broad mutant (deleting
@@ -1020,9 +1083,17 @@ MPTRIDX="Playhead/Services/TranscriptEngine/FastTranscriptCoverageIndex.swift"
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
 # readiness cache guard.
 THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
+# playhead-e75l: the daemon-refusal CLASS — kvs8's throttle plus the metadata
+# stall — and the per-kind tokens and log events that keep the two countable
+# apart in a device pull. Added for the DR series.
+FMREF="Playhead/Services/AdDetection/FMDaemonRefusal.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
+# playhead-e75l R4: the THIRD injected inference budget. R2's enumeration
+# derived the call sites and hand-picked one default to pin; this file carries
+# one of the two it did not.
+PERMC="Playhead/Services/AdDetection/PermissiveAdClassifier.swift"
 # playhead-usn1: the per-show skip-mode CONTROL. Two more files join the
 # djl0 trio because the field defect was not in the cause taxonomy at all — it
 # was a surface that sampled the mode ONCE, before `beginEpisode` had resolved
@@ -1188,7 +1259,7 @@ ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swi
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$THROT" "$FMREF" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
@@ -1223,6 +1294,16 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AnchorRefRediffSlotTests
   -only-testing:PlayheadTests/RediffByteFirstEndToEndTests
   -only-testing:PlayheadTests/RediffSlotOwnershipEndToEndTests
+  # playhead-e75l: the daemon-refusal rails (DR series). Three suites, because
+  # the claim spans three layers and no one of them can see the others: the
+  # enum's per-kind tokens and events (pure, instant); the runner's DISPOSITION
+  # for a metadata-deadline timeout (defer, retryCount preserved, named cause,
+  # one shared consecutive counter); and a SOURCE canary, because a log event
+  # name is not observable from a test on this harness and the drain-stop line
+  # shipped kvs8's literal for a condition that is not a throttle.
+  -only-testing:PlayheadTests/FMDaemonRefusalDefinitionTests
+  -only-testing:PlayheadTests/FMDaemonMetadataStallRunnerTests
+  -only-testing:PlayheadTests/FMDaemonRefusalSourceCanaryTests
   # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
@@ -2466,6 +2547,52 @@ T_IU0T_COLUMN="TranscriptCanonicalizationRuleCanaryTests/testNoProductionConsume
 # when the tree does.
 T_IU0T_SPLITLINE="TranscriptCanonicalizationRuleCanaryTests/testTheSiteFinderSeesACallSplitAcrossLines"
 T_IU0T_LAUNDER="TranscriptCanonicalizationRuleCanaryTests/testCanonicalizingAndThenCollapsingIsNotCanonicalized"
+
+# --- playhead-e75l: the daemon-refusal rails (DR series) -------------------
+T_DR_DEFERS="a metadata-deadline timeout in the PROLOGUE defers the job — it must not mark it failed"
+T_DR_COST="THE COST, DIRECTLY: three metadata stalls must not disqualify an episode forever"
+T_DR_CAUSE="a metadata stall records a NAMED cause, not the error's Swift description"
+# NOTE: no ';' in this display name. The MUTATIONS record separator is ';', so a
+# test whose name contains one can never be matched and every mutation naming it
+# reports ERROR while having killed it perfectly (observed here on DR02/DR03).
+T_DR_BUDGET="a metadata-deadline timeout is a refusal — a standard-deadline one is not"
+T_DR_STANDARD="DISCRIMINATOR: a STANDARD-deadline timeout through the same seam still fails and burns a retry"
+T_DR_ONECOUNTER="ONE counter: a throttle then a metadata stall stops the drain, and the sibling names the stall"
+T_DR_BATCH="a stalled batch leaves no job stranded in queued and none marked failed"
+# The wiring canary. XCTest, so `Suite/method`.
+T_DR_WIRING="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalLogEventsAreNotHardCodedInTheRunner"
+# R2 review: the durable token must not join a FOREIGN prefix family. XCTest —
+# it is a source canary because the foreign token is a bare literal in the
+# runner, so the rule has to be re-derived if playhead-8d5r's spelling moves.
+T_DR_FAMILY="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCausesDoNotJoinAForeignTokenFamily"
+# R4 review: the budget-enumeration canary. XCTest. It is the rail holding
+# `isMetadataStall`'s soundness — "no other budget reaching
+# `FMInferenceDeadline.run` is 30 s" — and until R4 it asked its question one
+# LINE at a time, which four different spellings walked past.
+T_DR_BUDGETSITES="FMDaemonRefusalSourceCanaryTests/testEveryProductionInferenceBudgetIsEnumerated"
+# R5 review. The per-kind LOG EVENT names, pinned as literals. `drainStoppedEvent`
+# was pinned for both kinds and `logEvent` for neither — only that the two DIFFER,
+# which a rename satisfies. This is the test that now holds kvs8's shipped
+# `fm.backfill.job_throttled`, which THIS bead moved out of a runner literal.
+T_DR_EVENTNAMES="R1-Fix1: the DRAIN-STOP event is named per kind too, and kvs8's spelling is preserved"
+# R5 review: the drain-stop line's sibling COUNT. XCTest — a log line's argument is
+# not observable from any runtime assertion on this harness.
+T_DR_SIBCOUNT="FMDaemonRefusalSourceCanaryTests/testDrainStopSiblingCountIsTheSweepNotTheDrainTotal"
+# R5 review: the swept-sibling token on the THROTTLE path. DR04 proved "not always
+# the throttle's"; until R5 nothing proved "not always the stall's".
+T_DR_THROTTLEBATCH="a THROTTLE-terminated drain sweeps its siblings with kvs8's rateLimited-batchSibling"
+# R6 review: the DURABLE-TOKEN field on each of the two log lines must name the
+# token the write beside it persisted. R4-Fix1 pinned the EVENT pair on these same
+# two lines after probe CN-A1 swapped them; the CAUSE pair was pinned by nothing,
+# and probes R6-PB1 / R6-PB2 confirmed both directions survive. XCTest — a log
+# line's argument is not observable from any runtime assertion on this harness.
+T_DR_CAUSEFIELDS="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCauseFieldsNameTheTokenTheyDescribe"
+# R7 review: both refusal log lines' `consecutive=` must name the counter the STOP
+# RULE reads. Fifth field on the drain-stop line to be examined and the first with
+# no rule at all — R1 corrected the event NAME, R2 `cause=` -> `siblingCause=`, R5
+# `deferredSiblings=`, R6 the cause pair's binding, and this one rode through all
+# four untouched on BOTH lines. XCTest, same reason as the two above.
+T_DR_CONSECFIELD="FMDaemonRefusalSourceCanaryTests/testConsecutiveFieldsNameTheCounterTheStopRuleReads"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4812,6 +4939,230 @@ MUTATIONS=(
   # below still let it through, which is how the fix's own reintroduction was
   # caught.
   "CN12|450|ACOORD|$T_IU0T_RULE"
+
+  # --- playhead-e75l: daemon-refusal disposition (DR series) ---------------
+  #
+  # Batches 500-506. The series is deliberately spread thin: four of the ten
+  # mutants make a metadata stall stop being a refusal, so any two of them in
+  # one batch would each be credited for the other's kill. Batch membership
+  # here means "these two cannot mask each other", never "these fit". R3 review
+  # moved DR02 out of batch 500 for exactly that reason once its expectation set
+  # grew — see batch 506.
+  #
+  # DR01 is THE mutant: the pre-e75l production line, verbatim. Everything else
+  # is one substitution inside the fix.
+
+  # Batch 500. DR01 reverts the classification to kvs8's throttle-only
+  # predicate — the shipped code this bead was filed against.
+  #
+  # R3 review MOVED DR02 out of this batch. Its expectation set grew to include
+  # the RUNNER-level control (`$T_DR_STANDARD`), and DR01 masks that control
+  # exactly: with `classify` reduced to the throttle-only ternary, a
+  # standard-deadline timeout still lands in the genuine-failure arm and the
+  # control stays GREEN, so DR02 would have reported SURVIVED for a mutation it
+  # kills on its own. Batch membership means "these two cannot mask each other".
+  "DR01|500|RUNNER|$T_DR_DEFERS;$T_DR_COST"
+
+  # Batch 501. DR03 is the reviewer's probe made concrete: the predicate reads
+  # the OTHER budget. It is in the same anchor as DR02, so it cannot share a
+  # batch with it regardless of masking.
+  "DR03|501|FMREF|$T_DR_BUDGET;$T_DR_DEFERS"
+
+  # Batch 502. DR04 collapses the SIBLING token back to kvs8's literal — a rate
+  # limit recorded for a batch the daemon stopped serving for another reason.
+  # DR06 restores the hard-coded drain-stop event name, and only the source
+  # canary can see it: no test on this harness reads a log line.
+  "DR04|502|RUNNER|$T_DR_ONECOUNTER;$T_DR_BATCH"
+  "DR06|502|RUNNER|$T_DR_WIRING"
+
+  # Batch 503. DR05 collapses the PER-JOB token. Alone because it also breaks
+  # the mixed-population test, which is DR04's and DR07's expectation.
+  "DR05|503|RUNNER|$T_DR_CAUSE"
+
+  # Batch 504. DR07 is the "two counters" defect the shared type exists to
+  # prevent: only throttles advance the consecutive counter, so a drain the
+  # daemon refused twice by two different means never stops.
+  "DR07|504|RUNNER|$T_DR_ONECOUNTER"
+
+  # Batch 505. R2 review. DR08 is DR06's twin one line up — the PER-JOB event
+  # name as a literal. R1's canary forbade two kvs8-era spellings by name, so
+  # it could not see a literal of the event this bead ADDED; DR08 SURVIVED on
+  # first plant and is what turned the canary from a blacklist into a rule
+  # derived from `FMDaemonRefusal.allCases`. DR09 is the durable TOKEN family:
+  # the pre-review spelling verbatim, which joined playhead-8d5r's
+  # `inferenceTimeout-` family — the prefix an operator greps to count "the
+  # model is not answering on this device".
+  "DR08|505|RUNNER|$T_DR_WIRING"
+  "DR09|505|FMREF|$T_DR_FAMILY"
+
+  # Batch 506. R3 review, and both entries are about a rail that was thinner
+  # than it read.
+  #
+  # DR02 moved here from batch 500 (see above) and now names the RUNNER-level
+  # control as well as the pure one. `$T_DR_STANDARD` was DEFINED at R1 and
+  # referenced by no mutation at all, so the claim "a 300 s inference timeout
+  # still fails and still spends a retry" had a test and no mutant — the
+  # difference between a rail and a sentence.
+  #
+  # DR10 is DR09's sibling in a family the canary could not see. R2's foreign
+  # set was the two spellings it had looked at; this runner writes six, so a
+  # refusal token named into `underCoverage-` (playhead-41mu's cause for a
+  # coverage-lane job that declines to certify itself) passed the rule. Neither
+  # can mask the other: DR02 cannot reach a source canary and DR10 cannot reach
+  # `classify`.
+  "DR02|506|FMREF|$T_DR_BUDGET;$T_DR_STANDARD"
+  "DR10|506|FMREF|$T_DR_FAMILY"
+
+  # Batches 507-510. R4 review, and all four are the SAME defect wearing four
+  # spellings: a source canary that finds its sites by literal substring over
+  # ONE line cannot see a name written across two. R4 planted eight respellings
+  # against these three canaries and SEVEN survived — the one that failed was
+  # killed by SwiftLint's `no_space_in_method_call`, not by a rail here.
+  #
+  # One mutation per batch, because DR11/DR12 both redden the wiring canary and
+  # DR13/DR14 both redden the budget canary, and a batch may contain no two
+  # mutations that can redden the same test.
+  #
+  # NOT ENCODED, and stated rather than hidden: probe CN-B1 (the foreign family
+  # written `"\(Self.underCoverageFamily)-…"` so the derivation loses it, plus a
+  # refusal token named into that family) needs edits in TWO files, and a
+  # mutation record names one. It was verified by hand at R4 — survives the R3
+  # canary, killed by the R4 one — and the constant-resolution fix it bought is
+  # exercised by nothing here.
+
+  # DR11 — the SWAP, and the sharpest of the four because it uses no literal at
+  # all. The per-job line emits `drainStoppedEvent`, the drain-stop line emits
+  # `logEvent`. R2's rail asked whether both properties are READ, which says
+  # nothing about which SITE reads which; both are read, so it passed. On a
+  # device every daemon-refused JOB would then be counted as a drain stop by a
+  # support-bundle grep, and every drain stop as a job. This bead's own defect
+  # class committed inside the check written for it.
+  "DR11|507|RUNNER|$T_DR_WIRING"
+
+  # DR12 — DR06 respelled. The drain-stop event is hard-coded again, but split
+  # across a `\` line continuation INSIDE the multiline string the runner
+  # already writes its log lines in, so no single line holds the name; a decoy
+  # `logger.debug` supplies the property read R2's half required.
+  "DR12|508|RUNNER|$T_DR_WIRING"
+
+  # DR13 — a third 30 s budget spelled as arithmetic on an allowed one.
+  # `FMInferenceDeadline.standard / 10` IS thirty seconds, and the pre-R4 check
+  # asked only whether the LINE mentions an allowed name. It does. Every
+  # genuine 300 s inference timeout would classify as a daemon refusal and
+  # retry unboundedly — the exact hazard R2-Fix5 built that canary for.
+  "DR13|509|PROBE|$T_DR_BUDGETSITES"
+
+  # DR14 — an ADDED call site written across two lines. Invisible to a per-line
+  # finder, and free: the site count is a FLOOR, so a site that disappears is
+  # red and a site nobody can see is not. The existing `standard` site is left
+  # in place precisely so the count still clears 9.
+  "DR14|510|PROBE|$T_DR_BUDGETSITES"
+
+  # DR15 — the third injected budget's DEFAULT. R2-Fix5 closed the "third 30 s
+  # budget" hole by enumerating every `FMInferenceDeadline.run` call site, then
+  # pinned ONE default by hand — and there are three. Four of the nine sites
+  # pass `inferenceDeadline`, and they are allowed exactly because that name
+  # resolves to `standard`; move a default and the call site still reads
+  # `inferenceDeadline` while every genuine inference timeout through that seam
+  # becomes a deferrable daemon refusal. R3-Fix1's shape one axis over: derived
+  # on the call sites, hand-written on the defaults.
+  "DR15|511|PERMC|$T_DR_BUDGETSITES"
+
+  # Batches 512-514. R5 review, and the difference from 507-511 is the point:
+  # every one of these is SHIPPED PRODUCTION BEHAVIOUR that no rail could see,
+  # not a respelling of a canary. All three were planted against production
+  # verbatim, in one build, and ALL THREE SURVIVED with every suite green.
+
+  # DR16 — the drain-stop line's `deferredSiblings=` reverts to `deferred.count`,
+  # which is the shipped code up to R5. `deferred` is the drain-WIDE accumulator
+  # (admission defers, rate-limited coverage-hole defers, 41mu's under-coverage
+  # terminals and the refused job's own defer all append before this line runs),
+  # so a field named for the sweep held the drain's total — 3 for one swept
+  # sibling on the mixed fixture. And reaching the line requires two refusals
+  # already appended, so it could never read ZERO: "the stop landed on the last
+  # job and cost the batch nothing" was unrepresentable.
+  "DR16|512|RUNNER|$T_DR_SIBCOUNT"
+
+  # DR17 — kvs8's PER-JOB event name renamed inside the enum this bead moved it
+  # into. Probe PB1, and it SURVIVED on first plant: the enum test asserted only
+  # that the two kinds' `logEvent`s differ, and the wiring canary derives its
+  # forbidden set from `allCases`, so it forbids whatever the new spelling is. A
+  # support-bundle grep for `fm.backfill.job_throttled` would read zero.
+  "DR17|513|FMREF|$T_DR_EVENTNAMES"
+
+  # DR18 — the sibling sweep hard-codes the STALL's token: DR04's exact mirror.
+  # Probe PB5, and it SURVIVED on first plant because both e75l batch tests are
+  # stall-terminated and kvs8's own batch test never reaches the sweep at all
+  # (empty EvidenceCatalog -> the harvester phase completes and resets the
+  # counter). A rate-limited drain would record a wedged tokenizer that never
+  # happened. Its own batch rather than sharing 512 although the expectations are
+  # disjoint today: DR16 changes what the sweep COUNTS and DR18 changes what it
+  # WRITES, and one batch would let either be credited for the other the moment
+  # an expectation set grows — the R3 lesson that moved DR02 out of batch 500.
+  "DR18|514|RUNNER|$T_DR_THROTTLEBATCH"
+
+  # ---------------------------------------------------------------------------
+  # R6 review — the DR19-DR21 group. Same discipline as R5's: planted against
+  # production verbatim, in one build, each PREDICTED TO SURVIVE so a green run
+  # attributes. All three SURVIVED, and each is a claim the shipped code makes
+  # correctly today with nothing holding it there.
+
+  # DR19 — the per-job refusal line's `cause=` field takes the SIBLING token.
+  # R4-Fix1 established that "both properties are read" says nothing about which
+  # SITE reads which, and pinned the EVENT pair on these two lines after probe
+  # CN-A1 swapped them. The CAUSE pair on the SAME two lines was pinned by
+  # nothing: the durable columns are asserted by the runner tests, the log fields
+  # by no one. On a device this reports, for a job the daemon refused on its own
+  # run, the token reserved for jobs that were never asked.
+  "DR19|515|RUNNER|$T_DR_CAUSEFIELDS"
+
+  # DR20 — the mirror, and its own batch for the R3 reason: DR19 alone kills the
+  # same test, so one batch could credit either for the other. The drain-stop
+  # line's `siblingCause=` takes the refused job's token, so the field naming
+  # what the SWEPT rows carry names a cause no swept row holds.
+  "DR20|516|RUNNER|$T_DR_CAUSEFIELDS"
+
+  # DR21 — `sweptSiblingCount` incremented ABOVE the `do` rather than after the
+  # defer returns. The declaration, increment and read all survive, so R5's
+  # "exactly three occurrences" rule is not what catches it; the ORDER is. The
+  # claim it breaks is R5's own — "incremented only on a SUCCESSFUL defer, so a
+  # sibling skipped by the terminal-row guard is correctly not counted" — and
+  # that guard is reachable in the field, because M-5 re-enqueues `.failed` rows
+  # under the retry budget. `deferredSiblings=` would then count siblings that
+  # were never deferred: the defect R5 removed from this field, returning by a
+  # different door.
+  "DR21|517|RUNNER|$T_DR_SIBCOUNT"
+
+  # ---------------------------------------------------------------------------
+  # R7 review — the DR22-DR24 group. Same discipline again: planted against
+  # production verbatim, in ONE build, each PREDICTED TO SURVIVE, alongside an
+  # observer control that was KILLED BY NAME so the survivals attribute. All
+  # three SURVIVED. Zero production defects this round.
+
+  # DR22 — the drain-stop EVENT bound to a fixed kind rather than to the refusal
+  # that stopped the drain. This is R1's PRODUCTION defect re-emitted with no
+  # literal anywhere: `fm.backfill.drain_stopped_by_throttle` for a drain stopped
+  # by two wedged tokenizer round trips, which is byte-identical to what R1
+  # removed. The hard-coding rail derives its forbidden set from `allCases`
+  # (R2-Fix2) and so only ever sees a literal; the ordering rail (R4-Fix1) sees a
+  # read that is still exactly once and still after `logEvent`. Fixing a value by
+  # forbidding its SPELLING is the shape R2-Fix2, R3-Fix1 and R4-Fix8 each had to
+  # replace — and a support-bundle grep counts the value.
+  "DR22|518|RUNNER|$T_DR_CAUSEFIELDS"
+
+  # DR23 — the drain-stop line's `consecutive=` takes `deferred.count`: the
+  # drain-WIDE accumulator R5 had just removed from `deferredSiblings=` ON THE
+  # SAME LINE, one field to the left.
+  "DR23|519|RUNNER|$T_DR_CONSECFIELD"
+
+  # DR24 — the per-job line's `consecutive=` takes `job.retryCount`, and this is
+  # the standing defect class at its sharpest: `retryCount` is the quantity THIS
+  # BEAD EXISTS TO HOLD CONSTANT, preserved across every daemon refusal, so the
+  # field reads the same number whether the daemon refused this job once or four
+  # times running. What would it read if the run of refusals had never happened?
+  # The same value, and normally zero. Its own batch rather than sharing 519 for
+  # the R3 reason: either alone kills the same test.
+  "DR24|520|RUNNER|$T_DR_CONSECFIELD"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5238,6 +5589,30 @@ describe_mutation() {
     CN10) echo "iu0t R5: an uncanonicalized atomize call SPLIT ACROSS LINES — the site finder was a literal substring, so one line break removed the call site from the walk" ;;
     CN11) echo "iu0t R5: CN06 spelled as a NEGATION (pass != fast) — the same collapse as instance #5, which the collapse-shape pattern required == to see" ;;
     CN12) echo "iu0t R5: LAUNDERING — the site canonicalizes and then filters to final anyway, which passed because the check tested for the TOKEN canonicalize( rather than the value" ;;
+    DR01) echo "e75l: the drain classifies only THROTTLES again — the pre-e75l line verbatim, so a wedged tokenizer is marked failed and spends a lifetime retry" ;;
+    DR02) echo "e75l: the discriminator keys on the TYPE, not the budget — every FMInferenceTimeoutError becomes a daemon refusal, including the 300s inference one" ;;
+    DR03) echo "e75l: the discriminator reads the OTHER budget — a standard-deadline timeout defers and a metadata stall fails" ;;
+    DR04) echo "e75l: swept siblings carry kvs8's rateLimited-batchSibling again — a rate limit recorded for a batch stopped by a wedged tokenizer" ;;
+    DR05) echo "e75l: the per-job cause is kvs8's rateLimited-prologue again — the stall answers to the prefix an operator counts rate limits with" ;;
+    DR06) echo "e75l: the drain-stop log EVENT is the hard-coded ..._by_throttle again — the name fires for a condition that is not a throttle" ;;
+    DR07) echo "e75l: only throttles advance the consecutive counter — two counters that can disagree about whether the daemon is serving us" ;;
+    DR08) echo "e75l R2: the PER-JOB log event is a hard-coded literal — R1's canary named two kvs8-era spellings, so it could not see a literal of the event this bead added" ;;
+    DR09) echo "e75l R2: the durable token joins playhead-8d5r's inferenceTimeout- family — the prefix an operator greps to count a model that is not answering" ;;
+    DR10) echo "e75l R3: the durable token joins playhead-41mu's underCoverage- family — one of the four families R2's hand-written foreign list forgot" ;;
+    DR11) echo "e75l R4: the two log-event properties are SWAPPED — no literal anywhere, both still read, and every refused JOB is counted as a drain stop" ;;
+    DR12) echo "e75l R4: the drain-stop event is hard-coded again but SPLIT across a backslash continuation, so no one line holds the name" ;;
+    DR13) echo "e75l R4: a third 30s budget as FMInferenceDeadline.standard / 10 — the line MENTIONS an allowed budget, which is all the old check asked" ;;
+    DR14) echo "e75l R4: an ADDED 30s call site spelled across two lines — invisible to a per-line finder, and free because the site count is a floor" ;;
+    DR15) echo "e75l R4: the third injected budget DEFAULTS to the metadata bound — R2 enumerated the call sites and pinned one of three defaults by hand" ;;
+    DR16) echo "e75l R5: deferredSiblings= reverts to deferred.count — the drain-WIDE total under a name that says siblings, and it can never read zero" ;;
+    DR17) echo "e75l R5: kvs8's per-job event name is renamed inside the enum — the support-bundle grep that counts throttles reads zero" ;;
+    DR18) echo "e75l R5: the sibling sweep hard-codes the STALL's token — a rate-limited drain records a wedged tokenizer that never happened" ;;
+    DR19) echo "e75l R6: the per-job refusal line's cause= field takes the SIBLING token — a job refused on its own run reports the cause reserved for jobs never asked" ;;
+    DR20) echo "e75l R6: the drain-stop line's siblingCause= field takes the refused job's token — the field naming what the swept rows carry names a cause no swept row holds" ;;
+    DR21) echo "e75l R6: sweptSiblingCount is incremented ABOVE the defer — a sibling rejected by the terminal-row guard is counted as swept and deferredSiblings= over-reports" ;;
+    DR22) echo "e75l R7: the drain-stop EVENT is bound to a fixed kind, so a drain stopped by metadata stalls emits kvs8's throttle event — R1's defect with no literal for the hard-coding rail to see" ;;
+    DR23) echo "e75l R7: the drain-stop line's consecutive= reports the drain-wide deferred.count instead of the run of back-to-back refusals" ;;
+    DR24) echo "e75l R7: the per-job line's consecutive= reports job.retryCount — the quantity this bead PRESERVES, so the field can never move" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11455,6 +11830,347 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-e75l: daemon-refusal disposition (DR series) ----
+
+  # DR01 — THE mutant: the shipped pre-e75l line, verbatim. Only a throttle is
+  # a daemon condition, so a tokenizer round trip that outlived the 30 s
+  # metadata bound falls to the genuine-failure disposition and spends one of
+  # three LIFETIME retries. Three of those and the episode is never scanned.
+  DR01)
+    snippet OLD <<'EOF'
+                if let refusal = FMDaemonRefusal.classify(error) {
+EOF
+    snippet NEW <<'EOF'
+                if let refusal: FMDaemonRefusal = FMDaemonThrottle.isThrottle(error) ? .throttle : nil {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR02 — the discriminator keys on the TYPE rather than on which BUDGET
+  # elapsed. The 300 s inference timeout is the same Swift type, so it becomes
+  # a daemon refusal too: an unbounded retry at 300 s per window per drain, and
+  # evidence about the MODEL read as evidence about the daemon.
+  DR02)
+    snippet OLD <<'EOF'
+        return timeout.deadline == FMInferenceDeadline.metadata
+EOF
+    snippet NEW <<'EOF'
+        return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR03 — the same predicate reading the OTHER budget. Two Durations, one
+  # comparison, and nothing in the type system distinguishes them: this is the
+  # substitution the whole `deadline ==` form is exposed to.
+  DR03)
+    snippet OLD <<'EOF'
+        return timeout.deadline == FMInferenceDeadline.metadata
+EOF
+    snippet NEW <<'EOF'
+        return timeout.deadline == FMInferenceDeadline.standard
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR04 — the swept siblings carry kvs8's literal again. Nothing about those
+  # jobs was rate-limited and nothing about the drain that stopped was either;
+  # an operator counting `rateLimited-` gets an event the daemon never
+  # described that way.
+  DR04)
+    snippet OLD <<'EOF'
+                        reason: refusalThatStoppedUs.batchSiblingCause
+EOF
+    snippet NEW <<'EOF'
+                        reason: FMDaemonThrottle.DeferCause.batchSibling.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR05 — the same substitution one level in: the REFUSED job's own cause.
+  DR05)
+    snippet OLD <<'EOF'
+                            reason: refusal.passPrologueCause
+EOF
+    snippet NEW <<'EOF'
+                            reason: FMDaemonThrottle.DeferCause.passPrologue.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR06 — the drain-stop log EVENT reverts to the hard-coded name. This is the
+  # defect R1 found: the durable tokens were split per kind but the event name
+  # was not, so a drain stopped by two wedged tokenizer round trips emitted
+  # `..._by_throttle` verbatim. No runtime test can see a log line, which is
+  # why the killer is a source canary.
+  DR06)
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                fm.backfill.drain_stopped_by_throttle \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR07 — two counters instead of one. Only throttles advance the consecutive
+  # count, so a daemon refusing one job by rate limit and the next by a wedged
+  # tokenizer never reaches the stop threshold and the drain keeps asking.
+  DR07)
+    snippet OLD <<'EOF'
+                    consecutiveDaemonRefusals += 1
+EOF
+    snippet NEW <<'EOF'
+                    if refusal == .throttle { consecutiveDaemonRefusals += 1 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR08 — R2 review. DR06's twin ONE LINE UP: the PER-JOB event as a literal.
+  # R1's canary forbade `fm.backfill.job_throttled` and
+  # `fm.backfill.drain_stopped_by` BY NAME, so a literal of the event this bead
+  # itself added was invisible to it — every throttle would log the stall's
+  # event name and the rate-limit count in a support bundle would read zero.
+  # This SURVIVED on first plant; the canary now derives its forbidden set from
+  # `FMDaemonRefusal.allCases`.
+  DR08)
+    snippet OLD <<'EOF'
+                        \(refusal.logEvent, privacy: .public) job=\(job.jobId, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                        fm.backfill.job_daemon_metadata_stalled job=\(job.jobId, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR09 — R2 review, and the pre-review spelling VERBATIM. The two new durable
+  # tokens were `inferenceTimeout-metadata` / `inferenceTimeout-batchSibling`,
+  # which put a wedged TOKENIZER round trip into the same greppable family as
+  # playhead-8d5r's `inferenceTimeout-noProgress` — a run of 300 s inference
+  # timeouts, whose documented operator reading is "the model is not answering
+  # on this device". That is the exact substitution `FMDaemonRefusal`'s own doc
+  # forbids for `rateLimited-`, one family over.
+  DR09)
+    snippet OLD <<'EOF'
+            "metadataStall-refused"
+EOF
+    snippet NEW <<'EOF'
+            "inferenceTimeout-metadata"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR10 — R3 review, and the reason a blacklist is not a rail. R2's foreign set
+  # was `["inferenceTimeout-noProgress", "cancelled-during-"]`: the two families
+  # it had just looked at. `BackfillJobRunner` writes SIX, and this plants the
+  # token in one of the four it forgot — playhead-41mu's `underCoverage-`, the
+  # cause a coverage-lane job records when it declines to certify its own
+  # completion. An operator counting that family to find jobs that stopped
+  # converging would be counting wedged tokenizer round trips instead. Under
+  # R2's list this SURVIVES by arithmetic (`underCoverage-` is not one of the two
+  # named); the canary now derives the families from the runner's own source.
+  DR10)
+    snippet OLD <<'EOF'
+            "metadataStall-refused"
+EOF
+    snippet NEW <<'EOF'
+            "underCoverage-refused"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR11 — R4 review. THE SWAP, and it uses no literal at all. Two patches in
+  # one mutation because the defect is the PAIR: swapping only one side leaves
+  # a property unread, which R2's half already caught. Swapping both leaves
+  # every rail satisfied — both properties read, no forbidden name anywhere —
+  # while the per-job line reports a drain stop and the drain-stop line reports
+  # a job.
+  DR11)
+    snippet OLD <<'EOF'
+                        \(refusal.logEvent, privacy: .public) job=\(job.jobId, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                        \(refusal.drainStoppedEvent, privacy: .public) job=\(job.jobId, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                \(refusalThatStoppedUs.logEvent, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR12 — R4 review. DR06 respelled: the drain-stop event hard-coded again,
+  # split by a `\` continuation inside the multiline string, with a decoy
+  # `logger.debug` supplying the property read.
+  DR12)
+    snippet OLD <<'EOF'
+            logger.error(
+                """
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+            logger.debug("drain stop kind=\(refusalThatStoppedUs.drainStoppedEvent, privacy: .public)")
+            logger.error(
+                """
+                fm.backfill.drain_stopped_\
+                by_throttle \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR13 — R4 review. The readiness probe's budget becomes thirty seconds,
+  # written as arithmetic on an allowed one so the line still MENTIONS
+  # `FMInferenceDeadline.standard`.
+  DR13)
+    snippet OLD <<'EOF'
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard) {
+EOF
+    snippet NEW <<'EOF'
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard / 10) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR14 — R4 review. An ADDED 30 s call site spelled across two lines. The
+  # existing `standard` site stays, so the site count still clears its floor
+  # and only judging the ARGUMENT can see this.
+  DR14)
+    snippet OLD <<'EOF'
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard) {
+EOF
+    snippet NEW <<'EOF'
+            try await FMInferenceDeadline
+                .run(.seconds(30)) {
+                logger.debug("Foundation Models readiness probe warm-up")
+            }
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR15 — R4 review. The THIRD injected budget's default moves to the metadata
+  # bound. Every `FMInferenceDeadline.run(inferenceDeadline)` site stays
+  # spelled exactly as the enumeration allows, and every genuine inference
+  # timeout through `PermissiveAdClassifier` becomes a daemon refusal.
+  DR15)
+    snippet OLD <<'EOF'
+        inferenceDeadline: Duration = FMInferenceDeadline.standard
+EOF
+    snippet NEW <<'EOF'
+        inferenceDeadline: Duration = FMInferenceDeadline.metadata
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR16 — R5 review. The shipped pre-R5 line, verbatim. The declaration and the
+  # increment stay, so the canary's "exactly three occurrences" rule is not what
+  # catches this: the ARGUMENT is.
+  DR16)
+    snippet OLD <<'EOF'
+                deferredSiblings=\(sweptSiblingCount, privacy: .public)
+EOF
+    snippet NEW <<'EOF'
+                deferredSiblings=\(deferred.count, privacy: .public)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR17 — R5 review. Probe PB1 made a record: kvs8's per-job event name renamed
+  # for symmetry with the stall's. SURVIVED on first plant.
+  DR17)
+    snippet OLD <<'EOF'
+            "fm.backfill.job_throttled"
+EOF
+    snippet NEW <<'EOF'
+            "fm.backfill.job_daemon_throttled"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR18 — R5 review. Probe PB5 made a record: DR04's mirror, hard-coding the
+  # STALL's token at the sweep. SURVIVED on first plant.
+  DR18)
+    snippet OLD <<'EOF'
+                        reason: refusalThatStoppedUs.batchSiblingCause
+EOF
+    snippet NEW <<'EOF'
+                        reason: FMDaemonRefusal.metadataStall.batchSiblingCause
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR19 — R6 review. Probe R6-PB1 made a record: the per-job refusal line's
+  # `cause=` field reads the SIBLING token. No literal, no count change, both
+  # properties still read — DR11's shape one pair over. SURVIVED on first plant.
+  DR19)
+    snippet OLD <<'EOF'
+                        cause=\(refusal.passPrologueCause, privacy: .public)
+EOF
+    snippet NEW <<'EOF'
+                        cause=\(refusal.batchSiblingCause, privacy: .public)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR20 — R6 review. Probe R6-PB2 made a record: the mirror, on the drain-stop
+  # line. SURVIVED on first plant.
+  DR20)
+    snippet OLD <<'EOF'
+                siblingCause=\(refusalThatStoppedUs.batchSiblingCause, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                siblingCause=\(refusalThatStoppedUs.passPrologueCause, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR21 — R6 review. Probe R6-PB3 made a record: the sweep's counter
+  # incremented before the write it is counting. SURVIVED on first plant.
+  DR21)
+    snippet OLD <<'EOF'
+                do {
+                    try await store.markBackfillJobDeferred(
+                        jobId: candidate.jobId,
+                        reason: refusalThatStoppedUs.batchSiblingCause
+                    )
+                    deferred.append(candidate.jobId)
+                    sweptSiblingCount += 1
+EOF
+    snippet NEW <<'EOF'
+                sweptSiblingCount += 1
+                do {
+                    try await store.markBackfillJobDeferred(
+                        jobId: candidate.jobId,
+                        reason: refusalThatStoppedUs.batchSiblingCause
+                    )
+                    deferred.append(candidate.jobId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR22 — R7 review. Probe R7-PC3 made a record: the drain-stop EVENT bound to a
+  # fixed kind. R1's production defect re-emitted with no literal anywhere — the
+  # name on the wire is byte-identical to the one R1 removed. SURVIVED on first
+  # plant.
+  DR22)
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                \(FMDaemonRefusal.throttle.drainStoppedEvent, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR23 — R7 review. Probe R7-PC1 made a record: the drain-stop line's
+  # `consecutive=` takes the drain-wide accumulator R5 removed from
+  # `deferredSiblings=` one field to its right. SURVIVED on first plant.
+  DR23)
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+                consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+                consecutive=\(deferred.count, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR24 — R7 review. Probe R7-PC2 made a record: the per-job line's
+  # `consecutive=` takes `job.retryCount`, the quantity this bead exists to hold
+  # CONSTANT, so the field can never move. SURVIVED on first plant.
+  DR24)
+    snippet OLD <<'EOF'
+                        phase=\(job.phase.rawValue, privacy: .public) \
+                        consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                        phase=\(job.phase.rawValue, privacy: .public) \
+                        consecutive=\(job.retryCount, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -11489,9 +12205,11 @@ rec_file()   {
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
     THROT) printf '%s' "$THROT" ;;
+    FMREF) printf '%s' "$FMREF" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;
+    PERMC) printf '%s' "$PERMC" ;;
     RT)    printf '%s' "$RT" ;;
     MODEL) printf '%s' "$MODEL" ;;
     INGO)  printf '%s' "$INGO" ;;

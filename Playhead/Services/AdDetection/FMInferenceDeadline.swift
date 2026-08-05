@@ -164,8 +164,22 @@ enum FMInferenceDeadline {
     /// `runtime.tokenCount` call sites already wrap it in `try?` with a
     /// documented character-based fallback estimate. A bound that fires there
     /// costs planning PRECISION, not coverage. Where it does propagate
-    /// (`planPassA`), the outcome is a named `inference_timeout` row and a
-    /// terminal job — strictly better than a row that says `running` forever.
+    /// (`planPassA`), the outcome is a job that stops short with a named,
+    /// greppable cause — strictly better than a row that says `running`
+    /// forever.
+    ///
+    /// **playhead-e75l corrected what "stops short" means here.** This
+    /// paragraph used to say the outcome was "a named `inference_timeout` row
+    /// and a TERMINAL job", and it was the sentence licensing the shorter
+    /// value. Both halves were wrong in the field: the throw escapes before a
+    /// single window is screened, so there is no scan row at all, and marking
+    /// it terminal spent one of `AdmissionController.maxRetries` lifetime
+    /// attempts on a condition that is evidence about the DAEMON, not the job
+    /// — three of which disqualified an episode from ad scanning forever. It
+    /// is now a DEFER with cause `metadataStall-refused` and `retryCount`
+    /// preserved (`FMDaemonRefusal`). The licence for 30 s survives the
+    /// correction and is in fact stronger: a bound that costs a retry needs to
+    /// be generous, a bound that costs only the wait does not.
     static let metadata: Duration = .seconds(30)
 
     /// Run `operation` under a hard wall-clock deadline.

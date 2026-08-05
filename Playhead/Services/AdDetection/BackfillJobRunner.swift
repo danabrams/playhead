@@ -751,7 +751,12 @@ actor BackfillJobRunner {
         // event on a daemon shared with the rest of the OS; two back-to-back
         // with nothing in between is a fact about its current disposition, and
         // the only useful response to that is to stop asking.
-        var consecutiveThrottledJobs = 0
+        //
+        // playhead-e75l: counts every `FMDaemonRefusal`, not throttles alone —
+        // a stalled tokenizer round trip is the same daemon telling us the same
+        // thing. Named for what it counts: a reader who sees `throttled` here
+        // and reasons about rate limits would be reasoning about a superset.
+        var consecutiveDaemonRefusals = 0
 
         // Drain the queue. AdmissionController is serial; one job at a time.
         for _ in enqueuedJobs {
@@ -856,9 +861,14 @@ actor BackfillJobRunner {
             // the CancellationError branch below (BG-window expiry) can
             // checkpoint durable progress before deferring. Fresh per job.
             let honestCursorBox = BackfillHonestCursorBox()
-            // playhead-kvs8: did THIS job end in a daemon throttle? Read below
+            // playhead-kvs8: did THIS job end in a daemon refusal? Read below
             // to decide whether the consecutive counter advances or resets.
-            var throttledThisJob = false
+            //
+            // playhead-e75l: the KIND, not a flag. The siblings the drain
+            // sweeps when it stops are deferred with a cause that names what
+            // actually stopped it, and a Bool cannot say which condition that
+            // was.
+            var daemonRefusalThisJob: FMDaemonRefusal?
 
             do {
                 // C-2: split lifecycle API. `markBackfillJobRunning` preserves
@@ -1293,9 +1303,10 @@ actor BackfillJobRunner {
                 ) {
                     evidenceEventIds.append(metricsEventId)
                 }
-            } catch let throttle where FMDaemonThrottle.isThrottle(throttle) {
-                // playhead-kvs8: the FoundationModels daemon declined to serve
-                // this job. This arm sits ABOVE the generic catch-all, which is
+            } catch {
+                // playhead-kvs8: the FoundationModels daemon did not serve this
+                // job. That case is CLASSIFIED FIRST inside this arm, ahead of
+                // the genuine-failure disposition below, which is
                 // where the 2026-07-31 field row came from: a throttle escaping
                 // the coarse pass PROLOGUE (`promptBudget` /
                 // `planPassA`'s `tokenCount` XPC round trips, all made before
@@ -1303,106 +1314,136 @@ actor BackfillJobRunner {
                 // recorded as `status=failed`, `retryCount=1`, with the
                 // daemon's prose raw in `deferReason`.
                 //
-                // Every part of that is wrong for a throttle, and the three
-                // corrections are visible here:
+                // playhead-e75l: and the 2026-08-03 field row, which is the
+                // same row with a different error in the same column — a
+                // tokenizer round trip that outlived `FMInferenceDeadline
+                // .metadata`, recorded as `failed` / `retryCount=1` /
+                // `deferReason="FMInferenceTimeoutError(deadline: 30.0 seconds)"`
+                // 52 s into a pass that takes 12–45 minutes. Same route, same
+                // three corrections, so one arm rather than two counters that
+                // can disagree about whether the daemon is serving us. See
+                // `FMDaemonRefusal` for why a `standard`-deadline timeout is
+                // deliberately NOT in this class.
                 //
-                //   * DEFER, never fail. A throttle is temporary — "try again
-                //     later" is the daemon's own wording — so a terminal state
-                //     would strand the episode exactly the way pmp9's
-                //     complete-with-holes did one level down.
+                // Every part of that disposition is wrong for a daemon
+                // condition, and the three corrections are visible here:
+                //
+                //   * DEFER, never fail. The condition is temporary — "try
+                //     again later" is the daemon's own wording for the
+                //     throttle, and a wedged tokenizer is a moment — so a
+                //     terminal state would strand the episode exactly the way
+                //     pmp9's complete-with-holes did one level down.
                 //   * `retryCount` is PRESERVED. `markBackfillJobDeferred`
-                //     leaves it alone, so a throttle never spends the lifetime
-                //     `AdmissionController.maxRetries` budget that exists to
-                //     disqualify jobs failing on their own merits.
-                //   * A NAMED cause, groupable from a database pull.
+                //     leaves it alone, so a daemon condition never spends the
+                //     lifetime `AdmissionController.maxRetries` budget that
+                //     exists to disqualify jobs failing on their own merits.
+                //   * A NAMED cause, groupable from a database pull, and named
+                //     per KIND so the two never merge in an operator's count.
                 //
                 // No progress checkpoint is written and no scan row is
-                // fabricated: a throttled prologue examined nothing, and
+                // fabricated: a refused round trip examined nothing NEW, and
                 // claiming otherwise is the false-coverage bug qbib and pmp9
                 // both fought. The job resumes from whatever cursor it already
-                // had.
-                throttledThisJob = true
-                consecutiveThrottledJobs += 1
-                do {
-                    try await store.markBackfillJobDeferred(
-                        jobId: job.jobId,
-                        reason: FMDaemonThrottle.DeferCause.passPrologue.rawValue
-                    )
-                    deferred.append(job.jobId)
-                } catch {
-                    logger.warning(
-                        "Failed to mark FM job throttle-deferred (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                    )
-                }
-                logger.error(
-                    """
-                    fm.backfill.job_throttled job=\(job.jobId, privacy: .public) \
-                    phase=\(job.phase.rawValue, privacy: .public) \
-                    consecutive=\(consecutiveThrottledJobs, privacy: .public) \
-                    cause=\(FMDaemonThrottle.DeferCause.passPrologue.rawValue, privacy: .public)
-                    """
-                )
-                if let metricsEventId = await recordFailedOperationalMetricsEvent(
-                    job: job,
-                    inputs: inputs,
-                    audioSegments: jobMetricsAudioSegments,
-                    wallStart: jobWallStart,
-                    jobCounters: jobMetricsCounters,
-                    plannerContext: inputs.plannerContext,
-                    resumeAttempted: resumedJobIds.contains(job.jobId)
-                ) {
-                    evidenceEventIds.append(metricsEventId)
-                }
-            } catch {
-                // C-2: markBackfillJobFailed writes deferReason so operators
-                // can diagnose the failure without scraping logs. The prior
-                // deprecated shim silently dropped the reason on .failed.
+                // had — which on the `planAdaptiveZoom` path is a real,
+                // non-empty one, since `coarsePassA` checkpoints as it goes
+                // (playhead-26od). "Prologue" in the tokens is historical.
                 //
-                // R4-Fix7: same wrap as the typed-error arm above. A
-                // racing terminal transition must not abort the drain
-                // loop and strand the rest of the batch.
-                do {
-                    try await store.markBackfillJobFailed(
-                        jobId: job.jobId,
-                        reason: String(describing: error),
-                        retryCount: job.retryCount + 1
+                // R1-Fix4: ONE arm that classifies, rather than a `where`-clause
+                // arm above the catch-all. The two forms are equivalent — the
+                // clause was literally `classify(error) != nil` — but the
+                // `where` form has to re-derive the classification inside the
+                // body, where the compiler no longer knows it is non-nil, and
+                // every default it can be given is a lie. The one it carried
+                // (`?? .throttle`) was the worst available: unreachable, but if
+                // ever reached it would DEFER a genuine failure — kvs8
+                // deliberately gives a throttle no terminal cause — and stamp
+                // `rateLimited-prologue` on a rate limit that never happened,
+                // which is the exact substitution `FMDaemonRefusal`'s per-kind
+                // tokens exist to prevent. Binding once removes the question.
+                if let refusal = FMDaemonRefusal.classify(error) {
+                    daemonRefusalThisJob = refusal
+                    consecutiveDaemonRefusals += 1
+                    do {
+                        try await store.markBackfillJobDeferred(
+                            jobId: job.jobId,
+                            reason: refusal.passPrologueCause
+                        )
+                        deferred.append(job.jobId)
+                    } catch {
+                        logger.warning(
+                            "Failed to mark FM job daemon-deferred (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                        )
+                    }
+                    logger.error(
+                        """
+                        \(refusal.logEvent, privacy: .public) job=\(job.jobId, privacy: .public) \
+                        phase=\(job.phase.rawValue, privacy: .public) \
+                        consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
+                        cause=\(refusal.passPrologueCause, privacy: .public)
+                        """
                     )
-                } catch {
-                    logger.warning(
-                        "Failed to mark FM job failed (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    if let metricsEventId = await recordFailedOperationalMetricsEvent(
+                        job: job,
+                        inputs: inputs,
+                        audioSegments: jobMetricsAudioSegments,
+                        wallStart: jobWallStart,
+                        jobCounters: jobMetricsCounters,
+                        plannerContext: inputs.plannerContext,
+                        resumeAttempted: resumedJobIds.contains(job.jobId)
+                    ) {
+                        evidenceEventIds.append(metricsEventId)
+                    }
+                } else {
+                    // C-2: markBackfillJobFailed writes deferReason so operators
+                    // can diagnose the failure without scraping logs. The prior
+                    // deprecated shim silently dropped the reason on .failed.
+                    //
+                    // R4-Fix7: same wrap as the typed-error arm above. A
+                    // racing terminal transition must not abort the drain
+                    // loop and strand the rest of the batch.
+                    do {
+                        try await store.markBackfillJobFailed(
+                            jobId: job.jobId,
+                            reason: String(describing: error),
+                            retryCount: job.retryCount + 1
+                        )
+                    } catch {
+                        logger.warning(
+                            "Failed to mark FM job failed (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                        )
+                    }
+                    // bd-1tl: see the typed-error arm above for why we prefer
+                    // String(describing:) over localizedDescription for on-device
+                    // diagnosis. Untyped errors here are typically Swift errors
+                    // bridged from FoundationModels or CancellationError.
+                    logger.error(
+                        "FM backfill job \(job.jobId, privacy: .public) failed: case=untyped detail=\(String(describing: error), privacy: .public)"
                     )
-                }
-                // bd-1tl: see the typed-error arm above for why we prefer
-                // String(describing:) over localizedDescription for on-device
-                // diagnosis. Untyped errors here are typically Swift errors
-                // bridged from FoundationModels or CancellationError.
-                logger.error(
-                    "FM backfill job \(job.jobId, privacy: .public) failed: case=untyped detail=\(String(describing: error), privacy: .public)"
-                )
-                if let metricsEventId = await recordFailedOperationalMetricsEvent(
-                    job: job,
-                    inputs: inputs,
-                    audioSegments: jobMetricsAudioSegments,
-                    wallStart: jobWallStart,
-                    jobCounters: jobMetricsCounters,
-                    plannerContext: inputs.plannerContext,
-                    resumeAttempted: resumedJobIds.contains(job.jobId)
-                ) {
-                    evidenceEventIds.append(metricsEventId)
+                    if let metricsEventId = await recordFailedOperationalMetricsEvent(
+                        job: job,
+                        inputs: inputs,
+                        audioSegments: jobMetricsAudioSegments,
+                        wallStart: jobWallStart,
+                        jobCounters: jobMetricsCounters,
+                        plannerContext: inputs.plannerContext,
+                        resumeAttempted: resumedJobIds.contains(job.jobId)
+                    ) {
+                        evidenceEventIds.append(metricsEventId)
+                    }
                 }
             }
 
             await admissionController.finish(jobId: job.jobId)
 
             // playhead-kvs8: a job that reached the daemon — successfully or
-            // not — clears the throttle evidence. Only back-to-back refusals
+            // not — clears the refusal evidence. Only back-to-back refusals
             // count, so a single unlucky job never stops a healthy drain.
-            guard throttledThisJob else {
-                consecutiveThrottledJobs = 0
+            guard let refusalThatStoppedUs = daemonRefusalThisJob else {
+                consecutiveDaemonRefusals = 0
                 continue
             }
-            guard FMDaemonThrottle.shouldStopDraining(
-                consecutiveThrottles: consecutiveThrottledJobs
+            guard FMDaemonRefusal.shouldStopDraining(
+                consecutiveRefusals: consecutiveDaemonRefusals
             ) else {
                 continue
             }
@@ -1416,7 +1457,39 @@ actor BackfillJobRunner {
             // `.queued` strands them exactly the way the H-1 orchestration bug
             // did before the admission-defer branch above began sweeping them.
             // They carry their own cause because nothing about THEM was
-            // throttled — re-driving them is unconditionally worth doing.
+            // refused — re-driving them is unconditionally worth doing.
+            //
+            // playhead-e75l: and the cause names the condition that actually
+            // stopped the drain. On a mixed run the MOST RECENT refusal wins,
+            // which is the one that crossed the threshold; recording a rate
+            // limit for a batch stopped by a wedged tokenizer would put an
+            // event in the durable record that never happened.
+            //
+            // R2-Fix3: the field on the drain-stop line below is `siblingCause=`,
+            // not `cause=`. It holds `batchSiblingCause` — the token written to
+            // the SWEPT jobs — and it prints unchanged when nothing was swept,
+            // so on a line whose name already carries the condition, reading it
+            // as "why the drain stopped" is reading a value that names
+            // something else. The event NAME is the answer to that question.
+            //
+            // R5-Fix1: and `deferredSiblings=` counts THE SWEEP, not `deferred`.
+            // `deferred` is the drain-WIDE accumulator: the admission-defer
+            // branch, the rate-limited coarse-coverage-hole defer, playhead-41mu's
+            // under-coverage terminal and the refused job's OWN defer have all
+            // appended to it before this line runs, so a field named for the
+            // siblings was reporting every job the sweep did not touch. The
+            // sharpest way to see it is that reaching this line requires
+            // `consecutiveDaemonRefusals >= 2` and each of those refusals
+            // appended, so the old value could never read ZERO — the one thing an
+            // operator most wants it to be able to say, which is that the stop
+            // landed on the last job and cost the batch nothing. Measured on the
+            // mixed-refusal fixture it printed 3 for one swept sibling. Same line
+            // and same defect class as R1's event name and R2's `siblingCause=`:
+            // a value that names one thing read as though it named another.
+            //
+            // Incremented only on a SUCCESSFUL defer, so a sibling skipped by the
+            // terminal-row guard below is correctly not counted as swept.
+            var sweptSiblingCount = 0
             for candidate in enqueuedJobs where
                 !admitted.contains(candidate.jobId)
                 && !deferred.contains(candidate.jobId)
@@ -1424,16 +1497,17 @@ actor BackfillJobRunner {
                 do {
                     try await store.markBackfillJobDeferred(
                         jobId: candidate.jobId,
-                        reason: FMDaemonThrottle.DeferCause.batchSibling.rawValue
+                        reason: refusalThatStoppedUs.batchSiblingCause
                     )
                     deferred.append(candidate.jobId)
+                    sweptSiblingCount += 1
                 } catch let error as AnalysisStoreError {
                     // R4-Fix1's reasoning: the M-5 idempotency path re-enqueues
                     // terminal rows, and the C-R3-1 status guard rejects the
                     // transition. That must not abort the batch.
                     if case .invalidStateTransition = error {
                         logger.warning(
-                            "Skipping throttle defer for terminal job: \(candidate.jobId, privacy: .public)"
+                            "Skipping daemon-refusal defer for terminal job: \(candidate.jobId, privacy: .public)"
                         )
                         continue
                     }
@@ -1442,9 +1516,10 @@ actor BackfillJobRunner {
             }
             logger.error(
                 """
-                fm.backfill.drain_stopped_by_throttle \
-                consecutive=\(consecutiveThrottledJobs, privacy: .public) \
-                deferredSiblings=\(deferred.count, privacy: .public)
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+                consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
+                siblingCause=\(refusalThatStoppedUs.batchSiblingCause, privacy: .public) \
+                deferredSiblings=\(sweptSiblingCount, privacy: .public)
                 """
             )
             break
