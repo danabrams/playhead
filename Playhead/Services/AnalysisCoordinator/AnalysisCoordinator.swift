@@ -2248,10 +2248,10 @@ actor AnalysisCoordinator {
         // (counting it as zero) or 28.6 % (counting it as complete), and the
         // second of those is the one that flatters the defect.
         //
-        // A banner whose
-        // window falls outside the final region gets ZERO evidence entries,
-        // because `SkipOrchestrator.catalogEntries(overlapping:)` slices by
-        // time. The degradation arrived exactly when the transcript improved.
+        // A banner whose window falls outside the final region gets ZERO
+        // evidence entries, because
+        // `SkipOrchestrator.catalogEntries(overlapping:)` slices by time.
+        // The degradation arrived exactly when the transcript improved.
         //
         // It also put this catalog's `transcriptVersion` in a different id
         // space from the one `runBackfill` builds for the same asset — the two
