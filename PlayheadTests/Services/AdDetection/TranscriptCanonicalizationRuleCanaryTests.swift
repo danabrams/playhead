@@ -204,6 +204,13 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
     /// sites pass `chunks:` first, inside their own parentheses. Bounded here
     /// anyway, because "it happens to be fine today" is precisely the reasoning
     /// this file exists to replace.
+    ///
+    /// Stated limit: the scan is brace/bracket/paren counting and does not know
+    /// about string literals, so a `)` inside a string BEFORE the `chunks:`
+    /// label would end the list early and produce the sentinel. That direction
+    /// is a false VIOLATION, not a false pass, and the expression scanner below
+    /// has shared the same naivety since R2 — so this narrows nothing that was
+    /// previously trusted.
     private static func argumentListEnd(in source: String, from start: String.Index) -> String.Index {
         var depth = 0
         var index = start
