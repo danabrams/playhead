@@ -24,6 +24,20 @@
 // every fast chunk and the final-only set and the canonical set are the same
 // array — a fixture in which the defect is unobservable.
 //
+// ⚠️ THE FIXTURE IS DELIBERATELY *NOT* 53FC53E3's SHAPE, and an earlier draft of
+// this header wrongly said it was (playhead-iu0t R1). Re-measured on the pull:
+// 53FC53E3's fast coverage ends at exactly 2490.0 and its final region starts at
+// exactly 2490.0, so the two ABUT — `droppedFastCount == 0`,
+// `residualFastFinalOverlapCount == 0`, and therefore V(canonical) == V(raw) on
+// the real asset. A fixture faithful to the field row could not distinguish
+// canonical from raw and CN03 would survive against it. The overlap below is a
+// deliberate strengthening: it is a shape `FinalPassRetranscriptionRunner` does
+// produce (6 of the 11 mixed-pass assets on the pull have `droppedFast > 0`,
+// up to 400 chunks on AD5F3A0A), chosen because it separates all four sets
+// rather than because 53FC53E3 had it. What IS taken from 53FC53E3 is the
+// PROPORTION — a long fast prefix and a short candidate-local final tail — and
+// that is what the reach rail measures.
+//
 // The fixture here separates FOUR candidate chunk sets, because there are four
 // plausible things this line could have been written as and only one of them is
 // right. 12 fast chunks over [0, 360] and 4 final chunks over [300, 420]:
@@ -64,8 +78,10 @@ struct ShadowRetryCanonicalReplayTests {
 
     // MARK: - Fixtures
 
-    /// The 53FC53E3 shape in miniature: a long fast prefix and a short,
-    /// candidate-local final region that overlaps its tail and runs past it.
+    /// 53FC53E3's PROPORTIONS — a long fast prefix and a short, candidate-local
+    /// final region — with a deliberate overlap the field asset does not have.
+    /// See the ⚠️ note in the file header for why the overlap is added rather
+    /// than reproduced.
     private func mixedPassChunks(assetId: String = assetId) -> [TranscriptChunk] {
         let fastTexts = [
             "Welcome to the show. Today we're discussing podcasts and how to find them.",

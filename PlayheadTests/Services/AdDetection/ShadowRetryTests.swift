@@ -615,10 +615,12 @@ struct ShadowRetryTests {
     /// chosen, and reading its green as evidence is how 2,490 s of a real
     /// episode's transcript got discarded in production.
     ///
-    /// The distinguishing fixture — a candidate-local final TAIL disjoint from
-    /// the fast prefix, which is the shape `FinalPassRetranscriptionRunner`
-    /// actually writes and the shape asset 53FC53E3 carried — lives in
-    /// `ShadowRetryCanonicalReplayTests`. What this test still earns its keep
+    /// The distinguishing fixture — a short candidate-local final TAIL against
+    /// a long fast prefix, overlapping it so that canonical, final-only,
+    /// fast-only and raw all hash differently — lives in
+    /// `ShadowRetryCanonicalReplayTests`. (Its header records why the overlap
+    /// is a deliberate strengthening rather than a copy of 53FC53E3, whose fast
+    /// and final regions abut exactly at 2490.0 s.) What this test still earns its keep
     /// for is the OTHER direction: proving the fully-overlapped case, where
     /// canonicalization legitimately keeps final text only, still drains.
     @Test("Bug 9-A: shadow retry drains a mixed-pass asset (fully-overlapped final)")

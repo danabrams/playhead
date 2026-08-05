@@ -4152,23 +4152,37 @@ actor AdDetectionService {
         // `canonicalChunks`." IT WAS NOT TRUE, and its untruth is why the
         // survivors went unfound for months — two separate reviewers had to
         // rediscover them from device data rather than from the source. hc7e's
-        // removal was LOCAL to this function; `retryShadowFMPhaseForSession`
-        // and `runPhase5ProjectorPhase` both still carried the collapse, and
-        // the first of them discarded 2,490 s of a real episode's transcript
-        // (see its own comment for the hash that proves it). Both are converted
-        // now.
+        // removal was LOCAL to this function; the collapse stood in
+        // `retryShadowFMPhaseForSession` (which discarded 2,490 s of a real
+        // episode's transcript — see its own comment for the hash that proves
+        // it), in `runPhase5ProjectorPhase`, and in
+        // `AnalysisCoordinator.pushEvidenceCatalog`.
         //
         // Do not restate that as a survey of call sites — a completeness claim
-        // decays silently the moment someone adds a caller. The durable form is
-        // a RULE, and it is this: any path that hands transcript chunks to
-        // `TranscriptAtomizer.atomize` or `TranscriptAtomizer.transcriptVersionHash`
-        // must canonicalize first, because `transcriptVersion` is derived from
-        // the chunks handed in and `BackfillJobRunner`'s job id embeds it — so
-        // an uncanonicalized caller does not merely read a narrower transcript,
-        // it mints rows in an id space nothing else can find.
+        // decays silently the moment someone adds a caller. iu0t proved that
+        // twice over: its own first draft of THIS paragraph named two survivors
+        // and asserted "both are converted now", and R1 found a third still
+        // live on the hot path. A prose survey cannot be trusted even when it
+        // is written by the person who just went looking.
+        //
+        // The durable form is a RULE plus something that ENFORCES it. The rule:
+        // any path that hands transcript chunks to `TranscriptAtomizer.atomize`
+        // or `TranscriptAtomizer.transcriptVersionHash` must canonicalize
+        // first, because `transcriptVersion` is derived from the chunks handed
+        // in and `BackfillJobRunner`'s job id embeds it — so an uncanonicalized
+        // caller does not merely read a narrower transcript, it mints rows in
+        // an id space nothing else can find.
         // `SemanticScanClaim.transcriptVersion(forPersistedChunks:)` exists to
         // make following that rule a one-liner for callers starting from raw
         // store rows.
+        //
+        // The enforcement is `TranscriptCanonicalizationRuleCanaryTests`, which
+        // walks every `.swift` file under `Playhead/`, extracts the `chunks:`
+        // argument at every call site of those two functions, and fails unless
+        // each one either canonicalizes inline or is on an allow-list carrying
+        // a written reason. That is what makes the rule survive the next
+        // caller: adding one without canonicalizing is a RED TEST, not a
+        // paragraph somebody has to re-audit by hand.
         // playhead-r5um: TIME-order the canonical array before anything reads
         // it. `canonicalize` time-sorts the MIXED path but returns single-pass
         // input byte-identically — that passthrough is a deliberate contract
@@ -9759,11 +9773,17 @@ actor AdDetectionService {
         //
         // NOT sorted here, unlike `runBackfill`'s call site. That sort exists
         // for r5um's RAW readers (`LexicalAnchorRefiner.buildWordStream`, the
-        // `RegionShadowPhase` input), which this path has none of: the only two
-        // consumers below are `TranscriptAtomizer.atomize` and
-        // `TranscriptAtomizer.transcriptVersionHash`, and both order their own
-        // input with `canonicalTimeOrder`. A sort here would be a line whose
-        // deletion nothing could observe.
+        // `RegionShadowPhase` input), which this path has none of. Everything
+        // this array reaches bottoms out in `TranscriptAtomizer.atomize` or
+        // `TranscriptAtomizer.transcriptVersionHash` — `runShadowFMPhase`
+        // atomizes it, and its `recordSemanticScanClaim` calls hash it — and
+        // both of those order their own input with `canonicalTimeOrder`. So a
+        // sort here would be a line whose deletion nothing could observe.
+        //
+        // Note the shape of that argument, because it is the one that decays:
+        // it is safe only while every TERMINAL reader sorts, not while some
+        // enumerated list of callers happens to. If a raw reader is ever added
+        // below, add the sort — it is idempotent and free.
         let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
         guard !chunksForReplay.isEmpty else {
             logger.debug("Shadow retry skipped: no transcript chunks for \(analysisAssetId)")

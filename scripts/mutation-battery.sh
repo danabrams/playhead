@@ -1159,6 +1159,10 @@ ATOM="Playhead/Services/AdDetection/TranscriptAtom.swift"
 # coverage-lane `BackfillJobRunner`. Two different files whose names differ by
 # a prefix; the RT series mutates this one.
 AJRUN="Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift"
+# playhead-iu0t R1: the analysis COORDINATOR — the actor that drives the
+# session lifecycle and pushes the evidence catalog onto the SkipOrchestrator.
+# Added for CN06, the fourth instance of the pre-hc7e final-only collapse.
+ACOORD="Playhead/Services/AnalysisCoordinator/AnalysisCoordinator.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -1167,7 +1171,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
-  "$CLAIM" "$RECON" "$ATOM" "$AJRUN"
+  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD"
 )
 
 FOCUSED_SUITES=(
@@ -1554,6 +1558,12 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/ShadowRetryCanonicalReplayTests
   -only-testing:PlayheadTests/ShadowRetryTests
   -only-testing:PlayheadTests/TranscriptChunkCanonicalizerTests
+  # playhead-iu0t R1: the RULE, enforced. A SOURCE canary — it reads the
+  # working-tree `.swift` files rather than running the code — so it kills a
+  # mutant at a call site with no behavioural test of its own, which is exactly
+  # the situation `pushEvidenceCatalog` (CN06) was in: private, unseamed, and
+  # covered by nothing. Two tests, no build cost beyond compiling them.
+  -only-testing:PlayheadTests/TranscriptCanonicalizationRuleCanaryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2423,6 +2433,9 @@ T_IU0T_FIXTURE="control: the fixture's four candidate chunk sets are all genuine
 T_IU0T_FASTFALLBACK="Bug 9-A: shadow retry succeeds with only pass='fast' chunks"
 T_IU0T_MIXEDDRAIN="Bug 9-A: shadow retry drains a mixed-pass asset (fully-overlapped final)"
 T_IU0T_RETRYRUNS="Test B: retry path runs only the shadow phase and clears the flag"
+# R1 — the rule canary. XCTest, so `Suite/method`.
+T_IU0T_RULE="TranscriptCanonicalizationRuleCanaryTests/testEveryTranscriptVersionCallSiteCanonicalizes"
+T_IU0T_SHAPE="TranscriptCanonicalizationRuleCanaryTests/testThePreHc7eFinalOnlyCollapseAppearsNowhereInProduction"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4605,6 +4618,24 @@ MUTATIONS=(
   # pre-iu0t drain rails and Test B: those predate this bead, so their reddening
   # is what proves the mutant kills the DRAIN rather than merely this suite.
   "CN04|442|ADSVC|$T_IU0T_REACH;$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM;$T_IU0T_ALLFAST;$T_IU0T_FASTFALLBACK;$T_IU0T_MIXEDDRAIN;$T_IU0T_RETRYRUNS"
+
+  # Batch 443 — CN06 (playhead-iu0t R1). THE FOURTH INSTANCE, restored verbatim
+  # in `AnalysisCoordinator.pushEvidenceCatalog`, where it was still live after
+  # iu0t declared "both are converted now". Different file, so it is not on the
+  # CN01-CN04 anchor and takes its own batch for the ordinary reason.
+  #
+  # Its victims are the CANARY, not a behavioural rail, and that is the finding
+  # rather than a shortcut: `pushEvidenceCatalog` is private, has no test seam,
+  # and no test in the repo exercises it — which is precisely how the collapse
+  # sat there. A source-level pin is what can see a defect at a call site that
+  # nothing runs. Both canary tests are named because they check different
+  # things (the ARGUMENT is uncanonicalized, and the COLLAPSE SHAPE is back)
+  # and a mutant that only tripped one would mean the other is miswritten.
+  #
+  # There is no CN05: it is the KNOWN GAP entry below (`runPhase5ProjectorPhase`,
+  # production-dead). The number is skipped rather than reused so the gap note
+  # and the battery agree.
+  "CN06|443|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5018,6 +5049,7 @@ describe_mutation() {
     CN02) echo "iu0t: the drain replays fast-only, throwing the re-transcription away — right reach, wrong identity" ;;
     CN03) echo "iu0t: the drain replays the RAW rows, so overlapped audio is scanned twice and the version drifts from runBackfill's" ;;
     CN04) echo "iu0t VACUITY CONTROL: the replay set is empty, so the drain never runs at all" ;;
+    CN06) echo "iu0t R1: the FOURTH collapse — pushEvidenceCatalog builds the banner evidence catalog from the final-only slice again" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10945,6 +10977,32 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # CN06 — the fourth instance, restored exactly as it stood in
+  # `AnalysisCoordinator.pushEvidenceCatalog` before playhead-iu0t R1,
+  # `preferred` binding and all. Restoring the BINDING rather than inlining a
+  # closure into the argument matters twice: it is what was actually on disk, and
+  # it exercises the canary's local-binding resolution rather than only its
+  # inline-expression path — a mutant that only ever appeared inline would leave
+  # the two-hop resolver unproven.
+  #
+  # The anchor is the two-line atomize call, not the 20-line comment above it:
+  # the comment is the measurement of what this cost, and no mutation should
+  # have to carry it.
+  CN06)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let preferred: [TranscriptChunk] = {
+            let finals = chunks.filter { $0.pass == "final" }
+            return finals.isEmpty ? chunks : finals
+        }()
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: preferred,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # SC15 — the selector drops the transcript requirement.
   SC15)
     snippet OLD <<'EOF'
@@ -11108,6 +11166,7 @@ rec_file()   {
     SEAMS) printf '%s' "$SEAMS" ;;
     ACT)   printf '%s' "$ACT" ;;
     ADSVC) printf '%s' "$ADSVC" ;;
+    ACOORD) printf '%s' "$ACOORD" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
