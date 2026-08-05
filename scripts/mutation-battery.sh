@@ -203,6 +203,29 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   R3 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batch 506 — DR10 added and
+#   DR02 MOVED here out of batch 500. Batch 506 run WITH a green baseline, then
+#   500-505 re-run behind it with PLAYHEAD_MB_SKIP_BASELINE=1 on the same
+#   commit. FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 8 builds, ~17m. Batches
+#   1-499 were NOT re-run and carry the verdicts below.
+#
+#   TWO LESSONS, and the first is the same one DR08 taught wearing a different
+#   hat. R2 fixed the log-EVENT canary to derive its forbidden set from
+#   `FMDaemonRefusal.allCases` and left the TOKEN-FAMILY canary next to it as a
+#   hand-written list of two families — the two it had just looked at.
+#   `BackfillJobRunner` writes six. DR10 names the token into `underCoverage-`
+#   (playhead-41mu), which the old list passes by arithmetic. When you fix one
+#   list-shaped rail, the next one is usually in the same file.
+#
+#   The second is about BATCHES, not rails. DR02's expectation set grew to
+#   include `$T_DR_STANDARD` — a variable DEFINED at R1 and referenced by no
+#   mutation at all, so the runner-level "a 300 s timeout still fails and still
+#   spends a retry" control had a test and no mutant. DR02 could not stay in
+#   batch 500: DR01 reduces `classify` to the throttle-only ternary, under which
+#   that control stays GREEN, so the batch would have reported SURVIVED for a
+#   mutation DR02 kills on its own. Growing an expectation set can invalidate a
+#   batch that was sound when it was written.
+#
 #   R2 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batches 500-505, the DR
 #   series: DR01-DR07 added at R1, DR08-DR09 added here. Batch 505 run WITH a
 #   green baseline, batches 500-504 re-run behind it with
