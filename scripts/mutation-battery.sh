@@ -4863,20 +4863,26 @@ MUTATIONS=(
 
   # --- playhead-e75l: daemon-refusal disposition (DR series) ---------------
   #
-  # Batches 500-504. The series is deliberately spread thin: four of the seven
+  # Batches 500-506. The series is deliberately spread thin: four of the ten
   # mutants make a metadata stall stop being a refusal, so any two of them in
   # one batch would each be credited for the other's kill. Batch membership
-  # here means "these two cannot mask each other", never "these fit".
+  # here means "these two cannot mask each other", never "these fit". R3 review
+  # moved DR02 out of batch 500 for exactly that reason once its expectation set
+  # grew — see batch 506.
   #
   # DR01 is THE mutant: the pre-e75l production line, verbatim. Everything else
   # is one substitution inside the fix.
 
   # Batch 500. DR01 reverts the classification to kvs8's throttle-only
-  # predicate — the shipped code this bead was filed against. DR02 is in the
-  # enum and its expectation is a PURE test, so DR01 (which cannot reach the
-  # enum) leaves it observable.
+  # predicate — the shipped code this bead was filed against.
+  #
+  # R3 review MOVED DR02 out of this batch. Its expectation set grew to include
+  # the RUNNER-level control (`$T_DR_STANDARD`), and DR01 masks that control
+  # exactly: with `classify` reduced to the throttle-only ternary, a
+  # standard-deadline timeout still lands in the genuine-failure arm and the
+  # control stays GREEN, so DR02 would have reported SURVIVED for a mutation it
+  # kills on its own. Batch membership means "these two cannot mask each other".
   "DR01|500|RUNNER|$T_DR_DEFERS;$T_DR_COST"
-  "DR02|500|FMREF|$T_DR_BUDGET"
 
   # Batch 501. DR03 is the reviewer's probe made concrete: the predicate reads
   # the OTHER budget. It is in the same anchor as DR02, so it cannot share a
@@ -4909,6 +4915,24 @@ MUTATIONS=(
   # model is not answering on this device".
   "DR08|505|RUNNER|$T_DR_WIRING"
   "DR09|505|FMREF|$T_DR_FAMILY"
+
+  # Batch 506. R3 review, and both entries are about a rail that was thinner
+  # than it read.
+  #
+  # DR02 moved here from batch 500 (see above) and now names the RUNNER-level
+  # control as well as the pure one. `$T_DR_STANDARD` was DEFINED at R1 and
+  # referenced by no mutation at all, so the claim "a 300 s inference timeout
+  # still fails and still spends a retry" had a test and no mutant — the
+  # difference between a rail and a sentence.
+  #
+  # DR10 is DR09's sibling in a family the canary could not see. R2's foreign
+  # set was the two spellings it had looked at; this runner writes six, so a
+  # refusal token named into `underCoverage-` (playhead-41mu's cause for a
+  # coverage-lane job that declines to certify itself) passed the rule. Neither
+  # can mask the other: DR02 cannot reach a source canary and DR10 cannot reach
+  # `classify`.
+  "DR02|506|FMREF|$T_DR_BUDGET;$T_DR_STANDARD"
+  "DR10|506|FMREF|$T_DR_FAMILY"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5344,6 +5368,7 @@ describe_mutation() {
     DR07) echo "e75l: only throttles advance the consecutive counter — two counters that can disagree about whether the daemon is serving us" ;;
     DR08) echo "e75l R2: the PER-JOB log event is a hard-coded literal — R1's canary named two kvs8-era spellings, so it could not see a literal of the event this bead added" ;;
     DR09) echo "e75l R2: the durable token joins playhead-8d5r's inferenceTimeout- family — the prefix an operator greps to count a model that is not answering" ;;
+    DR10) echo "e75l R3: the durable token joins playhead-41mu's underCoverage- family — one of the four families R2's hand-written foreign list forgot" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11679,6 +11704,24 @@ EOF
 EOF
     snippet NEW <<'EOF'
             "inferenceTimeout-metadata"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR10 — R3 review, and the reason a blacklist is not a rail. R2's foreign set
+  # was `["inferenceTimeout-noProgress", "cancelled-during-"]`: the two families
+  # it had just looked at. `BackfillJobRunner` writes SIX, and this plants the
+  # token in one of the four it forgot — playhead-41mu's `underCoverage-`, the
+  # cause a coverage-lane job records when it declines to certify its own
+  # completion. An operator counting that family to find jobs that stopped
+  # converging would be counting wedged tokenizer round trips instead. Under
+  # R2's list this SURVIVES by arithmetic (`underCoverage-` is not one of the two
+  # named); the canary now derives the families from the runner's own source.
+  DR10)
+    snippet OLD <<'EOF'
+            "metadataStall-refused"
+EOF
+    snippet NEW <<'EOF'
+            "underCoverage-refused"
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

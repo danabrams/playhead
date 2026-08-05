@@ -86,7 +86,13 @@ struct FMDaemonThrottleClassificationTests {
         #expect(!FMDaemonThrottle.isThrottle(TestFMRuntimeFailure.refusal.error))
         #expect(!FMDaemonThrottle.isThrottle(TestFMRuntimeFailure.guardrailViolation.error))
         #expect(!FMDaemonThrottle.isThrottle(TestFMRuntimeFailure.exceededContextWindow.error))
-        #expect(!FMDaemonThrottle.isThrottle(FMInferenceTimeoutError(deadline: .seconds(300))))
+        // playhead-e75l R3-Fix3: named, not spelled — and BOTH budgets, because
+        // `FMDaemonRefusal.classify` asks this question FIRST. An `isThrottle`
+        // that answered true for a `metadata`-deadline timeout would stamp
+        // `rateLimited-prologue` on a wedged tokenizer, which is the one
+        // substitution the per-kind tokens exist to prevent.
+        #expect(!FMDaemonThrottle.isThrottle(FMInferenceTimeoutError(deadline: FMInferenceDeadline.standard)))
+        #expect(!FMDaemonThrottle.isThrottle(FMInferenceTimeoutError(deadline: FMInferenceDeadline.metadata)))
         #expect(!FMDaemonThrottle.isThrottle(CancellationError()))
         #expect(!FMDaemonThrottle.isThrottle(ThrottleTestUnexpectedError()))
     }
@@ -391,6 +397,17 @@ struct FMThrottledPrologueRunnerTests {
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30)
         #expect(result.deferredJobIds.isEmpty)
         #expect(await fmRuntime.coarseCallCount == 3)
+
+        // playhead-e75l R3-Fix2: the POSITIVE CONTROL for
+        // `throttledPrologueLeavesCoverageUntouched`'s `#expect(scans.isEmpty)`.
+        // R2 replaced a vacuous `allSatisfy` there with an absence assertion and
+        // never showed that this query can observe a row for this asset in this
+        // fixture — an absence read through an observer that can see nothing is
+        // the same defect one layer out. Same query, same store, same runner,
+        // healthy daemon.
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(!scans.isEmpty,
+                "the query the throttle test reads as EMPTY returns nothing on the HEALTHY path either")
     }
 
     @available(iOS 26.0, *)
@@ -707,7 +724,22 @@ struct FMThrottleUsabilityProbeTests {
         #expect(!FoundationModelsUsabilityProbe.shouldCacheFailure(for: TestFMRuntimeFailure.rateLimited.error))
         #expect(FoundationModelsUsabilityProbe.shouldCacheFailure(for: TestFMRuntimeFailure.refusal.error))
         #expect(FoundationModelsUsabilityProbe.shouldCacheFailure(for: TestFMRuntimeFailure.guardrailViolation.error))
-        #expect(FoundationModelsUsabilityProbe.shouldCacheFailure(for: FMInferenceTimeoutError(deadline: .seconds(300))))
+        // playhead-e75l R3-Fix3: `FMInferenceDeadline.standard`, never a literal
+        // 300 — the R1-Fix2 correction, in the last two fixtures that still
+        // carried the number. This bead is what made WHICH BUDGET load-bearing,
+        // so a fixture spelling the value rather than naming it keeps passing
+        // while no longer being about `standard` at all if the constant moves.
+        //
+        // Only `standard` is asserted here, and that is the whole claim rather
+        // than an omission: this probe's ONLY bounded call is
+        // `FMInferenceDeadline.run(FMInferenceDeadline.standard)` around a
+        // `session.respond`, with no tokenizer round trip inside it, so a
+        // `metadata`-deadline timeout cannot arise in the `catch` this predicate
+        // serves. A 300 s probe that never answered IS a usability verdict, and
+        // caching it is correct.
+        #expect(FoundationModelsUsabilityProbe.shouldCacheFailure(
+            for: FMInferenceTimeoutError(deadline: FMInferenceDeadline.standard)
+        ))
         #expect(FoundationModelsUsabilityProbe.shouldCacheFailure(for: ThrottleTestUnexpectedError()))
     }
 }

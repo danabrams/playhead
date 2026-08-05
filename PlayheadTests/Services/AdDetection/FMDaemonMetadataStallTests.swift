@@ -549,6 +549,27 @@ struct FMDaemonMetadataStallRunnerTests {
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == 30)
         #expect(result.deferredJobIds.isEmpty)
         #expect(await fmRuntime.coarseCallCount == 3)
+
+        // R3-Fix2: the POSITIVE CONTROL for `metadataStallDoesNotPenaliseCoverage`'s
+        // `#expect(scans.isEmpty)`. That assertion is an ABSENCE, and R2 replaced
+        // a vacuous `allSatisfy` with it without ever showing that this query can
+        // observe a row for this asset in this fixture. Ask the diagnostic
+        // question of it — what would `scans.isEmpty` read if
+        // `fetchSemanticScanResults` could never return anything here, wrong
+        // asset id, wrong store, shadow mode persisting nothing? — and the answer
+        // is `true`, the passing value. This is the same query, the same store,
+        // the same asset and the same runner with a healthy daemon, so a row here
+        // is what makes the empty result over there mean "the prologue examined
+        // nothing" rather than "nobody was looking".
+        //
+        // The claim is not idle: this runner has a live mechanism that writes a
+        // `.noAds` sentinel row for work it did not do
+        // (`makeNoWorkSentinelScanResult`, three call sites), and a refusal
+        // routed through it would mint exactly the false coverage qbib and pmp9
+        // fought.
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(!scans.isEmpty,
+                "the query the stall test reads as EMPTY returns nothing on the HEALTHY path either")
     }
 
     @available(iOS 26.0, *)
@@ -827,34 +848,73 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
     /// This is a SOURCE canary rather than a pure test because the foreign
     /// token is a bare literal in the runner: if playhead-8d5r's spelling ever
     /// moves, the rule has to be re-derived rather than silently passing.
+    ///
+    /// R3-Fix1: the foreign families are now DERIVED FROM THE RUNNER'S SOURCE
+    /// rather than written out. R2's version named exactly two —
+    /// `inferenceTimeout-noProgress` and `cancelled-during-`, the two it had
+    /// just looked at — while this runner writes SIX durable token families to
+    /// the same column. `expiredWithoutProgress-` (line ~2044),
+    /// `underCoverage-` and `underCoverageBudgetSpent-` (playhead-41mu) and
+    /// `noWork-` were outside the rule by construction, so a third
+    /// `FMDaemonRefusal` kind named into any of them would pass. That is DR08's
+    /// shape one test over: a rail written as a list of known-bad spellings is a
+    /// memory of the last bug, not a rule. Mutation DR10 plants a refusal token
+    /// in one of the families the list forgot.
     func testDaemonRefusalCausesDoNotJoinAForeignTokenFamily() throws {
         let lines = try runnerSource()
 
-        // The foreign families this runner already writes, anchored in source
-        // so a rename surfaces here instead of quietly emptying the check.
-        let foreignTokens = ["inferenceTimeout-noProgress", "cancelled-during-"]
-        for token in foreignTokens {
+        // The two families R2 named are kept as ANCHORS — a rename of either
+        // must surface here rather than quietly emptying the check — but they
+        // are now a floor on the derivation, not the rule itself.
+        let anchorTokens = ["inferenceTimeout-noProgress", "cancelled-during-"]
+        for token in anchorTokens {
             XCTAssertTrue(
                 lines.contains { $0.contains("\"\(token)") },
                 "`\(token)` is no longer written by BackfillJobRunner. Re-derive this canary's foreign families."
             )
         }
-        // kvs8's family lives in FMDaemonThrottle, and the throttle kind
-        // deliberately BELONGS to it — that is the one legitimate overlap.
-        let foreignFamilies = Set(foreignTokens.map { family(of: $0) })
-        XCTAssertEqual(foreignFamilies.count, 2, "vacuity: the foreign families collapsed")
 
-        for refusal in FMDaemonRefusal.allCases {
-            for token in [refusal.passPrologueCause, refusal.batchSiblingCause] {
-                XCTAssertFalse(
-                    foreignFamilies.contains(family(of: token)),
-                    """
-                    `\(token)` joins the `\(family(of: token))` family, which this runner already \
-                    uses for an unrelated population. A durable cause token's prefix IS its \
-                    condition — an operator counting a family must be counting one thing.
-                    """
-                )
-            }
+        // kvs8's family lives in FMDaemonThrottle rather than in this runner,
+        // and the throttle kind deliberately BELONGS to it — that is the one
+        // legitimate overlap, and it is why the derivation reads the runner's
+        // own literals rather than every token in the repo.
+        let foreignFamilies = Set(Self.durableTokenLiterals(in: lines).map { family(of: $0) })
+        for token in anchorTokens {
+            XCTAssertTrue(
+                foreignFamilies.contains(family(of: token)),
+                "the derivation missed `\(family(of: token))`; it found \(foreignFamilies.sorted())"
+            )
+        }
+        // Vacuity floor: measured at SIX at R3 review. A derivation that
+        // collapses to the two anchors is the rail this fix replaced.
+        XCTAssertGreaterThanOrEqual(
+            foreignFamilies.count,
+            5,
+            "vacuity: the derivation found only \(foreignFamilies.sorted())"
+        )
+
+        let ownTokens = FMDaemonRefusal.allCases.flatMap { [$0.passPrologueCause, $0.batchSiblingCause] }
+        for token in ownTokens {
+            XCTAssertFalse(
+                foreignFamilies.contains(family(of: token)),
+                """
+                `\(token)` shares the `\(family(of: token))` family with a durable token this \
+                runner writes for an unrelated population. A cause token's prefix IS its \
+                condition — an operator counting a family must be counting one thing. \
+                (If the collision is because the runner now spells this very token as a bare \
+                literal, that is the same defect from the other side: the cause must come from \
+                `FMDaemonRefusal`, the way the log events already do.)
+                """
+            )
+
+            // The one family that is not hyphen-shaped, so `family(of:)` cannot
+            // see it: playhead-fil5's scan claims live in the SAME column and
+            // are read by a documented device-pull query
+            // (`WHERE deferReason LIKE 'scan_claim:%'`).
+            XCTAssertFalse(
+                token.hasPrefix(SemanticScanClaim.deferReasonPrefix),
+                "`\(token)` would be counted as a dropped-scan CLAIM by fil5's device-pull query."
+            )
         }
 
         // And the two kinds still do not share a family with EACH OTHER.
@@ -868,6 +928,45 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
     private func family(of token: String) -> String {
         guard let index = token.firstIndex(of: "-") else { return token }
         return String(token[...index])
+    }
+
+    /// Every DURABLE-TOKEN-shaped string literal in a source file: quoted, and
+    /// beginning with a word followed by a hyphen, with no whitespace and no
+    /// colon anywhere in it.
+    ///
+    /// The shape is what separates a cause token from the log-format literals in
+    /// the same file. `"bd-m8k: planner-state observation failed (suppressed): …"`
+    /// also begins with a word and a hyphen and is prose; a token an operator
+    /// groups by never contains a space. Measured at R3 review: the filter keeps
+    /// six families (`cancelled-`, `expiredWithoutProgress-`, `underCoverage-`,
+    /// `underCoverageBudgetSpent-`, `inferenceTimeout-`, `noWork-`) and drops the
+    /// two prose lines.
+    private static func durableTokenLiterals(in lines: [String]) -> [String] {
+        var found: [String] = []
+        for line in lines {
+            var rest = Substring(line)
+            while let open = rest.firstIndex(of: "\"") {
+                let afterOpen = rest.index(after: open)
+                guard let close = rest[afterOpen...].firstIndex(of: "\"") else { break }
+                let literal = String(rest[afterOpen..<close])
+                if isDurableTokenShaped(literal) {
+                    found.append(literal)
+                }
+                rest = rest[rest.index(after: close)...]
+            }
+        }
+        return found
+    }
+
+    private static func isDurableTokenShaped(_ literal: String) -> Bool {
+        guard let hyphen = literal.firstIndex(of: "-"), hyphen != literal.startIndex else {
+            return false
+        }
+        guard literal[literal.startIndex].isLetter else { return false }
+        guard literal[literal.startIndex..<hyphen].allSatisfy({ $0.isLetter || $0.isNumber }) else {
+            return false
+        }
+        return !literal.contains(where: { $0.isWhitespace || $0 == ":" })
     }
 
     /// R2-Fix5: R1 left the budget discriminator "uncovered by construction"
