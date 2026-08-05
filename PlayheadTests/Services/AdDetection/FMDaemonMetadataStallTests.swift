@@ -105,8 +105,8 @@ struct FMDaemonRefusalDefinitionTests {
 
     @Test("every cause is a NAMED token, and no two kinds share one")
     func causesAreNamedAndDistinct() {
-        #expect(FMDaemonRefusal.metadataStall.passPrologueCause == "inferenceTimeout-metadata")
-        #expect(FMDaemonRefusal.metadataStall.batchSiblingCause == "inferenceTimeout-batchSibling")
+        #expect(FMDaemonRefusal.metadataStall.passPrologueCause == "metadataStall-refused")
+        #expect(FMDaemonRefusal.metadataStall.batchSiblingCause == "metadataStall-batchSibling")
 
         // kvs8's tokens are preserved byte-for-byte: device pulls and support
         // bundles already grep for them.
@@ -114,6 +114,7 @@ struct FMDaemonRefusalDefinitionTests {
         #expect(FMDaemonRefusal.throttle.batchSiblingCause == "rateLimited-batchSibling")
 
         let tokens = FMDaemonRefusal.allCases.flatMap { [$0.passPrologueCause, $0.batchSiblingCause] }
+        #expect(tokens.count == 4, "vacuity: the collection assertions below run on \(tokens.count) tokens")
         #expect(Set(tokens).count == tokens.count, "two causes share a token: \(tokens)")
         #expect(tokens.allSatisfy { !$0.isEmpty })
 
@@ -123,6 +124,18 @@ struct FMDaemonRefusalDefinitionTests {
         #expect(!FMDaemonRefusal.metadataStall.passPrologueCause.hasPrefix("rateLimited-"))
         #expect(!FMDaemonRefusal.metadataStall.batchSiblingCause.hasPrefix("rateLimited-"))
         #expect(FMDaemonRefusal.metadataStall.logEvent != FMDaemonRefusal.throttle.logEvent)
+
+        // R2-Fix1 — and not a FOREIGN family either. `inferenceTimeout-` is
+        // taken: playhead-8d5r writes `inferenceTimeout-noProgress` for a
+        // coarse pass aborted by a run of 300 s inference timeouts, which the
+        // runner documents as "the model is not answering on this device". The
+        // first spelling of these two tokens answered to that prefix, so a
+        // device pull could not tell a wedged tokenizer from a mute model —
+        // the one distinction this whole type exists to hold. The source
+        // canary below anchors the foreign token; this pins the rule.
+        #expect(!FMDaemonRefusal.metadataStall.passPrologueCause.hasPrefix("inferenceTimeout-"))
+        #expect(!FMDaemonRefusal.metadataStall.batchSiblingCause.hasPrefix("inferenceTimeout-"))
+        #expect(tokens.allSatisfy { !$0.hasPrefix("cancelled-") })
     }
 
     @Test("R1-Fix1: the DRAIN-STOP event is named per kind too, and kvs8's spelling is preserved")
@@ -417,6 +430,9 @@ struct FMDaemonMetadataStallRunnerTests {
         // later", it said nothing at all. Merging the two would make the
         // throttle count in a device pull unreadable.
         #expect(!reason.hasPrefix("rateLimited-"))
+        // R2-Fix1: nor playhead-8d5r's family, which counts a model that is
+        // not answering — the opposite claim to the one this row makes.
+        #expect(!reason.hasPrefix("inferenceTimeout-"))
     }
 
     @available(iOS 26.0, *)
@@ -639,6 +655,9 @@ struct FMDaemonMetadataStallRunnerTests {
                 "vacuity: no sibling was swept, so the token assertion proves nothing")
         #expect(siblingReasons.allSatisfy { !$0.hasPrefix("rateLimited-") },
                 "a metadata stall deferred siblings as rate-limited: \(siblingReasons)")
+        // R2-Fix1: nor into playhead-8d5r's `inferenceTimeout-` family.
+        #expect(siblingReasons.allSatisfy { !$0.hasPrefix("inferenceTimeout-") },
+                "a metadata stall deferred siblings into the mute-model family: \(siblingReasons)")
     }
 
     @available(iOS 26.0, *)
@@ -694,17 +713,30 @@ struct FMDaemonMetadataStallRunnerTests {
     }
 }
 
-// MARK: - Source canary
+// MARK: - Source canaries
 
-/// R1-Fix1's WIRING, which no runtime assertion in this file can observe.
+/// The three claims about this bead that NO runtime assertion on this harness
+/// can observe, because each is about something outside a test's reach: a log
+/// line, a token nobody parses, and a call site in another file.
 ///
-/// A log line is not readable from a test on this harness, so the enum test
-/// above can prove `drainStoppedEvent` returns two names and still say nothing
-/// about whether the runner emits them. It did not: the drain-stop line carried
-/// kvs8's `fm.backfill.drain_stopped_by_throttle` as a hard-coded literal and
-/// fired verbatim for a batch stopped by a wedged tokenizer. Same technique and
-/// same rationale as `FMDaemonThrottleCanaryTests`.
-final class FMDaemonRefusalEventWiringCanaryTests: XCTestCase {
+///  1. **Event wiring.** A log line is not readable from a test here, so the
+///     enum test above can prove `drainStoppedEvent` returns two names and
+///     still say nothing about whether the runner emits them. It did not: the
+///     drain-stop line carried kvs8's `fm.backfill.drain_stopped_by_throttle`
+///     as a hard-coded literal and fired verbatim for a batch stopped by a
+///     wedged tokenizer (R1-Fix1).
+///  2. **Token families.** `deferReason` has no Swift parser by design, so the
+///     only consumer of a durable cause token is a human grepping a device
+///     pull — and the rule that a prefix family holds one population can only
+///     be checked against the OTHER families this runner writes, which are
+///     bare literals in its source (R2-Fix1).
+///  3. **Budget enumeration.** `isMetadataStall` is sound exactly while no
+///     other budget reaching `FMInferenceDeadline.run` is 30 s, and that is a
+///     property of call sites in two other files (R2-Fix5).
+///
+/// Same technique and same rationale as `FMDaemonThrottleCanaryTests`. The
+/// class was called `…EventWiringCanaryTests` when it held only the first.
+final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
 
     private func runnerSource() throws -> [String] {
         var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
@@ -721,6 +753,16 @@ final class FMDaemonRefusalEventWiringCanaryTests: XCTestCase {
 
     /// Both daemon-refusal event names must reach the log through the enum. A
     /// literal here is how the name and the condition drift apart.
+    ///
+    /// R2-Fix2: the forbidden set is DERIVED FROM `FMDaemonRefusal.allCases`,
+    /// not written out. R1's version named `fm.backfill.job_throttled` and
+    /// `fm.backfill.drain_stopped_by` — the two kvs8-era spellings it had just
+    /// seen go wrong — and was therefore blind to a literal of the event this
+    /// bead itself ADDED. Mutation DR08 (the per-job line emitting
+    /// `fm.backfill.job_daemon_metadata_stalled` verbatim, so every throttle
+    /// logs the stall's name and a support bundle's rate-limit count reads
+    /// zero) SURVIVED against it. A blacklist covers the mistakes already made;
+    /// deriving from `allCases` covers the third kind nobody has added yet.
     func testDaemonRefusalLogEventsAreNotHardCodedInTheRunner() throws {
         let lines = try runnerSource()
 
@@ -731,8 +773,17 @@ final class FMDaemonRefusalEventWiringCanaryTests: XCTestCase {
             "BackfillJobRunner no longer classifies daemon refusals; move this canary with the code."
         )
 
+        // Every event name the enum can produce, whichever kind owns it.
+        let forbidden = FMDaemonRefusal.allCases.flatMap { [$0.logEvent, $0.drainStoppedEvent] }
+        XCTAssertEqual(
+            forbidden.count,
+            Set(forbidden).count,
+            "two FMDaemonRefusal kinds share an event name; the enum test should have caught this first."
+        )
+        XCTAssertGreaterThanOrEqual(forbidden.count, 4, "vacuity: the forbidden set must not be empty")
+
         let offenders = lines.enumerated()
-            .filter { $0.element.contains("fm.backfill.drain_stopped_by") || $0.element.contains("fm.backfill.job_throttled") }
+            .filter { line in forbidden.contains { line.element.contains($0) } }
             .map { "\($0.offset + 1): \($0.element.trimmingCharacters(in: .whitespaces))" }
 
         XCTAssertTrue(
@@ -741,14 +792,149 @@ final class FMDaemonRefusalEventWiringCanaryTests: XCTestCase {
             A daemon-refusal log EVENT NAME is hard-coded in BackfillJobRunner. It must come from \
             `FMDaemonRefusal.logEvent` / `.drainStoppedEvent`, because an event name is the unit a \
             support-bundle grep counts: a literal `..._by_throttle` fires for a drain stopped by a \
-            metadata stall and inflates the rate-limit count with an event that never happened.
+            metadata stall and inflates the rate-limit count with an event that never happened — \
+            and a literal of the STALL's name fires for a throttle, which empties the same count.
             \(offenders.joined(separator: "\n"))
             """
         )
 
+        // Both properties must actually be READ. Forbidding the literals is
+        // only half the rule: a line that emits neither says nothing at all.
+        for property in ["logEvent", "drainStoppedEvent"] {
+            XCTAssertTrue(
+                lines.contains { $0.contains(property) },
+                "BackfillJobRunner no longer reads `\(property)`; the line cannot be naming the refusal it reports."
+            )
+        }
+    }
+
+    /// R2-Fix1: the durable cause tokens must not join a FOREIGN prefix family.
+    ///
+    /// The runner writes `inferenceTimeout-noProgress` (playhead-8d5r) when the
+    /// coarse pass aborts on a run of `standard`-deadline timeouts — "the model
+    /// is not answering on this device", in the runner's own words. The first
+    /// spelling of this bead's tokens was `inferenceTimeout-metadata` /
+    /// `inferenceTimeout-batchSibling`, so `grep -c 'inferenceTimeout-'` would
+    /// have counted wedged tokenizer round trips as evidence about the model.
+    ///
+    /// This is a SOURCE canary rather than a pure test because the foreign
+    /// token is a bare literal in the runner: if playhead-8d5r's spelling ever
+    /// moves, the rule has to be re-derived rather than silently passing.
+    func testDaemonRefusalCausesDoNotJoinAForeignTokenFamily() throws {
+        let lines = try runnerSource()
+
+        // The foreign families this runner already writes, anchored in source
+        // so a rename surfaces here instead of quietly emptying the check.
+        let foreignTokens = ["inferenceTimeout-noProgress", "cancelled-during-"]
+        for token in foreignTokens {
+            XCTAssertTrue(
+                lines.contains { $0.contains("\"\(token)") },
+                "`\(token)` is no longer written by BackfillJobRunner. Re-derive this canary's foreign families."
+            )
+        }
+        // kvs8's family lives in FMDaemonThrottle, and the throttle kind
+        // deliberately BELONGS to it — that is the one legitimate overlap.
+        let foreignFamilies = Set(foreignTokens.map { family(of: $0) })
+        XCTAssertEqual(foreignFamilies.count, 2, "vacuity: the foreign families collapsed")
+
+        for refusal in FMDaemonRefusal.allCases {
+            for token in [refusal.passPrologueCause, refusal.batchSiblingCause] {
+                XCTAssertFalse(
+                    foreignFamilies.contains(family(of: token)),
+                    """
+                    `\(token)` joins the `\(family(of: token))` family, which this runner already \
+                    uses for an unrelated population. A durable cause token's prefix IS its \
+                    condition — an operator counting a family must be counting one thing.
+                    """
+                )
+            }
+        }
+
+        // And the two kinds still do not share a family with EACH OTHER.
+        XCTAssertNotEqual(
+            family(of: FMDaemonRefusal.throttle.passPrologueCause),
+            family(of: FMDaemonRefusal.metadataStall.passPrologueCause)
+        )
+    }
+
+    /// Everything up to and including the first `-`; the unit an operator greps.
+    private func family(of token: String) -> String {
+        guard let index = token.firstIndex(of: "-") else { return token }
+        return String(token[...index])
+    }
+
+    /// R2-Fix5: R1 left the budget discriminator "uncovered by construction"
+    /// against a THIRD 30 s budget. This closes it by ENUMERATION rather than
+    /// by argument.
+    ///
+    /// `FMDaemonRefusal.isMetadataStall` asks `deadline == FMInferenceDeadline
+    /// .metadata`, so its soundness is exactly the claim "no other budget
+    /// reaching `FMInferenceDeadline.run` is 30 s". That set is small and
+    /// closed: every call site in production passes `FMInferenceDeadline
+    /// .metadata`, `FMInferenceDeadline.standard`, or the injected
+    /// `inferenceDeadline` whose default is `standard`. If a fourth spelling
+    /// appears — a literal `.seconds(30)`, a new constant, a config default
+    /// moved off `standard` — a genuine 300 s inference timeout would start
+    /// deferring with an unbounded retry, and nothing else in the suite would
+    /// notice. This test is what notices.
+    func testEveryProductionInferenceBudgetIsEnumerated() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Playhead", isDirectory: true)
+        let walker = try XCTUnwrap(
+            FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil),
+            "could not walk \(root.path)"
+        )
+        let files = walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThan(files.count, 100, "source walk found only \(files.count) Swift files")
+
+        // Measured, not guessed: 9 call sites at R2 review — 4 `metadata`
+        // (tokenCount plus three schema sizings), 4 injected `inferenceDeadline`
+        // (defaulted to `standard`, pinned below), 1 literal `standard` in the
+        // readiness probe.
+        let allowed = ["FMInferenceDeadline.metadata", "FMInferenceDeadline.standard", "inferenceDeadline"]
+        var callSites: [String] = []
+        var offenders: [String] = []
+        for file in files {
+            let lines = try String(contentsOf: file, encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            for (index, line) in lines.enumerated() where line.contains("FMInferenceDeadline.run(") {
+                let site = "\(file.lastPathComponent):\(index + 1): \(line.trimmingCharacters(in: .whitespaces))"
+                callSites.append(site)
+                if !allowed.contains(where: line.contains) {
+                    offenders.append(site)
+                }
+            }
+        }
+
+        // Vacuity guard: the walk must have found the call sites it judges.
+        XCTAssertGreaterThanOrEqual(callSites.count, 9, "found only \(callSites.count) FMInferenceDeadline.run call sites")
         XCTAssertTrue(
-            lines.contains { $0.contains("drainStoppedEvent") },
-            "the drain-stop line no longer reads `drainStoppedEvent`; it cannot be naming the refusal that stopped it."
+            offenders.isEmpty,
+            """
+            An inference budget outside the enumerated set reaches `FMInferenceDeadline.run`. \
+            `FMDaemonRefusal.isMetadataStall` discriminates on `deadline == FMInferenceDeadline.metadata`, \
+            so a third budget of 30 s silently turns a real inference timeout into a deferrable daemon \
+            refusal — an unbounded retry on evidence about the MODEL. Add the budget to the enumeration \
+            here and give it a rail, or route it through an existing one.
+            \(offenders.joined(separator: "\n"))
+            """
+        )
+
+        // The one budget a caller can move without touching a call site.
+        XCTAssertEqual(
+            FoundationModelClassifier.Config.default.inferenceDeadline,
+            FMInferenceDeadline.standard,
+            "the classifier's default inference budget moved off `standard`; if it is now 30 s, every inference timeout defers."
+        )
+        XCTAssertNotEqual(
+            FoundationModelClassifier.Config.default.inferenceDeadline,
+            FMInferenceDeadline.metadata
         )
     }
 }

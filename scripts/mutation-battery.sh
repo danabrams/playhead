@@ -1236,7 +1236,7 @@ FOCUSED_SUITES=(
   # shipped kvs8's literal for a condition that is not a throttle.
   -only-testing:PlayheadTests/FMDaemonRefusalDefinitionTests
   -only-testing:PlayheadTests/FMDaemonMetadataStallRunnerTests
-  -only-testing:PlayheadTests/FMDaemonRefusalEventWiringCanaryTests
+  -only-testing:PlayheadTests/FMDaemonRefusalSourceCanaryTests
   # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
@@ -2493,7 +2493,11 @@ T_DR_STANDARD="DISCRIMINATOR: a STANDARD-deadline timeout through the same seam 
 T_DR_ONECOUNTER="ONE counter: a throttle then a metadata stall stops the drain, and the sibling names the stall"
 T_DR_BATCH="a stalled batch leaves no job stranded in queued and none marked failed"
 # The wiring canary. XCTest, so `Suite/method`.
-T_DR_WIRING="FMDaemonRefusalEventWiringCanaryTests/testDaemonRefusalLogEventsAreNotHardCodedInTheRunner"
+T_DR_WIRING="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalLogEventsAreNotHardCodedInTheRunner"
+# R2 review: the durable token must not join a FOREIGN prefix family. XCTest —
+# it is a source canary because the foreign token is a bare literal in the
+# runner, so the rule has to be re-derived if playhead-8d5r's spelling moves.
+T_DR_FAMILY="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCausesDoNotJoinAForeignTokenFamily"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4878,6 +4882,17 @@ MUTATIONS=(
   # prevent: only throttles advance the consecutive counter, so a drain the
   # daemon refused twice by two different means never stops.
   "DR07|504|RUNNER|$T_DR_ONECOUNTER"
+
+  # Batch 505. R2 review. DR08 is DR06's twin one line up — the PER-JOB event
+  # name as a literal. R1's canary forbade two kvs8-era spellings by name, so
+  # it could not see a literal of the event this bead ADDED; DR08 SURVIVED on
+  # first plant and is what turned the canary from a blacklist into a rule
+  # derived from `FMDaemonRefusal.allCases`. DR09 is the durable TOKEN family:
+  # the pre-review spelling verbatim, which joined playhead-8d5r's
+  # `inferenceTimeout-` family — the prefix an operator greps to count "the
+  # model is not answering on this device".
+  "DR08|505|RUNNER|$T_DR_WIRING"
+  "DR09|505|FMREF|$T_DR_FAMILY"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5311,6 +5326,8 @@ describe_mutation() {
     DR05) echo "e75l: the per-job cause is kvs8's rateLimited-prologue again — the stall answers to the prefix an operator counts rate limits with" ;;
     DR06) echo "e75l: the drain-stop log EVENT is the hard-coded ..._by_throttle again — the name fires for a condition that is not a throttle" ;;
     DR07) echo "e75l: only throttles advance the consecutive counter — two counters that can disagree about whether the daemon is serving us" ;;
+    DR08) echo "e75l R2: the PER-JOB log event is a hard-coded literal — R1's canary named two kvs8-era spellings, so it could not see a literal of the event this bead added" ;;
+    DR09) echo "e75l R2: the durable token joins playhead-8d5r's inferenceTimeout- family — the prefix an operator greps to count a model that is not answering" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11614,6 +11631,38 @@ EOF
 EOF
     snippet NEW <<'EOF'
                     if refusal == .throttle { consecutiveDaemonRefusals += 1 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR08 — R2 review. DR06's twin ONE LINE UP: the PER-JOB event as a literal.
+  # R1's canary forbade `fm.backfill.job_throttled` and
+  # `fm.backfill.drain_stopped_by` BY NAME, so a literal of the event this bead
+  # itself added was invisible to it — every throttle would log the stall's
+  # event name and the rate-limit count in a support bundle would read zero.
+  # This SURVIVED on first plant; the canary now derives its forbidden set from
+  # `FMDaemonRefusal.allCases`.
+  DR08)
+    snippet OLD <<'EOF'
+                        \(refusal.logEvent, privacy: .public) job=\(job.jobId, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                        fm.backfill.job_daemon_metadata_stalled job=\(job.jobId, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR09 — R2 review, and the pre-review spelling VERBATIM. The two new durable
+  # tokens were `inferenceTimeout-metadata` / `inferenceTimeout-batchSibling`,
+  # which put a wedged TOKENIZER round trip into the same greppable family as
+  # playhead-8d5r's `inferenceTimeout-noProgress` — a run of 300 s inference
+  # timeouts, whose documented operator reading is "the model is not answering
+  # on this device". That is the exact substitution `FMDaemonRefusal`'s own doc
+  # forbids for `rateLimited-`, one family over.
+  DR09)
+    snippet OLD <<'EOF'
+            "metadataStall-refused"
+EOF
+    snippet NEW <<'EOF'
+            "inferenceTimeout-metadata"
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

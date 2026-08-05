@@ -1464,6 +1464,13 @@ actor BackfillJobRunner {
             // which is the one that crossed the threshold; recording a rate
             // limit for a batch stopped by a wedged tokenizer would put an
             // event in the durable record that never happened.
+            //
+            // R2-Fix3: the field on the drain-stop line below is `siblingCause=`,
+            // not `cause=`. It holds `batchSiblingCause` — the token written to
+            // the SWEPT jobs — and it prints unchanged when nothing was swept,
+            // so on a line whose name already carries the condition, reading it
+            // as "why the drain stopped" is reading a value that names
+            // something else. The event NAME is the answer to that question.
             for candidate in enqueuedJobs where
                 !admitted.contains(candidate.jobId)
                 && !deferred.contains(candidate.jobId)
@@ -1491,7 +1498,7 @@ actor BackfillJobRunner {
                 """
                 \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
                 consecutive=\(consecutiveDaemonRefusals, privacy: .public) \
-                cause=\(refusalThatStoppedUs.batchSiblingCause, privacy: .public) \
+                siblingCause=\(refusalThatStoppedUs.batchSiblingCause, privacy: .public) \
                 deferredSiblings=\(deferred.count, privacy: .public)
                 """
             )

@@ -141,8 +141,8 @@ enum FMDaemonRefusal: Sendable, Equatable, CaseIterable {
     /// historical — kvs8's `rateLimited-prologue` token is preserved
     /// byte-for-byte because device pulls grep for it — but the reading an
     /// operator should take is "this job's run was refused", never "nothing had
-    /// been scanned yet". The same latitude is why the metadata token is named
-    /// for the BOUND that elapsed. See playhead-e75l's follow-up note.
+    /// been scanned yet". See playhead-x8ck, and the suffix note at the bottom
+    /// of this comment for why the metadata token does not repeat the claim.
     ///
     /// playhead-v7q6: `deferReason` is the durable audit trail a device pull
     /// actually reads, so every stop-short cause in this runner is a named,
@@ -154,12 +154,30 @@ enum FMDaemonRefusal: Sendable, Equatable, CaseIterable {
     /// counting `rateLimited-` in a pull is counting throttles; a metadata
     /// stall answering to that prefix would inflate the count with an event the
     /// daemon never described that way.
+    ///
+    /// R2-Fix1: **and the family it does join must be its own.** The first
+    /// spelling of this token was `inferenceTimeout-metadata`, which put a
+    /// wedged tokenizer round trip into the SAME greppable family as
+    /// playhead-8d5r's `inferenceTimeout-noProgress` — the cause this runner
+    /// writes when the coarse pass aborts on a run of 300 s inference
+    /// timeouts, and whose documented operator reading is "the model is not
+    /// answering on this device". That is the rule two paragraphs up, one
+    /// family over: `grep -c 'inferenceTimeout-'` would have counted daemon
+    /// stalls as evidence about the model, which is the single distinction
+    /// this whole file exists to hold. The prefix is the CONDITION, always.
+    ///
+    /// The suffix names the ROLE, not a position in the pass — `refused` is
+    /// "the daemon refused this job's own run", which is true from
+    /// `promptBudget` and equally true from `planAdaptiveZoom` after
+    /// `coarsePassA` has already banked windows. kvs8's `-prologue` suffix
+    /// makes the stronger claim and playhead-x8ck is filed against it; this
+    /// token deliberately does not repeat it.
     var passPrologueCause: String {
         switch self {
         case .throttle:
             FMDaemonThrottle.DeferCause.passPrologue.rawValue
         case .metadataStall:
-            "inferenceTimeout-metadata"
+            "metadataStall-refused"
         }
     }
 
@@ -169,12 +187,16 @@ enum FMDaemonRefusal: Sendable, Equatable, CaseIterable {
     /// so they carry their own token, and it names the condition that actually
     /// stopped the drain. Deferring them as `rateLimited-batchSibling` after a
     /// metadata stall would put a rate limit in the record that never happened.
+    ///
+    /// R2-Fix1: same family correction as ``passPrologueCause`` — this was
+    /// `inferenceTimeout-batchSibling`, which answered to playhead-8d5r's
+    /// prefix.
     var batchSiblingCause: String {
         switch self {
         case .throttle:
             FMDaemonThrottle.DeferCause.batchSibling.rawValue
         case .metadataStall:
-            "inferenceTimeout-batchSibling"
+            "metadataStall-batchSibling"
         }
     }
 
