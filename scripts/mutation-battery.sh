@@ -4586,6 +4586,14 @@ MUTATIONS=(
   # a single-pass asset is what canonicalize returns anyway. Those tests are
   # correct to stay green, and naming them would be an expectation the mutant
   # cannot meet.
+  #
+  # R1 re-run, after the rule canary joined FOCUSED_SUITES: CN01 also reddens
+  # `$T_IU0T_SHAPE`, deterministically — it restores the literal collapse
+  # expression, which is what that canary bans by name. Deliberately NOT added
+  # as a named victim. CN01's claim is about the DRAIN, and pinning it to a
+  # repo-wide source canary would make a future edit to the canary's regex
+  # report as "CN01's expected test never ran". Observed, recorded, not
+  # depended on.
   "CN01|439|ADSVC|$T_IU0T_REACH;$T_IU0T_VERSION;$T_IU0T_JOBID;$T_IU0T_CLAIM"
 
   # Batch 440 — CN02. Fast-only: keep the whole fast pass and throw the
@@ -4595,6 +4603,13 @@ MUTATIONS=(
   # over-correction for CN01 ("the fast pass is the one with the coverage"),
   # which is exactly the kind of fix-introduced defect this queue keeps
   # producing.
+  #
+  # R1: the rule canary does NOT see CN02, and that is the canary being narrow
+  # rather than broken. It audits the argument at `atomize` call sites;
+  # `chunksForReplay` is handed to `runShadowFMPhase`, whose own atomize
+  # argument is the parameter `chunks` — allow-listed, because the obligation
+  # sits with the callers. Only the behavioural identity rails can see a wrong
+  # chunk set one frame up, which is the whole reason CN02 exists.
   "CN02|440|ADSVC|$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM"
 
   # Batch 441 — CN03. No canonicalization at all: replay the raw persisted rows.
