@@ -764,19 +764,156 @@ struct FMDaemonMetadataStallRunnerTests {
 ///
 /// Same technique and same rationale as `FMDaemonThrottleCanaryTests`. The
 /// class was called `…EventWiringCanaryTests` when it held only the first.
+///
+/// R4 REVIEW: every finder in here was a literal substring over ONE LINE, and
+/// a source canary that cannot read a respelling is a canary that reports on
+/// formatting. Eight probes were planted; SEVEN walked past — two hard-coded
+/// event names split across a `\` continuation or a `+` join, one that
+/// SWAPPED the two event properties and used no literal at all, and four
+/// third-30 s-budget call sites (`standard / 10`, a site split over two lines,
+/// `Type . run(`, and a budget in a local with the allowed name in a trailing
+/// comment). The one that failed was killed by SwiftLint, not by this class.
+/// The normalizations below, the exactly-once-and-in-order rule, and the
+/// exact-argument match are what those probes bought.
 final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
 
-    private func runnerSource() throws -> [String] {
+    /// One line of source, carrying the number it actually has in the FILE.
+    ///
+    /// R4-Fix5: the pre-R4 helper returned a FILTERED array and reported
+    /// `offset + 1` as a line number. `BackfillJobRunner` is two-thirds
+    /// comment, so every offender this class has ever printed named a line
+    /// several hundred short of the real one — a value that names one thing
+    /// (an index into the survivors) read as though it named another (a file
+    /// line). The number is carried now rather than recomputed.
+    typealias SourceLine = (number: Int, text: String)
+
+    private func runnerSource() throws -> [SourceLine] {
         var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         for _ in 0..<3 {
             root.deleteLastPathComponent()
         }
         let url = root
             .appendingPathComponent("Playhead/Services/AdDetection/BackfillJobRunner.swift")
-        return try String(contentsOf: url, encoding: .utf8)
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        return Self.codeLines(of: try String(contentsOf: url, encoding: .utf8))
+    }
+
+    // MARK: - Source normalization (R4-Fix1 / R4-Fix2 / R4-Fix3)
+    //
+    // EVERY finder in this class used to be a literal substring over ONE line.
+    // R4 planted eight respellings and seven of them walked past the rails
+    // untouched — the CN10 shape playhead-x0lb hit twice. The normalizations
+    // below are what those probes cost:
+    //
+    //   CN-A2  the drain-stop event, hard-coded but split by a `\` line
+    //          continuation INSIDE the multiline string the runner already
+    //          uses that idiom in. No single line held the forbidden name.
+    //   CN-A3  the per-job event, hard-coded as `"fm.backfill.job_" + "..."`.
+    //   CN-C2  a NEW call site written `FMInferenceDeadline` / newline /
+    //          `.run(.seconds(30))`, invisible to a per-line finder — and free,
+    //          because the site count is a FLOOR, so adding an unseen site
+    //          never trips it.
+    //   CN-C3b `FMInferenceDeadline . run(` — spaces around the member dot.
+    //          (`run (`, a space before the paren, is the ONE evasion that
+    //          failed, and SwiftLint's `no_space_in_method_call` is what
+    //          stopped it, not this class.)
+    //   CN-C4  the budget bound to a local, with an allowed name present only
+    //          in a TRAILING COMMENT on the call line.
+    //
+    // So: comments are stripped to end-of-line rather than only whole-line,
+    // continuations are joined, and `"a" + "b"` is collapsed before any
+    // forbidden name is looked for.
+
+    /// A source line with any trailing `//` comment removed.
+    ///
+    /// Whole-line comment filtering is not enough: a trailing comment is code
+    /// as far as a substring finder is concerned, which is how CN-C4 satisfied
+    /// an allow-list by mentioning an allowed budget in prose.
+    static func withoutTrailingComment(_ line: String) -> String {
+        var out = ""
+        var inString = false
+        var escaped = false
+        var index = line.startIndex
+        while index < line.endIndex {
+            let character = line[index]
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                inString.toggle()
+            } else if !inString, character == "/" {
+                let next = line.index(after: index)
+                if next < line.endIndex, line[next] == "/" {
+                    break
+                }
+            }
+            out.append(character)
+            index = line.index(after: index)
+        }
+        return out
+    }
+
+    /// Numbered code lines: whole-line comments dropped, trailing comments cut.
+    static func codeLines(of text: String) -> [SourceLine] {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated()
+            .filter { !$0.element.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .map { (number: $0.offset + 1, text: withoutTrailingComment(String($0.element))) }
+    }
+
+    /// The same code read as ONE string, so a name spelled across a line break
+    /// or a `+` join is the same name.
+    ///
+    /// Lines are trimmed and a trailing `\` dropped before joining, because
+    /// that is exactly what Swift does to a multiline-string continuation whose
+    /// indentation matches its closing delimiter — which is the shape the
+    /// runner's log lines are already written in.
+    static func collapsedCode(_ lines: [SourceLine]) -> String {
+        var joined = ""
+        for line in lines {
+            var text = line.text.trimmingCharacters(in: .whitespaces)
+            if text.hasSuffix("\\") {
+                text.removeLast()
+            }
+            joined += text
+        }
+        return collapsingLiteralConcatenation(joined)
+    }
+
+    /// `"a" + "b"` is one literal to everything that matters here.
+    ///
+    /// Scans right to left over a character array so each deletion cannot
+    /// disturb the indices still to be visited.
+    private static func collapsingLiteralConcatenation(_ text: String) -> String {
+        var characters = Array(text)
+        var position = characters.count - 1
+        while position >= 0 {
+            guard characters[position] == "+" else {
+                position -= 1
+                continue
+            }
+            var left = position - 1
+            while left >= 0, characters[left] == " " { left -= 1 }
+            var right = position + 1
+            while right < characters.count, characters[right] == " " { right += 1 }
+            if left >= 0, right < characters.count, characters[left] == "\"", characters[right] == "\"" {
+                characters.removeSubrange(left...right)
+                position = left - 1
+            } else {
+                position -= 1
+            }
+        }
+        return String(characters)
+    }
+
+    /// The same code with EVERY whitespace character removed, so a call spelled
+    /// `Type` / newline / `. run(` is the same call.
+    static func denseCode(_ lines: [SourceLine]) -> String {
+        var joined = ""
+        for line in lines {
+            joined += line.text.filter { !$0.isWhitespace }
+        }
+        return joined
     }
 
     /// Both daemon-refusal event names must reach the log through the enum. A
@@ -797,7 +934,7 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         // Vacuity guard: the file must have been found and be the real one.
         XCTAssertGreaterThan(lines.count, 1_000, "source read found only \(lines.count) code lines")
         XCTAssertTrue(
-            lines.contains { $0.contains("FMDaemonRefusal.classify(") },
+            lines.contains { $0.text.contains("FMDaemonRefusal.classify(") },
             "BackfillJobRunner no longer classifies daemon refusals; move this canary with the code."
         )
 
@@ -810,9 +947,9 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         )
         XCTAssertGreaterThanOrEqual(forbidden.count, 4, "vacuity: the forbidden set must not be empty")
 
-        let offenders = lines.enumerated()
-            .filter { line in forbidden.contains { line.element.contains($0) } }
-            .map { "\($0.offset + 1): \($0.element.trimmingCharacters(in: .whitespaces))" }
+        let offenders = lines
+            .filter { line in forbidden.contains { line.text.contains($0) } }
+            .map { "\($0.number): \($0.text.trimmingCharacters(in: .whitespaces))" }
 
         XCTAssertTrue(
             offenders.isEmpty,
@@ -826,14 +963,69 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
             """
         )
 
-        // Both properties must actually be READ. Forbidding the literals is
-        // only half the rule: a line that emits neither says nothing at all.
+        // R4-Fix2: the SAME rule against a name spelled across a line break or a
+        // `+` join. Probes CN-A2 and CN-A3 hard-coded both events past the check
+        // above without a single line containing either name — CN-A2 using the
+        // very `\` continuation idiom these log lines are already written in.
+        // A per-line finder cannot see a respelling; the collapsed read can.
+        let collapsed = Self.collapsedCode(lines)
+        let respelled = forbidden.filter { collapsed.contains($0) }
+        XCTAssertTrue(
+            respelled.isEmpty,
+            """
+            A daemon-refusal log EVENT NAME is hard-coded in BackfillJobRunner and SPLIT so no one \
+            line holds it — across a `\\` continuation, or as `"a" + "b"`. The emitted name is the \
+            same name and a support-bundle grep counts it the same way. Names found only in the \
+            collapsed read: \(respelled.sorted())
+            """
+        )
+
+        // Both properties must actually be READ, EXACTLY ONCE EACH, and in the
+        // order the control flow emits them.
+        //
+        // R4-Fix1: "is read at all" was satisfiable by a decoy — a one-line
+        // `logger.debug` naming the property, next to a hard-coded literal
+        // emitting it. And "both are read" says nothing about WHICH SITE reads
+        // WHICH, so probe CN-A1 simply SWAPPED them: the per-job line emitted
+        // `drain_stopped_by_…` and the drain-stop line emitted `job_…`. No
+        // literal anywhere, both properties read, every rail green — and every
+        // refused JOB counted as a drain stop in a support bundle. That is this
+        // bead's own defect class committed inside the check written for it.
+        //
+        // The order is not an accident to be pinned: the per-job event is
+        // emitted INSIDE the drain loop's catch arm and the drain-stop event
+        // AFTER the loop breaks, so `logEvent` precedes `drainStoppedEvent` in
+        // the source as a consequence of the control flow. Swapping the two
+        // reads inverts it.
+        var firstRead: [String: Int] = [:]
         for property in ["logEvent", "drainStoppedEvent"] {
-            XCTAssertTrue(
-                lines.contains { $0.contains(property) },
-                "BackfillJobRunner no longer reads `\(property)`; the line cannot be naming the refusal it reports."
+            let reads = lines.filter { $0.text.contains(property) }
+            XCTAssertEqual(
+                reads.count,
+                1,
+                """
+                BackfillJobRunner reads `\(property)` \(reads.count) times; expected exactly one. \
+                Zero means the line cannot be naming the refusal it reports. More than one means a \
+                read can be a DECOY satisfying this rail while the emitted name is hard-coded \
+                somewhere else. Sites: \(reads.map(\.number))
+                """
             )
+            firstRead[property] = reads.first?.number
         }
+        let jobEventLine = try XCTUnwrap(firstRead["logEvent"], "no `logEvent` read to order")
+        let stopEventLine = try XCTUnwrap(firstRead["drainStoppedEvent"], "no `drainStoppedEvent` read to order")
+        XCTAssertLessThan(
+            jobEventLine,
+            stopEventLine,
+            """
+            The per-job event (`logEvent`, line \(jobEventLine)) must be read BEFORE the drain-stop \
+            event (`drainStoppedEvent`, line \(stopEventLine)): the first is emitted inside the \
+            drain loop, the second after it breaks. Reading them in this order means one of the two \
+            sites is naming the OTHER site's event — the per-job line reporting a drain stop, or \
+            the drain-stop line reporting a job. Neither is observable from any runtime assertion \
+            on this harness, which is why it is checked here.
+            """
+        )
     }
 
     /// R2-Fix1: the durable cause tokens must not join a FOREIGN prefix family.
@@ -869,7 +1061,7 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         let anchorTokens = ["inferenceTimeout-noProgress", "cancelled-during-"]
         for token in anchorTokens {
             XCTAssertTrue(
-                lines.contains { $0.contains("\"\(token)") },
+                lines.contains { $0.text.contains("\"\(token)") },
                 "`\(token)` is no longer written by BackfillJobRunner. Re-derive this canary's foreign families."
             )
         }
@@ -941,16 +1133,70 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
     /// six families (`cancelled-`, `expiredWithoutProgress-`, `underCoverage-`,
     /// `underCoverageBudgetSpent-`, `inferenceTimeout-`, `noWork-`) and drops the
     /// two prose lines.
-    private static func durableTokenLiterals(in lines: [String]) -> [String] {
+    /// R4-Fix4: a leading interpolation is resolved ONE level through a string
+    /// constant declared in the same file.
+    ///
+    /// Probe CN-B1 rewrote playhead-41mu's token as
+    /// `"\(Self.underCoverageFamily)-\(phase.rawValue)"` — behaviour-identical,
+    /// still the same family on the device — and the derivation lost it,
+    /// because `isDurableTokenShaped` requires a LETTER first and a backslash
+    /// is not one. Six families fell to five, which still cleared the floor,
+    /// and mutation DR10's exact token then passed. The rail was not evaded by
+    /// touching the rail; it was evaded by refactoring the writer it reads.
+    ///
+    /// Following one level of naming is where this stops: an interpolation that
+    /// resolves to a computed property, to a constant in another file, or to
+    /// anything but a plain string literal is still invisible. That is the
+    /// honest limit, and the anchors plus the floor below are what keep it from
+    /// silently collapsing to nothing.
+    private static func resolvingLeadingInterpolation(
+        _ literal: String,
+        constants: [String: String]
+    ) -> String? {
+        guard literal.hasPrefix("\\(") else { return nil }
+        guard let close = literal.firstIndex(of: ")") else { return nil }
+        let inner = String(literal[literal.index(literal.startIndex, offsetBy: 2)..<close])
+            .replacingOccurrences(of: "Self.", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard let value = constants[inner] else { return nil }
+        return value + String(literal[literal.index(after: close)...])
+    }
+
+    /// `static let NAME = "value"` declarations, by name. Any binding form —
+    /// `let`, `static let`, `nonisolated static let`, `private static let` —
+    /// since all this needs is the name and the literal.
+    private static func stringConstants(in lines: [SourceLine]) -> [String: String] {
+        var constants: [String: String] = [:]
+        for line in lines {
+            let text = line.text
+            guard let letRange = text.range(of: "let ") else { continue }
+            let afterLet = text[letRange.upperBound...]
+            let name = String(afterLet.prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+            guard !name.isEmpty else { continue }
+            guard let equals = afterLet.firstIndex(of: "=") else { continue }
+            let rhs = afterLet[afterLet.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+            guard rhs.hasPrefix("\""), rhs.count >= 2 else { continue }
+            let body = rhs.dropFirst()
+            guard let close = body.firstIndex(of: "\"") else { continue }
+            constants[name] = String(body[body.startIndex..<close])
+        }
+        return constants
+    }
+
+    private static func durableTokenLiterals(in lines: [SourceLine]) -> [String] {
+        let constants = stringConstants(in: lines)
         var found: [String] = []
         for line in lines {
-            var rest = Substring(line)
+            var rest = Substring(line.text)
             while let open = rest.firstIndex(of: "\"") {
                 let afterOpen = rest.index(after: open)
                 guard let close = rest[afterOpen...].firstIndex(of: "\"") else { break }
                 let literal = String(rest[afterOpen..<close])
                 if isDurableTokenShaped(literal) {
                     found.append(literal)
+                } else if let resolved = resolvingLeadingInterpolation(literal, constants: constants),
+                          isDurableTokenShaped(resolved) {
+                    found.append(resolved)
                 }
                 rest = rest[rest.index(after: close)...]
             }
@@ -983,6 +1229,54 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
     /// moved off `standard` — a genuine 300 s inference timeout would start
     /// deferring with an unbounded retry, and nothing else in the suite would
     /// notice. This test is what notices.
+    /// R4-Fix3: judge the ARGUMENT, over a whitespace-free read of the file.
+    ///
+    /// The pre-R4 form asked two questions per line — "does this line contain
+    /// `FMInferenceDeadline.run(`" and "does this line also mention an allowed
+    /// name" — and four probes got a third 30 s budget past it:
+    ///
+    ///   CN-C1  `FMInferenceDeadline.run(FMInferenceDeadline.standard / 10)`.
+    ///          Thirty seconds exactly, on a line that names an allowed budget,
+    ///          so the allow-check said yes. `contains` cannot tell a budget
+    ///          from an expression that merely mentions one.
+    ///   CN-C2  a new site split over two lines. Invisible — and FREE, because
+    ///          the site count is a floor: a site that DISAPPEARS is red, a site
+    ///          nobody can see is not.
+    ///   CN-C3b `FMInferenceDeadline . run(`.
+    ///   CN-C4  the budget in a local, the allowed name only in a trailing
+    ///          comment on the call line.
+    ///
+    /// So the finder now runs over the file with all whitespace removed, and
+    /// the first argument is extracted by balanced-paren scan and matched
+    /// EXACTLY. `.seconds(30)`, `shortBudget` and `FMInferenceDeadline.standard/10`
+    /// are all offenders; nothing that merely mentions an allowed name passes.
+    private static func inferenceBudgetArguments(in dense: String) -> [String] {
+        var arguments: [String] = []
+        var searchRange = dense.startIndex..<dense.endIndex
+        while let call = dense.range(of: "FMInferenceDeadline.run(", range: searchRange) {
+            var depth = 1
+            var index = call.upperBound
+            let start = index
+            var end: String.Index?
+            while index < dense.endIndex {
+                let character = dense[index]
+                if character == "(" || character == "[" {
+                    depth += 1
+                } else if character == ")" || character == "]" {
+                    depth -= 1
+                    if depth == 0 { end = index; break }
+                } else if character == "," && depth == 1 {
+                    end = index
+                    break
+                }
+                index = dense.index(after: index)
+            }
+            arguments.append(String(dense[start..<(end ?? dense.endIndex)]))
+            searchRange = call.upperBound..<dense.endIndex
+        }
+        return arguments
+    }
+
     func testEveryProductionInferenceBudgetIsEnumerated() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -997,22 +1291,23 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         let files = walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
         XCTAssertGreaterThan(files.count, 100, "source walk found only \(files.count) Swift files")
 
-        // Measured, not guessed: 9 call sites at R2 review — 4 `metadata`
-        // (tokenCount plus three schema sizings), 4 injected `inferenceDeadline`
-        // (defaulted to `standard`, pinned below), 1 literal `standard` in the
-        // readiness probe.
-        let allowed = ["FMInferenceDeadline.metadata", "FMInferenceDeadline.standard", "inferenceDeadline"]
+        // Measured, not guessed: 9 call sites at R2 review, re-counted at R4 —
+        // 4 `metadata` (tokenCount plus three schema sizings), 4 injected
+        // `inferenceDeadline` (defaulted to `standard`, pinned below), 1
+        // literal `standard` in the readiness probe.
+        let allowed: Set<String> = [
+            "FMInferenceDeadline.metadata",
+            "FMInferenceDeadline.standard",
+            "inferenceDeadline"
+        ]
         var callSites: [String] = []
         var offenders: [String] = []
         for file in files {
-            let lines = try String(contentsOf: file, encoding: .utf8)
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .map(String.init)
-                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
-            for (index, line) in lines.enumerated() where line.contains("FMInferenceDeadline.run(") {
-                let site = "\(file.lastPathComponent):\(index + 1): \(line.trimmingCharacters(in: .whitespaces))"
+            let lines = Self.codeLines(of: try String(contentsOf: file, encoding: .utf8))
+            for argument in Self.inferenceBudgetArguments(in: Self.denseCode(lines)) {
+                let site = "\(file.lastPathComponent): FMInferenceDeadline.run(\(argument))"
                 callSites.append(site)
-                if !allowed.contains(where: line.contains) {
+                if !allowed.contains(argument) {
                     offenders.append(site)
                 }
             }
@@ -1026,8 +1321,10 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
             An inference budget outside the enumerated set reaches `FMInferenceDeadline.run`. \
             `FMDaemonRefusal.isMetadataStall` discriminates on `deadline == FMInferenceDeadline.metadata`, \
             so a third budget of 30 s silently turns a real inference timeout into a deferrable daemon \
-            refusal — an unbounded retry on evidence about the MODEL. Add the budget to the enumeration \
-            here and give it a rail, or route it through an existing one.
+            refusal — an unbounded retry on evidence about the MODEL. The argument must BE one of \
+            \(allowed.sorted()), not merely mention one: `FMInferenceDeadline.standard / 10` is thirty \
+            seconds. Add the budget to the enumeration here and give it a rail, or route it through an \
+            existing one.
             \(offenders.joined(separator: "\n"))
             """
         )

@@ -39,11 +39,26 @@
 //     markBackfillJobFailed(reason: String(describing: error), retryCount: job.retryCount + 1)
 //
 // WHY THAT COSTS REACH. `AdmissionController.maxRetries` is 3, and
-// `runPendingBackfill` refuses to re-enqueue a row at or above it. Three wedged
-// -daemon moments, unrelated to each other and to the episode, disqualify that
-// episode from ad scanning for the life of the install. Both terminal `failed`
-// rows in the 2026-08-03 pull are daemon conditions — one throttle, one
-// metadata stall — and neither is the job's own merits.
+// `runBackfill` refuses to re-enqueue a row at or above it. Three wedged-daemon
+// moments, unrelated to each other and to the episode, disqualify that episode
+// from ad scanning. Both terminal `failed` rows in the 2026-08-03 pull are
+// daemon conditions — one throttle, one metadata stall — and neither is the
+// job's own merits.
+//
+// R4 CORRECTED THE SCOPE OF THAT COST, and the field pull quoted above is its
+// own counterexample. The budget is spent per JOB ROW, and a row's identity is
+// `hash(asset | transcriptVersion | phase | offset)` (`makeJobIdForTesting`),
+// so an episode whose transcript is still growing gets a FRESH row at
+// `retryCount = 0` rather than being re-driven: 0C2FC22E's failed row
+// `fm-443333542600941c` is followed 2 h 04 m later by `fm-673a3b2b167fc4c7` —
+// queued, `retryCount = 0`, same asset, same phase. So "for the life of the
+// install", which this paragraph used to say, is false while the transcript is
+// still moving. It becomes true the moment the transcript stops moving, which
+// is exactly when a full-episode ad scan is worth running and is nearly all of
+// an episode's life. The disposition is wrong either way — a daemon condition
+// is not evidence about the job at any scope — but the cost is "this episode is
+// disqualified against its FINAL transcript", not "forever from the first
+// failure".
 //
 // WHY A SHARED TYPE RATHER THAN A SECOND CATCH ARM. kvs8's own doc states the
 // principle in general terms — a daemon condition "says nothing about the job" —
