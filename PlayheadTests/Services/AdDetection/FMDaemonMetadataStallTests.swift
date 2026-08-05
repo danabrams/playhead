@@ -62,7 +62,7 @@ import XCTest
 @Suite("playhead-e75l: FMDaemonRefusal is the one definition of a daemon condition")
 struct FMDaemonRefusalDefinitionTests {
 
-    @Test("a metadata-deadline timeout is a refusal; a standard-deadline one is not")
+    @Test("a metadata-deadline timeout is a refusal — a standard-deadline one is not")
     func theDiscriminatorIsTheBudget() {
         // Same type, same initializer, different budget. If the predicate keyed
         // on the type, these two lines could not disagree.

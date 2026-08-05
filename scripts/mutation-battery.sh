@@ -2485,7 +2485,10 @@ T_IU0T_LAUNDER="TranscriptCanonicalizationRuleCanaryTests/testCanonicalizingAndT
 T_DR_DEFERS="a metadata-deadline timeout in the PROLOGUE defers the job — it must not mark it failed"
 T_DR_COST="THE COST, DIRECTLY: three metadata stalls must not disqualify an episode forever"
 T_DR_CAUSE="a metadata stall records a NAMED cause, not the error's Swift description"
-T_DR_BUDGET="a metadata-deadline timeout is a refusal; a standard-deadline one is not"
+# NOTE: no ';' in this display name. The MUTATIONS record separator is ';', so a
+# test whose name contains one can never be matched and every mutation naming it
+# reports ERROR while having killed it perfectly (observed here on DR02/DR03).
+T_DR_BUDGET="a metadata-deadline timeout is a refusal — a standard-deadline one is not"
 T_DR_STANDARD="DISCRIMINATOR: a STANDARD-deadline timeout through the same seam still fails and burns a retry"
 T_DR_ONECOUNTER="ONE counter: a throttle then a metadata stall stops the drain, and the sibling names the stall"
 T_DR_BATCH="a stalled batch leaves no job stranded in queued and none marked failed"
