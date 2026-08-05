@@ -1206,6 +1206,123 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
             jobs carry; naming the refused job's token instead reports a cause no swept row holds.
             """
         )
+
+        // R7-Fix1: and the EVENT on each line must be read off the SAME VALUE as
+        // the cause beside it.
+        //
+        // R1 found the drain-stop event hard-coded to kvs8's
+        // `fm.backfill.drain_stopped_by_throttle` for a drain stopped by metadata
+        // stalls, and the rail it bought forbids that LITERAL (derived from
+        // `allCases`, R2-Fix2) and pins the read order (R4-Fix1). Probe R7-PC3
+        // wrote `FMDaemonRefusal.throttle.drainStoppedEvent` instead: no literal,
+        // `drainStoppedEvent` still read exactly once and still after `logEvent`,
+        // every rail green — and the emitted name is byte-identical to the one R1
+        // removed. Fixing a value by forbidding its SPELLING is what R2-Fix2,
+        // R3-Fix1 and R4-Fix8 each had to replace; the value itself is what an
+        // operator's `grep -c` counts.
+        //
+        // Derived from the receivers already extracted above, so nothing here is
+        // a list of expected spellings: the per-job line's event must hang off
+        // whatever value that line's own defer wrote its cause from, and the
+        // drain-stop line's off the sweep's. The `\\(` anchor is what makes it a
+        // whole-identifier match rather than a suffix one — `refusalThatStoppedUs`
+        // has `refusal` as a prefix, and only the anchor separates them.
+        for (token, property, role) in [
+            (ownDeferToken, "logEvent", "per-job refusal"),
+            (sweepToken, "drainStoppedEvent", "drain-stop"),
+        ] {
+            let receiver = String(token.prefix(while: { $0 != "." }))
+            XCTAssertFalse(
+                receiver.isEmpty || receiver == token,
+                "vacuity: `\(token)` has no receiver to bind `\(property)` to."
+            )
+            XCTAssertTrue(
+                dense.contains("\\(\(receiver).\(property)"),
+                """
+                The \(role) line's `\(property)` is not read off `\(receiver)` — the same value the \
+                defer beside it wrote `\(token)` from. Binding it to a fixed kind instead (or to the \
+                other line's value) emits an event name for a condition that did not occur, with no \
+                literal anywhere for the hard-coding rail above to see, and a support-bundle grep \
+                counts the event NAME. Probe R7-PC3 did exactly this and every rail stayed green.
+                """
+            )
+        }
+    }
+
+    /// R7-Fix2: both log lines' `consecutive=` must name the counter the STOP
+    /// RULE reads.
+    ///
+    /// This is the fifth field on the drain-stop line to be examined and the
+    /// first that had no rule at all. R1 corrected its event NAME, R2 its
+    /// `cause=` -> `siblingCause=`, R5 its `deferredSiblings=`, R6 the cause
+    /// pair's binding — and `consecutive=` was carried through all four
+    /// untouched, on both that line and the per-job line.
+    ///
+    /// Two probes ran it. R7-PC1 gave the drain-stop field `deferred.count`, the
+    /// drain-wide accumulator R5 had just removed from `deferredSiblings=` on the
+    /// same line. R7-PC2 gave the per-job field `job.retryCount` — and that one
+    /// is the standing defect class in its sharpest form, because `retryCount` is
+    /// the quantity THIS BEAD EXISTS TO HOLD CONSTANT: preserved across every
+    /// daemon refusal, so the field would read the same number whether the daemon
+    /// refused this job once or four times running. Ask the diagnostic — what
+    /// would it read if the thing it names had never happened? The same value,
+    /// and normally zero. Both SURVIVED every suite in this bead's scope.
+    ///
+    /// Derived rather than pinned, for the R2-Fix2 reason: the expected
+    /// identifier is read out of the `shouldStopDraining` call, so the rule is
+    /// "the number you report is the number you decide on" and a rename moves it
+    /// with the code.
+    func testConsecutiveFieldsNameTheCounterTheStopRuleReads() throws {
+        let lines = try runnerSource()
+        XCTAssertGreaterThan(lines.count, 1_000, "source read found only \(lines.count) code lines")
+
+        let dense = Self.denseCode(lines)
+
+        // The counter the drain actually decides on. One call site, asserted, so
+        // this cannot silently start reading a second one.
+        let stopRuleArguments = Self.firstArguments(after: "consecutiveRefusals:", in: dense)
+        XCTAssertEqual(
+            stopRuleArguments.count,
+            1,
+            """
+            Expected exactly one `shouldStopDraining(consecutiveRefusals:)` call in BackfillJobRunner \
+            to derive the reported counter from; found \(stopRuleArguments). Zero means the drain no \
+            longer delegates the stop rule and this canary is reading nothing.
+            """
+        )
+        let counter = try XCTUnwrap(stopRuleArguments.first)
+        XCTAssertFalse(
+            counter.contains("."),
+            "vacuity: expected a bare counter identifier at the stop rule; found `\(counter)`."
+        )
+
+        // Both refusal log lines report it: the per-job line and the drain-stop
+        // line. An exact count, not a floor — a field that DISAPPEARS is as much
+        // a regression as one that lies (R4's DR14 lesson).
+        let reported = Self.firstArguments(after: "consecutive=\\(", in: dense)
+        XCTAssertEqual(
+            reported.count,
+            2,
+            """
+            Expected exactly two `consecutive=` fields — one on the per-job refusal line, one on the \
+            drain-stop line; found \(reported).
+            """
+        )
+        for field in reported {
+            XCTAssertEqual(
+                field,
+                counter,
+                """
+                A daemon-refusal log line reports `consecutive=\\(\(field))` while the drain decides \
+                to stop on `\(counter)`. The field names the run of back-to-back refusals an operator \
+                reads to tell a wedged daemon from an unlucky job; anything else on that line either \
+                spans the whole drain (`deferred` accumulates admission defers, coverage-hole defers \
+                and under-coverage terminals) or is held DELIBERATELY CONSTANT by this bead \
+                (`job.retryCount` is preserved across every refusal, so the field could never move). \
+                Report the number you decided on.
+                """
+            )
+        }
     }
 
     /// R5-Fix1: the drain-stop line's `deferredSiblings=` must count THE SWEEP.
