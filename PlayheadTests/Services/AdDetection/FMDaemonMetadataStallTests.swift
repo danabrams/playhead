@@ -160,7 +160,7 @@ struct FMDaemonRefusalDefinitionTests {
         for consecutive in 0...(FMDaemonThrottle.consecutiveDeferStopThreshold + 2) {
             #expect(
                 FMDaemonRefusal.shouldStopDraining(consecutiveRefusals: consecutive)
-                    == FMDaemonThrottle.shouldStopDraining(consecutiveThrottles: consecutive),
+                    == FMDaemonThrottle.shouldStopDraining(consecutiveDaemonRefusals: consecutive),
                 "the two rules disagreed at \(consecutive)"
             )
         }
@@ -681,11 +681,17 @@ struct FMDaemonMetadataStallRunnerTests {
         // the sweep it is testing does not run.
         #expect(!siblingReasons.isEmpty,
                 "vacuity: no sibling was swept, so the token assertion proves nothing")
-        #expect(siblingReasons.allSatisfy { !$0.hasPrefix("rateLimited-") },
-                "a metadata stall deferred siblings as rate-limited: \(siblingReasons)")
-        // R2-Fix1: nor into playhead-8d5r's `inferenceTimeout-` family.
-        #expect(siblingReasons.allSatisfy { !$0.hasPrefix("inferenceTimeout-") },
-                "a metadata stall deferred siblings into the mute-model family: \(siblingReasons)")
+        // R4-Fix8: the token must BE the stall's, not merely avoid two families
+        // somebody thought of. This was `allSatisfy { !hasPrefix("rateLimited-") }`
+        // plus `!hasPrefix("inferenceTimeout-")` — a hand-written list of the two
+        // wrong answers already known, which is the shape R2-Fix2 and R3-Fix1
+        // both replaced elsewhere in this bead and which passes for a THIRD wrong
+        // family. Its sibling test (`aThrottleAndAStallShareOneConsecutiveCounter`)
+        // already asserted exact equality; this one did not. Set equality rather
+        // than array equality so the claim is about the TOKEN and not about how
+        // many siblings the fixture happens to leave.
+        #expect(Set(siblingReasons) == [FMDaemonRefusal.metadataStall.batchSiblingCause],
+                "the swept siblings must carry the STALL's token: \(siblingReasons)")
     }
 
     @available(iOS 26.0, *)
@@ -1329,7 +1335,9 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
             """
         )
 
-        // The one budget a caller can move without touching a call site.
+        // R2-Fix5 called this "the one budget a caller can move without touching
+        // a call site". `Config.default` omits `inferenceDeadline`, so this pin
+        // does reach that init's default transitively.
         XCTAssertEqual(
             FoundationModelClassifier.Config.default.inferenceDeadline,
             FMInferenceDeadline.standard,
@@ -1338,6 +1346,52 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         XCTAssertNotEqual(
             FoundationModelClassifier.Config.default.inferenceDeadline,
             FMInferenceDeadline.metadata
+        )
+
+        // R4-Fix6: THERE ARE THREE, and R2 pinned one.
+        //
+        // The enumeration above is derived — every `FMInferenceDeadline.run`
+        // call site, judged — but the DEFAULTS were not: `PermissiveAdClassifier
+        // .init` and the classifier's inner FM-call type each declare their own
+        // `inferenceDeadline: Duration = …`, and nothing looked at either. Move
+        // one to 30 s and every genuine inference timeout through that seam
+        // becomes a daemon refusal with an unbounded retry, while the call site
+        // still reads `inferenceDeadline` and stays allowed. That is R3-Fix1's
+        // shape one layer out: a set closed by enumeration on one axis and by
+        // hand on the other.
+        //
+        // Derived from source, floor measured at THREE at R4, and each default
+        // must BE `FMInferenceDeadline.standard` rather than merely mention it.
+        var deadlineDefaults: [String] = []
+        var movedDefaults: [String] = []
+        for file in files {
+            let dense = Self.denseCode(Self.codeLines(of: try String(contentsOf: file, encoding: .utf8)))
+            var searchRange = dense.startIndex..<dense.endIndex
+            while let hit = dense.range(of: "inferenceDeadline:Duration=", range: searchRange) {
+                let value = String(dense[hit.upperBound...].prefix { $0 != "," && $0 != ")" && $0 != "{" })
+                let site = "\(file.lastPathComponent): inferenceDeadline: Duration = \(value)"
+                deadlineDefaults.append(site)
+                if value != "FMInferenceDeadline.standard" {
+                    movedDefaults.append(site)
+                }
+                searchRange = hit.upperBound..<dense.endIndex
+            }
+        }
+        XCTAssertGreaterThanOrEqual(
+            deadlineDefaults.count,
+            3,
+            "found only \(deadlineDefaults.count) injected-deadline defaults; the derivation lost one"
+        )
+        XCTAssertTrue(
+            movedDefaults.isEmpty,
+            """
+            An injected inference budget DEFAULTS to something other than `FMInferenceDeadline.standard`. \
+            Every `FMInferenceDeadline.run` call site taking `inferenceDeadline` is allowed precisely \
+            because that is what it resolves to; a default of 30 s makes `FMDaemonRefusal.isMetadataStall` \
+            true for every genuine inference timeout through that seam, which then DEFERS with `retryCount` \
+            preserved and retries without bound.
+            \(movedDefaults.joined(separator: "\n"))
+            """
         )
     }
 }

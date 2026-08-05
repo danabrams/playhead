@@ -1090,6 +1090,10 @@ FMREF="Playhead/Services/AdDetection/FMDaemonRefusal.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
+# playhead-e75l R4: the THIRD injected inference budget. R2's enumeration
+# derived the call sites and hand-picked one default to pin; this file carries
+# one of the two it did not.
+PERMC="Playhead/Services/AdDetection/PermissiveAdClassifier.swift"
 # playhead-usn1: the per-show skip-mode CONTROL. Two more files join the
 # djl0 trio because the field defect was not in the cause taxonomy at all — it
 # was a surface that sampled the mode ONCE, before `beginEpisode` had resolved
@@ -1255,7 +1259,7 @@ ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swi
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$FMREF" "$RUNNER" "$FMCLS" "$PROBE" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$THROT" "$FMREF" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
@@ -5030,6 +5034,16 @@ MUTATIONS=(
   # red and a site nobody can see is not. The existing `standard` site is left
   # in place precisely so the count still clears 9.
   "DR14|510|PROBE|$T_DR_BUDGETSITES"
+
+  # DR15 — the third injected budget's DEFAULT. R2-Fix5 closed the "third 30 s
+  # budget" hole by enumerating every `FMInferenceDeadline.run` call site, then
+  # pinned ONE default by hand — and there are three. Four of the nine sites
+  # pass `inferenceDeadline`, and they are allowed exactly because that name
+  # resolves to `standard`; move a default and the call site still reads
+  # `inferenceDeadline` while every genuine inference timeout through that seam
+  # becomes a deferrable daemon refusal. R3-Fix1's shape one axis over: derived
+  # on the call sites, hand-written on the defaults.
+  "DR15|511|PERMC|$T_DR_BUDGETSITES"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5470,6 +5484,7 @@ describe_mutation() {
     DR12) echo "e75l R4: the drain-stop event is hard-coded again but SPLIT across a backslash continuation, so no one line holds the name" ;;
     DR13) echo "e75l R4: a third 30s budget as FMInferenceDeadline.standard / 10 — the line MENTIONS an allowed budget, which is all the old check asked" ;;
     DR14) echo "e75l R4: an ADDED 30s call site spelled across two lines — invisible to a per-line finder, and free because the site count is a floor" ;;
+    DR15) echo "e75l R4: the third injected budget DEFAULTS to the metadata bound — R2 enumerated the call sites and pinned one of three defaults by hand" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11894,6 +11909,19 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # DR15 — R4 review. The THIRD injected budget's default moves to the metadata
+  # bound. Every `FMInferenceDeadline.run(inferenceDeadline)` site stays
+  # spelled exactly as the enumeration allows, and every genuine inference
+  # timeout through `PermissiveAdClassifier` becomes a daemon refusal.
+  DR15)
+    snippet OLD <<'EOF'
+        inferenceDeadline: Duration = FMInferenceDeadline.standard
+EOF
+    snippet NEW <<'EOF'
+        inferenceDeadline: Duration = FMInferenceDeadline.metadata
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -11932,6 +11960,7 @@ rec_file()   {
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;
+    PERMC) printf '%s' "$PERMC" ;;
     RT)    printf '%s' "$RT" ;;
     MODEL) printf '%s' "$MODEL" ;;
     INGO)  printf '%s' "$INGO" ;;

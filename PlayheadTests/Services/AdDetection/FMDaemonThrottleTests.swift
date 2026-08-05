@@ -126,13 +126,13 @@ struct FMDaemonThrottleClassificationTests {
         // the pattern this repo has landed on: one throttle is an event, N
         // back-to-back with nothing succeeding in between is a device fact.
         #expect(FMDaemonThrottle.consecutiveDeferStopThreshold >= 2)
-        #expect(!FMDaemonThrottle.shouldStopDraining(consecutiveThrottles: 0))
-        #expect(!FMDaemonThrottle.shouldStopDraining(consecutiveThrottles: 1))
+        #expect(!FMDaemonThrottle.shouldStopDraining(consecutiveDaemonRefusals: 0))
+        #expect(!FMDaemonThrottle.shouldStopDraining(consecutiveDaemonRefusals: 1))
         #expect(FMDaemonThrottle.shouldStopDraining(
-            consecutiveThrottles: FMDaemonThrottle.consecutiveDeferStopThreshold
+            consecutiveDaemonRefusals: FMDaemonThrottle.consecutiveDeferStopThreshold
         ))
         #expect(FMDaemonThrottle.shouldStopDraining(
-            consecutiveThrottles: FMDaemonThrottle.consecutiveDeferStopThreshold + 1
+            consecutiveDaemonRefusals: FMDaemonThrottle.consecutiveDeferStopThreshold + 1
         ))
     }
 }
