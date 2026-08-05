@@ -203,6 +203,30 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   R4 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batches 507-510 — DR11
+#   through DR14, one mutation each because DR11/DR12 both redden the wiring
+#   canary and DR13/DR14 both redden the budget canary.
+#
+#   THE LESSON, and it is one lesson wearing four spellings: EVERY source
+#   canary in this bead found its sites by literal substring over ONE LINE, and
+#   no round had tried respelling one ACROSS lines. R4 planted eight and SEVEN
+#   walked past — two hard-coded event names split by a `\` continuation or a
+#   `+` join, one that SWAPPED the two event properties and used no literal at
+#   all, and four ways to spell a third 30 s budget (`standard / 10`, a site
+#   split over two lines, `Type . run(`, and a budget in a local with the
+#   allowed name in a trailing comment). The single evasion that FAILED was
+#   killed by SwiftLint's `no_space_in_method_call`, not by any rail here.
+#
+#   Two shapes are worth carrying forward. DR11 is the sharpest: R2's rule was
+#   "both properties must be READ", which says nothing about WHICH SITE reads
+#   which, so swapping them satisfied every assertion. A rail that checks a
+#   name is present is not checking that the name is in the right place. And
+#   DR14 is why a count FLOOR is only half a vacuity guard: a site that
+#   DISAPPEARS is red, a site nobody can see is not, so adding an unreadable
+#   one is free. The fix in both cases was to stop reading lines — the finders
+#   now run over a collapsed / whitespace-free read of the file and judge the
+#   ARGUMENT rather than the line it sits on.
+#
 #   R3 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batch 506 — DR10 added and
 #   DR02 MOVED here out of batch 500. Batch 506 run WITH a green baseline, then
 #   500-505 re-run behind it with PLAYHEAD_MB_SKIP_BASELINE=1 on the same
@@ -2537,6 +2561,11 @@ T_DR_WIRING="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalLogEventsAreNotHa
 # it is a source canary because the foreign token is a bare literal in the
 # runner, so the rule has to be re-derived if playhead-8d5r's spelling moves.
 T_DR_FAMILY="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCausesDoNotJoinAForeignTokenFamily"
+# R4 review: the budget-enumeration canary. XCTest. It is the rail holding
+# `isMetadataStall`'s soundness — "no other budget reaching
+# `FMInferenceDeadline.run` is 30 s" — and until R4 it asked its question one
+# LINE at a time, which four different spellings walked past.
+T_DR_BUDGETSITES="FMDaemonRefusalSourceCanaryTests/testEveryProductionInferenceBudgetIsEnumerated"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4956,6 +4985,51 @@ MUTATIONS=(
   # `classify`.
   "DR02|506|FMREF|$T_DR_BUDGET;$T_DR_STANDARD"
   "DR10|506|FMREF|$T_DR_FAMILY"
+
+  # Batches 507-510. R4 review, and all four are the SAME defect wearing four
+  # spellings: a source canary that finds its sites by literal substring over
+  # ONE line cannot see a name written across two. R4 planted eight respellings
+  # against these three canaries and SEVEN survived — the one that failed was
+  # killed by SwiftLint's `no_space_in_method_call`, not by a rail here.
+  #
+  # One mutation per batch, because DR11/DR12 both redden the wiring canary and
+  # DR13/DR14 both redden the budget canary, and a batch may contain no two
+  # mutations that can redden the same test.
+  #
+  # NOT ENCODED, and stated rather than hidden: probe CN-B1 (the foreign family
+  # written `"\(Self.underCoverageFamily)-…"` so the derivation loses it, plus a
+  # refusal token named into that family) needs edits in TWO files, and a
+  # mutation record names one. It was verified by hand at R4 — survives the R3
+  # canary, killed by the R4 one — and the constant-resolution fix it bought is
+  # exercised by nothing here.
+
+  # DR11 — the SWAP, and the sharpest of the four because it uses no literal at
+  # all. The per-job line emits `drainStoppedEvent`, the drain-stop line emits
+  # `logEvent`. R2's rail asked whether both properties are READ, which says
+  # nothing about which SITE reads which; both are read, so it passed. On a
+  # device every daemon-refused JOB would then be counted as a drain stop by a
+  # support-bundle grep, and every drain stop as a job. This bead's own defect
+  # class committed inside the check written for it.
+  "DR11|507|RUNNER|$T_DR_WIRING"
+
+  # DR12 — DR06 respelled. The drain-stop event is hard-coded again, but split
+  # across a `\` line continuation INSIDE the multiline string the runner
+  # already writes its log lines in, so no single line holds the name; a decoy
+  # `logger.debug` supplies the property read R2's half required.
+  "DR12|508|RUNNER|$T_DR_WIRING"
+
+  # DR13 — a third 30 s budget spelled as arithmetic on an allowed one.
+  # `FMInferenceDeadline.standard / 10` IS thirty seconds, and the pre-R4 check
+  # asked only whether the LINE mentions an allowed name. It does. Every
+  # genuine 300 s inference timeout would classify as a daemon refusal and
+  # retry unboundedly — the exact hazard R2-Fix5 built that canary for.
+  "DR13|509|PROBE|$T_DR_BUDGETSITES"
+
+  # DR14 — an ADDED call site written across two lines. Invisible to a per-line
+  # finder, and free: the site count is a FLOOR, so a site that disappears is
+  # red and a site nobody can see is not. The existing `standard` site is left
+  # in place precisely so the count still clears 9.
+  "DR14|510|PROBE|$T_DR_BUDGETSITES"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5392,6 +5466,10 @@ describe_mutation() {
     DR08) echo "e75l R2: the PER-JOB log event is a hard-coded literal — R1's canary named two kvs8-era spellings, so it could not see a literal of the event this bead added" ;;
     DR09) echo "e75l R2: the durable token joins playhead-8d5r's inferenceTimeout- family — the prefix an operator greps to count a model that is not answering" ;;
     DR10) echo "e75l R3: the durable token joins playhead-41mu's underCoverage- family — one of the four families R2's hand-written foreign list forgot" ;;
+    DR11) echo "e75l R4: the two log-event properties are SWAPPED — no literal anywhere, both still read, and every refused JOB is counted as a drain stop" ;;
+    DR12) echo "e75l R4: the drain-stop event is hard-coded again but SPLIT across a backslash continuation, so no one line holds the name" ;;
+    DR13) echo "e75l R4: a third 30s budget as FMInferenceDeadline.standard / 10 — the line MENTIONS an allowed budget, which is all the old check asked" ;;
+    DR14) echo "e75l R4: an ADDED 30s call site spelled across two lines — invisible to a per-line finder, and free because the site count is a floor" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11745,6 +11823,74 @@ EOF
 EOF
     snippet NEW <<'EOF'
             "underCoverage-refused"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR11 — R4 review. THE SWAP, and it uses no literal at all. Two patches in
+  # one mutation because the defect is the PAIR: swapping only one side leaves
+  # a property unread, which R2's half already caught. Swapping both leaves
+  # every rail satisfied — both properties read, no forbidden name anywhere —
+  # while the per-job line reports a drain stop and the drain-stop line reports
+  # a job.
+  DR11)
+    snippet OLD <<'EOF'
+                        \(refusal.logEvent, privacy: .public) job=\(job.jobId, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                        \(refusal.drainStoppedEvent, privacy: .public) job=\(job.jobId, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                \(refusalThatStoppedUs.logEvent, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR12 — R4 review. DR06 respelled: the drain-stop event hard-coded again,
+  # split by a `\` continuation inside the multiline string, with a decoy
+  # `logger.debug` supplying the property read.
+  DR12)
+    snippet OLD <<'EOF'
+            logger.error(
+                """
+                \(refusalThatStoppedUs.drainStoppedEvent, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+            logger.debug("drain stop kind=\(refusalThatStoppedUs.drainStoppedEvent, privacy: .public)")
+            logger.error(
+                """
+                fm.backfill.drain_stopped_\
+                by_throttle \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR13 — R4 review. The readiness probe's budget becomes thirty seconds,
+  # written as arithmetic on an allowed one so the line still MENTIONS
+  # `FMInferenceDeadline.standard`.
+  DR13)
+    snippet OLD <<'EOF'
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard) {
+EOF
+    snippet NEW <<'EOF'
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard / 10) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR14 — R4 review. An ADDED 30 s call site spelled across two lines. The
+  # existing `standard` site stays, so the site count still clears its floor
+  # and only judging the ARGUMENT can see this.
+  DR14)
+    snippet OLD <<'EOF'
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard) {
+EOF
+    snippet NEW <<'EOF'
+            try await FMInferenceDeadline
+                .run(.seconds(30)) {
+                logger.debug("Foundation Models readiness probe warm-up")
+            }
+            try await FMInferenceDeadline.run(FMInferenceDeadline.standard) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
