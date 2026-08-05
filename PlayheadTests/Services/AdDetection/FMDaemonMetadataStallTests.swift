@@ -453,8 +453,15 @@ struct FMDaemonMetadataStallRunnerTests {
         // this whole arc exists to kill.
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == nil)
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
-        #expect(scans.allSatisfy { $0.status != .success && $0.status != .noAds },
-                "a stalled prologue examined nothing; got \(scans.map(\.status.rawValue))")
+        // R2 vacuity sweep: this was `allSatisfy { $0.status != .success && … }`,
+        // which is TRUE on the empty array the refusal path actually produces —
+        // the F2 shape, one test over. `isEmpty` is the state the code is in and
+        // is strictly stronger: it also rejects a FAILURE row invented for a
+        // window nobody called, which is the shape playhead-8d5r had to fix
+        // once already ("no row may claim a timeout for a window nobody
+        // called").
+        #expect(scans.isEmpty,
+                "a stalled prologue examined nothing, so it may claim nothing; got \(scans.map(\.status.rawValue))")
         #expect(await fmRuntime.coarseCallCount == 0, "the stall precedes every window")
     }
 

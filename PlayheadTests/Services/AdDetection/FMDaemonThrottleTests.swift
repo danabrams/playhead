@@ -334,8 +334,12 @@ struct FMThrottledPrologueRunnerTests {
         // worse still.
         #expect(row.progressCursor?.lastProcessedUpperBoundSec == nil)
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
-        #expect(scans.allSatisfy { $0.status != .success && $0.status != .noAds },
-                "a throttled prologue examined nothing; got \(scans.map(\.status.rawValue))")
+        // playhead-e75l R2 vacuity sweep: `allSatisfy` is TRUE on the empty
+        // array this path actually produces, so the assertion could not fail.
+        // `isEmpty` is the real state and also rejects a fabricated FAILURE
+        // row, which `allSatisfy` permitted.
+        #expect(scans.isEmpty,
+                "a throttled prologue examined nothing, so it may claim nothing; got \(scans.map(\.status.rawValue))")
         #expect(await fmRuntime.coarseCallCount == 0, "the prologue throttle precedes every window")
     }
 
