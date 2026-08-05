@@ -62,11 +62,23 @@ struct SemanticScanClaimPredicateTests {
     /// 2026-08-03 pull in R5: exactly three of the twelve assets own any
     /// `semantic_scan_results` row, and their `adScanFraction` (coverage-lane
     /// `passA` windows that examined, intersected with the 5 s-bridged
-    /// fast-transcript region, over the declared duration) is
-    /// **0.000** (53FC53E3 — one 35.8 s window at 2490–2525.8 s, entirely
-    /// outside its fast transcript, so the intersection is genuinely zero),
+    /// TRANSCRIBED region, over the declared duration) is
+    /// **0.014** (53FC53E3 — one 35.8 s window at 2490–2525.8 s),
     /// **0.207** (AD5F3A0A, 885.3 s of 4280.9 s) and **0.380** (DE0784D8,
-    /// 2097.2 s of 5522.7 s). The last is not just a replication: the device
+    /// 2097.2 s of 5522.7 s).
+    ///
+    /// playhead-x0lb: 53FC53E3's figure read **0.000** here, and that number was
+    /// correct under the definition in force when it was written — the bound was
+    /// the FAST union alone, and this window lies entirely outside 53FC53E3's
+    /// fast transcript. playhead-9y9e widened the bound to BOTH passes, and the
+    /// asset has 32 final chunks over 2490–2493.4 s, so the intersection is now
+    /// 35.82 s and the fraction is 0.0142 — which is the figure playhead-41mu and
+    /// playhead-5pyq both quote. Re-derived both ways against
+    /// `scratchpad/db-aug3-work/analysis.sqlite`: fast-only 0.0000, canonical
+    /// 0.0142. A number computed under one definition and quoted under another is
+    /// instance 7 of playhead-x0lb's catalogue, so it is corrected rather than
+    /// left to be re-discovered. The argument list keeps `0.0` — it is a
+    /// legitimate synthetic bound, and every value here is owed either way. The last is not just a replication: the device
     /// wrote `ad scan 0.380 < 0.980 (decodeFailure)` into that asset's own
     /// `analysis_assets.terminalReason`, so the number has a witness in the
     /// pull rather than only in this file. The values this list carried before
