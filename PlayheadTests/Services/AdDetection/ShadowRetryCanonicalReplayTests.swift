@@ -311,12 +311,22 @@ struct ShadowRetryCanonicalReplayTests {
                 (earliest=\(earliest))
                 """)
 
-        // The union of screened spans, against the declared duration. This is
-        // the same shape as the field's 36-of-2,528 s = 0.0142.
+        // The union of screened spans over the declared duration — the same
+        // ratio the field row reads 36/2528 = 0.0142 on, and the same one
+        // `AnalysisCoverageSummary.adScanFraction` divides.
+        //
+        // EXACT, not a threshold. Measured: this drain screens 420.0 of 420.0 s,
+        // because the canonical transcript is contiguous over the whole episode
+        // and `fullEpisodeScan` plans across all of it. Replaying the final-only
+        // set screens 120 s — the [300, 420] region — for 0.286. A `> 0.5`-style
+        // bound would separate those two but would also quietly accept a future
+        // change that lost a third of the episode, and the whole point of this
+        // bead is that a plausible-looking coverage number is exactly what
+        // nobody checked.
         let unionSec = TranscriptChunkCanonicalizer
             .mergeIntervals(scans.map { ($0.windowStartTime, $0.windowEndTime) })
             .reduce(0) { $0 + ($1.1 - $1.0) }
-        #expect(unionSec > Self.episodeDurationSec * 0.5,
+        #expect(unionSec == Self.episodeDurationSec,
                 "screened \(unionSec)s of a \(Self.episodeDurationSec)s episode")
     }
 
