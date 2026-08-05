@@ -1209,7 +1209,7 @@ actor AnalysisJobRunner {
         wroteNewChunks: Bool,
         hasExistingWindows: Bool,
         hasCandidateWindows: Bool,
-        adScanFraction: Double?
+        adScanFraction: ReachRatio?
     ) -> Bool {
         guard semanticBackfillHasNoOtherWork(
             wroteNewChunks: wroteNewChunks,
@@ -1218,7 +1218,7 @@ actor AnalysisJobRunner {
         ) else {
             return false
         }
-        guard let adScanFraction, adScanFraction.isFinite else { return false }
+        guard let adScanFraction = adScanFraction.finiteValue else { return false }
         return adScanFraction >= semanticBackfillSufficientAdScanFraction
     }
 
@@ -1246,7 +1246,10 @@ actor AnalysisJobRunner {
     /// scanning at exactly the point the surface is willing to call the episode
     /// read. A lower floor here would produce episodes the pipeline considers
     /// done and the UI still marks ◐, with nothing able to close the gap.
-    static var semanticBackfillSufficientAdScanFraction: Double {
+    /// playhead-x0lb: a ``ReachRatio``. Typing the FLOOR is what makes the
+    /// comparison typed at every consumer — a ``DensityRatio`` can no longer be
+    /// measured against the floor a completed AD SCAN is judged by.
+    static var semanticBackfillSufficientAdScanFraction: ReachRatio {
         episodePreparationCompleteThreshold
     }
 
@@ -1257,7 +1260,7 @@ actor AnalysisJobRunner {
     ///
     /// A store failure returns `nil`, which forbids the skip. Erring towards
     /// running the scan costs one pass; erring the other way is the bug.
-    private func measuredAdScanFraction(assetId: String) async -> Double? {
+    private func measuredAdScanFraction(assetId: String) async -> ReachRatio? {
         do {
             return try await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]?
                 .adScanFraction

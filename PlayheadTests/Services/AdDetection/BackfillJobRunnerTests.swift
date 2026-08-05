@@ -688,7 +688,7 @@ struct BackfillJobRunnerTests {
         let fraction = try #require(
             await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]?.adScanFraction
         )
-        #expect(abs(fraction - 0.95) < 0.001, "fixture drifted: measured \(fraction)")
+        #expect(abs(fraction.rawValue - 0.95) < 0.001, "fixture drifted: measured \(fraction)")
         #expect(fraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction)
 
         // And one second under the floor is the same answer as ninety-five

@@ -804,7 +804,7 @@ struct CapOutRetryTests {
             nextOrdinal: Int? = 1,
             covered: Double = 0,
             duration: Double? = Self.durationSec,
-            adScanFraction: Double? = 1.0
+            adScanFraction: ReachRatio? = 1.0
         ) -> AnalysisWorkScheduler.CapOutRetryDecision {
             AnalysisWorkScheduler.capOutRetryDecision(
                 baseWorkKey: Self.baseWorkKey,
@@ -891,7 +891,7 @@ struct CapOutRetryTests {
     @Test("a fully transcribed episode whose ad scan is short still gets a retry")
     func fullyTranscribedButUnscannedIsOutstandingWork() {
         let now = 2_000_000.0
-        func decide(adScanFraction: Double?) -> AnalysisWorkScheduler.CapOutRetryDecision {
+        func decide(adScanFraction: ReachRatio?) -> AnalysisWorkScheduler.CapOutRetryDecision {
             AnalysisWorkScheduler.capOutRetryDecision(
                 baseWorkKey: Self.baseWorkKey,
                 chainTail: makeAnalysisJob(
@@ -927,10 +927,10 @@ struct CapOutRetryTests {
         // than a synthetic 0 — reading `nil` as "covered" would make the
         // never-scanned episode the one case this never fires for.
         #expect(decide(adScanFraction: nil) == expected)
-        #expect(decide(adScanFraction: .nan) == expected)
+        #expect(decide(adScanFraction: ReachRatio(.nan)) == expected)
         // One tick under the floor is still owed.
         let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
-        #expect(decide(adScanFraction: floor - 0.001) == expected)
+        #expect(decide(adScanFraction: ReachRatio(floor.rawValue - 0.001)) == expected)
 
         // At or above the floor there is genuinely nothing left to do, and the
         // decline is NAMED. This is the termination bound: without it the
@@ -946,7 +946,7 @@ struct CapOutRetryTests {
     @Test("an outstanding transcript rung still wins over the ad-scan term")
     func transcriptLadderTakesPrecedence() {
         let now = 2_000_000.0
-        func decide(adScanFraction: Double?) -> AnalysisWorkScheduler.CapOutRetryDecision {
+        func decide(adScanFraction: ReachRatio?) -> AnalysisWorkScheduler.CapOutRetryDecision {
             AnalysisWorkScheduler.capOutRetryDecision(
                 baseWorkKey: Self.baseWorkKey,
                 chainTail: makeAnalysisJob(

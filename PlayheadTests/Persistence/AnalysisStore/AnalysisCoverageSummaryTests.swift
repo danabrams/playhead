@@ -494,7 +494,7 @@ struct AnalysisCoverageMathClippedTests {
         let intervals: [(start: Double, end: Double)] = [
             (start: 0, end: 10), (start: 11, end: 20)
         ]
-        for width in [0.0, -1.0, -.infinity] {
+        for width: BridgeToleranceSec in [0.0, -1.0, BridgeToleranceSec(-.infinity)] {
             let bridged = AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: width)
             #expect(AnalysisCoverageMath.unionedSeconds(bridged)
                 == AnalysisCoverageMath.unionedSeconds(intervals))
@@ -904,8 +904,8 @@ struct AnalysisStoreFetchCoverageSummariesTests {
         #expect(analyzed <= transcript)
         // Both fractions land at 39% — NOT the old 100%.
         let duration = try #require(summary.episodeDurationSec)
-        #expect(analyzed / duration == 390.0 / 1000.0)
-        #expect(transcript / duration == 390.0 / 1000.0)
+        #expect(analyzed.rawValue / duration.rawValue == 390.0 / 1000.0)
+        #expect(transcript.rawValue / duration.rawValue == 390.0 / 1000.0)
     }
 
     /// Frontier landing mid-transcript clips the analyzed area strictly
@@ -1085,16 +1085,16 @@ struct DogfoodFixtureCoverageSummaryTests {
         let summaries = try await store.fetchCoverageSummariesByAssetIds(["asset_004"])
         let summary = try #require(summaries["asset_004"])
         // Chunk maxima dominate, not the 90-second watermark.
-        #expect(summary.fastTranscriptCoverageEndSec == chunkMax.maxEndTimeSec)
+        #expect(summary.fastTranscriptCoverageEndSec?.rawValue == chunkMax.maxEndTimeSec)
         #expect(summary.fastTranscriptCoverageEndSource == .fastTranscriptChunks)
         // The 90s watermark must NOT be the surfaced value.
-        #expect(summary.fastTranscriptCoverageEndSec != watermark)
+        #expect(summary.fastTranscriptCoverageEndSec?.rawValue != watermark)
         // Bead spec: the asset_004 chunk maxima are ~3959.77s (66 min).
         // Pin the order of magnitude so a future fixture regenerate
         // that subtly weakens the signal can't quietly slip past.
-        #expect(summary.fastTranscriptCoverageEndSec ?? 0 > 3000,
+        #expect((summary.fastTranscriptCoverageEndSec ?? 0).rawValue > 3000,
                 "expected chunk-derived coverage to clear 50 minutes; got \(summary.fastTranscriptCoverageEndSec ?? 0)s")
-        #expect(summary.fastTranscriptCoveredSec == chunkMax.maxEndTimeSec)
+        #expect(summary.fastTranscriptCoveredSec?.rawValue == chunkMax.maxEndTimeSec)
         #expect(summary.fastTranscriptCoveredSource == .fastTranscriptChunks)
     }
 }
@@ -2232,7 +2232,7 @@ struct AnalysisStoreAdScanCoverageTests {
             try await store.fetchCoverageSummariesByAssetIds(["a-repaired"])["a-repaired"]
         )
         let fraction = try #require(repaired.adScanFraction)
-        #expect(abs(fraction - 563.8 / 3810) < 0.0001)
+        #expect(abs(fraction.rawValue - 563.8 / 3810) < 0.0001)
         #expect(fraction < episodePreparationCompleteThreshold)
     }
 
@@ -2310,7 +2310,7 @@ struct AnalysisStoreAdScanCoverageTests {
         let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-agree"])
         let summary = try #require(summaries["a-agree"])
         let breadcrumb = SemanticScanCoverage.compute(rows: rows)
-        #expect(summary.adScanCoveredSec == breadcrumb.examinedSeconds)
+        #expect(summary.adScanCoveredSec?.rawValue == breadcrumb.examinedSeconds)
         // Sanity-check the number itself so the agreement isn't 0 == 0:
         // [0,600] = 600, [900,1425.9] = 525.9, [2000,2100] = 100.
         #expect(abs(breadcrumb.examinedSeconds - 1225.9) < 0.0001)
@@ -2340,7 +2340,7 @@ struct AnalysisStoreAdScanCoverageTests {
         let breadcrumb = SemanticScanCoverage.compute(rows: rows)
         #expect(breadcrumb.examinedSeconds == 3600)
         #expect(summary.adScanCoveredSec == 120)
-        #expect(summary.adScanCoveredSec! < breadcrumb.examinedSeconds)
+        #expect(summary.adScanCoveredSec!.rawValue < breadcrumb.examinedSeconds)
     }
 
     /// A scan window's persisted bounds are `first.startTime ... last.endTime`
@@ -2370,7 +2370,7 @@ struct AnalysisStoreAdScanCoverageTests {
         // says 120s = 3.3%.
         #expect(summary.adScanCoveredSec == 120)
         let fraction = try #require(summary.adScanFraction)
-        #expect(abs(fraction - 120.0 / 3600.0) < 0.0001)
+        #expect(abs(fraction.rawValue - 120.0 / 3600.0) < 0.0001)
         #expect(fraction < episodePreparationCompleteThreshold)
         // The bound is the transcript, so the ad-scan area cannot exceed the
         // transcript union by more than the bridged sub-ad-width gaps (none here:
@@ -2470,14 +2470,17 @@ struct AnalysisStoreAdScanCoverageTests {
         // Strictly less than every ad-width minimum in the codebase, so no
         // bridged gap can hide an ad.
         #expect(bridge <= 5.0)
-        #expect(bridge < GlobalPriorDefaults.standard.typicalAdDuration.lowerBound)
+        #expect(bridge.rawValue < GlobalPriorDefaults.standard.typicalAdDuration.lowerBound)
+        // playhead-x0lb: and it is NOT the re-scan threshold, which is 12x
+        // larger and answers the opposite question.
+        #expect(bridge.rawValue < RescanThresholdSec.adScanRescanWorthyGapSec.rawValue)
 
         let atWidth = AnalysisCoverageMath.bridgingShortGaps(
-            [(start: 0, end: 100), (start: 100 + bridge, end: 200)], upTo: bridge
+            [(start: 0, end: 100), (start: 100 + bridge.rawValue, end: 200)], upTo: bridge
         )
         #expect(atWidth.count == 1)
         let pastWidth = AnalysisCoverageMath.bridgingShortGaps(
-            [(start: 0, end: 100), (start: 100 + bridge + 0.001, end: 200)], upTo: bridge
+            [(start: 0, end: 100), (start: 100 + bridge.rawValue + 0.001, end: 200)], upTo: bridge
         )
         #expect(pastWidth.count == 2)
     }
@@ -2974,7 +2977,7 @@ struct AnalysisStoreCoverageRulerTests {
         // terminal both read.
         let summaries = try await store.fetchCoverageSummariesByAssetIds(["a-cd1ad629"])
         let summary = try #require(summaries["a-cd1ad629"])
-        #expect(abs(try #require(summary.adScanCoveredSec) - 1576.62) < 0.01)
+        #expect(abs(try #require(summary.adScanCoveredSec).rawValue - 1576.62) < 0.01)
         let fraction = try #require(summary.adScanFraction)
         #expect(abs(fraction - 0.9522) < 0.001)
         #expect(fraction <= 1.0)
@@ -3342,18 +3345,18 @@ struct AnalysisStoreCoverageRulerTests {
     @Test("a numerator past the denominator is withheld, never clamped to 1.0")
     func overshootingNumeratorIsWithheldNotClamped() {
         func summary(
-            adScanCoveredSec: Double?,
-            episodeDurationSec: Double?,
+            adScanCoveredSec: CoveredSeconds?,
+            episodeDurationSec: EpisodeSeconds?,
             transcriptReach: Double?
         ) -> AnalysisCoverageSummary {
             AnalysisCoverageSummary(
                 assetId: "a-bound",
                 episodeDurationSec: episodeDurationSec,
-                fastTranscriptCoveredSec: transcriptReach,
+                fastTranscriptCoveredSec: transcriptReach.map { CoveredSeconds($0) },
                 fastTranscriptCoveredSource: .fastTranscriptChunks,
-                fastTranscriptCoverageEndSec: transcriptReach,
+                fastTranscriptCoverageEndSec: transcriptReach.map { WatermarkSeconds($0) },
                 fastTranscriptCoverageEndSource: .fastTranscriptChunks,
-                featureCoverageEndSec: episodeDurationSec,
+                featureCoverageEndSec: episodeDurationSec.map { WatermarkSeconds($0.rawValue) },
                 featureCoverageEndSource: .assetWatermark,
                 confirmedAdCoverageEndSec: nil,
                 confirmedAdCoverageEndSource: .unknown,

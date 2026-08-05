@@ -41,7 +41,21 @@ struct BackfillProgressCursor: Codable, Sendable, Equatable, Hashable {
     /// so existing `backfill_jobs.progressCursorJSON` rows stay readable
     /// without a database migration.
     let processedPhaseCount: Int
-    let lastProcessedUpperBoundSec: Double?
+    /// playhead-x0lb: an ``EpisodeSeconds``, not a bare `Double`, because this
+    /// field is the one the whole cursor family of the defect catalogue is
+    /// about. Its meaning is an ASSERTION — `[0, x]` of the EPISODE is covered —
+    /// and `BackfillJobRunner.narrowedForResume` acts on it by dropping every
+    /// segment ending at or below `x` from the next attempt, permanently. A
+    /// ``PlanListSeconds`` (the end of the list a run was handed) is the same
+    /// number in the same timebase making a much weaker claim, and reading one
+    /// as the other is what wrote 53FC53E3's cursor of 2,525.82 on a 2,528 s
+    /// episode that had been ad-scanned for 1.4 % of its length.
+    ///
+    /// The on-disk JSON is UNCHANGED: ``EpisodeSeconds`` codes through a
+    /// single-value container, so the field stays a bare number and existing
+    /// `backfill_jobs.progressCursor` rows stay readable. `BackfillProgressCursorTests`
+    /// pins that against literal JSON captured from the device.
+    let lastProcessedUpperBoundSec: EpisodeSeconds?
 
     private enum CodingKeys: String, CodingKey {
         // Preserve the legacy JSON key for backward compatibility with
@@ -50,7 +64,7 @@ struct BackfillProgressCursor: Codable, Sendable, Equatable, Hashable {
         case lastProcessedUpperBoundSec
     }
 
-    init(processedPhaseCount: Int, lastProcessedUpperBoundSec: Double? = nil) {
+    init(processedPhaseCount: Int, lastProcessedUpperBoundSec: EpisodeSeconds? = nil) {
         self.processedPhaseCount = max(0, processedPhaseCount)
         if let value = lastProcessedUpperBoundSec {
             self.lastProcessedUpperBoundSec = max(0, value)
@@ -65,7 +79,7 @@ struct BackfillProgressCursor: Codable, Sendable, Equatable, Hashable {
     /// treated as the smaller value.
     func monotonic(from other: BackfillProgressCursor) -> BackfillProgressCursor {
         let mergedCount = max(processedPhaseCount, other.processedPhaseCount)
-        let mergedUpper: Double?
+        let mergedUpper: EpisodeSeconds?
         switch (lastProcessedUpperBoundSec, other.lastProcessedUpperBoundSec) {
         case let (lhs?, rhs?):
             mergedUpper = max(lhs, rhs)

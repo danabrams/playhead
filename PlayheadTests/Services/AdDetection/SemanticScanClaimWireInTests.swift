@@ -529,8 +529,8 @@ struct SemanticScanClaimReconcilerTests {
             try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]
         )
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: summary.fastTranscriptCoveredSec,
-            episodeDurationSec: summary.episodeDurationSec
+            coveredSec: summary.fastTranscriptCoveredSec?.rawValue,
+            episodeDurationSec: summary.episodeDurationSec?.rawValue
         ) == false, "the RAW union must fail the floor, else this fixture is contiguous")
 
         let report = try await makeReconciler(
@@ -616,8 +616,8 @@ struct SemanticScanClaimReconcilerTests {
             try await store.fetchCoverageSummariesByAssetIds([Self.assetId])[Self.assetId]
         )
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: summary.fastTranscriptCoverageEndSec,
-            episodeDurationSec: summary.episodeDurationSec
+            coveredSec: summary.fastTranscriptCoverageEndSec?.rawValue,
+            episodeDurationSec: summary.episodeDurationSec?.rawValue
         ), "the watermark must clear the floor, else this proves nothing")
 
         let report = try await makeReconciler(

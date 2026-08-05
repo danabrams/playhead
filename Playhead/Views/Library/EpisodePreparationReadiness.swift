@@ -112,7 +112,7 @@ struct EpisodePreparationInputs: Equatable, Sendable {
     /// detected ad windows (so one late detection lit the ✓ with almost
     /// nothing scanned — meaning AN EPISODE WHERE DETECTION DID WORSE COULD
     /// LOOK MORE COMPLETE). Neither is a measure of audio read for ads.
-    var adScanFraction: Double?
+    var adScanFraction: ReachRatio?
     /// The user tapped the control this session (explicit intent). Makes
     /// the control show the working bar immediately, before the first
     /// progress tick arrives.
@@ -198,7 +198,7 @@ func deriveEpisodePreparationReadiness(
     _ inputs: EpisodePreparationInputs
 ) -> EpisodePreparationReadiness {
     let download = clampUnit(inputs.downloadFraction)
-    let analysis = clampUnit(inputs.adScanFraction)
+    let analysis = clampUnit(inputs.adScanFraction?.rawValue)
 
     // 1. Honestly fully ad-scanned — the calm ✓. Highest precedence.
     if inputs.analysisComplete {
@@ -385,7 +385,7 @@ func episodePreparationPercent(_ fraction: Double) -> String {
 /// transcript chunk spans first-word to last-word and its union tops out around
 /// 0.93–0.98 of real audio. If this threshold is ever revisited, revisit the
 /// bridging in the same breath — the pair has to be calibrated together.
-let episodePreparationCompleteThreshold: Double = 0.98
+let episodePreparationCompleteThreshold = ReachRatio(0.98)
 
 /// Whether the (canonical, projected) analysis status indicates a job is
 /// queued or actively running. Drives the "auto-analyzing shows the
@@ -430,7 +430,7 @@ func episodePreparationAnalysisActive(status: AnalysisState.PersistedStatus?) ->
 /// not-ready rather than ready.
 func episodePreparationAnalysisComplete(
     status: AnalysisState.PersistedStatus?,
-    adScanFraction: Double?,
+    adScanFraction: ReachRatio?,
     isDegradedTerminal: Bool
 ) -> Bool {
     // A failed / cancelled job never reads as ready, even at full coverage —
@@ -442,7 +442,7 @@ func episodePreparationAnalysisComplete(
     // statement from the pipeline that it stopped short, and it must not be
     // possible for a coverage-measurement bug to override it.
     if isDegradedTerminal { return false }
-    guard let adScanFraction, adScanFraction.isFinite else { return false }
+    guard let adScanFraction = adScanFraction.finiteValue else { return false }
     return adScanFraction >= episodePreparationCompleteThreshold
 }
 
@@ -478,7 +478,7 @@ struct EpisodePreparationAnalysisInputs: Equatable, Sendable {
     var analysisComplete: Bool = false
     var analysisTerminatedComplete: Bool = false
     var analysisFailed: Bool = false
-    var adScanFraction: Double?
+    var adScanFraction: ReachRatio?
 }
 
 /// playhead-pz32: project the two persisted artifacts an episode row consults —

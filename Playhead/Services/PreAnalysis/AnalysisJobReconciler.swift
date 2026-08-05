@@ -989,7 +989,7 @@ actor AnalysisJobReconciler {
         //
         // An unresolved asset is also skipped: nothing to measure, and `nil`
         // already reads as owed.
-        var adScanFraction: Double?
+        var adScanFraction: ReachRatio?
         if nextOrdinal != nil,
            AnalysisWorkScheduler.capOutRetryCooldownElapsed(chainTail: tail, now: decidedAt),
            let assetId = tail.analysisAssetId {

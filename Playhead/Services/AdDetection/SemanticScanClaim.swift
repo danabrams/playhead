@@ -164,8 +164,10 @@ enum SemanticScanClaim {
     /// so ``AnalysisCoverageSummary/adScanFraction`` is `nil` — never a
     /// synthetic 0. Reading `nil` as "covered" would make the never-scanned
     /// asset the one case a claim is never minted for.
-    static func isOwed(adScanFraction: Double?) -> Bool {
-        guard let adScanFraction, adScanFraction.isFinite else { return true }
+    static func isOwed(adScanFraction: ReachRatio?) -> Bool {
+        // playhead-x0lb: `finiteValue` is absence and non-finiteness stated as
+        // one fact, because every consumer of this quantity treats them as one.
+        guard let adScanFraction = adScanFraction.finiteValue else { return true }
         return adScanFraction < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
     }
 

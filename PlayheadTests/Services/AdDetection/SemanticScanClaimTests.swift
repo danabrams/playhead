@@ -42,8 +42,8 @@ struct SemanticScanClaimPredicateTests {
     @Test("an unmeasured ad scan is owed a scan")
     func unmeasuredIsOwed() {
         #expect(SemanticScanClaim.isOwed(adScanFraction: nil))
-        #expect(SemanticScanClaim.isOwed(adScanFraction: .nan))
-        #expect(SemanticScanClaim.isOwed(adScanFraction: .infinity))
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(.nan)))
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(.infinity)))
     }
 
     /// The floor is the runner's own skip floor. If the two diverge, claims
@@ -53,8 +53,8 @@ struct SemanticScanClaimPredicateTests {
         let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
         #expect(floor == episodePreparationCompleteThreshold)
         #expect(SemanticScanClaim.isOwed(adScanFraction: floor) == false)
-        #expect(SemanticScanClaim.isOwed(adScanFraction: floor + 0.01) == false)
-        #expect(SemanticScanClaim.isOwed(adScanFraction: floor - 0.001))
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(floor.rawValue + 0.01)) == false)
+        #expect(SemanticScanClaim.isOwed(adScanFraction: ReachRatio(floor.rawValue - 0.001)))
     }
 
     /// **The three MEASURED field shapes, plus two synthetic bounds — and the
@@ -77,11 +77,12 @@ struct SemanticScanClaimPredicateTests {
     @Test(
         "the device's unscanned assets are all owed a scan",
         arguments: [
-            0.0, 0.207, 0.380,
-            0.9, AnalysisJobRunner.semanticBackfillSufficientAdScanFraction - 0.001
+            ReachRatio(0.0), ReachRatio(0.207), ReachRatio(0.380),
+            ReachRatio(0.9),
+            ReachRatio(AnalysisJobRunner.semanticBackfillSufficientAdScanFraction.rawValue - 0.001)
         ]
     )
-    func fieldShapesAreOwed(fraction: Double) {
+    func fieldShapesAreOwed(fraction: ReachRatio) {
         #expect(SemanticScanClaim.isOwed(adScanFraction: fraction))
     }
 

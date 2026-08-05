@@ -564,22 +564,27 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     }
 
     let assetId: String
-    let episodeDurationSec: Double?
-    /// Interval-unioned seconds of fast transcript actually present.
+    /// The episode's DECLARED duration — `analysis_assets.episodeDurationSec`,
+    /// which comes off the feed or a decode probe, not off the transcript.
+    /// playhead-x0lb: typed as ``EpisodeSeconds`` because it is the denominator
+    /// of every ratio on this struct, and a ratio whose denominator can be
+    /// swapped for a watermark is instance 9 of the defect catalogue.
+    let episodeDurationSec: EpisodeSeconds?
+    /// Interval-unioned seconds of fast transcript actually present — an AREA.
     /// `nil` when no fast chunks landed AND no watermark is recorded.
-    let fastTranscriptCoveredSec: Double?
+    let fastTranscriptCoveredSec: CoveredSeconds?
     let fastTranscriptCoveredSource: CoverageProvenance
     /// `MAX(endTime)` of fast chunks, or the asset watermark when no chunks
-    /// landed yet. `nil` when both signals are absent.
-    let fastTranscriptCoverageEndSec: Double?
+    /// landed yet — a REACH, not an area. `nil` when both signals are absent.
+    let fastTranscriptCoverageEndSec: WatermarkSeconds?
     let fastTranscriptCoverageEndSource: CoverageProvenance
-    let featureCoverageEndSec: Double?
+    let featureCoverageEndSec: WatermarkSeconds?
     let featureCoverageEndSource: CoverageProvenance
-    let confirmedAdCoverageEndSec: Double?
+    let confirmedAdCoverageEndSec: WatermarkSeconds?
     let confirmedAdCoverageEndSource: CoverageProvenance
     /// `MAX(endTime)` over `pass='final'` chunks, falling back to the asset
     /// watermark column when chunks are absent. `nil` when both are absent.
-    let finalPassCoverageEndSec: Double?
+    let finalPassCoverageEndSec: WatermarkSeconds?
     let finalPassCoverageEndSource: CoverageProvenance
     /// playhead-sd71: gap-aware **analyzed-coverage AREA** — the
     /// interval-unioned fast-transcript seconds that fall at or before the
@@ -593,7 +598,7 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// the analysis frontier is unknown OR the transcript coverage is
     /// unknown (mirrors ``fastTranscriptCoveredSec``'s nil semantics), so
     /// AN renders as `--%` rather than a synthetic 0%.
-    let analysisCoveredSec: Double?
+    let analysisCoveredSec: CoveredSeconds?
     /// playhead-pz32: seconds of audio a **semantic ad scan actually examined**.
     ///
     /// Precisely: the interval union of `semantic_scan_results` windows on the
@@ -636,7 +641,7 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// (the scan has not started, or its rows were invalidated by a cohort
     /// bump) — never a synthetic 0, so a caller can distinguish "measured
     /// zero" from "no measurement". Both must render as not-ready.
-    let adScanCoveredSec: Double?
+    let adScanCoveredSec: CoveredSeconds?
     let adScanCoveredSource: CoverageProvenance
 
     /// playhead-pz32: ``adScanCoveredSec`` as a fraction of the episode's
@@ -691,17 +696,31 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     ///     behind it must not withhold anything — see the comment at the guard
     ///     itself, and `finalPassWatermarkWithoutChunksDoesNotWithhold` /
     ///     mutation RT16.
-    var adScanFraction: Double? {
+    ///
+    /// playhead-x0lb: the return type is ``ReachRatio``, not `Double`. Its
+    /// numerator is an ``CoveredSeconds`` AREA and its denominator is the
+    /// DECLARED ``EpisodeSeconds`` duration, both named at the only constructor
+    /// (``ReachRatio/init(examined:ofDeclaredDuration:)``), so a
+    /// ``DensityRatio`` — the transcribed area over the same duration, which is
+    /// what playhead-fil5 R3 divided and called reach — can no longer be
+    /// supplied to any consumer that wants this one. The two coincide on
+    /// single-chunk fixtures, which is why every test passed while nought of
+    /// twelve field assets cleared the gate.
+    var adScanFraction: ReachRatio? {
         guard let adScanCoveredSec,
               adScanCoveredSec.isFinite,
-              adScanCoveredSec >= 0,
+              adScanCoveredSec.rawValue >= 0,
               let episodeDurationSec,
               episodeDurationSec.isFinite,
-              episodeDurationSec > 0 else {
+              episodeDurationSec.rawValue > 0 else {
             return nil
         }
         let tolerance = Self.adScanDurationToleranceSec(episodeDurationSec: episodeDurationSec)
-        guard adScanCoveredSec <= episodeDurationSec + tolerance else { return nil }
+        // playhead-x0lb: an AREA compared against a DURATION, deliberately and
+        // in raw values. The types are different on purpose and this is the one
+        // place the comparison is meaningful — an area that exceeds the whole
+        // declared duration is proof the two describe different audio.
+        guard adScanCoveredSec.rawValue <= episodeDurationSec.rawValue + tolerance else { return nil }
         // A transcript reaching far past the declared duration means the
         // denominator describes different audio than the numerator, even when
         // their RATIO looks healthy. Under-claim rather than divide by a number
@@ -731,14 +750,37 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         let finalReach = finalPassCoverageEndSource == .finalPassChunks
             ? finalPassCoverageEndSec
             : nil
+        // playhead-x0lb: these are ``WatermarkSeconds`` — REACH, not area — and
+        // that is exactly the property this guard needs. An AREA can never
+        // disprove a duration (a gappy transcript's area is legitimately small);
+        // only a reach PAST the declared end can.
         let transcriptReach = [fastTranscriptCoverageEndSec, finalReach]
             .compactMap { $0 }
             .filter { $0.isFinite }
             .max()
-        if let transcriptReach, transcriptReach > episodeDurationSec + tolerance {
+        if let transcriptReach, transcriptReach.rawValue > episodeDurationSec.rawValue + tolerance {
             return nil
         }
-        return min(1, adScanCoveredSec / episodeDurationSec)
+        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)
+    }
+
+    /// playhead-x0lb: the episode's transcript DENSITY — deliberately adjacent
+    /// to ``adScanFraction`` so the contrast is unmissable, and typed so the two
+    /// cannot be swapped.
+    ///
+    /// * numerator: ``fastTranscriptCoveredSec`` — the interval-unioned seconds
+    ///   of fast transcript actually present.
+    /// * denominator: ``episodeDurationSec`` — the same declared duration
+    ///   ``adScanFraction`` uses.
+    ///
+    /// **A high density is not reach.** Measured on the 2026-08-03 device pull:
+    /// 4FF3A238 has a fast density of 0.892 and NO coverage-lane scan row at
+    /// all, so its ``adScanFraction`` is absent — nine of the twelve assets on
+    /// that pull are in the same position. playhead-fil5 R3 computed this
+    /// quantity and read it as the other one; nought of twelve assets cleared
+    /// the gate and the feature was dead while every test passed.
+    var transcriptDensity: DensityRatio? {
+        DensityRatio(transcribed: fastTranscriptCoveredSec, ofDeclaredDuration: episodeDurationSec)
     }
 
     /// playhead-pz32: how far measured coverage may exceed the declared duration
@@ -753,8 +795,8 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// every scale; the shard cap keeps long episodes from acquiring a large
     /// absolute allowance (mirroring
     /// ``FastTranscriptCoverageInvariant/Tolerances/watermarkPastDurationSec``).
-    static func adScanDurationToleranceSec(episodeDurationSec: Double) -> Double {
-        min(AnalysisAudioService.defaultShardDuration, 0.05 * episodeDurationSec)
+    static func adScanDurationToleranceSec(episodeDurationSec: EpisodeSeconds) -> Double {
+        min(AnalysisAudioService.defaultShardDuration, 0.05 * episodeDurationSec.rawValue)
     }
 }
 
@@ -892,7 +934,11 @@ enum AnalysisCoverageMath {
     /// segment aggregator's floor is 30 s, six times larger). A bridged gap is
     /// therefore always shorter than the shortest span this app will ever call
     /// an ad, so bridging cannot conceal one.
-    static let adScanBridgeableGapSec: Double = 5.0
+    /// playhead-x0lb: a ``BridgeToleranceSec``, not a bare `Double`, so it
+    /// cannot be interchanged with ``RescanThresholdSec/adScanRescanWorthyGapSec``
+    /// (60 s, playhead-a1x0) — two gap widths in seconds answering opposite
+    /// questions, which Dan called out on a1x0 as instance 19 pre-loaded.
+    static let adScanBridgeableGapSec = BridgeToleranceSec(5.0)
 
     /// playhead-pz32: coalesce intervals across gaps no wider than `maxGapSec`,
     /// returning a disjoint ascending set.
@@ -916,9 +962,9 @@ enum AnalysisCoverageMath {
     /// ready) while the three well-transcribed ones reach 0.983–1.0.
     static func bridgingShortGaps(
         _ intervals: [(start: Double, end: Double)],
-        upTo maxGapSec: Double
+        upTo maxGapSec: BridgeToleranceSec
     ) -> [(start: Double, end: Double)] {
-        mergedIntervals(normalize(intervals), bridging: max(0, maxGapSec))
+        mergedIntervals(normalize(intervals), bridging: max(0, maxGapSec.rawValue))
     }
 
     /// Sort + coalesce ALREADY-NORMALIZED intervals into a disjoint ascending
@@ -10723,13 +10769,18 @@ actor AnalysisStore {
 
             // Fast covered seconds: prefer interval-unioned seconds when
             // any chunk landed; otherwise fall back to the asset watermark.
-            let fastCoveredSec: Double?
+            let fastCoveredSec: CoveredSeconds?
             let fastCoveredSource: AnalysisCoverageSummary.CoverageProvenance
             if chunkMaxEnd != nil {
-                fastCoveredSec = chunkUnionedSec
+                fastCoveredSec = CoveredSeconds(chunkUnionedSec)
                 fastCoveredSource = .fastTranscriptChunks
             } else if let watermark = assetRow?.fastTranscriptCoverageEndTime {
-                fastCoveredSec = watermark
+                // A watermark standing in for an area: it is a REACH, so this
+                // over-reports the moment the transcript has a hole. Kept
+                // (playhead-x0lb changes no behaviour here) and stated, because
+                // the conversion is exactly the substitution this file's types
+                // exist to make visible.
+                fastCoveredSec = CoveredSeconds(watermark)
                 fastCoveredSource = .assetWatermark
             } else {
                 fastCoveredSec = nil
@@ -10737,13 +10788,13 @@ actor AnalysisStore {
             }
 
             // Fast high-water end: chunks first, watermark fallback.
-            let fastEndSec: Double?
+            let fastEndSec: WatermarkSeconds?
             let fastEndSource: AnalysisCoverageSummary.CoverageProvenance
             if let chunkMaxEnd {
-                fastEndSec = chunkMaxEnd
+                fastEndSec = WatermarkSeconds(chunkMaxEnd)
                 fastEndSource = .fastTranscriptChunks
             } else if let watermark = assetRow?.fastTranscriptCoverageEndTime {
-                fastEndSec = watermark
+                fastEndSec = WatermarkSeconds(watermark)
                 fastEndSource = .assetWatermark
             } else {
                 fastEndSec = nil
@@ -10751,21 +10802,21 @@ actor AnalysisStore {
             }
 
             // Final-pass: chunks first, watermark fallback.
-            let finalEndSec: Double?
+            let finalEndSec: WatermarkSeconds?
             let finalEndSource: AnalysisCoverageSummary.CoverageProvenance
             if let chunkFinalMax = finalMaxEnd[id] {
-                finalEndSec = chunkFinalMax
+                finalEndSec = WatermarkSeconds(chunkFinalMax)
                 finalEndSource = .finalPassChunks
             } else if let watermark = assetRow?.finalPassCoverageEndTime {
-                finalEndSec = watermark
+                finalEndSec = WatermarkSeconds(watermark)
                 finalEndSource = .assetWatermark
             } else {
                 finalEndSec = nil
                 finalEndSource = .unknown
             }
 
-            let featureSec = assetRow?.featureCoverageEndTime
-            let confirmedAdSec = assetRow?.confirmedAdCoverageEndTime
+            let featureSec = assetRow?.featureCoverageEndTime.map { WatermarkSeconds($0) }
+            let confirmedAdSec = assetRow?.confirmedAdCoverageEndTime.map { WatermarkSeconds($0) }
 
             // playhead-sd71: gap-aware analyzed-coverage AREA. The analysis
             // frontier is the broad feature/confirmed-ad watermark; the
@@ -10776,7 +10827,7 @@ actor AnalysisStore {
             // watermark-vs-union antipattern this bead fixes). `nil` when the
             // frontier is unknown OR transcript coverage is unknown, matching
             // `fastTranscriptCoveredSec`'s nil semantics.
-            let analysisFrontierSec: Double?
+            let analysisFrontierSec: WatermarkSeconds?
             switch (featureSec, confirmedAdSec) {
             case let (feature?, confirmed?): analysisFrontierSec = max(feature, confirmed)
             case let (feature?, nil): analysisFrontierSec = feature
@@ -10792,7 +10843,7 @@ actor AnalysisStore {
             if chunkMaxEnd != nil {
                 transcriptIntervals = fastIntervals[id] ?? []
             } else if let transcriptCovered = fastCoveredSec {
-                transcriptIntervals = [(start: 0, end: transcriptCovered)]
+                transcriptIntervals = [(start: 0, end: transcriptCovered.rawValue)]
             } else {
                 transcriptIntervals = []
             }
@@ -10860,13 +10911,16 @@ actor AnalysisStore {
             // area can only ever move UP and no episode becomes less ready.
             let transcribedIntervals = transcriptIntervals + (finalIntervals[id] ?? [])
 
-            let analysisCoveredSec: Double?
+            let analysisCoveredSec: CoveredSeconds?
             if let frontier = analysisFrontierSec, fastCoveredSec != nil {
-                // Gap-aware clip of the transcribed region to the frontier.
-                analysisCoveredSec = AnalysisCoverageMath.unionedSecondsClipped(
+                // Gap-aware clip of the transcribed region to the frontier: a
+                // WATERMARK bounding an AREA, which is what makes the result a
+                // subset of the transcript union rather than the frontier
+                // itself. playhead-sd71's whole point, now stated in the types.
+                analysisCoveredSec = CoveredSeconds(AnalysisCoverageMath.unionedSecondsClipped(
                     transcriptIntervals,
-                    upperBound: frontier
-                )
+                    upperBound: frontier.rawValue
+                ))
             } else {
                 analysisCoveredSec = nil
             }
@@ -10892,16 +10946,16 @@ actor AnalysisStore {
             //
             // `nil` only when no coverage-lane row exists at all; a scan that
             // ran and examined nothing reports a measured 0.
-            let adScanCoveredSec: Double?
+            let adScanCoveredSec: CoveredSeconds?
             let adScanCoveredSource: AnalysisCoverageSummary.CoverageProvenance
             if adScanRowSeen.contains(id) {
-                adScanCoveredSec = AnalysisCoverageMath.unionedSecondsIntersecting(
+                adScanCoveredSec = CoveredSeconds(AnalysisCoverageMath.unionedSecondsIntersecting(
                     adScanIntervals[id] ?? [],
                     within: AnalysisCoverageMath.bridgingShortGaps(
                         transcribedIntervals,
                         upTo: AnalysisCoverageMath.adScanBridgeableGapSec
                     )
-                )
+                ))
                 adScanCoveredSource = .semanticScanResults
             } else {
                 adScanCoveredSec = nil
@@ -10910,7 +10964,7 @@ actor AnalysisStore {
 
             summaries[id] = AnalysisCoverageSummary(
                 assetId: id,
-                episodeDurationSec: assetRow?.episodeDurationSec,
+                episodeDurationSec: assetRow?.episodeDurationSec.map { EpisodeSeconds($0) },
                 fastTranscriptCoveredSec: fastCoveredSec,
                 fastTranscriptCoveredSource: fastCoveredSource,
                 fastTranscriptCoverageEndSec: fastEndSec,
