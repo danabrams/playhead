@@ -203,6 +203,22 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   180 live entries.
 
+#   R2 REVIEW ADDITIONS 2026-08-05 (playhead-e75l). Batches 500-505, the DR
+#   series: DR01-DR07 added at R1, DR08-DR09 added here. Batch 505 run WITH a
+#   green baseline, batches 500-504 re-run behind it with
+#   PLAYHEAD_MB_SKIP_BASELINE=1 on the same commit. FINAL 9 KILLED / 0 SURVIVED
+#   / 0 ERROR, 7 builds, ~19m. Batches 1-499 were NOT re-run and carry the
+#   verdicts above.
+#
+#   DR08 IS WHY THIS RE-RUN EXISTS, and it is the reusable lesson. R1 added a
+#   SOURCE canary forbidding two log-event literals BY NAME — the two kvs8-era
+#   spellings it had just watched go wrong. DR08 plants a literal of the event
+#   THIS BEAD ADDED, one line up from DR06's anchor, and it SURVIVED: a
+#   blacklist covers the mistakes already made and is blind by construction to
+#   the next one. The canary now derives its forbidden set from
+#   `FMDaemonRefusal.allCases`. When a rail is a list of known-bad strings, the
+#   mutation worth planting is the string that is not on the list yet.
+#
 #   R2 REVIEW ADDITIONS 2026-08-04 (playhead-9y9e). Batch 420, RT14 — one entry,
 #   KILLED on exactly ONE victim, baseline green. Its EDIT is the pre-review
 #   implementation verbatim, the standard RT12 set: the broad mutant (deleting
