@@ -722,11 +722,18 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
             return nil
         }
         let tolerance = Self.adScanDurationToleranceSec(episodeDurationSec: episodeDurationSec)
-        // playhead-x0lb: an AREA compared against a DURATION, deliberately and
-        // in raw values. The types are different on purpose and this is the one
-        // place the comparison is meaningful — an area that exceeds the whole
-        // declared duration is proof the two describe different audio.
-        guard adScanCoveredSec.rawValue <= episodeDurationSec.rawValue + tolerance else { return nil }
+        // playhead-x0lb: an AREA compared against a DURATION, deliberately —
+        // this is the one place the comparison is meaningful, because an area
+        // that exceeds the whole declared duration is proof the two describe
+        // different audio.
+        //
+        // R4 review: through ``AdScanSeconds/exceeds(_:byMoreThan:)``, not in
+        // raw values. Written inline the comparison accepted every area on the
+        // summary: probe PA2 drove it from `fastTranscriptCoveredSec` — an area
+        // this guard is not protecting — and it COMPILED, so the check meant to
+        // catch a numerator describing different audio could be pointed away
+        // from the numerator entirely. Rail TY22.
+        guard !adScanCoveredSec.exceeds(episodeDurationSec, byMoreThan: tolerance) else { return nil }
         // A transcript reaching far past the declared duration means the
         // denominator describes different audio than the numerator, even when
         // their RATIO looks healthy. Under-claim rather than divide by a number
@@ -768,7 +775,13 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
             .compactMap { $0 }
             .filter { $0.isFinite }
             .max()
-        if let transcriptReach, transcriptReach.rawValue > episodeDurationSec.rawValue + tolerance {
+        // R4 review: through ``WatermarkSeconds/reaches(past:byMoreThan:)``.
+        // The paragraph above ASSERTS that an area can never disprove a
+        // duration; written in raw values the guard did not enforce it — probe
+        // PA3 substituted `adScanCoveredSec.rawValue` for the reach here and it
+        // COMPILED. A sentence forbidding a substitution beside an expression
+        // that permits it is instance 18's own shape. Rail TY23.
+        if let transcriptReach, transcriptReach.reaches(past: episodeDurationSec, byMoreThan: tolerance) {
             return nil
         }
         return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)

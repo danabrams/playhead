@@ -191,6 +191,23 @@ struct PlanListSeconds: CoverageQuantity {
 struct WatermarkSeconds: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
+
+    /// playhead-x0lb R4: only a REACH past the declared end can disprove a
+    /// declared duration.
+    ///
+    /// **This predicate exists because the property was asserted in PROSE where
+    /// it needed a type.** The comment on `adScanFraction`'s guard said, and
+    /// still says, that "an AREA can never disprove a duration (a gappy
+    /// transcript's area is legitimately small); only a reach PAST the declared
+    /// end can" — and R4 probe PA3 then wrote `adScanCoveredSec.rawValue >
+    /// episodeDurationSec.rawValue + tolerance` into that exact guard and it
+    /// COMPILED. A sentence forbidding a substitution, next to an expression
+    /// that permits it, is the shape this whole bead is a reaction to. Making
+    /// the receiver a ``WatermarkSeconds`` is what turns the sentence into a
+    /// diagnostic. Rail TY23.
+    func reaches(past duration: EpisodeSeconds, byMoreThan tolerance: Double) -> Bool {
+        rawValue > duration.rawValue + tolerance
+    }
 }
 
 /// playhead-x0lb: the ANALYSIS FRONTIER — how far the acoustic/DSP pipeline has
@@ -269,6 +286,28 @@ struct AnalyzedSeconds: CoverageQuantity {
             upperBound: frontier.rawValue
         ))
     }
+
+    /// playhead-x0lb R4: the Activity AN bar's fill — THIS area over the
+    /// DECLARED duration — with both terms named and the division written once.
+    ///
+    /// **Why the two-argument helper was not enough.** R3 typed both terms of
+    /// `ActivitySnapshotProvider`'s `fraction(area:ofDeclaredDuration:)`, which
+    /// stops the wrong quantity ARRIVING. It does not stop the two that arrive
+    /// correctly from being divided the wrong way round: inside the helper both
+    /// are `Double`, and R4 probes PB1 and PB2 wrote `duration.rawValue /
+    /// area.rawValue` at each of the two copies and both COMPILED. A reciprocal
+    /// is dimensionally as wrong as a substitution and it renders in the same
+    /// `[0, 1]` bar — on any episode whose analyzed area is under its duration
+    /// it simply clamps to 1.0, i.e. a full bar on an episode nothing analyzed.
+    ///
+    /// This is the same answer ``ReachRatio/init(examined:ofDeclaredDuration:)``
+    /// gives: the division happens ONCE, in a method whose receiver is the
+    /// numerator, so there is no expression left to invert. It also collapses
+    /// the two duplicated copies into one. Rails TY24 / TY25.
+    func fractionOfDeclaredDuration(_ duration: EpisodeSeconds?) -> Double? {
+        guard let duration, duration.rawValue > 0 else { return nil }
+        return min(1.0, max(0.0, rawValue / duration.rawValue))
+    }
 }
 
 /// playhead-x0lb: the AD-SCAN AREA — audio a semantic ad scan actually READ.
@@ -289,6 +328,22 @@ struct AnalyzedSeconds: CoverageQuantity {
 struct AdScanSeconds: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
+
+    /// playhead-x0lb R4: an AREA that exceeds the whole declared duration is
+    /// proof the two describe different audio.
+    ///
+    /// **Why it is a named predicate and not a raw comparison.** The guard in
+    /// `adScanFraction` read `adScanCoveredSec.rawValue <= duration.rawValue +
+    /// tolerance` inline, and R4 probe PA2 drove it from
+    /// `fastTranscriptCoveredSec` — the TRANSCRIPT area, which is not the
+    /// numerator this guard is protecting — with no complaint. Once both sides
+    /// are `Double` the comparison accepts every area on the summary, so the
+    /// sanity check that is supposed to catch a numerator describing different
+    /// audio can be pointed at an area that is not the numerator at all. Rail
+    /// TY22.
+    func exceeds(_ duration: EpisodeSeconds, byMoreThan tolerance: Double) -> Bool {
+        rawValue > duration.rawValue + tolerance
+    }
 }
 
 // MARK: - Ratios, each naming both of its terms
@@ -562,7 +617,7 @@ extension EpisodeSeconds {
 // stated and deliberately untyped, and stated but WRONG — which is where the
 // audit earned its keep.
 //
-// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY21).
+// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY25).
 //    R1 review added TY09–TY14 and the three types the first six of them
 //    needed: the rails were PLANTED FIRST and three of them SURVIVED, which is
 //    how the area/watermark conflations below were found rather than argued
@@ -574,6 +629,16 @@ extension EpisodeSeconds {
 //    R3's three share one shape and it is the shape R2 opened: a value that
 //    reaches its slot through `?.rawValue`, or a paired term the previous round
 //    typed only one half of.
+//    R4 review stopped sampling and planted against the WHOLE remaining
+//    surface in one pass — every substitutable boundary L-H had counted, plus
+//    the two classes L-H did not count at all. TWENTY probes, TWENTY compiled,
+//    against three vacuity controls (the TY05 / TY17 / TY21 mutations, run
+//    through the same harness) that all three rejected with the expected
+//    diagnostics. Four of the twenty are closed here (TY22–TY25); the other
+//    sixteen are the untyped sections below and the limits, because closing
+//    them costs a tradeoff this bead deliberately declined and one that is not
+//    a reviewer's to take. THE NUMBER THAT MATTERS IS 20/20, not 4: the types
+//    hold exactly where a NAMED FUNCTION takes the quantity, and nowhere else.
 //
 //    The list below is what carries a type. It is NOT a list of everything a
 //    reader might want typed — the two sections after it are, and the middle
@@ -610,10 +675,33 @@ extension EpisodeSeconds {
 //   AnalysisCoverageMath.unionedSeconds / unionedSecondsClipped /
 //   unionedSecondsIntersecting / bridgingShortGaps  ->  Double over [(start, end)]
 //       Generic interval arithmetic. These PRODUCE the area types; typing their
-//       tuples would type every transcript-chunk timestamp in the app. Which
-//       area a call produces is decided at the ONE site that boxes the result
-//       — `fetchCoverageSummariesByAssetIds` — and the boxing is what the R1
-//       rails TY09/TY10 pin.
+//       tuples would type every transcript-chunk timestamp in the app.
+//       R4 review: the sentence that used to stand here — "Which area a call
+//       produces is decided at the ONE site that boxes the result, and the
+//       boxing is what the R1 rails TY09/TY10 pin" — was FALSE, and it is the
+//       fourth completeness claim of this bead to be measured and fail. TY09
+//       and TY10 mutate `adScanFraction`'s CONSUMER (which summary field the
+//       reach divides), not the boxing. Nothing pins which interval ARRAY goes
+//       in, and four probes proved it, all four COMPILED:
+//         PA7  the ad-scan area boxed from `fastIntervals` instead of
+//              `adScanIntervals` — playhead-fil5 R3's own P0 (the transcript
+//              published as ad-scan reach) reproduced ONE LAYER BELOW every
+//              rail that looks for it, with `AdScanSeconds` intact on the box.
+//         PA8  the ad-scan bound narrowed from `transcribedIntervals` to
+//              `transcriptIntervals` — playhead-9y9e's defect verbatim, worth
+//              55.4 % vs 100.0 % on 0C2FC22E per the comment at the site.
+//         PA5  the transcript intervals themselves built from the DSP frontier,
+//              which poisons TX, AN and the ad-scan bound in one edit.
+//         PA9  the AN clip's INTERVALS widened to both passes. TY20 pins which
+//              BOUND clips, and R3 said so; it does not pin what is clipped.
+//       Four `[(start: Double, end: Double)]` arrays are live in one scope and
+//       any of them fits any slot. No argument label closes this and no
+//       constructor does either — argument labels are not types. The only
+//       closure is to type the interval CARRIERS (a `TranscribedRegion` /
+//       `ScannedRegion` over the arrays, which is far cheaper than typing every
+//       timestamp), and that reverses a tradeoff this bead stated deliberately,
+//       so it is presented rather than taken: it is Dan's call, filed with the
+//       probes as evidence.
 //       R3 review: `unionedSecondsClipped`'s `upperBound` is a second, separate
 //       laundering point in the same call, and TY09/TY10 do NOT reach it — they
 //       pin which INTERVALS go in, not which BOUND clips them. Probe PC2 clipped
@@ -634,8 +722,22 @@ extension EpisodeSeconds {
 //       before the argument is read — and probe PC3 drove the analyze zone from
 //       `inputs.downloadFraction`, the BYTES-derived one, with no complaint. The
 //       analyze zone now demotes inside `analyzeZoneFill(_: ReachRatio?)`; the
-//       download zone keeps `clampUnit`, which is honest because its input is a
-//       genuine `Double`. Rail TY21.
+//       download zone keeps `clampUnit`. Rail TY21.
+//       R4 review: "the download zone keeps `clampUnit`, which is honest
+//       because its input is a genuine `Double`" used to end that sentence, and
+//       it is an argument about where the value CAME FROM when the question is
+//       what the slot ACCEPTS. Probe PE1 wrote
+//       `clampUnit(inputs.adScanFraction?.rawValue)` at the DOWNLOAD zone — the
+//       exact mirror of the PC3 substitution R3 closed one line above — and it
+//       COMPILED. R3 fixed one direction of a two-way adjacency and argued the
+//       other was safe; the argument was wrong in the same round it was
+//       written. It is NOT fixed here, and the reason is a cost, not a
+//       judgement that it is fine: the only closure is a distinct type for the
+//       BYTES-derived download fraction, and `downloadFraction` is threaded
+//       through `EpisodePreparationStatusModel`, `ActivityViewModel`,
+//       `ActivityView`, `DiagnosticsExportService` and ~60 sites across eight
+//       test files. That is a typing decision with its own blast radius and its
+//       own bead, not a review-round edit. Recorded as limit L-K.
 //   ActivitySnapshotProvider's AN fraction -> Double
 //       analysisCoveredSec ÷ episodeDurationSec — a THIRD ratio over the same
 //       denominator as reach and density. Left untyped because one producer and
@@ -660,6 +762,19 @@ extension EpisodeSeconds {
 //       the new `nil` does) — rails TY18 (UI) and TY19 (dogfood wire), one
 //       per call site for the reason R2 gave: fixing one and not the other is
 //       how this family survives.
+//       R4 review: typing both TERMS stops the wrong quantity ARRIVING and does
+//       nothing about what happens once it has. Inside the helper both operands
+//       were `Double` again, and probes PB1 (UI) and PB2 (wire) wrote
+//       `duration.rawValue / area.rawValue` — the RECIPROCAL — and both
+//       COMPILED. It is not a cosmetic defect: an inverted ratio renders in the
+//       same `[0, 1]` bar and clamps to 1.0 on every episode whose analyzed
+//       area is under its duration, i.e. a FULL AN bar on an episode nothing
+//       analyzed. Both helpers now delegate to
+//       ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``, where the division
+//       is written once with the numerator as the receiver, so there is no
+//       expression left to invert — rails TY24 / TY25. THE GENERAL LESSON, and
+//       it is why the ratio constructors were built this way from the start: a
+//       typed PAIR is not a typed OPERATION, and only the operation is safe.
 //   ActivitySnapshotProvider's TX fraction -> Double
 //       transcriptDensity, demoted to a bar fill. R2 review ADDED this line: it
 //       is the AN fraction's sibling, it was in neither list, and probe PR1
@@ -683,6 +798,20 @@ extension EpisodeSeconds {
 //       the wire (limit L-E), and because a dogfood field is not a decision
 //       input. It is NOT left unstated: L5 is proof the family is already live
 //       here, one field carrying the area under the watermark's name.
+//       R4 review: the surface is NINE adjacent `Double?` slots, not six. The
+//       three `*_fraction` slots belong to it too — `downloadFraction`,
+//       `transcriptFraction`, `analysisFraction` are three `Double?` locals
+//       handed to three `Double?` parameters at the same call, and L-H's count
+//       of six missed them because they reach the wire through typed HELPERS
+//       and so carry no `.rawValue` of their own. Probe PB5 wrote
+//       `analysisFraction: downloadFraction` — the BYTES-derived fraction into
+//       the analysis slot, PE1's shape on the diagnostics wire — and it
+//       COMPILED, as did PB3 (the duration slot fed the transcript watermark)
+//       and PB4 (the feature watermark fed the transcript area, which also
+//       feeds `analysisWatermarkSec` through `maxKnown`). Confirming a stated
+//       limit is worth the three builds it cost: "any of them fits any other"
+//       was an assertion until it was measured, and the measurement widened the
+//       surface by half.
 //
 // ── LATENT INSTANCES. Found by writing the line. Each is filed; none is fixed
 //    here, because each is a behaviour or wire change with its own blast radius.
@@ -730,6 +859,18 @@ extension EpisodeSeconds {
 //    Five, seven, eight — the list has grown in every round that planted, and
 //    the count of limits is a count of what somebody probed, not of what is
 //    there.
+//    R4 STOPPED SAMPLING AND MEASURED THE WHOLE THING, and the result changes
+//    what this section is. Twenty substitutions planted across every remaining
+//    boundary, twenty COMPILED, three vacuity controls rejected. Eleven, after
+//    the four closed as TY22–TY25. The rate did not fall from round to round
+//    because the rounds were unlucky; it did not fall because L-H had the
+//    surface WRONG — it counted `.rawValue` reads, and `.rawValue` is one of
+//    four doors. The other three are L-I (boxing: a raw `Double` entering a
+//    typed slot, 23 sites, uncounted anywhere before now), L-J (two values of
+//    the SAME type, which no type can separate) and L-G's literal door. Reading
+//    "the list grew again" as bad news is the wrong reading; the list grew
+//    because somebody finally counted, and a limit nobody has probed is not an
+//    absent limit.
 //
 //   L-A  A ``CoveredSeconds`` can still be carrying a REACH. When no chunk
 //        landed, `fastTranscriptCoveredSec` falls back to the
@@ -843,3 +984,95 @@ extension EpisodeSeconds {
 //        survived; that is a 3-for-3 hit rate on a surface of 26, so the honest
 //        expectation is that more of the remaining ones are writable, not that
 //        they are safe. What is claimed here is a CENSUS, not a clearance.
+//
+//        **R4 REVIEW: IT REMAINS A CENSUS, AND IT IS NOW A MEASURED ONE.** The
+//        26 is a count of LINES; those lines carry 30 reads (four lines read
+//        two quantities each), against 49 added `.rawValue` reads in total, 19
+//        of them inside this file. R4 planted against every substitutable one
+//        of the 26 and against the classes L-H does not cover. TWENTY PROBES,
+//        TWENTY COMPILED — 20/20, not 3/26 extrapolated — with three vacuity
+//        controls (the TY05 / TY17 / TY21 mutations through the same harness)
+//        rejecting with the expected diagnostics, so the result is not a
+//        harness that says yes to everything.
+//
+//        THE FIVE LINES THAT ARE GENUINELY NOT SUBSTITUTABLE, and why, because
+//        this is the only part of the surface that is CLEARED rather than
+//        counted:
+//          * `transcriptBarFill`'s `density?.rawValue` and `analyzeZoneFill`'s
+//            `fraction?.rawValue` — the R2 and R3 fixes. Each body has exactly
+//            ONE value in scope and it arrived typed. Nothing else is reachable
+//            to substitute, which is the whole reason the fix is shaped this way.
+//          * `narrowedForResume`'s two reads of `cursor.rawValue` — same
+//            property: one typed parameter, nothing else of any quantity type
+//            in scope, and TY12 pins the call site.
+//          * `adScanDurationToleranceSec`'s `0.05 * episodeDurationSec.rawValue`
+//            — one typed parameter, sole quantity in scope.
+//        That is the shape of every real clearance in this bead: not "the
+//        expression looks careful" but "there is no second quantity in scope to
+//        write". Five of twenty-six. The other twenty-one are either closed by
+//        a named function (TY15–TY25) or measured open above.
+//
+//        THE CORRECTED RULE. `.rawValue` is where a type stops applying on the
+//        way OUT; it is not the only place types stop applying. A quantity is
+//        unprotected at FOUR doors, and L-H named one:
+//          1. demotion  — `.rawValue`, this limit, 26 lines;
+//          2. promotion — `Type(someRawDouble)`, limit L-I, 23 sites;
+//          3. identity  — two values of the same type, limit L-J;
+//          4. literal   — `ExpressibleByFloatLiteral`, limit L-G.
+//        A round that audits only door 1 will keep finding survivors at the
+//        other three and keep reading the rate as bad luck.
+//   L-I  **BOXING IS UNGUARDED, AND IT IS A BIGGER SURFACE THAN L-H'S.** Every
+//        `SomeQuantity(rawDouble)` is a point where the wrong number can be put
+//        in the right-named box, and the type is not merely powerless there —
+//        it is what makes the mistake INVISIBLE downstream, because everything
+//        after the box reads a correctly-typed value. There are 23 such
+//        constructions in production code outside this file (14 in
+//        `AnalysisStore`, 6 in `BackfillJobRunner`, 2 in `AnalysisCoordinator`,
+//        1 in `EpisodePreparationReadiness`), and until R4 the audit named
+//        exactly one of them — L-A, the `CoveredSeconds(watermark)` fallback.
+//        Three were probed and all three COMPILED: PA6 boxed the FEATURE column
+//        as the final-pass `WatermarkSeconds`; PA11 boxed that same column as
+//        the reach DENOMINATOR (`EpisodeSeconds`), which is the one term every
+//        ratio in the path divides by; PA12 boxed the transcript AREA as the
+//        transcript WATERMARK — the exact inverse of L-A and unnamed anywhere.
+//        No type can close this by construction: a `CoverageQuantity` is a
+//        `RawRepresentable` over `Double` and its initialiser must accept any
+//        `Double`. What CAN close a given box is evidence at the box —
+//        ``AnalyzedSeconds/init(clipping:to:)`` is the pattern, taking the
+//        frontier as a `FrontierSeconds` rather than a number — and doing that
+//        for the other 22 is a bead, not a review round. Note also that
+//        `CoverageProvenance` already sits beside several of these boxes
+//        recording which column was used: it is a LABEL, exactly as
+//        ``UnsoundCursorPromotionSite`` is, and L-D applies to it verbatim.
+//   L-J  **TWO VALUES OF THE SAME TYPE ARE INDISTINGUISHABLE, BY DESIGN.** L-B
+//        recorded this for one pair (``EpisodeSeconds/promoting``'s two
+//        ``PlanListSeconds``) and closed it with a value guard. R4 measured how
+//        much wider the class is; all four COMPILED:
+//          PC1  the Episode→PlanList crossing in `checkpointCoarseProgress`
+//               cashing `honest` instead of `merged`, which silently undoes the
+//               monotonic merge the two lines above it exist to perform;
+//          PD1  `clearsFinalizeFloor`'s epsilon reconstruct reading
+//               `sufficientFraction` as the measurement, making every terminal
+//               read clean;
+//          PD2  the two ``ReachRatio`` operands of `diagnostic`'s
+//               `String(format:)` swapped;
+//          PA1  `adScanFraction`'s divide-by-zero guard reading the NUMERATOR
+//               (harmless only because ``ReachRatio``'s constructor re-guards
+//               the denominator — the guard is redundant, not sound).
+//        These are behaviour defects and BEHAVIOUR tests are the instrument for
+//        them, which is the honest division of labour: the UNTYPEABLE battery
+//        answers "can this be written", and for a same-type swap the answer is
+//        always yes and always will be. Do not widen a type to chase one.
+//   L-K  **THE DOWNLOAD/ANALYZE ADJACENCY IS STILL WRITABLE IN ONE DIRECTION.**
+//        R3 closed `clampUnit(inputs.adScanFraction?.rawValue)` at the ANALYZE
+//        zone and argued the download zone was safe because its input is a
+//        genuine `Double`. Probe PE1 wrote that same expression at the DOWNLOAD
+//        zone and it COMPILED: the ad-scan REACH rendering as the download bar,
+//        the mirror of the substitution fixed one line above. The argument
+//        confused where a value came from with what a slot accepts. Closing it
+//        needs a distinct type for the BYTES-derived download fraction, whose
+//        blast radius is ~60 sites across `EpisodePreparationStatusModel`,
+//        `ActivityViewModel`, `ActivityView`, `DiagnosticsExportService` and
+//        eight test files — a bead, and a typing decision that is Dan's, not a
+//        reviewer's. Filed rather than fixed, and stated here rather than
+//        argued away a second time.

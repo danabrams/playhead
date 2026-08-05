@@ -461,3 +461,92 @@ struct AnalyzedSecondsClipConstructorTests {
         #expect(atTranscriptReach.rawValue == transcriptArea)
     }
 }
+
+@Suite("playhead-x0lb R4 — the duration guards name which quantity may disprove a duration")
+struct DurationContradictionPredicateTests {
+
+    /// R4 probes PA2 and PA3. Both guards in `adScanFraction` were raw
+    /// comparisons, and once both sides are `Double` they accept every quantity
+    /// on the summary: PA2 drove the area-vs-duration guard from the TRANSCRIPT
+    /// area and PA3 drove the reach-past-duration guard from the AD-SCAN area,
+    /// and both COMPILED. Rails TY22/TY23 close the writing; this pins that
+    /// naming the receiver did not change the arithmetic.
+    @Test("both predicates are the comparison they replaced, at the boundary in both directions")
+    func predicatesAreTheOldComparison() {
+        let duration = EpisodeSeconds(100)
+        for tolerance in [0.0, 5.0] {
+            for value in [0.0, 99.0, 100.0, 100.0 + tolerance, 100.0 + tolerance + 0.5, 250.0] {
+                #expect(
+                    AdScanSeconds(value).exceeds(duration, byMoreThan: tolerance)
+                        == (value > 100.0 + tolerance)
+                )
+                #expect(
+                    WatermarkSeconds(value).reaches(past: duration, byMoreThan: tolerance)
+                        == (value > 100.0 + tolerance)
+                )
+            }
+        }
+    }
+
+    /// The asymmetry is the point, and it is why these are two predicates
+    /// rather than one shared one. An AREA is legitimately small on a gappy
+    /// transcript, so it can never disprove a duration by being small — only by
+    /// exceeding it. A REACH past the declared end is the only evidence the
+    /// denominator describes different audio. Same arithmetic, opposite
+    /// admissible receivers, which is exactly what the compiler now enforces:
+    /// `CoveredSeconds` has no `exceeds` and `AdScanSeconds` has no `reaches`.
+    @Test("a gappy transcript's area never trips the guard its reach does")
+    func areaAndReachDisagreeOnTheSameTranscript() {
+        // AD5F3A0A's shape on the 2026-08-03 pull: the watermark over-reports
+        // the area by 2.6x, so on a duration between them exactly one of the
+        // two readings contradicts the declared duration.
+        let duration = EpisodeSeconds(2_000)
+        let area = AdScanSeconds(1_645.92)
+        let reach = WatermarkSeconds(4_280.70)
+        #expect(area.exceeds(duration, byMoreThan: 30) == false)
+        #expect(reach.reaches(past: duration, byMoreThan: 30) == true)
+    }
+}
+
+@Suite("playhead-x0lb R4 — the AN ratio is an operation, not a pair")
+struct AnalyzedFractionTests {
+
+    /// R4 probes PB1 and PB2. R3 typed both TERMS of the two
+    /// `fraction(area:ofDeclaredDuration:)` helpers, which stops the wrong
+    /// quantity arriving; inside the helper both were `Double` again and the
+    /// reciprocal compiled at both copies. Rails TY24/TY25 close it. This pins
+    /// that the delegation is behaviour-identical to the expression it replaced
+    /// — the guard order, the clamp and the nil semantics.
+    @Test("the fraction is the clamped quotient, and absence is preserved exactly")
+    func matchesTheExpressionItReplaced() {
+        let area = AnalyzedSeconds(150)
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(300)) == 0.5)
+        // The old spelling collapsed an absent duration with `?? 0`, which then
+        // failed `> 0`; `nil` fails in exactly the same place.
+        #expect(area.fractionOfDeclaredDuration(nil) == nil)
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(0)) == nil)
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(-10)) == nil)
+        // Clamped into [0, 1] at both ends, as both call sites did.
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(100)) == 1.0)
+        #expect(AnalyzedSeconds(-5).fractionOfDeclaredDuration(EpisodeSeconds(100)) == 0.0)
+    }
+
+    /// WHY AN INVERTED RATIO IS NOT A COSMETIC DEFECT. It renders in the same
+    /// `[0, 1]` bar, and on every episode whose analyzed area is under its
+    /// declared duration — which is every episode that is not finished — the
+    /// reciprocal exceeds 1 and clamps to a FULL bar. The wrong answer is not
+    /// noisy; it is the most reassuring answer the surface can give.
+    @Test("the reciprocal clamps to a full bar on exactly the episodes that are not done")
+    func theReciprocalIsIndistinguishableFromComplete() {
+        let duration = EpisodeSeconds(3_600)
+        for analyzed in [1.0, 60.0, 1_800.0, 3_599.0] {
+            let area = AnalyzedSeconds(analyzed)
+            let honest = area.fractionOfDeclaredDuration(duration)
+            #expect(honest != nil && honest! < 1.0)
+            // What PB1/PB2 would have shipped, spelled by hand because the
+            // types no longer admit it.
+            let inverted = min(1.0, max(0.0, duration.rawValue / area.rawValue))
+            #expect(inverted == 1.0)
+        }
+    }
+}

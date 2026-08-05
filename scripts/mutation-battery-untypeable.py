@@ -347,6 +347,58 @@ MUTATIONS = [
         ["Double", "ReachRatio"],
     ),
     (
+        "TY22", STORE,
+        "R4 review, planted and SURVIVED before the fix: the area-vs-duration "
+        "sanity guard driven from the TRANSCRIPT area. Written in raw values "
+        "the comparison accepted every area on the summary, so the check meant "
+        "to catch a numerator that describes different audio could be pointed "
+        "away from the numerator entirely (probe PA2)",
+        "        guard !adScanCoveredSec.exceeds(episodeDurationSec, byMoreThan: tolerance) else { return nil }",
+        "        guard !(fastTranscriptCoveredSec?.exceeds(episodeDurationSec, byMoreThan: tolerance) ?? false) else { return nil }",
+        ["CoveredSeconds", "exceeds"],
+    ),
+    (
+        "TY23", STORE,
+        "R4 review, planted and SURVIVED before the fix: the reach-past-duration "
+        "guard fed an AREA. The comment directly above it SAYS an area can never "
+        "disprove a duration and only a reach past the declared end can — and "
+        "probe PA3 wrote the area into the guard anyway and it compiled. A "
+        "sentence forbidding a substitution beside an expression that permits it "
+        "is instance 18's own shape",
+        "        if let transcriptReach, transcriptReach.reaches(past: episodeDurationSec, byMoreThan: tolerance) {",
+        "        if transcriptReach != nil, adScanCoveredSec.reaches(past: episodeDurationSec, byMoreThan: tolerance) {",
+        ["AdScanSeconds", "reaches"],
+    ),
+    (
+        "TY24", ACTIVITY,
+        "R4 review, planted and SURVIVED before the fix: the Activity AN bar's "
+        "ratio INVERTED. R3 typed both terms, which stops the wrong quantity "
+        "arriving and does nothing once it has — inside the helper both were "
+        "`Double` again and probe PB1 divided duration by area. It renders in "
+        "the same [0,1] bar and clamps to 1.0 whenever the analyzed area is "
+        "under the duration: a FULL bar on an episode nothing analyzed",
+        """        func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+            area?.fractionOfDeclaredDuration(duration)
+        }""",
+        """        func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+            duration?.fractionOfDeclaredDuration(area)
+        }""",
+        ["EpisodeSeconds", "fractionOfDeclaredDuration"],
+    ),
+    (
+        "TY25", ACTIVITY,
+        "R4 review: the same inversion at the DOGFOOD WIRE copy (probe PB2), "
+        "which compiled independently of PB1. One rail per call site for the "
+        "reason R2 gave when it split TY15 from TY16",
+        """    private func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+        area?.fractionOfDeclaredDuration(duration)
+    }""",
+        """    private func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+        duration?.fractionOfDeclaredDuration(area)
+    }""",
+        ["EpisodeSeconds", "fractionOfDeclaredDuration"],
+    ),
+    (
         "TY99", RUNNER,
         "VACUITY CONTROL: the laundering site's inventory TAG changed to a "
         "different filed defect. This MUST still compile — the tag records which "

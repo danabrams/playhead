@@ -282,9 +282,16 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         // COMPILED. Both terms are named now (rails TY18/TY19), and the guard is
         // behaviour-identical: the old `?? 0` collapsed an absent duration to a
         // number that fails `> 0`, which is what `let duration` does directly.
+        // R4 review: the DIVISION moved into
+        // ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``. R3 typed both
+        // TERMS, which stops the wrong quantity arriving; it does not stop the
+        // two that arrive correctly from being divided the wrong way round.
+        // Probe PB1 wrote `duration.rawValue / area.rawValue` right here and it
+        // COMPILED — a reciprocal renders in the same [0, 1] bar and clamps to
+        // 1.0 on every episode whose analyzed area is under its duration, i.e.
+        // a FULL bar on an episode nothing analyzed. Rail TY24.
         func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
-            guard let area, let duration, duration.rawValue > 0 else { return nil }
-            return min(1.0, max(0.0, area.rawValue / duration.rawValue))
+            area?.fractionOfDeclaredDuration(duration)
         }
 
         for episode in episodes {
@@ -753,9 +760,11 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     // typed the DENOMINATOR — see the local copy's doc for the probe that
     // walked a WATERMARK into this slot while the numerator's type looked
     // like it had closed the family.
+    /// R4 review: same delegation as the local copy, and a rail per copy for
+    /// the reason R2 gave when it split TY15 from TY16 — probe PB2 inverted
+    /// THIS one independently and it compiled too. Rail TY25.
     private func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
-        guard let area, let duration, duration.rawValue > 0 else { return nil }
-        return clampFraction(area.rawValue / duration.rawValue)
+        area?.fractionOfDeclaredDuration(duration)
     }
 
     /// playhead-x0lb R2 review: the TX bar's demotion point, named.
