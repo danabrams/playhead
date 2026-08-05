@@ -64,9 +64,11 @@ an inventory of the laundering sites, but the Swift test can only read
 `allCases` — a property of the enum, not of the code. This ties the two
 together: every case written exactly once as a `site:` argument, the number of
 `unsoundPlanListPromotion(` calls equal to the number of cases, and no bare
-`EpisodeSeconds(` construction in the runner (which is how R2 probe PR5 wrote a
-sixth promotion with the enum untouched). It is a LEXICAL tripwire on one file
-and can be out-spelled like any other; see limit L-F in `CoverageQuantities.swift`.
+`EpisodeSeconds(` or `EpisodeSeconds.init(` construction in the runner (which is
+how R2 probe PR5 wrote a sixth promotion with the enum untouched, and how R3
+re-wrote it in the spelling this clause used to miss). It is a LEXICAL tripwire
+on one file and can be out-spelled like any other; see limit L-F in
+`CoverageQuantities.swift`.
 
 COST
 ----
@@ -91,6 +93,7 @@ RUNNER = "Playhead/Services/AdDetection/BackfillJobRunner.swift"
 CLAIM = "Playhead/Services/AdDetection/SemanticScanClaim.swift"
 ACTIVITY = "Playhead/Services/Activity/ActivitySnapshotProvider.swift"
 QUANTITIES = "Playhead/Persistence/AnalysisStore/CoverageQuantities.swift"
+READINESS = "Playhead/Views/Library/EpisodePreparationReadiness.swift"
 
 # name, file, description, old, new, diagnostic fragments the build MUST print
 MUTATIONS = [
@@ -244,12 +247,12 @@ MUTATIONS = [
         "area on it fitted the `Double?` parameter",
         """            let analysisFraction = fraction(
                 area: summary?.analysisCoveredSec,
-                durationSec: durationSec
+                ofDeclaredDuration: summary?.episodeDurationSec
             )
             // Download fraction comes from the (already-snapshotted)""",
         """            let analysisFraction = fraction(
                 area: summary?.adScanCoveredSec,
-                durationSec: durationSec
+                ofDeclaredDuration: summary?.episodeDurationSec
             )
             // Download fraction comes from the (already-snapshotted)""",
         ["AdScanSeconds", "AnalyzedSeconds"],
@@ -261,12 +264,12 @@ MUTATIONS = [
         "because fixing one and not the other is how this family survives",
         """            let analysisFraction = fraction(
                 area: summary?.analysisCoveredSec,
-                durationSec: durationSec
+                ofDeclaredDuration: summary?.episodeDurationSec
             )
             let fastTranscriptWatermarkSec""",
         """            let analysisFraction = fraction(
                 area: summary?.fastTranscriptCoveredSec,
-                durationSec: durationSec
+                ofDeclaredDuration: summary?.episodeDurationSec
             )
             let fastTranscriptWatermarkSec""",
         ["CoveredSeconds", "AnalyzedSeconds"],
@@ -282,6 +285,66 @@ MUTATIONS = [
         "            let transcriptFraction = transcriptBarFill(summary?.adScanFraction)\n"
         "            let featureCoverageEndSec",
         ["ReachRatio", "DensityRatio"],
+    ),
+    (
+        "TY18", ACTIVITY,
+        "R3 review, planted and SURVIVED before the fix: the AN bar's "
+        "DENOMINATOR taken from the transcript WATERMARK. R2 typed this "
+        "helper's numerator and left `durationSec: Double`, which made it the "
+        "one ratio in the path with a half-typed pair — ReachRatio and "
+        "DensityRatio both name BOTH terms at their only constructor",
+        """            let analysisFraction = fraction(
+                area: summary?.analysisCoveredSec,
+                ofDeclaredDuration: summary?.episodeDurationSec
+            )
+            // Download fraction comes from the (already-snapshotted)""",
+        """            let analysisFraction = fraction(
+                area: summary?.analysisCoveredSec,
+                ofDeclaredDuration: summary?.fastTranscriptCoverageEndSec
+            )
+            // Download fraction comes from the (already-snapshotted)""",
+        ["WatermarkSeconds", "EpisodeSeconds"],
+    ),
+    (
+        "TY19", ACTIVITY,
+        "R3 review: the same denominator substitution at the DOGFOOD WIRE copy "
+        "— probe PC1's exact site. One rail per call site, for the reason R2 "
+        "gave when it split TY15 from TY16: fixing one and not the other is how "
+        "this family survives",
+        """            let analysisFraction = fraction(
+                area: summary?.analysisCoveredSec,
+                ofDeclaredDuration: summary?.episodeDurationSec
+            )
+            let fastTranscriptWatermarkSec""",
+        """            let analysisFraction = fraction(
+                area: summary?.analysisCoveredSec,
+                ofDeclaredDuration: summary?.fastTranscriptCoverageEndSec
+            )
+            let fastTranscriptWatermarkSec""",
+        ["WatermarkSeconds", "EpisodeSeconds"],
+    ),
+    (
+        "TY20", STORE,
+        "R3 review, planted and SURVIVED before the fix: the ANALYZED area "
+        "clipped to the TRANSCRIPT's own watermark instead of the DSP "
+        "frontier. `unionedSecondsClipped`'s `upperBound` was a bare Double, "
+        "and TY09/TY10 pin which INTERVALS go in, not which BOUND clips them — "
+        "so AN would equal TX on every episode and the two bars would simply "
+        "agree, which is the one shape of this family a reader cannot spot",
+        "            if let frontier = analysisFrontierSec, fastCoveredSec != nil {",
+        "            if let frontier = fastEndSec, fastCoveredSec != nil {",
+        ["WatermarkSeconds", "FrontierSeconds"],
+    ),
+    (
+        "TY21", READINESS,
+        "R3 review, planted and SURVIVED before the fix: the analyze zone "
+        "driven by the DOWNLOAD fraction, whose numerator is BYTES. The third "
+        "instance of the spelling R2 found twice in ActivitySnapshotProvider — "
+        "`?.rawValue` at the CALL SITE, so the type had stopped applying before "
+        "the argument was read",
+        "    let analysis = analyzeZoneFill(inputs.adScanFraction)",
+        "    let analysis = analyzeZoneFill(inputs.downloadFraction)",
+        ["Double", "ReachRatio"],
     ),
     (
         "TY99", RUNNER,
@@ -346,6 +409,13 @@ def check_inventory():
     enum was untouched and the Swift test stayed green, so a bare
     `EpisodeSeconds(` construction anywhere in the runner is treated as an
     unlogged promotion until proven otherwise.
+
+    R3 review re-planted that probe in the `.init` spelling and this preflight
+    RETURNED 0 — a lexical rail out-spelled inside its own file, which is the
+    failure mode the whole bead is a reaction to. Both spellings are counted
+    now. That is a patch on one hole, not a proof: the clause remains lexical
+    and a helper declared in another file still walks past it (L-F), which is
+    why the sentence above says tripwire and not proof.
     """
     faults = []
     quantities = (ROOT / QUANTITIES).read_text(encoding="utf-8")
@@ -372,13 +442,24 @@ def check_inventory():
                       "the inventory and the sites have drifted apart"
                       % (calls, len(cases)))
 
-    # `EpisodeSeconds.` (the two named promotions) is fine; `EpisodeSeconds(`
-    # is a raw construction and is the bypass L-F describes.
-    raw = runner.count("EpisodeSeconds(")
+    # `EpisodeSeconds.promoting(` / `.unsoundPlanListPromotion(` (the two named
+    # promotions) are fine; a raw construction is the bypass L-F describes.
+    #
+    # R3 review: `EpisodeSeconds.init(` is counted TOO, and it was not. A sixth
+    # promotion written `bound.map { EpisodeSeconds.init($0.rawValue) }` — five
+    # tagged sites left intact — passed this preflight with rc=0, which is a
+    # tripwire failing to fire in its own stated scope rather than the
+    # out-of-file case L-F already concedes. SwiftLint's `explicit_init` does
+    # reject that spelling, so the tree was never actually open; but a rail
+    # whose only backstop is a different tool is a rail nobody can reason
+    # about, and this file is the one that claims the inventory is tied to the
+    # sites.
+    spellings = ["EpisodeSeconds(", "EpisodeSeconds.init("]
+    raw = sum(runner.count(s) for s in spellings)
     if raw:
-        faults.append("%d bare `EpisodeSeconds(` construction(s) in %s — a "
-                      "PlanList→Episode promotion that no site tag records"
-                      % (raw, RUNNER))
+        faults.append("%d bare `EpisodeSeconds(`/`EpisodeSeconds.init(` "
+                      "construction(s) in %s — a PlanList→Episode promotion "
+                      "that no site tag records" % (raw, RUNNER))
     return faults
 
 

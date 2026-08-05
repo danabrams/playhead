@@ -272,9 +272,19 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         // substituted `summary?.adScanCoveredSec?.rawValue` here and it
         // COMPILED. The demotion now happens INSIDE, so the substitution is a
         // compile error (mutation rail TY15).
-        func fraction(area: AnalyzedSeconds?, durationSec: Double) -> Double? {
-            guard let area, durationSec > 0 else { return nil }
-            return min(1.0, max(0.0, area.rawValue / durationSec))
+        //
+        // R3 review: the DENOMINATOR was still a bare `Double`, and R2 fixing
+        // only the numerator left this ratio the one pair in the path with a
+        // half-typed denominator — ``ReachRatio/init(examined:ofDeclaredDuration:)``
+        // and ``DensityRatio/init(transcribed:ofDeclaredDuration:)`` both name
+        // BOTH terms. Probe PC1 passed `summary?.fastTranscriptCoverageEndSec?.rawValue`
+        // — the transcript WATERMARK — as the AN bar's denominator and it
+        // COMPILED. Both terms are named now (rails TY18/TY19), and the guard is
+        // behaviour-identical: the old `?? 0` collapsed an absent duration to a
+        // number that fails `> 0`, which is what `let duration` does directly.
+        func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+            guard let area, let duration, duration.rawValue > 0 else { return nil }
+            return min(1.0, max(0.0, area.rawValue / duration.rawValue))
         }
 
         for episode in episodes {
@@ -331,7 +341,6 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // `analysis_fraction` disagreement) means the displayed
             // fractions never come from a contradictory source either.
             let summary = coverageSummariesByAssetId[asset.id]
-            let durationSec = summary?.episodeDurationSec?.rawValue ?? 0
             // playhead-x0lb: TX is the transcript DENSITY, and it now says so —
             // one ruler on the summary rather than a local copy of the division.
             //
@@ -361,7 +370,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // given a type nothing else would share.
             let analysisFraction = fraction(
                 area: summary?.analysisCoveredSec,
-                durationSec: durationSec
+                ofDeclaredDuration: summary?.episodeDurationSec
             )
             // Download fraction comes from the (already-snapshotted)
             // `DownloadManager` live-progress map. Completed cached
@@ -539,7 +548,6 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // contract, so this only matters when the SQLite read
             // itself throws — rare but the wire must stay self-consistent.)
             let summary = coverageSummariesByAssetId[asset.id]
-            let durationSec = summary?.episodeDurationSec?.rawValue ?? 0
             let transcriptCoveredSec = summary?.fastTranscriptCoveredSec?.rawValue
             let transcriptFraction = transcriptBarFill(summary?.transcriptDensity)
             let featureCoverageEndSec = summary?.featureCoverageEndSec?.rawValue
@@ -552,7 +560,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // `analysisWatermarkSec` wire field for debugging.
             let analysisFraction = fraction(
                 area: summary?.analysisCoveredSec,
-                durationSec: durationSec
+                ofDeclaredDuration: summary?.episodeDurationSec
             )
             let fastTranscriptWatermarkSec = summary?.fastTranscriptCoverageEndSec?.rawValue
             let finalPassCoverageEndSec = summary?.finalPassCoverageEndSec?.rawValue
@@ -741,10 +749,13 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     }
 
     // playhead-x0lb: same rename as the local copy above, same reason; R2
-    // review typed the parameter for the same reason too (rail TY16).
-    private func fraction(area: AnalyzedSeconds?, durationSec: Double) -> Double? {
-        guard let area, durationSec > 0 else { return nil }
-        return clampFraction(area.rawValue / durationSec)
+    // review typed the NUMERATOR for the same reason too (rail TY16), and R3
+    // typed the DENOMINATOR — see the local copy's doc for the probe that
+    // walked a WATERMARK into this slot while the numerator's type looked
+    // like it had closed the family.
+    private func fraction(area: AnalyzedSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) -> Double? {
+        guard let area, let duration, duration.rawValue > 0 else { return nil }
+        return clampFraction(area.rawValue / duration.rawValue)
     }
 
     /// playhead-x0lb R2 review: the TX bar's demotion point, named.

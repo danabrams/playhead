@@ -249,6 +249,26 @@ struct CoveredSeconds: CoverageQuantity {
 struct AnalyzedSeconds: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
+
+    /// playhead-x0lb R3: the ONLY way this area is produced — a transcribed
+    /// region CLIPPED to the analysis frontier, with both operands named.
+    ///
+    /// **Why it exists.** `AnalysisCoverageMath.unionedSecondsClipped` is
+    /// deliberately generic interval arithmetic (see the audit), so its
+    /// `upperBound` is a bare `Double`, and the store handed it
+    /// `frontier.rawValue`. R3 probe PC2 handed it the TRANSCRIPT's own
+    /// watermark instead and it COMPILED — which would make AN identical to TX
+    /// on every episode, the "AN 100 % / TX 39 %" family (playhead-sd71) in the
+    /// one direction nobody would notice, because the two bars would simply
+    /// agree. The helper stays generic; the BOXING is what carries the type,
+    /// which is exactly where rails TY09/TY10 already decide which area a call
+    /// produces. Rail TY20.
+    init(clipping transcribed: [(start: Double, end: Double)], to frontier: FrontierSeconds) {
+        self.init(AnalysisCoverageMath.unionedSecondsClipped(
+            transcribed,
+            upperBound: frontier.rawValue
+        ))
+    }
 }
 
 /// playhead-x0lb: the AD-SCAN AREA — audio a semantic ad scan actually READ.
@@ -420,10 +440,13 @@ struct RescanThresholdSec: CoverageQuantity {
 /// `--check-inventory` preflight in `scripts/mutation-battery-untypeable.py`:
 /// every case must be written at exactly one `site:` argument, the number of
 /// `unsoundPlanListPromotion(` calls must equal the number of cases, and
-/// `BackfillJobRunner.swift` must contain no bare `EpisodeSeconds(`
-/// construction. That last clause is the one that matters, and L-F says why:
-/// a sixth site can be written as `planListBound.map { EpisodeSeconds($0.rawValue) }`
-/// with this enum untouched, and R2 probe PR5 confirmed it compiles.
+/// `BackfillJobRunner.swift` must contain no bare `EpisodeSeconds(` or
+/// `EpisodeSeconds.init(` construction. That last clause is the one that
+/// matters, and L-F says why: a sixth site can be written as
+/// `planListBound.map { EpisodeSeconds($0.rawValue) }` with this enum
+/// untouched, and R2 probe PR5 confirmed it compiles. R3 review re-planted it
+/// as `EpisodeSeconds.init($0.rawValue)` — five tagged sites intact — and the
+/// preflight returned 0, so the `.init` spelling is counted now too.
 ///
 /// Adding a case is the deliberate act. Removing one is what playhead-5pyq and
 /// playhead-a1x0 do when they make the site sound.
@@ -539,17 +562,22 @@ extension EpisodeSeconds {
 // stated and deliberately untyped, and stated but WRONG — which is where the
 // audit earned its keep.
 //
-// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY17).
+// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY21).
 //    R1 review added TY09–TY14 and the three types the first six of them
 //    needed: the rails were PLANTED FIRST and three of them SURVIVED, which is
 //    how the area/watermark conflations below were found rather than argued
 //    about. R2 review did the same at the Activity surface and added TY15–TY17;
-//    two of those three survived as well, so the running score for planting
-//    before arguing is five survivors from nine plants across two rounds.
+//    two of those three survived as well. R3 planted three more and ALL THREE
+//    survived (TY18–TY21 pin them), so the running score for planting is
+//    eight survivors from twelve plants across three rounds — a rate that has
+//    not fallen, and the reason the LIMITS section calls itself a measurement.
+//    R3's three share one shape and it is the shape R2 opened: a value that
+//    reaches its slot through `?.rawValue`, or a paired term the previous round
+//    typed only one half of.
 //
 //    The list below is what carries a type. It is NOT a list of everything a
 //    reader might want typed — the two sections after it are, and the middle
-//    one is where the R2 findings landed.
+//    one is where the R2 and R3 findings landed.
 //
 //   AnalysisCoverageSummary.episodeDurationSec        EpisodeSeconds       s   position of the episode's end, DECLARED (feed or decode probe), not measured
 //   AnalysisCoverageSummary.fastTranscriptCoveredSec  CoveredSeconds       s   AREA: interval union of pass='fast' transcript_chunks
@@ -586,10 +614,28 @@ extension EpisodeSeconds {
 //       area a call produces is decided at the ONE site that boxes the result
 //       — `fetchCoverageSummariesByAssetIds` — and the boxing is what the R1
 //       rails TY09/TY10 pin.
+//       R3 review: `unionedSecondsClipped`'s `upperBound` is a second, separate
+//       laundering point in the same call, and TY09/TY10 do NOT reach it — they
+//       pin which INTERVALS go in, not which BOUND clips them. Probe PC2 clipped
+//       the transcript union to the transcript's own WATERMARK instead of the
+//       DSP frontier and it COMPILED, which makes AN identical to TX on every
+//       episode — the one direction of the sd71 antipattern a reader cannot
+//       spot, because the two bars simply agree. The helper stays generic; the
+//       boxing now goes through ``AnalyzedSeconds/init(clipping:to:)``, which
+//       names both operands, and rail TY20 pins it.
 //   EpisodePreparationReadiness.analysisFraction / .downloadFraction -> Double
 //       Post-clamp BAR FILLS in [0, 1], provenance deliberately discarded. Note
 //       the two are adjacent fields with different units underneath: the analyze
 //       zone's numerator is seconds and the download zone's is BYTES.
+//       R3 review: that adjacency was WRITABLE, not merely noted.
+//       `clampUnit(inputs.adScanFraction?.rawValue)` is the third instance of
+//       the spelling R2 found twice in `ActivitySnapshotProvider` — the
+//       `?.rawValue` is at the CALL SITE, so the type has stopped applying
+//       before the argument is read — and probe PC3 drove the analyze zone from
+//       `inputs.downloadFraction`, the BYTES-derived one, with no complaint. The
+//       analyze zone now demotes inside `analyzeZoneFill(_: ReachRatio?)`; the
+//       download zone keeps `clampUnit`, which is honest because its input is a
+//       genuine `Double`. Rail TY21.
 //   ActivitySnapshotProvider's AN fraction -> Double
 //       analysisCoveredSec ÷ episodeDurationSec — a THIRD ratio over the same
 //       denominator as reach and density. Left untyped because one producer and
@@ -603,6 +649,17 @@ extension EpisodeSeconds {
 //       so probe PR2 substituted `summary?.adScanCoveredSec?.rawValue` and it
 //       BUILT. The helpers now take an ``AnalyzedSeconds?`` and demote inside —
 //       rails TY15/TY16.
+//       R3 review: R2 typed the NUMERATOR and left `durationSec: Double`, which
+//       made this the one ratio in the path with a half-typed pair —
+//       ``ReachRatio/init(examined:ofDeclaredDuration:)`` and
+//       ``DensityRatio/init(transcribed:ofDeclaredDuration:)`` both name BOTH
+//       terms. Probe PC1 passed the transcript WATERMARK as the AN bar's
+//       denominator and it COMPILED. Both helpers now take an
+//       ``EpisodeSeconds?`` (the `?? 0` that collapsed an absent duration is
+//       gone, behaviour-identically: the old zero failed `> 0` exactly where
+//       the new `nil` does) — rails TY18 (UI) and TY19 (dogfood wire), one
+//       per call site for the reason R2 gave: fixing one and not the other is
+//       how this family survives.
 //   ActivitySnapshotProvider's TX fraction -> Double
 //       transcriptDensity, demoted to a bar fill. R2 review ADDED this line: it
 //       is the AN fraction's sibling, it was in neither list, and probe PR1
@@ -612,6 +669,20 @@ extension EpisodeSeconds {
 //       deliberately discarded, and rail TY17 pins it. Two adjacent bar fills
 //       whose underlying quantities differ is the same shape as the analyze /
 //       download pair noted above, and it is why neither is left inline.
+//   DogfoodDiagnosticsPipelineSnapshot's coverage fields -> Double?
+//       R3 review ADDED this line, because the audit named exactly one member
+//       of it (L5) and named it as a DEFECT rather than as a surface. SIX typed
+//       quantities are demoted at one call in `ActivitySnapshotProvider`'s wire
+//       builder — `episodeDurationSec` (``EpisodeSeconds``),
+//       `transcriptCoveredSec` (``CoveredSeconds``), `featureCoverageEndSec`
+//       and `confirmedAdCoverageEndSec` (``FrontierSeconds``),
+//       `fastTranscriptWatermarkSec` and `finalPassCoverageEndSec`
+//       (``WatermarkSeconds``) — into six adjacent `Double?` wire parameters,
+//       where any of them fits any other. It is left untyped because the struct
+//       is a `Codable` JSON snapshot and typing it would put every quantity on
+//       the wire (limit L-E), and because a dogfood field is not a decision
+//       input. It is NOT left unstated: L5 is proof the family is already live
+//       here, one field carrying the area under the watermark's name.
 //
 // ── LATENT INSTANCES. Found by writing the line. Each is filed; none is fixed
 //    here, because each is a behaviour or wire change with its own blast radius.
@@ -652,7 +723,13 @@ extension EpisodeSeconds {
 //    survivors of planted substitutions (probes PR5 and PR6), and L-B moved
 //    from "documented" to "guarded". THE HONEST READING OF THAT TRAJECTORY is
 //    that this section is a measurement, not a proof — every round that has
-//    planted has found one, so assume the eighth exists.
+//    planted has found one, so assume the next one exists.
+//    R3 made that prediction come true twice over: it found the eighth (L-H,
+//    the `.rawValue` surface, which is the GENERALISATION of the two R2 found
+//    one at a time) and it found the `.init` hole inside L-F's own tripwire.
+//    Five, seven, eight — the list has grown in every round that planted, and
+//    the count of limits is a count of what somebody probed, not of what is
+//    there.
 //
 //   L-A  A ``CoveredSeconds`` can still be carrying a REACH. When no chunk
 //        landed, `fastTranscriptCoveredSec` falls back to the
@@ -693,6 +770,20 @@ extension EpisodeSeconds {
 //        it: `AnalysisCoverageSummary`, `CoverageOutcome`, `CoarseCoverageWalk`,
 //        `EpisodePreparationInputs` and `EpisodePreparationAnalysisInputs` are
 //        all `Sendable, Equatable` and none is `Codable`. The claim holds.
+//        R3 review re-derived it AGAIN, and widened the question from "which
+//        containers in this path are Codable" to "which Codable container holds
+//        a field of one of these types", which is what the limit is actually
+//        about. Eleven quantity-typed stored properties exist outside this
+//        file; their containers are `AnalysisCoverageSummary`,
+//        `EpisodePreparationInputs`, `EpisodePreparationAnalysisInputs`,
+//        `CoverageOutcome`, `CoarseCoverageWalk`, `BackfillHonestCursorBox`,
+//        `CoarseCheckpointBox`, `AnalysisCoordinator.AdScanCoverage` and
+//        `BackfillProgressCursor`. Only the last is `Codable`.
+//        `DogfoodDiagnosticsPipelineSnapshot` IS `Codable` and is the nearest
+//        thing to a counterexample — but it stores `Double?`, having been handed
+//        six demoted quantities at the call (see the audit's untyped section),
+//        so it is a laundering surface rather than a Codable carrier. The claim
+//        still holds, for a reason one word wider than R2's.
 //   L-F  **A promotion can bypass the inventory entirely.** ``PlanListSeconds``
 //        → ``EpisodeSeconds`` has two named doors (``EpisodeSeconds/promoting``
 //        and ``EpisodeSeconds/unsoundPlanListPromotion(_:site:)``) and one
@@ -707,6 +798,13 @@ extension EpisodeSeconds {
 //        therefore exactly the kind of thing this bead exists to distrust —
 //        it is a tripwire on one file, not a proof, and it is stated here as
 //        such rather than sold as one.
+//        R3 review MEASURED how thin it is: the same sixth promotion written
+//        `EpisodeSeconds.init($0.rawValue)`, with all five tagged sites left
+//        intact, passed the preflight with rc=0. Both spellings are counted
+//        now, and SwiftLint's `explicit_init` independently rejects the second
+//        — but the general shape (a promotion helper declared in ANOTHER file
+//        and merely called from the runner) is still unreachable by a check
+//        that reads one file, and no amount of spelling closes that.
 //   L-G  **Literal expressibility admits the OTHER threshold's value.**
 //        `ExpressibleByFloatLiteral` is deliberate (see the file header: a
 //        literal has no provenance to lose), and it is nonetheless a hole for
@@ -717,3 +815,31 @@ extension EpisodeSeconds {
 //        `#expect(bridge == 5.0)` and every `ReachRatio(0.98)` in the tree for a
 //        hole a magic number already advertises, so the trade is taken
 //        knowingly and written down instead.
+//   L-H  **`.rawValue` is where the types stop applying, and it is a SURFACE,
+//        not an incident.** R3 review's finding is not any one of the three
+//        below — it is that both of R2's High findings went through `?.rawValue`
+//        and nobody had counted the rest. Counted now, in production code added
+//        by this bead: 47 genuine reads (excluding the 22 `let rawValue` /
+//        memberwise-init declaration lines and every prose mention). 21 of the
+//        47 are inside THIS FILE — the mechanism's own guards, divisions and
+//        promotions, where both operands are already the same kind and nothing
+//        can be substituted. The other 26 are real boundaries, and they classify
+//        as: 4 deliberate cross-kind comparisons inside `adScanFraction`
+//        (area-vs-duration, watermark-vs-duration; pinned by TY06/TY09–TY11),
+//        3 demotions into generic interval arithmetic, 6 into
+//        `DogfoodDiagnosticsPipelineSnapshot`'s adjacent `Double?` wire fields,
+//        4 into bar fills (now behind `transcriptBarFill` / `analyzeZoneFill` /
+//        the two `fraction(area:ofDeclaredDuration:)` helpers), 3 into
+//        `String(format:)` diagnostics, 2 cashing the cursor in
+//        `narrowedForResume` against raw segment times, 1 epsilon reconstruct in
+//        `clearsFinalizeFloor`, 1 the Episode→PlanList crossing, and the
+//        remainder guard-local.
+//        THE RULE THAT FALLS OUT: a `.rawValue` whose result flows into a
+//        parameter, a dictionary, a JSON field, a format string, an arithmetic
+//        expression or a comparison **that would also accept a different
+//        quantity** is a laundering point, and the fix is always the same one —
+//        move the demotion INSIDE a named function that takes the quantity.
+//        R3 planted against the three that looked load-bearing and all three
+//        survived; that is a 3-for-3 hit rate on a surface of 26, so the honest
+//        expectation is that more of the remaining ones are writable, not that
+//        they are safe. What is claimed here is a CENSUS, not a clearance.

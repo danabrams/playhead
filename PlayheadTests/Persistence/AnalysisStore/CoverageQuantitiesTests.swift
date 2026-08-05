@@ -411,3 +411,53 @@ struct GapWidthTests {
         #expect(rescan.rawValue > shortestAd)
     }
 }
+
+@Suite("playhead-x0lb R3 — the analyzed area names the bound that clips it")
+struct AnalyzedSecondsClipConstructorTests {
+
+    /// R3 review's probe PC2. `AnalysisCoverageMath.unionedSecondsClipped` is
+    /// deliberately generic interval arithmetic, so its `upperBound` is a bare
+    /// `Double`; the store used to hand it `frontier.rawValue`, and PC2 handed
+    /// it the TRANSCRIPT's own watermark instead and the tree COMPILED.
+    ///
+    /// The rail that closes it is TY20 (the substitution no longer builds).
+    /// What this test adds is the part a compile check cannot see: that routing
+    /// the store through the named constructor did not change the arithmetic.
+    /// The bound genuinely truncates, so a wrong bound is not cosmetic — it is
+    /// the whole value of the AN quantity.
+    @Test("clipping delegates to unionedSecondsClipped, bound and all")
+    func delegatesWithoutChangingTheArithmetic() {
+        let transcribed: [(start: Double, end: Double)] = [
+            (start: 0, end: 100),
+            (start: 200, end: 300)
+        ]
+        for bound in [0.0, 50.0, 100.0, 250.0, 1_000.0] {
+            #expect(
+                AnalyzedSeconds(clipping: transcribed, to: FrontierSeconds(bound)).rawValue
+                    == AnalysisCoverageMath.unionedSecondsClipped(transcribed, upperBound: bound)
+            )
+        }
+    }
+
+    /// The bound is load-bearing in the direction that matters: clipping the
+    /// same union to the transcript's own reach returns the whole union, which
+    /// is exactly the "AN ≡ TX on every episode" reading PC2 would have shipped
+    /// — the one shape of this family a reader cannot spot, because the two
+    /// bars simply agree.
+    @Test("a frontier below the union truncates; the transcript's own reach does not")
+    func theBoundIsWhatMakesTheQuantityDifferentFromTX() {
+        let transcribed: [(start: Double, end: Double)] = [
+            (start: 0, end: 100),
+            (start: 200, end: 300)
+        ]
+        let transcriptArea = AnalysisCoverageMath.unionedSeconds(transcribed)
+        #expect(transcriptArea == 200)
+
+        let atFrontier = AnalyzedSeconds(clipping: transcribed, to: FrontierSeconds(250))
+        #expect(atFrontier.rawValue == 150)
+
+        // The substitution PC2 wrote: clip to the transcript's own watermark.
+        let atTranscriptReach = AnalyzedSeconds(clipping: transcribed, to: FrontierSeconds(300))
+        #expect(atTranscriptReach.rawValue == transcriptArea)
+    }
+}

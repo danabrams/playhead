@@ -10924,13 +10924,21 @@ actor AnalysisStore {
             let analysisCoveredSec: AnalyzedSeconds?
             if let frontier = analysisFrontierSec, fastCoveredSec != nil {
                 // Gap-aware clip of the transcribed region to the frontier: a
-                // WATERMARK bounding an AREA, which is what makes the result a
+                // FRONTIER bounding an AREA, which is what makes the result a
                 // subset of the transcript union rather than the frontier
                 // itself. playhead-sd71's whole point, now stated in the types.
-                analysisCoveredSec = AnalyzedSeconds(AnalysisCoverageMath.unionedSecondsClipped(
-                    transcriptIntervals,
-                    upperBound: frontier.rawValue
-                ))
+                //
+                // R3 review: through ``AnalyzedSeconds/init(clipping:to:)``
+                // rather than `unionedSecondsClipped(_:upperBound:)` directly.
+                // The generic helper's bound is a bare `Double`, and probe PC2
+                // put the TRANSCRIPT's watermark in it — AN would then equal TX
+                // on every episode and the two bars would simply agree, which
+                // is the one shape of this family a reader cannot spot. Rail
+                // TY20.
+                analysisCoveredSec = AnalyzedSeconds(
+                    clipping: transcriptIntervals,
+                    to: frontier
+                )
             } else {
                 analysisCoveredSec = nil
             }
