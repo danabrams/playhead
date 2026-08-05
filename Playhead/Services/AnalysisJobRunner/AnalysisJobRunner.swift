@@ -1825,9 +1825,14 @@ actor AnalysisJobRunner {
               !region.isEmpty else {
             return nil
         }
+        // playhead-x0lb R6: this call site is why the floor's two parameters
+        // carry types. Both were `Double?`, and `watermark` — a REACH, three
+        // lines above — plus `region.unionedSeconds` (the RAW union) plus the
+        // duration itself were all writable into `coveredSec:`. Three probes,
+        // three COMPILED; rails TY35–TY37.
         guard SemanticScanClaim.transcriptClearsFinalizeFloor(
             coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(region: region),
-            episodeDurationSec: asset.episodeDurationSec
+            episodeDurationSec: asset.episodeDurationSec.map { EpisodeSeconds($0) }
         ) else {
             return nil
         }

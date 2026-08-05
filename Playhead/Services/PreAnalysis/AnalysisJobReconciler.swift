@@ -1410,11 +1410,17 @@ actor AnalysisJobReconciler {
             // fast pass alone made this gate refuse 48E903D7 at 36.9 % when its
             // transcript covers 95.1 %, and 0C2FC22E at 55.4 % when its two
             // passes tile the episode end to end between them.
+            //
+            // playhead-x0lb R6: both parameters carry types. They were `Double?`
+            // and `Double?`, so probe PJ5 exchanged the numerator and the
+            // denominator here and it COMPILED — R4's PB1/PB2 reciprocal shape,
+            // which R4 closed for the Activity bars and which was still writable
+            // at this gate. Rail TY37.
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
                 coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
                     region: try await store.fetchTranscribedRegion(assetId: assetId)
                 ),
-                episodeDurationSec: asset.episodeDurationSec
+                episodeDurationSec: asset.episodeDurationSec.map { EpisodeSeconds($0) }
             ) else { continue }
             // Whether a scan is OWED is deliberately not re-asked here.
             // ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``

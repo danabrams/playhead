@@ -131,13 +131,16 @@ struct SemanticScanClaimPredicateTests {
     func transcriptFloorAdmits95Percent() {
         #expect(AnalysisCoordinator.finalizeBackfillMinCoverageRatio == 0.95)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 0.95 * 2_113, episodeDurationSec: 2_113
+            coveredSec: BridgedTranscriptSeconds(0.95 * 2_113),
+            episodeDurationSec: EpisodeSeconds(2_113)
         ))
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: 2_113
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(2_113)
         ))
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 0.94 * 2_113, episodeDurationSec: 2_113
+            coveredSec: BridgedTranscriptSeconds(0.94 * 2_113),
+            episodeDurationSec: EpisodeSeconds(2_113)
         ) == false)
     }
 
@@ -182,16 +185,21 @@ struct SemanticScanClaimPredicateTests {
         let raw = AnalysisCoverageMath.unionedSeconds(ranges)
         #expect(raw / duration < 0.95,
                 "fixture is not gappy enough to prove anything: \(raw / duration)")
+        // playhead-x0lb R6: the RAW union has to be BOXED to reach this gate now,
+        // and that is the point — probe PJ3 wrote `coveredSec:
+        // region.unionedSeconds` at the production call site and it compiled.
+        // Here the box is deliberate and states which quantity is on trial.
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: raw, episodeDurationSec: duration
+            coveredSec: BridgedTranscriptSeconds(raw),
+            episodeDurationSec: EpisodeSeconds(duration)
         ) == false)
 
         let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(
             region: CoverageRegionFixtures.transcribed(ranges)
         )
-        #expect(bridged > raw)
+        #expect(bridged.rawValue > raw)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: bridged, episodeDurationSec: duration
+            coveredSec: bridged, episodeDurationSec: EpisodeSeconds(duration)
         ), "a fully transcribed episode must clear the transcript floor")
     }
 
@@ -212,10 +220,10 @@ struct SemanticScanClaimPredicateTests {
         let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(
             region: CoverageRegionFixtures.transcribed(head + tail)
         )
-        #expect(bridged < 0.95 * duration,
+        #expect(bridged.rawValue < 0.95 * duration,
                 "a 400 s hole must not be bridged away")
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: bridged, episodeDurationSec: duration
+            coveredSec: bridged, episodeDurationSec: EpisodeSeconds(duration)
         ) == false)
         // …and the gap really is wider than the bridge, or this proves nothing.
         #expect(400 > AnalysisCoverageMath.adScanBridgeableGapSec)
@@ -227,17 +235,33 @@ struct SemanticScanClaimPredicateTests {
     @Test("an unmeasurable transcript never clears the floor")
     func unmeasurableTranscriptDoesNotClear() {
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: nil, episodeDurationSec: 2_113) == false)
+            coveredSec: nil, episodeDurationSec: EpisodeSeconds(2_113)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: nil) == false)
+            coveredSec: BridgedTranscriptSeconds(2_113), episodeDurationSec: nil) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: 0) == false)
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(0)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: 2_113, episodeDurationSec: -1) == false)
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(-1)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: .nan, episodeDurationSec: 2_113) == false)
+            coveredSec: BridgedTranscriptSeconds(.nan),
+            episodeDurationSec: EpisodeSeconds(2_113)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: -5, episodeDurationSec: 2_113) == false)
+            coveredSec: BridgedTranscriptSeconds(-5),
+            episodeDurationSec: EpisodeSeconds(2_113)) == false)
+        // playhead-x0lb R6: the `+∞` numerator. It is not decoration — the R6 fix
+        // routes the division through
+        // ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)``, which
+        // CLAMPS into [0, 1], so an infinite area clamps to 1.0 and would clear
+        // this floor if the finiteness guard were merely inherited rather than
+        // re-stated. This assertion is what makes that guard non-removable.
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(.infinity),
+            episodeDurationSec: EpisodeSeconds(2_113)) == false)
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(.infinity)) == false)
     }
 
     /// The prefix IS the device-pull query (`deferReason LIKE 'scan_claim:%'`),

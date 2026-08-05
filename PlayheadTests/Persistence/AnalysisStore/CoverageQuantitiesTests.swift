@@ -552,6 +552,85 @@ struct AnalyzedFractionTests {
     }
 }
 
+@Suite("playhead-x0lb R6 — the finalize floor's numerator is its own quantity")
+struct BridgedTranscriptSecondsTests {
+
+    /// R6 probes PJ3/PJ4/PJ5. `transcriptClearsFinalizeFloor` took two bare
+    /// `Double?`s, and at `AnalysisJobRunner.transcriptCoverageOfCompletedTranscript`
+    /// the RAW union, the fast WATERMARK and the DURATION were all in scope and
+    /// all three fitted `coveredSec:`. Rails TY35–TY37.
+    ///
+    /// This pins the arithmetic against the expression the types replaced: the
+    /// same clamp, the same nil semantics, the same guard order.
+    @Test("the fraction is the clamped quotient, and absence is preserved exactly")
+    func matchesTheExpressionItReplaced() {
+        let area = BridgedTranscriptSeconds(150)
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(300)) == 0.5)
+        #expect(area.fractionOfDeclaredDuration(nil) == nil)
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(0)) == nil)
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(-10)) == nil)
+        #expect(area.fractionOfDeclaredDuration(EpisodeSeconds(100)) == 1.0)
+        #expect(BridgedTranscriptSeconds(-5)
+            .fractionOfDeclaredDuration(EpisodeSeconds(100)) == 0.0)
+    }
+
+    /// **THE GUARD THAT THE R6 FIX ALMOST REMOVED WHILE ADDING ONE.** The floor
+    /// used to reject a non-finite numerator outright (`coveredSec.isFinite`).
+    /// Routing the division through ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)``
+    /// — which is the R4 lesson, a typed pair is not a typed operation — moves it
+    /// behind a CLAMP, and `+∞` clamps to `1.0`, which clears a 0.95 floor. The
+    /// finiteness guard is therefore re-stated at the floor rather than inherited,
+    /// and this is the assertion that makes it non-removable.
+    ///
+    /// It is worth stating what an infinite area would MEAN: it cannot come off
+    /// ``TranscribedRegion/bridgedSeconds(bridging:)`` over sane rows, so the
+    /// only route is a hand-boxed value — which is limit L-I, the door this bead
+    /// cannot close. The guard is what stops L-I's door opening onto a gate.
+    @Test("an infinite area clamps to a full bar and must still fail the floor")
+    func infiniteAreaClampsButMustNotClear() {
+        let infinite = BridgedTranscriptSeconds(.infinity)
+        // The clamp really does produce a passing-looking ratio…
+        #expect(infinite.fractionOfDeclaredDuration(EpisodeSeconds(2_113)) == 1.0)
+        // …and the floor must still refuse it.
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: infinite, episodeDurationSec: EpisodeSeconds(2_113)) == false)
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(.nan),
+            episodeDurationSec: EpisodeSeconds(2_113)) == false)
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(2_113),
+            episodeDurationSec: EpisodeSeconds(.infinity)) == false)
+    }
+
+    /// The RAW union and the BRIDGED area are different quantities off the same
+    /// receiver, and only one of them is this floor's numerator. PJ3 wrote
+    /// `coveredSec: region.unionedSeconds` in one token; the measurement that
+    /// makes it a P0 rather than a rounding difference is that the raw union
+    /// clears 0.95 for ZERO of the twelve assets on the 2026-08-03 pull.
+    @Test("the raw union and the bridged area disagree across the floor")
+    func rawUnionAndBridgedAreaDisagreeAcrossTheFloor() {
+        // 400 speech runs of 0.75 s separated by 0.11 s breaths — FCDDB309's
+        // measured shape, and the field asset's own raw/bridged split.
+        let ranges: [(start: Double, end: Double)] = (0..<400).map { index in
+            let start = Double(index) * 0.86
+            return (start: start, end: start + 0.75)
+        }
+        let duration = EpisodeSeconds(400 * 0.86 - 0.11)
+        let region = CoverageRegionFixtures.transcribed(ranges)
+
+        let raw = region.unionedSeconds
+        let bridged = region.bridgedSeconds(bridging: AnalysisCoverageMath.adScanBridgeableGapSec)
+        #expect(bridged.rawValue > raw)
+
+        // The raw union is a DENSITY and fails a floor calibrated for REACH…
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(raw), episodeDurationSec: duration) == false)
+        // …while the quantity the floor actually names clears it.
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: bridged, episodeDurationSec: duration))
+    }
+}
+
 /// playhead-x0lb R5: the region types keep their intervals `fileprivate`, so a
 /// test builds one the way the coverage reader does — one row at a time, off the
 /// SQL columns. That is deliberate: an `init(intervals:)` visible to the whole
@@ -743,7 +822,7 @@ struct CoverageRegionTests {
         // Bridged: [0,120] ∪ [600,700]. The breath closes, the block does not.
         #expect(region.bridgedSeconds(bridging: bridge) == 220)
         #expect(
-            region.bridgedSeconds(bridging: bridge)
+            region.bridgedSeconds(bridging: bridge).rawValue
                 == AnalysisCoverageMath.unionedSeconds(
                     AnalysisCoverageMath.bridgingShortGaps(raw, upTo: bridge)
                 )
@@ -756,7 +835,7 @@ struct CoverageRegionTests {
                 examined: CoverageRegionFixtures.scanned([(start: 0, end: 700)]),
                 within: region,
                 bridging: bridge
-            ).rawValue == region.bridgedSeconds(bridging: bridge)
+            ).rawValue == region.bridgedSeconds(bridging: bridge).rawValue
         )
     }
 

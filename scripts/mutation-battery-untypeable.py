@@ -70,6 +70,21 @@ re-wrote it in the spelling this clause used to miss). It is a LEXICAL tripwire
 on one file and can be out-spelled like any other; see limit L-F in
 `CoverageQuantities.swift`.
 
+R6 review added a SECOND clause to it, `check_region_fabrication`, and the
+reason is the same shape one layer down. R5 typed the four interval carriers and
+recorded in limit L-I that "there is now exactly ONE such door per region and it
+sits at the genuine boundary" — a claim about CALL SITES that reads as a claim
+about reachability. `init()` and `append(start:end:)` are INTERNAL, so any file
+in the module can assemble any region out of any numbers in three lines: probe
+PJ1 built a `TranscribedRegion` from `fetchFastTranscriptCoveredRanges` in
+`AnalysisJobRunner` and it COMPILED, reproducing playhead-9y9e's SHIPPED defect
+one layer below rails TY32/TY34, which exist to stop exactly that. No type
+closes it (Swift's only friend mechanism is file scope, and the two file moves
+that would work are measured and rejected in the function's own docstring), so
+region fabrication is CONFINED to the two producing files lexically. Same
+worth as L-F's: it cannot stop a fabrication, only stop a new one landing
+unnoticed.
+
 COST
 ----
 Each rail is one incremental `xcodebuild build` (no tests, no simulator boot).
@@ -82,6 +97,7 @@ import argparse
 import hashlib
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -508,6 +524,45 @@ MUTATIONS = [
         ["TranscribedRegion", "(start: Double, end: Double)"],
     ),
     (
+        "TY35", JOBRUNNER,
+        "R6 review probe PJ3, planted and COMPILED before the fix: the RAW "
+        "interval union handed to the finalize floor, written in ONE TOKEN off "
+        "the very region the correct expression takes. This is playhead-fil5 "
+        "R3's P0 — and it does not loosen the gate, it turns it off: the raw "
+        "union clears 0.95 for ZERO of the twelve assets on the 2026-08-03 pull",
+        "            coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(region: region),",
+        "            coveredSec: region.unionedSeconds,",
+        ["expected argument type 'BridgedTranscriptSeconds'"],
+    ),
+    (
+        "TY36", JOBRUNNER,
+        "R6 review probe PJ4: the fast WATERMARK as the finalize floor's AREA, "
+        "in scope three lines above a doc paragraph saying in as many words that "
+        "the watermark cannot be the gate. Latent instance L1 (playhead-fpnt), "
+        "which the audit cleared with an argument rather than a probe — on the "
+        "same pull D9B513CD reads 100.0 % by watermark against an 88.3 % area, "
+        "and the 11.7 pp is across this floor",
+        "            coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(region: region),",
+        "            coveredSec: watermark,",
+        ["expected argument type 'BridgedTranscriptSeconds'"],
+    ),
+    (
+        "TY37", RECONCILER,
+        "R6 review probe PJ5: the finalize floor's NUMERATOR and DENOMINATOR "
+        "exchanged. R4's PB1/PB2 reciprocal shape, closed for the Activity bars "
+        "by moving the division into `fractionOfDeclaredDuration` and still "
+        "writable at this gate because both slots were `Double?`",
+        """                coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
+                    region: try await store.fetchTranscribedRegion(assetId: assetId)
+                ),
+                episodeDurationSec: asset.episodeDurationSec.map { EpisodeSeconds($0) }""",
+        """                coveredSec: asset.episodeDurationSec.map { EpisodeSeconds($0) },
+                episodeDurationSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
+                    region: try await store.fetchTranscribedRegion(assetId: assetId)
+                )""",
+        ["BridgedTranscriptSeconds", "EpisodeSeconds"],
+    ),
+    (
         "TY99", RUNNER,
         "VACUITY CONTROL: the laundering site's inventory TAG changed to a "
         "different filed defect. This MUST still compile — the tag records which "
@@ -621,6 +676,78 @@ def check_inventory():
         faults.append("%d bare `EpisodeSeconds(`/`EpisodeSeconds.init(` "
                       "construction(s) in %s — a PlanList→Episode promotion "
                       "that no site tag records" % (raw, RUNNER))
+    faults.extend(check_region_fabrication())
+    return faults
+
+
+# The four interval carriers, and the only two production files allowed to
+# FABRICATE one. See `check_region_fabrication`.
+REGION_TYPES = (
+    "FastTranscriptRegion",
+    "FinalTranscriptRegion",
+    "TranscribedRegion",
+    "ScannedRegion",
+)
+REGION_PRODUCERS = {STORE, QUANTITIES}
+
+
+def check_region_fabrication():
+    """Confine region FABRICATION to the two files that legitimately produce one.
+
+    **Why this exists, and what it is not.** R5 gave the four interval
+    populations distinct types and wrote, in limit L-I, that "there is now
+    exactly ONE such door per region and it sits at the genuine boundary rather
+    than at every consumer". R6 planted against that sentence and it is a claim
+    about CALL SITES, not about reachability: `init()` and `append(start:end:)`
+    are INTERNAL, so any file in the module can build any region out of any
+    numbers in three lines. Probe PJ1 did exactly that in
+    `AnalysisJobRunner` —
+
+        var region = TranscribedRegion()
+        for range in fetchFastTranscriptCoveredRanges(...) { region.append(...) }
+
+    — and it COMPILED, reproducing playhead-9y9e's SHIPPED defect (48E903D7 at
+    36.9 % against a 0.95 floor on an asset covering 95.1 %) one layer below
+    rails TY32/TY34, which were added in the previous round to stop precisely
+    that substitution. Probe PJ2 did the same for `ScannedRegion` and minted an
+    `AdScanSeconds` outside the store from a region fabricated out of a
+    watermark.
+
+    **No type closes it, and the two closures that would were measured and
+    rejected.** `fileprivate` is the only friend mechanism Swift has, so the
+    fill door can only be shut by putting the SQL readers and the region types
+    in one file. Moving the readers into `CoverageQuantities.swift` is
+    impossible: they are built on `prepare` / `bind` / `text` / `optionalText`,
+    which are `private` to `AnalysisStore.swift`, and widening the store's raw
+    SQL primitives to internal to close an interval door is a worse trade than
+    the door. Moving the region types into `AnalysisStore.swift` works and
+    moves limit L-L's blast radius from a 1,565-line file to a 21,147-line one,
+    which is the same hole with a wider mouth.
+
+    So this is a LEXICAL tripwire in exactly the shape of L-F's, and it is
+    worth the same amount: it cannot stop a fabrication, it can only refuse to
+    let a NEW one land unnoticed. It is scoped to production (`Playhead/`);
+    tests fabricate regions on purpose, which is what fixtures are for.
+    """
+    faults = []
+    pattern = re.compile(
+        r"\b(?:%s)\(" % "|".join(REGION_TYPES) + r"|\.append\(start:"
+    )
+    for path in sorted((ROOT / "Playhead").rglob("*.swift")):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel in REGION_PRODUCERS:
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("//") or stripped.startswith("///"):
+                continue
+            if pattern.search(line):
+                faults.append(
+                    "%s:%d fabricates a coverage region outside %s — a region "
+                    "built from loose numbers carries whatever population the "
+                    "author reached for (probe PJ1): %s"
+                    % (rel, lineno, " / ".join(sorted(REGION_PRODUCERS)), stripped)
+                )
     return faults
 
 
@@ -634,14 +761,19 @@ def main(argv=None):
 
     faults = check_inventory()
     if faults:
-        sys.stderr.write("untypeable-battery: the unsound-promotion inventory does "
-                         "not match the sites.\n")
+        sys.stderr.write("untypeable-battery: the buildless preflight failed.\n")
         for fault in faults:
             sys.stderr.write("    %s\n" % fault)
-        sys.stderr.write("Add the case, or route the site through "
-                         "EpisodeSeconds.unsoundPlanListPromotion(_:site:).\n")
+        sys.stderr.write(
+            "A PROMOTION fault: add the case, or route the site through "
+            "EpisodeSeconds.unsoundPlanListPromotion(_:site:).\n"
+            "A FABRICATION fault: get the region from AnalysisStore instead of "
+            "building one — a region assembled from loose numbers carries "
+            "whatever population was in reach, which is probe PJ1 (rails "
+            "TY32/TY34 reproduced one layer below themselves).\n")
         return 2
-    print("=== inventory: every promotion site is tagged, and only tagged sites promote ===")
+    print("=== inventory: every promotion site is tagged, only tagged sites "
+          "promote, and no file outside the store fabricates a region ===")
     if args.check_inventory:
         return 0
 

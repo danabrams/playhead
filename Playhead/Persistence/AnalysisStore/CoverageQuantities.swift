@@ -252,6 +252,57 @@ struct CoveredSeconds: CoverageQuantity {
     init(_ rawValue: Double) { self.rawValue = rawValue }
 }
 
+/// playhead-x0lb R6: the BRIDGED TRANSCRIPT AREA — the de-overlapped area of the
+/// ``TranscribedRegion`` (BOTH passes) with sub-``BridgeToleranceSec`` gaps
+/// closed. The one numerator
+/// ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
+/// is allowed to divide.
+///
+/// * numerator / denominator: none — an area.
+/// * unit: seconds of episode audio.
+/// * produced by exactly one expression, ``TranscribedRegion/bridgedSeconds(bridging:)``.
+///
+/// **It exists because the floor's parameter was a bare `Double?` and THREE
+/// different quantities were writable into it at one production call site.** The
+/// audit filed that as latent instance L1 (playhead-fpnt) on the strength of an
+/// argument — "the demotion happens INSIDE a function that takes the region,
+/// which is limit L-H's own stated remedy" — and R6 planted against it instead.
+/// All three COMPILED, in `AnalysisJobRunner.transcriptCoverageOfCompletedTranscript`:
+///
+///   * `coveredSec: region.unionedSeconds` — the RAW union, off the very region
+///     the correct expression takes. That is playhead-fil5 R3's P0 in ONE TOKEN,
+///     and it is not a near miss: the raw union clears 0.95 for **zero of the
+///     twelve** assets on the 2026-08-03 pull (maximum 93.8 %, re-derived at R6),
+///     so the substitution turns the gate off rather than loosening it.
+///   * `coveredSec: watermark` — the fast `fastTranscriptCoverageEndTime`
+///     WATERMARK, in scope three lines above, under a doc paragraph that says in
+///     as many words that the watermark cannot be the gate. On the same pull the
+///     watermark reads 100.0 % against an 88.3 % two-pass area on D9B513CD, and
+///     that 11.7 pp is across the 0.95 floor.
+///   * the numerator and the denominator EXCHANGED at the reconciler's copy —
+///     R4's PB1/PB2 reciprocal shape, which R4 closed for the Activity bars by
+///     moving the division into ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``
+///     and which was still writable here because both slots were `Double?`.
+///
+/// The lesson is the one this bead keeps re-learning: a clearance is not "the
+/// demotion is inside a named function", it is "there is no second quantity in
+/// scope to write". The demotion WAS inside a named function, and the call site
+/// still had a watermark, a raw union and a duration in scope. Rails TY35–TY37.
+struct BridgedTranscriptSeconds: CoverageQuantity {
+    let rawValue: Double
+    init(_ rawValue: Double) { self.rawValue = rawValue }
+
+    /// This area over the DECLARED duration, with the division written ONCE and
+    /// the numerator as the receiver — so the reciprocal that probe PJ5 wrote is
+    /// not an expression anybody can form. Same shape and same guards as
+    /// ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``; see rails TY24/TY25
+    /// for why a typed PAIR is not a typed OPERATION.
+    func fractionOfDeclaredDuration(_ duration: EpisodeSeconds?) -> Double? {
+        guard let duration, duration.rawValue > 0 else { return nil }
+        return min(1.0, max(0.0, rawValue / duration.rawValue))
+    }
+}
+
 /// playhead-x0lb: the ANALYZED AREA — the transcript union CLIPPED to the
 /// analysis frontier. An area, and a subset of ``CoveredSeconds``.
 ///
@@ -568,6 +619,17 @@ struct TranscribedRegion {
     /// check into `DensityRatio(transcribed:ofDeclaredDuration:)`. A bare `Double`
     /// under a name that says which region it came off is the honest answer until
     /// someone needs a second consumer.
+    ///
+    /// **R6 review: staying bare is now a CLEARANCE rather than a shrug, and it
+    /// was not one when it was written.** Its only consumer is a test, but a bare
+    /// `Double` off this receiver was also writable into the finalize floor —
+    /// probe PJ3 wrote `coveredSec: region.unionedSeconds` and it compiled, which
+    /// is the RAW union as the gate, i.e. playhead-fil5 R3's P0 (zero of twelve
+    /// assets clear 0.95 raw). What closed it is the floor taking a
+    /// ``BridgedTranscriptSeconds``, not this property changing: the raw union is
+    /// a genuinely different quantity from the bridged one and giving both the
+    /// same type would have re-opened the substitution inside the region. Rail
+    /// TY35.
     var unionedSeconds: Double {
         AnalysisCoverageMath.unionedSeconds(intervals)
     }
@@ -577,15 +639,20 @@ struct TranscribedRegion {
     /// is meant to be handed, and the same region
     /// ``AdScanSeconds/init(examined:within:bridging:)`` intersects against.
     ///
-    /// It returns a bare `Double` because its one consumer is that floor, whose
-    /// `coveredSec` parameter takes an AREA or a WATERMARK indistinguishably —
-    /// latent instance L1, filed as playhead-fpnt and deliberately not fixed here.
-    /// The demotion happens INSIDE a function that takes the region, which is
-    /// limit L-H's own stated remedy.
-    func bridgedSeconds(bridging tolerance: BridgeToleranceSec) -> Double {
-        AnalysisCoverageMath.unionedSeconds(
+    /// **R6 review: it returns a ``BridgedTranscriptSeconds``, and the sentence
+    /// that used to stand here is the finding.** It read: "It returns a bare
+    /// `Double` because its one consumer is that floor, whose `coveredSec`
+    /// parameter takes an AREA or a WATERMARK indistinguishably — latent instance
+    /// L1, filed as playhead-fpnt and deliberately not fixed here. The demotion
+    /// happens INSIDE a function that takes the region, which is limit L-H's own
+    /// stated remedy." Every clause is true and the conclusion does not follow:
+    /// the demotion being inside a named function says nothing about what else is
+    /// in scope AT THE CALL SITE, and three substitutions were writable there.
+    /// See ``BridgedTranscriptSeconds`` for the probes; rails TY35–TY37.
+    func bridgedSeconds(bridging tolerance: BridgeToleranceSec) -> BridgedTranscriptSeconds {
+        BridgedTranscriptSeconds(AnalysisCoverageMath.unionedSeconds(
             AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: tolerance)
-        )
+        ))
     }
 }
 
@@ -921,6 +988,24 @@ extension EpisodeSeconds {
 //    region's raw array from `AnalysisStore.swift` and both were REJECTED for
 //    `fileprivate` protection — a clearance with a probe under it, not an
 //    argument.
+//    R6 REVIEW planted five and ALL FIVE COMPILED, through a harness carrying a
+//    control in BOTH directions (CTL1, rail TY34's mutation, REJECTED with the
+//    expected diagnostic; CTL2, rail TY99's edit, COMPILED) — so the 5/5 is a
+//    result and not a harness that says yes. They split into two findings:
+//      * PJ3 / PJ4 / PJ5 — `SemanticScanClaim.transcriptClearsFinalizeFloor`
+//        took two bare `Double?`, so at ONE production call site the RAW union,
+//        the fast WATERMARK and the DURATION all fitted `coveredSec:`. It was
+//        filed as latent instance L1 on the strength of an argument — "the
+//        demotion happens INSIDE a function that takes the region" — which is a
+//        statement about the CALLEE and says nothing about the caller's scope.
+//        CLOSED here: ``BridgedTranscriptSeconds`` and ``EpisodeSeconds``, with
+//        the division written once inside the numerator. Rails TY35–TY37.
+//      * PJ1 / PJ2 — the region types' own `init()` and `append(start:end:)` are
+//        INTERNAL, so any file in the module assembles any region from any
+//        numbers. NOT closable by types; see limit L-I's R6 entry for the two
+//        file moves that would work and the measurement that rejected each.
+//    The running score for planting is 49 plants / 42 survivors across six
+//    rounds (R1 6/3, R2 3/2, R3 3/3, R4 20/20, R5 5/4 plus review 7/5, R6 5/5).
 //
 //    The list below is what carries a type. It is NOT a list of everything a
 //    reader might want typed — the two sections after it are, and the middle
@@ -930,6 +1015,7 @@ extension EpisodeSeconds {
 //   AnalysisCoverageSummary.fastTranscriptCoveredSec  CoveredSeconds       s   AREA: interval union of pass='fast' transcript_chunks
 //   AnalysisCoverageSummary.analysisCoveredSec        AnalyzedSeconds      s   AREA: that union clipped to the DSP frontier
 //   AnalysisCoverageSummary.adScanCoveredSec          AdScanSeconds        s   AREA: coverage-lane scan windows that examined, ∩ the bridged transcript
+//   TranscribedRegion.bridgedSeconds(bridging:)       BridgedTranscriptSeconds s AREA: both passes, de-overlapped, sub-5 s gaps closed (R6)
 //   AnalysisCoverageSummary.fastTranscriptCoverageEndSec  WatermarkSeconds s   REACH: MAX(endTime) of fast chunks, watermark fallback
 //   AnalysisCoverageSummary.featureCoverageEndSec     FrontierSeconds      s   REACH: the DSP feature-extraction watermark
 //   AnalysisCoverageSummary.confirmedAdCoverageEndSec FrontierSeconds      s   REACH: MAX(endTime) of DETECTED ad windows — not coverage at all
@@ -1145,10 +1231,24 @@ extension EpisodeSeconds {
 //    here, because each is a behaviour or wire change with its own blast radius.
 //
 //   L1  SemanticScanClaim.transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)
-//       `coveredSec: Double` accepts an AREA or a WATERMARK indistinguishably.
-//       Production hands it the 5 s-bridged AREA; `SemanticScanClaimWireInTests`
-//       hands it a WATERMARK at one site and an area at another ON PURPOSE, to
-//       show they differ. Two callers, ~14 test sites — playhead-fpnt.
+//       **CLOSED AT R6 REVIEW, and the way it was filed is the finding.** It was
+//       recorded here as latent-but-not-live on the strength of a sentence at
+//       ``TranscribedRegion/bridgedSeconds(bridging:)``: "the demotion happens
+//       INSIDE a function that takes the region, which is limit L-H's own stated
+//       remedy". Every clause of that is true and the conclusion does not
+//       follow — where the demotion happens says nothing about what else is in
+//       scope AT THE CALL SITE. Three probes at
+//       `AnalysisJobRunner.transcriptCoverageOfCompletedTranscript`, three
+//       COMPILED: PJ3 the RAW union off the same region (playhead-fil5 R3's P0;
+//       raw clears 0.95 for ZERO of twelve field assets, so it turns the gate
+//       off rather than loosening it), PJ4 the fast WATERMARK from three lines
+//       above (D9B513CD 100.0 % by watermark against 88.3 % by area, across this
+//       floor), PJ5 the numerator and denominator EXCHANGED at the reconciler's
+//       copy. Both parameters now carry types — ``BridgedTranscriptSeconds`` and
+//       ``EpisodeSeconds`` — and the division is written once inside
+//       ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)``. Rails
+//       TY35–TY37. playhead-fpnt is what remains of it, which is the two test
+//       sites that feed it a watermark ON PURPOSE and now say so in a box.
 //   L2  SemanticScanCoverage.examinedFraction
 //       examinedSeconds ÷ (examinedSeconds + unexaminedSeconds) — the span the
 //       PASS ATTEMPTED, NOT the episode. Same name-shape as `adScanFraction`,
@@ -1422,6 +1522,39 @@ extension EpisodeSeconds {
 //        `CoverageProvenance` already sits beside several of these boxes
 //        recording which column was used: it is a LABEL, exactly as
 //        ``UnsoundCursorPromotionSite`` is, and L-D applies to it verbatim.
+//
+//        **R6 REVIEW: "exactly ONE such door per region" IS A COUNT OF CALL
+//        SITES AND WAS PUBLISHED AS A STATEMENT ABOUT REACHABILITY.** It is the
+//        sixth completeness claim of this bead to be measured and fail, and it
+//        fails in the direction that matters: `init()` and `append(start:end:)`
+//        are INTERNAL, so any file in the module can assemble any region out of
+//        any numbers in three lines. Two probes, both COMPILED:
+//          PJ1  a ``TranscribedRegion`` built in `AnalysisJobRunner` by looping
+//               `fetchFastTranscriptCoveredRanges` into `append(start:end:)` —
+//               playhead-9y9e's SHIPPED defect (48E903D7 at 36.9 % against a
+//               0.95 floor on an asset covering 95.1 %) reproduced ONE LAYER
+//               BELOW rails TY32 and TY34, which were added in the round before
+//               this one to make that exact substitution untypeable;
+//          PJ2  a ``ScannedRegion`` fabricated from the transcript WATERMARK and
+//               measured into an ``AdScanSeconds`` outside `AnalysisStore`
+//               entirely — the ad-scan area minted from a quantity that has
+//               never been near a scan window.
+//        NO TYPE CLOSES IT, and the two closures that would were measured, not
+//        assumed. Swift's only friend mechanism is file scope, so the fill door
+//        shuts only if the SQL readers and the region types share a file.
+//        (a) Moving the readers into THIS file is impossible: they are built on
+//        `prepare` / `bind` / `text` / `optionalText`, which are `private` to
+//        `AnalysisStore.swift`, and widening the store's raw SQL primitives to
+//        internal in order to close an interval door is a worse trade than the
+//        door. (b) Moving the region types into `AnalysisStore.swift` compiles
+//        and moves limit L-L's blast radius from 1,565 lines to 21,147 — the
+//        same hole with a wider mouth. What stands in their place is
+//        `check_region_fabrication` in `scripts/mutation-battery-untypeable.py`,
+//        which confines fabrication to `AnalysisStore.swift` and this file. It
+//        is LEXICAL and worth exactly what L-F's tripwire is worth: it cannot
+//        stop a fabrication, only stop a new one landing unnoticed. It was
+//        verified by re-planting PJ1 under it (rc=2, both lines named), not by
+//        being written.
 //   L-J  **TWO VALUES OF THE SAME TYPE ARE INDISTINGUISHABLE, BY DESIGN.** L-B
 //        recorded this for one pair (``EpisodeSeconds/promoting``'s two
 //        ``PlanListSeconds``) and closed it with a value guard. R4 measured how

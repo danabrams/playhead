@@ -226,7 +226,15 @@ enum SemanticScanClaim {
     /// and gating on something LARGER than the bridged region (the watermark)
     /// would solicit passes whose scan fraction could never reach the floor
     /// that retires them.
-    static func bridgedTranscriptCoveredSec(region: TranscribedRegion) -> Double {
+    ///
+    /// **playhead-x0lb R6 review: the RETURN type is now a
+    /// ``BridgedTranscriptSeconds`` too, and R5 typing only the argument is why
+    /// it had to be.** R5 closed which REGION goes in and left what comes out a
+    /// bare `Double`, so at the call site the correct expression sat beside a
+    /// watermark and a raw union of the same type — three probes, three
+    /// COMPILED. That is R4's lesson at one more layer: a typed INPUT is not a
+    /// typed OPERATION. Rails TY35–TY37.
+    static func bridgedTranscriptCoveredSec(region: TranscribedRegion) -> BridgedTranscriptSeconds {
         region.bridgedSeconds(bridging: AnalysisCoverageMath.adScanBridgeableGapSec)
     }
 
@@ -316,15 +324,40 @@ enum SemanticScanClaim {
     /// safe direction is the opposite of `isOwed`'s: an asset whose transcript
     /// reach cannot be established has not been shown to be ready for a scan,
     /// and the transcript lane will come back to it.
+    ///
+    /// **playhead-x0lb R6 review: BOTH parameters carry types, and this was the
+    /// round's largest finding.** They were `Double?` and `Double?`, and the
+    /// audit cleared them as latent instance L1 (playhead-fpnt) with an argument
+    /// rather than a probe. Three substitutions were planted at
+    /// `AnalysisJobRunner.transcriptCoverageOfCompletedTranscript` and all three
+    /// COMPILED: the RAW union off the same region (playhead-fil5 R3's P0, and
+    /// zero of twelve field assets clear 0.95 raw), the fast WATERMARK from three
+    /// lines above (D9B513CD reads 100.0 % against an 88.3 % area — across this
+    /// very floor), and the numerator and denominator EXCHANGED. See
+    /// ``BridgedTranscriptSeconds``; rails TY35–TY37.
+    ///
+    /// **The arithmetic is unchanged and the guards are the same guards**, moved
+    /// into ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)`` so the
+    /// division is written once with the numerator as the receiver — R4's
+    /// TY24/TY25 fix, applied here because a typed pair is not a typed operation.
+    /// A negative numerator clamps to 0 and fails the floor exactly as
+    /// `coveredSec >= 0` refused it; an absent or non-positive duration yields
+    /// `nil` exactly as `episodeDurationSec > 0` refused it.
+    ///
+    /// **`finiteValue` on both terms is load-bearing and is NOT decoration.**
+    /// ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)`` clamps into
+    /// `[0, 1]`, and a `+∞` numerator clamps to `1.0` — which would CLEAR this
+    /// floor, where `coveredSec.isFinite` refused it. Delegating the division
+    /// without re-stating the finiteness guard was a behaviour change written
+    /// while removing one, so it is spelled out rather than inherited.
     static func transcriptClearsFinalizeFloor(
-        coveredSec: Double?,
-        episodeDurationSec: Double?
+        coveredSec: BridgedTranscriptSeconds?,
+        episodeDurationSec: EpisodeSeconds?
     ) -> Bool {
-        guard let coveredSec, coveredSec.isFinite, coveredSec >= 0,
-              let episodeDurationSec, episodeDurationSec.isFinite, episodeDurationSec > 0 else {
+        guard let ratio = coveredSec.finiteValue?
+            .fractionOfDeclaredDuration(episodeDurationSec.finiteValue) else {
             return false
         }
-        let ratio = coveredSec / episodeDurationSec
         return ratio + 1e-9 >= AnalysisCoordinator.finalizeBackfillMinCoverageRatio
     }
 
