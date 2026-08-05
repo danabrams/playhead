@@ -417,10 +417,21 @@ struct AdScanSeconds: CoverageQuantity {
 // types below are what make them TY26–TY29.
 //
 // THE SHAPE, and it is the one R4 found works: every region keeps its intervals
-// `fileprivate` and offers only NAMED operations, so a consumer cannot reach the
-// raw array to substitute it. `AnalysisCoverageMath` stays generic — it is
-// honest interval arithmetic and its tests hit it directly — and the REGION
-// types are the door it is reached through from the coverage reader.
+// `fileprivate` and offers only NAMED operations, so a consumer IN ANOTHER FILE
+// cannot reach the raw array to substitute it. `AnalysisCoverageMath` stays
+// generic — it is honest interval arithmetic and its tests hit it directly — and
+// the REGION types are the door it is reached through from the coverage reader.
+//
+// THAT SENTENCE USED TO STOP AT "a consumer", AND THE R5 REVIEW MEASURED WHY IT
+// CANNOT. `fileprivate` is per-FILE, so the clearance is real everywhere except
+// HERE: probes PF1 and PF7 were rejected reaching `.intervals` from
+// `AnalysisStore.swift`, review probe PG4 was rejected reaching it from
+// `AnalysisJobReconciler.swift` — three files, three refusals — while inside THIS
+// file `.intervals` demotes all four regions to one shared
+// `[(start: Double, end: Double)]`, and two of them are live in one scope at two
+// sites. Review probes PG5 and PG6 wrote those two swaps and BOTH COMPILED. See
+// limit L-L: no type closes them short of typing the tuples, and behaviour tests
+// are the instrument that does.
 //
 // WHAT THIS DOES NOT CLOSE, measured not assumed: each region is still BUILT
 // from bare `Double` columns at the SQL read (`append(start:end:)`), which is
@@ -513,9 +524,12 @@ struct FinalTranscriptRegion {
 /// device pull. R4 probe PA8 wrote the narrow one back into the bound and it
 /// compiled. Rail TY28.
 struct TranscribedRegion {
-    fileprivate var intervals: [(start: Double, end: Double)]
+    fileprivate var intervals: [(start: Double, end: Double)] = []
 
-    /// The only constructor, and it names both passes.
+    /// An empty readable region — no transcript of either pass.
+    init() {}
+
+    /// The composing constructor, and it names both passes.
     ///
     /// **The fast term is not redundant and cannot be dropped.** When no fast
     /// chunk landed but the asset carries a `fastTranscriptCoverageEndTime`, the
@@ -526,6 +540,52 @@ struct TranscribedRegion {
     /// Adding rather than replacing makes the widening MONOTONE.
     init(fastPass: FastTranscriptRegion, finalPass: FinalTranscriptRegion) {
         self.intervals = fastPass.intervals + finalPass.intervals
+    }
+
+    /// Accumulate one row; see ``FastTranscriptRegion/append(start:end:)``.
+    ///
+    /// playhead-x0lb R5 review: this exists because
+    /// ``AnalysisStore/fetchTranscribedRegion(assetId:)`` reads BOTH passes in one
+    /// query — it has no `pass` column to route on — so it builds this region
+    /// directly rather than composing two. It is the same single raw door per
+    /// region that limit L-I describes, not a second one.
+    mutating func append(start: Double, end: Double) {
+        intervals.append((start: start, end: end))
+    }
+
+    var isEmpty: Bool { intervals.isEmpty }
+
+    /// How many rows backed this region. An `Int` count of rows, not a quantity.
+    var intervalCount: Int { intervals.count }
+
+    /// The de-overlapped AREA of this region, as a BARE `Double`.
+    ///
+    /// **Deliberately not ``CoveredSeconds``, and that is the whole point of the
+    /// bead.** ``CoveredSeconds`` names the FAST-pass area — it is
+    /// `fastTranscriptCoveredSec` on the summary and ``DensityRatio``'s only
+    /// numerator — so handing a BOTH-PASS area back under that type would create
+    /// exactly the same-unit pair this file exists to prevent, and it would type-
+    /// check into `DensityRatio(transcribed:ofDeclaredDuration:)`. A bare `Double`
+    /// under a name that says which region it came off is the honest answer until
+    /// someone needs a second consumer.
+    var unionedSeconds: Double {
+        AnalysisCoverageMath.unionedSeconds(intervals)
+    }
+
+    /// The de-overlapped area with sub-`tolerance` gaps BRIDGED — the numerator
+    /// ``SemanticScanClaim/transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
+    /// is meant to be handed, and the same region
+    /// ``AdScanSeconds/init(examined:within:bridging:)`` intersects against.
+    ///
+    /// It returns a bare `Double` because its one consumer is that floor, whose
+    /// `coveredSec` parameter takes an AREA or a WATERMARK indistinguishably —
+    /// latent instance L1, filed as playhead-fpnt and deliberately not fixed here.
+    /// The demotion happens INSIDE a function that takes the region, which is
+    /// limit L-H's own stated remedy.
+    func bridgedSeconds(bridging tolerance: BridgeToleranceSec) -> Double {
+        AnalysisCoverageMath.unionedSeconds(
+            AnalysisCoverageMath.bridgingShortGaps(intervals, upTo: tolerance)
+        )
     }
 }
 
@@ -894,6 +954,28 @@ extension EpisodeSeconds {
 //   fetchCoverage… finalIntervals[id]     FinalTranscriptRegion  pass='final' chunk spans
 //   fetchCoverage… transcribedRegion      TranscribedRegion      fast ∪ final — what a semantic scan can READ (9y9e)
 //   fetchCoverage… adScanIntervals[id]    ScannedRegion          coverage-lane windows that produced a verdict
+//   AnalysisStore.fetchTranscribedRegion(assetId:) -> TranscribedRegion         both passes, one asset, across the store's API
+//
+//    R5 REVIEW added that last line, and it is the round's largest finding: the
+//    four above are the carriers INSIDE `fetchCoverageSummariesByAssetIds`, and
+//    R5 stated them as the complete set. They are not. `AnalysisStore` publishes
+//    the SAME TWO REGIONS across its own API — `fetchTranscriptCoveredRanges`
+//    (both passes) and ``fetchFastTranscriptCoveredRanges`` (fast) — and both
+//    returned the identical bare `[(start: Double, end: Double)]`, so every one
+//    of their three production consumers accepted either. Three probes, three
+//    COMPILED: PG2 and PG8 fed the FAST ranges to
+//    ``SemanticScanClaim/bridgedTranscriptCoveredSec(region:)`` from the
+//    reconciler sweep and from `AnalysisJobRunner` — which is playhead-9y9e's
+//    SHIPPED defect verbatim, the one measured at 36.9 % against a 0.95 floor on
+//    an asset covering 95.1 % — and PG3 fed the BOTH-PASS region to the
+//    transcript engine's fast-only shard-skip index. Rails TY32–TY34.
+//    Typing the both-pass getter closes the pair in BOTH directions, so the fast
+//    sibling keeps its bare array deliberately: its one consumer is in
+//    `TranscriptEngineService`, outside this bead's named scope, and with the
+//    lookalike gone there is no second interval population in scope to write.
+//    THE GENERAL LESSON, and it is the fifth completeness claim of this bead to
+//    be measured and fail: "the four arrays live in one scope" was a statement
+//    about ONE FUNCTION, and it was published as a statement about the codebase.
 //
 // ── STATED AND DELIBERATELY UNTYPED. Each is one line, so none is latent; a
 //    type is withheld because nothing else would share it or because typing it
@@ -1306,12 +1388,23 @@ extension EpisodeSeconds {
 //        that went is `CoveredSeconds(unionedSeconds(fastIntervals[id] ?? []))`,
 //        now ``FastTranscriptRegion/unionedSeconds``: a hand-picked array and a
 //        hand-named box replaced by a property of the region that decides both.
-//        TWO MORE of the 22 stopped being BARE boxes without leaving the count
-//        — `AnalyzedSeconds(` and `AdScanSeconds(` in the reader now take named
-//        typed operands rather than a computed `Double` — so under the tighter
-//        reading "a quantity built from an unlabelled expression" it is 18.
-//        Both readings are stated because quoting only the flattering one is
-//        this bead's own defect class.
+//
+//        **R5 REVIEW re-derived both numbers independently and confirms 23 → 22,
+//        13/6/2/1 by file. It also fixes the arithmetic under the second one.**
+//        The tighter reading — "a quantity built from an UNLABELLED expression"
+//        — is 22 minus the FOUR constructors that take named typed operands, and
+//        the text used to say two: `AnalyzedSeconds(clipping:to:)` and
+//        `AdScanSeconds(examined:within:bridging:)` are R3's and R5's, but
+//        `ReachRatio(examined:ofDeclaredDuration:)` and
+//        `DensityRatio(transcribed:ofDeclaredDuration:)` are R1's and were
+//        already labelled. `22 - 2` is 20; the answer is 18 and the sentence did
+//        not produce it. Note also that the reading is under-specified at its
+//        edge: the two LITERAL boxes (`BridgeToleranceSec(5.0)`,
+//        `ReachRatio(0.98)`) are unlabelled expressions too, and this file's own
+//        header says a literal has no provenance to lose — exclude them as well
+//        and it is 16. Quote 22 unless you say which narrowing you mean.
+//        All three readings are stated because quoting only the flattering one
+//        is this bead's own defect class.
 //
 //        **R5 ALSO ADDED A SURFACE, counted here rather than announced as a
 //        clearance.** The four region types are constructed at 9 sites in
@@ -1361,8 +1454,45 @@ extension EpisodeSeconds {
 //        the mirror of the substitution fixed one line above. The argument
 //        confused where a value came from with what a slot accepts. Closing it
 //        needs a distinct type for the BYTES-derived download fraction, whose
-//        blast radius is ~60 sites across `EpisodePreparationStatusModel`,
-//        `ActivityViewModel`, `ActivityView`, `DiagnosticsExportService` and
-//        eight test files — a bead, and a typing decision that is Dan's, not a
-//        reviewer's. Filed rather than fixed, and stated here rather than
-//        argued away a second time.
+//        blast radius is 112 sites, measured at R5 review by grepping the
+//        identifier rather than recalling it: 52 in production across NINE files
+//        (`ActivitySnapshotProvider`, `DownloadManager`,
+//        `DiagnosticsExportService`, `ActivityView`, `ActivityViewModel`,
+//        `PipelineProgressStripView`, `EpisodePreparationControl`,
+//        `EpisodePreparationReadiness`, `EpisodePreparationStatusModel`) and 60
+//        across eight test files. The earlier figure here was "~60 sites across
+//        four named files and eight test files", which counted the TEST sites
+//        and none of the production ones — the wrong-population shape, on this
+//        bead's own scoping estimate. It is a bead either way, and a typing
+//        decision that is Dan's, not a reviewer's: filed as playhead-x0lb.1,
+//        stated here rather than argued away a second time.
+//   L-L  **`fileprivate` IS A REAL CLEARANCE FROM EVERY OTHER FILE, AND IS NOT
+//        ONE INSIDE THIS ONE.** Three probes measured the first half — PF1 and
+//        PF7 from `AnalysisStore.swift`, R5-review probe PG4 from
+//        `AnalysisJobReconciler.swift`, all three REJECTED with
+//        `'intervals' is inaccessible due to 'fileprivate' protection level`.
+//        That is the strongest clearance this bead has, and it has probes under
+//        it rather than an argument.
+//        The second half is the limit. `.intervals` is the regions' `.rawValue`:
+//        it demotes all four distinct types to one shared
+//        `[(start: Double, end: Double)]`, and inside this file two of them are
+//        live in one scope at two sites. Both were probed at R5 review and both
+//        COMPILED:
+//          PG5  ``AdScanSeconds/init(examined:within:bridging:)`` with `scanned`
+//               and `readable` exchanged — playhead-fil5 R3's P0 (the transcript
+//               measured as ad-scan reach) written INSIDE the very operation
+//               that was introduced to make it unwritable at every call site;
+//          PG6  ``TranscribedRegion/init(fastPass:finalPass:)`` written
+//               `fastPass.intervals + fastPass.intervals` — probe PA8 / rail
+//               TY28's substitution inside the constructor that replaced it.
+//        This is limit L-J one level down, and it is irreducible without typing
+//        the TUPLES, which is the cost Dan's expansion explicitly did not buy:
+//        somewhere the two populations must be handed to the same generic
+//        arithmetic, and at that point they share a type. BEHAVIOUR is the
+//        instrument, and here it actually holds — `bridgingClosesBreathsAndNotBlocks`
+//        kills PG5 (199 s against an expected 200) and
+//        `transcribedRegionIsMonotoneOverTheFastPass` kills PG6 (1,155.7 s
+//        against an expected 2,085.7). Both kills were RUN, not reasoned about.
+//        The rule for anyone adding a region operation: if your body reads
+//        `.intervals` off two different regions, a behaviour test must
+//        distinguish the order, because nothing else will.

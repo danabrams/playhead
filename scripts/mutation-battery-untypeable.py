@@ -94,6 +94,9 @@ CLAIM = "Playhead/Services/AdDetection/SemanticScanClaim.swift"
 ACTIVITY = "Playhead/Services/Activity/ActivitySnapshotProvider.swift"
 QUANTITIES = "Playhead/Persistence/AnalysisStore/CoverageQuantities.swift"
 READINESS = "Playhead/Views/Library/EpisodePreparationReadiness.swift"
+RECONCILER = "Playhead/Services/PreAnalysis/AnalysisJobReconciler.swift"
+ENGINE = "Playhead/Services/TranscriptEngine/TranscriptEngineService.swift"
+JOBRUNNER = "Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift"
 
 # name, file, description, old, new, diagnostic fragments the build MUST print
 MUTATIONS = [
@@ -470,6 +473,39 @@ MUTATIONS = [
         "            try readScannedRegions(ids: slice, into: &adScanIntervals, rowSeen: &adScanRowSeen)",
         "            try readScannedRegions(ids: slice, into: &fastIntervals, rowSeen: &adScanRowSeen)",
         ["FastTranscriptRegion", "ScannedRegion"],
+    ),
+    (
+        "TY32", RECONCILER,
+        "R5 review probe PG2, planted and COMPILED before the fix: the sweep's "
+        "transcript floor measured over the FAST pass alone. This is "
+        "playhead-9y9e's SHIPPED defect verbatim — 48E903D7 read 36.9 % against "
+        "a 0.95 floor while its two passes cover 95.1 % — and it was writable "
+        "again because `fetchTranscriptCoveredRanges` and "
+        "`fetchFastTranscriptCoveredRanges` returned the identical bare "
+        "`[(start: Double, end: Double)]`. A FIFTH producer, outside the four "
+        "R5 enumerated inside `fetchCoverageSummariesByAssetIds`",
+        "                    region: try await store.fetchTranscribedRegion(assetId: assetId)",
+        "                    region: try await store.fetchFastTranscriptCoveredRanges(assetId: assetId)",
+        ["TranscribedRegion", "(start: Double, end: Double)"],
+    ),
+    (
+        "TY33", ENGINE,
+        "R5 review probe PG3, planted and COMPILED before the fix: the MIRROR — "
+        "the both-pass readable region poured into the transcript engine's "
+        "FAST-only shard-skip index, which would let final-pass coverage "
+        "authorise skipping fast-pass work",
+        "                chunkRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: analysisAssetId)",
+        "                chunkRanges: try await store.fetchTranscribedRegion(assetId: analysisAssetId)",
+        ["TranscribedRegion", "(start: Double, end: Double)"],
+    ),
+    (
+        "TY34", JOBRUNNER,
+        "R5 review probe PG8, planted and COMPILED before the fix: TY32's "
+        "substitution at the runner's own copy of the same gate. Fixing one call "
+        "site and not the other is how this family has survived four rounds",
+        "        guard let region = try? await store.fetchTranscribedRegion(assetId: assetId),",
+        "        guard let region = try? await store.fetchFastTranscriptCoveredRanges(assetId: assetId),",
+        ["TranscribedRegion", "(start: Double, end: Double)"],
     ),
     (
         "TY99", RUNNER,

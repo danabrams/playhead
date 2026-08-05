@@ -1404,7 +1404,7 @@ actor AnalysisJobReconciler {
             // spans first-word to last-word and every breath is a hole: on the
             // 2026-08-03 pull the raw union cleared 0.95 for **zero of twelve**
             // assets, which is a gate that mints nothing rather than a strict
-            // one. See ``SemanticScanClaim/bridgedTranscriptCoveredSec(ranges:)``.
+            // one. See ``SemanticScanClaim/bridgedTranscriptCoveredSec(region:)``.
             //
             // playhead-9y9e: the ranges span BOTH transcript passes. Reading the
             // fast pass alone made this gate refuse 48E903D7 at 36.9 % when its
@@ -1412,7 +1412,7 @@ actor AnalysisJobReconciler {
             // passes tile the episode end to end between them.
             guard SemanticScanClaim.transcriptClearsFinalizeFloor(
                 coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(
-                    ranges: try await store.fetchTranscriptCoveredRanges(assetId: assetId)
+                    region: try await store.fetchTranscribedRegion(assetId: assetId)
                 ),
                 episodeDurationSec: asset.episodeDurationSec
             ) else { continue }

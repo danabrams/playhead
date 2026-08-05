@@ -1821,12 +1821,12 @@ actor AnalysisJobRunner {
               watermark.isFinite, watermark > 0 else {
             return nil
         }
-        guard let ranges = try? await store.fetchTranscriptCoveredRanges(assetId: assetId),
-              !ranges.isEmpty else {
+        guard let region = try? await store.fetchTranscribedRegion(assetId: assetId),
+              !region.isEmpty else {
             return nil
         }
         guard SemanticScanClaim.transcriptClearsFinalizeFloor(
-            coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: ranges),
+            coveredSec: SemanticScanClaim.bridgedTranscriptCoveredSec(region: region),
             episodeDurationSec: asset.episodeDurationSec
         ) else {
             return nil

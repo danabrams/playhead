@@ -186,7 +186,9 @@ struct SemanticScanClaimPredicateTests {
             coveredSec: raw, episodeDurationSec: duration
         ) == false)
 
-        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: ranges)
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(
+            region: CoverageRegionFixtures.transcribed(ranges)
+        )
         #expect(bridged > raw)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
             coveredSec: bridged, episodeDurationSec: duration
@@ -207,7 +209,9 @@ struct SemanticScanClaimPredicateTests {
         }
         let duration = holeEnd + Self.speechSpan(count: 200)
 
-        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(ranges: head + tail)
+        let bridged = SemanticScanClaim.bridgedTranscriptCoveredSec(
+            region: CoverageRegionFixtures.transcribed(head + tail)
+        )
         #expect(bridged < 0.95 * duration,
                 "a 400 s hole must not be bridged away")
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(

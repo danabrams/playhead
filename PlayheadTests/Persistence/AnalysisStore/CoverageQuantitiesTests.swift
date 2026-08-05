@@ -576,6 +576,15 @@ enum CoverageRegionFixtures {
         for interval in intervals { region.append(start: interval.start, end: interval.end) }
         return region
     }
+
+    /// R5 review: the readable region built row-at-a-time, which is what
+    /// ``AnalysisStore/fetchTranscribedRegion(assetId:)`` does — its query reads
+    /// both passes at once and has no `pass` column to compose on.
+    static func transcribed(_ intervals: [(start: Double, end: Double)]) -> TranscribedRegion {
+        var region = TranscribedRegion()
+        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        return region
+    }
 }
 
 @Suite("playhead-x0lb R5 — the interval REGIONS, one layer below every other rail")
@@ -707,6 +716,48 @@ struct CoverageRegionTests {
         let bridge = AnalysisCoverageMath.adScanBridgeableGapSec
         #expect(AdScanSeconds(examined: scan, within: breathy, bridging: bridge).rawValue == 200)
         #expect(AdScanSeconds(examined: scan, within: blocked, bridging: bridge).rawValue == 100)
+    }
+
+    /// R5 review — the readable region is now published across the store's API
+    /// (``AnalysisStore/fetchTranscribedRegion(assetId:)``, rails TY32–TY34), and
+    /// the gate that consumes it must measure the SAME region the ad-scan area is
+    /// intersected against. That commensurability is the whole argument in
+    /// ``SemanticScanClaim/bridgedTranscriptCoveredSec(region:)``'s doc, and it
+    /// was previously only an argument: both sides took a bare interval array.
+    @Test("the readable region's bridged area IS the ad-scan bound")
+    func bridgedSecondsIsTheAdScanBound() {
+        // A breath-width hole at 60→63 and a real one at 120→600.
+        let raw: [(start: Double, end: Double)] = [
+            (start: 0, end: 60),
+            (start: 63, end: 120),
+            (start: 600, end: 700)
+        ]
+        let region = CoverageRegionFixtures.transcribed(raw)
+        let bridge = AnalysisCoverageMath.adScanBridgeableGapSec
+
+        #expect(region.unionedSeconds == 217)
+        #expect(region.intervalCount == 3)
+        #expect(region.isEmpty == false)
+        #expect(TranscribedRegion().isEmpty)
+
+        // Bridged: [0,120] ∪ [600,700]. The breath closes, the block does not.
+        #expect(region.bridgedSeconds(bridging: bridge) == 220)
+        #expect(
+            region.bridgedSeconds(bridging: bridge)
+                == AnalysisCoverageMath.unionedSeconds(
+                    AnalysisCoverageMath.bridgingShortGaps(raw, upTo: bridge)
+                )
+        )
+        // A scan that read everything measures exactly the bound and no more —
+        // which is what makes the sweep's floor and the readiness fraction
+        // comparable rather than two numbers over different denominators.
+        #expect(
+            AdScanSeconds(
+                examined: CoverageRegionFixtures.scanned([(start: 0, end: 700)]),
+                within: region,
+                bridging: bridge
+            ).rawValue == region.bridgedSeconds(bridging: bridge)
+        )
     }
 
     /// No transcript evidence means nothing can have been read, however wide the

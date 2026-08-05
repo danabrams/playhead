@@ -10517,9 +10517,26 @@ actor AnalysisStore {
     ///
     /// Same filters and same index (`idx_chunks_time`) as the fast-only sibling;
     /// a degenerate row covers no time and is dropped.
-    func fetchTranscriptCoveredRanges(
-        assetId: String
-    ) throws -> [(start: Double, end: Double)] {
+    ///
+    /// **playhead-x0lb R5 review: it returns a ``TranscribedRegion``, and it was
+    /// renamed from `fetchTranscriptCoveredRanges` to say so.** This getter and
+    /// ``fetchFastTranscriptCoveredRanges(assetId:)`` are a FIFTH and SIXTH
+    /// producer of the interval populations R5 typed inside
+    /// ``fetchCoverageSummariesByAssetIds(_:)`` — the same two regions, across the
+    /// store's own API, and until this change both returned the identical bare
+    /// `[(start: Double, end: Double)]`. Three probes were planted against the
+    /// three production consumers and ALL THREE COMPILED: the fast-only ranges fed
+    /// to ``SemanticScanClaim/bridgedTranscriptCoveredSec(region:)`` from
+    /// `AnalysisJobReconciler` and from `AnalysisJobRunner` — which is
+    /// playhead-9y9e's SHIPPED defect verbatim, 48E903D7 reading 36.9 % against a
+    /// 0.95 floor while its two passes cover 95.1 % — and the both-pass ranges fed
+    /// to the transcript engine's fast-only shard-skip index. Rails TY32–TY34.
+    ///
+    /// Typing THIS one closes the substitution in both directions, so the fast
+    /// sibling deliberately keeps its bare array: its only consumer is in
+    /// `TranscriptEngineService`, outside this bead's named scope, and with the
+    /// lookalike gone there is no second interval population in scope to write.
+    func fetchTranscribedRegion(assetId: String) throws -> TranscribedRegion {
         let sql = """
             SELECT startTime, endTime FROM transcript_chunks
             WHERE analysisAssetId = ?
@@ -10529,64 +10546,15 @@ actor AnalysisStore {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, assetId)
-        var results: [(start: Double, end: Double)] = []
+        var region = TranscribedRegion()
         while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(
-                (start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1))
+            region.append(
+                start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1)
             )
         }
-        return results
+        return region
     }
 
-    /// playhead-hygc.1.2: canonical pipeline-progress read model for
-    /// Activity rows and the dogfood diagnostics snapshot.
-    ///
-    /// Reconciles per-asset coverage from the most trustworthy persisted
-    /// artifact at read time. Returns ``AnalysisCoverageSummary`` for
-    /// every requested assetId, including ids with no `analysis_assets`
-    /// row and no `transcript_chunks` rows. Those "missing" entries are
-    /// surfaced with all coverage fields `nil` and provenance
-    /// ``CoverageProvenance/unknown`` so callers don't need to
-    /// distinguish "asset row not present" from "asset present but no
-    /// coverage" — both render the same `--%` placeholder. Use
-    /// ``fetchAssetByEpisodeId`` / ``fetchLatestAssetByEpisodeIdMap`` for
-    /// existence checks.
-    ///
-    /// Coverage rules:
-    ///   - `fastTranscriptCoveredSec` is the **interval-unioned seconds** of
-    ///     fast-pass transcript chunks. Overlapping chunks count once;
-    ///     gaps are excluded. SQL cannot do interval union without an
-    ///     extension, so we fetch `(startTime, endTime)` pairs and union
-    ///     them in Swift. When no chunks exist we fall back to the asset
-    ///     watermark (`fastTranscriptCoverageEndTime`) — the only signal
-    ///     available pre-chunk-landing — and tag the value as
-    ///     ``CoverageProvenance/assetWatermark``.
-    ///   - `fastTranscriptCoverageEndSec` is the **high-water `MAX(endTime)`**
-    ///     of fast chunks (or the asset watermark when no chunks landed).
-    ///     This is the "how far into the audio has the runner reached?"
-    ///     answer that does not collapse on transcription gaps.
-    ///   - Final-pass coverage is the `MAX(endTime)` of `pass='final'`
-    ///     chunks, with the asset's `finalPassCoverageEndTime` watermark
-    ///     as a fallback. Final-pass coverage rarely has gaps in practice
-    ///     (the runner re-transcribes contiguous AdWindow ranges), so we
-    ///     do not bother computing an interval union for it.
-    ///   - Feature and confirmed-ad coverage come straight from the asset
-    ///     watermarks; no artifact tables outrank them today. Provenance
-    ///     stays ``CoverageProvenance/assetWatermark`` while populated and
-    ///     ``CoverageProvenance/unknown`` when nil.
-    ///   - playhead-pz32: `adScanCoveredSec` is the interval-unioned seconds of
-    ///     coverage-lane `semantic_scan_results` windows that produced a verdict,
-    ///     intersected with the (gap-bridged) transcribed region. SQLite cannot
-    ///     union intervals, so we fetch `(windowStartTime, windowEndTime, status,
-    ///     errorContext)` and do the set arithmetic in Swift — same shape as the
-    ///     fast-chunk pass above. The row filter runs in Swift against
-    ///     ``SemanticScanResult/didExamineWindow(status:errorContext:)`` rather
-    ///     than an `IN (...)` list of raw values, so "what counts as examined"
-    ///     has exactly one definition in the codebase.
-    ///
-    /// Empty input returns an empty dictionary without preparing a
-    /// statement; large inputs are chunked at 500 placeholders per
-    /// statement to stay well under SQLite's `SQLITE_MAX_VARIABLE_NUMBER`
     /// playhead-x0lb R5: read the FAST-pass chunk intervals for one id slice.
     ///
     /// **Why this is a function and not four lines inline.** See the note at
@@ -10728,6 +10696,55 @@ actor AnalysisStore {
         }
     }
 
+    /// playhead-hygc.1.2: canonical pipeline-progress read model for
+    /// Activity rows and the dogfood diagnostics snapshot.
+    ///
+    /// Reconciles per-asset coverage from the most trustworthy persisted
+    /// artifact at read time. Returns ``AnalysisCoverageSummary`` for
+    /// every requested assetId, including ids with no `analysis_assets`
+    /// row and no `transcript_chunks` rows. Those "missing" entries are
+    /// surfaced with all coverage fields `nil` and provenance
+    /// ``CoverageProvenance/unknown`` so callers don't need to
+    /// distinguish "asset row not present" from "asset present but no
+    /// coverage" — both render the same `--%` placeholder. Use
+    /// ``fetchAssetByEpisodeId`` / ``fetchLatestAssetByEpisodeIdMap`` for
+    /// existence checks.
+    ///
+    /// Coverage rules:
+    ///   - `fastTranscriptCoveredSec` is the **interval-unioned seconds** of
+    ///     fast-pass transcript chunks. Overlapping chunks count once;
+    ///     gaps are excluded. SQL cannot do interval union without an
+    ///     extension, so we fetch `(startTime, endTime)` pairs and union
+    ///     them in Swift. When no chunks exist we fall back to the asset
+    ///     watermark (`fastTranscriptCoverageEndTime`) — the only signal
+    ///     available pre-chunk-landing — and tag the value as
+    ///     ``CoverageProvenance/assetWatermark``.
+    ///   - `fastTranscriptCoverageEndSec` is the **high-water `MAX(endTime)`**
+    ///     of fast chunks (or the asset watermark when no chunks landed).
+    ///     This is the "how far into the audio has the runner reached?"
+    ///     answer that does not collapse on transcription gaps.
+    ///   - Final-pass coverage is the `MAX(endTime)` of `pass='final'`
+    ///     chunks, with the asset's `finalPassCoverageEndTime` watermark
+    ///     as a fallback. Final-pass coverage rarely has gaps in practice
+    ///     (the runner re-transcribes contiguous AdWindow ranges), so we
+    ///     do not bother computing an interval union for it.
+    ///   - Feature and confirmed-ad coverage come straight from the asset
+    ///     watermarks; no artifact tables outrank them today. Provenance
+    ///     stays ``CoverageProvenance/assetWatermark`` while populated and
+    ///     ``CoverageProvenance/unknown`` when nil.
+    ///   - playhead-pz32: `adScanCoveredSec` is the interval-unioned seconds of
+    ///     coverage-lane `semantic_scan_results` windows that produced a verdict,
+    ///     intersected with the (gap-bridged) transcribed region. SQLite cannot
+    ///     union intervals, so we fetch `(windowStartTime, windowEndTime, status,
+    ///     errorContext)` and do the set arithmetic in Swift — same shape as the
+    ///     fast-chunk pass above. The row filter runs in Swift against
+    ///     ``SemanticScanResult/didExamineWindow(status:errorContext:)`` rather
+    ///     than an `IN (...)` list of raw values, so "what counts as examined"
+    ///     has exactly one definition in the codebase.
+    ///
+    /// Empty input returns an empty dictionary without preparing a
+    /// statement; large inputs are chunked at 500 placeholders per
+    /// statement to stay well under SQLite's `SQLITE_MAX_VARIABLE_NUMBER`
     /// (matches ``fetchAssetsByEpisodeIds`` / the sibling bulk fetchers).
     func fetchCoverageSummariesByAssetIds(
         _ assetIds: Set<String>

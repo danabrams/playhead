@@ -3139,11 +3139,11 @@ struct AnalysisStoreCoverageRulerTests {
                 "fixture premise: the hole is wider than the bridge")
     }
 
-    /// RT07 — `fetchTranscriptCoveredRanges` is what every caller outside this
+    /// RT07 — `fetchTranscribedRegion` is what every caller outside this
     /// summary uses to ask the same question, so it must agree: both passes, and
     /// degenerate rows dropped (a zero-width row covers no time and must not be
     /// able to authorise anything).
-    @Test("fetchTranscriptCoveredRanges spans both passes and drops degenerate rows")
+    @Test("fetchTranscribedRegion spans both passes and drops degenerate rows")
     func transcriptCoveredRangesSpanBothPasses() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset(id: "a-9y9e-ranges", episodeDurationSec: 1000))
@@ -3154,9 +3154,9 @@ struct AnalysisStoreCoverageRulerTests {
             makePassChunk(assetId: "a-9y9e-ranges", index: 2, start: 950, end: 950, pass: "fast")
         ])
 
-        let all = try await store.fetchTranscriptCoveredRanges(assetId: "a-9y9e-ranges")
-        #expect(all.count == 2)
-        #expect(AnalysisCoverageMath.unionedSeconds(all) == 900)
+        let all = try await store.fetchTranscribedRegion(assetId: "a-9y9e-ranges")
+        #expect(all.intervalCount == 2)
+        #expect(all.unionedSeconds == 900)
 
         // The fast-only sibling is unchanged and still answers the narrower
         // question the transcript engine asks it.
@@ -3237,9 +3237,9 @@ struct AnalysisStoreCoverageRulerTests {
         #expect(summary.finalPassCoverageEndSource == .assetWatermark)
         // And the degenerate rows widen no bound either: the fast pass backs
         // [0, 500] and nothing claims [500, 1000].
-        #expect(AnalysisCoverageMath.unionedSeconds(
-            try await store.fetchTranscriptCoveredRanges(assetId: "a-9y9e-degen")
-        ) == 500)
+        #expect(
+            try await store.fetchTranscribedRegion(assetId: "a-9y9e-degen").unionedSeconds == 500
+        )
     }
 
     /// RT14 (R2 review) — WIDENING THE BOUND WIDENED WHAT THE SANITY GUARD HAS

@@ -23,7 +23,7 @@ import os
 /// but that area was measured over the FAST pass alone, and 48E903D7's
 /// transcript is mostly final-pass. Across both passes it covers 95.1 % as a
 /// bridged area, which agrees with the watermark. The measurement was wrong,
-/// not the watermark; see ``bridgedTranscriptCoveredSec(ranges:)``. The
+/// not the watermark; see ``bridgedTranscriptCoveredSec(region:)``. The
 /// principle in ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)``
 /// stands unchanged — this gate divides an area and never a watermark — and it
 /// still stands on the pull as well as on its fixtures. Widening the area to
@@ -176,8 +176,8 @@ enum SemanticScanClaim {
     /// ``transcriptClearsFinalizeFloor(coveredSec:episodeDurationSec:)`` is
     /// meant to be handed.
     ///
-    /// **playhead-9y9e: the ranges must span BOTH passes**
-    /// (``AnalysisStore/fetchTranscriptCoveredRanges(assetId:)``), because the
+    /// **playhead-9y9e: the region must span BOTH passes**
+    /// (``AnalysisStore/fetchTranscribedRegion(assetId:)``), because the
     /// region this gate measures has to be the region
     /// ``AnalysisCoverageSummary/adScanCoveredSec`` is intersected with — that
     /// is the whole commensurability argument below. It was handed
@@ -188,6 +188,15 @@ enum SemanticScanClaim {
     /// same shape and more extreme — its passes are DISJOINT, final `[0, 930]`
     /// and fast `[930, 2086]`, so the fast-only reading is 55.4 % of an episode
     /// transcribed end to end.
+    ///
+    /// **playhead-x0lb R5 review: that paragraph is now a TYPE.** It was still
+    /// only a paragraph — the parameter took a bare
+    /// `[(start: Double, end: Double)]`, and `fetchFastTranscriptCoveredRanges`
+    /// returned the identical type, so the substitution the sentence forbids was
+    /// writable at both of this function's production call sites. Both probes
+    /// COMPILED before this change (rails TY32 / TY34), which is the same shape
+    /// as every other finding on this bead: a sentence forbidding a substitution
+    /// next to an expression that permits it.
     ///
     /// **The raw chunk union is not a reach measure and using it as one made
     /// this sweep mint nothing at all.** A `transcript_chunks` row spans the
@@ -217,15 +226,8 @@ enum SemanticScanClaim {
     /// and gating on something LARGER than the bridged region (the watermark)
     /// would solicit passes whose scan fraction could never reach the floor
     /// that retires them.
-    static func bridgedTranscriptCoveredSec(
-        ranges: [(start: Double, end: Double)]
-    ) -> Double {
-        AnalysisCoverageMath.unionedSeconds(
-            AnalysisCoverageMath.bridgingShortGaps(
-                ranges,
-                upTo: AnalysisCoverageMath.adScanBridgeableGapSec
-            )
-        )
+    static func bridgedTranscriptCoveredSec(region: TranscribedRegion) -> Double {
+        region.bridgedSeconds(bridging: AnalysisCoverageMath.adScanBridgeableGapSec)
     }
 
     /// Has the transcript reached far enough that a scan has something to read?
@@ -241,7 +243,7 @@ enum SemanticScanClaim {
     /// **The CONSTANT is shared with `finalizeBackfill`; the NUMERATOR is
     /// deliberately not.** ``AnalysisCoordinator/finalizeBackfillVerdict(chunks:episodeDuration:)``
     /// divides `chunks.map(\.endTime).max()` — a WATERMARK — by the duration.
-    /// The caller here passes ``bridgedTranscriptCoveredSec(ranges:)``,
+    /// The caller here passes ``bridgedTranscriptCoveredSec(region:)``,
     /// which is an AREA. They agree on a contiguous transcript and diverge on a
     /// gappy one, where the watermark reads 100 % over audio nobody transcribed
     /// (the watermark-vs-union antipattern playhead-sd71 fixed on the Activity
@@ -307,7 +309,7 @@ enum SemanticScanClaim {
     /// So this gate is strictly stricter than `finalizeBackfill`'s. An asset it
     /// would complete can fail here, on purpose, and it stays the transcript
     /// lane's problem until the holes fill. What the numerator must NOT be is
-    /// the RAW union — see ``bridgedTranscriptCoveredSec(ranges:)`` for the
+    /// the RAW union — see ``bridgedTranscriptCoveredSec(region:)`` for the
     /// measurement showing that reads 0/12 in the field.
     ///
     /// Unmeasurable inputs return `false`. This gate SUPPRESSES a mint, so the
