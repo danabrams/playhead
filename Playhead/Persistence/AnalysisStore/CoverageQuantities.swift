@@ -539,11 +539,17 @@ extension EpisodeSeconds {
 // stated and deliberately untyped, and stated but WRONG — which is where the
 // audit earned its keep.
 //
-// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY14).
+// ── TYPED. The substitution is now a compile error (mutation rails TY01–TY17).
 //    R1 review added TY09–TY14 and the three types the first six of them
 //    needed: the rails were PLANTED FIRST and three of them SURVIVED, which is
 //    how the area/watermark conflations below were found rather than argued
-//    about.
+//    about. R2 review did the same at the Activity surface and added TY15–TY17;
+//    two of those three survived as well, so the running score for planting
+//    before arguing is five survivors from nine plants across two rounds.
+//
+//    The list below is what carries a type. It is NOT a list of everything a
+//    reader might want typed — the two sections after it are, and the middle
+//    one is where the R2 findings landed.
 //
 //   AnalysisCoverageSummary.episodeDurationSec        EpisodeSeconds       s   position of the episode's end, DECLARED (feed or decode probe), not measured
 //   AnalysisCoverageSummary.fastTranscriptCoveredSec  CoveredSeconds       s   AREA: interval union of pass='fast' transcript_chunks
