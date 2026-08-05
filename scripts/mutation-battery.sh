@@ -4697,6 +4697,24 @@ MUTATIONS=(
   # is the instrument that can see it. Same lesson as CN06, by a different
   # route: the sites this defect family survives at are the ones no test runs.
   "CN07|445|ESUMBF|$T_IU0T_COLUMN"
+
+  # Batch 446 — CN08 (playhead-iu0t R3). THE FIFTH INSTANCE AGAIN, RESPELLED.
+  # Semantically identical to CN07 — the same column, read as the same
+  # invalidation key, at the same line — but written with a closure instead of
+  # a keypath. Before R3 this mutant SURVIVED while CN07 died, because the rule
+  # it violates was policed by three literal substrings and the first of them
+  # was the keypath spelling `\.transcriptVersion` matched with
+  # `String.contains`, not a regex.
+  #
+  # That is why it is worth its own batch rather than being folded into CN07.
+  # CN07 alone proves the canary recognises ONE WAY OF WRITING the defect; a
+  # pair that differ only in spelling is what proves it recognises the DEFECT.
+  # R3 verified the gap directly rather than by reading: it planted this
+  # spelling plus `chunks.last?.transcriptVersion` and a plain-receiver form in
+  # the tree and the whole canary exited 0.
+  #
+  # Same anchor line as CN07, so it takes its own batch on the M08/M13 rule.
+  "CN08|446|ESUMBF|$T_IU0T_COLUMN"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5118,6 +5136,7 @@ describe_mutation() {
     CN06) echo "iu0t R1: the FOURTH collapse — pushEvidenceCatalog builds the banner evidence catalog from the final-only slice again" ;;
     CN05) echo "iu0t R2: the THIRD collapse restored at runPhase5ProjectorPhase — killable only once the allow-list is keyed per DECLARATION, not per file" ;;
     CN07) echo "iu0t R2: the FIFTH collapse — the episode-summary invalidation key read back out of the final-only persisted transcriptVersion column" ;;
+    CN08) echo "iu0t R3: CN07 RESPELLED with a closure instead of a keypath — the same read of the same column, which survived while CN07 died" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11098,6 +11117,22 @@ EOF
     snippet NEW <<'EOF'
         let transcriptVersion = chunks
             .compactMap(\.transcriptVersion)
+            .last
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN08 — CN07's defect, respelled with a closure instead of a keypath. The
+  # SAME read of the SAME column at the SAME line; only the syntax differs.
+  # It survived until playhead-iu0t R3, because the rule was enforced by the
+  # literal substring `\.transcriptVersion` rather than by a pattern that knows
+  # what a read of the column looks like.
+  CN08)
+    snippet OLD <<'EOF'
+        let transcriptVersion = SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)
+EOF
+    snippet NEW <<'EOF'
+        let transcriptVersion = chunks
+            .compactMap { $0.transcriptVersion }
             .last
 EOF
     patch "$file" "$OLD" "$NEW" ;;

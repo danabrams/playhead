@@ -421,9 +421,20 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
 
         // Vacuity guard. A refactor that renamed either guarded function, or a
         // regression in the argument parser, would empty the walk and leave
-        // this test green while enforcing nothing. Six production call sites
-        // exist as of playhead-iu0t R1; the floor is deliberately below that so
-        // ordinary churn does not trip it, but a collapse to zero does.
+        // this test green while enforcing nothing. The floor is deliberately
+        // below the real count so ordinary churn does not trip it, but a
+        // collapse to zero does.
+        //
+        // MEASURED 8, playhead-iu0t R3, by temporarily raising this floor and
+        // reading the failure back: `runBackfill`, `runPhase5ProjectorPhase`,
+        // `recordSemanticScanClaim`, `runShadowFMPhase`, `SemanticScanClaim
+        // .transcriptVersion(forPersistedChunks:)`, `RegionShadowPhase.run`,
+        // `DebugEpisodeExportService.formatExport` and
+        // `AnalysisCoordinator.pushEvidenceCatalog`. This comment said "Six …
+        // as of playhead-iu0t R1" and was never re-measured after R1 and R2
+        // each converted a site — the same stale-census defect this bead keeps
+        // finding, in the bead's own enforcement. Re-measure it when you change
+        // it; do not infer it.
         XCTAssertGreaterThanOrEqual(audited, 6, """
             this canary audited only \(audited) call site(s). It enforces nothing \
             when it finds nothing: check that `guardedCalls` still names the \
@@ -517,43 +528,128 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
     /// through when it rebuilds a row. Both are exempt by file, with reasons.
     /// Everything else derives the version instead —
     /// `SemanticScanClaim.transcriptVersion(forPersistedChunks:)` is one call.
+    ///
+    /// **playhead-iu0t R3 replaced this rule's three literal needles with a
+    /// receiver-rooted regex, because the needles enforced a SPELLING and not a
+    /// rule — and that is this bead's own defect class committed by its own
+    /// fix.** The needles were
+    ///
+    ///     [#"\.transcriptVersion"#, "chunk.transcriptVersion", "Chunk.transcriptVersion"]
+    ///
+    /// matched with `source.contains(_:)`, which is a literal substring search,
+    /// not a regex — so the first needle was the 19 characters
+    /// `\.transcriptVersion`, i.e. the KEYPATH form alone. R3 planted instance
+    /// #4's exact defect three times, in three ordinary respellings, and the
+    /// whole canary stayed green (exit 0):
+    ///
+    ///     chunks.compactMap { $0.transcriptVersion }.last   // closure form
+    ///     chunks.last?.transcriptVersion                    // optional chain
+    ///     rows.last -> row.transcriptVersion                // plain receiver
+    ///
+    /// CN07 restores the keypath form and dies, so the mutant read as proof of
+    /// a rule when it was proof of one spelling of it.
+    ///
+    /// Two further things measured while fixing it, both of which changed the
+    /// rule rather than only its regex:
+    ///
+    ///   * **There was no vacuity guard.** Every `\.transcriptVersion` keypath
+    ///     left in the tree sits inside a COMMENT (the two postmortems quoting
+    ///     the removed line), and comments are stripped — so the old needle set
+    ///     matched nothing anywhere outside the exempt files. A rule matching
+    ///     zero things is green whether or not it works, and rule 1 carries an
+    ///     `audited >=` floor for exactly this reason while this one carried
+    ///     nothing. The guard below re-uses the exempt files as the anchor: both
+    ///     genuinely contain the reads this rule is about, so if the detector
+    ///     stops seeing THEM it has stopped working.
+    ///   * **It enforced half the sentence it points at.** `AnalysisStore`'s
+    ///     doc says "do not read `transcript_chunks.atomOrdinal` or
+    ///     `.transcriptVersion` … `TranscriptCanonicalizationRuleCanaryTests`
+    ///     is what enforces it". Only the version half was enforced. Both are
+    ///     now, and both measure clean: 0 matches outside the exempt files, 2
+    ///     inside (`AnalysisStore` binds each on insert; `TranscriptEngineService`
+    ///     copies each through).
+    ///
+    /// **What it still cannot see, stated rather than implied.** The receiver
+    /// must be chunk-shaped: the regex roots at an identifier containing
+    /// `chunk`/`chunks` and walks member access, optional chaining, subscripts
+    /// and closure bodies from there. A `TranscriptChunk` bound to a name with
+    /// no `chunk` in it — `guard let row = someOtherArray.last` — is invisible,
+    /// and closing that needs type information this test does not have. That is
+    /// a stated limit, not a completeness claim; the difference is the whole
+    /// lesson of hc7e's sentence.
     func testNoProductionConsumerReadsThePersistedChunkTranscriptVersion() throws {
-        // Files that legitimately touch the column, and why.
+        // Files that legitimately touch the columns, and why.
         let exempt: [String: String] = [
-            "AnalysisStore.swift": "defines the column: hydrates the row and binds it on insert",
+            "AnalysisStore.swift": "defines the columns: hydrates the row and binds them on insert",
             "TranscriptEngineService.swift":
-                "field-preserving copy when an existing row is rebuilt — carries the value through, never reads its meaning",
+                "field-preserving copy when an existing row is rebuilt — carries the values through, never reads their meaning",
         ]
 
+        // Both persisted columns the `AnalysisStore` doc bans reading. Each is
+        // written from the legacy `WHERE pass != 'fast'` backfill and therefore
+        // describes the FINAL-ONLY chunk set, whatever its name suggests.
+        let bannedFields = ["transcriptVersion", "atomOrdinal"]
+
+        // A read of the field whose receiver chain is rooted in a chunk-shaped
+        // identifier. `[^;]{0,160}?` is what carries it across the member
+        // access, optional chain, subscript or closure body in between —
+        // instance #4's real spelling put the receiver and both narrowing calls
+        // on three separate source lines.
+        func pattern(for field: String) -> String {
+            #"\b\w*[Cc]hunks?\b[^;]{0,160}?\."# + field + #"\b"#
+        }
+
         var violations: [String] = []
+        var exemptAnchorHits: [String: Int] = [:]
         for file in try productionSwiftFiles() {
             let name = file.lastPathComponent
-            if exempt[name] != nil { continue }
             let source = SwiftSourceInspector.strippingComments(
                 try String(contentsOf: file, encoding: .utf8)
             )
-            // The three spellings that reach the persisted field: the keypath
-            // form a `map`/`compactMap` uses, and member access off a receiver
-            // whose name ends in `chunk`/`Chunk` (case-insensitively covered by
-            // the two literals below, which is every receiver name in the tree).
-            for needle in [#"\.transcriptVersion"#, "chunk.transcriptVersion", "Chunk.transcriptVersion"]
-            where source.contains(needle) {
-                violations.append("\(name): \(needle)")
+            for field in bannedFields {
+                let hits = SwiftSourceInspector.regexOccurrences(
+                    of: pattern(for: field), in: source
+                )
+                guard hits > 0 else { continue }
+                if exempt[name] != nil {
+                    exemptAnchorHits[name, default: 0] += hits
+                } else {
+                    violations.append("\(name): \(hits) read(s) of chunk.\(field)")
+                }
             }
         }
 
         XCTAssertTrue(violations.isEmpty, """
-            \(violations.count) production site(s) read the PERSISTED \
-            `transcript_chunks.transcriptVersion`:
+            \(violations.count) production site(s) read a PERSISTED \
+            `transcript_chunks` identity column:
 
             \(violations.joined(separator: "\n            "))
 
-            That column is written only by \
+            Those columns are written only by \
             `AnalysisStore.backfillLegacyTranscriptChunksPhase1IfNeeded`, whose \
-            SELECT is `WHERE pass != 'fast'` — so it holds a FINAL-ONLY \
-            version, the pre-hc7e collapse in persisted form, and it is stale \
-            for any asset transcribed since. Derive instead: \
-            `SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)`.
+            SELECT is `WHERE pass != 'fast'` — so they describe a FINAL-ONLY \
+            chunk set, the pre-hc7e collapse in persisted form, and they are \
+            stale for any asset transcribed since. Derive instead: \
+            `SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)` \
+            for the version, and the in-memory atom array for the ordinal.
             """)
+
+        // VACUITY GUARD. This rule matched nothing at all before R3 and was
+        // green for that reason rather than for a good one. The exempt files
+        // are the anchor because they genuinely contain the reads this rule is
+        // about: `AnalysisStore` binds both columns on insert and
+        // `TranscriptEngineService` copies both through. If the detector stops
+        // seeing those, it has stopped detecting — a bad regex (which
+        // `regexOccurrences` reports as zero matches rather than as an error),
+        // a broken comment-stripper, or an empty file walk all land here.
+        for name in exempt.keys {
+            XCTAssertGreaterThanOrEqual(exemptAnchorHits[name] ?? 0, 1, """
+                the persisted-column detector found NOTHING in \(name), which \
+                is one of the two files that certainly reads these columns. \
+                This rule enforces nothing when it matches nothing — check the \
+                regex, `strippingComments`, and the file walk before assuming \
+                the tree got cleaner.
+                """)
+        }
     }
 }
