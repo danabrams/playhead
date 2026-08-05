@@ -280,9 +280,17 @@ struct AnalyzedSeconds: CoverageQuantity {
     /// agree. The helper stays generic; the BOXING is what carries the type,
     /// which is exactly where rails TY09/TY10 already decide which area a call
     /// produces. Rail TY20.
-    init(clipping transcribed: [(start: Double, end: Double)], to frontier: FrontierSeconds) {
+    /// R5 (Dan's scope expansion): the INTERVALS are typed too, and they are the
+    /// FAST region specifically. R3 typed the bound and said so; R4 probe PA9
+    /// then widened what is clipped to both passes and it compiled, because
+    /// "TY20 pins which BOUND clips, not what is clipped". `analysisCoveredSec`
+    /// is documented as the fast-transcript area clipped to the frontier, and
+    /// playhead-9y9e deliberately did NOT widen it when it widened the ad-scan
+    /// bound — so the fast region is the contract, not an accident of what was
+    /// in scope. Rail TY29.
+    init(clipping transcribed: FastTranscriptRegion, to frontier: FrontierSeconds) {
         self.init(AnalysisCoverageMath.unionedSecondsClipped(
-            transcribed,
+            transcribed.intervals,
             upperBound: frontier.rawValue
         ))
     }
@@ -329,6 +337,41 @@ struct AdScanSeconds: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
 
+    /// playhead-x0lb R5: the ONLY way this area is produced — the scan windows
+    /// INTERSECTED with the readable region, whose sub-ad-width gaps are bridged
+    /// as part of the same operation.
+    ///
+    /// **Three operands, three types, one call.** The expression this replaces
+    /// was `AdScanSeconds(unionedSecondsIntersecting(adScanIntervals[id] ?? [],
+    /// within: bridgingShortGaps(transcribedIntervals, upTo: …)))`, and every one
+    /// of its three inputs was substitutable: probe PA7 measured the area from
+    /// the FAST TRANSCRIPT instead of the scan windows (playhead-fil5 R3's P0 one
+    /// layer below every rail that looks for it), probe PA8 narrowed the bound to
+    /// the fast pass (playhead-9y9e verbatim), and the tolerance is instance 19
+    /// pre-loaded (playhead-a1x0's 60 s re-scan threshold beside this 5 s
+    /// measuring tolerance). Rails TY27 / TY28 / TY07.
+    ///
+    /// **The bridging is INSIDE, deliberately.** R4's lesson is that a typed
+    /// pair is not a typed operation: typing the operands stops the wrong
+    /// quantity arriving and does nothing once it has. An unbridged bound is not
+    /// a different TYPE, it is the same type with a step missed — and a missed
+    /// bridge caps the ad-scan fraction below the 0.98 readiness floor on every
+    /// real episode, which is an under-claim that deletes the signal. Doing it
+    /// here means there is no unbridged bound in scope to pass.
+    init(
+        examined scanned: ScannedRegion,
+        within readable: TranscribedRegion,
+        bridging tolerance: BridgeToleranceSec
+    ) {
+        self.init(AnalysisCoverageMath.unionedSecondsIntersecting(
+            scanned.intervals,
+            within: AnalysisCoverageMath.bridgingShortGaps(
+                readable.intervals,
+                upTo: tolerance
+            )
+        ))
+    }
+
     /// playhead-x0lb R4: an AREA that exceeds the whole declared duration is
     /// proof the two describe different audio.
     ///
@@ -343,6 +386,170 @@ struct AdScanSeconds: CoverageQuantity {
     /// TY22.
     func exceeds(_ duration: EpisodeSeconds, byMoreThan tolerance: Double) -> Bool {
         rawValue > duration.rawValue + tolerance
+    }
+}
+
+// MARK: - Regions: the INTERVAL SETS the areas above are measured from
+
+// playhead-x0lb R5 (Dan's 2026-08-05 decision to EXPAND scope): the scalars above
+// carry types; the interval arrays they are measured FROM did not, and that is
+// one layer below every rail in this bead.
+//
+// WHAT R4 MEASURED. Four `[(start: Double, end: Double)]` arrays are live in one
+// scope inside `AnalysisStore.fetchCoverageSummariesByAssetIds` — the fast pass,
+// the final pass, the fast∪final readable region, and the scan windows — and any
+// of them fitted any slot. Four probes were planted and all four COMPILED:
+//
+//   PA5  the transcript region built from the DSP FRONTIER instead of the
+//        transcript's own area, which poisons AN and the ad-scan bound at once;
+//   PA7  the ad-scan area measured from the FAST TRANSCRIPT instead of the scan
+//        windows — playhead-fil5 R3's P0 (the transcript published as ad-scan
+//        reach) reproduced ONE LAYER BELOW every rail that looks for it, with
+//        ``AdScanSeconds`` intact on the box;
+//   PA8  the ad-scan bound narrowed from the readable region to the FAST pass
+//        alone — playhead-9y9e's defect verbatim, worth 55.4 % vs 100.0 % on
+//        0C2FC22E;
+//   PA9  the AN clip's intervals WIDENED to both passes, which TY20 does not
+//        pin: TY20 pins which BOUND clips, not what is clipped.
+//
+// Re-planted against this tree on 2026-08-05 before any fix, through the same
+// harness the rails use: **PA5 PA7 PA8 PA9, four probes, four COMPILED.** The
+// types below are what make them TY26–TY29.
+//
+// THE SHAPE, and it is the one R4 found works: every region keeps its intervals
+// `fileprivate` and offers only NAMED operations, so a consumer cannot reach the
+// raw array to substitute it. `AnalysisCoverageMath` stays generic — it is
+// honest interval arithmetic and its tests hit it directly — and the REGION
+// types are the door it is reached through from the coverage reader.
+//
+// WHAT THIS DOES NOT CLOSE, measured not assumed: each region is still BUILT
+// from bare `Double` columns at the SQL read (`append(start:end:)`), which is
+// door 2 (limit L-I) one level down. That door cannot be closed here because
+// `sqlite3_column_double` returns a `Double` and nothing else; what changes is
+// that there is now exactly ONE such door per region and it sits at the genuine
+// boundary rather than at every consumer.
+
+/// playhead-x0lb: the FAST-PASS transcript region — the intervals of
+/// `transcript_chunks` rows with `pass = 'fast'`, or the asset watermark modelled
+/// as one contiguous `[0, watermark]` span when no fast chunk landed.
+///
+/// * unit: half-open `[start, end)` intervals of episode audio.
+/// * measures to: ``CoveredSeconds`` (its own area) and, clipped to the DSP
+///   frontier, ``AnalyzedSeconds``.
+///
+/// It is NOT the region a semantic scan can read — that is ``TranscribedRegion``,
+/// which adds the final pass — and it is not what a scan examined, which is
+/// ``ScannedRegion``. Probes PA8 and PA9 are exactly those two confusions and
+/// both compiled while all three were `[(start: Double, end: Double)]`.
+struct FastTranscriptRegion {
+    fileprivate var intervals: [(start: Double, end: Double)] = []
+
+    /// An empty region — no fast chunk landed and no watermark stands in.
+    init() {}
+
+    /// playhead-x0lb R5: the watermark stand-in, and the ONE promotion into this
+    /// region that is not a raw SQL column.
+    ///
+    /// The parameter is a ``CoveredSeconds`` and not a `Double` because probe PA5
+    /// built this span from ``FrontierSeconds`` — the DSP sweep, which reaches
+    /// 100 % on an episode nothing transcribed — and it compiled. Rail TY26.
+    init(spanningFromZeroTo covered: CoveredSeconds) {
+        self.intervals = [(start: 0, end: covered.rawValue)]
+    }
+
+    /// Accumulate one row. `start`/`end` are bare `Double`s because they come
+    /// straight off `sqlite3_column_double`; see the note above on limit L-I.
+    mutating func append(start: Double, end: Double) {
+        intervals.append((start: start, end: end))
+    }
+
+    var isEmpty: Bool { intervals.isEmpty }
+
+    /// The de-overlapped AREA of this region, typed as the transcript's area.
+    ///
+    /// playhead-x0lb R5: this replaces a bare
+    /// `CoveredSeconds(AnalysisCoverageMath.unionedSeconds(fastIntervals[id] ?? []))`
+    /// in the coverage reader — a boxing site (limit L-I) where the array was
+    /// chosen by hand and the box named a quantity nothing checked it against.
+    var unionedSeconds: CoveredSeconds {
+        CoveredSeconds(AnalysisCoverageMath.unionedSeconds(intervals))
+    }
+}
+
+/// playhead-x0lb: the FINAL-PASS transcript region — `transcript_chunks` rows
+/// with `pass = 'final'`.
+///
+/// * unit: half-open `[start, end)` intervals of episode audio.
+///
+/// It has exactly one consumer: it is the other half of ``TranscribedRegion``.
+/// It is a distinct type from ``FastTranscriptRegion`` rather than a second value
+/// of it because the coverage reader holds both at once, and a same-type pair is
+/// indistinguishable by construction (limit L-J) — the fast/final swap would be
+/// unwritable in neither direction if they shared a type.
+struct FinalTranscriptRegion {
+    fileprivate var intervals: [(start: Double, end: Double)] = []
+
+    init() {}
+
+    /// Accumulate one row; see ``FastTranscriptRegion/append(start:end:)``.
+    mutating func append(start: Double, end: Double) {
+        intervals.append((start: start, end: end))
+    }
+}
+
+/// playhead-x0lb: the TRANSCRIBED REGION — the audio a semantic scan can
+/// actually READ, which is the whole transcript, BOTH passes.
+///
+/// * unit: half-open `[start, end)` intervals of episode audio.
+/// * measures to: nothing on its own — it is the BOUND that
+///   ``AdScanSeconds/init(examined:within:bridging:)`` intersects against.
+///
+/// **Why it is not ``FastTranscriptRegion``.** playhead-9y9e: the scan is planned
+/// over the CANONICAL chunk stream, where a final-pass chunk replaces the fast
+/// coverage it fully contains and every other chunk of either pass is retained —
+/// so the canonical union is exactly `union(fast) ∪ union(final)`. Bounding the
+/// ad-scan area by the fast union alone discarded audio the scan genuinely read:
+/// 0C2FC22E measured 55.4 % fast against 100.0 % canonical on the 2026-08-03
+/// device pull. R4 probe PA8 wrote the narrow one back into the bound and it
+/// compiled. Rail TY28.
+struct TranscribedRegion {
+    fileprivate var intervals: [(start: Double, end: Double)]
+
+    /// The only constructor, and it names both passes.
+    ///
+    /// **The fast term is not redundant and cannot be dropped.** When no fast
+    /// chunk landed but the asset carries a `fastTranscriptCoverageEndTime`, the
+    /// fast region is the watermark modelled as one contiguous span, and the
+    /// final-pass intervals alone are neither contiguous nor guaranteed to reach
+    /// it — so a bound built from the final pass alone would be SMALLER than the
+    /// bound this replaced and an episode could measure less scanned than before.
+    /// Adding rather than replacing makes the widening MONOTONE.
+    init(fastPass: FastTranscriptRegion, finalPass: FinalTranscriptRegion) {
+        self.intervals = fastPass.intervals + finalPass.intervals
+    }
+}
+
+/// playhead-x0lb: the SCANNED REGION — the `[windowStartTime, windowEndTime]`
+/// spans of coverage-lane `semantic_scan_results` rows that produced a verdict.
+///
+/// * unit: half-open `[start, end)` intervals of episode audio.
+/// * measures to: ``AdScanSeconds``, and only after intersection with a
+///   ``TranscribedRegion``.
+///
+/// **It is never taken at face value.** A window's persisted bounds are
+/// `first.startTime ... last.endTime` over the segments that fit one prompt, so
+/// where the transcript has a hole between two consecutive segments the bounds
+/// straddle audio whose text never entered the prompt. That is why this type has
+/// no area accessor of its own: the only measurement it offers goes through
+/// ``AdScanSeconds/init(examined:within:bridging:)``, which requires the bound.
+struct ScannedRegion {
+    fileprivate var intervals: [(start: Double, end: Double)] = []
+
+    init() {}
+
+    /// Accumulate one examined window; see ``FastTranscriptRegion/append(start:end:)``.
+    mutating func append(start: Double, end: Double) {
+        intervals.append((start: start, end: end))
     }
 }
 

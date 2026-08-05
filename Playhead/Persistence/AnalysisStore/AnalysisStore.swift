@@ -620,12 +620,12 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     /// playhead-9y9e: "the transcribed region" means BOTH passes. It was the
     /// fast pass alone, which on the 2026-08-03 device pull put a ceiling below
     /// the 0.98 completion floor under this fraction for NINE of twelve assets,
-    /// of which this change lifts FOUR over it — see the `transcribedIntervals`
+    /// of which this change lifts FOUR over it — see the `transcribedRegion`
     /// block in ``fetchCoverageSummariesByAssetIds(_:)`` for the split.
     ///
     /// (R2 review: this line read "four of twelve assets", which is the number
     /// LIFTED, not the number capped. R1 corrected that count at the
-    /// `transcribedIntervals` block and this sentence — which points AT that
+    /// `transcribedRegion` block and this sentence — which points AT that
     /// block — was left contradicting it.)
     ///
     /// This is the only persisted quantity that answers "how much of this
@@ -750,7 +750,7 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         // `finalPassCoverageEndSec` falls back to the
         // `analysis_assets.finalPassCoverageEndTime` COLUMN when no final chunk
         // is on disk — playhead-0sro's "watermark outliving the rows it claims"
-        // shape, the same one `transcribedIntervals` and
+        // shape, the same one `transcribedRegion` and
         // `watermarkWithoutChunksStillFails` are built around, and reachable
         // because playhead-wvdz's chunk deletion outlives the asset row. A stale
         // column would then WITHHOLD a fraction that is fine, i.e. make an
@@ -10650,17 +10650,21 @@ actor AnalysisStore {
         //              `ORDER BY` is purely for deterministic output order
         //              (helps debugging / explain plans), not for the merge
         //              algorithm's correctness.
-        var fastIntervals: [String: [(start: Double, end: Double)]] = [:]
+        // playhead-x0lb R5: the three interval collections carry DISTINCT TYPES.
+        // They were all `[(start: Double, end: Double)]`, live in one scope, and
+        // R4 planted four substitutions between them — PA5, PA7, PA8, PA9 — and
+        // all four compiled. See the REGIONS section of `CoverageQuantities.swift`.
+        var fastIntervals: [String: FastTranscriptRegion] = [:]
         var fastMaxEnd: [String: Double] = [:]
         // ---- Pass 3 (fold into one query): final-pass chunk intervals + MAX(endTime).
         // playhead-9y9e: the INTERVALS are new. They were not collected before,
         // and that omission is what capped the ad-scan bound below — see
-        // `transcribedIntervals`.
-        var finalIntervals: [String: [(start: Double, end: Double)]] = [:]
+        // `transcribedRegion`.
+        var finalIntervals: [String: FinalTranscriptRegion] = [:]
         var finalMaxEnd: [String: Double] = [:]
         // ---- Pass 4 (playhead-pz32): coverage-lane semantic-scan windows
         //      that produced a verdict, for the ad-scan AREA.
-        var adScanIntervals: [String: [(start: Double, end: Double)]] = [:]
+        var adScanIntervals: [String: ScannedRegion] = [:]
         var adScanRowSeen: Set<String> = []
 
         index = 0
@@ -10688,7 +10692,8 @@ actor AnalysisStore {
                 // Skip degenerate / inverted rows so they don't poison
                 // either the union or the high-water max.
                 guard endTime > startTime else { continue }
-                fastIntervals[assetId, default: []].append((start: startTime, end: endTime))
+                fastIntervals[assetId, default: FastTranscriptRegion()]
+                    .append(start: startTime, end: endTime)
                 if let prior = fastMaxEnd[assetId] {
                     fastMaxEnd[assetId] = max(prior, endTime)
                 } else {
@@ -10701,7 +10706,7 @@ actor AnalysisStore {
             // max. playhead-9y9e: this used to project `MAX(endTime)` alone,
             // "because only MAX(endTime) is useful for display today" — true of
             // the display fields, and false of the ad-scan bound that later
-            // reused `transcriptIntervals`. Same shape as the fast query above.
+            // reused the fast region as the bound. Same shape as the fast query above.
             let finalSQL = """
                 SELECT analysisAssetId, startTime, endTime
                 FROM transcript_chunks
@@ -10718,7 +10723,8 @@ actor AnalysisStore {
                 let startTime = sqlite3_column_double(finalStmt, 1)
                 let endTime = sqlite3_column_double(finalStmt, 2)
                 guard endTime > startTime else { continue }
-                finalIntervals[assetId, default: []].append((start: startTime, end: endTime))
+                finalIntervals[assetId, default: FinalTranscriptRegion()]
+                    .append(start: startTime, end: endTime)
                 if let prior = finalMaxEnd[assetId] {
                     finalMaxEnd[assetId] = max(prior, endTime)
                 } else {
@@ -10767,7 +10773,8 @@ actor AnalysisStore {
                 ) else {
                     continue
                 }
-                adScanIntervals[assetId, default: []].append((start: startTime, end: endTime))
+                adScanIntervals[assetId, default: ScannedRegion()]
+                    .append(start: startTime, end: endTime)
             }
             sqlite3_finalize(scanStmt)
 
@@ -10785,9 +10792,11 @@ actor AnalysisStore {
         summaries.reserveCapacity(allIds.count)
         for id in allIds {
             let assetRow = assetRows[id]
-            let chunkUnionedSec = AnalysisCoverageMath.unionedSeconds(
-                fastIntervals[id] ?? []
-            )
+            // playhead-x0lb R5: the area comes off the REGION, which names both
+            // which intervals were unioned and which quantity the result is.
+            // This used to be `CoveredSeconds(unionedSeconds(fastIntervals[id]))`
+            // — a hand-picked array and a hand-named box, limit L-I's own shape.
+            let fastRegion = fastIntervals[id] ?? FastTranscriptRegion()
             let chunkMaxEnd = fastMaxEnd[id]
 
             // Fast covered seconds: prefer interval-unioned seconds when
@@ -10795,7 +10804,7 @@ actor AnalysisStore {
             let fastCoveredSec: CoveredSeconds?
             let fastCoveredSource: AnalysisCoverageSummary.CoverageProvenance
             if chunkMaxEnd != nil {
-                fastCoveredSec = CoveredSeconds(chunkUnionedSec)
+                fastCoveredSec = fastRegion.unionedSeconds
                 fastCoveredSource = .fastTranscriptChunks
             } else if let watermark = assetRow?.fastTranscriptCoverageEndTime {
                 // A watermark standing in for an area: it is a REACH, so this
@@ -10862,19 +10871,25 @@ actor AnalysisStore {
             // `[0, watermark]` span (so a clip degrades to
             // `min(transcriptWatermark, …)`); empty when transcript coverage is
             // entirely unknown.
-            let transcriptIntervals: [(start: Double, end: Double)]
+            //
+            // playhead-x0lb R5: a ``FastTranscriptRegion``, not a bare interval
+            // array. Probe PA5 built this span from `analysisFrontierSec` — the
+            // DSP sweep, which reaches the end of the episode on audio nothing
+            // ever transcribed — and it compiled, poisoning the AN clip and the
+            // ad-scan bound in one edit. Rail TY26.
+            let transcriptRegion: FastTranscriptRegion
             if chunkMaxEnd != nil {
-                transcriptIntervals = fastIntervals[id] ?? []
+                transcriptRegion = fastRegion
             } else if let transcriptCovered = fastCoveredSec {
-                transcriptIntervals = [(start: 0, end: transcriptCovered.rawValue)]
+                transcriptRegion = FastTranscriptRegion(spanningFromZeroTo: transcriptCovered)
             } else {
-                transcriptIntervals = []
+                transcriptRegion = FastTranscriptRegion()
             }
 
             // playhead-9y9e: the region a semantic scan can actually READ, which
             // is the whole transcript — both passes — not the fast pass alone.
             //
-            // WHY THIS IS A SEPARATE QUANTITY FROM `transcriptIntervals`. The
+            // WHY THIS IS A SEPARATE QUANTITY FROM `transcriptRegion`. The
             // scan is planned over the CANONICAL chunk stream
             // (`AdDetectionService.runBackfill` hands `runShadowFMPhase` the
             // output of `TranscriptChunkCanonicalizer.canonicalize`), where a
@@ -10915,12 +10930,12 @@ actor AnalysisStore {
             // `analysisCoveredSec` (documented as the fast-transcript area
             // clipped to the analysis frontier). Only the ad-scan bound changes.
             //
-            // THE BOUND IS `transcriptIntervals` PLUS THE FINAL PASS, and the
-            // `transcriptIntervals` term is not redundant — it is what makes the
+            // THE BOUND IS `transcriptRegion` PLUS THE FINAL PASS, and the
+            // `transcriptRegion` term is not redundant — it is what makes the
             // widening MONOTONE. It looks like it can be dropped, since it is
             // `fastIntervals[id]` whenever any fast chunk landed. But when NO
             // fast chunk landed and the asset still carries a
-            // `fastTranscriptCoverageEndTime`, `transcriptIntervals` is the
+            // `fastTranscriptCoverageEndTime`, `transcriptRegion` is the
             // watermark modelled as one contiguous `[0, watermark]` span, and
             // the final-pass intervals alone are neither contiguous nor
             // guaranteed to reach it — so a bound built from the final pass
@@ -10929,10 +10944,19 @@ actor AnalysisStore {
             // (a watermark outliving the chunks it claims) is playhead-0sro's,
             // and `AnalysisJobRunner`'s own
             // `watermarkWithoutChunksStillFails` fixture is built on it. Adding
-            // to `transcriptIntervals` rather than replacing it makes the new
+            // to `transcriptRegion` rather than replacing it makes the new
             // bound a SUPERSET of the old one in every branch, so the measured
             // area can only ever move UP and no episode becomes less ready.
-            let transcribedIntervals = transcriptIntervals + (finalIntervals[id] ?? [])
+            //
+            // playhead-x0lb R5: a ``TranscribedRegion``, whose only constructor
+            // names BOTH passes. It was `transcriptIntervals + (finalIntervals[id]
+            // ?? [])` — an array concatenation of two arrays of the same type, so
+            // either term accepted either population and the result accepted
+            // both. Rail TY28 pins the consumer.
+            let transcribedRegion = TranscribedRegion(
+                fastPass: transcriptRegion,
+                finalPass: finalIntervals[id] ?? FinalTranscriptRegion()
+            )
 
             let analysisCoveredSec: AnalyzedSeconds?
             if let frontier = analysisFrontierSec, fastCoveredSec != nil {
@@ -10948,8 +10972,14 @@ actor AnalysisStore {
                 // on every episode and the two bars would simply agree, which
                 // is the one shape of this family a reader cannot spot. Rail
                 // TY20.
+                //
+                // R5: and the INTERVALS are typed too. TY20 pins which BOUND
+                // clips; probe PA9 widened what IS clipped to both passes and it
+                // compiled, which is the substitution playhead-9y9e deliberately
+                // did NOT make here when it made it to the ad-scan bound below.
+                // Rail TY29.
                 analysisCoveredSec = AnalyzedSeconds(
-                    clipping: transcriptIntervals,
+                    clipping: transcriptRegion,
                     to: frontier
                 )
             } else {
@@ -10979,14 +11009,19 @@ actor AnalysisStore {
             // ran and examined nothing reports a measured 0.
             let adScanCoveredSec: AdScanSeconds?
             let adScanCoveredSource: AnalysisCoverageSummary.CoverageProvenance
+            //
+            // playhead-x0lb R5: ONE typed operation, three named operands. It
+            // was three nested generic calls over four interchangeable interval
+            // arrays: probe PA7 measured the area from `fastIntervals` (fil5's
+            // P0, one layer below every rail that looks for it) and probe PA8
+            // narrowed the bound to the fast pass (9y9e verbatim). Rails TY27 /
+            // TY28, and TY07 still pins the tolerance.
             if adScanRowSeen.contains(id) {
-                adScanCoveredSec = AdScanSeconds(AnalysisCoverageMath.unionedSecondsIntersecting(
-                    adScanIntervals[id] ?? [],
-                    within: AnalysisCoverageMath.bridgingShortGaps(
-                        transcribedIntervals,
-                        upTo: AnalysisCoverageMath.adScanBridgeableGapSec
-                    )
-                ))
+                adScanCoveredSec = AdScanSeconds(
+                    examined: adScanIntervals[id] ?? ScannedRegion(),
+                    within: transcribedRegion,
+                    bridging: AnalysisCoverageMath.adScanBridgeableGapSec
+                )
                 adScanCoveredSource = .semanticScanResults
             } else {
                 adScanCoveredSec = nil

@@ -168,8 +168,13 @@ MUTATIONS = [
         "60 s RE-SCAN threshold instead of its own 5 s measuring tolerance. Dan's "
         "note on a1x0 is 'Two names, or the next reviewer finds the seventeenth "
         "instance of the family here'",
-        "                        upTo: AnalysisCoverageMath.adScanBridgeableGapSec",
-        "                        upTo: RescanThresholdSec.adScanRescanWorthyGapSec",
+        # R5 re-anchor: the three nested generic calls collapsed into
+        # `AdScanSeconds(examined:within:bridging:)`, so the tolerance now
+        # arrives at a `bridging:` label. The SUBSTITUTION is untouched — the
+        # 60 s re-scan threshold in the 5 s measuring slot — which is what the
+        # rail is about; only its spelling moved with the fix.
+        "                    bridging: AnalysisCoverageMath.adScanBridgeableGapSec",
+        "                    bridging: RescanThresholdSec.adScanRescanWorthyGapSec",
         ["RescanThresholdSec", "BridgeToleranceSec"],
     ),
     (
@@ -397,6 +402,52 @@ MUTATIONS = [
         duration?.fractionOfDeclaredDuration(area)
     }""",
         ["EpisodeSeconds", "fractionOfDeclaredDuration"],
+    ),
+    (
+        "TY26", STORE,
+        "R5 probe PA5, planted and COMPILED before the fix: the transcript "
+        "REGION built from the DSP frontier. The frontier reaches the end of an "
+        "episode nothing ever transcribed, and this one edit poisons the AN clip "
+        "and the ad-scan bound at once — the interval arrays were all "
+        "`[(start: Double, end: Double)]`, so the watermark stand-in accepted "
+        "any position on the summary",
+        "            } else if let transcriptCovered = fastCoveredSec {",
+        "            } else if let transcriptCovered = analysisFrontierSec {",
+        ["FrontierSeconds", "CoveredSeconds"],
+    ),
+    (
+        "TY27", STORE,
+        "R5 probe PA7, planted and COMPILED before the fix: the ad-scan area "
+        "measured from `fastIntervals` instead of the scan windows. This is "
+        "playhead-fil5 R3's own P0 — the transcript published as ad-scan reach — "
+        "reproduced ONE LAYER BELOW every rail that looks for it, with "
+        "`AdScanSeconds` intact on the box and TY05/TY06/TY09/TY10 all still "
+        "green. It is the probe that decided this scope expansion",
+        "                    examined: adScanIntervals[id] ?? ScannedRegion(),",
+        "                    examined: fastIntervals[id] ?? ScannedRegion(),",
+        ["FastTranscriptRegion", "ScannedRegion"],
+    ),
+    (
+        "TY28", STORE,
+        "R5 probe PA8, planted and COMPILED before the fix: the ad-scan bound "
+        "narrowed from the readable region to the FAST pass alone — "
+        "playhead-9y9e's defect verbatim, worth 55.4 % vs 100.0 % on 0C2FC22E "
+        "per the comment at the site, and a ceiling below the 0.98 completion "
+        "floor on nine of twelve field assets",
+        "                    within: transcribedRegion,",
+        "                    within: transcriptRegion,",
+        ["FastTranscriptRegion", "TranscribedRegion"],
+    ),
+    (
+        "TY29", STORE,
+        "R5 probe PA9, planted and COMPILED before the fix: the AN clip's "
+        "INTERVALS widened to both passes. TY20 pins which BOUND clips and R3 "
+        "said so explicitly; it does not pin what is CLIPPED, and playhead-9y9e "
+        "deliberately did not widen this quantity when it widened the ad-scan "
+        "bound one block below",
+        "                    clipping: transcriptRegion,",
+        "                    clipping: transcribedRegion,",
+        ["TranscribedRegion", "FastTranscriptRegion"],
     ),
     (
         "TY99", RUNNER,

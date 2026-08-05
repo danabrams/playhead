@@ -427,14 +427,15 @@ struct AnalyzedSecondsClipConstructorTests {
     /// the whole value of the AN quantity.
     @Test("clipping delegates to unionedSecondsClipped, bound and all")
     func delegatesWithoutChangingTheArithmetic() {
-        let transcribed: [(start: Double, end: Double)] = [
+        let raw: [(start: Double, end: Double)] = [
             (start: 0, end: 100),
             (start: 200, end: 300)
         ]
+        let transcribed = CoverageRegionFixtures.fast(raw)
         for bound in [0.0, 50.0, 100.0, 250.0, 1_000.0] {
             #expect(
                 AnalyzedSeconds(clipping: transcribed, to: FrontierSeconds(bound)).rawValue
-                    == AnalysisCoverageMath.unionedSecondsClipped(transcribed, upperBound: bound)
+                    == AnalysisCoverageMath.unionedSecondsClipped(raw, upperBound: bound)
             )
         }
     }
@@ -446,11 +447,11 @@ struct AnalyzedSecondsClipConstructorTests {
     /// bars simply agree.
     @Test("a frontier below the union truncates; the transcript's own reach does not")
     func theBoundIsWhatMakesTheQuantityDifferentFromTX() {
-        let transcribed: [(start: Double, end: Double)] = [
+        let transcribed = CoverageRegionFixtures.fast([
             (start: 0, end: 100),
             (start: 200, end: 300)
-        ]
-        let transcriptArea = AnalysisCoverageMath.unionedSeconds(transcribed)
+        ])
+        let transcriptArea = transcribed.unionedSeconds.rawValue
         #expect(transcriptArea == 200)
 
         let atFrontier = AnalyzedSeconds(clipping: transcribed, to: FrontierSeconds(250))
@@ -548,5 +549,168 @@ struct AnalyzedFractionTests {
             let inverted = min(1.0, max(0.0, duration.rawValue / area.rawValue))
             #expect(inverted == 1.0)
         }
+    }
+}
+
+/// playhead-x0lb R5: the region types keep their intervals `fileprivate`, so a
+/// test builds one the way the coverage reader does — one row at a time, off the
+/// SQL columns. That is deliberate: an `init(intervals:)` visible to the whole
+/// module would be a second door into every region and would put back exactly
+/// what probes PA7/PA8/PA9 walked through.
+enum CoverageRegionFixtures {
+
+    static func fast(_ intervals: [(start: Double, end: Double)]) -> FastTranscriptRegion {
+        var region = FastTranscriptRegion()
+        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        return region
+    }
+
+    static func final(_ intervals: [(start: Double, end: Double)]) -> FinalTranscriptRegion {
+        var region = FinalTranscriptRegion()
+        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        return region
+    }
+
+    static func scanned(_ intervals: [(start: Double, end: Double)]) -> ScannedRegion {
+        var region = ScannedRegion()
+        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        return region
+    }
+}
+
+@Suite("playhead-x0lb R5 — the interval REGIONS, one layer below every other rail")
+struct CoverageRegionTests {
+
+    /// Rails TY26–TY29 prove the four substitutions no longer COMPILE. What a
+    /// compile check cannot see is that routing the store through the region
+    /// types did not change the arithmetic — so each of these pins the new
+    /// named operation against the generic helper it delegates to.
+    @Test("the fast region's area is the interval union, unchanged")
+    func fastRegionAreaIsTheUnion() {
+        let raw: [(start: Double, end: Double)] = [
+            (start: 0, end: 100),
+            (start: 50, end: 120),
+            (start: 300, end: 310)
+        ]
+        #expect(
+            CoverageRegionFixtures.fast(raw).unionedSeconds.rawValue
+                == AnalysisCoverageMath.unionedSeconds(raw)
+        )
+        #expect(CoverageRegionFixtures.fast(raw).unionedSeconds.rawValue == 130)
+        #expect(FastTranscriptRegion().unionedSeconds.rawValue == 0)
+    }
+
+    /// The watermark stand-in. Probe PA5 built this span from the DSP frontier —
+    /// which reaches the end of an episode nothing transcribed — and it compiled
+    /// while the region was a bare interval array. Rail TY26 closes the writing;
+    /// this pins that the span is still `[0, area]` and nothing else.
+    @Test("the watermark stand-in is one contiguous span from zero")
+    func watermarkStandInSpansFromZero() {
+        let region = FastTranscriptRegion(spanningFromZeroTo: CoveredSeconds(842.5))
+        #expect(region.unionedSeconds.rawValue == 842.5)
+        #expect(AnalyzedSeconds(clipping: region, to: FrontierSeconds(400)).rawValue == 400)
+        // A degenerate stand-in contributes nothing rather than a negative span.
+        #expect(FastTranscriptRegion(spanningFromZeroTo: CoveredSeconds(0)).unionedSeconds.rawValue == 0)
+    }
+
+    /// playhead-9y9e's own property, now carried by a type: the readable region
+    /// is a SUPERSET of the fast pass in every branch, so the measured ad-scan
+    /// area can only ever move UP and no episode becomes less ready.
+    @Test("the transcribed region is fast ∪ final, and never smaller than fast alone")
+    func transcribedRegionIsMonotoneOverTheFastPass() {
+        // 0C2FC22E's shape on the 2026-08-03 pull: the two passes are DISJOINT,
+        // final holding the head and fast holding the tail.
+        let fast = CoverageRegionFixtures.fast([(start: 930, end: 2_086)])
+        let final = CoverageRegionFixtures.final([(start: 0, end: 930)])
+        let scan = CoverageRegionFixtures.scanned([(start: 0, end: 2_086)])
+
+        let fastOnly = AdScanSeconds(
+            examined: scan,
+            within: TranscribedRegion(fastPass: fast, finalPass: FinalTranscriptRegion()),
+            bridging: AnalysisCoverageMath.adScanBridgeableGapSec
+        )
+        let bothPasses = AdScanSeconds(
+            examined: scan,
+            within: TranscribedRegion(fastPass: fast, finalPass: final),
+            bridging: AnalysisCoverageMath.adScanBridgeableGapSec
+        )
+        #expect(fastOnly.rawValue == 1_156)
+        #expect(bothPasses.rawValue == 2_086)
+        #expect(bothPasses > fastOnly)
+    }
+
+    /// The ad-scan area delegates to the same intersection the store used to
+    /// spell inline, bridging included. The bridging is INSIDE the constructor
+    /// precisely so there is no unbridged bound in scope to pass — an unbridged
+    /// bound is not a different type, it is the same type with a step missed.
+    @Test("the ad-scan area is the intersection of the windows with the BRIDGED region")
+    func adScanAreaIsTheBridgedIntersection() {
+        // A window whose bounds straddle a transcript hole: the raw span reads
+        // [0, 3600] while only the two ends carry text.
+        let fastRaw: [(start: Double, end: Double)] = [
+            (start: 0, end: 60),
+            (start: 3_540, end: 3_600)
+        ]
+        let scanRaw: [(start: Double, end: Double)] = [(start: 0, end: 3_600)]
+        let area = AdScanSeconds(
+            examined: CoverageRegionFixtures.scanned(scanRaw),
+            within: TranscribedRegion(
+                fastPass: CoverageRegionFixtures.fast(fastRaw),
+                finalPass: FinalTranscriptRegion()
+            ),
+            bridging: AnalysisCoverageMath.adScanBridgeableGapSec
+        )
+        #expect(
+            area.rawValue == AnalysisCoverageMath.unionedSecondsIntersecting(
+                scanRaw,
+                within: AnalysisCoverageMath.bridgingShortGaps(
+                    fastRaw,
+                    upTo: AnalysisCoverageMath.adScanBridgeableGapSec
+                )
+            )
+        )
+        // 120 s of text, not the 3,600 s the window's bounds claim.
+        #expect(area.rawValue == 120)
+    }
+
+    /// The bridge is load-bearing in both directions, which is what makes the
+    /// tolerance a quantity worth its own type (rail TY07): sub-ad-width holes
+    /// close, a genuine untranscribed BLOCK does not.
+    @Test("bridging closes inter-utterance holes and leaves a real block open")
+    func bridgingClosesBreathsAndNotBlocks() {
+        let scan = CoverageRegionFixtures.scanned([(start: 0, end: 200)])
+        let breathy = TranscribedRegion(
+            fastPass: CoverageRegionFixtures.fast([
+                (start: 0, end: 99),
+                (start: 100, end: 200)
+            ]),
+            finalPass: FinalTranscriptRegion()
+        )
+        let blocked = TranscribedRegion(
+            fastPass: CoverageRegionFixtures.fast([
+                (start: 0, end: 50),
+                (start: 150, end: 200)
+            ]),
+            finalPass: FinalTranscriptRegion()
+        )
+        let bridge = AnalysisCoverageMath.adScanBridgeableGapSec
+        #expect(AdScanSeconds(examined: scan, within: breathy, bridging: bridge).rawValue == 200)
+        #expect(AdScanSeconds(examined: scan, within: blocked, bridging: bridge).rawValue == 100)
+    }
+
+    /// No transcript evidence means nothing can have been read, however wide the
+    /// persisted window bounds are. This is the direction that matters: a window
+    /// taken at face value would report a fully screened episode.
+    @Test("an empty readable region measures zero regardless of the windows")
+    func nothingReadableMeasuresZero() {
+        let area = AdScanSeconds(
+            examined: CoverageRegionFixtures.scanned([(start: 0, end: 3_600)]),
+            within: TranscribedRegion(
+                fastPass: FastTranscriptRegion(),
+                finalPass: FinalTranscriptRegion()
+            ),
+            bridging: AnalysisCoverageMath.adScanBridgeableGapSec
+        )
+        #expect(area.rawValue == 0)
     }
 }
