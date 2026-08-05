@@ -600,10 +600,28 @@ struct ShadowRetryTests {
     }
 
     /// Mixed-pass case: when both fast and final chunks exist for the same
-    /// asset, the drain MUST prefer the final chunks (the higher-accuracy
-    /// transcript). This pins the fallback ordering — final-when-available,
-    /// fast-as-fallback — so a future change can't accidentally invert it.
-    @Test("Bug 9-A: shadow retry prefers pass='final' chunks when both passes exist")
+    /// asset, the drain replays the CANONICAL transcript — final text where the
+    /// final pass ran, fast text everywhere it did not.
+    ///
+    /// **This test used to assert the opposite, and its fixture is why nobody
+    /// noticed (playhead-iu0t).** It read "the drain MUST prefer the final
+    /// chunks… so a future change can't accidentally invert it", pinning the
+    /// pre-hc7e collapse as if it were the contract. It could not have caught
+    /// the defect either way: the fast and final chunks below share identical
+    /// spans, so canonicalization drops every fast chunk as fully covered and
+    /// the canonical set IS the final set. The assertions are unchanged and
+    /// still pass — that is the point. A fixture in which the two candidate
+    /// chunk sets are indistinguishable cannot testify about which one was
+    /// chosen, and reading its green as evidence is how 2,490 s of a real
+    /// episode's transcript got discarded in production.
+    ///
+    /// The distinguishing fixture — a candidate-local final TAIL disjoint from
+    /// the fast prefix, which is the shape `FinalPassRetranscriptionRunner`
+    /// actually writes and the shape asset 53FC53E3 carried — lives in
+    /// `ShadowRetryCanonicalReplayTests`. What this test still earns its keep
+    /// for is the OTHER direction: proving the fully-overlapped case, where
+    /// canonicalization legitimately keeps final text only, still drains.
+    @Test("Bug 9-A: shadow retry drains a mixed-pass asset (fully-overlapped final)")
     func testBug9A_mixedPassPrefersFinal() async throws {
         let store = try await makeTestStore()
         let assetId = "asset-bug9a-mixed"
@@ -682,14 +700,30 @@ struct ShadowRetryTests {
             canUseFoundationModelsProvider: { true }
         )
 
+        // playhead-iu0t: state what this fixture actually is, so nobody reads
+        // the green below as a verdict on which chunk set was replayed.
+        let canonicalization = TranscriptChunkCanonicalizer.canonicalize(combined)
+        #expect(canonicalization.diagnostics.droppedFastCount == 3,
+                "every fast chunk here is fully covered by a final chunk")
+        #expect(TranscriptAtomizer.transcriptVersionHash(chunks: canonicalization.chunks)
+                == TranscriptAtomizer.transcriptVersionHash(
+                    chunks: combined.filter { $0.pass == TranscriptPassType.final_.rawValue }
+                ),
+                """
+                the canonical and final-only sets are IDENTICAL for this fixture — \
+                it cannot distinguish them, which is what made the pre-iu0t \
+                assertion vacuous. The distinguishing case is in \
+                ShadowRetryCanonicalReplayTests.
+                """)
+
         let didRun = await service.retryShadowFMPhaseForSession(sessionId: "sess-bug9a-mixed")
-        #expect(didRun, "mixed-pass drain should execute via the final-pass branch")
+        #expect(didRun, "a fully-overlapped mixed-pass drain should execute")
 
         // The drain must have landed shadow scan rows. The exact count is
         // implementation-detail of the rule-based classifier, but a
         // successful run produces at least one row.
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
-        #expect(!scans.isEmpty, "shadow phase must have written semantic scan rows on the final branch")
+        #expect(!scans.isEmpty, "shadow phase must have written semantic scan rows")
 
         let cleared = try await store.fetchSession(id: "sess-bug9a-mixed")
         #expect(cleared?.needsShadowRetry == false, "flag should clear on successful mixed-pass drain")
