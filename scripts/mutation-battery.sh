@@ -2570,6 +2570,17 @@ T_DR_FAMILY="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCausesDoNotJoinAF
 # `FMInferenceDeadline.run` is 30 s" — and until R4 it asked its question one
 # LINE at a time, which four different spellings walked past.
 T_DR_BUDGETSITES="FMDaemonRefusalSourceCanaryTests/testEveryProductionInferenceBudgetIsEnumerated"
+# R5 review. The per-kind LOG EVENT names, pinned as literals. `drainStoppedEvent`
+# was pinned for both kinds and `logEvent` for neither — only that the two DIFFER,
+# which a rename satisfies. This is the test that now holds kvs8's shipped
+# `fm.backfill.job_throttled`, which THIS bead moved out of a runner literal.
+T_DR_EVENTNAMES="R1-Fix1: the DRAIN-STOP event is named per kind too, and kvs8's spelling is preserved"
+# R5 review: the drain-stop line's sibling COUNT. XCTest — a log line's argument is
+# not observable from any runtime assertion on this harness.
+T_DR_SIBCOUNT="FMDaemonRefusalSourceCanaryTests/testDrainStopSiblingCountIsTheSweepNotTheDrainTotal"
+# R5 review: the swept-sibling token on the THROTTLE path. DR04 proved "not always
+# the throttle's"; until R5 nothing proved "not always the stall's".
+T_DR_THROTTLEBATCH="a THROTTLE-terminated drain sweeps its siblings with kvs8's rateLimited-batchSibling"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5044,6 +5055,39 @@ MUTATIONS=(
   # becomes a deferrable daemon refusal. R3-Fix1's shape one axis over: derived
   # on the call sites, hand-written on the defaults.
   "DR15|511|PERMC|$T_DR_BUDGETSITES"
+
+  # Batches 512-514. R5 review, and the difference from 507-511 is the point:
+  # every one of these is SHIPPED PRODUCTION BEHAVIOUR that no rail could see,
+  # not a respelling of a canary. All three were planted against production
+  # verbatim, in one build, and ALL THREE SURVIVED with every suite green.
+
+  # DR16 — the drain-stop line's `deferredSiblings=` reverts to `deferred.count`,
+  # which is the shipped code up to R5. `deferred` is the drain-WIDE accumulator
+  # (admission defers, rate-limited coverage-hole defers, 41mu's under-coverage
+  # terminals and the refused job's own defer all append before this line runs),
+  # so a field named for the sweep held the drain's total — 3 for one swept
+  # sibling on the mixed fixture. And reaching the line requires two refusals
+  # already appended, so it could never read ZERO: "the stop landed on the last
+  # job and cost the batch nothing" was unrepresentable.
+  "DR16|512|RUNNER|$T_DR_SIBCOUNT"
+
+  # DR17 — kvs8's PER-JOB event name renamed inside the enum this bead moved it
+  # into. Probe PB1, and it SURVIVED on first plant: the enum test asserted only
+  # that the two kinds' `logEvent`s differ, and the wiring canary derives its
+  # forbidden set from `allCases`, so it forbids whatever the new spelling is. A
+  # support-bundle grep for `fm.backfill.job_throttled` would read zero.
+  "DR17|513|FMREF|$T_DR_EVENTNAMES"
+
+  # DR18 — the sibling sweep hard-codes the STALL's token: DR04's exact mirror.
+  # Probe PB5, and it SURVIVED on first plant because both e75l batch tests are
+  # stall-terminated and kvs8's own batch test never reaches the sweep at all
+  # (empty EvidenceCatalog -> the harvester phase completes and resets the
+  # counter). A rate-limited drain would record a wedged tokenizer that never
+  # happened. Its own batch rather than sharing 512 although the expectations are
+  # disjoint today: DR16 changes what the sweep COUNTS and DR18 changes what it
+  # WRITES, and one batch would let either be credited for the other the moment
+  # an expectation set grows — the R3 lesson that moved DR02 out of batch 500.
+  "DR18|514|RUNNER|$T_DR_THROTTLEBATCH"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5485,6 +5529,9 @@ describe_mutation() {
     DR13) echo "e75l R4: a third 30s budget as FMInferenceDeadline.standard / 10 — the line MENTIONS an allowed budget, which is all the old check asked" ;;
     DR14) echo "e75l R4: an ADDED 30s call site spelled across two lines — invisible to a per-line finder, and free because the site count is a floor" ;;
     DR15) echo "e75l R4: the third injected budget DEFAULTS to the metadata bound — R2 enumerated the call sites and pinned one of three defaults by hand" ;;
+    DR16) echo "e75l R5: deferredSiblings= reverts to deferred.count — the drain-WIDE total under a name that says siblings, and it can never read zero" ;;
+    DR17) echo "e75l R5: kvs8's per-job event name is renamed inside the enum — the support-bundle grep that counts throttles reads zero" ;;
+    DR18) echo "e75l R5: the sibling sweep hard-codes the STALL's token — a rate-limited drain records a wedged tokenizer that never happened" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11919,6 +11966,40 @@ EOF
 EOF
     snippet NEW <<'EOF'
         inferenceDeadline: Duration = FMInferenceDeadline.metadata
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR16 — R5 review. The shipped pre-R5 line, verbatim. The declaration and the
+  # increment stay, so the canary's "exactly three occurrences" rule is not what
+  # catches this: the ARGUMENT is.
+  DR16)
+    snippet OLD <<'EOF'
+                deferredSiblings=\(sweptSiblingCount, privacy: .public)
+EOF
+    snippet NEW <<'EOF'
+                deferredSiblings=\(deferred.count, privacy: .public)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR17 — R5 review. Probe PB1 made a record: kvs8's per-job event name renamed
+  # for symmetry with the stall's. SURVIVED on first plant.
+  DR17)
+    snippet OLD <<'EOF'
+            "fm.backfill.job_throttled"
+EOF
+    snippet NEW <<'EOF'
+            "fm.backfill.job_daemon_throttled"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DR18 — R5 review. Probe PB5 made a record: DR04's mirror, hard-coding the
+  # STALL's token at the sweep. SURVIVED on first plant.
+  DR18)
+    snippet OLD <<'EOF'
+                        reason: refusalThatStoppedUs.batchSiblingCause
+EOF
+    snippet NEW <<'EOF'
+                        reason: FMDaemonRefusal.metadataStall.batchSiblingCause
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
