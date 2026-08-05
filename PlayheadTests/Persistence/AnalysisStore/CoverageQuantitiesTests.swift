@@ -618,11 +618,15 @@ struct CoverageRegionTests {
     /// area can only ever move UP and no episode becomes less ready.
     @Test("the transcribed region is fast ∪ final, and never smaller than fast alone")
     func transcribedRegionIsMonotoneOverTheFastPass() {
-        // 0C2FC22E's shape on the 2026-08-03 pull: the two passes are DISJOINT,
-        // final holding the head and fast holding the tail.
-        let fast = CoverageRegionFixtures.fast([(start: 930, end: 2_086)])
+        // 0C2FC22E's shape on the 2026-08-03 pull, re-derived for R5: the two
+        // passes are DISJOINT — `final` holds 940 chunks spanning [0.0, 930.0]
+        // and `fast` holds 1,272 spanning [930.0, 2085.7]. Collapsed to one span
+        // each here, because what is under test is which REGION reaches the
+        // bound, not the interval arithmetic (that is AnalysisCoverageMath's own
+        // ~40 tests).
+        let fast = CoverageRegionFixtures.fast([(start: 930, end: 2_085.7)])
         let final = CoverageRegionFixtures.final([(start: 0, end: 930)])
-        let scan = CoverageRegionFixtures.scanned([(start: 0, end: 2_086)])
+        let scan = CoverageRegionFixtures.scanned([(start: 0, end: 2_085.7)])
 
         let fastOnly = AdScanSeconds(
             examined: scan,
@@ -634,9 +638,16 @@ struct CoverageRegionTests {
             within: TranscribedRegion(fastPass: fast, finalPass: final),
             bridging: AnalysisCoverageMath.adScanBridgeableGapSec
         )
-        #expect(fastOnly.rawValue == 1_156)
-        #expect(bothPasses.rawValue == 2_086)
+        // Written as the difference, not as `1_155.7`: the union returns
+        // `end - start` and `2085.7 - 930` is not the `Double` nearest 1155.7.
+        // A literal here would be asserting the decimal, not the arithmetic.
+        #expect(fastOnly.rawValue == 2_085.7 - 930)
+        #expect(bothPasses.rawValue == 2_085.7)
         #expect(bothPasses > fastOnly)
+        // The whole point of the widening: the fast pass alone reaches 55.4 % of
+        // this episode's readable audio and both passes reach all of it.
+        #expect(fastOnly.rawValue / bothPasses.rawValue < 0.555)
+        #expect(fastOnly.rawValue / bothPasses.rawValue > 0.554)
     }
 
     /// The ad-scan area delegates to the same intersection the store used to

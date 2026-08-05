@@ -846,6 +846,21 @@ extension EpisodeSeconds {
 //    them costs a tradeoff this bead deliberately declined and one that is not
 //    a reviewer's to take. THE NUMBER THAT MATTERS IS 20/20, not 4: the types
 //    hold exactly where a NAMED FUNCTION takes the quantity, and nowhere else.
+//    R5 (Dan's 2026-08-05 decision) took the tradeoff R4 declined and typed the
+//    INTERVAL CARRIERS. The four probes R4 filed rather than fixed — PA5, PA7,
+//    PA8, PA9 — were RE-PLANTED against this tree before any fix and all four
+//    COMPILED again; they are now TY26–TY29. Typing the consumers then moved
+//    the same confusion one layer further down, exactly as PA7 had moved it one
+//    layer below R4's rails: probes PF2 and PF4 poured one query's rows into
+//    another region's dictionary and both COMPILED, so the three accumulation
+//    loops were split into three functions with one region each (TY30/TY31).
+//    Two doors are measured OPEN and left there: PF3 (the two SQL columns
+//    swapped at `append`, limit L-I at the genuine `sqlite3_column_double`
+//    boundary) and PF6 (the two `[String: Double]` high-water dictionaries,
+//    limit L-J). Two are measured CLOSED: PF1 and PF7 both tried to reach a
+//    region's raw array from `AnalysisStore.swift` and both were REJECTED for
+//    `fileprivate` protection — a clearance with a probe under it, not an
+//    argument.
 //
 //    The list below is what carries a type. It is NOT a list of everything a
 //    reader might want typed — the two sections after it are, and the middle
@@ -871,6 +886,15 @@ extension EpisodeSeconds {
 //   episodePreparationCompleteThreshold               ReachRatio      [0,1]    the same number, the same quantity, one definition
 //   AnalysisCoordinator.AdScanCoverage.fraction       ReachRatio      [0,1]    the terminal's copy of adScanFraction
 //
+//    R5 added the INTERVAL CARRIERS, which are what the areas above are
+//    measured FROM. They are regions, not scalars, so they carry no `rawValue`
+//    and no `CoverageQuantity` conformance:
+//
+//   fetchCoverage… fastIntervals[id]      FastTranscriptRegion   pass='fast' chunk spans, or the watermark as [0, area]
+//   fetchCoverage… finalIntervals[id]     FinalTranscriptRegion  pass='final' chunk spans
+//   fetchCoverage… transcribedRegion      TranscribedRegion      fast ∪ final — what a semantic scan can READ (9y9e)
+//   fetchCoverage… adScanIntervals[id]    ScannedRegion          coverage-lane windows that produced a verdict
+//
 // ── STATED AND DELIBERATELY UNTYPED. Each is one line, so none is latent; a
 //    type is withheld because nothing else would share it or because typing it
 //    would drag in a layer this bead is not converting.
@@ -881,8 +905,20 @@ extension EpisodeSeconds {
 //       type would have to be laundered at one of the two.
 //   AnalysisCoverageMath.unionedSeconds / unionedSecondsClipped /
 //   unionedSecondsIntersecting / bridgingShortGaps  ->  Double over [(start, end)]
-//       Generic interval arithmetic. These PRODUCE the area types; typing their
-//       tuples would type every transcript-chunk timestamp in the app.
+//       Generic interval arithmetic, and it STAYS generic — R5 typed the
+//       CARRIERS instead of the tuples, which is what "far cheaper than typing
+//       every timestamp" below turned out to mean in practice: four region
+//       structs, ~40 direct tests of these helpers untouched, and the four
+//       probes closed. Everything from here to the end of this entry is the R2/
+//       R3/R4 record of how the hole was found, kept because it is the evidence
+//       and because R4's own reading of it was one of this bead's five failed
+//       completeness claims.
+//       R5 STATUS: PA5 → TY26, PA7 → TY27, PA8 → TY28, PA9 → TY29, all four
+//       UNTYPEABLE. The consumers of these helpers in the coverage reader are
+//       now ``AnalyzedSeconds/init(clipping:to:)`` and
+//       ``AdScanSeconds/init(examined:within:bridging:)``, and the raw arrays
+//       they delegate with are `fileprivate` to this file (probes PF1 and PF7
+//       both REJECTED trying to reach them from `AnalysisStore.swift`).
 //       R4 review: the sentence that used to stand here — "Which area a call
 //       produces is decided at the ONE site that boxes the result, and the
 //       boxing is what the R1 rails TY09/TY10 pin" — was FALSE, and it is the
@@ -909,6 +945,9 @@ extension EpisodeSeconds {
 //       timestamp), and that reverses a tradeoff this bead stated deliberately,
 //       so it is presented rather than taken: it is Dan's call, filed with the
 //       probes as evidence.
+//       R5: Dan took it. See the R5 STATUS line at the top of this entry — the
+//       four probes are closed and the sentence above is kept as the record of
+//       what was proposed and why, not as an open item.
 //       R3 review: `unionedSecondsClipped`'s `upperBound` is a second, separate
 //       laundering point in the same call, and TY09/TY10 do NOT reach it — they
 //       pin which INTERVALS go in, not which BOUND clips them. Probe PC2 clipped
@@ -1257,7 +1296,36 @@ extension EpisodeSeconds {
 //        `Double`. What CAN close a given box is evidence at the box —
 //        ``AnalyzedSeconds/init(clipping:to:)`` is the pattern, taking the
 //        frontier as a `FrontierSeconds` rather than a number — and doing that
-//        for the other 22 is a bead, not a review round. Note also that
+//        for the other 22 is a bead, not a review round.
+//
+//        **R5: RE-DERIVED, AND IT MOVED BY ONE.** Under R4's own definition
+//        (`\bQuantity(` in production code outside this file, comment lines
+//        excluded) the count reproduces at 23 on `78892f0d` and reads 22 at
+//        HEAD — 13 in `AnalysisStore`, 6 in `BackfillJobRunner`, 2 in
+//        `AnalysisCoordinator`, 1 in `EpisodePreparationReadiness`. The one
+//        that went is `CoveredSeconds(unionedSeconds(fastIntervals[id] ?? []))`,
+//        now ``FastTranscriptRegion/unionedSeconds``: a hand-picked array and a
+//        hand-named box replaced by a property of the region that decides both.
+//        TWO MORE of the 22 stopped being BARE boxes without leaving the count
+//        — `AnalyzedSeconds(` and `AdScanSeconds(` in the reader now take named
+//        typed operands rather than a computed `Double` — so under the tighter
+//        reading "a quantity built from an unlabelled expression" it is 18.
+//        Both readings are stated because quoting only the flattering one is
+//        this bead's own defect class.
+//
+//        **R5 ALSO ADDED A SURFACE, counted here rather than announced as a
+//        clearance.** The four region types are constructed at 9 sites in
+//        `AnalysisStore`: 8 are the empty region, which can carry nothing
+//        wrong, and 1 is the named watermark stand-in, whose argument is a
+//        ``CoveredSeconds`` because probe PA5 fed it a ``FrontierSeconds``
+//        (rail TY26). The genuine raw door is `append(start:end:)`, 3 sites,
+//        taking two bare `Double`s straight off `sqlite3_column_double`: probe
+//        PF3 swapped the two columns and it COMPILED. No type closes that —
+//        SQLite returns a `Double` and nothing else. What R5 changed is that
+//        there is now exactly ONE such door per region, inside a function that
+//        reads one query into one region; before the split, probes PF2 and PF4
+//        crossed regions at those very lines and both COMPILED (rails
+//        TY30/TY31). Note also that
 //        `CoverageProvenance` already sits beside several of these boxes
 //        recording which column was used: it is a LABEL, exactly as
 //        ``UnsoundCursorPromotionSite`` is, and L-D applies to it verbatim.
@@ -1276,6 +1344,11 @@ extension EpisodeSeconds {
 //          PA1  `adScanFraction`'s divide-by-zero guard reading the NUMERATOR
 //               (harmless only because ``ReachRatio``'s constructor re-guards
 //               the denominator — the guard is redundant, not sound).
+//        R5 adds one more, measured on the post-fix tree: PF6 handed
+//        `readFastTranscriptRegions` the FINAL pass's high-water dictionary.
+//        Both are `[String: Double]` and it COMPILED. The region arguments
+//        beside it are typed and TY30/TY31 pin them; the two watermark
+//        accumulators are the same type by nature and no type separates them.
 //        These are behaviour defects and BEHAVIOUR tests are the instrument for
 //        them, which is the honest division of labour: the UNTYPEABLE battery
 //        answers "can this be written", and for a same-type swap the answer is

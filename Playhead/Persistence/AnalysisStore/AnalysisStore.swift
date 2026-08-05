@@ -10587,6 +10587,147 @@ actor AnalysisStore {
     /// Empty input returns an empty dictionary without preparing a
     /// statement; large inputs are chunked at 500 placeholders per
     /// statement to stay well under SQLite's `SQLITE_MAX_VARIABLE_NUMBER`
+    /// playhead-x0lb R5: read the FAST-pass chunk intervals for one id slice.
+    ///
+    /// **Why this is a function and not four lines inline.** See the note at
+    /// the call site: probe PF2 wrote the fast query's rows into
+    /// `finalIntervals` and it compiled. A body with exactly one region in
+    /// scope is the only clearance this bead has ever been able to demonstrate
+    /// — "there is no second quantity in scope to write", not "the expression
+    /// looks careful".
+    ///
+    /// `maxEnd` is the high-water mark, kept alongside because it is the same
+    /// scan of the same rows. It is a `[String: Double]` and so is the final
+    /// pass's, so THAT pair is a same-type swap (limit L-J) and no type
+    /// separates them; the region dictionaries are what this closes.
+    private func readFastTranscriptRegions(
+        ids: [String],
+        into regions: inout [String: FastTranscriptRegion],
+        maxEnd: inout [String: Double]
+    ) throws {
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+            SELECT analysisAssetId, startTime, endTime
+            FROM transcript_chunks
+            WHERE pass = 'fast'
+              AND analysisAssetId IN (\(placeholders))
+            ORDER BY analysisAssetId, startTime, endTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for (i, id) in ids.enumerated() {
+            bind(stmt, Int32(i + 1), id)
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let assetId = text(stmt, 0)
+            let startTime = sqlite3_column_double(stmt, 1)
+            let endTime = sqlite3_column_double(stmt, 2)
+            // Skip degenerate / inverted rows so they don't poison either the
+            // union or the high-water max.
+            guard endTime > startTime else { continue }
+            regions[assetId, default: FastTranscriptRegion()]
+                .append(start: startTime, end: endTime)
+            if let prior = maxEnd[assetId] {
+                maxEnd[assetId] = max(prior, endTime)
+            } else {
+                maxEnd[assetId] = endTime
+            }
+        }
+    }
+
+    /// playhead-x0lb R5: read the FINAL-pass chunk intervals for one id slice.
+    ///
+    /// playhead-9y9e: the INTERVALS are the new part. This query used to
+    /// project `MAX(endTime)` alone, "because only MAX(endTime) is useful for
+    /// display today" — true of the display fields, and false of the ad-scan
+    /// bound that then had to make do with the fast pass. See
+    /// ``TranscribedRegion``.
+    private func readFinalTranscriptRegions(
+        ids: [String],
+        into regions: inout [String: FinalTranscriptRegion],
+        maxEnd: inout [String: Double]
+    ) throws {
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+            SELECT analysisAssetId, startTime, endTime
+            FROM transcript_chunks
+            WHERE pass = 'final'
+              AND analysisAssetId IN (\(placeholders))
+            ORDER BY analysisAssetId, startTime, endTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        for (i, id) in ids.enumerated() {
+            bind(stmt, Int32(i + 1), id)
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let assetId = text(stmt, 0)
+            let startTime = sqlite3_column_double(stmt, 1)
+            let endTime = sqlite3_column_double(stmt, 2)
+            guard endTime > startTime else { continue }
+            regions[assetId, default: FinalTranscriptRegion()]
+                .append(start: startTime, end: endTime)
+            if let prior = maxEnd[assetId] {
+                maxEnd[assetId] = max(prior, endTime)
+            } else {
+                maxEnd[assetId] = endTime
+            }
+        }
+    }
+
+    /// playhead-x0lb R5: read the coverage-lane semantic-scan windows for one
+    /// id slice (playhead-pz32). Hits `idx_semantic_scan_results_asset_pass`.
+    ///
+    /// `rowSeen` records an asset regardless of status, so a scan that only
+    /// ever refused reports a MEASURED zero (0 examined seconds) rather than
+    /// "unknown" — both render not-ready, but the provenance tag stays honest
+    /// about which one it is.
+    private func readScannedRegions(
+        ids: [String],
+        into regions: inout [String: ScannedRegion],
+        rowSeen: inout Set<String>
+    ) throws {
+        let placeholders = ids.map { _ in "?" }.joined(separator: ", ")
+        let sql = """
+            SELECT analysisAssetId, windowStartTime, windowEndTime, status, errorContext
+            FROM semantic_scan_results
+            WHERE scanPass = ?
+              AND analysisAssetId IN (\(placeholders))
+            ORDER BY analysisAssetId, windowStartTime, windowEndTime
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, SemanticScanCoverage.coverageScanPass)
+        for (i, id) in ids.enumerated() {
+            bind(stmt, Int32(i + 2), id)
+        }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let assetId = text(stmt, 0)
+            rowSeen.insert(assetId)
+            let startTime = sqlite3_column_double(stmt, 1)
+            let endTime = sqlite3_column_double(stmt, 2)
+            guard endTime > startTime else { continue }
+            // A window only counts as scanned when a verdict was actually
+            // obtained. A refused / guardrailed / cancelled window is NOT audio
+            // we screened and found clean, and a NO-WORK SENTINEL row (`.noAds`
+            // spanning the whole attempted range, meaning "no work performed")
+            // is not either — counting them would silently inflate coverage,
+            // which is the failure mode this whole read exists to prevent. The
+            // condition lives in
+            // `SemanticScanResult.didExamineWindow(status:errorContext:)` so
+            // this narrow projection and the pipeline's own breadcrumb apply the
+            // same definition.
+            guard SemanticScanResult.didExamineWindow(
+                status: SemanticScanStatus(rawValue: text(stmt, 3)),
+                errorContext: optionalText(stmt, 4)
+            ) else {
+                continue
+            }
+            regions[assetId, default: ScannedRegion()]
+                .append(start: startTime, end: endTime)
+        }
+    }
+
     /// (matches ``fetchAssetsByEpisodeIds`` / the sibling bulk fetchers).
     func fetchCoverageSummariesByAssetIds(
         _ assetIds: Set<String>
@@ -10667,117 +10808,23 @@ actor AnalysisStore {
         var adScanIntervals: [String: ScannedRegion] = [:]
         var adScanRowSeen: Set<String> = []
 
+        // playhead-x0lb R5: each population is READ BY ITS OWN FUNCTION, and
+        // that is not tidying — it is the only fix shape this bead has found to
+        // work. Probes PF2 and PF4 poured one query's rows into another
+        // region's dictionary and both COMPILED, because three dictionaries of
+        // three types were live in one scope and every region answers
+        // `append(start:end:)`. PF4 is PA7's confusion — scan windows read as
+        // transcript — moved to the PRODUCER, which is the same "one layer
+        // below the rail" shape PA7 itself was. Inside each helper there is
+        // exactly ONE region in scope and nothing else to write, and at the
+        // call site the `inout` argument is typed.
         index = 0
         while index < allIds.count {
             let end = min(index + chunkSize, allIds.count)
             let slice = Array(allIds[index..<end])
-            let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
-
-            // Fast pass: interval ranges for union + max.
-            let fastSQL = """
-                SELECT analysisAssetId, startTime, endTime
-                FROM transcript_chunks
-                WHERE pass = 'fast'
-                  AND analysisAssetId IN (\(placeholders))
-                ORDER BY analysisAssetId, startTime, endTime
-                """
-            let fastStmt = try prepare(fastSQL)
-            for (i, id) in slice.enumerated() {
-                bind(fastStmt, Int32(i + 1), id)
-            }
-            while sqlite3_step(fastStmt) == SQLITE_ROW {
-                let assetId = text(fastStmt, 0)
-                let startTime = sqlite3_column_double(fastStmt, 1)
-                let endTime = sqlite3_column_double(fastStmt, 2)
-                // Skip degenerate / inverted rows so they don't poison
-                // either the union or the high-water max.
-                guard endTime > startTime else { continue }
-                fastIntervals[assetId, default: FastTranscriptRegion()]
-                    .append(start: startTime, end: endTime)
-                if let prior = fastMaxEnd[assetId] {
-                    fastMaxEnd[assetId] = max(prior, endTime)
-                } else {
-                    fastMaxEnd[assetId] = endTime
-                }
-            }
-            sqlite3_finalize(fastStmt)
-
-            // Final pass: interval ranges for the transcribed-region bound +
-            // max. playhead-9y9e: this used to project `MAX(endTime)` alone,
-            // "because only MAX(endTime) is useful for display today" — true of
-            // the display fields, and false of the ad-scan bound that later
-            // reused the fast region as the bound. Same shape as the fast query above.
-            let finalSQL = """
-                SELECT analysisAssetId, startTime, endTime
-                FROM transcript_chunks
-                WHERE pass = 'final'
-                  AND analysisAssetId IN (\(placeholders))
-                ORDER BY analysisAssetId, startTime, endTime
-                """
-            let finalStmt = try prepare(finalSQL)
-            for (i, id) in slice.enumerated() {
-                bind(finalStmt, Int32(i + 1), id)
-            }
-            while sqlite3_step(finalStmt) == SQLITE_ROW {
-                let assetId = text(finalStmt, 0)
-                let startTime = sqlite3_column_double(finalStmt, 1)
-                let endTime = sqlite3_column_double(finalStmt, 2)
-                guard endTime > startTime else { continue }
-                finalIntervals[assetId, default: FinalTranscriptRegion()]
-                    .append(start: startTime, end: endTime)
-                if let prior = finalMaxEnd[assetId] {
-                    finalMaxEnd[assetId] = max(prior, endTime)
-                } else {
-                    finalMaxEnd[assetId] = endTime
-                }
-            }
-            sqlite3_finalize(finalStmt)
-
-            // playhead-pz32: coverage-lane semantic-scan windows. Hits
-            // `idx_semantic_scan_results_asset_pass`. Rows are recorded as
-            // "seen" regardless of status so a scan that only ever refused
-            // reports a MEASURED zero (0 examined seconds) rather than
-            // "unknown" — both render not-ready, but the provenance tag stays
-            // honest about which one it is.
-            let scanSQL = """
-                SELECT analysisAssetId, windowStartTime, windowEndTime, status, errorContext
-                FROM semantic_scan_results
-                WHERE scanPass = ?
-                  AND analysisAssetId IN (\(placeholders))
-                ORDER BY analysisAssetId, windowStartTime, windowEndTime
-                """
-            let scanStmt = try prepare(scanSQL)
-            bind(scanStmt, 1, SemanticScanCoverage.coverageScanPass)
-            for (i, id) in slice.enumerated() {
-                bind(scanStmt, Int32(i + 2), id)
-            }
-            while sqlite3_step(scanStmt) == SQLITE_ROW {
-                let assetId = text(scanStmt, 0)
-                adScanRowSeen.insert(assetId)
-                let startTime = sqlite3_column_double(scanStmt, 1)
-                let endTime = sqlite3_column_double(scanStmt, 2)
-                guard endTime > startTime else { continue }
-                // A window only counts as scanned when a verdict was actually
-                // obtained. A refused / guardrailed / cancelled window is NOT
-                // audio we screened and found clean, and a NO-WORK SENTINEL row
-                // (`.noAds` spanning the whole attempted range, meaning "no work
-                // performed") is not either — counting them would silently
-                // inflate coverage, which is the failure mode this whole read
-                // exists to prevent. The condition lives in
-                // `SemanticScanResult.didExamineWindow(status:errorContext:)` so
-                // this narrow projection and the pipeline's own breadcrumb apply
-                // the same definition.
-                guard SemanticScanResult.didExamineWindow(
-                    status: SemanticScanStatus(rawValue: text(scanStmt, 3)),
-                    errorContext: optionalText(scanStmt, 4)
-                ) else {
-                    continue
-                }
-                adScanIntervals[assetId, default: ScannedRegion()]
-                    .append(start: startTime, end: endTime)
-            }
-            sqlite3_finalize(scanStmt)
-
+            try readFastTranscriptRegions(ids: slice, into: &fastIntervals, maxEnd: &fastMaxEnd)
+            try readFinalTranscriptRegions(ids: slice, into: &finalIntervals, maxEnd: &finalMaxEnd)
+            try readScannedRegions(ids: slice, into: &adScanIntervals, rowSeen: &adScanRowSeen)
             index = end
         }
 

@@ -450,6 +450,28 @@ MUTATIONS = [
         ["TranscribedRegion", "FastTranscriptRegion"],
     ),
     (
+        "TY30", STORE,
+        "R5 probe PF2, planted and COMPILED before the fix: the FAST query's "
+        "rows accumulated into the FINAL region. The producer side had three "
+        "dictionaries of three region types live in one scope and every region "
+        "answers `append(start:end:)`, so typing the CONSUMERS (TY26-TY29) left "
+        "the populations swappable where they are built",
+        "            try readFastTranscriptRegions(ids: slice, into: &fastIntervals, maxEnd: &fastMaxEnd)",
+        "            try readFastTranscriptRegions(ids: slice, into: &finalIntervals, maxEnd: &fastMaxEnd)",
+        ["FinalTranscriptRegion", "FastTranscriptRegion"],
+    ),
+    (
+        "TY31", STORE,
+        "R5 probe PF4, planted and COMPILED before the fix: the SCAN WINDOWS "
+        "poured into the FAST TRANSCRIPT region — PA7's confusion (scan read as "
+        "transcript) moved to the PRODUCER, which is the same 'one layer below "
+        "the rail' shape PA7 itself was. It corrupts TX and AN as well as the "
+        "ad-scan area, so it is strictly wider than PA7",
+        "            try readScannedRegions(ids: slice, into: &adScanIntervals, rowSeen: &adScanRowSeen)",
+        "            try readScannedRegions(ids: slice, into: &fastIntervals, rowSeen: &adScanRowSeen)",
+        ["FastTranscriptRegion", "ScannedRegion"],
+    ),
+    (
         "TY99", RUNNER,
         "VACUITY CONTROL: the laundering site's inventory TAG changed to a "
         "different filed defect. This MUST still compile — the tag records which "
