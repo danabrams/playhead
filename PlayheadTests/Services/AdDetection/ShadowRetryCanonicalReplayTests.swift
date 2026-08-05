@@ -32,11 +32,20 @@
 // the real asset. A fixture faithful to the field row could not distinguish
 // canonical from raw and CN03 would survive against it. The overlap below is a
 // deliberate strengthening: it is a shape `FinalPassRetranscriptionRunner` does
-// produce (6 of the 11 mixed-pass assets on the pull have `droppedFast > 0`,
-// up to 400 chunks on AD5F3A0A), chosen because it separates all four sets
-// rather than because 53FC53E3 had it. What IS taken from 53FC53E3 is the
-// PROPORTION — a long fast prefix and a short candidate-local final tail — and
-// that is what the reach rail measures.
+// produce — SEVEN of the 11 mixed-pass assets on the pull have
+// `droppedFast > 0`, and this line said six until playhead-iu0t R2 re-derived
+// it. The full census, so the next reader checks a table rather than a claim:
+// 44F076BB 104, 58882C47 225, 83592353 82, AD5F3A0A 400, D9B513CD 383,
+// DE0784D8 329, FCDDB309 21; zero on 0C2FC22E, 2C5C3699, 48E903D7 and 53FC53E3;
+// 4FF3A238 is the single-pass asset and takes the passthrough. 400 on AD5F3A0A
+// is the correct maximum. `residualFastFinalOverlapCount` is 0 on all twelve —
+// no partial window-edge overlap anywhere on this pull, which is worth knowing
+// because it means every real drop is a FULL cover.
+//
+// The overlap is chosen because it separates all four sets rather than because
+// 53FC53E3 had it. What IS taken from 53FC53E3 is the PROPORTION — a long fast
+// prefix and a short candidate-local final tail — and that is what the reach
+// rail measures.
 //
 // The fixture here separates FOUR candidate chunk sets, because there are four
 // plausible things this line could have been written as and only one of them is
