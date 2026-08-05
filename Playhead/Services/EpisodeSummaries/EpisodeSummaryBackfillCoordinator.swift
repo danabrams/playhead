@@ -179,6 +179,16 @@ struct AnalysisStoreEpisodeSummaryBackfillCandidateProvider: EpisodeSummaryBackf
         // selector's only staleness test is `schemaVersion < ?`), which is
         // filed separately. Correcting the value first means the selector has
         // something true to read when it starts reading it.
+        //
+        // ⚠️ The argument is `chunks`, NOT `summarizerChunks`, and that is
+        // deliberate — it is the one sentence of the original comment worth
+        // keeping, and playhead-iu0t R4 put it back after R2 deleted it along
+        // with the line it annotated. Derived from the FULL chunk set rather
+        // than the ad-filtered one so the invalidation key tracks the
+        // TRANSCRIPT independently of which spans were dropped as ads: an ad
+        // window confirmed after the summary was written must not read as a
+        // new transcript. `summarizerChunks` is three lines above and is the
+        // obvious-looking "fix"; it is the wrong one.
         let transcriptVersion = SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)
         return EpisodeSummaryBackfillInput(
             analysisAssetId: assetId,

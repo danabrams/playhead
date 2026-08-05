@@ -180,6 +180,46 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             .sorted { $0.path < $1.path }
     }
 
+    /// Recorded as the argument of a guarded call that has NO `chunks:` label
+    /// inside its own parentheses. It is not an identifier and it is not an
+    /// allow-list key, so it resolves to nothing and reports as a violation.
+    private static let missingChunksArgument = "<no chunks: argument>"
+
+    /// The index of the `)` that closes the argument list opened immediately
+    /// before `start`, or `endIndex` if the source is unbalanced.
+    ///
+    /// **playhead-iu0t R4.** This exists because the `chunks:` search used to be
+    /// unbounded — `range(of: "chunks:", range: callRange.upperBound..<source
+    /// .endIndex)` — and R3 recorded the consequence as "an overload lacking
+    /// that label would steal a later call's argument and mis-attribute its
+    /// scope". That is one of two consequences and not the worse one. The other
+    /// is in the `guard … else { continue }` it fed: when NO later `chunks:`
+    /// existed anywhere in the file, the call site was dropped from the walk
+    /// entirely — never audited, never counted toward the `audited` floor,
+    /// never reported. A canary whose stated principle is "failing closed is
+    /// the right direction" (see ``enclosingDeclaration(containing:in:)``) had
+    /// one branch that failed OPEN, and silently.
+    ///
+    /// Measured non-live at the time and still non-live: all 8 guarded call
+    /// sites pass `chunks:` first, inside their own parentheses. Bounded here
+    /// anyway, because "it happens to be fine today" is precisely the reasoning
+    /// this file exists to replace.
+    private static func argumentListEnd(in source: String, from start: String.Index) -> String.Index {
+        var depth = 0
+        var index = start
+        while index < source.endIndex {
+            let character = source[index]
+            if character == "(" || character == "[" || character == "{" {
+                depth += 1
+            } else if character == ")" || character == "]" || character == "}" {
+                if depth == 0 { return index }
+                depth -= 1
+            }
+            index = source.index(after: index)
+        }
+        return source.endIndex
+    }
+
     /// The `chunks:` argument expression at each guarded call site, paired with
     /// the call it belongs to and the index the call starts at.
     ///
@@ -191,6 +231,12 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
     /// resolves scopes in. Two separately-produced but equal Strings would
     /// compare equal and index compatibly today; relying on that is a
     /// correctness footgun this signature removes.
+    ///
+    /// Every guarded call yields exactly one entry — one WITH its argument, or
+    /// one carrying ``missingChunksArgument`` — so the count returned is the
+    /// number of guarded calls in the file, unconditionally. That is what makes
+    /// the `audited` floor a measurement of the walk rather than of the walk's
+    /// successes. See ``argumentListEnd(in:from:)``.
     private func guardedArguments(
         inStripped source: String
     ) -> [(call: String, argument: String, site: String.Index)] {
@@ -199,9 +245,14 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             var searchStart = source.startIndex
             while let callRange = source.range(of: call, range: searchStart..<source.endIndex) {
                 searchStart = callRange.upperBound
+                // THIS call's own argument list, not the rest of the file.
+                let listEnd = Self.argumentListEnd(in: source, from: callRange.upperBound)
                 guard let label = source.range(
-                    of: "chunks:", range: callRange.upperBound..<source.endIndex
-                ) else { continue }
+                    of: "chunks:", range: callRange.upperBound..<listEnd
+                ) else {
+                    found.append((call, Self.missingChunksArgument, callRange.lowerBound))
+                    continue
+                }
                 // Read to the terminator of this argument: a `,` or the closing
                 // `)` at the argument's own nesting depth. Anything deeper —
                 // `canonicalize(chunks).chunks`, a trailing closure, a nested
@@ -454,8 +505,41 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
     /// one step EARLIER — at the point the wrong array is built, before anyone
     /// hands it anywhere — and because a future instance might feed something
     /// other than the atomizer.
+    ///
+    /// **playhead-iu0t R4 replaced half one's two literal substrings with a
+    /// pattern, and added the vacuity anchor it never had.** R3 found both of
+    /// those defects in rule 3 and did not check rule 2 for them; rule 2 had
+    /// both. Half one used to be
+    ///
+    ///     source.contains(#"filter { $0.pass == "final" }"#)
+    ///         || source.contains("filter { $0.pass == TranscriptPassType.final_.rawValue }")
+    ///
+    /// i.e. two exact spellings out of the many a Swift author can write. The
+    /// same collapse as `filter { c in c.pass == "final" }`, or written against
+    /// `TranscriptChunkCanonicalizer.finalPass`, was invisible to it. That is
+    /// R3's own finding 1 — "an enforcement named for a rule that checked a
+    /// spelling" — and it is this bead's defect class committed twice in the
+    /// same file.
+    ///
+    /// Measured 2026-08-05 with the pattern below: half one matches ONE file
+    /// (`FinalPassRetranscriptionRunner.swift`, which filters for final rows to
+    /// read back what it just wrote), exactly as the two literals did, so the
+    /// broadening costs no false positive. Half two matches one file
+    /// (`EpisodeSummaryBackfillCoordinator`'s `adFreeChunks.isEmpty ? chunks :
+    /// adFreeChunks`, a correct fallback over AD ranges rather than transcript
+    /// passes). Requiring BOTH matches zero files, which is why the conjunction
+    /// is the rule and neither half alone is.
+    ///
+    /// **What is anchored, and what deliberately is not.** Half one carries a
+    /// floor, because it is the half with spelling risk and it has a permanent
+    /// legitimate home: `FinalPassRetranscriptionRunner` must filter for final
+    /// rows. Half two carries none on purpose — its idiom is ordinary code that
+    /// may legitimately leave the tree, and a floor on it would assert a fact
+    /// about unrelated files that a correct edit could break. So this rule is
+    /// half-anchored, said out loud rather than implied.
     func testThePreHc7eFinalOnlyCollapseAppearsNowhereInProduction() throws {
         var violations: [String] = []
+        var finalFilterFiles = 0
 
         for file in try productionSwiftFiles() {
             let source = SwiftSourceInspector.strippingComments(
@@ -465,9 +549,11 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             // first because three of the four fixed sites now QUOTE the
             // collapse in the comment explaining why it is gone, and a canary
             // that fired on its own postmortem would be deleted within a week.
-            let filtersFinal = source.contains(#"filter { $0.pass == "final" }"#)
-                || source.contains("filter { $0.pass == TranscriptPassType.final_.rawValue }")
+            let filtersFinal = SwiftSourceInspector.regexOccurrences(
+                of: Self.finalPassFilterPattern, in: source
+            ) > 0
             guard filtersFinal else { continue }
+            finalFilterFiles += 1
             // Half two: the fallback that turns that filter into a discard —
             // `X.isEmpty ? chunks : X`, i.e. "if the subset is empty use ALL of
             // them, otherwise ONLY the subset".
@@ -499,7 +585,32 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             uses final text in the intervals the final pass covered and keeps \
             fast text everywhere else.
             """)
+
+        // VACUITY ANCHOR for half one (playhead-iu0t R4). A conjunction is
+        // green whenever EITHER conjunct stops matching, and half one is the
+        // conjunct made of a pattern that a respelling — or a bad edit to the
+        // pattern, which `regexOccurrences` reports as zero matches rather than
+        // as an error — can silence. Measured 1 file; the floor is 1.
+        XCTAssertGreaterThanOrEqual(finalFilterFiles, 1, """
+            the final-pass-filter detector matched NOTHING anywhere under \
+            `Playhead/`, so this rule's conjunction can no longer fire whatever \
+            the tree contains. `FinalPassRetranscriptionRunner` filters for \
+            `pass == "final"` rows to read back what it just wrote, and is the \
+            measured anchor. Check `finalPassFilterPattern` and \
+            `SwiftSourceInspector.strippingComments` before concluding the tree \
+            got cleaner.
+            """)
     }
+
+    /// Half one of ``testThePreHc7eFinalOnlyCollapseAppearsNowhereInProduction()``:
+    /// a closure that tests a chunk's `pass` against the final-pass value.
+    ///
+    /// Receiver-agnostic on purpose — `$0.pass`, `c.pass`, `chunk.pass` all
+    /// match — because the thing being banned is the SHAPE, and pinning it to
+    /// `$0` would be banning a spelling again. `[^{}]{0,120}?` keeps the match
+    /// inside a single closure body rather than spanning nested braces.
+    private static let finalPassFilterPattern =
+        #"filter\s*\{[^{}]{0,120}?\.pass\s*==\s*(?:"final"|TranscriptPassType\.final_\.rawValue|finalPass)"#
 
     /// **The THIRD sink** (playhead-iu0t R2).
     ///
@@ -612,7 +723,9 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
                 )
                 guard hits > 0 else { continue }
                 if exempt[name] != nil {
-                    exemptAnchorHits[name, default: 0] += hits
+                    // Keyed per (file, FIELD) — see the guard below for why the
+                    // per-file sum this used to accumulate could not do the job.
+                    exemptAnchorHits["\(name)|\(field)", default: 0] += hits
                 } else {
                     violations.append("\(name): \(hits) read(s) of chunk.\(field)")
                 }
@@ -642,14 +755,95 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
         // seeing those, it has stopped detecting — a bad regex (which
         // `regexOccurrences` reports as zero matches rather than as an error),
         // a broken comment-stripper, or an empty file walk all land here.
+        //
+        // **playhead-iu0t R4: per (file, FIELD), not per file.** R3 added this
+        // guard and keyed it on the file alone, summing both fields into one
+        // counter — so `atomOrdinal`'s half of `pattern(for:)` could go vacuous
+        // and the guard would stay green off `transcriptVersion`'s hits. That
+        // is R3's own finding 3 ("it enforced half the sentence it points at")
+        // reintroduced one level up, inside the fix for R3's finding 2. The two
+        // fields are separate detectors and each needs its own floor.
+        //
+        // MEASURED 2026-08-05, and the reason a floor of 1 per pair is exact
+        // rather than generous: `AnalysisStore` 1 + 1, `TranscriptEngineService`
+        // 1 + 1. Four pairs, one hit each.
         for name in exempt.keys {
-            XCTAssertGreaterThanOrEqual(exemptAnchorHits[name] ?? 0, 1, """
-                the persisted-column detector found NOTHING in \(name), which \
-                is one of the two files that certainly reads these columns. \
-                This rule enforces nothing when it matches nothing — check the \
-                regex, `strippingComments`, and the file walk before assuming \
-                the tree got cleaner.
-                """)
+            for field in bannedFields {
+                XCTAssertGreaterThanOrEqual(exemptAnchorHits["\(name)|\(field)"] ?? 0, 1, """
+                    the persisted-column detector found NO read of \
+                    `chunk.\(field)` in \(name), which is one of the two files \
+                    that certainly reads it. This rule enforces nothing for a \
+                    field it cannot match — check `pattern(for:)`, \
+                    `strippingComments`, and the file walk before assuming the \
+                    tree got cleaner. Summing the two fields into one per-file \
+                    counter is what this guard used to do, and it is why the \
+                    `\(field)` half could have gone dark unnoticed.
+                    """)
+            }
         }
+    }
+
+    // MARK: - The walk's own rail (playhead-iu0t R4)
+
+    /// **The argument parser fails CLOSED.**
+    ///
+    /// Rules 1–3 all read the tree, so their evidence is only as good as the
+    /// walk that produces it — and the walk's one failure direction was
+    /// invisible from the tree, because it only shows up for source the tree
+    /// does not currently contain. R3 recorded the unbounded `chunks:` search
+    /// as a mis-attribution risk and measured it non-live; the branch it fed
+    /// also DROPPED a call site silently, which is the direction that matters
+    /// in a canary. This exercises the parser on synthetic source instead of
+    /// waiting for production to grow the shape.
+    ///
+    /// Three properties, each of which was false before R4:
+    ///   1. a guarded call with no `chunks:` inside its own parentheses is
+    ///      RECORDED (as ``missingChunksArgument``), not skipped;
+    ///   2. it does not steal the `chunks:` of a later call;
+    ///   3. the sentinel resolves to nothing and is on no allow-list, so it
+    ///      reaches ``testEveryTranscriptVersionCallSiteCanonicalizes()`` as a
+    ///      violation rather than as silence.
+    func testTheArgumentParserRecordsAGuardedCallThatHasNoChunksArgument() {
+        // `atomize` here takes no `chunks:` at all; the only `chunks:` in the
+        // string belongs to the SECOND call, 200 characters later.
+        let source = """
+            func a() {
+                let x = TranscriptAtomizer.atomize(atoms: someAtoms, analysisAssetId: id)
+                _ = x
+            }
+            func b() {
+                let y = TranscriptAtomizer.atomize(
+                    chunks: TranscriptChunkCanonicalizer.canonicalize(raw).chunks,
+                    analysisAssetId: id
+                )
+                _ = y
+            }
+            """
+        let parsed = guardedArguments(inStripped: source)
+
+        XCTAssertEqual(parsed.count, 2, """
+            both guarded calls must be recorded. Before playhead-iu0t R4 the \
+            first one was dropped entirely — not reported, not counted toward \
+            the `audited` floor — because the `chunks:` search was unbounded and \
+            its `guard … else { continue }` skipped the site.
+            """)
+        XCTAssertEqual(parsed.first?.argument, Self.missingChunksArgument,
+                       "a call with no `chunks:` of its own must not borrow the next call's")
+        XCTAssertEqual(
+            parsed.last?.argument,
+            "TranscriptChunkCanonicalizer.canonicalize(raw).chunks",
+            "and a well-formed call must still parse exactly as before"
+        )
+
+        // Property 3: the sentinel is inert to every escape the rule offers.
+        XCTAssertFalse(Self.missingChunksArgument.contains("canonicalize("),
+                       "the sentinel must not look canonicalized")
+        XCTAssertFalse(isCanonicalized(Self.missingChunksArgument, in: source),
+                       "and must resolve to no local binding")
+        XCTAssertNil(
+            Self.allowedUncanonicalizedArguments.keys
+                .first { $0.hasSuffix("|\(Self.missingChunksArgument)") },
+            "and must be on no allow-list, so it lands as a violation"
+        )
     }
 }

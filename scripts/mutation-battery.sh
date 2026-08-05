@@ -4715,6 +4715,22 @@ MUTATIONS=(
   #
   # Same anchor line as CN07, so it takes its own batch on the M08/M13 rule.
   "CN08|446|ESUMBF|$T_IU0T_COLUMN"
+
+  # Batch 447 — CN09 (playhead-iu0t R4). CN06 RESPELLED: the same collapse at
+  # the same line of `pushEvidenceCatalog`, written `{ chunk in chunk.pass ==
+  # "final" }` instead of `{ $0.pass == "final" }`. CN08 is to CN07 what this is
+  # to CN06, and for the identical reason — R3 fixed rule 3's spelling-bound
+  # needles and did not check rule 2, which was policed by TWO literal
+  # substrings (`filter { $0.pass == "final" }` and the `TranscriptPassType`
+  # form). This spelling matched neither.
+  #
+  # The victim that discriminates is `$T_IU0T_SHAPE`. `$T_IU0T_RULE` reddens
+  # either way — rule 1 checks for the PRESENCE of `canonicalize(`, so it is
+  # spelling-blind by construction and killed CN09 before R4 too. Naming both is
+  # what makes this mutant a measurement rather than a duplicate of CN06: under
+  # R3's literal half-one the SHAPE rail stayed green and the battery would
+  # report CN09 SURVIVED on that victim; under R4's pattern both die.
+  "CN09|447|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5137,6 +5153,7 @@ describe_mutation() {
     CN05) echo "iu0t R2: the THIRD collapse restored at runPhase5ProjectorPhase — killable only once the allow-list is keyed per DECLARATION, not per file" ;;
     CN07) echo "iu0t R2: the FIFTH collapse — the episode-summary invalidation key read back out of the final-only persisted transcriptVersion column" ;;
     CN08) echo "iu0t R3: CN07 RESPELLED with a closure instead of a keypath — the same read of the same column, which survived while CN07 died" ;;
+    CN09) echo "iu0t R4: CN06 RESPELLED with a named closure parameter — the collapse shape rule matched two literal spellings and not this one" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -11134,6 +11151,25 @@ EOF
         let transcriptVersion = chunks
             .compactMap { $0.transcriptVersion }
             .last
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN09 — CN06's defect, respelled with a named closure parameter. The SAME
+  # collapse at the SAME line; only the closure's binding differs. It escaped
+  # the collapse-shape rule until playhead-iu0t R4, because that rule's first
+  # half was two literal substrings rather than a pattern.
+  CN09)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let preferred: [TranscriptChunk] = {
+            let finals = chunks.filter { chunk in chunk.pass == "final" }
+            return finals.isEmpty ? chunks : finals
+        }()
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: preferred,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
