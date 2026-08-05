@@ -10549,7 +10549,8 @@ actor AnalysisStore {
         var region = TranscribedRegion()
         while sqlite3_step(stmt) == SQLITE_ROW {
             region.append(
-                start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1)
+                start: sqlite3_column_double(stmt, 0), end: sqlite3_column_double(stmt, 1),
+                door: .openedByCoverageReader
             )
         }
         return region
@@ -10594,7 +10595,7 @@ actor AnalysisStore {
             // union or the high-water max.
             guard endTime > startTime else { continue }
             regions[assetId, default: FastTranscriptRegion()]
-                .append(start: startTime, end: endTime)
+                .append(start: startTime, end: endTime, door: .openedByCoverageReader)
             if let prior = maxEnd[assetId] {
                 maxEnd[assetId] = max(prior, endTime)
             } else {
@@ -10634,7 +10635,7 @@ actor AnalysisStore {
             let endTime = sqlite3_column_double(stmt, 2)
             guard endTime > startTime else { continue }
             regions[assetId, default: FinalTranscriptRegion()]
-                .append(start: startTime, end: endTime)
+                .append(start: startTime, end: endTime, door: .openedByCoverageReader)
             if let prior = maxEnd[assetId] {
                 maxEnd[assetId] = max(prior, endTime)
             } else {
@@ -10692,7 +10693,7 @@ actor AnalysisStore {
                 continue
             }
             regions[assetId, default: ScannedRegion()]
-                .append(start: startTime, end: endTime)
+                .append(start: startTime, end: endTime, door: .openedByCoverageReader)
         }
     }
 
@@ -10945,7 +10946,10 @@ actor AnalysisStore {
             if chunkMaxEnd != nil {
                 transcriptRegion = fastRegion
             } else if let transcriptCovered = fastCoveredSec {
-                transcriptRegion = FastTranscriptRegion(spanningFromZeroTo: transcriptCovered)
+                transcriptRegion = FastTranscriptRegion(
+                    spanningFromZeroTo: transcriptCovered,
+                    door: .openedByCoverageReader
+                )
             } else {
                 transcriptRegion = FastTranscriptRegion()
             }
@@ -11019,7 +11023,8 @@ actor AnalysisStore {
             // both. Rail TY28 pins the consumer.
             let transcribedRegion = TranscribedRegion(
                 fastPass: transcriptRegion,
-                finalPass: finalIntervals[id] ?? FinalTranscriptRegion()
+                finalPass: finalIntervals[id] ?? FinalTranscriptRegion(),
+                door: .openedByCoverageReader
             )
 
             let analysisCoveredSec: AnalyzedSeconds?

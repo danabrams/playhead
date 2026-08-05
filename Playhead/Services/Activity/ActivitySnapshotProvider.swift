@@ -390,8 +390,13 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
             // totalBytes` but a brief race where `totalBytes` falls
             // back to a smaller value than `bytesWritten` could in
             // principle yield > 1 mid-tick.
+            //
+            // R7: this was a SECOND, unguarded copy of `clampFraction` written
+            // inline. Two copies of a clamp is how R2 came to split TY15 from
+            // TY16, and the copies had already diverged — the named helper is the
+            // one that now refuses a non-finite input.
             let downloadFraction = downloadFractions[episodeId]
-                .map { min(1.0, max(0.0, $0)) }
+                .map(clampFraction)
                 ?? (downloadedEpisodeIds.contains(episodeId) ? 1.0 : nil)
             let latestSession = latestSessionsByAssetId[asset.id]
             let latestJob = latestJobsByEpisodeId[episodeId]
@@ -784,8 +789,17 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         density?.rawValue
     }
 
+    /// playhead-x0lb R7, the clamp class: a non-finite input reads as 0, not as a
+    /// full bar.
+    ///
+    /// `min(1.0, max(0.0, .infinity))` is `1.0`, so without the guard a download
+    /// whose `totalBytes` briefly reads 0 renders **DL 100 %** — the clamp turning
+    /// "we cannot measure this" into "it is finished". `clampUnit` in
+    /// `EpisodePreparationReadiness` already made this exact choice ("`isFinite`,
+    /// not `!= nil`: a NaN clamps to 0"); this is the sibling that had not.
     private func clampFraction(_ fraction: Double) -> Double {
-        min(1.0, max(0.0, fraction))
+        guard fraction.isFinite else { return 0 }
+        return min(1.0, max(0.0, fraction))
     }
 
     private func maxKnown(_ lhs: Double?, _ rhs: Double?) -> Double? {

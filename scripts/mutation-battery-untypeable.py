@@ -452,7 +452,11 @@ MUTATIONS = [
         "narrowed from the readable region to the FAST pass alone — "
         "playhead-9y9e's defect verbatim, worth 55.4 % vs 100.0 % on 0C2FC22E "
         "per the comment at the site, and a ceiling below the 0.98 completion "
-        "floor on nine of twelve field assets",
+        "floor on the nine assets whose FAST-ONLY ceiling sits below it "
+        "(0C2FC22E 2C5C3699 44F076BB 48E903D7 53FC53E3 58882C47 83592353 "
+        "AD5F3A0A D9B513CD, re-derived at R6). The pull carries THREE "
+        "different nines-of-twelve and R6 named the other two at their sites; "
+        "this was the one it did not touch",
         "                    within: transcribedRegion,",
         "                    within: transcriptRegion,",
         ["FastTranscriptRegion", "TranscribedRegion"],
@@ -561,6 +565,26 @@ MUTATIONS = [
                     region: try await store.fetchTranscribedRegion(assetId: assetId)
                 )""",
         ["BridgedTranscriptSeconds", "EpisodeSeconds"],
+    ),
+    (
+        "TY38", JOBRUNNER,
+        "R7 probe PK1, planted and COMPILED before the fix, WITH the R6 lexical "
+        "rail returning rc=0: the fast WATERMARK modelled as a contiguous "
+        "TRANSCRIBED REGION and handed to the 0.95 finalize floor, three lines "
+        "under a doc paragraph saying the watermark cannot be the gate "
+        "(D9B513CD reads 100.0 % by watermark against an 88.3 % two-pass area, "
+        "which is across that floor). It evaded `check_region_fabrication` "
+        "because dot-`.init` names no type, so no grep over TYPE NAMES can see "
+        "it. What refuses it now is the compiler, via `RegionFillDoor`",
+        """        guard let region = try? await store.fetchTranscribedRegion(assetId: assetId),
+              !region.isEmpty else {
+            return nil
+        }""",
+        """        let region: TranscribedRegion = .init(
+            fastPass: .init(spanningFromZeroTo: CoveredSeconds(watermark)),
+            finalPass: .init()
+        )""",
+        ["missing argument for parameter 'door'"],
     ),
     (
         "TY99", RUNNER,
@@ -689,49 +713,67 @@ REGION_TYPES = (
     "ScannedRegion",
 )
 REGION_PRODUCERS = {STORE, QUANTITIES}
+# The token every region assembly must NAME, and how many entry points demand
+# it (`spanningFromZeroTo`, `fastPass/finalPass`, and four `append`s).
+REGION_FILL_DOOR_TOKEN = "openedByCoverageReader"
+REGION_FILL_DOOR_COUNT = 6
 
 
 def check_region_fabrication():
-    """Confine region FABRICATION to the two files that legitimately produce one.
+    """Confine region ASSEMBLY to the two files that legitimately produce one.
 
-    **Why this exists, and what it is not.** R5 gave the four interval
-    populations distinct types and wrote, in limit L-I, that "there is now
-    exactly ONE such door per region and it sits at the genuine boundary rather
-    than at every consumer". R6 planted against that sentence and it is a claim
-    about CALL SITES, not about reachability: `init()` and `append(start:end:)`
-    are INTERNAL, so any file in the module can build any region out of any
-    numbers in three lines. Probe PJ1 did exactly that in
-    `AnalysisJobRunner` —
+    **R7 rewrote this, because R6's version had three holes and one of them
+    compiled.** R6 confined fabrication by grepping for the four region TYPE
+    NAMES followed by `(`, plus `.append(start:`. R7 planted against that grep:
 
-        var region = TranscribedRegion()
-        for range in fetchFastTranscriptCoveredRanges(...) { region.append(...) }
+      * `TranscribedRegion ()` — one space before the parens. Swift accepts it;
+        the pattern required `\(` immediately.
+      * `.append(start : 0, end: 1)` — one space before the label's colon. Same.
+      * **probe PK1**, the one that mattered:
 
-    — and it COMPILED, reproducing playhead-9y9e's SHIPPED defect (48E903D7 at
-    36.9 % against a 0.95 floor on an asset covering 95.1 %) one layer below
-    rails TY32/TY34, which were added in the previous round to stop precisely
-    that substitution. Probe PJ2 did the same for `ScannedRegion` and minted an
-    `AdScanSeconds` outside the store from a region fabricated out of a
-    watermark.
+            let region: TranscribedRegion = .init(
+                fastPass: .init(spanningFromZeroTo: CoveredSeconds(watermark)),
+                finalPass: .init()
+            )
 
-    **No type closes it, and the two closures that would were measured and
-    rejected.** `fileprivate` is the only friend mechanism Swift has, so the
-    fill door can only be shut by putting the SQL readers and the region types
-    in one file. Moving the readers into `CoverageQuantities.swift` is
-    impossible: they are built on `prepare` / `bind` / `text` / `optionalText`,
-    which are `private` to `AnalysisStore.swift`, and widening the store's raw
-    SQL primitives to internal to close an interval door is a worse trade than
-    the door. Moving the region types into `AnalysisStore.swift` works and
-    moves limit L-L's blast radius from a 1,565-line file to a 21,147-line one,
-    which is the same hole with a wider mouth.
+        planted at `AnalysisJobRunner.transcriptCoverageOfCompletedTranscript`,
+        where it models the fast WATERMARK as a contiguous transcribed region and
+        feeds it to the 0.95 finalize floor — three lines under a doc paragraph
+        saying the watermark cannot be the gate (D9B513CD reads 100.0 % by
+        watermark against an 88.3 % two-pass area, across that very floor). This
+        preflight returned **rc=0** and the app **BUILT**.
 
-    So this is a LEXICAL tripwire in exactly the shape of L-F's, and it is
-    worth the same amount: it cannot stop a fabrication, it can only refuse to
-    let a NEW one land unnoticed. It is scoped to production (`Playhead/`);
-    tests fabricate regions on purpose, which is what fixtures are for.
+    Dot-`.init` names no type, so NO pattern over type names can ever see it.
+    That is not a hole to patch, it is the shape of the instrument.
+
+    **What replaced it: a compile-enforced naming obligation.** ``RegionFillDoor``
+    is a token the six assembly entry points now take, so any expression that
+    builds a non-empty region must write ``openedByCoverageReader``. A static
+    member has no spelling that omits its own name, so the grep below went from
+    "the spellings R6 thought of" to "one identifier, every spelling" — and the
+    type checker, not this script, is what refuses an omission
+    (`missing argument for parameter 'door'`, rail TY38).
+
+    **Say plainly what it is NOT.** The token is `internal`, so any file in the
+    module can write it; this stops an author who is not thinking about which
+    population they hold, not one who is determined. It is L-F's worth, arrived
+    at honestly rather than by enumerating spellings. The one bypass left is
+    laundering a token through a producer file — visible, weird, and greppable.
+
+    The type-name clause is KEPT and hardened (whitespace-tolerant) because the
+    EMPTY `init()` deliberately takes no door: an empty region is an absence, and
+    it errs toward under-claiming. Scoped to production (`Playhead/`); tests
+    fabricate on purpose, which is what fixtures are for.
     """
     faults = []
+    names = "|".join(REGION_TYPES)
+    # `Type (`, `.append( start :` — both whitespace-tolerant, which is the R7
+    # finding; and the door token, which is the clause with teeth.
     pattern = re.compile(
-        r"\b(?:%s)\(" % "|".join(REGION_TYPES) + r"|\.append\(start:"
+        r"\b(?:%s)\s*\(" % names
+        + r"|\.append\s*\(\s*start\s*:"
+        + r"|\b%s\b" % re.escape(REGION_FILL_DOOR_TOKEN)
+        + r"|\bRegionFillDoor\b"
     )
     for path in sorted((ROOT / "Playhead").rglob("*.swift")):
         rel = path.relative_to(ROOT).as_posix()
@@ -743,11 +785,23 @@ def check_region_fabrication():
                 continue
             if pattern.search(line):
                 faults.append(
-                    "%s:%d fabricates a coverage region outside %s — a region "
+                    "%s:%d assembles a coverage region outside %s — a region "
                     "built from loose numbers carries whatever population the "
-                    "author reached for (probe PJ1): %s"
+                    "author reached for (probes PJ1 / PK1): %s"
                     % (rel, lineno, " / ".join(sorted(REGION_PRODUCERS)), stripped)
                 )
+
+    # The obligation is only worth anything while the doors actually demand it.
+    # Deleting a `door:` parameter would make every fabrication legal again AND
+    # silence this check, so the check verifies its own premise.
+    quantities = (ROOT / QUANTITIES).read_text(encoding="utf-8")
+    doors = quantities.count("door: RegionFillDoor")
+    if doors != REGION_FILL_DOOR_COUNT:
+        faults.append(
+            "%d region entry point(s) take a `door: RegionFillDoor`, expected %d "
+            "— a door was removed, which re-opens probe PK1 and silences the "
+            "clause above at the same time" % (doors, REGION_FILL_DOOR_COUNT)
+        )
     return faults
 
 

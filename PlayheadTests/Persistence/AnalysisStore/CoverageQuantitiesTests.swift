@@ -550,6 +550,71 @@ struct AnalyzedFractionTests {
             #expect(inverted == 1.0)
         }
     }
+
+    /// **playhead-x0lb R7, the CLAMP CLASS.** R6 found that `min(1.0, max(0.0, …))`
+    /// converts a `+∞` numerator into `1.0` and answered it at ONE of the two
+    /// methods carrying that clamp — it added `finiteValue` at
+    /// `transcriptClearsFinalizeFloor`'s call of
+    /// ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)`` and wrote that
+    /// the guard is "load-bearing and NOT decoration". The identical clamp sits in
+    /// ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``, whose two consumers —
+    /// both copies of `ActivitySnapshotProvider.fraction(area:ofDeclaredDuration:)`
+    /// — guard nothing at all.
+    ///
+    /// The standing question for this defect class is what the expression reads if
+    /// the thing it claims to measure never happened. Before R7 a `+∞` analyzed
+    /// area rendered **AN 100 %**: a full analysis bar on an episode nothing
+    /// analyzed, which is playhead-sd71's "AN 100 % / TX 39 %" antipattern arriving
+    /// through the clamp rather than through a watermark.
+    ///
+    /// A guard that lives at the CALLER is a guard the next caller does not get, so
+    /// it is inside the method now, and this test is what says so.
+    @Test("a non-finite term withholds the number instead of clamping to a full bar")
+    func nonFiniteTermsAreRefusedRatherThanClamped() {
+        let duration = EpisodeSeconds(3_600)
+        // The direction that bites: +∞ used to clamp to 1.0, the most reassuring
+        // answer the surface can give.
+        #expect(AnalyzedSeconds(.infinity).fractionOfDeclaredDuration(duration) == nil)
+        #expect(AnalyzedSeconds(-.infinity).fractionOfDeclaredDuration(duration) == nil)
+        // NaN already read 0.0 (`max(0, .nan)` returns 0), an under-claim rather
+        // than an over-claim — but "we cannot measure this" is not "zero".
+        #expect(AnalyzedSeconds(.nan).fractionOfDeclaredDuration(duration) == nil)
+        // A non-finite DENOMINATOR passed `> 0` and divided into 0.0. Both ratio
+        // constructors have always guarded it; this method did not.
+        #expect(AnalyzedSeconds(1_800).fractionOfDeclaredDuration(EpisodeSeconds(.infinity)) == nil)
+        #expect(AnalyzedSeconds(1_800).fractionOfDeclaredDuration(EpisodeSeconds(.nan)) == nil)
+        // Finite inputs are untouched — the guard adds a refusal, not a shift.
+        #expect(AnalyzedSeconds(1_800).fractionOfDeclaredDuration(duration) == 0.5)
+    }
+
+    /// The same guard on the sibling that R6 fixed at the caller, so the two
+    /// methods cannot drift apart again: the floor's own `finiteValue` is kept as
+    /// defence in depth, and this pins that the method no longer DEPENDS on it.
+    @Test("the finalize floor's numerator refuses a non-finite term at the method")
+    func bridgedFractionRefusesNonFiniteTerms() {
+        #expect(BridgedTranscriptSeconds(.infinity)
+            .fractionOfDeclaredDuration(EpisodeSeconds(3_600)) == nil)
+        #expect(BridgedTranscriptSeconds(.nan)
+            .fractionOfDeclaredDuration(EpisodeSeconds(3_600)) == nil)
+        #expect(BridgedTranscriptSeconds(1_800)
+            .fractionOfDeclaredDuration(EpisodeSeconds(.infinity)) == nil)
+        #expect(BridgedTranscriptSeconds(3_420)
+            .fractionOfDeclaredDuration(EpisodeSeconds(3_600)) == 0.95)
+    }
+
+    /// The behaviour the clamp fix is FOR: an unmeasurable numerator must not
+    /// clear the 0.95 finalize floor. `+∞` clamping to 1.0 would have cleared it.
+    @Test("a non-finite transcript area does not clear the finalize floor")
+    func nonFiniteAreaDoesNotClearTheFinalizeFloor() {
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(.infinity),
+            episodeDurationSec: EpisodeSeconds(3_600)
+        ) == false)
+        #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
+            coveredSec: BridgedTranscriptSeconds(3_420),
+            episodeDurationSec: EpisodeSeconds(3_600)
+        ))
+    }
 }
 
 @Suite("playhead-x0lb R6 — the finalize floor's numerator is its own quantity")
@@ -577,21 +642,38 @@ struct BridgedTranscriptSecondsTests {
     /// **THE GUARD THAT THE R6 FIX ALMOST REMOVED WHILE ADDING ONE.** The floor
     /// used to reject a non-finite numerator outright (`coveredSec.isFinite`).
     /// Routing the division through ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)``
-    /// — which is the R4 lesson, a typed pair is not a typed operation — moves it
-    /// behind a CLAMP, and `+∞` clamps to `1.0`, which clears a 0.95 floor. The
-    /// finiteness guard is therefore re-stated at the floor rather than inherited,
-    /// and this is the assertion that makes it non-removable.
+    /// — which is the R4 lesson, a typed pair is not a typed operation — moved it
+    /// behind a CLAMP, and `+∞` clamps to `1.0`, which clears a 0.95 floor. R6
+    /// re-stated the finiteness guard at the floor rather than inheriting it, and
+    /// this is the assertion that makes it non-removable.
     ///
     /// It is worth stating what an infinite area would MEAN: it cannot come off
     /// ``TranscribedRegion/bridgedSeconds(bridging:)`` over sane rows, so the
     /// only route is a hand-boxed value — which is limit L-I, the door this bead
     /// cannot close. The guard is what stops L-I's door opening onto a gate.
-    @Test("an infinite area clamps to a full bar and must still fail the floor")
-    func infiniteAreaClampsButMustNotClear() {
+    ///
+    /// **R7 CHANGED THE FIRST ASSERTION, DELIBERATELY, AND KEPT THE REST.** This
+    /// test used to open by DEMONSTRATING the hazard — `#expect(infinite
+    /// .fractionOfDeclaredDuration(…) == 1.0)`, "the clamp really does produce a
+    /// passing-looking ratio". R7 found the identical clamp in
+    /// ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``, whose two Activity
+    /// consumers guard nothing, and moved the finiteness guard INSIDE both methods
+    /// — a guard that lives at the caller is a guard the next caller does not get.
+    /// So the clamp is no longer reachable with a non-finite numerator and the
+    /// demonstration is now false BY CONSTRUCTION, which is the point of the fix.
+    ///
+    /// The CONTRACT the test exists to protect is untouched and still asserted
+    /// below: the floor refuses `+∞`, `NaN`, and a non-finite duration. R6's
+    /// `finiteValue` at the floor is deliberately kept as defence in depth, so
+    /// there are now two independent refusals rather than one — and this test
+    /// would still fail if either were removed alone.
+    @Test("a non-finite area is refused at the method AND must still fail the floor")
+    func infiniteAreaIsRefusedAndMustNotClear() {
         let infinite = BridgedTranscriptSeconds(.infinity)
-        // The clamp really does produce a passing-looking ratio…
-        #expect(infinite.fractionOfDeclaredDuration(EpisodeSeconds(2_113)) == 1.0)
-        // …and the floor must still refuse it.
+        // R7: the method now WITHHOLDS the number instead of clamping it to a
+        // passing-looking 1.0. This is the assertion that inverted.
+        #expect(infinite.fractionOfDeclaredDuration(EpisodeSeconds(2_113)) == nil)
+        // …and the floor must still refuse it, via its own retained guard.
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
             coveredSec: infinite, episodeDurationSec: EpisodeSeconds(2_113)) == false)
         #expect(SemanticScanClaim.transcriptClearsFinalizeFloor(
@@ -640,19 +722,19 @@ enum CoverageRegionFixtures {
 
     static func fast(_ intervals: [(start: Double, end: Double)]) -> FastTranscriptRegion {
         var region = FastTranscriptRegion()
-        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        for interval in intervals { region.append(start: interval.start, end: interval.end, door: .openedByCoverageReader) }
         return region
     }
 
     static func final(_ intervals: [(start: Double, end: Double)]) -> FinalTranscriptRegion {
         var region = FinalTranscriptRegion()
-        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        for interval in intervals { region.append(start: interval.start, end: interval.end, door: .openedByCoverageReader) }
         return region
     }
 
     static func scanned(_ intervals: [(start: Double, end: Double)]) -> ScannedRegion {
         var region = ScannedRegion()
-        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        for interval in intervals { region.append(start: interval.start, end: interval.end, door: .openedByCoverageReader) }
         return region
     }
 
@@ -661,7 +743,7 @@ enum CoverageRegionFixtures {
     /// both passes at once and has no `pass` column to compose on.
     static func transcribed(_ intervals: [(start: Double, end: Double)]) -> TranscribedRegion {
         var region = TranscribedRegion()
-        for interval in intervals { region.append(start: interval.start, end: interval.end) }
+        for interval in intervals { region.append(start: interval.start, end: interval.end, door: .openedByCoverageReader) }
         return region
     }
 }
@@ -694,11 +776,11 @@ struct CoverageRegionTests {
     /// this pins that the span is still `[0, area]` and nothing else.
     @Test("the watermark stand-in is one contiguous span from zero")
     func watermarkStandInSpansFromZero() {
-        let region = FastTranscriptRegion(spanningFromZeroTo: CoveredSeconds(842.5))
+        let region = FastTranscriptRegion(spanningFromZeroTo: CoveredSeconds(842.5), door: .openedByCoverageReader)
         #expect(region.unionedSeconds.rawValue == 842.5)
         #expect(AnalyzedSeconds(clipping: region, to: FrontierSeconds(400)).rawValue == 400)
         // A degenerate stand-in contributes nothing rather than a negative span.
-        #expect(FastTranscriptRegion(spanningFromZeroTo: CoveredSeconds(0)).unionedSeconds.rawValue == 0)
+        #expect(FastTranscriptRegion(spanningFromZeroTo: CoveredSeconds(0), door: .openedByCoverageReader).unionedSeconds.rawValue == 0)
     }
 
     /// playhead-9y9e's own property, now carried by a type: the readable region
@@ -718,12 +800,12 @@ struct CoverageRegionTests {
 
         let fastOnly = AdScanSeconds(
             examined: scan,
-            within: TranscribedRegion(fastPass: fast, finalPass: FinalTranscriptRegion()),
+            within: TranscribedRegion(fastPass: fast, finalPass: FinalTranscriptRegion(), door: .openedByCoverageReader),
             bridging: AnalysisCoverageMath.adScanBridgeableGapSec
         )
         let bothPasses = AdScanSeconds(
             examined: scan,
-            within: TranscribedRegion(fastPass: fast, finalPass: final),
+            within: TranscribedRegion(fastPass: fast, finalPass: final, door: .openedByCoverageReader),
             bridging: AnalysisCoverageMath.adScanBridgeableGapSec
         )
         // Written as the difference, not as `1_155.7`: the union returns
@@ -755,7 +837,8 @@ struct CoverageRegionTests {
             examined: CoverageRegionFixtures.scanned(scanRaw),
             within: TranscribedRegion(
                 fastPass: CoverageRegionFixtures.fast(fastRaw),
-                finalPass: FinalTranscriptRegion()
+                finalPass: FinalTranscriptRegion(),
+                door: .openedByCoverageReader
             ),
             bridging: AnalysisCoverageMath.adScanBridgeableGapSec
         )
@@ -783,14 +866,16 @@ struct CoverageRegionTests {
                 (start: 0, end: 99),
                 (start: 100, end: 200)
             ]),
-            finalPass: FinalTranscriptRegion()
+            finalPass: FinalTranscriptRegion(),
+            door: .openedByCoverageReader
         )
         let blocked = TranscribedRegion(
             fastPass: CoverageRegionFixtures.fast([
                 (start: 0, end: 50),
                 (start: 150, end: 200)
             ]),
-            finalPass: FinalTranscriptRegion()
+            finalPass: FinalTranscriptRegion(),
+            door: .openedByCoverageReader
         )
         let bridge = AnalysisCoverageMath.adScanBridgeableGapSec
         #expect(AdScanSeconds(examined: scan, within: breathy, bridging: bridge).rawValue == 200)
@@ -848,7 +933,8 @@ struct CoverageRegionTests {
             examined: CoverageRegionFixtures.scanned([(start: 0, end: 3_600)]),
             within: TranscribedRegion(
                 fastPass: FastTranscriptRegion(),
-                finalPass: FinalTranscriptRegion()
+                finalPass: FinalTranscriptRegion(),
+                door: .openedByCoverageReader
             ),
             bridging: AnalysisCoverageMath.adScanBridgeableGapSec
         )

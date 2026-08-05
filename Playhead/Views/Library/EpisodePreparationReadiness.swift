@@ -371,7 +371,16 @@ func episodePreparationAccessibilityValue(
 
 /// Format a `[0, 1]` fraction as an integer percent for the functional
 /// progress caption. Never a vanity metric — pure progress only.
+///
+/// **playhead-x0lb R7, the clamp class.** The guard is here rather than assumed
+/// from the callers. Every caller today passes a value that went through
+/// `clampUnit`, which already refuses a non-finite input — but that is a SURVEY of
+/// three call sites, and it goes stale the moment someone formats a fourth
+/// fraction. Without it `min(1, max(0, .infinity))` is `1`, so an unmeasurable
+/// fraction reads **"100% scanned for ads"**: the clamp turning "we cannot measure
+/// this" into the most reassuring caption the surface can print.
 func episodePreparationPercent(_ fraction: Double) -> String {
+    guard fraction.isFinite else { return "0%" }
     let clamped = min(1, max(0, fraction))
     return "\(Int((clamped * 100).rounded()))%"
 }

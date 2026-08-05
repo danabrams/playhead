@@ -297,8 +297,15 @@ struct BridgedTranscriptSeconds: CoverageQuantity {
     /// not an expression anybody can form. Same shape and same guards as
     /// ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)``; see rails TY24/TY25
     /// for why a typed PAIR is not a typed OPERATION.
+    ///
+    /// **R7: the finiteness guard is INSIDE, where the clamp is.** See
+    /// ``AnalyzedSeconds/fractionOfDeclaredDuration(_:)`` for the finding — R6
+    /// identified this clamp's `+∞ → 1.0` hazard and answered it at ONE of the two
+    /// call sites that reach it. A guard that lives at the caller is a guard the
+    /// next caller does not get.
     func fractionOfDeclaredDuration(_ duration: EpisodeSeconds?) -> Double? {
-        guard let duration, duration.rawValue > 0 else { return nil }
+        guard rawValue.isFinite,
+              let duration, duration.isFinite, duration.rawValue > 0 else { return nil }
         return min(1.0, max(0.0, rawValue / duration.rawValue))
     }
 }
@@ -363,8 +370,34 @@ struct AnalyzedSeconds: CoverageQuantity {
     /// gives: the division happens ONCE, in a method whose receiver is the
     /// numerator, so there is no expression left to invert. It also collapses
     /// the two duplicated copies into one. Rails TY24 / TY25.
+    ///
+    /// **playhead-x0lb R7: the CLAMP CLASS, and this is the instance R6 missed.**
+    /// R6 found that `min(1.0, max(0.0, …))` turns a `+∞` numerator into `1.0` and
+    /// wrote, on ``BridgedTranscriptSeconds/fractionOfDeclaredDuration(_:)``, that
+    /// `finiteValue` at the caller is "load-bearing and NOT decoration". The same
+    /// clamp is here, and NEITHER of this method's two consumers guards it: both
+    /// copies of `ActivitySnapshotProvider.fraction(area:ofDeclaredDuration:)` pass
+    /// `summary?.analysisCoveredSec` straight in.
+    ///
+    /// Ask the standing question — what would this read if the thing it claims to
+    /// measure had never happened? A `+∞` analyzed area renders **AN 100 %**, a full
+    /// analysis bar on an episode nothing analyzed. That is playhead-sd71's
+    /// "AN 100 % / TX 39 %" antipattern arriving through the clamp instead of
+    /// through a watermark, and it is reachable from data, not only from a mutation:
+    /// the area is a union of `sqlite3_column_double` values and SQLite REAL holds
+    /// infinities.
+    ///
+    /// The comment twenty lines above the AN bar already recorded this exact
+    /// four-case analysis — "a NaN numerator clamped to 0.0, an infinite one to 1.0,
+    /// a negative one to 0.0, and a non-finite DURATION divided into 0.0" — as
+    /// something ``DensityRatio`` fixed for the TX bar. The AN bar three lines below
+    /// it still had all four. Both terms are guarded here now, which also makes this
+    /// method agree with ``ReachRatio/init(examined:ofDeclaredDuration:)`` and
+    /// ``DensityRatio/init(transcribed:ofDeclaredDuration:)``, which have always
+    /// guarded `isFinite` on both sides.
     func fractionOfDeclaredDuration(_ duration: EpisodeSeconds?) -> Double? {
-        guard let duration, duration.rawValue > 0 else { return nil }
+        guard rawValue.isFinite,
+              let duration, duration.isFinite, duration.rawValue > 0 else { return nil }
         return min(1.0, max(0.0, rawValue / duration.rawValue))
     }
 }
@@ -442,6 +475,54 @@ struct AdScanSeconds: CoverageQuantity {
 
 // MARK: - Regions: the INTERVAL SETS the areas above are measured from
 
+/// playhead-x0lb R7: the token every region assembly must NAME.
+///
+/// **What it is, exactly, and what it is not.** It is not a capability — its one
+/// value is `internal`, so any file in the module can write `.openedByCoverageReader`
+/// and assemble a region. It is a compile-enforced NAMING OBLIGATION: the fill
+/// entry points below take it, so a fabrication that omits it is
+/// `missing argument for parameter 'door'` rather than a working expression.
+///
+/// **Why that is worth a parameter.** R6 confined fabrication LEXICALLY, because
+/// Swift's only friend mechanism is file scope and the two file moves that would
+/// work are measured and rejected in ``check_region_fabrication``'s docstring. R7
+/// planted against that grep and got three spellings past it — `TranscribedRegion ()`
+/// (whitespace before the parens), `.append(start : …)` (whitespace before the
+/// label's colon), and the one that mattered:
+///
+///     let region: TranscribedRegion = .init(
+///         fastPass: .init(spanningFromZeroTo: CoveredSeconds(watermark)),
+///         finalPass: .init()
+///     )
+///
+/// planted at `AnalysisJobRunner.transcriptCoverageOfCompletedTranscript`, where
+/// it models the fast WATERMARK as a contiguous transcribed region and hands it to
+/// the 0.95 finalize floor — under a doc paragraph three lines up that says in as
+/// many words that the watermark cannot be the gate. The preflight returned rc=0
+/// and the app BUILT (probe PK1). Dot-`.init` names no type, so no grep over type
+/// names can ever see it.
+///
+/// **The obligation is what a grep cannot be: bounded.** A static member has no
+/// spelling that omits its own name, so `openedByCoverageReader` must appear in
+/// the source of any file that assembles a region — which turns the preflight from
+/// "the spellings R6 thought of" into "one identifier, all spellings". That is a
+/// strictly smaller claim than the type safety this bead is otherwise about, and it
+/// is labelled as such: the door does not stop a determined author, it stops an
+/// author who is not thinking about which population they hold.
+///
+/// The EMPTY `init()` on each region deliberately does not take one. An empty
+/// region is an absence, not a wrong population: it drives ``AdScanSeconds`` to 0
+/// and fails the finalize floor, so it errs in the only direction this bead
+/// permits, and `adScanIntervals[id] ?? ScannedRegion()` needs it.
+struct RegionFillDoor: Sendable {
+    fileprivate init() {}
+
+    /// The one door: `AnalysisStore`'s coverage readers, assembling a region out
+    /// of `sqlite3_column_double` pairs (or the asset watermark standing in for a
+    /// fast pass that produced no chunk).
+    static let openedByCoverageReader = RegionFillDoor()
+}
+
 // playhead-x0lb R5 (Dan's 2026-08-05 decision to EXPAND scope): the scalars above
 // carry types; the interval arrays they are measured FROM did not, and that is
 // one layer below every rail in this bead.
@@ -490,6 +571,16 @@ struct AdScanSeconds: CoverageQuantity {
 // `sqlite3_column_double` returns a `Double` and nothing else; what changes is
 // that there is now exactly ONE such door per region and it sits at the genuine
 // boundary rather than at every consumer.
+//
+// R6 PLANTED AGAINST THAT LAST SENTENCE AND IT IS A CLAIM ABOUT CALL SITES, NOT
+// ABOUT REACHABILITY — `init()` and `append(start:end:)` were internal, so probe
+// PJ1 assembled a `TranscribedRegion` out of the FAST ranges in
+// `AnalysisJobRunner` and it compiled. R6 confined assembly lexically; R7 got
+// three spellings past that grep, one of which (PK1) modelled the WATERMARK as a
+// transcribed region and fed the 0.95 finalize floor while the preflight returned
+// rc=0. The doors now take a ``RegionFillDoor``, so "exactly ONE door per region"
+// is enforced by the compiler rather than asserted — see limit L-M for what that
+// does and, more importantly, what it does not.
 
 /// playhead-x0lb: the FAST-PASS transcript region — the intervals of
 /// `transcript_chunks` rows with `pass = 'fast'`, or the asset watermark modelled
@@ -515,13 +606,17 @@ struct FastTranscriptRegion {
     /// The parameter is a ``CoveredSeconds`` and not a `Double` because probe PA5
     /// built this span from ``FrontierSeconds`` — the DSP sweep, which reaches
     /// 100 % on an episode nothing transcribed — and it compiled. Rail TY26.
-    init(spanningFromZeroTo covered: CoveredSeconds) {
+    init(spanningFromZeroTo covered: CoveredSeconds, door: RegionFillDoor) {
+        _ = door
         self.intervals = [(start: 0, end: covered.rawValue)]
     }
 
     /// Accumulate one row. `start`/`end` are bare `Double`s because they come
     /// straight off `sqlite3_column_double`; see the note above on limit L-I.
-    mutating func append(start: Double, end: Double) {
+    ///
+    /// R7: `door` is the naming obligation — see ``RegionFillDoor``.
+    mutating func append(start: Double, end: Double, door: RegionFillDoor) {
+        _ = door
         intervals.append((start: start, end: end))
     }
 
@@ -553,8 +648,9 @@ struct FinalTranscriptRegion {
 
     init() {}
 
-    /// Accumulate one row; see ``FastTranscriptRegion/append(start:end:)``.
-    mutating func append(start: Double, end: Double) {
+    /// Accumulate one row; see ``FastTranscriptRegion/append(start:end:door:)``.
+    mutating func append(start: Double, end: Double, door: RegionFillDoor) {
+        _ = door
         intervals.append((start: start, end: end))
     }
 }
@@ -589,18 +685,26 @@ struct TranscribedRegion {
     /// it — so a bound built from the final pass alone would be SMALLER than the
     /// bound this replaced and an episode could measure less scanned than before.
     /// Adding rather than replacing makes the widening MONOTONE.
-    init(fastPass: FastTranscriptRegion, finalPass: FinalTranscriptRegion) {
+    /// R7: it takes a ``RegionFillDoor`` even though both operands are already
+    /// typed, because probe PK1 fabricated through THIS constructor — an empty
+    /// final pass beside a watermark-shaped fast one — without naming a type. That
+    /// composition is unreachable outside the store today only because no store API
+    /// hands out a ``FastTranscriptRegion``, which is a SURVEY of the callers and
+    /// goes stale the moment somebody adds one. The door makes it a rule.
+    init(fastPass: FastTranscriptRegion, finalPass: FinalTranscriptRegion, door: RegionFillDoor) {
+        _ = door
         self.intervals = fastPass.intervals + finalPass.intervals
     }
 
-    /// Accumulate one row; see ``FastTranscriptRegion/append(start:end:)``.
+    /// Accumulate one row; see ``FastTranscriptRegion/append(start:end:door:)``.
     ///
     /// playhead-x0lb R5 review: this exists because
     /// ``AnalysisStore/fetchTranscribedRegion(assetId:)`` reads BOTH passes in one
     /// query — it has no `pass` column to route on — so it builds this region
     /// directly rather than composing two. It is the same single raw door per
     /// region that limit L-I describes, not a second one.
-    mutating func append(start: Double, end: Double) {
+    mutating func append(start: Double, end: Double, door: RegionFillDoor) {
+        _ = door
         intervals.append((start: start, end: end))
     }
 
@@ -674,8 +778,9 @@ struct ScannedRegion {
 
     init() {}
 
-    /// Accumulate one examined window; see ``FastTranscriptRegion/append(start:end:)``.
-    mutating func append(start: Double, end: Double) {
+    /// Accumulate one examined window; see ``FastTranscriptRegion/append(start:end:door:)``.
+    mutating func append(start: Double, end: Double, door: RegionFillDoor) {
+        _ = door
         intervals.append((start: start, end: end))
     }
 }
@@ -1629,3 +1734,28 @@ extension EpisodeSeconds {
 //        The rule for anyone adding a region operation: if your body reads
 //        `.intervals` off two different regions, a behaviour test must
 //        distinguish the order, because nothing else will.
+//   L-M  **``RegionFillDoor`` IS AN OBLIGATION, NOT A CAPABILITY** (R7). R6
+//        confined region assembly with a grep over the four TYPE NAMES and
+//        recorded it as a tripwire of L-F's worth. R7 planted against it and got
+//        three spellings through — `TranscribedRegion ()`, `.append(start : …)`,
+//        and probe PK1, the dot-`.init` form, which named no type at all, passed
+//        the preflight at rc=0 and BUILT. The lesson is not "patch the pattern":
+//        a contextual `.init` has no type name to match, so no pattern over type
+//        names is ever complete, and R6's was the fifth lexical rail on this bead
+//        to be out-spelled by the next round.
+//        What the door changes is the QUANTIFIER. Every non-empty assembly now
+//        takes the token, so omitting it is a compile error (rail TY38) and
+//        supplying it writes an identifier that has no spelling omitting its own
+//        name — so the preflight went from enumerating spellings to grepping one
+//        symbol. What it does NOT do: the token is `internal`, so any file can
+//        write `.openedByCoverageReader` and assemble whatever it likes. That is
+//        deliberate — `fileprivate` is Swift's only friend mechanism and the two
+//        file moves that would use it are measured and rejected in
+//        `check_region_fabrication`'s docstring — and it means the door stops an
+//        author who is not thinking about which population they hold, not one who
+//        is. Do not describe it as a type-level guarantee; the guarantee is that
+//        an assembly cannot be SILENT.
+//        The EMPTY `init()`s deliberately take no door, so they remain assemblable
+//        anywhere. An empty region is an absence rather than a wrong population:
+//        it drives ``AdScanSeconds`` to 0 and fails the finalize floor, erring in
+//        the only direction this bead permits.
