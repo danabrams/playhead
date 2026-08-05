@@ -234,7 +234,13 @@ struct CapOutRetryTests {
         supersededAt: Double,
         desiredCoverageSec: Double = 90,
         lastErrorCode: String = "maxAttemptsReached:transcription:zeroCoverage",
-        state: String = "superseded"
+        state: String = "superseded",
+        // playhead-dl9k: the attempt cap is what the y8f3 shape spends, so 5 is
+        // its default — but the no-progress terminal reaches its dead end
+        // WITHOUT spending attempts, and all FIVE `coverageInsufficient:noProgress`
+        // rows on the 2026-08-03 pull carry `attemptCount = 0`. A fixture that
+        // hardcoded 5 would seed a row the device never produces.
+        attemptCount: Int = 5
     ) async throws {
         try await store.insertAsset(
             AnalysisAsset(
@@ -281,7 +287,7 @@ struct CapOutRetryTests {
             sourceFingerprint: Self.fingerprint,
             desiredCoverageSec: desiredCoverageSec,
             state: state,
-            attemptCount: 5,
+            attemptCount: attemptCount,
             lastErrorCode: lastErrorCode,
             createdAt: supersededAt,
             updatedAt: supersededAt
@@ -1132,5 +1138,313 @@ struct CapOutRetryTests {
         #expect(try await reconciler.reconcile().capOutRetriesMinted == 0,
                 "nothing is owed, so the rescue must decline — otherwise it mints forever")
         #expect(try await store.fetchJob(byWorkKey: Self.retryKey(1)) == nil)
+    }
+
+    // MARK: - playhead-dl9k: the OTHER dead end, and the population already stuck
+
+    /// THE acceptance test for playhead-dl9k, seeded at `2C5C3699`'s exact shape
+    /// from the 2026-08-03 device pull.
+    ///
+    /// **A second terminal reaches the same dead end by a different road.** y8f3
+    /// rescues the row that ran out of ATTEMPTS (`state = 'superseded'`,
+    /// `maxAttemptsReached:…`). This one ran out of PROGRESS: the tier pass
+    /// completed, moved none of the four coverage measures, and
+    /// `shouldRetryCoverageInsufficient` returned false, so the scheduler wrote
+    /// `state = 'complete'` with `lastErrorCode = 'coverageInsufficient:noProgress'`
+    /// and `nextEligibleAt = nil`. `analysis_jobs.workKey` is UNIQUE and
+    /// `insertJob` is `INSERT OR IGNORE`, so from that moment every enqueue for
+    /// the episode is the same silent no-op y8f3 documents — by a terminal
+    /// `isAttemptCapTerminal` deliberately does not match.
+    ///
+    /// **The fixture is the device's, down to the tier boundary.** `2C5C3699` is
+    /// a 6,925.5 s episode whose `fastTranscriptCoverageEndTime` reads 900.0
+    /// EXACTLY — the `t2DepthSeconds` rung — with its `:6925` tier `complete` on
+    /// `coverageInsufficient:noProgress` and every one of its four
+    /// `analysis_jobs` rows terminal. Re-derived here: 900.0 / 6,925.5 = 13.0 %,
+    /// and the numerator is a WATERMARK, not an area — but for this asset the
+    /// two agree, because `max(endTime)` over all 931 of its transcript chunks
+    /// is also exactly 900.0. There is genuinely no transcript past the rung.
+    ///
+    /// Seeding the watermark ON the boundary is what makes the target assertion
+    /// below load-bearing: the next ladder rung above 900 is the DURATION, so a
+    /// mint that re-used the terminated job's own target, or that walked one
+    /// configured tier, lands somewhere else and is caught.
+    ///
+    /// **Why re-running is not the same futile pass.** It was, before
+    /// playhead-mptr (#335). A no-progress terminal means "this pass read audio
+    /// and moved nothing", and pre-mptr a repeat re-read the covered prefix
+    /// first and spent the whole 300 s stage cap before reaching anything new —
+    /// which is precisely how the episode got here. `orderingUncoveredFirst`
+    /// inverts that, so the mint condition for this class is exactly "mptr can
+    /// now help": uncovered audio exists. The `after > before` assertion is what
+    /// ties this test to that dependency — revert the ordering and the row still
+    /// mints, but the audio does not move.
+    @Test("a no-progress terminal becomes dispatchable again and transcribes more audio")
+    func noProgressTerminalTranscribesMoreAudio() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        // 900 s of 1,212.5 s, the watermark sitting exactly on `t2DepthSeconds`
+        // — 2C5C3699's shape. The terminal is a day old, so the cooldown is not
+        // what this test is measuring.
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: 900,
+            supersededAt: clock.value.timeIntervalSince1970 - 86_400,
+            desiredCoverageSec: Self.durationSec,
+            lastErrorCode: "coverageInsufficient:noProgress",
+            state: "complete",
+            attemptCount: 0
+        )
+
+        let before = try await transcriptCoverage(store)
+        #expect(before == 900)
+
+        // The precondition, and the reason this bead exists: the episode has no
+        // dispatchable row and cannot get one. Without this the test would pass
+        // against an implementation that never needed to mint anything.
+        let scheduler = try await makeScheduler(
+            store: store, downloads: downloads, audio: decodingAudio(), clock: clock
+        )
+        #expect(await scheduler.processNextDispatchableJobForTesting() == false,
+                "precondition: a complete no-progress row must not be dispatchable")
+
+        let reconciler = makeReconciler(store: store, downloads: downloads, clock: clock)
+        let report = try await reconciler.reconcile()
+
+        #expect(report.capOutRetriesMinted == 1)
+        #expect(report.unEnqueuedDownloadsCreated == 0,
+                "the base key was swallowed; the retry is minted at a fresh ordinal")
+        #expect(report.reEnqueuesSwallowed == 1, "the swallow itself must stay visible")
+
+        // The terminal is the ledger and is never touched — same contract as
+        // y8f3. No state change, no attempt reset, no workKey rewrite.
+        let terminal = try await store.fetchJob(byId: "job-y8f3-base")
+        #expect(terminal?.state == "complete")
+        #expect(terminal?.lastErrorCode == "coverageInsufficient:noProgress")
+        #expect(terminal?.workKey == Self.baseWorkKey)
+
+        let retry = try #require(try await store.fetchJob(byWorkKey: Self.retryKey(1)))
+        #expect(retry.state == "queued")
+        #expect(retry.attemptCount == 0)
+        #expect(retry.analysisAssetId == Self.assetId)
+        // The DURATION rung, because the watermark is already on the deepest
+        // configured tier. Re-using the terminated job's target would also land
+        // on the duration here, so this alone does not discriminate — the reach
+        // assertion below is what does.
+        let ladder = AnalysisWorkScheduler.coverageTierLadder(
+            tiers: Self.defaultTiers,
+            episodeDurationSec: Self.durationSec
+        )
+        #expect(retry.desiredCoverageSec == ladder.last,
+                "expected the duration rung; got \(retry.desiredCoverageSec)")
+
+        var dispatches = 0
+        for _ in 0..<8 {
+            if await scheduler.processNextDispatchableJobForTesting() { dispatches += 1 }
+            clock.advance(by: 7_200)
+        }
+        #expect(dispatches >= 1)
+
+        // Seconds of audio. The whole claim of this bead.
+        let after = try await transcriptCoverage(store)
+        #expect(after > before,
+                "the retry must READ AUDIO, not merely move a row: \(before) -> \(after)")
+    }
+
+    /// The two terminals share ONE budget, and it is the y8f3 budget.
+    ///
+    /// This is the double-count check. The ordinal lives in the UNIQUE
+    /// `workKey`, and both classes derive it from the SAME `baseWorkKey`, so an
+    /// episode that reaches a dead end by both roads gets
+    /// ``AnalysisWorkScheduler/maxCapOutRetries`` rescue passes IN TOTAL rather
+    /// than that many per class. That is the conservative reading and the one
+    /// the bound is stated in: the ledger is "how many times has this episode
+    /// been rescued", not "how many times for this reason".
+    ///
+    /// Driven well past the budget against a fixture whose decode always throws,
+    /// so every minted pass dies and the chain has every opportunity to leak. A
+    /// leak shows up as a fourth row.
+    @Test("the no-progress chain shares the cap-out budget and terminates")
+    func noProgressChainSharesTheBoundedBudget() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: 0,
+            supersededAt: clock.value.timeIntervalSince1970 - 86_400,
+            desiredCoverageSec: Self.durationSec,
+            lastErrorCode: "coverageInsufficient:noProgress",
+            state: "complete",
+            attemptCount: 0
+        )
+        let scheduler = try await makeScheduler(
+            store: store, downloads: downloads, audio: FailingDecodeStub(), clock: clock
+        )
+        let reconciler = makeReconciler(store: store, downloads: downloads, clock: clock)
+
+        var minted = 0
+        for _ in 0..<12 {
+            minted += try await reconciler.reconcile().capOutRetriesMinted
+            for _ in 0..<6 {
+                _ = await scheduler.processNextDispatchableJobForTesting()
+                clock.advance(by: 7_200)
+            }
+        }
+
+        #expect(minted == AnalysisWorkScheduler.maxCapOutRetries,
+                "the budget is spent exactly once, in total: got \(minted)")
+        // The strong bound: the TOTAL rows this episode can ever hold is the
+        // seeded terminal plus the budget. Anything more is a leak.
+        #expect(try await allJobs(store).count == AnalysisWorkScheduler.maxCapOutRetries + 1)
+
+        // And it stops for a reason we can name, not because the loop ran out.
+        let tail = try #require(try await store.fetchJob(byWorkKey: Self.retryKey(2)))
+        #expect(AnalysisWorkScheduler.capOutRetryDecision(
+            baseWorkKey: Self.baseWorkKey,
+            chainTail: tail,
+            nextOrdinal: nil,
+            transcriptCoverageSec: 0,
+            episodeDurationSec: Self.durationSec,
+            adScanFraction: nil,
+            tiers: Self.defaultTiers,
+            now: clock.value.timeIntervalSince1970
+        ) == .declined(.budgetSpent))
+    }
+
+    /// The discrimination matrix for the widened terminal class, in one table.
+    ///
+    /// **The whole risk of this bead is over-matching**, because the new class
+    /// is a `complete` row and `complete` is also how every HEALTHY episode
+    /// ends. So the boundary is asserted from both sides: the no-progress
+    /// terminal mints, and the four neighbours that must not are named
+    /// individually. `maxAttemptsReached:coverageInsufficient` is the sharpest —
+    /// playhead-gqx4's degraded terminal is ALSO `complete`, ALSO a
+    /// coverage-insufficient give-up, and is another bead's to remedy.
+    @Test("only the no-progress terminal joins the rescuable class")
+    func rescuableTerminalDiscrimination() {
+        func job(state: String, lastErrorCode: String?) -> AnalysisJob {
+            makeAnalysisJob(state: state, lastErrorCode: lastErrorCode)
+        }
+        let noProgress = job(state: "complete", lastErrorCode: "coverageInsufficient:noProgress")
+
+        #expect(AnalysisWorkScheduler.isNoProgressTerminal(noProgress))
+        #expect(AnalysisWorkScheduler.isRescuableTerminal(noProgress))
+        // It is emphatically NOT an attempt-cap terminal. y8f3's predicate keeps
+        // its exact meaning; this bead adds a sibling rather than loosening it,
+        // because `isAttemptCapTerminal` is read elsewhere as "the attempt cap
+        // was reached" and that claim would become false.
+        #expect(!AnalysisWorkScheduler.isAttemptCapTerminal(noProgress))
+
+        // The attempt-cap terminal still qualifies — the widening is additive.
+        let capOut = job(state: "superseded", lastErrorCode: "maxAttemptsReached:cancelMidRun")
+        #expect(AnalysisWorkScheduler.isRescuableTerminal(capOut))
+
+        // The neighbours, each for its own reason.
+        for (state, code, why) in [
+            ("complete", nil as String?, "a clean terminal has nothing to rescue"),
+            ("complete", "maxAttemptsReached:coverageInsufficient", "gqx4's degraded terminal"),
+            ("superseded", nil as String?, "a genuine supersession stays retired"),
+            ("queued", "coverageInsufficient:noProgress", "a live row is already dispatchable"),
+            ("running", "coverageInsufficient:noProgress", "ditto, mid-flight"),
+        ] {
+            let neighbour = job(state: state, lastErrorCode: code)
+            #expect(!AnalysisWorkScheduler.isRescuableTerminal(neighbour),
+                    "\(state)/\(code ?? "nil") must not be rescuable — \(why)")
+        }
+    }
+
+    /// The no-progress terminal reaches the SAME guards in the SAME order.
+    ///
+    /// Widening the entry predicate must not create a second path that bypasses
+    /// the budget, the cooldown, or the outstanding-work floor — the three
+    /// things that make this rescue bounded rather than a retry loop. Asserted
+    /// on the pure decision so the ordering is visible without a store.
+    @Test("the no-progress terminal does not bypass the budget, cooldown or work floor")
+    func noProgressTerminalHonoursEveryGuard() {
+        let now = 2_000_000.0
+        func decide(
+            nextOrdinal: Int?,
+            age: Double,
+            transcriptCoverageSec: Double,
+            adScanFraction: ReachRatio?
+        ) -> AnalysisWorkScheduler.CapOutRetryDecision {
+            AnalysisWorkScheduler.capOutRetryDecision(
+                baseWorkKey: Self.baseWorkKey,
+                chainTail: makeAnalysisJob(
+                    state: "complete",
+                    lastErrorCode: "coverageInsufficient:noProgress",
+                    updatedAt: now - age
+                ),
+                nextOrdinal: nextOrdinal,
+                transcriptCoverageSec: transcriptCoverageSec,
+                episodeDurationSec: Self.durationSec,
+                adScanFraction: adScanFraction,
+                tiers: Self.defaultTiers,
+                now: now
+            )
+        }
+        let cooled = AnalysisWorkScheduler.capOutRetryCooldownSeconds
+        let ladder = AnalysisWorkScheduler.coverageTierLadder(
+            tiers: Self.defaultTiers,
+            episodeDurationSec: Self.durationSec
+        )
+
+        // The positive control. Without it every assertion below reads `true`
+        // against an implementation that declines unconditionally.
+        #expect(decide(
+            nextOrdinal: 1, age: cooled, transcriptCoverageSec: 900, adScanFraction: nil
+        ) == .mint(.init(
+            workKey: Self.retryKey(1), ordinal: 1, desiredCoverageSec: ladder.last ?? -1
+        )))
+
+        #expect(decide(
+            nextOrdinal: nil, age: cooled, transcriptCoverageSec: 900, adScanFraction: nil
+        ) == .declined(.budgetSpent))
+        #expect(decide(
+            nextOrdinal: 1, age: cooled - 1, transcriptCoverageSec: 900, adScanFraction: nil
+        ) == .declined(.cooling))
+        // Fully transcribed AND fully scanned: a repeat would read no audio it
+        // has not read and screen nothing it has not screened.
+        #expect(decide(
+            nextOrdinal: 1, age: cooled, transcriptCoverageSec: Self.durationSec, adScanFraction: 1.0
+        ) == .declined(.noOutstandingWork))
+    }
+
+    /// The terminal string is ONE constant, shared by the writer and the reader.
+    ///
+    /// A discriminator that matches a literal the producer spells somewhere else
+    /// is a silent-drift bug waiting for the day someone edits the arm: the
+    /// rescue would simply stop matching, no test would fail, and the episodes
+    /// would strand exactly as they do today. Same reasoning — and same remedy —
+    /// as ``AnalysisWorkScheduler/maxAttemptsReachedPrefix``.
+    ///
+    /// Read off the source, because the point is that the WRITE SITE references
+    /// the constant rather than that the two happen to be equal today.
+    @Test("the no-progress terminal arm writes the shared constant, not a literal")
+    func noProgressTerminalCodeIsSharedWithItsWriter() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()   // PreAnalysis
+                .deletingLastPathComponent()   // Services
+                .deletingLastPathComponent()   // PlayheadTests
+                .deletingLastPathComponent()   // repo root
+                .appendingPathComponent("Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift"),
+            encoding: .utf8
+        )
+        let arm = try #require(
+            source.range(of: #"commitOutcomeArm\(\s*"coverageInsufficient\.noProgress""#,
+                         options: .regularExpression),
+            "the no-progress terminal arm must still exist under that name"
+        )
+        // The `stateUpdate:` that follows the arm tag, up to the end of the call.
+        let tail = source[arm.upperBound...].prefix(900)
+        #expect(tail.contains("lastErrorCode: Self.noProgressTerminalErrorCode"),
+                "the arm must write the shared constant; a literal here silently un-strands nothing")
+        #expect(
+            AnalysisWorkScheduler.noProgressTerminalErrorCode == "coverageInsufficient:noProgress",
+            "and the constant must still be the string on the device's rows"
+        )
     }
 }

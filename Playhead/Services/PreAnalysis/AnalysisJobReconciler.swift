@@ -834,9 +834,34 @@ actor AnalysisJobReconciler {
 
     // MARK: - Step 7b: bounded cap-out retry (playhead-y8f3)
 
-    /// Mint one bounded retry for an episode whose base `workKey` is held by an
-    /// ATTEMPT-CAP terminal. Returns `true` when a dispatchable row was
-    /// inserted.
+    /// Mint one bounded retry for an episode whose base `workKey` is held by a
+    /// terminal this rescue owns — an ATTEMPT-CAP terminal (playhead-y8f3) or a
+    /// NO-PROGRESS terminal (playhead-dl9k). Returns `true` when a dispatchable
+    /// row was inserted.
+    ///
+    /// **playhead-dl9k: the second road to the same dead end.** The trap below
+    /// is described in terms of the attempt cap, but nothing in it is specific
+    /// to attempts — it is a property of ANY terminal that leaves
+    /// `nextEligibleAt = nil` on the row holding a UNIQUE `workKey`. The
+    /// `coverageInsufficient.noProgress` arm does exactly that with
+    /// `state = 'complete'`, and reaches it with `attemptCount = 0`, so y8f3's
+    /// `superseded` state check excluded it. Measured on the 2026-08-03 device
+    /// pull: three assets — `2C5C3699` (transcript watermark 900.0 s of a
+    /// 6,925.5 s episode, 13.0 %), `44F076BB` (1,620.0 / 1,977.0, 81.9 %) and
+    /// `48E903D7` (2,010.0 / 2,113.1, 95.1 %) — every `analysis_jobs` row
+    /// terminal, every one with a `coverageInsufficient:noProgress` tail, and no
+    /// path back to a dispatchable row short of the 7-day GC.
+    ///
+    /// **Why the retry is productive now and was not before.** A no-progress
+    /// terminal means a pass ran and moved none of the four coverage measures,
+    /// so re-requesting the same target used to be a guaranteed repeat: the run
+    /// re-read the covered prefix first and spent the whole 300 s stage cap
+    /// before reaching anything new. playhead-mptr (#335) inverted that ordering
+    /// (`FastTranscriptCoverageIndex.orderingUncoveredFirst`), which is what
+    /// makes "uncovered audio exists" — the condition
+    /// ``AnalysisWorkScheduler/outstandingTranscriptTarget(transcriptCoverageSec:tiers:episodeDurationSec:)``
+    /// already tests — sufficient. This bead is the vehicle for a mechanism that
+    /// landed without one.
     ///
     /// **The trap this opens.** A job that exhausts ``AnalysisWorkScheduler``'s
     /// five attempts is written `state = 'superseded'` with `nextEligibleAt =
@@ -933,7 +958,11 @@ actor AnalysisJobReconciler {
         // three store round-trips and an `info` line apiece, forever, to
         // re-derive "not ours" would make an opportunistic top-up the most
         // expensive step in the sweep.
-        guard AnalysisWorkScheduler.isAttemptCapTerminal(tail) else {
+        //
+        // playhead-dl9k widened the predicate, NOT the cost model: a clean
+        // `complete` (no `lastErrorCode`) still declines here on one string
+        // comparison, which is the population that dominates the sweep.
+        guard AnalysisWorkScheduler.isRescuableTerminal(tail) else {
             logger.debug(
                 """
                 cap_out_retry_declined episode=\(episodeId, privacy: .public) \
