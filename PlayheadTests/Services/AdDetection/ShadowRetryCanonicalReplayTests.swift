@@ -22,12 +22,26 @@
 // mixed-pass test did not have. `ShadowRetryTests.testBug9A_mixedPassPrefersFinal`
 // gave its fast and final chunks IDENTICAL spans, so canonicalization drops
 // every fast chunk and the final-only set and the canonical set are the same
-// array — a fixture in which the defect is unobservable. Here the final chunks
-// sit at the TAIL, disjoint from the fast coverage, exactly as they do in the
-// field: `FinalPassRetranscriptionRunner` only re-transcribes around detected
-// candidate windows, so the final set is candidate-local by construction.
-// `fixtureDistinguishesTheTwoChunkSets` below is the control that keeps it that
-// way.
+// array — a fixture in which the defect is unobservable.
+//
+// The fixture here separates FOUR candidate chunk sets, because there are four
+// plausible things this line could have been written as and only one of them is
+// right. 12 fast chunks over [0, 360] and 4 final chunks over [300, 420]:
+//
+//   canonical  14 chunks, [0, 420]  final text replaces the two fast chunks it
+//                                   covers; the other ten survive        <- correct
+//   final-only  4 chunks, [300, 420]  candidate-local — the shipped defect
+//   fast-only  12 chunks, [0, 360]    ignores the higher-accuracy re-transcription
+//   raw        16 chunks, [0, 420]    right reach, but the overlapped audio is
+//                                     present TWICE and the version drifts from
+//                                     `runBackfill`'s
+//
+// All four hash differently, so every rail below can fail. The overlap is not
+// decoration: `FinalPassRetranscriptionRunner` re-transcribes AROUND detected
+// candidate windows, so a real final set is both candidate-local (which is what
+// makes final-only catastrophic) and partly overlapping (which is what makes raw
+// wrong). `fixtureDistinguishesTheCandidateChunkSets` is the control that keeps
+// all four apart.
 
 import Foundation
 import Testing
@@ -41,14 +55,17 @@ struct ShadowRetryCanonicalReplayTests {
     private static let sessionId = "sess-iu0t"
     private static let podcastId = "pod-iu0t"
 
-    /// Fast coverage ends here; the final pass picks up from it.
+    /// Where the fast pass stops.
     private static let fastReachSec: Double = 360
+    /// Where the candidate-local final pass starts — inside the fast coverage,
+    /// so it REPLACES two fast chunks and extends past the rest.
+    private static let finalRegionStartSec: Double = 300
     private static let episodeDurationSec: Double = 420
 
     // MARK: - Fixtures
 
     /// The 53FC53E3 shape in miniature: a long fast prefix and a short,
-    /// candidate-local final tail that does not overlap it.
+    /// candidate-local final region that overlaps its tail and runs past it.
     private func mixedPassChunks(assetId: String = assetId) -> [TranscriptChunk] {
         let fastTexts = [
             "Welcome to the show. Today we're discussing podcasts and how to find them.",
@@ -66,7 +83,9 @@ struct ShadowRetryCanonicalReplayTests {
         ]
         let finalTexts = [
             "This episode is brought to you by Squarespace. Use code SHOW for 20 percent off.",
-            "Sign up today at squarespace dot com slash show and make your own website."
+            "Sign up today at squarespace dot com slash show and make your own website.",
+            "And we are also supported by listeners like you who back the show directly.",
+            "That is all for this week, we will see you again on Thursday morning."
         ]
         var chunks: [TranscriptChunk] = fastTexts.enumerated().map { idx, text in
             TranscriptChunk(
@@ -92,8 +111,8 @@ struct ShadowRetryCanonicalReplayTests {
                 analysisAssetId: assetId,
                 segmentFingerprint: "fp-final-\(idx)",
                 chunkIndex: 1_000 + idx,
-                startTime: Self.fastReachSec + Double(idx) * 30,
-                endTime: Self.fastReachSec + Double(idx + 1) * 30,
+                startTime: Self.finalRegionStartSec + Double(idx) * 30,
+                endTime: Self.finalRegionStartSec + Double(idx + 1) * 30,
                 text: text,
                 normalizedText: text.lowercased(),
                 pass: "final",
@@ -209,35 +228,61 @@ struct ShadowRetryCanonicalReplayTests {
         )
     }
 
+    private func fastOnlyVersion(_ chunks: [TranscriptChunk]) -> String {
+        TranscriptAtomizer.transcriptVersionHash(
+            chunks: chunks.filter { $0.pass != TranscriptPassType.final_.rawValue }
+        )
+    }
+
+    private func rawVersion(_ chunks: [TranscriptChunk]) -> String {
+        TranscriptAtomizer.transcriptVersionHash(chunks: chunks)
+    }
+
     // MARK: - The control that makes every rail below mean something
 
     /// **The fixture control.** Every assertion in this suite distinguishes the
-    /// canonical chunk set from the final-only one, which is only possible if
-    /// the fixture makes them different. A future edit that gave the final
-    /// chunks the same spans as the fast ones would make canonicalization drop
-    /// every fast chunk, collapse the two sets into one array, and turn this
+    /// canonical chunk set from one of the three wrong ones, which is only
+    /// possible if the fixture keeps all four apart. A future edit that gave the
+    /// final chunks the same spans as the fast ones would make canonicalization
+    /// drop every fast chunk, collapse canonical into final-only, and turn this
     /// whole suite green against the unfixed code. That is exactly how the
     /// pre-iu0t mixed-pass test failed to see this bug for months.
-    @Test("control: the fixture's final-only and canonical chunk sets are genuinely different")
-    func fixtureDistinguishesTheTwoChunkSets() throws {
+    @Test("control: the fixture's four candidate chunk sets are all genuinely different")
+    func fixtureDistinguishesTheCandidateChunkSets() throws {
         let chunks = mixedPassChunks()
         let canonicalization = TranscriptChunkCanonicalizer.canonicalize(chunks)
+        let diagnostics = canonicalization.diagnostics
 
-        #expect(canonicalization.diagnostics.isPassthrough == false,
+        #expect(diagnostics.isPassthrough == false,
                 "a mixed-pass fixture must not take the single-pass passthrough")
-        #expect(canonicalization.diagnostics.droppedFastCount == 0,
-                "the final tail must not overlap the fast prefix — a candidate-local final set")
-        #expect(canonicalization.chunks.count == chunks.count)
-        #expect(canonicalVersion(chunks) != finalOnlyVersion(chunks),
-                "the two chunk sets must hash differently or nothing below can fail")
+        #expect(diagnostics.fastCount == 12)
+        #expect(diagnostics.finalCount == 4)
+        #expect(diagnostics.droppedFastCount == 2,
+                "the final region must REPLACE two fast chunks — the overlap raw would double-count")
+        #expect(diagnostics.retainedFastCount == 10,
+                "and must leave the other ten standing — the coverage final-only discards")
+        #expect(diagnostics.coverageRetained,
+                "canonicalization must not lose a second of audio")
+        #expect(canonicalization.chunks.count == 14)
 
-        // And the reach the defect discards, named as a numerator over a
-        // denominator: 360 of 420 declared seconds live only in the fast pass.
-        let finalReach = chunks
-            .filter { $0.pass == TranscriptPassType.final_.rawValue }
-            .map(\.startTime)
-            .min()
-        #expect(finalReach == Self.fastReachSec)
+        let canonical = canonicalVersion(chunks)
+        let versions = [
+            "final-only": finalOnlyVersion(chunks),
+            "fast-only": fastOnlyVersion(chunks),
+            "raw": rawVersion(chunks)
+        ]
+        for (name, version) in versions {
+            #expect(canonical != version,
+                    "the canonical set must hash differently from \(name) or its rail cannot fail")
+        }
+        #expect(Set(versions.values).count == 3, "and the three wrong sets differ from each other")
+
+        // The reach the shipped defect discards, as a numerator over a named
+        // denominator: the final region begins at 300 s of a 420 s episode, so
+        // replaying it alone screens at most 120/420 = 0.286 of the audio. The
+        // field row's equivalent was 36/2528 = 0.0142.
+        #expect(chunks.filter { $0.pass == TranscriptPassType.final_.rawValue }
+                    .map(\.startTime).min() == Self.finalRegionStartSec)
     }
 
     // MARK: - Rail 1: reach
@@ -259,10 +304,11 @@ struct ShadowRetryCanonicalReplayTests {
         #expect(!scans.isEmpty, "the drain must have written semantic scan rows")
 
         let earliest = try #require(scans.map(\.windowStartTime).min())
-        #expect(earliest < Self.fastReachSec,
+        #expect(earliest < Self.finalRegionStartSec,
                 """
-                every screened window started at or after \(Self.fastReachSec)s — \
-                the fast prefix was discarded (earliest=\(earliest))
+                every screened window started at or after \(Self.finalRegionStartSec)s — \
+                the fast-only coverage in front of the final region was discarded \
+                (earliest=\(earliest))
                 """)
 
         // The union of screened spans, against the declared duration. This is
@@ -295,6 +341,27 @@ struct ShadowRetryCanonicalReplayTests {
         #expect(!scans.isEmpty)
         #expect(scans.allSatisfy { $0.transcriptVersion == canonical })
         #expect(scans.allSatisfy { $0.transcriptVersion != finalOnly })
+    }
+
+    /// The OTHER direction, and the reason "just don't filter" is not the fix.
+    /// Replaying the RAW persisted rows reaches the whole episode and would pass
+    /// the reach rail above, but it feeds the FM phase both the fast and the
+    /// final text for the audio the final pass re-transcribed — the duplicate
+    /// evidence hc7e removed — and hashes to a version `runBackfill` never
+    /// derives, which puts the drain back in its own id space by a different
+    /// route.
+    @Test("the replay is the canonical set, not the raw persisted rows")
+    func replayIsNotTheRawPersistedRows() async throws {
+        let chunks = mixedPassChunks()
+        let store = try await seededStore(chunks: chunks)
+
+        _ = await service(store: store).retryShadowFMPhaseForSession(sessionId: Self.sessionId)
+
+        let persisted = try await store.fetchTranscriptChunks(assetId: Self.assetId)
+        let scans = try await store.fetchSemanticScanResults(analysisAssetId: Self.assetId)
+        #expect(!scans.isEmpty)
+        #expect(scans.allSatisfy { $0.transcriptVersion != rawVersion(persisted) })
+        #expect(scans.allSatisfy { $0.transcriptVersion != fastOnlyVersion(persisted) })
     }
 
     /// The identity that decides whether a later pass can find this work at all.
