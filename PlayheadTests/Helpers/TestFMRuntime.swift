@@ -247,10 +247,28 @@ enum TestFMRuntimeFailure: Sendable {
     // PerfGate.
     case inferenceTimeout
 
+    /// playhead-e75l: the same error TYPE as `.inferenceTimeout`, carrying the
+    /// OTHER deadline — `FMInferenceDeadline.metadata` (30 s), the bound on
+    /// tokenizer round trips rather than on inference.
+    ///
+    /// A separate case rather than an associated value on `.inferenceTimeout`
+    /// because the two are different events with different dispositions, and a
+    /// call site that has to pass a `Duration` to say which is a call site that
+    /// can pass the wrong one. `.inferenceTimeout` means "the model did not
+    /// answer"; this means "the daemon did not complete an XPC round trip that
+    /// does no generation at all" — evidence about the daemon, not the model.
+    case metadataTimeout
+
     var error: Error {
         // playhead-8d5r: not a FoundationModels error — the deadline is ours.
         if case .inferenceTimeout = self {
             return FMInferenceTimeoutError(deadline: .seconds(300))
+        }
+        // playhead-e75l: derived from the production constant, never a literal
+        // 30. A test that hard-codes the number keeps passing if the constant
+        // moves, which would silently stop exercising the discriminator.
+        if case .metadataTimeout = self {
+            return FMInferenceTimeoutError(deadline: FMInferenceDeadline.metadata)
         }
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
@@ -265,8 +283,8 @@ enum TestFMRuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
             case .rateLimited:
                 return LanguageModelSession.GenerationError.rateLimited(context)
-            case .inferenceTimeout:
-                // Unreachable — handled by the early return above. Kept so the
+            case .inferenceTimeout, .metadataTimeout:
+                // Unreachable — handled by the early returns above. Kept so the
                 // switch stays exhaustive.
                 break
             }
