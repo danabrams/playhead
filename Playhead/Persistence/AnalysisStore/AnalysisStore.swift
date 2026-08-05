@@ -2977,11 +2977,24 @@ actor AnalysisStore {
     /// assets (worst −3405.6 s), so these persisted ordinals name a different
     /// atom than a fresh `atomize` would.
     ///
-    /// That is safe ONLY because nothing reads them. `transcript_chunks
-    /// .atomOrdinal` and `.transcriptVersion` are written here and at the
-    /// insert, copied through `TranscriptEngineService`, and read by no
-    /// production consumer — every live ordinal comes from the in-memory atom
-    /// array. Do not start reading them without re-deriving them first.
+    /// That is safe ONLY while nothing reads them, and the sentence that used
+    /// to stand here — "read by no production consumer" — had already stopped
+    /// being true when it was written. `EpisodeSummaryBackfillCoordinator
+    /// .hydrate` was reading `chunks.compactMap(\.transcriptVersion).last` as
+    /// an episode summary's invalidation key. Because this backfill's SELECT is
+    /// `WHERE pass != 'fast'`, that column holds a FINAL-ONLY version and
+    /// nothing else — the pre-hc7e collapse, persisted (playhead-iu0t R2, which
+    /// converted that caller to
+    /// `SemanticScanClaim.transcriptVersion(forPersistedChunks:)`).
+    ///
+    /// So: do not read `transcript_chunks.atomOrdinal` or `.transcriptVersion`.
+    /// Every live ordinal comes from the in-memory atom array, and every live
+    /// version comes from `TranscriptAtomizer` over the CANONICAL chunk set. If
+    /// you need either, re-derive it. That is a RULE, not a survey of who
+    /// currently obeys it — `TranscriptCanonicalizationRuleCanaryTests` is what
+    /// enforces it, because the previous form of this paragraph is exactly the
+    /// kind of completeness claim that let four instances of this defect live
+    /// for months.
     ///
     /// Repointing this at `canonicalTimeOrder` would rewrite historical rows,
     /// which the product owner has declined three times; the `WHERE
@@ -19432,8 +19445,15 @@ actor AnalysisStore {
     }
 
     /// Fetch the persisted episode summary for `analysisAssetId`, or nil if
-    /// none exists. The caller is responsible for invalidating against the
-    /// asset's current `transcriptVersion` / `EpisodeSummary.currentSchemaVersion`.
+    /// none exists.
+    ///
+    /// playhead-iu0t R2: this used to say "the caller is responsible for
+    /// invalidating against the asset's current `transcriptVersion` /
+    /// `EpisodeSummary.currentSchemaVersion`". Only the second half happens.
+    /// `fetchEpisodeSummaryBackfillCandidates` tests `s.schemaVersion < ?` and
+    /// nothing else, so a shifted `transcriptVersion` re-queues nothing — the
+    /// column is written, indexed, and never compared. Filed separately; do not
+    /// restore the sentence without a selector that makes it true.
     func fetchEpisodeSummary(assetId: String) throws -> EpisodeSummary? {
         let sql = """
             SELECT analysisAssetId, summary, mainTopicsJSON, notableGuestsJSON,

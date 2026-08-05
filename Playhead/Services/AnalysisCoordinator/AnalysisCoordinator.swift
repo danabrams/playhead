@@ -2219,15 +2219,45 @@ actor AnalysisCoordinator {
         assetId: String
     ) async {
         guard !chunks.isEmpty else { return }
-        // Prefer "final" chunks when available so the catalog reflects the most
-        // accurate transcript pass; otherwise build from whatever we have so a
-        // fast-pass-only episode still surfaces evidence.
-        let preferred: [TranscriptChunk] = {
-            let finals = chunks.filter { $0.pass == "final" }
-            return finals.isEmpty ? chunks : finals
-        }()
+        // playhead-iu0t R1: CANONICALIZE. This block used to read
+        //
+        //     let finals = chunks.filter { $0.pass == "final" }
+        //     return finals.isEmpty ? chunks : finals
+        //
+        // which is the pre-hc7e collapse — the FOURTH surviving instance, and
+        // the one iu0t's own "both are converted now" survey missed. Its stated
+        // intent ("prefer final so the catalog reflects the most accurate pass,
+        // otherwise build from whatever we have") is exactly what
+        // `canonicalize` implements CORRECTLY: final text in the intervals the
+        // final pass re-transcribed, fast text everywhere it did not. The
+        // ternary implemented it as "final text, or nothing, everywhere".
+        //
+        // `FinalPassRetranscriptionRunner` writes `final` rows only around
+        // already-detected candidate windows, so once one final chunk existed
+        // the catalog was built from a candidate-local slice. Measured on the
+        // 2026-08-03 device pull: 11 of 12 assets carry final chunks, and the
+        // collapsed catalog covers 7,295.6 s of 29,817.2 s of canonical
+        // transcript coverage — 24.5 %, worst 1.5 % on 53FC53E3.
+        //
+        // Both totals are over THOSE ELEVEN, which R2 re-derived exactly
+        // (7295.5914 / 29817.1914 = 24.4677 %; 33.96 / 2200.56 = 1.5432 % on
+        // 53FC53E3, the minimum). Say so rather than leave it inferred: the
+        // twelfth asset, 4FF3A238, has no final chunks at all, so the ternary
+        // fell through to the whole transcript there and it belongs in neither
+        // the numerator nor the denominator. Folding it in would read 23.1 %
+        // (counting it as zero) or 28.6 % (counting it as complete), and the
+        // second of those is the one that flatters the defect.
+        //
+        // A banner whose window falls outside the final region gets ZERO
+        // evidence entries, because
+        // `SkipOrchestrator.catalogEntries(overlapping:)` slices by time.
+        // The degradation arrived exactly when the transcript improved.
+        //
+        // It also put this catalog's `transcriptVersion` in a different id
+        // space from the one `runBackfill` builds for the same asset — the two
+        // now agree.
         let (atoms, version) = TranscriptAtomizer.atomize(
-            chunks: preferred,
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
             analysisAssetId: assetId,
             normalizationHash: "norm-v1",
             sourceHash: "asr-v1"

@@ -145,14 +145,51 @@ struct AnalysisStoreEpisodeSummaryBackfillCandidateProvider: EpisodeSummaryBackf
         // missing summary, and such rows are vanishingly rare.
         let summarizerChunks = adFreeChunks.isEmpty ? chunks : adFreeChunks
 
-        // Pick the most recent transcriptVersion observed across the
-        // transcript. Fast-pass chunks carry `nil`, so we fall back to the
-        // last non-nil if any. Derived from the FULL chunk set (not the
-        // ad-filtered one) so the invalidation key tracks the transcript
-        // pass independently of which spans were dropped as ads.
-        let transcriptVersion = chunks
-            .compactMap(\.transcriptVersion)
-            .last
+        // playhead-iu0t R2: DERIVE the version from the canonical chunk set,
+        // the way every other consumer does. This line used to read
+        //
+        //     let transcriptVersion = chunks.compactMap(\.transcriptVersion).last
+        //
+        // and its comment said "the most recent transcriptVersion observed
+        // across the transcript". It was neither.
+        //
+        // `transcript_chunks.transcriptVersion` is a PERSISTED column, and the
+        // only thing that ever fills it is
+        // `AnalysisStore.backfillLegacyTranscriptChunksPhase1IfNeeded`, whose
+        // SELECT is `WHERE pass != 'fast'`. Measured on the 2026-08-03 device
+        // pull: all 29,247 `fast` rows carry NULL and all 8,251 `final` rows
+        // carry exactly one value per asset — for 53FC53E3 that value is
+        // `55afd3e8bb41833c004ee7d4b1be7589`, which is this bead's field proof,
+        // the hash of the 32 FINAL chunks alone. So `compactMap` could only
+        // ever return final-pass values, and `.last` picked one of them: the
+        // pre-hc7e final-only collapse, spelled `!= 'fast'` in SQL and read
+        // back out of the database rather than computed here. Neither the
+        // `TranscriptPassType` grep nor the raw-`"final"` grep could see it,
+        // and neither can the rule canary's call-site walk — this is a THIRD
+        // sink for `transcriptVersion`, alongside `TranscriptAtomizer.atomize`
+        // and `.transcriptVersionHash`.
+        //
+        // It also meant the key moved when the FINAL pass moved and stood
+        // still when the FAST transcript grew — while the text the summarizer
+        // actually reads is overwhelmingly fast-pass. An invalidation key that
+        // does not move when its own input does is not an invalidation key.
+        //
+        // Behaviourally this is a no-op TODAY, and deliberately so: nothing
+        // reads `episode_summaries.transcriptVersion` back (the candidate
+        // selector's only staleness test is `schemaVersion < ?`), which is
+        // filed separately. Correcting the value first means the selector has
+        // something true to read when it starts reading it.
+        //
+        // ⚠️ The argument is `chunks`, NOT `summarizerChunks`, and that is
+        // deliberate — it is the one sentence of the original comment worth
+        // keeping, and playhead-iu0t R4 put it back after R2 deleted it along
+        // with the line it annotated. Derived from the FULL chunk set rather
+        // than the ad-filtered one so the invalidation key tracks the
+        // TRANSCRIPT independently of which spans were dropped as ads: an ad
+        // window confirmed after the summary was written must not read as a
+        // new transcript. `summarizerChunks` is three lines above and is the
+        // obvious-looking "fix"; it is the wrong one.
+        let transcriptVersion = SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)
         return EpisodeSummaryBackfillInput(
             analysisAssetId: assetId,
             episodeTitle: asset.episodeTitle,
@@ -299,8 +336,13 @@ actor EpisodeSummaryBackfillCoordinator {
                     return .capabilityUnavailable
                 case .bothPathsRefused:
                     terminallyRefused += 1
-                    // No retry on this pass; the row stays a candidate
-                    // until `transcriptVersion` shifts.
+                    // No retry on this pass. playhead-iu0t R2: this used to say
+                    // "the row stays a candidate until `transcriptVersion`
+                    // shifts" — it does not. No row is written on a refusal, so
+                    // the asset stays a candidate because `s.analysisAssetId IS
+                    // NULL`, and it is re-attempted on every subsequent pass
+                    // regardless of the transcript. `transcriptVersion` is not
+                    // consulted by any selector; see `EpisodeSummary`'s header.
                 case .insufficientCoverage,
                      .unparseableResponse:
                     // Transient — leave for next pass.

@@ -4144,10 +4144,45 @@ actor AdDetectionService {
         // single final chunk existed (a candidate-local atom timeline instead
         // of full-episode coverage), while the lexical/catalog/FM consumers
         // below still saw the RAW mixed-pass array and double-counted the
-        // overlapping fast+final text. Every consumer now reads
-        // `canonicalChunks`. Single-pass transcripts (all-fast or all-final)
-        // pass through byte-identically, so this is a no-op for every asset
-        // that has never had a final-pass run.
+        // overlapping fast+final text. Single-pass transcripts (all-fast or
+        // all-final) pass through byte-identically, so this is a no-op for
+        // every asset that has never had a final-pass run.
+        //
+        // ⚠️ playhead-iu0t: this comment used to end "Every consumer now reads
+        // `canonicalChunks`." IT WAS NOT TRUE, and its untruth is why the
+        // survivors went unfound for months — two separate reviewers had to
+        // rediscover them from device data rather than from the source. hc7e's
+        // removal was LOCAL to this function; the collapse stood in
+        // `retryShadowFMPhaseForSession` (which discarded 2,490 s of a real
+        // episode's transcript — see its own comment for the hash that proves
+        // it), in `runPhase5ProjectorPhase`, and in
+        // `AnalysisCoordinator.pushEvidenceCatalog`.
+        //
+        // Do not restate that as a survey of call sites — a completeness claim
+        // decays silently the moment someone adds a caller. iu0t proved that
+        // twice over: its own first draft of THIS paragraph named two survivors
+        // and asserted "both are converted now", and R1 found a third still
+        // live on the hot path. A prose survey cannot be trusted even when it
+        // is written by the person who just went looking.
+        //
+        // The durable form is a RULE plus something that ENFORCES it. The rule:
+        // any path that hands transcript chunks to `TranscriptAtomizer.atomize`
+        // or `TranscriptAtomizer.transcriptVersionHash` must canonicalize
+        // first, because `transcriptVersion` is derived from the chunks handed
+        // in and `BackfillJobRunner`'s job id embeds it — so an uncanonicalized
+        // caller does not merely read a narrower transcript, it mints rows in
+        // an id space nothing else can find.
+        // `SemanticScanClaim.transcriptVersion(forPersistedChunks:)` exists to
+        // make following that rule a one-liner for callers starting from raw
+        // store rows.
+        //
+        // The enforcement is `TranscriptCanonicalizationRuleCanaryTests`, which
+        // walks every `.swift` file under `Playhead/`, extracts the `chunks:`
+        // argument at every call site of those two functions, and fails unless
+        // each one either canonicalizes inline or is on an allow-list carrying
+        // a written reason. That is what makes the rule survive the next
+        // caller: adding one without canonicalizing is a RED TEST, not a
+        // paragraph somebody has to re-audit by hand.
         // playhead-r5um: TIME-order the canonical array before anything reads
         // it. `canonicalize` time-sorts the MIXED path but returns single-pass
         // input byte-identically — that passthrough is a deliberate contract
@@ -9116,9 +9151,23 @@ actor AdDetectionService {
     ) async {
         guard !chunks.isEmpty else { return }
 
-        // Atomize the same transcript the Phase 4 shadow phase used.
+        // Atomize the same transcript the Phase 4 shadow phase used — which
+        // means the CANONICAL one (playhead-iu0t). This was the third surviving
+        // instance of the pre-hc7e `filter { pass == "final" }` collapse, and
+        // here it made the comment above self-refuting: Phase 4 atomizes
+        // `runBackfill`'s `canonicalChunks`, so re-collapsing to final-only
+        // produced a DIFFERENT atom sequence and therefore different atom
+        // ordinals, and the `bundles` argument — whose region ordinals were
+        // assigned against the Phase 4 atoms — would have been projected onto
+        // atoms that are not the ones it names.
+        //
+        // No production caller reaches this method (see the doc above); its two
+        // call sites are `SpliceSlotOwnershipPhase5GuardTests`, both of which
+        // pass an all-`final` fixture that canonicalize returns unchanged. So
+        // this is a no-op today by measurement, and correct the moment anything
+        // does call it. The dead-in-production half is filed as playhead-tqqu.
         let (atoms, _) = TranscriptAtomizer.atomize(
-            chunks: chunks.filter { $0.pass == "final" }.isEmpty ? chunks : chunks.filter { $0.pass == "final" },
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
             analysisAssetId: analysisAssetId,
             normalizationHash: "norm-v1",
             sourceHash: "asr-v1"
@@ -9234,10 +9283,17 @@ actor AdDetectionService {
     ///
     /// `chunks` must be the SAME array the phase would have atomized, because
     /// the claim's job id is derived from its `transcriptVersion`. That is why
-    /// this takes the chunks rather than re-reading them: `runBackfill` passes
-    /// canonicalized chunks and `retryShadowFMPhaseForSession` passes its
-    /// final-pass-preferred replay set, and each claim must name the job ITS
-    /// caller would have minted.
+    /// this takes the chunks rather than re-reading them: each claim must name
+    /// the job ITS caller would have minted.
+    ///
+    /// playhead-iu0t: both callers now pass the CANONICAL set, so "the job its
+    /// caller would have minted" and "the job any other caller would mint" are
+    /// finally the same row. Until iu0t, `retryShadowFMPhaseForSession` passed
+    /// a final-pass-only replay set, and a claim minted on its behalf named a
+    /// job in an id space no other dispatcher derives — a durable rescue row
+    /// for work nothing could pick up. Do not "simplify" this by re-reading the
+    /// store here: the parameter is what keeps the claim and the phase provably
+    /// in agreement rather than agreeing by coincidence.
     ///
     /// Empty chunks are a no-op: there is no transcript to scan, so there is
     /// nothing to claim (and `runBackfill` has already returned in that case).
@@ -9650,7 +9706,10 @@ actor AdDetectionService {
     ///   • It must be re-entrant against a session whose transcription and
     ///     coarse phases already completed: `BackfillJobRunner.jobId`
     ///     already keys on `transcriptVersion` so duplicate FM jobs are
-    ///     deduped at the store level, not by accident here.
+    ///     deduped at the store level, not by accident here. That dedupe
+    ///     only holds while this path and `runBackfill` derive the version
+    ///     from the SAME chunk set — which, before playhead-iu0t, they did
+    ///     not. See the note above `chunksForReplay`.
     ///   • It does not modify `AnalysisCoordinator` state. The session
     ///     stays in whatever state it was in (typically `.complete`).
     ///   • If the FM capability has flipped back to `false` before the
@@ -9685,16 +9744,47 @@ actor AdDetectionService {
             logger.warning("Shadow retry skipped: failed to fetch chunks for \(analysisAssetId): \(error.localizedDescription)")
             return false
         }
-        // Prefer final-pass chunks for the FM shadow phase — they carry the
-        // higher-accuracy `transcriptVersion` that `BackfillJobRunner.jobId`
-        // consumes for dedupe. When no final-pass chunks exist (the common
-        // case until the charge-gated final-pass backfill phase has run),
-        // fall back to fast-pass chunks. This mirrors the fallback pattern
-        // used at lines 1395 and 2607 of this file. Without the fallback
-        // the shadow-retry drain bails unconditionally because production
-        // currently persists only `pass='fast'` rows.
-        let finalChunks = chunks.filter { $0.pass == TranscriptPassType.final_.rawValue }
-        let chunksForReplay = finalChunks.isEmpty ? chunks : finalChunks
+        // playhead-iu0t: CANONICALIZE, exactly as `runBackfill` does. This line
+        // used to read `finalChunks.isEmpty ? chunks : finalChunks` — the
+        // pre-hc7e `filter { pass == "final" }` collapse, which hc7e removed
+        // from `runBackfill` and left standing here.
+        //
+        // What it cost, measured on the 2026-08-03 device pull. Asset 53FC53E3
+        // held 2,917 `fast` chunks over [0, 2490] and 32 `final` chunks over
+        // [2490, 2525.82]. Its only `backfill_jobs` row, `fm-041dedcf8293523e`,
+        // re-derives byte-exact from the FINAL-ONLY transcript version
+        // (`55afd3e8bb41833c004ee7d4b1be7589`; canonical is `61872a4d…`,
+        // fast-only `766ea8ba…`), so this line is provably the dispatcher that
+        // minted it. The drain screened ONE 36 s window, completed 23 s after
+        // creation at an `adScanFraction` of 0.0142, published cursor 2525.82,
+        // and `countResumableBackfillJobs` then read 0 — 41 minutes of
+        // transcribed audio discarded with no path back.
+        //
+        // Two things the collapse broke, and the canonical set fixes both:
+        //   • REACH. `FinalPassRetranscriptionRunner` writes `final` rows only
+        //     around already-detected candidate windows, so the final set is
+        //     candidate-local by construction. Replaying it hands the FM phase
+        //     a candidate-local timeline in place of the episode.
+        //   • IDENTITY. `TranscriptAtomizer` derives `transcriptVersion` from
+        //     whatever chunks it is given, and `BackfillJobRunner`'s job id
+        //     embeds it — so a final-only replay minted rows in an id space no
+        //     other dispatcher derives. They could not dedupe against
+        //     `runBackfill`'s rows, and `runBackfill` could not resume theirs.
+        //
+        // NOT sorted here, unlike `runBackfill`'s call site. That sort exists
+        // for r5um's RAW readers (`LexicalAnchorRefiner.buildWordStream`, the
+        // `RegionShadowPhase` input), which this path has none of. Everything
+        // this array reaches bottoms out in `TranscriptAtomizer.atomize` or
+        // `TranscriptAtomizer.transcriptVersionHash` — `runShadowFMPhase`
+        // atomizes it, and its `recordSemanticScanClaim` calls hash it — and
+        // both of those order their own input with `canonicalTimeOrder`. So a
+        // sort here would be a line whose deletion nothing could observe.
+        //
+        // Note the shape of that argument, because it is the one that decays:
+        // it is safe only while every TERMINAL reader sorts, not while some
+        // enumerated list of callers happens to. If a raw reader is ever added
+        // below, add the sort — it is idempotent and free.
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
         guard !chunksForReplay.isEmpty else {
             logger.debug("Shadow retry skipped: no transcript chunks for \(analysisAssetId)")
             return false

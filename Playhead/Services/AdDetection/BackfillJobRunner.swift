@@ -1982,11 +1982,16 @@ actor BackfillJobRunner {
     ///     chunks ALONE (the canonical fast+final set hashes to `61872a4d…`), so
     ///     the dispatcher was
     ///     `AdDetectionService.retryShadowFMPhaseForSession`, whose
-    ///     `chunksForReplay = finalChunks.isEmpty ? chunks : finalChunks` still
-    ///     carries the pre-playhead-hc7e `filter { pass == "final" }` collapse
+    ///     `chunksForReplay = finalChunks.isEmpty ? chunks : finalChunks`
+    ///     carried the pre-playhead-hc7e `filter { pass == "final" }` collapse
     ///     that hc7e removed from `runBackfill` — see the comment above
-    ///     `canonicalChunks` there. Filed as **playhead-3ort**; it is a
-    ///     DISCARDED transcript, not an unfinished one.
+    ///     `canonicalChunks` there. Filed as playhead-3ort, consolidated into
+    ///     and FIXED by **playhead-iu0t**: that line now canonicalizes, so the
+    ///     drain replays the episode and mints in the same id space as
+    ///     `runBackfill`. It is a DISCARDED transcript, not an unfinished one —
+    ///     which is why this terminal is still needed: the fix stops the
+    ///     discarding, and this gate is what refuses to call the result
+    ///     `complete` if anything ever narrows the input again.
     ///   * AD5F3A0A — a 4,281 s episode, complete 08-03 08:23:05 with scan
     ///     windows spanning 3–900 s: this one IS the early-transcript shape (the
     ///     900 s tier), filed as playhead-9new. Measured `adScanFraction`

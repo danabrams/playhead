@@ -17,7 +17,12 @@
 //             2,917 fast chunks over [0, 2490] were already on disk, and the
 //             job's persisted transcriptVersion is byte-exact the hash of the
 //             32 FINAL chunks alone, i.e. the dispatcher DISCARDED the fast
-//             pass (`retryShadowFMPhaseForSession`, playhead-3ort).
+//             pass (`retryShadowFMPhaseForSession`, playhead-3ort — fixed in
+//             playhead-iu0t, whose rails are in
+//             `ShadowRetryCanonicalReplayTests`). The two beads are
+//             complementary, not redundant: iu0t stops the discarding, this
+//             terminal is what refuses to call the result `complete` if any
+//             future dispatcher narrows the input again.
 //   AD5F3A0A  4,281 s episode, complete with windows spanning 3–900 s — this
 //             one IS the early-transcript shape (the 900 s tier, playhead-9new).
 //             adScanFraction 0.2068. Its first segment starts at 2.8 s, so its

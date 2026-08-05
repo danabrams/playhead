@@ -5,10 +5,23 @@
 // transcript window (first/middle/last of the transcript chunk list) and
 // persisted in the `episode_summaries` table keyed by `analysisAssetId`.
 //
-// `transcriptVersion` participates as the invalidation key — when the
-// underlying transcript regenerates and produces a new version string,
+// `transcriptVersion` is RECORDED but not yet READ (playhead-iu0t R2).
+// This header used to say it "participates as the invalidation key — when
+// the underlying transcript regenerates and produces a new version string,
 // the backfill coordinator treats any pre-existing row with a stale
-// `transcriptVersion` as missing and queues a fresh generation.
+// `transcriptVersion` as missing and queues a fresh generation." No
+// selector does that. `fetchEpisodeSummaryBackfillCandidates`' only
+// staleness test is `s.schemaVersion < ?`; the column is written, indexed
+// (`idx_episode_summaries_transcript_version`) and never compared. A
+// summary therefore survives any amount of transcript growth.
+//
+// This is the l4i4 shape — every selector reads the STATUS, none reads the
+// MEASUREMENT against it — and it is filed as its own bead rather than
+// fixed here, because making the selector read it changes how much FM work
+// the backfill schedules. What R2 did fix is the VALUE: it used to be the
+// final-only version read back out of `transcript_chunks.transcriptVersion`
+// and is now derived from the canonical chunk set, so the selector has
+// something true to read when it starts reading it.
 
 import Foundation
 
@@ -30,9 +43,9 @@ import Foundation
 ///   - `schemaVersion`: bumped when we materially change the persisted
 ///     shape OR the prompt grammar. Old rows below the current version
 ///     are treated as invalidated by `EpisodeSummaryBackfillCoordinator`.
-///   - `transcriptVersion`: identifies which transcript pass produced
-///     the source text. When the transcript engine emits a new version
-///     for the same asset, the row is treated as invalidated.
+///   - `transcriptVersion`: the CANONICAL transcript version the source
+///     text was drawn from. Recorded only — no selector compares it, so
+///     it does not currently invalidate anything. See the file header.
 ///   - `createdAt`: wall-clock at write time. Used purely for export /
 ///     diagnostics; never load-bearing.
 struct EpisodeSummary: Sendable, Equatable, Hashable, Codable {

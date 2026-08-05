@@ -1159,6 +1159,15 @@ ATOM="Playhead/Services/AdDetection/TranscriptAtom.swift"
 # coverage-lane `BackfillJobRunner`. Two different files whose names differ by
 # a prefix; the RT series mutates this one.
 AJRUN="Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift"
+# playhead-iu0t R1: the analysis COORDINATOR — the actor that drives the
+# session lifecycle and pushes the evidence catalog onto the SkipOrchestrator.
+# Added for CN06, the fourth instance of the pre-hc7e final-only collapse.
+ACOORD="Playhead/Services/AnalysisCoordinator/AnalysisCoordinator.swift"
+# playhead-iu0t R2: the episode-summary backfill coordinator — the FIFTH
+# instance of the collapse, and the one that reached it through the persisted
+# `transcript_chunks.transcriptVersion` column rather than through a call.
+# Added for CN07.
+ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -1167,7 +1176,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
-  "$CLAIM" "$RECON" "$ATOM" "$AJRUN"
+  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF"
 )
 
 FOCUSED_SUITES=(
@@ -1542,6 +1551,24 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AnalysisStoreCoverageRulerTests
   -only-testing:PlayheadTests/AnalysisStoreAdScanCoverageTests
   -only-testing:PlayheadTests/CapOutRetryTests
+  # playhead-iu0t: the shadow-retry drain's replay set (CN series). Three
+  # suites. The bead's own rails are the first; `ShadowRetryTests` is listed
+  # because it is the suite that owns "the drain runs at all" and, until iu0t,
+  # the suite that asserted the DEFECT as the contract — a mutant that broke the
+  # drain outright must be judged by the tests that predate this bead, not only
+  # by its own. `TranscriptChunkCanonicalizerTests` is hc7e's, and is what
+  # separates "the drain picked the wrong set" from "canonicalize itself
+  # changed"; without it a mutation to the canonicalizer would be credited to
+  # the drain. ~50 tests, well under a second.
+  -only-testing:PlayheadTests/ShadowRetryCanonicalReplayTests
+  -only-testing:PlayheadTests/ShadowRetryTests
+  -only-testing:PlayheadTests/TranscriptChunkCanonicalizerTests
+  # playhead-iu0t R1: the RULE, enforced. A SOURCE canary — it reads the
+  # working-tree `.swift` files rather than running the code — so it kills a
+  # mutant at a call site with no behavioural test of its own, which is exactly
+  # the situation `pushEvidenceCatalog` (CN06) was in: private, unseamed, and
+  # covered by nothing. Two tests, no build cost beyond compiling them.
+  -only-testing:PlayheadTests/TranscriptCanonicalizationRuleCanaryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2396,6 +2423,32 @@ T_41MU_PREFIX="a run that starts at the head publishes the honest bound, and lea
 T_41MU_BRIDGE="the hole threshold is the coverage reader's own bridge tolerance, not a fresh constant"
 T_41MU_NONFINITE="R1 — a non-finite MEASUREMENT is an absence, and under-claims like every other reader of it"
 T_41MU_RESUMEHOLE="R2 — the head test measures the RESUME's own first plan, so a hole immediately above the prior cursor freezes it on attempt TWO as well as attempt one"
+
+# playhead-iu0t — the CN series. What the shadow-retry drain REPLAYS.
+T_IU0T_REACH="the drain screens the whole transcript, not just the candidate-local final tail"
+T_IU0T_VERSION="scan rows are stamped with the canonical transcriptVersion, not a drain-private one"
+T_IU0T_RAW="the replay is the canonical set, not the raw persisted rows"
+T_IU0T_JOBID="the drain mints the job id the runBackfill path would mint"
+T_IU0T_CLAIM="a mode-off bail on the drain claims under the canonical job id"
+T_IU0T_ALLFAST="an all-fast transcript replays byte-identically to the pre-fix fallback"
+T_IU0T_FIXTURE="control: the fixture's four candidate chunk sets are all genuinely different"
+# The pre-iu0t suite's own drain rails. Listed as victims for the mutants that
+# stop the drain running at all, so "did it replay the right set" is judged
+# separately from "did it replay anything".
+T_IU0T_FASTFALLBACK="Bug 9-A: shadow retry succeeds with only pass='fast' chunks"
+T_IU0T_MIXEDDRAIN="Bug 9-A: shadow retry drains a mixed-pass asset (fully-overlapped final)"
+T_IU0T_RETRYRUNS="Test B: retry path runs only the shadow phase and clears the flag"
+# R1 — the rule canary. XCTest, so `Suite/method`.
+T_IU0T_RULE="TranscriptCanonicalizationRuleCanaryTests/testEveryTranscriptVersionCallSiteCanonicalizes"
+T_IU0T_SHAPE="TranscriptCanonicalizationRuleCanaryTests/testThePreHc7eFinalOnlyCollapseAppearsNowhereInProduction"
+# R2 — the THIRD sink: the persisted `transcript_chunks.transcriptVersion`
+# column, which no call-site walk can see because there is no call.
+T_IU0T_COLUMN="TranscriptCanonicalizationRuleCanaryTests/testNoProductionConsumerReadsThePersistedChunkTranscriptVersion"
+# R5 — the walk's own rails. Synthetic source, so they are the tests that go red
+# when the SITE FINDER or the canonicalization predicate regresses, as opposed to
+# when the tree does.
+T_IU0T_SPLITLINE="TranscriptCanonicalizationRuleCanaryTests/testTheSiteFinderSeesACallSplitAcrossLines"
+T_IU0T_LAUNDER="TranscriptCanonicalizationRuleCanaryTests/testCanonicalizingAndThenCollapsingIsNotCanonicalized"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4516,6 +4569,232 @@ MUTATIONS=(
   # narrowest possible cut for a defect whose whole signature is "agrees with
   # the right answer until the second attempt".
   "UC09|438|RUNNER|$T_41MU_RESUMEHOLE"
+
+  # ---------------------------------------------------------------------------
+  # playhead-iu0t — WHAT THE SHADOW-RETRY DRAIN REPLAYS (CN01-CN04)
+  #
+  # One line, four ways to write it, and only one is right. The shipped defect
+  # was `finalChunks.isEmpty ? chunks : finalChunks` — the pre-hc7e collapse,
+  # which hc7e removed from `runBackfill` and left standing here. It is worth
+  # four mutants rather than one because the three wrong answers fail
+  # DIFFERENTLY and no single rail sees more than two of them: final-only loses
+  # reach AND identity, fast-only loses only identity (its reach is fine), and
+  # raw loses only identity by a third route (right reach, duplicated evidence,
+  # drifted version). A suite that killed final-only alone would be satisfied by
+  # either of the others.
+  #
+  # All four edit the same three lines, so each takes its own batch on the
+  # M08/M13 anchor rule.
+  # ---------------------------------------------------------------------------
+
+  # Batch 439 — CN01. THE SHIPPED DEFECT, restored verbatim. Not "delete the
+  # canonicalize call" — the exact expression that was on disk at d257a060,
+  # including the `finalChunks` binding, so the mutant reproduces the field row
+  # rather than merely something adjacent to it. On asset 53FC53E3 this is what
+  # discarded 2,917 fast chunks over [0, 2490] and completed a `fullEpisodeScan`
+  # at an adScanFraction of 0.0142.
+  #
+  # It does NOT name `$T_IU0T_ALLFAST` or the two pre-iu0t drain rails: with no
+  # final chunks the restored ternary falls through to the raw array, which for
+  # a single-pass asset is what canonicalize returns anyway. Those tests are
+  # correct to stay green, and naming them would be an expectation the mutant
+  # cannot meet.
+  #
+  # R1 re-run, after the rule canary joined FOCUSED_SUITES: CN01 also reddens
+  # `$T_IU0T_SHAPE`, deterministically — it restores the literal collapse
+  # expression, which is what that canary bans by name. Deliberately NOT added
+  # as a named victim. CN01's claim is about the DRAIN, and pinning it to a
+  # repo-wide source canary would make a future edit to the canary's regex
+  # report as "CN01's expected test never ran". Observed, recorded, not
+  # depended on.
+  "CN01|439|ADSVC|$T_IU0T_REACH;$T_IU0T_VERSION;$T_IU0T_JOBID;$T_IU0T_CLAIM"
+
+  # Batch 440 — CN02. Fast-only: keep the whole fast pass and throw the
+  # higher-accuracy re-transcription away. The complement of CN01, and the
+  # reason CN01 alone is not enough — its REACH is correct, so the reach rail
+  # cannot see it and only the identity rails can. It is also the plausible
+  # over-correction for CN01 ("the fast pass is the one with the coverage"),
+  # which is exactly the kind of fix-introduced defect this queue keeps
+  # producing.
+  #
+  # R1: the rule canary does NOT see CN02, and that is the canary being narrow
+  # rather than broken. It audits the argument at `atomize` call sites;
+  # `chunksForReplay` is handed to `runShadowFMPhase`, whose own atomize
+  # argument is the parameter `chunks` — allow-listed, because the obligation
+  # sits with the callers. Only the behavioural identity rails can see a wrong
+  # chunk set one frame up, which is the whole reason CN02 exists.
+  "CN02|440|ADSVC|$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM"
+
+  # Batch 441 — CN03. No canonicalization at all: replay the raw persisted rows.
+  # The subtlest of the three and the one the FIRST version of this bead's
+  # fixture could not see — its reach is correct AND its chunk count is correct;
+  # what is wrong is that the audio the final pass re-transcribed is present
+  # twice (hc7e's duplicate evidence) and the version drifts from the one
+  # `runBackfill` derives, putting the drain back in a private id space by a
+  # third route. Killed only because the fixture's final region OVERLAPS the
+  # fast coverage; with a disjoint final tail this mutant survives, which is why
+  # the fixture control asserts `droppedFastCount == 2`.
+  "CN03|441|ADSVC|$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM"
+
+  # Batch 442 — CN04, THE VACUITY CONTROL. The replay set is empty, so the
+  # `!chunksForReplay.isEmpty` guard bails and the drain never runs. Every
+  # behavioural rail in the bead must go red, and the PURE fixture control must
+  # stay green — that is the shape a vacuity control has to have here. Without
+  # it, the identity rails above could in principle be satisfied by a store that
+  # happened to contain no rows at all (`allSatisfy` over an empty array is
+  # true), and the reach rail by ambient fixtures. It also names the two
+  # pre-iu0t drain rails and Test B: those predate this bead, so their reddening
+  # is what proves the mutant kills the DRAIN rather than merely this suite.
+  "CN04|442|ADSVC|$T_IU0T_REACH;$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM;$T_IU0T_ALLFAST;$T_IU0T_FASTFALLBACK;$T_IU0T_MIXEDDRAIN;$T_IU0T_RETRYRUNS"
+
+  # Batch 443 — CN06 (playhead-iu0t R1). THE FOURTH INSTANCE, restored verbatim
+  # in `AnalysisCoordinator.pushEvidenceCatalog`, where it was still live after
+  # iu0t declared "both are converted now". Different file, so it is not on the
+  # CN01-CN04 anchor and takes its own batch for the ordinary reason.
+  #
+  # Its victims are the CANARY, not a behavioural rail, and that is the finding
+  # rather than a shortcut: `pushEvidenceCatalog` is private, has no test seam,
+  # and no test in the repo exercises it — which is precisely how the collapse
+  # sat there. A source-level pin is what can see a defect at a call site that
+  # nothing runs. Both canary tests are named because they check different
+  # things (the ARGUMENT is uncanonicalized, and the COLLAPSE SHAPE is back)
+  # and a mutant that only tripped one would mean the other is miswritten.
+  #
+  # There is no CN05: it is the KNOWN GAP entry below (`runPhase5ProjectorPhase`,
+  # production-dead). The number is skipped rather than reused so the gap note
+  # and the battery agree.
+  "CN06|443|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 444 — CN05 (playhead-iu0t R2). The THIRD instance, restored verbatim
+  # in `runPhase5ProjectorPhase`. It was a KNOWN GAP in R1 and is no longer one,
+  # and the reason it stopped being one is itself the R2 finding.
+  #
+  # R1 declined to encode it on the grounds that a mutant on production-dead
+  # code "can only ever be red or meaningless". That was right about a
+  # BEHAVIOURAL rail — the method's only two call sites are tests passing an
+  # all-`final` fixture that canonicalize returns unchanged, so the mutation is
+  # a literal no-op there — but it is wrong about a SOURCE canary, which reads
+  # the call site rather than running it. The reason CN05 nevertheless could not
+  # be encoded in R1 is that the canary's allow-list was keyed
+  # `File.swift|expression`, so `AdDetectionService.swift|chunks` licensed the
+  # collapse in every one of that file's 13,331 lines and the mutant SURVIVED.
+  # R2 re-keyed it `File.swift|declaration|expression`; the entry now licenses
+  # `runShadowFMPhase` and `recordSemanticScanClaim` only, and this mutant dies.
+  #
+  # So CN05 is the mutant that proves the scoping change bites, and it converts
+  # a documented hole into a killed mutant. Both canary tests are named: the
+  # restored expression is both an uncanonicalized ARGUMENT and the literal
+  # COLLAPSE SHAPE.
+  "CN05|444|ADSVC|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 445 — CN07 (playhead-iu0t R2). THE FIFTH INSTANCE, restored verbatim:
+  # the episode-summary invalidation key read back out of the persisted
+  # `transcript_chunks.transcriptVersion` column, which
+  # `backfillLegacyTranscriptChunksPhase1IfNeeded` fills `WHERE pass != 'fast'`
+  # — the collapse spelled as a negation, in SQL, and therefore invisible to
+  # both greps that found the first four AND to the call-site walk, because
+  # reading a column is not a call.
+  #
+  # Its victim is the third canary test only. `hydrate` has no behavioural rail
+  # that could see this: nothing reads `episode_summaries.transcriptVersion`
+  # back (the candidate selector's only staleness test is `schemaVersion < ?`),
+  # which is filed separately — and that absence is precisely why a source pin
+  # is the instrument that can see it. Same lesson as CN06, by a different
+  # route: the sites this defect family survives at are the ones no test runs.
+  "CN07|445|ESUMBF|$T_IU0T_COLUMN"
+
+  # Batch 446 — CN08 (playhead-iu0t R3). THE FIFTH INSTANCE AGAIN, RESPELLED.
+  # Semantically identical to CN07 — the same column, read as the same
+  # invalidation key, at the same line — but written with a closure instead of
+  # a keypath. Before R3 this mutant SURVIVED while CN07 died, because the rule
+  # it violates was policed by three literal substrings and the first of them
+  # was the keypath spelling `\.transcriptVersion` matched with
+  # `String.contains`, not a regex.
+  #
+  # That is why it is worth its own batch rather than being folded into CN07.
+  # CN07 alone proves the canary recognises ONE WAY OF WRITING the defect; a
+  # pair that differ only in spelling is what proves it recognises the DEFECT.
+  # R3 verified the gap directly rather than by reading: it planted this
+  # spelling plus `chunks.last?.transcriptVersion` and a plain-receiver form in
+  # the tree and the whole canary exited 0.
+  #
+  # Same anchor line as CN07, so it takes its own batch on the M08/M13 rule.
+  "CN08|446|ESUMBF|$T_IU0T_COLUMN"
+
+  # Batch 447 — CN09 (playhead-iu0t R4). CN06 RESPELLED: the same collapse at
+  # the same line of `pushEvidenceCatalog`, written `{ chunk in chunk.pass ==
+  # "final" }` instead of `{ $0.pass == "final" }`. CN08 is to CN07 what this is
+  # to CN06, and for the identical reason — R3 fixed rule 3's spelling-bound
+  # needles and did not check rule 2, which was policed by TWO literal
+  # substrings (`filter { $0.pass == "final" }` and the `TranscriptPassType`
+  # form). This spelling matched neither.
+  #
+  # The victim that discriminates is `$T_IU0T_SHAPE`. `$T_IU0T_RULE` reddens
+  # either way — rule 1 checks for the PRESENCE of `canonicalize(`, so it is
+  # spelling-blind by construction and killed CN09 before R4 too. Naming both is
+  # what makes this mutant a measurement rather than a duplicate of CN06: under
+  # R3's literal half-one the SHAPE rail stayed green and the battery would
+  # report CN09 SURVIVED on that victim; under R4's pattern both die.
+  "CN09|447|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 448 — CN10 (playhead-iu0t R5). CN06 RESPELLED A THIRD TIME, and this
+  # one is not about the closure at all: the collapse is gone and the ONLY
+  # change is that the call itself is split across two lines.
+  #
+  #     TranscriptAtomizer
+  #         .atomize(chunks: chunks, …)
+  #
+  # Before R5 that made the call site VANISH — `guardedCalls` held two literal
+  # substrings, so one line break removed it from the walk entirely: not
+  # reported, not counted against the `audited` floor, indistinguishable from a
+  # clean tree. Measured directly rather than reasoned about: the identical
+  # uncanonicalized argument planted INLINE reddened rule 1 and named the site;
+  # planted SPLIT it passed. CN09 is to CN06 what this is to CN01-style raw
+  # replay — the pair differing only in spelling is what proves the rule is
+  # about the defect rather than about one way of writing it.
+  #
+  # `$T_IU0T_RULE` is the discriminating victim. `$T_IU0T_SHAPE` is NOT named:
+  # this mutant contains no final-pass filter, so rule 2 is correct to stay
+  # green and naming it would be an expectation the mutant cannot meet.
+  "CN10|448|ACOORD|$T_IU0T_RULE"
+
+  # Batch 449 — CN11 (playhead-iu0t R5). The collapse spelled as a NEGATION:
+  # `filter { $0.pass != "fast" }` with the same `.isEmpty ? chunks :` fallback.
+  # Semantically CN06 exactly — "keep the final pass" and "drop the fast pass"
+  # are one instruction — and it is not a hypothetical spelling: instance #5 of
+  # this bead's five IS the negation (`AnalysisStore
+  # .backfillLegacyTranscriptChunksPhase1IfNeeded`, `WHERE pass != 'fast'`), and
+  # this file's own header already calls it "the collapse spelled as a
+  # negation". R4's pattern was receiver-agnostic but still required `==`
+  # against one of three final literals, so it did not see this.
+  #
+  # `$T_IU0T_SHAPE` is the discriminating victim — under R4's pattern it stayed
+  # green. `$T_IU0T_RULE` reddens either way, because rule 1 judges the
+  # ARGUMENT and `preferred` resolves to no canonicalizing binding whatever the
+  # filter says. Naming both is what makes this a measurement rather than a
+  # duplicate of CN06.
+  "CN11|449|ACOORD|$T_IU0T_RULE;$T_IU0T_SHAPE"
+
+  # Batch 450 — CN12 (playhead-iu0t R5). LAUNDERING: the site canonicalizes and
+  # then collapses the result anyway.
+  #
+  #     chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+  #         .filter { $0.pass == "final" }
+  #
+  # This passed rule 1 before R5 because the check named `isCanonicalized`
+  # actually tested whether the token `canonicalize(` APPEARS — the bead's own
+  # defect class (a value that names one thing, read as though it named
+  # another) committed inside the check named for it, failing OPEN. Rule 2
+  # cannot cover it either: its conjunction needs the `X.isEmpty ? chunks : X`
+  # fallback and a bare `.filter` has none.
+  #
+  # Worth its own batch rather than folding into CN06 because it is the mutant
+  # that separates "the argument mentions canonicalize" from "the argument IS
+  # the canonical set" — and because fixing `isCanonicalized` alone did NOT
+  # kill it: a duplicated bare `argument.contains("canonicalize(")` one line
+  # below still let it through, which is how the fix's own reintroduction was
+  # caught.
+  "CN12|450|ACOORD|$T_IU0T_RULE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4567,6 +4846,27 @@ MUTATIONS=(
 #   [.fullEpisodeScan]` and then builds the id the way `runPendingBackfill`
 #   does. Change the plan and it goes red. The claim's own side of the coupling
 #   stays mutation-covered by SC05, which names this same test.
+#
+#   CN05 (playhead-iu0t) — RESOLVED in R2; it is encoded above as batch 444 and
+#   this entry is kept only because the reasoning that closed it is worth more
+#   than the hole was.
+#
+#   R1 left it out: restoring `filter { $0.pass == "final" }` inside
+#   `AdDetectionService.runPhase5ProjectorPhase` changes nothing observable,
+#   because the method has no production caller at all — its only two call sites
+#   are `SpliceSlotOwnershipPhase5GuardTests`, both passing an all-`final`
+#   fixture that canonicalize returns unchanged. That argument is sound for a
+#   BEHAVIOURAL rail and it is what "a mutant on unreachable code can only ever
+#   be red or meaningless" meant.
+#
+#   It stops being sound the moment the victim is a SOURCE canary, which reads
+#   the call site instead of running it. The real reason CN05 could not be
+#   encoded in R1 was narrower and fixable: the canary's allow-list was keyed
+#   `File.swift|expression`, so one entry (`AdDetectionService.swift|chunks`)
+#   licensed the collapse anywhere in a 13,331-line file. R2 re-keyed it to
+#   `File.swift|declaration|expression` and the mutant dies. The dead-code
+#   question is still open and still filed as **playhead-tqqu** — encoding CN05
+#   pins the call site, it does not decide whether the method should exist.
 
 # One-line description per mutation, for the report.
 describe_mutation() {
@@ -4909,6 +5209,18 @@ describe_mutation() {
     UC07) echo "41mu VACUITY CONTROL: the terminal refuses unconditionally, deferring episodes that were genuinely read" ;;
     UC08) echo "41mu R1: a non-finite measured fraction completes the job again — the terminal alone reads an absence as 'read'" ;;
     UC09) echo "41mu R2: the cursor's head test reads the caller's PRE-narrowing segment list again, so no resume can ever detect a hole above its cursor" ;;
+    CN01) echo "iu0t: THE SHIPPED DEFECT — the drain replays the final-only chunk set again, verbatim (53FC53E3's discarded 2,490 s)" ;;
+    CN02) echo "iu0t: the drain replays fast-only, throwing the re-transcription away — right reach, wrong identity" ;;
+    CN03) echo "iu0t: the drain replays the RAW rows, so overlapped audio is scanned twice and the version drifts from runBackfill's" ;;
+    CN04) echo "iu0t VACUITY CONTROL: the replay set is empty, so the drain never runs at all" ;;
+    CN06) echo "iu0t R1: the FOURTH collapse — pushEvidenceCatalog builds the banner evidence catalog from the final-only slice again" ;;
+    CN05) echo "iu0t R2: the THIRD collapse restored at runPhase5ProjectorPhase — killable only once the allow-list is keyed per DECLARATION, not per file" ;;
+    CN07) echo "iu0t R2: the FIFTH collapse — the episode-summary invalidation key read back out of the final-only persisted transcriptVersion column" ;;
+    CN08) echo "iu0t R3: CN07 RESPELLED with a closure instead of a keypath — the same read of the same column, which survived while CN07 died" ;;
+    CN09) echo "iu0t R4: CN06 RESPELLED with a named closure parameter — the collapse shape rule matched two literal spellings and not this one" ;;
+    CN10) echo "iu0t R5: an uncanonicalized atomize call SPLIT ACROSS LINES — the site finder was a literal substring, so one line break removed the call site from the walk" ;;
+    CN11) echo "iu0t R5: CN06 spelled as a NEGATION (pass != fast) — the same collapse as instance #5, which the collapse-shape pattern required == to see" ;;
+    CN12) echo "iu0t R5: LAUNDERING — the site canonicalizes and then filters to final anyway, which passed because the check tested for the TOKEN canonicalize( rather than the value" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10780,6 +11092,217 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-iu0t: the shadow-retry drain's replay set (CN series) ----
+  #
+  # All four cut the same statement in `retryShadowFMPhaseForSession`, so the
+  # anchor is shared and each needs its own batch. The anchor is the STATEMENT,
+  # not the surrounding comment: the comment above it is 30 lines of field
+  # evidence that no mutation should have to carry, and including it would make
+  # every one of these anchors drift the first time a word of it is edited.
+
+  # CN01 — THE SHIPPED DEFECT, restored exactly as it stood on `main` at
+  # d257a060, `finalChunks` binding and all. Anything less literal (say, just
+  # `chunks.filter { ... }`) would be a different defect that happens to be
+  # nearby; this one is the row on the device.
+  CN01)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let finalChunks = chunks.filter { $0.pass == TranscriptPassType.final_.rawValue }
+        let chunksForReplay = finalChunks.isEmpty ? chunks : finalChunks
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN02 — the over-correction: keep the fast pass, drop the final one. Reach is
+  # correct, so only the identity rails can see it.
+  CN02)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let chunksForReplay = chunks.filter { $0.pass != TranscriptPassType.final_.rawValue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN03 — no canonicalization at all. The narrowest possible cut: the call is
+  # removed and nothing else moves.
+  CN03)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let chunksForReplay = chunks
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN04 — VACUITY CONTROL. Nothing is replayed, so the empty guard below bails
+  # and the drain never runs. Every behavioural rail must die; the pure fixture
+  # control must not.
+  CN04)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let chunksForReplay: [TranscriptChunk] = []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN06 — the fourth instance, restored exactly as it stood in
+  # `AnalysisCoordinator.pushEvidenceCatalog` before playhead-iu0t R1,
+  # `preferred` binding and all. Restoring the BINDING rather than inlining a
+  # closure into the argument matters twice: it is what was actually on disk, and
+  # it exercises the canary's local-binding resolution rather than only its
+  # inline-expression path — a mutant that only ever appeared inline would leave
+  # the two-hop resolver unproven.
+  #
+  # The anchor is the two-line atomize call, not the 20-line comment above it:
+  # the comment is the measurement of what this cost, and no mutation should
+  # have to carry it.
+  CN06)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let preferred: [TranscriptChunk] = {
+            let finals = chunks.filter { $0.pass == "final" }
+            return finals.isEmpty ? chunks : finals
+        }()
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: preferred,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN05 — the THIRD instance, restored exactly as it stood before playhead-iu0t
+  # in `runPhase5ProjectorPhase`, ternary and all. The victim is the rule canary,
+  # not a behavioural rail: nothing in production calls this method. It is
+  # encodable at all only because the allow-list is keyed per DECLARATION —
+  # under the file-scoped key this mutant survived. See the batch-444 note.
+  CN05)
+    snippet OLD <<'EOF'
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let (atoms, _) = TranscriptAtomizer.atomize(
+            chunks: chunks.filter { $0.pass == "final" }.isEmpty ? chunks : chunks.filter { $0.pass == "final" },
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN07 — the FIFTH instance, restored exactly as it stood before
+  # playhead-iu0t R2: the episode-summary invalidation key read out of the
+  # persisted `transcript_chunks.transcriptVersion` column, which is populated
+  # `WHERE pass != 'fast'` and therefore holds a final-only version.
+  CN07)
+    snippet OLD <<'EOF'
+        let transcriptVersion = SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)
+EOF
+    snippet NEW <<'EOF'
+        let transcriptVersion = chunks
+            .compactMap(\.transcriptVersion)
+            .last
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN08 — CN07's defect, respelled with a closure instead of a keypath. The
+  # SAME read of the SAME column at the SAME line; only the syntax differs.
+  # It survived until playhead-iu0t R3, because the rule was enforced by the
+  # literal substring `\.transcriptVersion` rather than by a pattern that knows
+  # what a read of the column looks like.
+  CN08)
+    snippet OLD <<'EOF'
+        let transcriptVersion = SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks)
+EOF
+    snippet NEW <<'EOF'
+        let transcriptVersion = chunks
+            .compactMap { $0.transcriptVersion }
+            .last
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN09 — CN06's defect, respelled with a named closure parameter. The SAME
+  # collapse at the SAME line; only the closure's binding differs. It escaped
+  # the collapse-shape rule until playhead-iu0t R4, because that rule's first
+  # half was two literal substrings rather than a pattern.
+  CN09)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let preferred: [TranscriptChunk] = {
+            let finals = chunks.filter { chunk in chunk.pass == "final" }
+            return finals.isEmpty ? chunks : finals
+        }()
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: preferred,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN10 — playhead-iu0t R5. The NARROWEST possible cut for the site-finder
+  # defect: the argument becomes the raw `chunks` AND the call is split across
+  # two lines. No collapse, no ternary, no closure — the whole point is that
+  # the line break alone is what used to make it invisible, so anything more
+  # elaborate would be a different mutant that happens to also be split.
+  # The anchor is the whole call rather than its first two lines, unlike CN06 /
+  # CN09 / CN11 / CN12: splitting the receiver from the member re-indents every
+  # argument, and leaving the tail at the old indent would make the mutant's
+  # own formatting, rather than its semantics, the thing a reader notices.
+  CN10)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+            analysisAssetId: assetId,
+            normalizationHash: "norm-v1",
+            sourceHash: "asr-v1"
+        )
+EOF
+    snippet NEW <<'EOF'
+        let (atoms, version) = TranscriptAtomizer
+            .atomize(
+                chunks: chunks,
+                analysisAssetId: assetId,
+                normalizationHash: "norm-v1",
+                sourceHash: "asr-v1"
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN11 — playhead-iu0t R5. CN06's collapse spelled as a negation against the
+  # FAST pass instead of an equality against the FINAL one. Identical semantics,
+  # identical line; only the operator and the literal differ. This is instance
+  # #5's spelling, lifted out of SQL into Swift.
+  CN11)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let preferred: [TranscriptChunk] = {
+            let finals = chunks.filter { $0.pass != "fast" }
+            return finals.isEmpty ? chunks : finals
+        }()
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: preferred,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN12 — playhead-iu0t R5. The site canonicalizes and then collapses the
+  # result anyway. The `canonicalize(` call is KEPT deliberately: a mutant that
+  # removed it would be CN03's shape and would prove nothing about laundering.
+  # What is added is the `.filter`, and it is the whole mutation.
+  CN12)
+    snippet OLD <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
+EOF
+    snippet NEW <<'EOF'
+        let (atoms, version) = TranscriptAtomizer.atomize(
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks.filter { $0.pass == "final" },
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # SC15 — the selector drops the transcript requirement.
   SC15)
     snippet OLD <<'EOF'
@@ -10943,6 +11466,8 @@ rec_file()   {
     SEAMS) printf '%s' "$SEAMS" ;;
     ACT)   printf '%s' "$ACT" ;;
     ADSVC) printf '%s' "$ADSVC" ;;
+    ACOORD) printf '%s' "$ACOORD" ;;
+    ESUMBF) printf '%s' "$ESUMBF" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
