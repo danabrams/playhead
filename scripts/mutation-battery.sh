@@ -1542,6 +1542,18 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AnalysisStoreCoverageRulerTests
   -only-testing:PlayheadTests/AnalysisStoreAdScanCoverageTests
   -only-testing:PlayheadTests/CapOutRetryTests
+  # playhead-iu0t: the shadow-retry drain's replay set (CN series). Three
+  # suites. The bead's own rails are the first; `ShadowRetryTests` is listed
+  # because it is the suite that owns "the drain runs at all" and, until iu0t,
+  # the suite that asserted the DEFECT as the contract — a mutant that broke the
+  # drain outright must be judged by the tests that predate this bead, not only
+  # by its own. `TranscriptChunkCanonicalizerTests` is hc7e's, and is what
+  # separates "the drain picked the wrong set" from "canonicalize itself
+  # changed"; without it a mutation to the canonicalizer would be credited to
+  # the drain. ~50 tests, well under a second.
+  -only-testing:PlayheadTests/ShadowRetryCanonicalReplayTests
+  -only-testing:PlayheadTests/ShadowRetryTests
+  -only-testing:PlayheadTests/TranscriptChunkCanonicalizerTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2396,6 +2408,21 @@ T_41MU_PREFIX="a run that starts at the head publishes the honest bound, and lea
 T_41MU_BRIDGE="the hole threshold is the coverage reader's own bridge tolerance, not a fresh constant"
 T_41MU_NONFINITE="R1 — a non-finite MEASUREMENT is an absence, and under-claims like every other reader of it"
 T_41MU_RESUMEHOLE="R2 — the head test measures the RESUME's own first plan, so a hole immediately above the prior cursor freezes it on attempt TWO as well as attempt one"
+
+# playhead-iu0t — the CN series. What the shadow-retry drain REPLAYS.
+T_IU0T_REACH="the drain screens the whole transcript, not just the candidate-local final tail"
+T_IU0T_VERSION="scan rows are stamped with the canonical transcriptVersion, not a drain-private one"
+T_IU0T_RAW="the replay is the canonical set, not the raw persisted rows"
+T_IU0T_JOBID="the drain mints the job id the runBackfill path would mint"
+T_IU0T_CLAIM="a mode-off bail on the drain claims under the canonical job id"
+T_IU0T_ALLFAST="an all-fast transcript replays byte-identically to the pre-fix fallback"
+T_IU0T_FIXTURE="control: the fixture's four candidate chunk sets are all genuinely different"
+# The pre-iu0t suite's own drain rails. Listed as victims for the mutants that
+# stop the drain running at all, so "did it replay the right set" is judged
+# separately from "did it replay anything".
+T_IU0T_FASTFALLBACK="Bug 9-A: shadow retry succeeds with only pass='fast' chunks"
+T_IU0T_MIXEDDRAIN="Bug 9-A: shadow retry drains a mixed-pass asset (fully-overlapped final)"
+T_IU0T_RETRYRUNS="Test B: retry path runs only the shadow phase and clears the flag"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -4516,6 +4543,68 @@ MUTATIONS=(
   # narrowest possible cut for a defect whose whole signature is "agrees with
   # the right answer until the second attempt".
   "UC09|438|RUNNER|$T_41MU_RESUMEHOLE"
+
+  # ---------------------------------------------------------------------------
+  # playhead-iu0t — WHAT THE SHADOW-RETRY DRAIN REPLAYS (CN01-CN04)
+  #
+  # One line, four ways to write it, and only one is right. The shipped defect
+  # was `finalChunks.isEmpty ? chunks : finalChunks` — the pre-hc7e collapse,
+  # which hc7e removed from `runBackfill` and left standing here. It is worth
+  # four mutants rather than one because the three wrong answers fail
+  # DIFFERENTLY and no single rail sees more than two of them: final-only loses
+  # reach AND identity, fast-only loses only identity (its reach is fine), and
+  # raw loses only identity by a third route (right reach, duplicated evidence,
+  # drifted version). A suite that killed final-only alone would be satisfied by
+  # either of the others.
+  #
+  # All four edit the same three lines, so each takes its own batch on the
+  # M08/M13 anchor rule.
+  # ---------------------------------------------------------------------------
+
+  # Batch 439 — CN01. THE SHIPPED DEFECT, restored verbatim. Not "delete the
+  # canonicalize call" — the exact expression that was on disk at d257a060,
+  # including the `finalChunks` binding, so the mutant reproduces the field row
+  # rather than merely something adjacent to it. On asset 53FC53E3 this is what
+  # discarded 2,917 fast chunks over [0, 2490] and completed a `fullEpisodeScan`
+  # at an adScanFraction of 0.0142.
+  #
+  # It does NOT name `$T_IU0T_ALLFAST` or the two pre-iu0t drain rails: with no
+  # final chunks the restored ternary falls through to the raw array, which for
+  # a single-pass asset is what canonicalize returns anyway. Those tests are
+  # correct to stay green, and naming them would be an expectation the mutant
+  # cannot meet.
+  "CN01|439|ADSVC|$T_IU0T_REACH;$T_IU0T_VERSION;$T_IU0T_JOBID;$T_IU0T_CLAIM"
+
+  # Batch 440 — CN02. Fast-only: keep the whole fast pass and throw the
+  # higher-accuracy re-transcription away. The complement of CN01, and the
+  # reason CN01 alone is not enough — its REACH is correct, so the reach rail
+  # cannot see it and only the identity rails can. It is also the plausible
+  # over-correction for CN01 ("the fast pass is the one with the coverage"),
+  # which is exactly the kind of fix-introduced defect this queue keeps
+  # producing.
+  "CN02|440|ADSVC|$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM"
+
+  # Batch 441 — CN03. No canonicalization at all: replay the raw persisted rows.
+  # The subtlest of the three and the one the FIRST version of this bead's
+  # fixture could not see — its reach is correct AND its chunk count is correct;
+  # what is wrong is that the audio the final pass re-transcribed is present
+  # twice (hc7e's duplicate evidence) and the version drifts from the one
+  # `runBackfill` derives, putting the drain back in a private id space by a
+  # third route. Killed only because the fixture's final region OVERLAPS the
+  # fast coverage; with a disjoint final tail this mutant survives, which is why
+  # the fixture control asserts `droppedFastCount == 2`.
+  "CN03|441|ADSVC|$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM"
+
+  # Batch 442 — CN04, THE VACUITY CONTROL. The replay set is empty, so the
+  # `!chunksForReplay.isEmpty` guard bails and the drain never runs. Every
+  # behavioural rail in the bead must go red, and the PURE fixture control must
+  # stay green — that is the shape a vacuity control has to have here. Without
+  # it, the identity rails above could in principle be satisfied by a store that
+  # happened to contain no rows at all (`allSatisfy` over an empty array is
+  # true), and the reach rail by ambient fixtures. It also names the two
+  # pre-iu0t drain rails and Test B: those predate this bead, so their reddening
+  # is what proves the mutant kills the DRAIN rather than merely this suite.
+  "CN04|442|ADSVC|$T_IU0T_REACH;$T_IU0T_VERSION;$T_IU0T_RAW;$T_IU0T_JOBID;$T_IU0T_CLAIM;$T_IU0T_ALLFAST;$T_IU0T_FASTFALLBACK;$T_IU0T_MIXEDDRAIN;$T_IU0T_RETRYRUNS"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -4567,6 +4656,22 @@ MUTATIONS=(
 #   [.fullEpisodeScan]` and then builds the id the way `runPendingBackfill`
 #   does. Change the plan and it goes red. The claim's own side of the coupling
 #   stays mutation-covered by SC05, which names this same test.
+#
+#   CN05 (playhead-iu0t) — restore `filter { $0.pass == "final" }` inside
+#   `AdDetectionService.runPhase5ProjectorPhase`, the THIRD instance of the same
+#   collapse, which iu0t also converted. It would survive, and not because a
+#   test is missing: the method has no production caller at all. Its only two
+#   call sites are `SpliceSlotOwnershipPhase5GuardTests`, both of which pass an
+#   all-`final` fixture that canonicalize returns unchanged, so the mutation is
+#   a literal no-op there. Production's Phase-5 projection is a separate inline
+#   block in `runBackfill`.
+#
+#   NOT ENCODED because a mutant on unreachable code can only ever be red or
+#   meaningless, and the honest fix is not a test — it is deciding whether the
+#   method should exist. Filed as **playhead-tqqu** with the three options. This
+#   is the "a correct mechanism production never invokes" family, and the note
+#   is here so the next person to grep for it finds the reason rather than the
+#   hole.
 
 # One-line description per mutation, for the report.
 describe_mutation() {
@@ -4909,6 +5014,10 @@ describe_mutation() {
     UC07) echo "41mu VACUITY CONTROL: the terminal refuses unconditionally, deferring episodes that were genuinely read" ;;
     UC08) echo "41mu R1: a non-finite measured fraction completes the job again — the terminal alone reads an absence as 'read'" ;;
     UC09) echo "41mu R2: the cursor's head test reads the caller's PRE-narrowing segment list again, so no resume can ever detect a hole above its cursor" ;;
+    CN01) echo "iu0t: THE SHIPPED DEFECT — the drain replays the final-only chunk set again, verbatim (53FC53E3's discarded 2,490 s)" ;;
+    CN02) echo "iu0t: the drain replays fast-only, throwing the re-transcription away — right reach, wrong identity" ;;
+    CN03) echo "iu0t: the drain replays the RAW rows, so overlapped audio is scanned twice and the version drifts from runBackfill's" ;;
+    CN04) echo "iu0t VACUITY CONTROL: the replay set is empty, so the drain never runs at all" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -10777,6 +10886,62 @@ EOF
 EOF
     snippet NEW <<'EOF'
             firstPlannedSegmentStartSec: rootInputs.segments.first?.startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-iu0t: the shadow-retry drain's replay set (CN series) ----
+  #
+  # All four cut the same statement in `retryShadowFMPhaseForSession`, so the
+  # anchor is shared and each needs its own batch. The anchor is the STATEMENT,
+  # not the surrounding comment: the comment above it is 30 lines of field
+  # evidence that no mutation should have to carry, and including it would make
+  # every one of these anchors drift the first time a word of it is edited.
+
+  # CN01 — THE SHIPPED DEFECT, restored exactly as it stood on `main` at
+  # d257a060, `finalChunks` binding and all. Anything less literal (say, just
+  # `chunks.filter { ... }`) would be a different defect that happens to be
+  # nearby; this one is the row on the device.
+  CN01)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let finalChunks = chunks.filter { $0.pass == TranscriptPassType.final_.rawValue }
+        let chunksForReplay = finalChunks.isEmpty ? chunks : finalChunks
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN02 — the over-correction: keep the fast pass, drop the final one. Reach is
+  # correct, so only the identity rails can see it.
+  CN02)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let chunksForReplay = chunks.filter { $0.pass != TranscriptPassType.final_.rawValue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN03 — no canonicalization at all. The narrowest possible cut: the call is
+  # removed and nothing else moves.
+  CN03)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let chunksForReplay = chunks
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # CN04 — VACUITY CONTROL. Nothing is replayed, so the empty guard below bails
+  # and the drain never runs. Every behavioural rail must die; the pure fixture
+  # control must not.
+  CN04)
+    snippet OLD <<'EOF'
+        let chunksForReplay = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+EOF
+    snippet NEW <<'EOF'
+        let chunksForReplay: [TranscriptChunk] = []
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
