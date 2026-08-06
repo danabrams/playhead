@@ -32,12 +32,18 @@
 // design grant below is derived from the FIRST mode only, and the second mode is
 // deliberately left to cancellation.
 //
-// NOT A KILL SWITCH. Every consumer of these values checks them BEFORE starting
-// a unit of work, never during one. A deadline that has passed stops the next
-// pass; it does not interrupt the pass in flight. Interruption is the
-// expiration handler's job (it cancels the work task AND tells
-// `AnalysisWorkScheduler` its grant is over, so the in-flight job checkpoints
-// and requeues rather than being abandoned mid-flight).
+// NOT A KILL SWITCH. `designGrant`, `workBudget` and `minimumCheckpointBudget`
+// are checked BEFORE starting a unit of work, never during one. A deadline that
+// has passed stops the next pass; it does not interrupt the pass in flight.
+// Interruption is the handler's job — at the work deadline on the normal path
+// and in the expiration handler when the OS gets there first, and both of them
+// cancel the work task AND tell `AnalysisWorkScheduler` the grant is over, so
+// the in-flight job requeues rather than being abandoned mid-flight.
+//
+// `teardownReserve` is the one exception and is deliberately different: it is
+// spent DURING teardown, as a live timeout on how long the handler may wait for
+// that requeue to commit before it must call `setTaskCompleted` anyway. See
+// `remainingTeardownReserve(since:now:)`.
 
 import Foundation
 
@@ -248,22 +254,34 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// `com.playhead.app.analysis.backfill.charged` — the playhead-i6oi
     /// charger-maintenance sibling, which shares `handleBackfillTask`.
     ///
-    /// **ASSUMED, NOT MEASURED, AND DELIBERATELY DIFFERENT.** The 2026-08-06
-    /// pull contains **zero** rows for this identifier — `SELECT DISTINCT
-    /// taskIdentifier FROM background_task_runs` returns only the plain
-    /// backfill, recovery and rediff ids — so there is no observation of what
-    /// iOS grants a charger-class window. Applying the plain identifier's
-    /// measured 219 s here would be the exact error this type exists to prevent:
-    /// a number measured on one population spent on another. It would also be a
-    /// live regression risk, because the charger class is expected to grant
-    /// LONGER windows (that is the whole point of playhead-i6oi) and a 219 s cap
-    /// would surrender the rest of an overnight grant.
+    /// **ASSUMED, NOT MEASURED, AND DELIBERATELY DIFFERENT.** There is no
+    /// observation of what iOS grants a charger-class window. Applying the
+    /// plain identifier's measured 219 s here would be the exact error this
+    /// type exists to prevent: a number measured on one population spent on
+    /// another. It would also be a live regression risk, because the charger
+    /// class is expected to grant LONGER windows (that is the whole point of
+    /// playhead-i6oi) and a 219 s cap would surrender the rest of an overnight
+    /// grant.
+    ///
+    /// **WHY "NO OBSERVATION" IS NOT THE SAME AS "IT NEVER RAN", corrected in
+    /// the lmrx review round.** The first draft justified this with `SELECT
+    /// DISTINCT taskIdentifier FROM background_task_runs` returning only the
+    /// plain backfill, recovery and rediff ids. That query could not have
+    /// returned anything else: `handleBackfillTask` serves BOTH identifiers and
+    /// hardcoded the plain one on every ledger and telemetry write, so
+    /// `taskIdentifier` named which HANDLER ran and was being read as which
+    /// CLASS the OS granted. Absence produced by the instrumentation is not
+    /// evidence about the world — the same defect this type exists to remove,
+    /// one layer up. It also means any charger-class window that did run is
+    /// inside the 203 expired rows ``backfillProcessing`` was derived from;
+    /// nothing in that population exceeds 321.4 s, so no long charger-class
+    /// grant is visibly in it, but that is an argument from the data rather
+    /// than from the recording.
     ///
     /// So this keeps the 30-minute horizon the handler assumed before
     /// playhead-lmrx — no behaviour change for the class nobody has measured —
-    /// and says out loud that it is an assumption. The next pull can settle it:
-    /// `background_task_runs` already records `taskIdentifier`, and as of this
-    /// bead it also records what each window achieved.
+    /// and says out loud that it is an assumption. The handler now threads its
+    /// real identifier, so the NEXT pull genuinely can settle this.
     static let backfillProcessingCharged = BackgroundGrantBudget(
         designGrant: .seconds(1800),
         teardownReserve: .seconds(36),
@@ -282,6 +300,22 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// the same 255/36 split applies. Shortening its drain from 300 s to 219 s
     /// is safe against that 164.4 s maximum, and marked `.assumed` because the
     /// grant length itself was borrowed rather than observed on this identifier.
+    ///
+    /// **THE BORROW HAS SUPPORTING EVIDENCE, added in the lmrx review round
+    /// because "same OS class" was asserted rather than shown.** The 5 expired
+    /// recovery runs are 41.6 / 42.5 / 126.4 / 289.7 / **294.9 s** — the top of
+    /// that range sits on the same ~295 s ceiling the 132 full-length backfill
+    /// expiries do, which is what a shared OS class looks like. It stays
+    /// `.assumed` because five observations of a ceiling is not a percentile.
+    ///
+    /// **What the change costs recovery, stated so it is not discovered later.**
+    /// The old bound was `now + 300 s` read AT THE DRAIN CALL, i.e. after
+    /// `reconcile()`; the new one is `grantStart + 219 s`, and no pass may start
+    /// after `grantStart + 159 s`. Against a ~295 s grant the old bound was
+    /// never the binding constraint — the OS was — so the drain loses roughly
+    /// the reserve plus the floor. That binds on 5 of the 97 recorded runs, and
+    /// all five of those ended in expiry, which is the outcome the reserve
+    /// exists to convert into a recorded one.
     static let preAnalysisRecovery = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),

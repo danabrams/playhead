@@ -497,10 +497,14 @@ actor AnalysisCoordinator {
     ///
     ///   The 25-minute cap it replaced was not merely generous, it was
     ///   self-defeating: the measured grant is 294 s (p50, n=203 expired
-    ///   backfill runs), so the loop could never return normally, and
-    ///   `handleBackfillTask`'s terminal `finishRun` — the one write that
-    ///   records `jobsSeen`/`jobsAdmitted` — sat downstream of a return that
-    ///   never happened. That is why all 203 expired rows carry NULL counters.
+    ///   backfill runs), so whenever work was still PENDING the loop outlived
+    ///   the window and `handleBackfillTask`'s terminal `finishRun` — the one
+    ///   write that records `jobsSeen`/`jobsAdmitted` — sat downstream of a
+    ///   return the OS never let it reach. That is why all 203 expired rows
+    ///   carry NULL counters. (The loop could always return EARLY on two
+    ///   consecutive empty polls, which is what the 51 normal returns in the
+    ///   same pull are; the deadline was the binding constraint only in the
+    ///   80 % of windows where the queue stayed non-empty.)
     func runPendingBackfill(deadline: ContinuousClock.Instant) async {
         // Clear any prior stop request. stop() sets this flag to break the
         // polling loop in a previous backfill run, but a NEW backfill invocation

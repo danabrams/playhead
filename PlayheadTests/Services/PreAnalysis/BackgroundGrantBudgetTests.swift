@@ -380,6 +380,35 @@ struct GrantCompletionPopulationTests {
                 "a count delta would read 0 here, for a window that completed a job")
     }
 
+    @Test("a graceful coverage give-up IS counted, and that is deliberate",
+          .timeLimit(.minutes(1)))
+    func gracefulGiveUpIsCounted() async throws {
+        // The other edge of the predicate, pinned so the choice is a decision
+        // rather than an accident. `coverageInsufficient`'s no-progress and
+        // retry-exhaustion arms both terminate `state = 'complete'` and both
+        // emit `work_journal.finalized` — a job that ran end-to-end under our
+        // lease, will never requeue, and did not fail.
+        //
+        // The narrower reading ("reached its coverage TARGET") is a different
+        // question with its own instrument in the coverage program. Splitting it
+        // out HERE would give one ledger two definitions of done, which is worse
+        // than a permissive one. If that call is ever revisited, this test is
+        // where it is written down.
+        let store = try await makeTestStore()
+        let scheduler = makeScheduler(store: store)
+        try await insertJob(store, id: "gave-up")
+
+        let baseline = await scheduler.pendingJobIdsForLedger()
+        try await store.updateJobState(jobId: "gave-up", state: "complete")
+
+        #expect(await scheduler.completedJobIdsForLedger(among: baseline) == ["gave-up"],
+                """
+                `complete` is this codebase's terminal-success classification, \
+                give-ups included. It is the same set `work_journal` calls \
+                finalized, and the ledger must not disagree with the journal.
+                """)
+    }
+
     @Test("an empty baseline completes nothing", .timeLimit(.minutes(1)))
     func emptyBaselineCompletesNothing() async throws {
         let store = try await makeTestStore()
@@ -892,6 +921,19 @@ struct BackfillGrantBoundingTests {
 @Suite("playhead-lmrx: a backfill expiry is durable")
 struct BackfillExpiryDurabilityTests {
 
+    /// Hangs in `decode` until cancelled, so a job can be held in flight across
+    /// a handler's exit.
+    private final class CancellableDecodeAudioStub: AnalysisAudioProviding, @unchecked Sendable {
+        func decode(
+            fileURL: LocalAudioURL,
+            episodeID: String,
+            shardDuration: TimeInterval
+        ) async throws -> [AnalysisShard] {
+            try await Task.sleep(for: .seconds(120))
+            return []
+        }
+    }
+
     /// Ignores cancellation for a bounded interval, so a test can observe what
     /// the expiration handler does WHILE the in-flight job is still unwinding.
     /// `Task.sleep` would be useless here — it throws the instant the task is
@@ -1117,6 +1159,133 @@ struct BackfillExpiryDurabilityTests {
                 """)
         #expect(latest.jobsCompleted == 0,
                 "nothing completed in this window, and 0 is a finding — not NULL, not absent")
+    }
+
+    @Test("an expired run's completion count is measured, not a literal zero",
+          .timeLimit(.minutes(1)))
+    func expiredRunCountsRealCompletions() async throws {
+        // The complement of the test above, and the reason it exists: nothing
+        // else drives the HANDLER to a non-zero completion, so a
+        // `counters.noteCompleted(0)` literal inside `recordGrantCompletions`
+        // would satisfy every other assertion in this file. Zero is the bead's
+        // headline finding precisely because it is a MEASUREMENT, and a
+        // measurement that can only ever read zero is not one.
+        let store = try await makeTestStore()
+        let scheduler = makeScheduler(store: store)
+        try await insertQueuedJob(store, id: "pending-a")
+        try await insertQueuedJob(store, id: "pending-b")
+
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.runPendingBackfillDuration = .seconds(30)
+        let bps = BackgroundProcessingService(
+            coordinator: coordinator,
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider(),
+            runLedger: ledger
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        let workTask = Task { await bps.handleBackfillTask(task) }
+        // Entry into the poll loop proves the baseline of TWO was already read,
+        // so the completion below lands inside the window and is scored against
+        // the population the window named.
+        await coordinator.runPendingBackfillEntries.wait(for: 1)
+        try await store.updateJobState(jobId: "pending-a", state: "complete")
+        task.simulateExpiration()
+        _ = await workTask.value
+        await task.awaitCompletion()
+
+        let latest = try #require(await ledger.fetchLatestRun(for: .backfill))
+        #expect(latest.outcome == .expired)
+        #expect(latest.jobsSeen == 2, "the denominator is still the queue depth at grant open")
+        #expect(latest.jobsCompleted == 1,
+                """
+                One of the two jobs this window found pending reached a terminal \
+                complete inside it. A hardcoded 0 — or a count taken over the \
+                whole `complete` table rather than the baseline — fails here.
+                """)
+    }
+
+    @Test("the work-deadline return does not strand the job it leaves running",
+          .timeLimit(.minutes(2)))
+    func normalReturnAlsoRequeuesTheInFlightJob() async throws {
+        // playhead-lmrx review round: THE EXIT THE FIX CREATED.
+        //
+        // Pre-lmrx both work drivers ran to `now + 25 * 60`, so inside a ~295 s
+        // grant `handleBackfillTask`'s normal return was unreachable and the OS
+        // expiry always drove teardown. Bounding them at 219 s makes that return
+        // the common exit — with `Task.isCancelled` still FALSE, and with the
+        // scheduler's long-lived `runLoop()` (started and woken by this handler)
+        // still dispatching on its own 5 s poll. The handler then calls
+        // `setTaskCompleted`, after which iOS may suspend at once AND after
+        // which the expirationHandler can never fire. A job in flight at that
+        // moment is stranded exactly as the bead describes.
+        //
+        // Driven deterministically: the drain runs against an empty queue, the
+        // job is dispatched WHILE the poll loop is parked, and the handler's
+        // normal return then has to deal with it.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(
+            store: store,
+            audio: CancellableDecodeAudioStub(),
+            downloads: downloads
+        )
+
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.runPendingBackfillDuration = .seconds(3)
+        let bps = BackgroundProcessingService(
+            coordinator: coordinator,
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider()
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        let workTask = Task { await bps.handleBackfillTask(task) }
+        await coordinator.runPendingBackfillEntries.wait(for: 1)
+
+        // Now mint the work, mid-window, the way a tier advance does.
+        downloads.cachedURLs["ep-late-dispatch"] = URL(fileURLWithPath: "/tmp/ep-late-dispatch.m4a")
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "late-dispatch",
+            jobType: "preAnalysis",
+            episodeId: "ep-late-dispatch",
+            analysisAssetId: "asset-late-dispatch",
+            workKey: "fp-late-dispatch:1:preAnalysis",
+            sourceFingerprint: "fp-late-dispatch",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+        let dispatch = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 500, "the late-minted job never entered decode")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        _ = await workTask.value
+        await task.awaitCompletion()
+
+        let after = try #require(try await store.fetchJob(byId: "late-dispatch"))
+        #expect(after.state == "queued",
+                """
+                The work-deadline return must cancel and requeue what it leaves \
+                running, exactly as the expiry does. Finding this row still \
+                `running` means the handler called setTaskCompleted over a live \
+                job — no checkpoint, no requeue, a stale lease for the reaper, \
+                and no expirationHandler left to rescue it.
+                """)
+        #expect(after.lastErrorCode == AnalysisWorkScheduler.backgroundWindowExpiredErrorCode)
+        #expect(after.attemptCount == 0,
+                "the grant ending is not the job's fault on this path either")
+        _ = await dispatch.value
     }
 
     @Test("the expired row is durable BEFORE the handler waits for anything",

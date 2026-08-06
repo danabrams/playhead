@@ -808,12 +808,32 @@ actor BackgroundProcessingService {
         // charger-maintenance), the identical backfill drain runs.
         //
         // playhead-lmrx: but NOT the same budget. Every grant measurement in
-        // this repo comes from the plain identifier — the pull has zero rows for
-        // this one — and the charger class exists precisely because it is
-        // expected to behave differently. Spending the plain identifier's 219 s
-        // here would both be unevidenced and risk surrendering most of an
-        // overnight grant, so this class keeps the horizon the handler assumed
-        // before lmrx and says so in `Provenance.assumed`.
+        // this repo comes from the plain identifier, and the charger class
+        // exists precisely because it is expected to behave differently.
+        // Spending the plain identifier's 219 s here would both be unevidenced
+        // and risk surrendering most of an overnight grant, so this class keeps
+        // the horizon the handler assumed before lmrx and says so in
+        // `Provenance.assumed`.
+        //
+        // playhead-lmrx (review round): the IDENTIFIER is threaded too, and it
+        // was not before. Every ledger and telemetry write in this handler
+        // hardcoded `BackgroundTaskID.backfillProcessing`, so a charger-class
+        // window was recorded as a plain one. Two consequences, both of them
+        // the standing defect class — `taskIdentifier` named WHICH HANDLER RAN
+        // and was read as WHICH CLASS THE OS GRANTED:
+        //
+        //  * "the pull contains zero rows for this identifier" was true by
+        //    construction and could never have been otherwise, so it was not
+        //    evidence that the class never ran;
+        //  * and any charger-class window that DID run is inside the 203
+        //    expired rows the plain identifier's measured grant came from.
+        //    (Nothing in that population exceeds 321.4 s, so no long
+        //    charger-class grant is visibly in it — but that is an argument
+        //    from the data, not from the instrumentation.)
+        //
+        // With the identifier threaded, the next pull can actually settle what
+        // this class is granted, which is what the budget's doc comment
+        // promises.
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged,
             using: nil
@@ -826,6 +846,7 @@ actor BackgroundProcessingService {
             Task {
                 await self.handleBackfillTask(
                     sendableTask.value,
+                    identifier: BackgroundTaskID.backfillProcessingCharged,
                     budget: .backfillProcessingCharged
                 )
             }
@@ -1228,14 +1249,21 @@ actor BackgroundProcessingService {
     ///   the pull contains ZERO observations of that identifier and spending the
     ///   plain identifier's measurement on it would be exactly the
     ///   wrong-population error this type exists to stop (playhead-lmrx).
+    /// - Parameter identifier: the BGTask identifier iOS actually dispatched,
+    ///   recorded on every ledger and telemetry write. Threaded rather than
+    ///   hardcoded (playhead-lmrx review round) because this handler serves two
+    ///   identifiers and used to record both as the plain one — which made
+    ///   "the pull has zero rows for the charged class" an artifact of the
+    ///   instrumentation rather than an observation about the class.
     func handleBackfillTask(
         _ task: any BackgroundProcessingTaskProtocol,
+        identifier: String = BackgroundTaskID.backfillProcessing,
         budget: BackgroundGrantBudget = .backfillProcessing
     ) async {
         logger.info("Backfill task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
-        emitStart(identifier: BackgroundTaskID.backfillProcessing, taskRef: task as AnyObject)
+        emitStart(identifier: identifier, taskRef: task as AnyObject)
 
         // playhead-hygc.1.4: open a durable run-outcome row at handler
         // entry so dogfood snapshots taken mid-run are still classifiable
@@ -1282,7 +1310,7 @@ actor BackgroundProcessingService {
             await runLedgerForStart.recordRunStart(
                 runId: runId,
                 entryPoint: .backfill,
-                taskIdentifier: BackgroundTaskID.backfillProcessing,
+                taskIdentifier: identifier,
                 taskInstanceID: instanceID,
                 scenePhase: scenePhase
             )
@@ -1476,8 +1504,48 @@ actor BackgroundProcessingService {
             // the queue (the polling loop only returns when pending
             // count hits zero or the task is cancelled), so the
             // outcome is `.admittedWork`.
+            //
+            // playhead-lmrx (review round): NOT FIXED HERE, AND SAY SO. This
+            // expression has the same shape as the `jobsAdmitted: baselinePending`
+            // write the same commit deleted — what would it read if the window
+            // admitted nothing? `.admittedWork`, whenever the queue was
+            // non-empty. The difference is that `jobsAdmitted` was a NUMBER
+            // nobody else consumed, while `outcome` is the enum every existing
+            // ledger query groups by and every prior bead's measurement is
+            // stated in (`12 admitted_work`, `23 no_eligible_work`). Redefining
+            // it mid-bead would silently re-cut every one of those. It is left
+            // exactly as it was, and named here so the next reader is not misled
+            // by the counter argument three lines down.
             let outcome: BackgroundTaskRunOutcome =
                 baselinePending > 0 ? .admittedWork : .noEligibleWork
+            // playhead-lmrx (review round): THE NORMAL RETURN IS NOW A TEARDOWN
+            // PATH TOO, AND IT MUST DO THE SAME THING THE EXPIRY DOES.
+            //
+            // Bounding the drivers at 219 s created an exit the old code did not
+            // have. Pre-lmrx both drivers ran to `now + 25 * 60`, so inside a
+            // ~295 s grant this return was unreachable and the OS expiry always
+            // drove teardown. Now the poll loop returns the moment the work
+            // deadline passes, with `Task.isCancelled` still FALSE — and the
+            // scheduler's long-lived `runLoop()`, which this handler explicitly
+            // started and woke above, keeps dispatching on its own 5 s poll for
+            // the rest of the window. So a job dispatched at t+200 s is still in
+            // flight here, and `markComplete` below calls `setTaskCompleted`,
+            // after which iOS may suspend the process at once. That is exactly
+            // the stranding this bead exists to remove — no checkpoint, no
+            // requeue, a leased `running` row for mk6z's reaper — reintroduced
+            // on the path the fix makes common.
+            //
+            // Completing the task is what makes this urgent: once completed, the
+            // `expirationHandler` will never fire, so the cancel wiring below it
+            // cannot rescue anything.
+            //
+            // Harmless when the queue genuinely drained: nothing is in flight,
+            // `cancelCurrentJob` returns an empty set, and the settle is a
+            // no-op.
+            var cancelledJobIds: Set<String> = []
+            if let scheduler = self.analysisWorkScheduler {
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
             // playhead-lmrx: `jobsCompleted` was never written on this path, so
             // all 12 `admitted_work` rows in the 2026-08-06 pull read NULL and
             // "26 jobs admitted, 0 completed" had to be inferred. Measure it —
@@ -1494,6 +1562,21 @@ actor BackgroundProcessingService {
                     jobsCompleted: achieved.jobsCompleted
                 )
             )
+
+            // And only then wait for the requeue, for the same reason and in
+            // the same order as the expiration path: the durable row first, the
+            // wait between it and `setTaskCompleted`.
+            if !cancelledJobIds.isEmpty, let scheduler = self.analysisWorkScheduler {
+                let settled = await scheduler.awaitJobsSettled(
+                    cancelledJobIds,
+                    within: budget.teardownReserve
+                )
+                if !settled {
+                    self.logger.warning(
+                        "Backfill work deadline: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(budget.teardownReserve, privacy: .public) teardown reserve; the requeue may be lost to suspension"
+                    )
+                }
+            }
 
             // Let the coordinator run until the task expires or completes.
             self.markComplete(task, success: true)
@@ -1544,12 +1627,12 @@ actor BackgroundProcessingService {
                 // flag and calls `cancel()`. Getting the cancellation in flight
                 // early is free; WAITING for it is what costs, and that wait is
                 // deliberately last (see below).
-                let cancelledJobIds: Set<String> = await {
-                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
-                    return await scheduler.cancelCurrentJob(cause: .taskExpired)
-                }()
+                var cancelledJobIds: Set<String> = []
+                if let scheduler = await self?.analysisWorkScheduler {
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
                 await self?.emitExpire(
-                    identifier: BackgroundTaskID.backfillProcessing,
+                    identifier: identifier,
                     taskRef: task as AnyObject,
                     detail: "backfill-task-expired"
                 )
@@ -1648,8 +1731,13 @@ actor BackgroundProcessingService {
                 if !cancelledJobIds.isEmpty,
                    let scheduler = await self?.analysisWorkScheduler {
                     let remaining = budget.remainingTeardownReserve(since: teardownStart)
-                    let settled = remaining > .zero
-                        && (await scheduler.awaitJobsSettled(cancelledJobIds, within: remaining))
+                    var settled = false
+                    if remaining > .zero {
+                        settled = await scheduler.awaitJobsSettled(
+                            cancelledJobIds,
+                            within: remaining
+                        )
+                    }
                     if !settled {
                         self?.logger.warning(
                             "Backfill expiration: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(budget.teardownReserve, privacy: .public) teardown reserve (\(remaining, privacy: .public) left after the ledger write); the requeue may be lost to suspension"

@@ -2804,6 +2804,7 @@ T_LMRX_CHARGED="the charged sibling is declared an assumption, not a measurement
 T_LMRX_SETTLE="awaitJobsSettled waits for a running job and times out rather than lying"
 T_LMRX_PROVENANCE="a measured budget names the denominator each of its numbers came from"
 T_LMRX_ROWFIRST="the expired row is durable BEFORE the handler waits for anything"
+T_LMRX_NORMALEXIT="the work-deadline return does not strand the job it leaves running"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5650,9 +5651,14 @@ MUTATIONS=(
   #     and the expiry requeue leaves a queue full of eligible siblings, so the
   #     wait would routinely time out on a requeue that already committed —
   #     burning the reserve that stands between it and `setTaskCompleted`.
+  #   * LX21 is the exit the 219 s bound created and the first draft did not
+  #     cover: the work-deadline return completes the task with an analysis job
+  #     still in flight, which strands it exactly as the expiry used to — and
+  #     completing the task means the expirationHandler can never rescue it.
   "LX18|557|GRANT|$T_LMRX_PROVENANCE"
   "LX19|558|BGPS|$T_LMRX_ROWFIRST"
   "LX20|559|SCHED|$T_LMRX_SETTLE"
+  "LX21|560|BGPS|$T_LMRX_NORMALEXIT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6023,6 +6029,7 @@ describe_mutation() {
     LX18) echo "lmrx: the provenance quotes 203 — the row count — where the design grant's denominator is 132" ;;
     LX19) echo "lmrx: the settle wait moves back in front of the durable expired row, so a kill leaves no outcome" ;;
     LX20) echo "lmrx: the settle wait drops its identity scoping and waits out any sibling the run loop picks up" ;;
+    LX21) echo "lmrx: the work-deadline return completes the task with a job still running, stranding it" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12934,12 +12941,14 @@ EOF
   # is the cancellation and nothing else.
   LX02)
     snippet OLD <<'EOF'
-                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
-                    return await scheduler.cancelCurrentJob(cause: .taskExpired)
+                if let scheduler = await self?.analysisWorkScheduler {
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
 EOF
     snippet NEW <<'EOF'
-                    guard (await self?.analysisWorkScheduler) != nil else { return [] }
-                    return []
+                if (await self?.analysisWorkScheduler) != nil {
+                    cancelledJobIds = []
+                }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12987,10 +12996,23 @@ EOF
 
   # LX07 — the zero-clamp goes, so an over-reserved budget yields a negative
   # duration and a work deadline in the past.
+  # The anchor carries the enclosing `workBudget` block: the same clamp
+  # expression also ends `remainingTeardownReserve`, and `patch` refuses a
+  # non-unique anchor.
   LX07)
-    patch "$file" \
-      '        return remainder > .zero ? remainder : .zero' \
-      '        return remainder' ;;
+    snippet OLD <<'EOF'
+    var workBudget: Duration {
+        let remainder = designGrant - teardownReserve
+        return remainder > .zero ? remainder : .zero
+    }
+EOF
+    snippet NEW <<'EOF'
+    var workBudget: Duration {
+        let remainder = designGrant - teardownReserve
+        return remainder
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # LX08 — the start gate refuses a unit that costs exactly its measured cost.
   LX08)
@@ -13147,14 +13169,37 @@ EOF
   # `expired`-with-NULL-counters row the bead was filed to improve.
   LX19)
     snippet OLD <<'EOF'
-                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
-                    return await scheduler.cancelCurrentJob(cause: .taskExpired)
+                if let scheduler = await self?.analysisWorkScheduler {
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
 EOF
     snippet NEW <<'EOF'
-                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
-                    let ids = await scheduler.cancelCurrentJob(cause: .taskExpired)
-                    _ = await scheduler.awaitJobsSettled(ids, within: budget.teardownReserve)
-                    return ids
+                if let scheduler = await self?.analysisWorkScheduler {
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                    _ = await scheduler.awaitJobsSettled(
+                        cancelledJobIds,
+                        within: budget.teardownReserve
+                    )
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX21 — the WORK-DEADLINE return stops telling the scheduler the grant is
+  # over. Reads as removing a redundant call (the expiration handler does it),
+  # and it is redundant only if the expiration handler still runs — which it
+  # cannot, because this path calls `setTaskCompleted` a few lines later and a
+  # completed task never fires its expirationHandler. This is the exit the 219 s
+  # bound created; before lmrx the 25-minute deadline made it unreachable.
+  LX21)
+    snippet OLD <<'EOF'
+            if let scheduler = self.analysisWorkScheduler {
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
+EOF
+    snippet NEW <<'EOF'
+            if let scheduler = self.analysisWorkScheduler {
+                cancelledJobIds = await scheduler.pendingJobIdsForLedger().subtracting(baselineIds)
+            }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

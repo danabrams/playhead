@@ -2673,6 +2673,12 @@ actor AnalysisWorkScheduler {
         let deadline = ContinuousClock.now + budget
         while !inFlightJobIds.isDisjoint(with: jobIds) {
             guard ContinuousClock.now < deadline else { return false }
+            // `try?` swallows the cancellation `Task.sleep` throws, so without
+            // this the loop would spin at full speed to the deadline once the
+            // caller's task is cancelled. No production caller is cancellable
+            // today; the guard is what keeps that from becoming a busy-wait the
+            // day one is.
+            guard !Task.isCancelled else { return false }
             try? await Task.sleep(for: pollInterval)
         }
         return true
@@ -2813,6 +2819,26 @@ actor AnalysisWorkScheduler {
     /// and crediting those to a background window as work COMPLETED is the
     /// defect this whole bead is filed under: a value that would read the same
     /// whether the thing it claims to measure happened or not.
+    ///
+    /// **WHAT `complete` MEANS HERE, spelled out because "terminal SUCCESS"
+    /// invites a stronger reading than the schema supports (lmrx review
+    /// round).** It is this codebase's single terminal-success classification —
+    /// exactly the set that emits `work_journal.finalized` and that orphan
+    /// recovery treats as "nothing to resume" — and it INCLUDES the two
+    /// graceful give-ups the coverage arms write: `coverageInsufficient`'s
+    /// no-progress pass and its retry-budget exhaustion both land
+    /// `state = 'complete'`. Those are jobs that ran end-to-end under our lease
+    /// and will never requeue, at less coverage than they wanted; they are not
+    /// failures, and the journal already counts them as finalized.
+    ///
+    /// Aligning with `finalized` rather than inventing a narrower predicate is
+    /// the point: two definitions of "done" in one ledger is a worse defect than
+    /// a permissive one, and the narrower question ("did it reach its coverage
+    /// TARGET?") has its own instrument in the coverage program. What this
+    /// column answers is "how many of the jobs this window found pending are now
+    /// off the queue for good, without having failed" — and
+    /// ``GrantCompletionPopulationTests`` pins both halves of that, the credited
+    /// give-up as well as the excluded failure.
     func completedJobIdsForLedger(among ids: Set<String>) async -> Set<String> {
         guard !ids.isEmpty else { return [] }
         guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
@@ -4169,6 +4195,21 @@ actor AnalysisWorkScheduler {
         inFlightJobIds.insert(job.jobId)
         currentEpisodeId = job.episodeId
         shouldCancelCurrentJob = false
+        // playhead-lmrx (review round): the CAUSE is reset here too, alongside
+        // the flag it accompanies. `cancelCurrentJob` sets both unconditionally
+        // — even when nothing is running, which is the COMMON case at a
+        // background expiry now that `drainEligible` stops at the work deadline
+        // well before the OS reclaims. `shouldCancelCurrentJob` was already
+        // cleared here (a cancel aimed at a job that had finished must not
+        // strike the next one); the cause was not, so it survived into the next
+        // dispatched job — possibly a foreground one, launches later.
+        //
+        // That was cosmetic before this bead: a mislabelled journal cause. It is
+        // not cosmetic now. `.taskExpired` selects the arm that spends NO
+        // attempt, so a stale one would exempt an unrelated job from the retry
+        // ladder — silently disarming the poisoned-job escape valve for a job
+        // the OS never interrupted, which is the exact converse of the fix.
+        pendingCancelCause = nil
         lostOwnership = false
 
         // End queue-wait signpost interval.
