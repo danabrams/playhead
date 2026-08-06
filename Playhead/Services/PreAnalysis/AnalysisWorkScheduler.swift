@@ -104,6 +104,13 @@ actor AnalysisWorkScheduler {
     /// Renewal cadence for in-flight job leases. Must be < leaseExpirySeconds
     /// with margin so a missed wakeup doesn't lose the lease.
     private static let leaseRenewalIntervalSeconds: UInt64 = 120
+    /// playhead-mk6z: how often the run loop sweeps for leases whose deadline
+    /// has passed. Comfortably longer than `idlePollSeconds` because the sweep
+    /// is a repair, not a dispatch decision — a job orphaned a minute ago is
+    /// not more recoverable than one orphaned five seconds ago, and one UPDATE
+    /// per minute keeps the sweep off the hot path of a loop that can spin
+    /// through several `continue` branches per second.
+    private static let expiredLeaseSweepIntervalSeconds: TimeInterval = 60
 
     /// Centralized exponential-backoff for failed/retrying jobs. Doubles per
     /// attempt, capped at 1 hour. `attempt` is 1-indexed (first retry is 2 min).
@@ -739,6 +746,34 @@ actor AnalysisWorkScheduler {
     /// writes would clobber the new owner's bookkeeping. Reset at the
     /// start of every job so the flag never bleeds across iterations.
     private var lostOwnership = false
+    /// playhead-mk6z: wall-clock of the last expired-lease sweep. Starts at
+    /// `0` so the very first loop iteration always sweeps — the orphan a
+    /// bootstrap sweep could not see (because it was minted after bootstrap)
+    /// should not have to wait out a throttle interval as well.
+    private var lastExpiredLeaseSweepAt: TimeInterval = 0
+    /// playhead-mk6z (review round): every job this scheduler is holding a
+    /// lease on right now.
+    ///
+    /// **`currentJobId` is NOT this set, and the difference is what the sweep
+    /// must read.** `currentJobId` names the job dispatched MOST RECENTLY;
+    /// `processJob` overwrites it on entry and nils it in its `defer`. Two
+    /// dispatch drivers can be inside `processJob` at the same time — the run
+    /// loop and `drainEligible`, whose own header says it is "safe to run
+    /// alongside the long-lived `runLoop()`" — and the lane caps admit it
+    /// (`nowCap` is 2, and a `playback` job bypasses the cap entirely). So:
+    ///
+    ///   drain dispatches A   -> currentJobId = A
+    ///   loop  dispatches B   -> currentJobId = B          (A's identity lost)
+    ///   B completes          -> currentJobId = nil        (A still running)
+    ///   loop reaches its top -> sweeps with `nil`, and A's lease, if renewal
+    ///                           was starved past the deadline, is reclaimed
+    ///                           out from under a runner that is still working.
+    ///
+    /// That is the standing defect class exactly: a value that names "the last
+    /// dispatch" read as though it named "what this process is running". The
+    /// set is keyed by job id, so an overlapping dispatch adds rather than
+    /// replaces, and each `processJob` removes only its own entry.
+    private var inFlightJobIds: Set<String> = []
     /// Cause to thread into WorkJournal when the current running job is
     /// cancelled. Set by `cancelCurrentJob(cause:)`; consumed on the
     /// cancellation branch of the run loop. Resets to `nil` after each
@@ -2850,12 +2885,99 @@ actor AnalysisWorkScheduler {
 
     // MARK: - Scheduler Loop
 
+    /// playhead-mk6z: throttled expired-lease sweep, called once per run-loop
+    /// iteration. See the call site for why the loop is the right home for it.
+    ///
+    /// Throttling is on the sweep, not on the reclaim: the interval only bounds
+    /// how often the UPDATE is issued, and the UPDATE itself carries the expiry
+    /// predicate, so a lease that expires between two sweeps is reclaimed by the
+    /// next one rather than missed.
+    ///
+    /// Errors are logged and swallowed. A sweep that cannot reach SQLite must
+    /// not take down the loop that dispatches every job in the app; the next
+    /// iteration retries in `expiredLeaseSweepIntervalSeconds`.
+    private func sweepExpiredLeasesIfDue() async {
+        let now = clock().timeIntervalSince1970
+        guard now - lastExpiredLeaseSweepAt >= Self.expiredLeaseSweepIntervalSeconds else {
+            return
+        }
+        // playhead-mk6z (review round): the exclusion is read from
+        // `inFlightJobIds`, NOT from `currentJobId` — see that property for the
+        // interleaving in which `currentJobId` is `nil` while a job this very
+        // process dispatched is still running.
+        //
+        // The store's parameter is a single id, which is all that is needed
+        // here and is bounded by construction rather than by luck: this method
+        // is only ever called from the top of `runLoop()`, so the run loop is
+        // demonstrably NOT inside `processJob`, and the only other dispatch
+        // driver (`drainEligible`) awaits its passes serially. At most one job
+        // can therefore be in flight at this instant. If a THIRD driver is ever
+        // added the set can hold two and one id can no longer express the
+        // exclusion — so the sweep declines rather than guessing which live
+        // claim to expose. A repair deferred by one poll interval is cheap; a
+        // live claim reclaimed is the work.
+        guard inFlightJobIds.count <= 1 else {
+            logger.notice(
+                "expired_lease_sweep_declined reason=multiple_in_flight count=\(self.inFlightJobIds.count, privacy: .public)"
+            )
+            return
+        }
+        let excludedJobId = inFlightJobIds.first
+        lastExpiredLeaseSweepAt = now
+        do {
+            let reclaimed = try await store.reclaimExpiredLeases(
+                now: now,
+                excludingJobId: excludedJobId
+            )
+            if reclaimed > 0 {
+                logger.notice(
+                    "expired_lease_swept count=\(reclaimed, privacy: .public) excluded=\(excludedJobId ?? "none", privacy: .public)"
+                )
+            }
+        } catch {
+            logger.error("expired_lease_sweep_failed: \(error)")
+        }
+    }
+
     private func runLoop() async {
         while !Task.isCancelled {
             guard config.isEnabled else {
                 await sleepOrWake(seconds: Self.rejectionBackoffSeconds)
                 continue
             }
+
+            // playhead-mk6z: return lease-expired rows to the queue from the
+            // LIVE loop, not only from a process bootstrap.
+            //
+            // Measured on device 2026-08-06: a row sat `state='running'`,
+            // `leaseOwner='preAnalysis'`, with a five-minute lease that had
+            // expired 132 minutes earlier. Both existing reclaimers would have
+            // moved it — `AnalysisCoordinator.recoverOrphans` and
+            // `AnalysisJobReconciler.recoverExpiredLeases` — but every path
+            // that calls either is a process-bootstrap path (`PlayheadRuntime`'s
+            // launch Task) or an OS-granted BGTask (`preAnalysisRecovery`,
+            // which additionally requires external power). This loop, the one
+            // thing that keeps running for the rest of the process's life,
+            // never swept; and `fetchNextEligibleJob` selects only
+            // `queued`/`paused`/`failed`, so a `running` row is invisible to
+            // dispatch. An orphan minted AFTER bootstrap therefore pinned its
+            // episode out of the queue until the app was relaunched.
+            //
+            // Deliberately ABOVE the admission gate: a thermal or battery
+            // pause is a reason not to start work, never a reason to keep a
+            // dead claim on the books. The sweep is one UPDATE.
+            //
+            // Expiry-based, not liveness-based, and safe because the lease is
+            // already a heartbeat, not a bare deadline: `leaseRenewalTask`
+            // re-stamps `leaseExpiresAt = now + leaseExpirySeconds` every
+            // `leaseRenewalIntervalSeconds` for as long as an in-process owner
+            // lives, so an expired lease means at least two renewal ticks
+            // failed to land. This scheduler's own in-flight job is excluded on
+            // top of that, which is exact rather than inferred: it knows which
+            // row it is running, so its own job survives the sweep even if
+            // renewal is starved past the deadline. That identity is read from
+            // `inFlightJobIds`, not `currentJobId` — see `sweepExpiredLeasesIfDue`.
+            await sweepExpiredLeasesIfDue()
 
             let admission = await currentLaneAdmission()
 
@@ -3903,6 +4025,10 @@ actor AnalysisWorkScheduler {
         }
 
         currentJobId = job.jobId
+        // playhead-mk6z (review round): additive, unlike `currentJobId`. See
+        // the property's own comment for the interleaving that makes the
+        // difference load-bearing for `sweepExpiredLeasesIfDue()`.
+        inFlightJobIds.insert(job.jobId)
         currentEpisodeId = job.episodeId
         shouldCancelCurrentJob = false
         lostOwnership = false
@@ -3941,6 +4067,12 @@ actor AnalysisWorkScheduler {
             currentRunningTask?.cancel()
             currentRunningTask = nil
             currentJobId = nil
+            // playhead-mk6z (review round): remove only THIS job. `currentJobId
+            // = nil` above is a blanket clear and is why a sibling dispatch's
+            // completion used to make a still-running job look unowned to the
+            // sweep. This runs on every exit path the `defer` covers, so the
+            // set cannot leak an entry and silence the sweep's exclusion.
+            inFlightJobIds.remove(job.jobId)
             currentEpisodeId = nil
             shouldCancelCurrentJob = false
             pendingCancelCause = nil

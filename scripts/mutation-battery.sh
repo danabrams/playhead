@@ -1312,6 +1312,8 @@ AJRUN="Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift"
 # session lifecycle and pushes the evidence catalog onto the SkipOrchestrator.
 # Added for CN06, the fourth instance of the pre-hc7e final-only collapse.
 ACOORD="Playhead/Services/AnalysisCoordinator/AnalysisCoordinator.swift"
+# playhead-mk6z: the BGTask scheduling/handler surface.
+BGPS="Playhead/Services/AnalysisCoordinator/BackgroundProcessingService.swift"
 # playhead-iu0t R2: the episode-summary backfill coordinator — the FIFTH
 # instance of the collapse, and the one that reached it through the persisted
 # `transcript_chunks.transcriptVersion` column rather than through a call.
@@ -1326,6 +1328,7 @@ MUTABLE_FILES=(
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
+  "$BGPS"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1391,6 +1394,15 @@ FOCUSED_SUITES=(
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
   -only-testing:PlayheadTests/TestScratchReaperTests
+  # playhead-mk6z: the expired-lease reclaim rails (MK series). One suite, three
+  # tests, ~0.2 s — two are pure store calls and the third drives the real run
+  # loop, which is the only place able to observe that the sweep is WIRED at all.
+  -only-testing:PlayheadTests/SchedulerExpiredLeaseReclaimTests
+  # playhead-mk6z: the BGTask reschedule guard (MK04-MK06). `Scheduling` is the
+  # suite that owns every submit-path assertion; ~5 s, and it is the only thing
+  # able to observe an age-reset, since a bulldozed request is still pending and
+  # looks identical from every other angle.
+  -only-testing:PlayheadTests/SchedulingTests
   # playhead-mptr: the artifact-backed ordering rails (K2 series). Both suites
   # are pure value-type / small-store tests, well under a second.
   -only-testing:PlayheadTests/TranscriptCoverageIndexTests
@@ -2730,6 +2742,16 @@ T_DL_CONST="the no-progress terminal arm writes the shared constant, not a liter
 # R1 review. The MIXED chain — one budget across both dead ends, not one each.
 # The single-class budget test cannot see a per-reason ledger; this can.
 T_DL_MIXED="an episode that reaches both dead ends still gets one budget, not two"
+
+# playhead-mk6z — the live scheduler loop reclaims a lease whose deadline passed.
+T_MK6Z_LOOP="the live scheduler loop returns a lease-expired running row to the queue"
+T_MK6Z_MINE="the sweep never reclaims the row the caller is running, however stale its lease looks"
+T_MK6Z_TERMINAL="the sweep resurrects no terminal row and disturbs no live lease"
+T_MK6Z_BULLDOZE="start() does not age-reset a recovery request already pending (playhead-mk6z)"
+T_MK6Z_ARMS="start() still arms recovery when nothing is pending (playhead-mk6z)"
+T_MK6Z_LATCH="the recovery reschedule guard re-arms across consecutive wakes (playhead-mk6z)"
+T_MK6Z_INFLIGHT="the loop's sweep excludes the job this process is running, not merely the last one it dispatched (playhead-mk6z)"
+T_MK6Z_IDEMPOTENT="the reconciler's reclaim does not re-charge a row the loop's sweep already reclaimed (playhead-mk6z)"
 # y8f3's own tests, named here because DL05 must prove the widening is ADDITIVE
 # and DL02 must prove it did not swallow a neighbouring bead's terminal.
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
@@ -5403,6 +5425,79 @@ MUTATIONS=(
   # into a rescue whose target, budget and productivity argument were sized for
   # one member — so the killing row is a sibling that does not exist yet.
   "DL09|529|SCHED|$T_DL_DISCRIM"
+
+  # ---- playhead-mk6z: reclaim a lease whose deadline has passed (MK) ----
+  #
+  # WHAT IS BEING DEFENDED. Not the reclaim — `recoverExpiredLease` and
+  # `recoverOrphans` both did the right thing already — but the fact that
+  # something reclaims WITHOUT a new process. Every pre-existing caller is a
+  # bootstrap path or an OS-granted, externally-powered BGTask, so a row
+  # orphaned after launch stayed `running` (and `fetchNextEligibleJob` cannot
+  # select `running`) until the app was relaunched.
+  #
+  # WHY THE KILL SETS ARE SHAPED THIS WAY:
+  #   * MK01 removes the CALL. Only the loop rail can see it: both store rails
+  #     invoke `reclaimExpiredLeases` directly and pass with the wiring gone,
+  #     which is exactly the hole the loop rail exists to close.
+  #   * MK02 keeps the sweep and drops the caller-identity guard, the "the clock
+  #     already told us it is dead" simplification. Killed by the rail whose two
+  #     rows are identical on the clock and differ only in who owns them.
+  #   * MK03 drops the state filter — "an expired lease is an expired lease".
+  #     It resurrects finished work forever, and the terminal rail is the only
+  #     witness because every other fixture here is non-terminal.
+  "MK01|530|SCHED|$T_MK6Z_LOOP"
+  "MK02|531|STORE|$T_MK6Z_MINE"
+  "MK03|532|STORE|$T_MK6Z_TERMINAL"
+
+  # ---- playhead-mk6z: the recovery reschedule guard (MK04-MK06) ----
+  #
+  # `schedulePreAnalysisRecovery()` shipped with neither the pending check nor
+  # the reentrancy flag its neighbour has carried since playhead-txq3, so every
+  # launch age-reset the pending recovery wake. All three rails attack the ONE
+  # guarded entry point, because that is where the mechanism lives.
+  #
+  # MK05 and MK06 are the two directions the guard can fail that are NOT the
+  # original defect, and each has exactly one witness:
+  #   * MK05 fails CLOSED — arm only what is already armed. That is the
+  #     playhead-fuo6 blackout and no bulldozing rail can see it, because a
+  #     process that submits nothing also never age-resets anything.
+  #   * MK06 drops the latch release. Invisible to a single call and to two
+  #     consecutive calls; only a rail that CONSUMES the request between them
+  #     can tell a stuck latch from a working guard.
+  "MK04|533|BGPS|$T_MK6Z_BULLDOZE"
+  "MK05|534|BGPS|$T_MK6Z_ARMS"
+  "MK06|535|BGPS|$T_MK6Z_LATCH"
+
+  # ---- playhead-mk6z review round: WHICH id the scheduler excludes (MK07-MK09) ----
+  #
+  # MK01-MK03 cover the store honouring `excludingJobId` and the loop being
+  # wired at all. Nothing covered the ARGUMENT, and the round-1 code passed the
+  # wrong one: `currentJobId` names the job dispatched MOST RECENTLY, and two
+  # dispatch drivers can be inside `processJob` at once (`runLoop` and
+  # `drainEligible`), so a sibling dispatch's COMPLETION nils the identity of a
+  # job that is still running and the next sweep reclaims live work.
+  #
+  #   * MK07 restores the shipped round-1 expression verbatim. It is the defect
+  #     itself, and it reads as the obvious simplification (`currentJobId` is
+  #     right there and is what the doc comment named).
+  #   * MK08 passes `nil` — "the expiry predicate already proved it dead".
+  #     Distinct from MK02 because MK02 mutates the STORE: a call site that
+  #     never supplies an id is invisible to every store-side rail.
+  #   * MK09 makes the removal in `processJob`'s `defer` a blanket clear, the
+  #     shape `currentJobId = nil` already has one line above. A single-dispatch
+  #     run cannot see it — only an OVERLAPPING dispatch can, which is the same
+  #     population the guard exists for.
+  "MK07|536|SCHED|$T_MK6Z_INFLIGHT"
+  "MK08|537|SCHED|$T_MK6Z_INFLIGHT"
+  "MK09|538|SCHED|$T_MK6Z_INFLIGHT"
+
+  # MK10 — drop the idempotence clause this bead had to add to the OTHER
+  # reclaimer. Until mk6z there was one reclaimer per process bootstrap and
+  # `WHERE jobId = ?` alone cost nothing; the 60 s sweep makes the reconciler's
+  # SELECT-then-UPDATE a race that charges one orphan's `attemptCount` twice.
+  # Reads as removing a redundant clause — every caller already selects rows
+  # with a non-NULL owner — and it IS redundant except in the race.
+  "MK10|539|STORE|$T_MK6Z_IDEMPOTENT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5743,6 +5838,16 @@ describe_mutation() {
     KN07) echo "kanf: the flag is consumed unconditionally again, so a refused tap cannot retry" ;;
     KN08) echo "kanf: promote to the SOON floor — the row keeps starving in a deferred lane" ;;
     KN09) echo "kanf: the promotion rotates generationID, breaking the orphan-recovery join" ;;
+    MK01) echo "mk6z: the run loop stops sweeping — reclaim is back to bootstrap-only" ;;
+    MK02) echo "mk6z: the sweep forgets which job the caller is running and reclaims on the clock alone" ;;
+    MK03) echo "mk6z: any expired lease is reclaimable, so a completed row is requeued forever" ;;
+    MK04) echo "mk6z: the launch reschedule goes back to the unguarded submit and age-resets the pending wake" ;;
+    MK05) echo "mk6z: the guard fails CLOSED — a launch with nothing pending arms nothing at all" ;;
+    MK06) echo "mk6z: the reentrancy latch never releases, silencing every later reschedule" ;;
+    MK07) echo "mk6z: the sweep excludes the LAST job dispatched instead of the one still running" ;;
+    MK08) echo "mk6z: the sweep call site excludes nothing at all" ;;
+    MK09) echo "mk6z: a finished dispatch clears the whole in-flight set, unmasking its sibling" ;;
+    MK10) echo "mk6z: the reconciler re-charges attemptCount on a row the sweep already reclaimed" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12528,6 +12633,115 @@ EOF
       '        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode' \
       '        job.state == "complete" && job.lastErrorCode?.hasPrefix("coverageInsufficient") == true' ;;
 
+  # MK01 — delete the loop's sweep call. This is not a strawman: it is the state
+  # of the code before this bead, and it reads as obviously redundant because
+  # two other reclaimers already exist. What it removes is the only one that
+  # runs without a relaunch.
+  MK01)
+    snippet OLD <<'EOF'
+            await sweepExpiredLeasesIfDue()
+
+            let admission = await currentLaneAdmission()
+EOF
+    snippet NEW <<'EOF'
+            let admission = await currentLaneAdmission()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK02 — stop excluding the caller's own in-flight job. The tempting argument
+  # is that the expiry predicate has already established the row is dead, so the
+  # identity check is redundant. It is not: a runner starved past its renewal
+  # interval is alive and looks identical, and this reclaims the row out from
+  # under it.
+  MK02)
+    snippet OLD <<'EOF'
+        bind(stmt, 3, excludingJobId ?? "")
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 3, "")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK04 — restore the pre-bead call site. Reads as a simplification (why await
+  # a query to submit a request the OS de-dups anyway?) and is exactly the
+  # defect: submit de-dups, but it also age-resets.
+  MK04)
+    snippet OLD <<'EOF'
+        await schedulePreAnalysisRecoveryIfNeeded()
+EOF
+    snippet NEW <<'EOF'
+        schedulePreAnalysisRecovery()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK05 — negate the guard. A one-character class of typo, and it inverts the
+  # meaning into "only re-arm something already armed", i.e. arm nothing, ever.
+  MK05)
+    snippet OLD <<'EOF'
+        if pendingIdentifiers.contains(BackgroundTaskID.preAnalysisRecovery) {
+EOF
+    snippet NEW <<'EOF'
+        if !pendingIdentifiers.contains(BackgroundTaskID.preAnalysisRecovery) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK06 — hold the reentrancy latch forever. The `defer` looks redundant next
+  # to an early `return` on every branch; dropping it is the c25o latch defect,
+  # which costs every subsequent reschedule for the process lifetime.
+  MK06)
+    snippet OLD <<'EOF'
+        recoveryRescheduleInFlight = true
+        defer { recoveryRescheduleInFlight = false }
+EOF
+    snippet NEW <<'EOF'
+        recoveryRescheduleInFlight = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK07 — the round-1 expression, verbatim. `currentJobId` is right there, the
+  # store's own doc comment names it, and it is correct in every single-dispatch
+  # run. It is wrong exactly when a sibling dispatch finished while another job
+  # is still in flight.
+  MK07)
+    patch "$file" \
+      '        let excludedJobId = inFlightJobIds.first' \
+      '        let excludedJobId = currentJobId' ;;
+
+  # MK08 — exclude nothing from the call site. Invisible to MK02, which mutates
+  # the STORE: a store that honours an exclusion it is never given is useless.
+  MK08)
+    patch "$file" \
+      '        let excludedJobId = inFlightJobIds.first' \
+      '        let excludedJobId: String? = nil' ;;
+
+  # MK09 — make the in-flight removal a blanket clear, mirroring the
+  # `currentJobId = nil` on the line above. Only an overlapping dispatch can
+  # see it.
+  MK09)
+    patch "$file" \
+      '            inFlightJobIds.remove(job.jobId)' \
+      '            inFlightJobIds.removeAll()' ;;
+
+  # MK10 — drop the idempotence clause from `recoverExpiredLease`. Invisible to
+  # every rail above: they exercise ONE reclaimer at a time, and this defect
+  # needs both.
+  MK10)
+    patch "$file" \
+      '            WHERE jobId = ? AND leaseOwner IS NOT NULL' \
+      '            WHERE jobId = ?' ;;
+
+  # MK03 — drop the state filter. Reads as a simplification of a redundant
+  # clause ("a terminal row has no lease"), and it is redundant only for rows
+  # whose terminal transition happened to clear the lease columns. For any row
+  # where it did not, the sweep requeues finished work on every pass, forever.
+  MK03)
+    snippet OLD <<'EOF'
+              AND state IN ('running', 'queued', 'paused')
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -12594,6 +12808,7 @@ rec_file()   {
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;
     SCHED) printf '%s' "$SCHED" ;;
+    BGPS)  printf '%s' "$BGPS" ;;
     CLAIM) printf '%s' "$CLAIM" ;;
     RECON) printf '%s' "$RECON" ;;
     ATOM)  printf '%s' "$ATOM" ;;

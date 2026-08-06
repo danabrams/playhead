@@ -454,6 +454,11 @@ actor BackgroundProcessingService {
     /// serializes concurrent callers to keep the check-then-submit atomic
     /// on the actor (mirrors y5mk's `rescheduleInFlight` for feed refresh).
     private var backfillRescheduleInFlight = false
+    /// playhead-mk6z: reentrancy guard for `schedulePreAnalysisRecoveryIfNeeded()`,
+    /// for the same reason as `backfillRescheduleInFlight` — the pending-requests
+    /// query is a suspension point, so the check-then-submit needs serializing to
+    /// stay atomic on the actor.
+    private var recoveryRescheduleInFlight = false
 
     /// Whether all analysis is paused. Under C1, this gate is set only when
     /// `QualityProfile.schedulerPolicy.pauseAllWork` is true — today that is
@@ -796,7 +801,16 @@ actor BackgroundProcessingService {
 
         logger.info("BackgroundProcessingService started")
         // Kick off the initial pre-analysis recovery schedule.
-        schedulePreAnalysisRecovery()
+        //
+        // playhead-mk6z: GUARDED. This used to call the bare
+        // `schedulePreAnalysisRecovery()`, and every launch therefore
+        // age-reset whatever recovery request was already pending — the
+        // playhead-txq3 bulldozing pattern, which backfill below has been
+        // guarded against since that bead and recovery was not. The worst
+        // case is a cold launch triggered by the recovery BGTask itself: the
+        // handler's self-rearm arms the next wake and this line, moments
+        // later in the same process, pushes it back out again.
+        await schedulePreAnalysisRecoveryIfNeeded()
         // playhead-txq3: arm backfill at LAUNCH too. Previously backfill was
         // only submitted on a `.background`/`playbackDidStop`/self-rearm
         // transition, so a user who queues episodes and never backgrounds
@@ -1886,8 +1900,56 @@ actor BackgroundProcessingService {
         }
     }
 
+    /// playhead-mk6z: submit a recovery request only when one is not already
+    /// pending. The unguarded `schedulePreAnalysisRecovery()` below had neither
+    /// this check nor a reentrancy flag, while its neighbour
+    /// `scheduleBackfillIfNeeded()` has had both since playhead-txq3 — and that
+    /// neighbour's comment states the reason: `submit(_:)` de-dups on identifier,
+    /// but every submit AGE-RESETS the pending request's scheduling, so repeated
+    /// submits keep pushing the wake further out.
+    ///
+    /// WHY THIS IS WIRED TO `start()` AND NOT TO THE HANDLER'S SELF-REARM, which
+    /// is the asymmetry a future reader will want to "fix":
+    ///
+    ///  * `start()` is the bulldozing site. A cold launch triggered BY the
+    ///    recovery BGTask runs the handler's self-rearm first and `start()`
+    ///    second, inside one process, so the second submit age-resets the wake
+    ///    the first one just armed. Every ordinary app launch does the same to
+    ///    whatever request is already pending.
+    ///  * The handler's self-rearm cannot bulldoze. It runs at the moment iOS
+    ///    has just CONSUMED that identifier's request, so there is nothing
+    ///    pending to age-reset and the check would be a guaranteed no-op.
+    ///  * And putting it there would cost something real: `playhead-c25o`
+    ///    established that nothing in a BGTask handler may `await` before
+    ///    `task.expirationHandler` is installed, because a lost daemon reply
+    ///    parks the handler unarmed and iOS kills the process. The self-rearm at
+    ///    the top of `handlePreAnalysisRecovery` is synchronous today; making it
+    ///    await `pendingTaskRequestIdentifiers()` would put a suspension point
+    ///    there for no benefit.
+    ///
+    /// Fails OPEN: if the pending query returns nothing (including the c25o
+    /// bounded-continuation timeout) this submits, because a launch that arms
+    /// nothing is the playhead-fuo6 blackout — the strictly worse defect.
+    func schedulePreAnalysisRecoveryIfNeeded() async {
+        // Reentrancy guard — serialize concurrent callers around the suspension
+        // point so the check-then-submit stays atomic.
+        guard !recoveryRescheduleInFlight else { return }
+        recoveryRescheduleInFlight = true
+        defer { recoveryRescheduleInFlight = false }
+
+        let pendingIdentifiers = Set(await taskScheduler.pendingTaskRequestIdentifiers())
+        if pendingIdentifiers.contains(BackgroundTaskID.preAnalysisRecovery) {
+            logger.info("Pre-analysis recovery already pending — skipping duplicate submit (playhead-mk6z)")
+            return
+        }
+        schedulePreAnalysisRecovery()
+    }
+
     /// Schedule a BGProcessingTask for pre-analysis recovery.
     /// Requires external power; earliest begin 60s from now.
+    ///
+    /// Unguarded by design — see `schedulePreAnalysisRecoveryIfNeeded()` for
+    /// which call sites need the pending check and which must stay synchronous.
     func schedulePreAnalysisRecovery() {
         let request = BGProcessingTaskRequest(identifier: BackgroundTaskID.preAnalysisRecovery)
         request.requiresExternalPower = true
