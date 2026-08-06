@@ -2251,6 +2251,7 @@ T_MPTR_UNCOVERED_FIRST="the D9B513CD shape: the unread tail is ordered ahead of 
 # playhead-6r4z — the widened artifact test, and the WIRING that carries it.
 T_6R4Z_ENGINE_WIRING="final-pass-covered shards are decoded LAST, and without them they are decoded FIRST"
 T_6R4Z_REGION_INDEX="an index built from the region classifies final-pass audio the fast-only read misses"
+T_6R4Z_REGION_DEGENERATE="a degenerate row in either pass cannot authorise re-ordering a shard last"
 T_GARD_CREDIT_NOT_SHARED="Credit goes to the observed detector only"
 T_GARD_OVERRIDE_CLEARS="An explicit user override clears the stale evidence against every detector"
 T_GARD_BANNER_CREDITS="A confirmed banner IS a correct observation, credited to the detector that drew the span"
@@ -3941,6 +3942,11 @@ MUTATIONS=(
   # COMPILE; this is its behavioural half, because a type rail cannot see a
   # third spelling that type-checks.
   "K211|204|MPTRENG|$T_6R4Z_ENGINE_WIRING"
+
+  # K213 rides with K211: it mutates the STORE's degenerate filter, which the
+  # engine fixture (one honest final-pass row) cannot observe, and K211 moves the
+  # engine's read, which the degenerate fixture never goes through.
+  "K213|204|STORE|$T_6R4Z_REGION_DEGENERATE"
 
   # K212 — the typed door silently discarding what it was handed. `chunkRanges`
   # is still a real initializer (tests and migrations use it), so an empty
@@ -10150,10 +10156,42 @@ EOF
       "              AND pass = 'fast'" \
       "              AND pass IS NOT NULL" ;;
 
+  # K207 — playhead-6r4z rewrote this EDIT, not its expectation. The one-line
+  # anchor `AND endTime > startTime` was unique when mptr wrote it and stopped
+  # being unique the moment playhead-9y9e added the both-pass sibling with the
+  # same SQL shape, so batch 203 has been reporting "anchor did not apply, source
+  # moved on" for BOTH its entries (K208's own anchor is still unique; it was
+  # collateral from the batch aborting). Re-anchored on the `pass = 'fast'` line,
+  # which is what makes the fast-only query fast-only.
   K207)
-    patch "$file" \
-      "              AND endTime > startTime" \
-      "              AND endTime >= startTime" ;;
+    snippet OLD <<'EOF'
+              AND pass = 'fast'
+              AND endTime > startTime
+EOF
+    snippet NEW <<'EOF'
+              AND pass = 'fast'
+              AND endTime >= startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # K213 — playhead-6r4z: the same degenerate filter on the BOTH-PASS getter,
+  # which is now what the shard index is built from. A zero-width or inverted row
+  # covers no time; admitting one lets a chunk that backs nothing sort a shard
+  # last, which is the artifact test authorising a re-order on no artifact.
+  K213)
+    snippet OLD <<'EOF'
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND endTime > startTime
+            ORDER BY startTime
+EOF
+    snippet NEW <<'EOF'
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND endTime >= startTime
+            ORDER BY startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   K208)
     patch "$file" \
