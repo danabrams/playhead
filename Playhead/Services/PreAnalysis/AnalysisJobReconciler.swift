@@ -858,38 +858,40 @@ actor AnalysisJobReconciler {
     /// the four coverage measures, so re-requesting the same target used to be a
     /// guaranteed repeat: the run re-read the covered prefix first and spent the
     /// whole 300 s stage cap before reaching anything new. playhead-mptr (#335)
-    /// re-ordered that pass (`FastTranscriptCoverageIndex.orderingUncoveredFirst`)
+    /// re-ordered that pass (`TranscriptCoverageIndex.orderingUncoveredFirst`)
     /// so unread audio goes first.
     ///
-    /// **But "unread" there means "no `pass = 'fast'` chunk overlaps it", not
-    /// "never transcribed".** `AnalysisStore.fetchFastTranscriptCoveredRanges`
-    /// selects `pass = 'fast'` alone, so a region a FINAL pass covers — whether
-    /// because the two passes ran over disjoint spans or because
-    /// `TranscriptChunkCanonicalizer` dropped the fast chunks a final chunk fully
-    /// contains — has no fast artifact to point at and sorts as UNREAD. The
-    /// partition is stable over playhead-proximity order, so that already-read
-    /// audio floats to the FRONT, ahead of the audio the retry was minted for.
-    /// This is the same fast-only-under-report playhead-9y9e fixed for the
-    /// ad-scan bound and did not fix for this index.
+    /// **"Unread" there used to mean "no `pass = 'fast'` chunk overlaps it",
+    /// which is not the same as "never transcribed" — playhead-6r4z fixed that,
+    /// and the condition below is what it was measured against.** The index read
+    /// `AnalysisStore.fetchFastTranscriptCoveredRanges`, `pass = 'fast'` alone,
+    /// so a region a FINAL pass covers — whether because the two passes ran over
+    /// disjoint spans or because `TranscriptChunkCanonicalizer` dropped the fast
+    /// chunks a final chunk fully contains — had no fast artifact to point at and
+    /// sorted as UNREAD. The partition is stable over playhead-proximity order,
+    /// so that already-read audio floated to the FRONT, ahead of the audio the
+    /// retry was minted for. It was the same fast-only-under-report
+    /// playhead-9y9e fixed for the ad-scan bound and did not fix for this index.
     ///
     /// Measured on the 2026-08-03 pull, at 30 s shards, over the three assets
-    /// this rescue admits — shards below the watermark that nonetheless sort
-    /// UNREAD, against the genuinely-new audio behind them:
+    /// this rescue admits — shards below the watermark that nonetheless sorted
+    /// UNREAD, against the genuinely-new audio behind them, BEFORE playhead-6r4z:
     ///
     /// | asset | phantom-unread below watermark | new audio | premise |
     /// |---|---|---|---|
-    /// | `44F076BB` | 0 of 54 shards (0 s) | 357 s | holds |
+    /// | `44F076BB` | 0 of 54 shards (0 s) | 357 s | held anyway |
     /// | `2C5C3699` | 20 of 30 shards (600 s) | 6,025 s | weakened |
     /// | `48E903D7` | 41 of 67 shards (1,230 s) | 103 s | inverted, 12:1 |
     ///
-    /// So the honest claim is: mptr made the retry productive on assets whose
-    /// fast artifacts survive, and left it re-reading a prefix on assets that
-    /// have had a final pass. The rescue is still strictly better than the status
-    /// quo — the alternative for all three is stranded until the 7-day GC — and
-    /// the cost of being wrong is bounded by ``AnalysisWorkScheduler/maxCapOutRetries``
-    /// passes, not an unbounded loop. Fixing the index to read the canonical
-    /// union of both passes is playhead-6r4z, not this bead: it changes what the
-    /// transcription stage decodes, which is a behaviour decision of its own.
+    /// The honest claim WAS: mptr made the retry productive on assets whose fast
+    /// artifacts survive, and left it re-reading a prefix on assets that have had
+    /// a final pass — and the rescue was still strictly better than the status
+    /// quo, the alternative for all three being stranded until the 7-day GC, with
+    /// the cost of being wrong bounded by
+    /// ``AnalysisWorkScheduler/maxCapOutRetries`` passes rather than an unbounded
+    /// loop. playhead-6r4z widened the index to the canonical union of both
+    /// passes, so all three columns now read 0 phantom-unread shards and the
+    /// premise holds unconditionally on the assets this rescue admits.
     ///
     /// What this bead still owns unconditionally is the VEHICLE: "uncovered audio
     /// exists" — the condition

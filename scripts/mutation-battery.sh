@@ -31,7 +31,8 @@
 #
 # K2 SERIES STATUS — playhead-mptr, 2026-08-02
 #   The artifact-backed shard ORDERING (unread audio before audio we already
-#   hold). 10 entries K201-K210, 4 batches (200-203).
+#   hold). 10 entries K201-K210, 4 batches (200-203). playhead-6r4z added
+#   K211-K212 (batches 204-205) when it widened the artifact test to BOTH passes.
 #   FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 5 builds — batches 200, 201, 202,
 #   203, then K206 alone after its expectation string was corrected.
 #
@@ -1077,7 +1078,11 @@ ADSVC="Playhead/Services/AdDetection/AdDetectionService.swift"
 PODC="Playhead/Services/AdDetection/AdPodContinuation.swift"
 # playhead-mptr: the artifact-backed shard skip (K2 series). MPTRIDX owns the
 # merge/overlap/skip policy; the two SQL rails live in STORE.
-MPTRIDX="Playhead/Services/TranscriptEngine/FastTranscriptCoverageIndex.swift"
+MPTRIDX="Playhead/Services/TranscriptEngine/TranscriptCoverageIndex.swift"
+# playhead-6r4z: the one line that decides which population the index is BUILT
+# from. The index being right is a property of a value type and says nothing
+# about what the loop hands it — which is the whole of the shipped defect.
+MPTRENG="Playhead/Services/TranscriptEngine/TranscriptEngineService.swift"
 # playhead-kvs8: the FM daemon throttle (Q01-Q08). THROT is the single
 # definition + the named causes; RUNNER carries the defer branch that replaced
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
@@ -1264,8 +1269,30 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
-  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF"
+  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
 )
+# playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
+# moment playhead-mptr added the K2 series, and it is the target of NINE of the
+# thirteen K2 mutations (K201 K202 K203 K204 K205 K208 K209 K210 K212, batches
+# 200-203 and 205). `restore_sources` only checks out `MUTABLE_FILES` and
+# `restore_and_verify` only hashes `MUTABLE_FILES`, so a batch touching this
+# file did BOTH halves of the failure that helper's own comment says it exists
+# to prevent: the injected defect stayed in the working tree, and the
+# byte-exactness check reported success because it never looked at the file.
+#
+# OBSERVED, not reasoned: `--batch 200` on 10018535 exited 0 printing "All
+# mutations killed" and left K201+K203+K209 applied. Batches 201 and 202 then
+# refused with "the focused suites are RED before any mutation" — which is the
+# only reason this has never been scored WRONG rather than merely aborted, and
+# it is luck: those batches happen to share a focused suite with the leftover
+# defect. A batch whose suites did not overlap would have been evaluated against
+# a codebase already carrying an injected bug, and one whose expectation named a
+# test the leftover defect reddens would have been credited a false KILL.
+#
+# The residue is worse than a wrong verdict. An author who runs one batch and
+# then commits, commits the mutation — and the K2 mutations are one-token
+# comparison flips (`>=` for `>`, `<=` for `<`) in a file whose whole job is a
+# half-open-interval contract.
 
 FOCUSED_SUITES=(
   # playhead-gard: the per-detector trust rails (I series). Seven suites,
@@ -1310,8 +1337,15 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/TestScratchReaperTests
   # playhead-mptr: the artifact-backed ordering rails (K2 series). Both suites
   # are pure value-type / small-store tests, well under a second.
-  -only-testing:PlayheadTests/FastTranscriptCoverageIndexTests
+  -only-testing:PlayheadTests/TranscriptCoverageIndexTests
   -only-testing:PlayheadTests/FastTranscriptCoveredRangesStoreTests
+  # playhead-6r4z: the widened artifact test (both passes), the store read it is
+  # built from, and the loop WIRING — the last of which is the only thing here
+  # that can observe which population `runTranscriptionLoop` actually asks for.
+  # It drives two real transcription loops through a mock recognizer; ~0.5 s.
+  -only-testing:PlayheadTests/TranscriptCoverageBothPassesTests
+  -only-testing:PlayheadTests/TranscriptCoverageIndexStoreInputTests
+  -only-testing:PlayheadTests/TranscriptEngineCoverageOrderingTests
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertLifecycleRaceTests
@@ -2236,6 +2270,10 @@ T_MPTR_PASS_FILTER="a final-pass chunk is not reported as fast coverage"
 T_MPTR_SQL_DEGENERATE="a degenerate chunk covers no time and is excluded"
 T_MPTR_WATERMARK_INCLUSIVE="a shard ending exactly at the watermark counts, one second past does not"
 T_MPTR_UNCOVERED_FIRST="the D9B513CD shape: the unread tail is ordered ahead of the covered prefix"
+# playhead-6r4z — the widened artifact test, and the WIRING that carries it.
+T_6R4Z_ENGINE_WIRING="final-pass-covered shards are decoded LAST, and without them they are decoded FIRST"
+T_6R4Z_REGION_INDEX="an index built from the region classifies final-pass audio the fast-only read misses"
+T_6R4Z_REGION_DEGENERATE="a degenerate row in either pass cannot authorise re-ordering a shard last"
 T_GARD_CREDIT_NOT_SHARED="Credit goes to the observed detector only"
 T_GARD_OVERRIDE_CLEARS="An explicit user override clears the stale evidence against every detector"
 T_GARD_BANNER_CREDITS="A confirmed banner IS a correct observation, credited to the detector that drew the span"
@@ -2489,7 +2527,13 @@ T_9Y9E_INTERRUPT="an interrupted pass does not short-circuit, even on a complete
 T_9Y9E_FINALONLY="a scan window inside FINAL-pass-only transcript is counted, not discarded"
 T_9Y9E_CEILING="a fully scanned, mostly-final-pass episode can now reach the sufficiency floor"
 T_9Y9E_CLIPS="widening the bound to both passes does not stop it clipping untranscribed audio"
-T_9Y9E_RANGES="fetchTranscriptCoveredRanges spans both passes and drops degenerate rows"
+# playhead-6r4z: this said `fetchTranscriptCoveredRanges` until now, and had said
+# so since playhead-x0lb R5 renamed the getter to `fetchTranscribedRegion` and
+# renamed its test's display name with it — leaving RT08's expectation naming a
+# test that cannot run. The rail was reporting `expected test never ran` rather
+# than KILLED, which is the header's "the 4th field is the EXACT display name"
+# trap, hit by a rename in another bead rather than by a fresh entry.
+T_9Y9E_RANGES="fetchTranscribedRegion spans both passes and drops degenerate rows"
 T_9Y9E_UNSCANNED="a fully transcribed episode whose ad scan is short still gets a retry"
 # R1 review additions.
 T_9Y9E_MONO="the widened ad-scan bound never measures LESS than the watermark fallback did"
@@ -3910,6 +3954,26 @@ MUTATIONS=(
   "K206|202|STORE|$T_MPTR_PASS_FILTER"
   "K207|203|STORE|$T_MPTR_SQL_DEGENERATE"
   "K208|203|MPTRIDX|$T_MPTR_WATERMARK_INCLUSIVE"
+
+  # playhead-6r4z — the widening, and it needs TWO batches rather than one
+  # because each mutation empties the index the OTHER's expected test reads, so
+  # sharing a batch would score both a false KILL (the header's own rule).
+  #
+  # K211 is the shipped defect restored at the only line that decides which
+  # population the loop reads. Rail TY33 makes the same substitution fail to
+  # COMPILE; this is its behavioural half, because a type rail cannot see a
+  # third spelling that type-checks.
+  "K211|204|MPTRENG|$T_6R4Z_ENGINE_WIRING"
+
+  # K213 rides with K211: it mutates the STORE's degenerate filter, which the
+  # engine fixture (one honest final-pass row) cannot observe, and K211 moves the
+  # engine's read, which the degenerate fixture never goes through.
+  "K213|204|STORE|$T_6R4Z_REGION_DEGENERATE"
+
+  # K212 — the typed door silently discarding what it was handed. `chunkRanges`
+  # is still a real initializer (tests and migrations use it), so an empty
+  # forward is one token and reads as a stub nobody finished.
+  "K212|205|MPTRIDX|$T_6R4Z_REGION_INDEX"
 
   # playhead-hx6n — SCAN-ROW RUN ATTRIBUTION. Fifteen entries, batches 210-216.
   #
@@ -10114,10 +10178,42 @@ EOF
       "              AND pass = 'fast'" \
       "              AND pass IS NOT NULL" ;;
 
+  # K207 — playhead-6r4z rewrote this EDIT, not its expectation. The one-line
+  # anchor `AND endTime > startTime` was unique when mptr wrote it and stopped
+  # being unique the moment playhead-9y9e added the both-pass sibling with the
+  # same SQL shape, so batch 203 has been reporting "anchor did not apply, source
+  # moved on" for BOTH its entries (K208's own anchor is still unique; it was
+  # collateral from the batch aborting). Re-anchored on the `pass = 'fast'` line,
+  # which is what makes the fast-only query fast-only.
   K207)
-    patch "$file" \
-      "              AND endTime > startTime" \
-      "              AND endTime >= startTime" ;;
+    snippet OLD <<'EOF'
+              AND pass = 'fast'
+              AND endTime > startTime
+EOF
+    snippet NEW <<'EOF'
+              AND pass = 'fast'
+              AND endTime >= startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # K213 — playhead-6r4z: the same degenerate filter on the BOTH-PASS getter,
+  # which is now what the shard index is built from. A zero-width or inverted row
+  # covers no time; admitting one lets a chunk that backs nothing sort a shard
+  # last, which is the artifact test authorising a re-order on no artifact.
+  K213)
+    snippet OLD <<'EOF'
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND endTime > startTime
+            ORDER BY startTime
+EOF
+    snippet NEW <<'EOF'
+            SELECT startTime, endTime FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND endTime >= startTime
+            ORDER BY startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   K208)
     patch "$file" \
@@ -10133,6 +10229,35 @@ EOF
     patch "$file" \
       "        return uncovered + covered" \
       "        return covered + uncovered" ;;
+
+  # ---- playhead-6r4z: the index reads BOTH passes (K211-K212) ----
+
+  # K211 — THE shipped defect, restored verbatim: the loop builds its ordering
+  # index from `pass = 'fast'` alone, so audio the FINAL pass covers has no
+  # artifact to point at, sorts UNCOVERED and floats to the FRONT of the pass
+  # minted to read the audio behind it. 215 shards / 6,450 s across seven of
+  # twelve assets on the 2026-08-03 pull.
+  K211)
+    snippet OLD <<'EOF'
+            coverageIndex = TranscriptCoverageIndex(
+                transcribedRegion: try await store.fetchTranscribedRegion(assetId: analysisAssetId)
+            )
+EOF
+    snippet NEW <<'EOF'
+            coverageIndex = TranscriptCoverageIndex(
+                chunkRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: analysisAssetId)
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # K212 — the typed door drops its argument. Every shard then sorts uncovered,
+  # which is the pre-mptr order: SAFE in the "nothing is skipped" sense and
+  # exactly the ceiling mptr exists to remove, so it is silent without a test
+  # that reads the ORDER.
+  K212)
+    patch "$file" \
+      "        self.init(chunkRanges: transcribedRegion.transcribedSpans)" \
+      "        self.init(chunkRanges: [])" ;;
 
   # ---- playhead-kkzu: the show a background download carries (KZ series) ----
 
@@ -12361,6 +12486,7 @@ rec_file()   {
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
+    MPTRENG) printf '%s' "$MPTRENG" ;;
     THROT) printf '%s' "$THROT" ;;
     FMREF) printf '%s' "$FMREF" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
@@ -12605,6 +12731,48 @@ while [ $# -gt 0 ]; do
     *) echo "mutation-battery: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+# playhead-6r4z R1 review: EVERY mutation's file must be restorable, checked on
+# every invocation.
+#
+# `restore_sources` checks out `MUTABLE_FILES` and `restore_and_verify` hashes
+# `MUTABLE_FILES`, so a mutation whose file is absent from that list is applied
+# and never taken back — and the byte-exactness check reports success because it
+# never looked at the file. Both halves fail together, and they fail in the
+# direction that reads as success: "All mutations killed", exit 0, defect still
+# in the tree. `$MPTRIDX` sat in exactly that state from playhead-mptr until
+# this review, nine mutations across five batches.
+#
+# It drifts by construction: `rec_file`'s case table and `MUTABLE_FILES` are
+# edited in different parts of this file, eleven thousand lines apart, and a
+# rename touches the first without touching the second. So the premise is
+# checked rather than remembered — the same move `restore_and_verify` itself
+# makes by re-hashing after every batch instead of trusting one final restore.
+UNRESTORABLE=""
+for rec in "${MUTATIONS[@]}"; do
+  mb_f="$(rec_file "$rec")"
+  mb_n="$(rec_name "$rec")"
+  if [ -z "$mb_f" ]; then
+    UNRESTORABLE="$UNRESTORABLE  $mb_n -> rec_file returned NOTHING (key not in its case table)
+"
+    continue
+  fi
+  mb_found=0
+  for mb_m in "${MUTABLE_FILES[@]}"; do
+    [ "$mb_m" = "$mb_f" ] && mb_found=1 && break
+  done
+  [ "$mb_found" -eq 0 ] && UNRESTORABLE="$UNRESTORABLE  $mb_n -> $mb_f
+"
+done
+if [ -n "$UNRESTORABLE" ]; then
+  echo "mutation-battery: FATAL — mutation target(s) missing from MUTABLE_FILES:" >&2
+  printf '%s' "$UNRESTORABLE" >&2
+  echo "Those files are mutated but never restored, and restore_and_verify" >&2
+  echo "cannot see them — so an injected defect stays in your working tree while" >&2
+  echo "the run still prints that the tree was restored. Add them to" >&2
+  echo "MUTABLE_FILES (and check nothing was committed from an earlier run)." >&2
+  exit 2
+fi
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   printf '%-5s %-6s %s\n' "NAME" "BATCH" "MUTATION"

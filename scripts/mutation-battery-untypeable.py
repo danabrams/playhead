@@ -510,12 +510,21 @@ MUTATIONS = [
     ),
     (
         "TY33", ENGINE,
-        "R5 review probe PG3, planted and COMPILED before the fix: the MIRROR — "
-        "the both-pass readable region poured into the transcript engine's "
-        "FAST-only shard-skip index, which would let final-pass coverage "
-        "authorise skipping fast-pass work",
-        "                chunkRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: analysisAssetId)",
-        "                chunkRanges: try await store.fetchTranscribedRegion(assetId: analysisAssetId)",
+        "playhead-6r4z INVERTED THIS RAIL, and the inversion is the finding. R5 "
+        "wrote it as 'the both-pass region poured into the FAST-only shard-skip "
+        "index, which would let final-pass coverage authorise SKIPPING fast-pass "
+        "work' — and that index never skipped anything, it only re-orders "
+        "(playhead-mptr's header argues the point at length, because the "
+        "skipping shape was tried and two tests proved it a capability loss). So "
+        "the direction R5 pinned was the defect: reading `pass = 'fast'` alone "
+        "made audio the FINAL pass covers sort UNREAD and float to the FRONT of "
+        "the pass minted to read the audio behind it — 215 shards / 6,450 s "
+        "across seven of the twelve assets on the 2026-08-03 pull, and on "
+        "48E903D7 a 1,230 s re-read prefix against 103 s of new audio inside a "
+        "flat 300 s cap. The mutation is now the SHIPPED defect restored: the "
+        "narrow population back at the widened call site",
+        "                transcribedRegion: try await store.fetchTranscribedRegion(assetId: analysisAssetId)",
+        "                transcribedRegion: try await store.fetchFastTranscriptCoveredRanges(assetId: analysisAssetId)",
         ["TranscribedRegion", "(start: Double, end: Double)"],
     ),
     (

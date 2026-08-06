@@ -1,7 +1,45 @@
-// FastTranscriptCoverageIndex.swift
-// playhead-mptr: an in-memory index of what the `pass = 'fast'` transcript
+// TranscriptCoverageIndex.swift
+// playhead-mptr: an in-memory index of what an asset's persisted transcript
 // chunks ACTUALLY back, used to transcribe unread audio BEFORE audio we already
 // hold — not to skip anything.
+//
+// playhead-6r4z: BOTH PASSES, AND THE NAME SAYS SO NOW. This shipped as
+// `FastTranscriptCoverageIndex` reading `pass = 'fast'` alone, and the fix was
+// partly defeating itself in the field. A region the FINAL pass covers has no
+// fast artifact to point at — either the two passes ran over disjoint spans, or
+// `TranscriptChunkCanonicalizer.canonicalize` dropped the fast chunks a final
+// chunk fully contains — so it failed condition 2 below, sorted UNCOVERED, and,
+// the partition being stable over playhead-proximity order, floated to the FRONT
+// of the very pass that was minted to read the audio behind it.
+//
+// Measured on the 2026-08-03 device pull at 30 s shards, re-derived for this
+// bead: 215 shards (6,450 s) lie below their asset's fast watermark backed ONLY
+// by a final-pass chunk, out of 1,174 shards below a watermark across the 12
+// assets — SEVEN of the twelve carry some (the bead's ticket named six; 83592353
+// is the seventh, 5 shards / 150 s). On 48E903D7 that re-read prefix is 1,230 s
+// against 103.1 s of genuinely new audio, a 11.9:1 inversion inside a 300 s stage
+// cap.
+//
+// IS THE ARTIFACT BEHIND A MOVED SHARD THIN? This is the only way the widening
+// could hurt — `overlaps` is satisfied by ANY overlap, so a one-second final
+// chunk would be enough to sort a 30 s shard last. R1 review replaced the first
+// draft's answer here, which was "of those 215 shards, ZERO lacked a chunk of
+// either pass": true, and empty, because a shard moves precisely when a chunk
+// of some pass overlaps it and the count could not have come out otherwise.
+//
+// The measurement with content is the FILL: what fraction of a moved shard the
+// union of chunks actually spans. On the same pull the moved shards run
+// min 0.610 / p10 0.806 / median 0.906, and NONE is under 0.25 — against the
+// 959 shards mptr already sorted last, whose minimum is 0.266. The audio this
+// deprioritises is better backed than the audio already being deprioritised,
+// which is the comparison that makes the widening safe. (Chunks are
+// utterance-level, ~0.9 s mean, so a fill below 1.0 is silence between
+// utterances, not unread audio — which is why the CONTROL population, not 1.0,
+// is the yardstick.)
+//
+// This is the same fast-only under-report `playhead-9y9e` fixed for the ad-scan
+// bound. The canonical union — `AnalysisStore.fetchTranscribedRegion` — already
+// existed; it simply had not been applied here.
 //
 // WHY THIS EXISTS. `TranscriptEngineService.runTranscriptionLoop` walks shards
 // in playhead-proximity order, which on a re-run means starting over from the
@@ -38,22 +76,57 @@
 //
 //   1. the durable watermark has reached past the shard's end — some completed
 //      pass claims to have gone at least this far, and
-//   2. a persisted `pass = 'fast'` chunk actually overlaps the shard's range —
-//      there is a real row on disk behind the claim.
+//   2. a persisted transcript chunk of EITHER PASS actually overlaps the shard's
+//      range — there is a real row on disk behind the claim.
 //
 // H3's counterexamples fail condition 2, so they sort as UNCOVERED and run
-// first — stronger than the pre-mptr behaviour, not weaker.
+// first — stronger than the pre-mptr behaviour, not weaker. playhead-6r4z
+// widened condition 2 and left condition 1 exactly where it was, which is the
+// conservative half: the watermark is still `fastTranscriptCoverageEndTime`, so
+// final-pass coverage ABOVE the fast watermark still sorts first. That is real
+// and it is a separate question, because raising the watermark changes what
+// "some pass claims to have gone this far" MEANS rather than which artifact
+// backs the claim. Filed as `playhead-9j94`.
+//
+// R1 REVIEW CORRECTED THE SIZE OF IT, and the error was this bead's own defect
+// class. The first draft of this paragraph said "480 s on D9B513CD and 96 s on
+// 83592353", and the bead comment added "which is ALL of the remaining unread
+// audio on both". Those are `episodeDurationSec - watermark` — the SPAN above
+// the watermark — read as though it were the audio a final pass has already
+// covered inside that span. Measured, on the same 2026-08-03 pull:
+//
+//   asset      span above wm   UNION of chunks in it   what is actually re-read
+//   D9B513CD        479.9 s          50.3 s (10.5 %)       ~60 s, 2 shards
+//   83592353         95.9 s          58.0 s (60.5 %)       ~66 s, 3 shards
+//
+// So raising condition 1 would recover tens of seconds, not 576 s, and it is
+// ~10x smaller than quoted on the bigger of the two. The tell is the standing
+// one: `MAX(endTime)` over final chunks is a REACH — D9B513CD's is 3,929.8 s
+// against a 3,929.9 s episode, which reads as 100 % and is 10.5 % of the span.
+// Ask what the value would read if the thing it claims to measure had never
+// happened: an episode with ONE final chunk at the very end reads the same.
+//
+// WHY WIDENING CONDITION 2 LOSES NOTHING, since it is a behaviour change on
+// every run. Re-running ASR over a final-covered region is the LEAST valuable
+// place the stage's budget can go, not merely a cheaper one:
+// `TranscriptChunkCanonicalizer.canonicalize` drops fast chunks a final chunk
+// fully contains, so the fast rows the re-read would produce there are dropped
+// from the canonical stream anyway; the finalize floor and the ad-scan bound
+// have measured the UNION since playhead-9y9e, so deferring this work moves
+// neither; and it is still an ORDERING, so the budget that survives the unread
+// audio still reaches these shards and still performs the duplicate-fingerprint
+// `speakerId` / `avgConfidence` upgrades.
 
 import Foundation
 
 /// A merged, sorted view of the time ranges covered by an asset's persisted
-/// `pass = 'fast'` transcript chunks.
+/// transcript chunks, across BOTH passes.
 ///
 /// Construction merges overlapping and touching inputs, so the stored intervals
 /// are disjoint and ascending. That is what lets ``overlaps(start:end:)`` be a
 /// binary search rather than a scan — the loop asks this question once per
 /// shard, and an episode can carry thousands of chunks.
-struct FastTranscriptCoverageIndex: Sendable, Equatable {
+struct TranscriptCoverageIndex: Sendable, Equatable {
 
     /// A half-open covered range `[start, end)`. Disjoint and ascending across
     /// the array; see ``init(chunkRanges:)``.
@@ -68,10 +141,29 @@ struct FastTranscriptCoverageIndex: Sendable, Equatable {
     /// An index backing nothing. Every query returns `false`, so a caller that
     /// fails to load coverage transcribes everything — the pre-mptr behavior,
     /// which is the safe direction to fail in.
-    static let empty = FastTranscriptCoverageIndex(intervals: [])
+    static let empty = TranscriptCoverageIndex(intervals: [])
 
     private init(intervals: [Interval]) {
         self.intervals = intervals
+    }
+
+    /// playhead-6r4z: THE PRODUCTION DOOR, and it takes the typed region rather
+    /// than an array of pairs.
+    ///
+    /// The bug this bead fixed was writable in one token — `AnalysisStore`
+    /// offers `fetchFastTranscriptCoveredRanges` (the fast pass alone) beside
+    /// ``AnalysisStore/fetchTranscribedRegion(assetId:)`` (both passes), and
+    /// until playhead-x0lb typed the second one they returned the identical bare
+    /// `[(start: Double, end: Double)]`. Naming ``TranscribedRegion`` here is
+    /// what makes the narrower query unwritable at the one call site that
+    /// matters; rail TY33 in `scripts/mutation-battery-untypeable.py` is that
+    /// substitution, and it must fail to COMPILE.
+    ///
+    /// ``init(chunkRanges:)`` stays for callers that are not reading the store —
+    /// tests and migrations — where there is no second population in scope to
+    /// confuse.
+    init(transcribedRegion: TranscribedRegion) {
+        self.init(chunkRanges: transcribedRegion.transcribedSpans)
     }
 
     /// Build from raw chunk `(startTime, endTime)` pairs in any order.
@@ -137,6 +229,12 @@ struct FastTranscriptCoverageIndex: Sendable, Equatable {
     /// this file's header. `watermark` is
     /// `analysis_assets.fastTranscriptCoverageEndTime`; `nil` means the asset
     /// has no watermark at all, which is never a licence to skip.
+    ///
+    /// playhead-6r4z: the two conditions are deliberately asymmetric about which
+    /// pass they consult. The ARTIFACT test spans both passes — a final-pass row
+    /// is as real a row as a fast one — while the WATERMARK stays the fast
+    /// pass's, so the widening can only ever move a shard that is already inside
+    /// the reach some completed pass claimed.
     func isShardAlreadyTranscribed(
         shardStart: Double,
         shardEnd: Double,

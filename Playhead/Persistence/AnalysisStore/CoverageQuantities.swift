@@ -713,6 +713,25 @@ struct TranscribedRegion {
     /// How many rows backed this region. An `Int` count of rows, not a quantity.
     var intervalCount: Int { intervals.count }
 
+    /// playhead-6r4z: the region's spans themselves, for the ONE consumer whose
+    /// question is not an area — ``TranscriptCoverageIndex``, which merges them
+    /// into a disjoint ascending index and asks "does a persisted chunk overlap
+    /// this shard?" once per shard.
+    ///
+    /// **Why handing out an array here does not re-open the substitution R5
+    /// closed.** The four regions were interchangeable because they SHARED one
+    /// type in one scope; what a consumer outside this file can reach is what
+    /// decides whether it can pick the wrong one. ``FastTranscriptRegion`` and
+    /// ``ScannedRegion`` expose no spans at all, so there is no second array in
+    /// scope at the index's call site to write instead — and the store-API pair
+    /// that WAS writable (`fetchFastTranscriptCoveredRanges` beside
+    /// ``AnalysisStore/fetchTranscribedRegion(assetId:)``) is separated by this
+    /// type at ``TranscriptCoverageIndex/init(transcribedRegion:)``. Rail TY33.
+    ///
+    /// Raw and unmerged, ascending by start because the reader's `ORDER BY` is;
+    /// the index merges, and its merge is its own tested contract.
+    var transcribedSpans: [(start: Double, end: Double)] { intervals }
+
     /// The de-overlapped AREA of this region, as a BARE `Double`.
     ///
     /// **Deliberately not ``CoveredSeconds``, and that is the whole point of the
