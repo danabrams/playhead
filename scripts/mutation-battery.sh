@@ -13138,19 +13138,18 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   # LX17 — the settle wait reports success without waiting for anything.
+  # Anchored on the two lines that OPEN the wait rather than on the whole loop
+  # body: the body carries comments, and a comment edit must not be able to
+  # silently retire a rail (it did once, in this bead's own review round).
   LX17)
     snippet OLD <<'EOF'
+        guard !jobIds.isEmpty else { return true }
         let deadline = ContinuousClock.now + budget
-        while !inFlightJobIds.isDisjoint(with: jobIds) {
-            guard ContinuousClock.now < deadline else { return false }
-            try? await Task.sleep(for: pollInterval)
-        }
-        return true
 EOF
     snippet NEW <<'EOF'
-        _ = budget
-        _ = pollInterval
-        return true
+        guard !jobIds.isEmpty else { return true }
+        if true { return true }
+        let deadline = ContinuousClock.now + budget
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
