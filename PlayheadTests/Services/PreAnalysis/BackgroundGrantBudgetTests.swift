@@ -42,7 +42,11 @@ struct BackgroundGrantBudgetArithmeticTests {
             designGrant: grant,
             teardownReserve: reserve,
             minimumCheckpointBudget: floor,
-            provenance: .measured(sampleSize: 203)
+            provenance: .measured(
+                grantObservations: 132,
+                teardownObservations: 30,
+                checkpointObservations: 142
+            )
         )
     }
 
@@ -88,6 +92,25 @@ struct BackgroundGrantBudgetArithmeticTests {
         #expect(subject.canReachCheckpoint(before: now + .seconds(120), now: now))
         #expect(!subject.canReachCheckpoint(before: now + .seconds(5), now: now))
         #expect(!subject.canReachCheckpoint(before: now - .seconds(5), now: now))
+    }
+
+    @Test("the teardown reserve is spent DOWN by teardown, not re-granted per step")
+    func teardownReserveIsOneBudgetForTheWholeTeardown() {
+        // The reserve pays for the whole teardown — the ledger write AND the
+        // wait for the interrupted job's resume point. The first draft handed
+        // the entire reserve to the wait alone, which is the handler's
+        // 25-minute deadline defect at a smaller scale: a step that may spend
+        // the whole of a shared budget is not bounded by it.
+        let subject = budget(reserve: .seconds(36))
+        let start = ContinuousClock.now
+        #expect(subject.remainingTeardownReserve(since: start, now: start) == .seconds(36))
+        #expect(subject.remainingTeardownReserve(since: start, now: start + .seconds(10))
+            == .seconds(26))
+        #expect(subject.remainingTeardownReserve(since: start, now: start + .seconds(36))
+            == .zero)
+        #expect(subject.remainingTeardownReserve(since: start, now: start + .seconds(90))
+            == .zero,
+                "an overrun clamps at zero rather than going negative")
     }
 }
 
@@ -138,6 +161,30 @@ struct BackgroundGrantBudgetMeasurementTests {
             #expect(budget.designGrant <= Self.measuredGrantP95,
                     "\(name) designGrant \(budget.designGrant) exceeds the measured grant")
         }
+    }
+
+    @Test("a measured budget names the denominator each of its numbers came from")
+    func measuredProvenanceNamesTheRightDenominators() {
+        // THE STANDING DEFECT CLASS, one level up from the values. The first
+        // draft carried a single `sampleSize: 203` — the number of expired
+        // backfill rows. Ask the diagnostic question of it: what would 203 read
+        // if nobody had derived the p05 of the full-length grants at all? The
+        // same, because it is just how many rows carry that outcome. None of
+        // the three shipped numbers has 203 as its denominator:
+        //
+        //   designGrant             p05 of the 132 expiries that reached 200 s
+        //   teardownReserve         max of the 30 no-work runs
+        //   minimumCheckpointBudget p95 of the 142 `latencyMs` values
+        //
+        // A provenance that stays true when its own values were never measured
+        // is not provenance, and this bead is about a ledger that said things
+        // it had no basis for.
+        #expect(BackgroundGrantBudget.backfillProcessing.provenance
+            == .measured(
+                grantObservations: 132,
+                teardownObservations: 30,
+                checkpointObservations: 142
+            ))
     }
 
     @Test("the charged sibling is declared an assumption, not a measurement")
@@ -603,14 +650,38 @@ struct ExpiredWindowAttemptAccountingTests {
         #expect(after.nextEligibleAt == fixedNow.timeIntervalSince1970 + 60)
     }
 
+    /// A wall clock the test can move, so consecutive expiries can be driven
+    /// past the flat `interruptedRequeueDelaySeconds` requeue floor without
+    /// sleeping for real.
+    private final class MutableClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: TimeInterval
+        init(_ value: TimeInterval) { self.value = value }
+        var now: TimeInterval {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+        func advance(by seconds: TimeInterval) {
+            lock.lock(); value += seconds; lock.unlock()
+        }
+    }
+
     @Test("five expired windows in a row still leave the job alive",
           .timeLimit(.minutes(1)))
     func repeatedExpiryNeverSupersedes() async throws {
-        // Seeded at 4, one below `maxAttemptCount`. Pre-fix this exact input
-        // superseded the job with `nextEligibleAt: nil` and
+        // Seeded at 4, one below `maxAttemptCount`. Pre-fix ONE cancel at this
+        // input superseded the job with `nextEligibleAt: nil` and
         // `maxAttemptsReached:cancelMidRun` — and a superseded row NEVER comes
         // back, because `workKey` is UNIQUE and `insertJob` is `INSERT OR
         // IGNORE` over a key stable across launches.
+        //
+        // FIVE windows, actually driven, because the claim is about a SEQUENCE:
+        // an implementation that exempted only the first expiry, or that
+        // charged on some later pass, satisfies a single-dispatch version of
+        // this test and still abandons every long episode — just later. Each
+        // pass advances the clock past the flat requeue floor so the job is
+        // genuinely re-dispatched rather than skipped as ineligible, which is
+        // the failure mode that would make this vacuous.
         //
         // The 2026-08-06 pull contains two episodes killed at this terminal, so
         // it is real rather than theoretical — though both carry
@@ -621,35 +692,52 @@ struct ExpiredWindowAttemptAccountingTests {
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         try await insertJob(store: store, downloads: downloads, jobId: "long-episode", attemptCount: 4)
-        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let clock = MutableClock(1_800_000_000)
+        let scheduler = makeScheduler(
+            store: store,
+            downloads: downloads,
+            clock: { Date(timeIntervalSince1970: clock.now) }
+        )
 
-        _ = await scheduler.processNextDispatchableJobForTesting(cancelAfterRunnerStart: .taskExpired)
+        for window in 1...5 {
+            let dispatched = await scheduler.processNextDispatchableJobForTesting(
+                cancelAfterRunnerStart: .taskExpired
+            )
+            #expect(dispatched,
+                    "window \(window): the job must still be dispatchable, or the loop proves nothing")
 
-        let after = try #require(try await store.fetchJob(byId: "long-episode"))
-        #expect(after.state == "queued",
-                "the OS reclaiming a window must never permanently abandon an episode")
-        #expect(after.attemptCount == 4)
-        #expect(after.lastErrorCode?.contains("maxAttemptsReached") != true)
+            let after = try #require(try await store.fetchJob(byId: "long-episode"))
+            #expect(after.state == "queued",
+                    "window \(window): the OS reclaiming a window must never permanently abandon an episode")
+            #expect(after.attemptCount == 4,
+                    "window \(window): attemptCount must still be untouched")
+            #expect(after.lastErrorCode?.contains("maxAttemptsReached") != true,
+                    "window \(window): no expiry may reach a terminal error code")
+
+            // Past the flat requeue floor so the next pass can pick it up.
+            clock.advance(by: 120)
+        }
     }
 
-    @Test("awaitCurrentJobSettled waits for a running job and times out rather than lying",
+    @Test("awaitJobsSettled waits for a running job and times out rather than lying",
           .timeLimit(.minutes(1)))
     func settleWaitDoesNotLie() async throws {
-        // The expiration handler spends part of its teardown reserve here so
-        // that `setTaskCompleted` — after which iOS may suspend the process —
-        // does not land while the requeue write is still in flight. A wait that
-        // reports success without observing anything is worse than no wait: it
-        // makes the handler *look* like it protects the write.
+        // The expiration handler spends what is left of its teardown reserve
+        // here so that `setTaskCompleted` — after which iOS may suspend the
+        // process — does not land while the requeue write is still in flight. A
+        // wait that reports success without observing anything is worse than no
+        // wait: it makes the handler *look* like it protects the write.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         try await insertJob(store: store, downloads: downloads, jobId: "settle", attemptCount: 0)
         let scheduler = makeScheduler(store: store, downloads: downloads)
 
-        // Nothing running: settles immediately, and must not burn the budget.
+        // Nothing running: the cancel names nothing, and an empty population is
+        // settled by definition rather than a thing to wait for.
         let idleStart = ContinuousClock.now
-        #expect(await scheduler.awaitCurrentJobSettled(within: .seconds(5)))
+        #expect(await scheduler.awaitJobsSettled([], within: .seconds(5)))
         #expect(idleStart.duration(to: ContinuousClock.now) < .seconds(2),
-                "an idle scheduler must settle at once, not wait out the budget")
+                "an empty population must settle at once, not wait out the budget")
 
         // A job parked in `decode` is NOT settled, and the wait must say so by
         // timing out rather than returning true.
@@ -666,15 +754,37 @@ struct ExpiredWindowAttemptAccountingTests {
             try #require(spins < 500, "the seeded job never entered decode")
             try await Task.sleep(for: .milliseconds(20))
         }
-        let settled = await scheduler.awaitCurrentJobSettled(
+        let settled = await scheduler.awaitJobsSettled(
+            ["settle"],
             within: .milliseconds(300),
             pollInterval: .milliseconds(20)
         )
         #expect(!settled,
                 "a job still parked in decode has not settled; reporting true loses the requeue")
 
-        await scheduler.cancelCurrentJob(cause: .taskExpired)
-        #expect(await scheduler.awaitCurrentJobSettled(within: .seconds(10)),
+        // THE IDENTITY SCOPING, and the reason this method takes ids at all.
+        // The first draft waited on `currentRunningTask == nil` — "is ANYTHING
+        // running" — which reads the same whether the job the handler cancelled
+        // has settled or a sibling has since been picked up by `runLoop()`
+        // (which polls every 5 s for the whole grant). With that signal this
+        // assertion is false and the handler burns its entire reserve waiting
+        // for a requeue that already committed.
+        let unrelated = await scheduler.awaitJobsSettled(
+            ["a-job-nobody-cancelled"],
+            within: .milliseconds(300),
+            pollInterval: .milliseconds(20)
+        )
+        #expect(unrelated,
+                """
+                The wait must be over the population the cancel named. A job \
+                this handler never cancelled being in flight says nothing about \
+                whether the cancelled one settled.
+                """)
+
+        let cancelled = await scheduler.cancelCurrentJob(cause: .taskExpired)
+        #expect(cancelled == ["settle"],
+                "the cancel must name what it acted on, or the wait cannot be scoped")
+        #expect(await scheduler.awaitJobsSettled(cancelled, within: .seconds(10)),
                 "once cancelled, the job must settle and the wait must observe it")
         _ = await dispatch.value
     }
@@ -782,11 +892,85 @@ struct BackfillGrantBoundingTests {
 @Suite("playhead-lmrx: a backfill expiry is durable")
 struct BackfillExpiryDurabilityTests {
 
-    private func makeScheduler(store: AnalysisStore) -> AnalysisWorkScheduler {
+    /// Ignores cancellation for a bounded interval, so a test can observe what
+    /// the expiration handler does WHILE the in-flight job is still unwinding.
+    /// `Task.sleep` would be useless here — it throws the instant the task is
+    /// cancelled, which is the opposite of the condition under test.
+    private final class UncancellableUnwindAudioStub: AnalysisAudioProviding, @unchecked Sendable {
+        private let hold: TimeInterval
+        init(hold: TimeInterval) { self.hold = hold }
+        func decode(
+            fileURL: LocalAudioURL,
+            episodeID: String,
+            shardDuration: TimeInterval
+        ) async throws -> [AnalysisShard] {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global().asyncAfter(deadline: .now() + hold) {
+                    continuation.resume()
+                }
+            }
+            try Task.checkCancellation()
+            return []
+        }
+    }
+
+    /// Snapshots an arbitrary probe at the moment `finishRun` lands, so the
+    /// ORDER of the expiration handler's steps is directly assertable rather
+    /// than inferred from wall clock. Same shape as
+    /// `HandlerOrderSpyTempFileRemover` in the rediff suite.
+    private final class OrderProbeRunLedger: BackgroundTaskRunLedger, @unchecked Sendable {
+        private let probe: @Sendable () async -> Bool
+        private let lock = NSLock()
+        private var finishes: [(BackgroundTaskRunOutcome, Bool)] = []
+
+        init(probe: @escaping @Sendable () async -> Bool) { self.probe = probe }
+
+        /// `(outcome, probe result)` for every terminal write, in order.
+        var recordedFinishes: [(BackgroundTaskRunOutcome, Bool)] {
+            lock.lock(); defer { lock.unlock() }
+            return finishes
+        }
+
+        func startRun(
+            entryPoint: BackgroundTaskRunEntryPoint,
+            taskIdentifier: String,
+            taskInstanceID: String?,
+            scenePhase: String?
+        ) async -> String { UUID().uuidString }
+
+        func recordRunStart(
+            runId: String,
+            entryPoint: BackgroundTaskRunEntryPoint,
+            taskIdentifier: String,
+            taskInstanceID: String?,
+            scenePhase: String?
+        ) async {}
+
+        @discardableResult
+        func finishRun(runId: String, update: BackgroundTaskRunOutcomeUpdate) async -> Bool {
+            let observed = await probe()
+            lock.lock()
+            finishes.append((update.outcome, observed))
+            lock.unlock()
+            return true
+        }
+
+        func fetchLatestRun(for entryPoint: BackgroundTaskRunEntryPoint) async -> BackgroundTaskRunRecord? { nil }
+        func fetchRecentRuns(limit: Int) async -> [BackgroundTaskRunRecord] { [] }
+        func fetchLatestRun(forAssetId assetId: String) async -> BackgroundTaskRunRecord? { nil }
+        @discardableResult
+        func reapOrphansAtLaunch(startedBefore: Double) async -> Int { 0 }
+    }
+
+    private func makeScheduler(
+        store: AnalysisStore,
+        audio: any AnalysisAudioProviding = StubAnalysisAudioProvider(),
+        downloads: StubDownloadProvider = StubDownloadProvider()
+    ) -> AnalysisWorkScheduler {
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
         let runner = AnalysisJobRunner(
             store: store,
-            audioProvider: StubAnalysisAudioProvider(),
+            audioProvider: audio,
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
             adDetection: StubAdDetectionProvider()
@@ -800,7 +984,7 @@ struct BackfillExpiryDurabilityTests {
             capabilitiesService: StubCapabilitiesProvider(
                 snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true)
             ),
-            downloadManager: StubDownloadProvider(),
+            downloadManager: downloads,
             batteryProvider: battery,
             transportStatusProvider: StubTransportStatusProvider()
         )
@@ -933,5 +1117,97 @@ struct BackfillExpiryDurabilityTests {
                 """)
         #expect(latest.jobsCompleted == 0,
                 "nothing completed in this window, and 0 is a finding — not NULL, not absent")
+    }
+
+    @Test("the expired row is durable BEFORE the handler waits for anything",
+          .timeLimit(.minutes(1)))
+    func expiredRowLandsBeforeTheSettleWait() async throws {
+        // playhead-lmrx review round. playhead-hygc.1.4 ordered the expiration
+        // `finishRun` first on purpose — "so a subsequent crash (or OS-forced
+        // termination) still leaves a durable audit trail". The first draft of
+        // this bead put a wait of up to the WHOLE teardown reserve in front of
+        // that write, to give the cancelled analysis job time to commit its
+        // resume point. Both obligations are real; the order that satisfies
+        // both is cancel, write, THEN wait.
+        //
+        // Get it wrong and the regression is silent and strictly worse than the
+        // defect being fixed: a process killed during the wait leaves the row at
+        // `running` — no outcome at all — where before it at least reached
+        // `expired` with NULL counters.
+        //
+        // The probe is taken INSIDE `finishRun`, so this asserts ordering
+        // directly rather than by wall clock: the job's decode ignores
+        // cancellation for a bounded interval, so "still unwinding when the row
+        // was written" is a deterministic fact, not a race.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-slow-unwind"] = URL(fileURLWithPath: "/tmp/ep-slow-unwind.m4a")
+        let job = makeAnalysisJob(
+            jobId: "slow-unwind",
+            jobType: "preAnalysis",
+            episodeId: "ep-slow-unwind",
+            analysisAssetId: "asset-slow-unwind",
+            workKey: "fp-slow-unwind:1:preAnalysis",
+            sourceFingerprint: "fp-slow-unwind",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let scheduler = makeScheduler(
+            store: store,
+            audio: UncancellableUnwindAudioStub(hold: 2.0),
+            downloads: downloads
+        )
+        let ledger = OrderProbeRunLedger {
+            await scheduler.hasCurrentRunningTaskForTesting()
+        }
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.runPendingBackfillDuration = .seconds(30)
+        let bps = BackgroundProcessingService(
+            coordinator: coordinator,
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider(),
+            runLedger: ledger
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        let workTask = Task { await bps.handleBackfillTask(task) }
+        await task.awaitExpirationHandlerInstalled()
+
+        // Wait until the drain has the job genuinely in flight, so the
+        // expiration has something to cancel. Bounded explicitly: a hang here
+        // means the job never dispatched, which is a different bug from the one
+        // under test and must not read as a load flake.
+        var spins = 0
+        while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 1000, "the seeded job never entered decode")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        task.simulateExpiration()
+        _ = await workTask.value
+        await task.awaitCompletion()
+
+        let expiredWrites = ledger.recordedFinishes.filter { $0.0 == .expired }
+        try #require(!expiredWrites.isEmpty, "the expiration path must write a terminal row")
+        #expect(expiredWrites.allSatisfy { $0.1 },
+                """
+                The `expired` row must be written while the cancelled job is \
+                STILL unwinding. Observing a settled scheduler here means the \
+                handler waited first and the durable write is behind a wait \
+                that an OS kill can cut short — which leaves no row at all.
+                """)
+
+        // And the wait still happened: by the time teardown finished, the job
+        // had unwound and been requeued. Without the wait the handler would
+        // reach `setTaskCompleted` with this row still `running`.
+        let after = try #require(try await store.fetchJob(byId: "slow-unwind"))
+        #expect(after.state == "queued",
+                "the handler must not complete the task until the requeue has committed")
     }
 }

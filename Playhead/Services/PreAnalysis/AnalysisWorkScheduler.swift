@@ -2588,7 +2588,14 @@ actor AnalysisWorkScheduler {
     /// `.taskExpired` is passed from `BackgroundProcessingService`'s
     /// expirationHandler; `.userCancelled` is the explicit-cancel
     /// entry point.
-    func cancelCurrentJob(cause: InternalMissCause = .pipelineError) {
+    ///
+    /// playhead-lmrx (review round): returns the identifiers this cancel was
+    /// AIMED AT, so a caller that must wait for the unwind waits on the right
+    /// population. See ``awaitJobsSettled(_:within:pollInterval:)`` for why a
+    /// bare "is anything running" signal is the wrong question. Empty means
+    /// nothing was in flight, which is a settled state, not an unknown one.
+    @discardableResult
+    func cancelCurrentJob(cause: InternalMissCause = .pipelineError) -> Set<String> {
         shouldCancelCurrentJob = true
         // Concurrent cancels with different causes must not stomp each
         // other with last-writer-wins. Route through
@@ -2615,10 +2622,11 @@ actor AnalysisWorkScheduler {
         }
         pendingCancelCause = resolved
         currentRunningTask?.cancel()
+        return inFlightJobIds
     }
 
-    /// playhead-lmrx: suspend until the cancelled job has finished unwinding, or
-    /// `budget` elapses. Returns `true` if it settled, `false` on timeout.
+    /// playhead-lmrx: suspend until `jobIds` have finished unwinding, or
+    /// `budget` elapses. Returns `true` if they settled, `false` on timeout.
     ///
     /// WHY THE CALLER MUST WAIT. ``cancelCurrentJob(cause:)`` only sets a flag
     /// and calls `cancel()`. The writes that make the interruption a RESUME
@@ -2628,12 +2636,27 @@ actor AnalysisWorkScheduler {
     /// BGTask expiration handler that fires the cancel and goes straight on to
     /// `setTaskCompleted` is telling iOS it may suspend the process while those
     /// writes are still in flight, which loses exactly the durability the cancel
-    /// was for. So the handler spends part of its teardown reserve here.
+    /// was for. So the handler spends what is left of its teardown reserve here.
     ///
-    /// `currentRunningTask == nil` is the settled signal, and it is the right
-    /// one: `processJob`'s `defer` nils it, and a `defer` runs AFTER the cancel
-    /// arm's `commitOutcomeArm` has returned. So observing nil proves the
-    /// requeue write completed rather than merely that cancellation was noticed.
+    /// **IT TAKES IDENTITIES, AND THE FIRST DRAFT OF THIS METHOD DID NOT.** That
+    /// draft waited on `currentRunningTask == nil` — "is ANY job running", asked
+    /// as though it meant "has the job I cancelled settled". Ask the diagnostic
+    /// question of it: what does non-nil read when the cancelled job HAS
+    /// settled and `runLoop()` has since picked up a sibling? Exactly the same.
+    /// And that is not a corner: `runLoop()` polls every
+    /// `idlePollSeconds` (5 s) for the whole grant, the expiry requeue leaves
+    /// the queue full of eligible siblings, and the reserve this wait spends is
+    /// tens of seconds — so the wait would routinely run to its timeout and
+    /// report `false` for a requeue that had already committed, while burning
+    /// the whole reserve before `setTaskCompleted`. Membership in
+    /// ``inFlightJobIds`` is the population `cancelCurrentJob` actually acted
+    /// on, and it is the signal that answers the question asked.
+    ///
+    /// `inFlightJobIds` rather than `currentRunningTask` for a second reason
+    /// too: the id is inserted at the top of `processJob` and removed in its
+    /// `defer`, so it spans the whole body — including the commit arms that
+    /// write the resume point, and the early phases in which
+    /// `currentRunningTask` has not been assigned yet.
     ///
     /// A poll rather than a continuation because the settle can also happen
     /// without any cancel arm running at all (the job may finish normally in the
@@ -2641,12 +2664,14 @@ actor AnalysisWorkScheduler {
     /// `processJob`'s exit paths — a rule no test could see deleted. The poll is
     /// bounded, cheap (an actor hop against a stored property), and its budget
     /// is the caller's, so it cannot outlive the grant it is protecting.
-    func awaitCurrentJobSettled(
+    func awaitJobsSettled(
+        _ jobIds: Set<String>,
         within budget: Duration,
         pollInterval: Duration = .milliseconds(50)
     ) async -> Bool {
+        guard !jobIds.isEmpty else { return true }
         let deadline = ContinuousClock.now + budget
-        while currentRunningTask != nil {
+        while !inFlightJobIds.isDisjoint(with: jobIds) {
             guard ContinuousClock.now < deadline else { return false }
             try? await Task.sleep(for: pollInterval)
         }
@@ -4505,12 +4530,40 @@ actor AnalysisWorkScheduler {
                 // THE ACCEPTED TRADE, stated plainly: a job that is ONLY ever
                 // ended by window expiry now retries forever. That is correct —
                 // an expiry is evidence about the window, not the job — and it
-                // is bounded elsewhere: the flat `interruptedRequeueDelaySeconds`
-                // floor stops a hot requeue loop (it never escalates, because
-                // there is nothing to escalate), the lease reaper handles a
-                // process that dies without unwinding, and a job that is
-                // genuinely wedged fails through the `.failed` arm on its own
-                // merits rather than through the OS's clock.
+                // is what stops a long episode being abandoned PERMANENTLY,
+                // which is the failure this codebase keeps paying for
+                // (`workKey` is UNIQUE and `insertJob` is `INSERT OR IGNORE`,
+                // so a superseded row never returns).
+                //
+                // WHAT IT COSTS, named precisely rather than waved at
+                // (playhead-lmrx review round). Three populations, and only two
+                // of them are still bounded:
+                //
+                //  * A job that FAILS reaches the `.failed` arm on its own
+                //    merits, spends an attempt, and supersedes at five.
+                //    Unaffected by anything here.
+                //  * A job that hangs WITHOUT observing cancellation never
+                //    reaches this arm at all: `processJob` does not return, the
+                //    process is suspended holding the lease, and the lease
+                //    reaper (`reclaimExpiredLeases`) requeues it with
+                //    `attemptCount + 1`. Still bounded, by a different rail.
+                //  * A job that DOES observe cancellation but never advances —
+                //    one whose first durable checkpoint costs more than a whole
+                //    grant — is no longer bounded by anything. It requeues with
+                //    `attemptCount` frozen, and `fetchNextEligibleJob` orders by
+                //    `priority DESC, createdAt ASC`, so it is picked first again
+                //    in the next window and every window after. It cannot die,
+                //    and it can hold the head of the queue indefinitely.
+                //
+                // That third population is a REAL residual, filed as its own
+                // bead rather than papered over here: bounding it needs a
+                // durable per-window PROGRESS witness (did this grant bank
+                // anything for this job?), and this arm has none — an
+                // `AnalysisOutcome` never arrives, so there is no `progress` to
+                // commit. Sizing the unit so a grant can finish one is the
+                // architectural fix and is not this bead's. The flat
+                // `interruptedRequeueDelaySeconds` floor below bounds only the
+                // requeue RATE, not the number of windows spent.
                 if cause == .taskExpired {
                     let expiredNextEligible =
                         clock().timeIntervalSince1970 + Self.interruptedRequeueDelaySeconds

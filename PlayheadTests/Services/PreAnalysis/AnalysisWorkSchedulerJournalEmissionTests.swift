@@ -422,16 +422,22 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         )
     }
 
-    // MARK: - cancelCatch.requeue → preempted with .taskExpired
+    // MARK: - cancelCatch.taskExpiredRequeue → preempted with .taskExpired
 
     @Test("cancel-mid-decode (attempts < max) emits a `.preempted` journal row tagged with the cancel cause")
     func cancelMidDecodeEmitsPreemptedWithTaskExpired() async throws {
-        // Drives the `cancelCatch.requeue` arm with the BG-task
-        // expiration shape (`cancelCurrentJob(.taskExpired)`). This is
-        // the production path that fires when the OS reclaims a BG
-        // processing window before the decoder finishes. The arm
-        // reverts state to 'queued' with backoff and (post-fix) emits
-        // a `.preempted` row with cause `.taskExpired`.
+        // Drives the BG-task expiration shape (`cancelCurrentJob(.taskExpired)`).
+        // This is the production path that fires when the OS reclaims a BG
+        // processing window before the decoder finishes.
+        //
+        // playhead-lmrx moved which ARM serves it — `.taskExpired` now takes
+        // `cancelCatch.taskExpiredRequeue` (state 'queued', a FLAT requeue
+        // floor, and no attempt spent) rather than `cancelCatch.requeue` (state
+        // 'queued' with exponential backoff and an attempt spent). What this
+        // test pins is unchanged and is what it was written for: the cause on
+        // the emitted `.preempted` row is the cancel's own, never the helper's
+        // `.pipelineError` default. The attempt accounting is covered next
+        // door, in `ExpiredWindowAttemptAccountingTests`.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-task-expired"] = URL(fileURLWithPath: "/tmp/ep-task-expired.mp3")

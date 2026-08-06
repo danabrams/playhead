@@ -1774,7 +1774,7 @@ FOCUSED_SUITES=(
   # the situation `pushEvidenceCatalog` (CN06) was in: private, unseamed, and
   # covered by nothing. Two tests, no build cost beyond compiling them.
   -only-testing:PlayheadTests/TranscriptCanonicalizationRuleCanaryTests
-  # playhead-lmrx: the six suites the LX series is scored against. Three are
+  # playhead-lmrx: the suites the LX series is scored against. Three are
   # pure value tests over `BackgroundGrantBudget` / `BackgroundGrantCounters`
   # (no build cost beyond compiling them); the other three drive a real
   # `AnalysisWorkScheduler` + `AnalysisStore` through the BGTask handler,
@@ -2801,7 +2801,9 @@ T_LMRX_POISON="control: a genuine mid-run cancel still spends an attempt and sti
 T_LMRX_POPULATION="a FAILED job is not credited as completed"
 T_LMRX_SCOPE="an empty baseline completes nothing"
 T_LMRX_CHARGED="the charged sibling is declared an assumption, not a measurement"
-T_LMRX_SETTLE="awaitCurrentJobSettled waits for a running job and times out rather than lying"
+T_LMRX_SETTLE="awaitJobsSettled waits for a running job and times out rather than lying"
+T_LMRX_PROVENANCE="a measured budget names the denominator each of its numbers came from"
+T_LMRX_ROWFIRST="the expired row is durable BEFORE the handler waits for anything"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5630,6 +5632,27 @@ MUTATIONS=(
   "LX15|554|SCHED|$T_LMRX_SCOPE"
   "LX16|555|GRANT|$T_LMRX_CHARGED"
   "LX17|556|SCHED|$T_LMRX_SETTLE"
+
+  # ---- playhead-lmrx review round 2: three defects the first fix introduced ----
+  #
+  #   * LX18 is the standing defect class one level ABOVE the values it guards.
+  #     The `Provenance` payload was a single `sampleSize: 203` — the number of
+  #     expired backfill rows — while the three quantities it vouches for have
+  #     denominators 132, 30 and 142. A provenance that reads the same whether
+  #     or not its own values were derived is not provenance.
+  #   * LX19 restores the ordering the first draft shipped: the settle wait in
+  #     FRONT of the durable ledger write. playhead-hygc.1.4 put that write
+  #     first on purpose; a kill during a wait of up to the whole teardown
+  #     reserve leaves the row at `running`, which is worse than the
+  #     `expired`-with-NULL-counters row this bead exists to improve.
+  #   * LX20 restores the un-scoped settle signal (`currentRunningTask != nil`,
+  #     "is ANYTHING running"). `runLoop()` polls every 5 s for the whole grant
+  #     and the expiry requeue leaves a queue full of eligible siblings, so the
+  #     wait would routinely time out on a requeue that already committed —
+  #     burning the reserve that stands between it and `setTaskCompleted`.
+  "LX18|557|GRANT|$T_LMRX_PROVENANCE"
+  "LX19|558|BGPS|$T_LMRX_ROWFIRST"
+  "LX20|559|SCHED|$T_LMRX_SETTLE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5997,6 +6020,9 @@ describe_mutation() {
     LX15) echo "lmrx: the completion count drops its baseline scoping and stops matching its own denominator" ;;
     LX16) echo "lmrx: the unmeasured charger-class budget is tidied into the measured one, and relabelled measured" ;;
     LX17) echo "lmrx: the settle wait returns success without waiting, so a requeue can be lost to suspension" ;;
+    LX18) echo "lmrx: the provenance quotes 203 — the row count — where the design grant's denominator is 132" ;;
+    LX19) echo "lmrx: the settle wait moves back in front of the durable expired row, so a kill leaves no outcome" ;;
+    LX20) echo "lmrx: the settle wait drops its identity scoping and waits out any sibling the run loop picks up" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12900,15 +12926,20 @@ EOF
       '            let workDeadline = budget.workDeadline(from: grantStart)' \
       '            let workDeadline = ContinuousClock.now + .seconds(25 * 60)' ;;
 
-  # LX02 — the backfill expiry stops telling the scheduler its grant ended. The
-  # anchor carries the following `emitExpire` identifier because the same cancel
-  # line also exists in the pre-analysis recovery handler, and `patch` refuses a
-  # non-unique anchor.
+  # LX02 — the backfill expiry stops telling the scheduler its grant ended.
+  # The anchor carries the preceding `guard` line: the pre-analysis recovery
+  # handler has its own `cancelCurrentJob(cause: .taskExpired)` call, and the
+  # `guard` is what makes this one the backfill site. The replacement keeps the
+  # closure's `Set<String>` return and its `await`, so what the mutant removes
+  # is the cancellation and nothing else.
   LX02)
     snippet OLD <<'EOF'
-                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
+                    return await scheduler.cancelCurrentJob(cause: .taskExpired)
 EOF
     snippet NEW <<'EOF'
+                    guard (await self?.analysisWorkScheduler) != nil else { return [] }
+                    return []
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13067,7 +13098,11 @@ EOF
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
-        provenance: .measured(sampleSize: 203)
+        provenance: .measured(
+            grantObservations: 132,
+            teardownObservations: 30,
+            checkpointObservations: 142
+        )
     )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -13076,7 +13111,7 @@ EOF
   LX17)
     snippet OLD <<'EOF'
         let deadline = ContinuousClock.now + budget
-        while currentRunningTask != nil {
+        while !inFlightJobIds.isDisjoint(with: jobIds) {
             guard ContinuousClock.now < deadline else { return false }
             try? await Task.sleep(for: pollInterval)
         }
@@ -13088,6 +13123,50 @@ EOF
         return true
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  # LX18 — the provenance names the wrong denominator: 203 is how many expired
+  # backfill rows exist, and it is what the first draft carried. The design
+  # grant's own denominator is the 132 of those that reached 200 s. Reads as a
+  # harmless tidy-up toward "the sample size everybody quotes".
+  LX18)
+    snippet OLD <<'EOF'
+        provenance: .measured(
+            grantObservations: 132,
+EOF
+    snippet NEW <<'EOF'
+        provenance: .measured(
+            grantObservations: 203,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX19 — the settle wait moves back IN FRONT of the durable ledger write,
+  # which is where this bead's first draft put it. Reads as "wait for the job
+  # before recording the outcome", and it puts up to a whole teardown reserve
+  # between the expiration and the only write that records it: a process killed
+  # during the wait leaves the row at `running`, i.e. strictly worse than the
+  # `expired`-with-NULL-counters row the bead was filed to improve.
+  LX19)
+    snippet OLD <<'EOF'
+                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
+                    return await scheduler.cancelCurrentJob(cause: .taskExpired)
+EOF
+    snippet NEW <<'EOF'
+                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
+                    let ids = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                    _ = await scheduler.awaitJobsSettled(ids, within: budget.teardownReserve)
+                    return ids
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX20 — the settle wait loses its identity scoping and goes back to asking
+  # "is ANYTHING running", which is the same question whether the cancelled job
+  # settled or `runLoop()` (5 s poll) has since picked up a sibling. Reads as a
+  # simplification; it makes the handler burn its whole reserve waiting out a
+  # requeue that already committed.
+  LX20)
+    patch "$file" \
+      '        while !inFlightJobIds.isDisjoint(with: jobIds) {' \
+      '        while currentRunningTask != nil {' ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2

@@ -60,10 +60,28 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// `.assumed` is exempt from that check and is, by construction, not
     /// evidence of anything.
     enum Provenance: Sendable, Equatable {
-        /// Derived from `sampleSize` observations in `background_task_runs` /
-        /// `semantic_scan_results`. The derivation belongs in the doc comment of
-        /// the specific instance.
-        case measured(sampleSize: Int)
+        /// Derived from device observations — one denominator PER FIELD,
+        /// because the three fields were not measured over the same rows and a
+        /// single `sampleSize` could only be right about one of them.
+        ///
+        /// The first draft of this type carried exactly that single number, and
+        /// it read `203` — the count of expired backfill runs. Ask the
+        /// diagnostic question: what would `203` read if nobody had derived the
+        /// design grant at all? The same, because it is just how many rows the
+        /// table holds for that outcome; none of the three shipped values has
+        /// 203 as its denominator (they are 132, 30 and 142). A provenance that
+        /// survives its own values not being measured is not provenance, which
+        /// is the defect this type exists to remove, committed one level up.
+        ///
+        /// - Parameters:
+        ///   - grantObservations: rows behind ``designGrant``.
+        ///   - teardownObservations: rows behind ``teardownReserve``.
+        ///   - checkpointObservations: rows behind ``minimumCheckpointBudget``.
+        case measured(
+            grantObservations: Int,
+            teardownObservations: Int,
+            checkpointObservations: Int
+        )
         /// No observations exist for this task class. The value preserves prior
         /// behaviour so the change is not a regression, and it must never be
         /// quoted as evidence about that class.
@@ -78,9 +96,14 @@ struct BackgroundGrantBudget: Sendable, Equatable {
 
     /// Wall clock held back from ``designGrant`` so the handler can finish:
     /// resolve its outcome, read the counters it is about to persist, write the
-    /// `background_task_runs` UPDATE, and call `setTaskCompleted`. A handler
-    /// that spends its whole grant on work and then gets reclaimed mid-teardown
+    /// `background_task_runs` UPDATE, wait for the interrupted analysis job to
+    /// commit its resume point, and call `setTaskCompleted`. A handler that
+    /// spends its whole grant on work and then gets reclaimed mid-teardown
     /// leaves exactly the `expired` row with NULL counters this bead is about.
+    ///
+    /// It is a budget for ALL of that together, not one each — see
+    /// ``remainingTeardownReserve(since:now:)``, which is how the expiration
+    /// handler spends it.
     let teardownReserve: Duration
 
     /// The smallest remaining grant worth starting a dispatch pass with.
@@ -135,6 +158,27 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// the instant the grant opened.
     func workDeadline(from grantStart: ContinuousClock.Instant) -> ContinuousClock.Instant {
         grantStart + workBudget
+    }
+
+    /// How much of ``teardownReserve`` is left, given when teardown began.
+    ///
+    /// The reserve is a budget for the WHOLE teardown — resolve the outcome,
+    /// write the `background_task_runs` UPDATE, wait for the interrupted job to
+    /// commit its resume point, call `setTaskCompleted` — not a per-step
+    /// allowance each step may spend in full. The first draft handed the entire
+    /// reserve to the settle wait alone, which is the same over-spend the
+    /// handler's 25-minute deadline was, at a smaller scale: an expiration
+    /// handler that has already spent its reserve and is still waiting is one
+    /// iOS may kill for never completing its task.
+    ///
+    /// Clamped at zero for the same reason ``workBudget`` is: a negative
+    /// remainder would read as a deadline in the past for the wrong reason.
+    func remainingTeardownReserve(
+        since teardownStart: ContinuousClock.Instant,
+        now: ContinuousClock.Instant = .now
+    ) -> Duration {
+        let remainder = teardownReserve - teardownStart.duration(to: now)
+        return remainder > .zero ? remainder : .zero
     }
 
     /// Is there enough grant left for a pass that starts now to reach a
@@ -194,7 +238,11 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
-        provenance: .measured(sampleSize: 203)
+        provenance: .measured(
+            grantObservations: 132,
+            teardownObservations: 30,
+            checkpointObservations: 142
+        )
     )
 
     /// `com.playhead.app.analysis.backfill.charged` — the playhead-i6oi

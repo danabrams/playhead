@@ -1399,8 +1399,14 @@ actor BackgroundProcessingService {
             // normal-return `finishRun` below. In a full-length grant that
             // return is never reached — the OS reclaims first — which is exactly
             // why every `expired` row carries NULL counters today.
-            baselineIdsBox.store(baselineIds)
+            //
+            // The DENOMINATOR is published first and the ids second, so the
+            // only interleaving an expiration can observe is "jobsSeen without
+            // jobsCompleted" (honest: the window ended before completions could
+            // be counted). The other order admits "completed 2 of NULL", which
+            // is a numerator with no denominator.
             counters.noteBaseline(pending: baselinePending)
+            baselineIdsBox.store(baselineIds)
 
             // Drive the analysis pipeline to drain pending backfill jobs.
             //
@@ -1501,6 +1507,12 @@ actor BackgroundProcessingService {
         task.expirationHandler = { [weak self] in
             workTask.cancel()
             Task { [weak self] in
+                // playhead-lmrx: the teardown reserve is spent from HERE. It is
+                // one budget for the whole teardown — the ledger write and the
+                // wait for the interrupted job's resume point — not an
+                // allowance each step may take in full. See
+                // `BackgroundGrantBudget.remainingTeardownReserve(since:now:)`.
+                let teardownStart = ContinuousClock.now
                 // playhead-lmrx: tell the SCHEDULER the grant is over, not just
                 // this handler's task.
                 //
@@ -1513,11 +1525,13 @@ actor BackgroundProcessingService {
                 // with a stale lease left for the reaper (which is
                 // playhead-mk6z's problem, and this is why it had one to solve).
                 // `cancelCurrentJob` cancels the in-flight job so its
-                // cancel-catch arm commits `state = 'queued'` with a backoff
-                // `nextEligibleAt`, increments the attempt count, and journals a
-                // `preempted` row carrying `task_expired` — i.e. the next
-                // granted window CONTINUES from a durable, correct position
-                // instead of restarting from a lease nobody released.
+                // cancel-catch arm commits `state = 'queued'` with a flat-floor
+                // `nextEligibleAt` and journals a `preempted` row carrying
+                // `task_expired` — WITHOUT spending an attempt, because an
+                // OS-reclaimed window is evidence about the window and not
+                // about the job. The next granted window therefore CONTINUES
+                // from a durable, correct position instead of restarting from a
+                // lease nobody released.
                 //
                 // The healthy sibling already does exactly this: the
                 // pre-analysis recovery expiration handler has called
@@ -1525,34 +1539,15 @@ actor BackgroundProcessingService {
                 // and recovery ran 86 of 97 wakes to `recovered_work` at 5.1 s
                 // average while backfill produced nothing durable in 199 of 203.
                 //
-                // Ordered BEFORE `markComplete` (inside
-                // `handleExpiredProcessingTask` below) for the same reason the
-                // reschedule is: iOS may suspend the process the moment a task
-                // is completed, and a cancellation lost to that suspension is a
-                // job stranded exactly as before.
-                //
-                // AND WE WAIT FOR IT. `cancelCurrentJob` only sets a flag and
-                // calls `cancel()`; the writes that make this a resume point —
-                // `state = 'queued'`, `nextEligibleAt`, the `preempted` journal
-                // row — land later on the scheduler's own task. Firing the
-                // cancel and walking straight to `setTaskCompleted` invites iOS
-                // to suspend the process while they are in flight, which loses
-                // the durability the cancel exists to buy. The wait is bounded
-                // by the SAME teardown reserve the budget already holds back for
-                // this teardown, so it cannot outlive the grant; a timeout is
-                // logged and teardown continues, because a late requeue is still
-                // better than an unreported task.
-                if let scheduler = await self?.analysisWorkScheduler {
-                    await scheduler.cancelCurrentJob(cause: .taskExpired)
-                    let settled = await scheduler.awaitCurrentJobSettled(
-                        within: budget.teardownReserve
-                    )
-                    if !settled {
-                        self?.logger.warning(
-                            "Backfill expiration: in-flight job did not settle within \(budget.teardownReserve, privacy: .public); its requeue may be lost to suspension"
-                        )
-                    }
-                }
+                // FIRST, and before the ledger write, because it is the one
+                // step that costs nothing to issue: `cancelCurrentJob` sets a
+                // flag and calls `cancel()`. Getting the cancellation in flight
+                // early is free; WAITING for it is what costs, and that wait is
+                // deliberately last (see below).
+                let cancelledJobIds: Set<String> = await {
+                    guard let scheduler = await self?.analysisWorkScheduler else { return [] }
+                    return await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }()
                 await self?.emitExpire(
                     identifier: BackgroundTaskID.backfillProcessing,
                     taskRef: task as AnyObject,
@@ -1621,6 +1616,43 @@ actor BackgroundProcessingService {
                     if !advanced {
                         self.logger.info(
                             "Backfill expiration: ledger row not advanced for runId=\(runId, privacy: .public) — either recordRunStart's INSERT lost, OR the work task wrote a terminal outcome before expiration fired. Probe the ledger to distinguish."
+                        )
+                    }
+                }
+                // playhead-lmrx: AND ONLY NOW DO WE WAIT. `cancelCurrentJob`
+                // above only set a flag; the writes that make this a resume
+                // point — `state = 'queued'`, `nextEligibleAt`, the `preempted`
+                // journal row — land later on the scheduler's own task. Walking
+                // straight from the cancel to `setTaskCompleted` invites iOS to
+                // suspend the process while they are in flight, which loses the
+                // durability the cancel exists to buy. So the wait sits between
+                // the ledger write and `markComplete` (inside
+                // `handleExpiredProcessingTask`), which is the only ordering
+                // that satisfies BOTH obligations:
+                //
+                //  * the `expired` row is durable before anything that can
+                //    block — playhead-hygc.1.4's rule, and the first draft of
+                //    this bead broke it by putting a wait of up to the whole
+                //    teardown reserve in front of the write. A process killed
+                //    during that wait leaves the row at `running`, which is
+                //    STRICTLY WORSE than the `expired`-with-NULL-counters row
+                //    this bead was filed to improve;
+                //  * and `setTaskCompleted` still does not fire until the
+                //    requeue has committed or the reserve is gone.
+                //
+                // The wait is scoped to the jobs the cancel was actually aimed
+                // at, not to "is anything running" — `runLoop()` polls every 5 s
+                // and will happily start a sibling while this waits, and a
+                // signal that cannot tell that apart would time out on a
+                // requeue that already landed.
+                if !cancelledJobIds.isEmpty,
+                   let scheduler = await self?.analysisWorkScheduler {
+                    let remaining = budget.remainingTeardownReserve(since: teardownStart)
+                    let settled = remaining > .zero
+                        && (await scheduler.awaitJobsSettled(cancelledJobIds, within: remaining))
+                    if !settled {
+                        self?.logger.warning(
+                            "Backfill expiration: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(budget.teardownReserve, privacy: .public) teardown reserve (\(remaining, privacy: .public) left after the ledger write); the requeue may be lost to suspension"
                         )
                     }
                 }
