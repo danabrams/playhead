@@ -31,7 +31,8 @@
 #
 # K2 SERIES STATUS — playhead-mptr, 2026-08-02
 #   The artifact-backed shard ORDERING (unread audio before audio we already
-#   hold). 10 entries K201-K210, 4 batches (200-203).
+#   hold). 10 entries K201-K210, 4 batches (200-203). playhead-6r4z added
+#   K211-K212 (batches 204-205) when it widened the artifact test to BOTH passes.
 #   FINAL 10 KILLED / 0 SURVIVED / 0 ERROR, 5 builds — batches 200, 201, 202,
 #   203, then K206 alone after its expectation string was corrected.
 #
@@ -1078,6 +1079,10 @@ PODC="Playhead/Services/AdDetection/AdPodContinuation.swift"
 # playhead-mptr: the artifact-backed shard skip (K2 series). MPTRIDX owns the
 # merge/overlap/skip policy; the two SQL rails live in STORE.
 MPTRIDX="Playhead/Services/TranscriptEngine/TranscriptCoverageIndex.swift"
+# playhead-6r4z: the one line that decides which population the index is BUILT
+# from. The index being right is a property of a value type and says nothing
+# about what the loop hands it — which is the whole of the shipped defect.
+MPTRENG="Playhead/Services/TranscriptEngine/TranscriptEngineService.swift"
 # playhead-kvs8: the FM daemon throttle (Q01-Q08). THROT is the single
 # definition + the named causes; RUNNER carries the defer branch that replaced
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
@@ -1264,7 +1269,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
-  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF"
+  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG"
 )
 
 FOCUSED_SUITES=(
@@ -1312,6 +1317,13 @@ FOCUSED_SUITES=(
   # are pure value-type / small-store tests, well under a second.
   -only-testing:PlayheadTests/TranscriptCoverageIndexTests
   -only-testing:PlayheadTests/FastTranscriptCoveredRangesStoreTests
+  # playhead-6r4z: the widened artifact test (both passes), the store read it is
+  # built from, and the loop WIRING — the last of which is the only thing here
+  # that can observe which population `runTranscriptionLoop` actually asks for.
+  # It drives two real transcription loops through a mock recognizer; ~0.5 s.
+  -only-testing:PlayheadTests/TranscriptCoverageBothPassesTests
+  -only-testing:PlayheadTests/TranscriptCoverageIndexStoreInputTests
+  -only-testing:PlayheadTests/TranscriptEngineCoverageOrderingTests
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertLifecycleRaceTests
@@ -2236,6 +2248,9 @@ T_MPTR_PASS_FILTER="a final-pass chunk is not reported as fast coverage"
 T_MPTR_SQL_DEGENERATE="a degenerate chunk covers no time and is excluded"
 T_MPTR_WATERMARK_INCLUSIVE="a shard ending exactly at the watermark counts, one second past does not"
 T_MPTR_UNCOVERED_FIRST="the D9B513CD shape: the unread tail is ordered ahead of the covered prefix"
+# playhead-6r4z — the widened artifact test, and the WIRING that carries it.
+T_6R4Z_ENGINE_WIRING="final-pass-covered shards are decoded LAST, and without them they are decoded FIRST"
+T_6R4Z_REGION_INDEX="an index built from the region classifies final-pass audio the fast-only read misses"
 T_GARD_CREDIT_NOT_SHARED="Credit goes to the observed detector only"
 T_GARD_OVERRIDE_CLEARS="An explicit user override clears the stale evidence against every detector"
 T_GARD_BANNER_CREDITS="A confirmed banner IS a correct observation, credited to the detector that drew the span"
@@ -2489,7 +2504,13 @@ T_9Y9E_INTERRUPT="an interrupted pass does not short-circuit, even on a complete
 T_9Y9E_FINALONLY="a scan window inside FINAL-pass-only transcript is counted, not discarded"
 T_9Y9E_CEILING="a fully scanned, mostly-final-pass episode can now reach the sufficiency floor"
 T_9Y9E_CLIPS="widening the bound to both passes does not stop it clipping untranscribed audio"
-T_9Y9E_RANGES="fetchTranscriptCoveredRanges spans both passes and drops degenerate rows"
+# playhead-6r4z: this said `fetchTranscriptCoveredRanges` until now, and had said
+# so since playhead-x0lb R5 renamed the getter to `fetchTranscribedRegion` and
+# renamed its test's display name with it — leaving RT08's expectation naming a
+# test that cannot run. The rail was reporting `expected test never ran` rather
+# than KILLED, which is the header's "the 4th field is the EXACT display name"
+# trap, hit by a rename in another bead rather than by a fresh entry.
+T_9Y9E_RANGES="fetchTranscribedRegion spans both passes and drops degenerate rows"
 T_9Y9E_UNSCANNED="a fully transcribed episode whose ad scan is short still gets a retry"
 # R1 review additions.
 T_9Y9E_MONO="the widened ad-scan bound never measures LESS than the watermark fallback did"
@@ -3910,6 +3931,21 @@ MUTATIONS=(
   "K206|202|STORE|$T_MPTR_PASS_FILTER"
   "K207|203|STORE|$T_MPTR_SQL_DEGENERATE"
   "K208|203|MPTRIDX|$T_MPTR_WATERMARK_INCLUSIVE"
+
+  # playhead-6r4z — the widening, and it needs TWO batches rather than one
+  # because each mutation empties the index the OTHER's expected test reads, so
+  # sharing a batch would score both a false KILL (the header's own rule).
+  #
+  # K211 is the shipped defect restored at the only line that decides which
+  # population the loop reads. Rail TY33 makes the same substitution fail to
+  # COMPILE; this is its behavioural half, because a type rail cannot see a
+  # third spelling that type-checks.
+  "K211|204|MPTRENG|$T_6R4Z_ENGINE_WIRING"
+
+  # K212 — the typed door silently discarding what it was handed. `chunkRanges`
+  # is still a real initializer (tests and migrations use it), so an empty
+  # forward is one token and reads as a stub nobody finished.
+  "K212|205|MPTRIDX|$T_6R4Z_REGION_INDEX"
 
   # playhead-hx6n — SCAN-ROW RUN ATTRIBUTION. Fifteen entries, batches 210-216.
   #
@@ -10134,6 +10170,35 @@ EOF
       "        return uncovered + covered" \
       "        return covered + uncovered" ;;
 
+  # ---- playhead-6r4z: the index reads BOTH passes (K211-K212) ----
+
+  # K211 — THE shipped defect, restored verbatim: the loop builds its ordering
+  # index from `pass = 'fast'` alone, so audio the FINAL pass covers has no
+  # artifact to point at, sorts UNCOVERED and floats to the FRONT of the pass
+  # minted to read the audio behind it. 215 shards / 6,450 s across seven of
+  # twelve assets on the 2026-08-03 pull.
+  K211)
+    snippet OLD <<'EOF'
+            coverageIndex = TranscriptCoverageIndex(
+                transcribedRegion: try await store.fetchTranscribedRegion(assetId: analysisAssetId)
+            )
+EOF
+    snippet NEW <<'EOF'
+            coverageIndex = TranscriptCoverageIndex(
+                chunkRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: analysisAssetId)
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # K212 — the typed door drops its argument. Every shard then sorts uncovered,
+  # which is the pre-mptr order: SAFE in the "nothing is skipped" sense and
+  # exactly the ceiling mptr exists to remove, so it is silent without a test
+  # that reads the ORDER.
+  K212)
+    patch "$file" \
+      "        self.init(chunkRanges: transcribedRegion.transcribedSpans)" \
+      "        self.init(chunkRanges: [])" ;;
+
   # ---- playhead-kkzu: the show a background download carries (KZ series) ----
 
   # KZ01 — THE defect, restored. `handleBackgroundDownloadComplete` is the only
@@ -12361,6 +12426,7 @@ rec_file()   {
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
+    MPTRENG) printf '%s' "$MPTRENG" ;;
     THROT) printf '%s' "$THROT" ;;
     FMREF) printf '%s' "$FMREF" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
