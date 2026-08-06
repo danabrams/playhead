@@ -1787,6 +1787,14 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/DrainEligibleStartGateTests
   -only-testing:PlayheadTests/BackfillGrantBoundingTests
   -only-testing:PlayheadTests/BackfillExpiryDurabilityTests
+  -only-testing:PlayheadTests/GrantCompletionPopulationTests
+  -only-testing:PlayheadTests/ExpiredWindowAttemptAccountingTests
+  # playhead-lmrx review round: the cancel-catch arm is shared, so the LX11-LX13
+  # exemption rails must be scored against the suites that already own the
+  # poisoned-job escape valve too. Without these a mutation that widened the
+  # exemption to every cause would redden nothing an LX rail names.
+  -only-testing:PlayheadTests/AnalysisWorkSchedulerOutcomeBookkeepingTests
+  -only-testing:PlayheadTests/AnalysisWorkSchedulerJournalEmissionTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2781,12 +2789,19 @@ T_Y8F3_STALE="an older cap-out under a newer clean terminal is not re-requested"
 T_LMRX_DEADLINE="the poll loop is handed a deadline inside the measured grant, not 25 minutes"
 T_LMRX_RESUME="expiry tells the SCHEDULER the grant is over, so the in-flight job requeues"
 T_LMRX_COUNTERS="an expired run records what the window achieved, not only that it ended"
-T_LMRX_STARTGATE="a pass is NOT started when the remaining grant is below the unit floor"
-T_LMRX_MEASURED="the backfill design grant does not exceed the measured grant"
+T_LMRX_STARTGATE="a pass is NOT started when the remaining grant is below the checkpoint floor"
+T_LMRX_MEASURED="a budget that claims to be measured fits the grant that was measured"
 T_LMRX_CLAMP="workBudget clamps at zero rather than going negative"
-T_LMRX_BOUNDARY="canStartUnit admits exactly the floor and refuses below it"
+T_LMRX_BOUNDARY="canReachCheckpoint admits exactly the floor and refuses below it"
 T_LMRX_ZERO="noteCompleted records zero as a measurement, not as absence"
-T_LMRX_UNITFLOOR="the start-gate floor is large enough to bank one durable window"
+T_LMRX_UNITFLOOR="the checkpoint floor is large enough to bank one durable window"
+T_LMRX_ATTEMPT="an expired background window leaves the job queued and spends no attempt"
+T_LMRX_NEVERDIE="five expired windows in a row still leave the job alive"
+T_LMRX_POISON="control: a genuine mid-run cancel still spends an attempt and still supersedes"
+T_LMRX_POPULATION="a FAILED job is not credited as completed"
+T_LMRX_SCOPE="an empty baseline completes nothing"
+T_LMRX_CHARGED="the charged sibling is declared an assumption, not a measurement"
+T_LMRX_SETTLE="awaitCurrentJobSettled waits for a running job and times out rather than lying"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5583,6 +5598,38 @@ MUTATIONS=(
   "LX08|547|GRANT|$T_LMRX_BOUNDARY"
   "LX09|548|BGPS|$T_LMRX_ZERO"
   "LX10|549|GRANT|$T_LMRX_UNITFLOOR"
+
+  # ---- playhead-lmrx review round: the fixes the FIRST fix made necessary ----
+  #
+  #   * LX11 is the most important rail in the series. Wiring the backfill
+  #     expiry to `cancelCurrentJob` (LX02) routes ~80 % of grants through the
+  #     cancel-catch arm, which charges an attempt and SUPERSEDES at five — and
+  #     a superseded row never comes back (`workKey` UNIQUE, `insertJob` is
+  #     `INSERT OR IGNORE`). Removing the `.taskExpired` exemption reads as
+  #     deleting a special case; it abandons every long episode on its fifth
+  #     window, by the OS doing exactly what the OS does.
+  #   * LX12 is LX11's terminal half, seeded one below the cap — the shape that
+  #     already killed two episodes in the 2026-08-06 pull.
+  #   * LX13 is the vacuity control in the other direction: exempting an expiry
+  #     must not disarm the poisoned-job escape valve.
+  #   * LX14 is the standing defect class, caught in this bead's own first
+  #     draft: counting "no longer pending" credits a FAILURE as a completion,
+  #     and failure is the commoner exit (112 `failed` vs 45 `finalized` in the
+  #     pull). LX15 drops the baseline SCOPING, which is what makes the
+  #     numerator and the denominator the same population.
+  #   * LX16 lets the unmeasured charger-class sibling inherit the measured
+  #     identifier's cap — the wrong-population error, one layer up.
+  #   * LX17 makes the settle-wait lie. `cancelCurrentJob` only sets a flag; the
+  #     requeue write lands later on the scheduler's task, so a wait that
+  #     returns success immediately invites iOS to suspend the process
+  #     mid-write and loses exactly the durability the cancel was for.
+  "LX11|550|SCHED|$T_LMRX_ATTEMPT"
+  "LX12|551|SCHED|$T_LMRX_NEVERDIE"
+  "LX13|552|SCHED|$T_LMRX_POISON"
+  "LX14|553|SCHED|$T_LMRX_POPULATION"
+  "LX15|554|SCHED|$T_LMRX_SCOPE"
+  "LX16|555|GRANT|$T_LMRX_CHARGED"
+  "LX17|556|SCHED|$T_LMRX_SETTLE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5943,6 +5990,13 @@ describe_mutation() {
     LX08) echo "lmrx: the start gate refuses a unit costing exactly its own measured cost" ;;
     LX09) echo "lmrx: a measured ZERO completion is written as NULL — 'completed none' reads as 'never started'" ;;
     LX10) echo "lmrx: the unit floor shrinks below the cost of one durable FM window" ;;
+    LX11) echo "lmrx: an OS-expired window is charged as an attempt again — 80% of grants now strike the job" ;;
+    LX12) echo "lmrx: the expiry requeue spends an attempt, so a long episode still supersedes on its 5th window" ;;
+    LX13) echo "lmrx: the expiry exemption widens to EVERY cancel, disarming the poisoned-job escape valve" ;;
+    LX14) echo "lmrx: 'completed' becomes 'no longer pending', so a FAILED job is credited to the window" ;;
+    LX15) echo "lmrx: the completion count drops its baseline scoping and stops matching its own denominator" ;;
+    LX16) echo "lmrx: the unmeasured charger-class budget is tidied into the measured one, and relabelled measured" ;;
+    LX17) echo "lmrx: the settle wait returns success without waiting, so a requeue can be lost to suspension" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12880,7 +12934,7 @@ EOF
   # LX04 — the drain start-gate goes; a pass may begin with any remaining grant.
   LX04)
     patch "$file" \
-      '            guard remaining > .zero, remaining >= minimumUnitBudget else { break }' \
+      '            guard remaining > .zero, remaining >= minimumCheckpointBudget else { break }' \
       '            guard remaining > .zero else { break }' ;;
 
   # LX05 — the baseline is no longer published when it is READ, only assembled
@@ -12915,8 +12969,8 @@ EOF
   # LX08 — the start gate refuses a unit that costs exactly its measured cost.
   LX08)
     patch "$file" \
-      '        remaining >= minimumUnitBudget' \
-      '        remaining > minimumUnitBudget' ;;
+      '        remaining >= minimumCheckpointBudget' \
+      '        remaining > minimumCheckpointBudget' ;;
 
   # LX09 — a measured zero is written as NULL, collapsing "completed none" into
   # "never started".
@@ -12931,13 +12985,112 @@ EOF
     static let backfillProcessing = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
-        minimumUnitBudget: .seconds(60)
+        minimumCheckpointBudget: .seconds(60),
 EOF
     snippet NEW <<'EOF'
     static let backfillProcessing = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
-        minimumUnitBudget: .seconds(1)
+        minimumCheckpointBudget: .seconds(1),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX11 — the `.taskExpired` exemption goes, and every expired window is
+  # charged an attempt again. Reads as deleting a special case.
+  LX11)
+    patch "$file" \
+      '                if cause == .taskExpired {' \
+      '                if cause == .taskExpired, false {' ;;
+
+  # LX12 — the exemption survives but spends an attempt, so the terminal arm
+  # still catches a long episode on its fifth window.
+  LX12)
+    snippet OLD <<'EOF'
+                            jobId: job.jobId,
+                            // `incrementAttempt` left at its `false` default,
+                            // which is the entire fix.
+                            stateUpdate: .init(
+                                state: "queued",
+                                nextEligibleAt: expiredNextEligible,
+EOF
+    snippet NEW <<'EOF'
+                            jobId: job.jobId,
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "queued",
+                                nextEligibleAt: expiredNextEligible,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX13 — the exemption widens to every cancel cause, disarming the
+  # poisoned-job escape valve. The vacuity control for LX11/LX12.
+  LX13)
+    patch "$file" \
+      '                if cause == .taskExpired {' \
+      '                if true {' ;;
+
+  # LX14 — completion becomes "no longer pending", so a FAILED job is credited
+  # to the window as work completed.
+  LX14)
+    snippet OLD <<'EOF'
+        guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
+        return ids.intersection(rows.map(\.jobId))
+EOF
+    snippet NEW <<'EOF'
+        let stillPending = await pendingJobIdsForLedger()
+        return ids.subtracting(stillPending)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX15 — the baseline scoping goes, so the count stops being over the
+  # population `jobsSeen` measured.
+  LX15)
+    snippet OLD <<'EOF'
+        guard !ids.isEmpty else { return [] }
+        guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
+        return ids.intersection(rows.map(\.jobId))
+EOF
+    snippet NEW <<'EOF'
+        guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
+        return Set(rows.map(\.jobId))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX16 — the unmeasured charger-class sibling is "tidied" into the measured
+  # identifier's constants, and relabelled as measured along with them.
+  LX16)
+    snippet OLD <<'EOF'
+    static let backfillProcessingCharged = BackgroundGrantBudget(
+        designGrant: .seconds(1800),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+        provenance: .assumed
+    )
+EOF
+    snippet NEW <<'EOF'
+    static let backfillProcessingCharged = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+        provenance: .measured(sampleSize: 203)
+    )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX17 — the settle wait reports success without waiting for anything.
+  LX17)
+    snippet OLD <<'EOF'
+        let deadline = ContinuousClock.now + budget
+        while currentRunningTask != nil {
+            guard ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: pollInterval)
+        }
+        return true
+EOF
+    snippet NEW <<'EOF'
+        _ = budget
+        _ = pollInterval
+        return true
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

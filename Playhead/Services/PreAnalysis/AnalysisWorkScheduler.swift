@@ -129,6 +129,14 @@ actor AnalysisWorkScheduler {
     /// the retry usually finds the work already done.
     private static let interruptedRequeueDelaySeconds = exponentialBackoffSeconds(attempt: 0)
 
+    /// playhead-lmrx: `lastErrorCode` for a job requeued because its background
+    /// window ended. A diagnosis on a `queued` row, not a failure — the same
+    /// shape `.interrupted` uses — so it reads as "why the last pass produced
+    /// nothing", not as "this job is broken". Deliberately does NOT carry the
+    /// `maxAttemptsReached:` prefix that the terminal arms use, because this
+    /// path spends no attempt and can never be terminal.
+    static let backgroundWindowExpiredErrorCode = "backgroundWindowExpired"
+
     private let store: AnalysisStore
     private let jobRunner: AnalysisJobRunner
     private let capabilitiesService: any CapabilitiesProviding
@@ -2609,6 +2617,42 @@ actor AnalysisWorkScheduler {
         currentRunningTask?.cancel()
     }
 
+    /// playhead-lmrx: suspend until the cancelled job has finished unwinding, or
+    /// `budget` elapses. Returns `true` if it settled, `false` on timeout.
+    ///
+    /// WHY THE CALLER MUST WAIT. ``cancelCurrentJob(cause:)`` only sets a flag
+    /// and calls `cancel()`. The writes that make the interruption a RESUME
+    /// POINT — the `state = 'queued'` commit, the `nextEligibleAt`, the
+    /// `preempted` journal row — happen later, on this actor's own task, once
+    /// `AnalysisJobRunner` observes the cancellation at its next checkpoint. A
+    /// BGTask expiration handler that fires the cancel and goes straight on to
+    /// `setTaskCompleted` is telling iOS it may suspend the process while those
+    /// writes are still in flight, which loses exactly the durability the cancel
+    /// was for. So the handler spends part of its teardown reserve here.
+    ///
+    /// `currentRunningTask == nil` is the settled signal, and it is the right
+    /// one: `processJob`'s `defer` nils it, and a `defer` runs AFTER the cancel
+    /// arm's `commitOutcomeArm` has returned. So observing nil proves the
+    /// requeue write completed rather than merely that cancellation was noticed.
+    ///
+    /// A poll rather than a continuation because the settle can also happen
+    /// without any cancel arm running at all (the job may finish normally in the
+    /// race), and a continuation would need resuming from every one of
+    /// `processJob`'s exit paths — a rule no test could see deleted. The poll is
+    /// bounded, cheap (an actor hop against a stored property), and its budget
+    /// is the caller's, so it cannot outlive the grant it is protecting.
+    func awaitCurrentJobSettled(
+        within budget: Duration,
+        pollInterval: Duration = .milliseconds(50)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + budget
+        while currentRunningTask != nil {
+            guard ContinuousClock.now < deadline else { return false }
+            try? await Task.sleep(for: pollInterval)
+        }
+        return true
+    }
+
     #if DEBUG
     /// Test-only accessor for the `pendingCancelCause` field so unit
     /// tests can verify `cancelCurrentJob(cause:)` precedence without
@@ -2699,14 +2743,55 @@ actor AnalysisWorkScheduler {
     /// BGProcessingTask budget and does not want a transient SQLite
     /// hiccup to surface as a thrown error.
     func pendingJobCountForLedger() async -> Int {
+        await pendingJobIdsForLedger().count
+    }
+
+    /// playhead-lmrx: the IDENTITIES behind ``pendingJobCountForLedger()``.
+    ///
+    /// The count alone cannot answer the question the ledger's `jobsCompleted`
+    /// column asks, and the first draft of this bead tried: subtracting a later
+    /// count from an earlier one measures how much the GLOBAL QUEUE SHRANK, not
+    /// what this grant achieved. Two things make those different, and both are
+    /// ordinary rather than exotic:
+    ///
+    /// - The queue shortens when a job **fails or is superseded**, not only when
+    ///   one completes. In the 2026-08-06 pull `work_journal` holds 112 `failed`
+    ///   events against 45 `finalized` — failure is the COMMONER way a row
+    ///   leaves the pending set, and a delta scores it identically to success.
+    /// - The drain MINTS work while it runs: a tier-advance commits
+    ///   `insertNextJob` inside `processJob`. Finish one, mint one, and the
+    ///   delta is zero for a window that did real work.
+    ///
+    /// Holding the identities makes numerator and denominator the same
+    /// population by construction: `jobsSeen` is the size of this set, and
+    /// `jobsCompleted` is how many OF THIS SET reached terminal success —
+    /// see ``completedJobIdsForLedger(among:)``.
+    ///
+    /// Returns the empty set on read failure rather than throwing, for the same
+    /// reason the count does: the caller is spending an OS grant and a transient
+    /// SQLite hiccup must not become a thrown error on the teardown path.
+    func pendingJobIdsForLedger() async -> Set<String> {
         let states = ["queued", "running", "paused"]
-        var total = 0
+        var ids: Set<String> = []
         for state in states {
             if let rows = try? await store.fetchJobsByState(state) {
-                total += rows.count
+                for row in rows { ids.insert(row.jobId) }
             }
         }
-        return total
+        return ids
+    }
+
+    /// playhead-lmrx: of `ids`, those that have reached terminal SUCCESS.
+    ///
+    /// `complete` only — deliberately not "no longer pending". A job that
+    /// `failed`, was `superseded`, or was blocked has also left the pending set,
+    /// and crediting those to a background window as work COMPLETED is the
+    /// defect this whole bead is filed under: a value that would read the same
+    /// whether the thing it claims to measure happened or not.
+    func completedJobIdsForLedger(among ids: Set<String>) async -> Set<String> {
+        guard !ids.isEmpty else { return [] }
+        guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
+        return ids.intersection(rows.map(\.jobId))
     }
 
     /// Install a lane-preemption handler. This bead (playhead-r835) only
@@ -2779,18 +2864,28 @@ actor AnalysisWorkScheduler {
     /// alongside the long-lived `runLoop()` — dispatch is lease-guarded, so a
     /// racing pass on the same job cleanly loses the CAS and skips.
     ///
-    /// playhead-lmrx: `minimumUnitBudget` is a START GATE, not a kill switch. A
-    /// bare `now < deadline` admits a pass with a millisecond left, and a pass
-    /// is a whole analysis job — so the loop could convert the tail of a grant
-    /// into work that is guaranteed to be abandoned. The floor is the measured
-    /// cost of the smallest unit the pipeline makes durable (one FM coarse
-    /// window; see ``BackgroundGrantBudget/backfillProcessing``), so below it a
-    /// pass cannot reach even one checkpoint. Defaults to `.zero`, which is
-    /// exactly the pre-lmrx condition, so callers that are not spending an OS
-    /// grant (tests, foreground drains) are unchanged.
+    /// playhead-lmrx: `minimumCheckpointBudget` is a START GATE, not a kill
+    /// switch, and it bounds something narrower than its position suggests.
+    ///
+    /// A bare `now < deadline` admits a pass with a millisecond left. A pass is
+    /// a whole analysis job and the device ledger says one routinely outlives
+    /// the entire grant, so this floor is emphatically NOT "enough time to
+    /// finish a pass" — no honest value would ever admit one. It is the cost of
+    /// the smallest DURABLE ARTIFACT the pipeline writes (one FM coarse window;
+    /// see ``BackgroundGrantBudget/minimumCheckpointBudget``), so below it a
+    /// pass that starts cannot bank anything at all before the window closes.
+    ///
+    /// Measured scope, so nobody reads more into it: of 203 expired backfill
+    /// grants, 108 contained exactly one dispatch and 33 none, so this gate is
+    /// consulted on roughly 30 of them. It stops wasted tail-of-grant dispatch;
+    /// it is not what makes a granted window productive.
+    ///
+    /// Defaults to `.zero`, which is exactly the pre-lmrx condition, so callers
+    /// that are not spending an OS grant (tests, foreground drains) are
+    /// unchanged.
     func drainEligible(
         deadline: ContinuousClock.Instant,
-        minimumUnitBudget: Duration = .zero
+        minimumCheckpointBudget: Duration = .zero
     ) async {
         guard config.isEnabled else { return }
         while !Task.isCancelled {
@@ -2798,7 +2893,7 @@ actor AnalysisWorkScheduler {
             // must agree about what "now" is, or a pass can be admitted by the
             // first and disowned by the second.
             let remaining = ContinuousClock.now.duration(to: deadline)
-            guard remaining > .zero, remaining >= minimumUnitBudget else { break }
+            guard remaining > .zero, remaining >= minimumCheckpointBudget else { break }
             let dispatched = await runSingleDispatchPass()
             if !dispatched { break }
             // playhead-bbut: cooperative yield between passes. In the one
@@ -4369,6 +4464,86 @@ actor AnalysisWorkScheduler {
                 let cause = pendingCancelCause ?? .pipelineError
                 pendingCancelCause = nil
                 let episodeId = job.episodeId
+
+                // playhead-lmrx: AN OS-RECLAIMED BACKGROUND WINDOW IS NOT AN
+                // ATTEMPT, AND MUST NOT SPEND ONE.
+                //
+                // This is the same accounting `playhead-ngev` established for
+                // `.interrupted` two arms below, reached through a different
+                // door, and for the identical reason: nothing about the analysis
+                // went wrong. The window ended. Charging it to `attemptCount`
+                // reads an environmental reclaim as a defect in the job.
+                //
+                // WHY IT IS URGENT NOW. Before playhead-lmrx the backfill
+                // expiration handler never called `cancelCurrentJob`, so
+                // `.taskExpired` reached this arm only from the pre-analysis
+                // recovery handler — which averages 5.1 s and rarely cancels
+                // anything. lmrx wires the backfill expiry here too, and 80 % of
+                // backfill grants expire. Without this branch every in-flight
+                // job would be charged one attempt per window and hit the
+                // `attempts >= maxAttemptCount` arm below on the FIFTH expiry,
+                // which supersedes it with `nextEligibleAt: nil`. A superseded
+                // row never comes back — `workKey` is UNIQUE and `insertJob` is
+                // `INSERT OR IGNORE` over a key stable across launches — so the
+                // episode would be abandoned permanently, by the OS doing
+                // exactly what the OS does. The bead exists to make a long
+                // episode survive many windows; without this it would make one
+                // survive four.
+                //
+                // NOT HYPOTHETICAL. The 2026-08-06 pull already carries two
+                // rows at `maxAttemptsReached:cancelMidRun` and two
+                // `analysisWorkScheduler.cancelCatchSupersede` journal events —
+                // this arm has already permanently abandoned episodes.
+                //
+                // THE ACCEPTED TRADE, stated plainly: a job that is ONLY ever
+                // ended by window expiry now retries forever. That is correct —
+                // an expiry is evidence about the window, not the job — and it
+                // is bounded elsewhere: the flat `interruptedRequeueDelaySeconds`
+                // floor stops a hot requeue loop (it never escalates, because
+                // there is nothing to escalate), the lease reaper handles a
+                // process that dies without unwinding, and a job that is
+                // genuinely wedged fails through the `.failed` arm on its own
+                // merits rather than through the OS's clock.
+                if cause == .taskExpired {
+                    let expiredNextEligible =
+                        clock().timeIntervalSince1970 + Self.interruptedRequeueDelaySeconds
+                    await commitOutcomeArm(
+                        "cancelCatch.taskExpiredRequeue",
+                        AnalysisStore.ProcessJobOutcomeArmCommit(
+                            jobId: job.jobId,
+                            // `incrementAttempt` left at its `false` default,
+                            // which is the entire fix.
+                            stateUpdate: .init(
+                                state: "queued",
+                                nextEligibleAt: expiredNextEligible,
+                                lastErrorCode: Self.backgroundWindowExpiredErrorCode
+                            )
+                        )
+                    )
+                    let expiredMetadata = await SliceCompletionInstrumentation
+                        .recordPaused(
+                            cause: .taskExpired,
+                            deviceClass: DeviceClass.detect(),
+                            sliceDurationMs: 0,
+                            bytesProcessed: 0,
+                            shardsCompleted: 0,
+                            extras: [
+                                "stage": "analysisWorkScheduler.taskExpiredRequeue",
+                                "job_id": job.jobId,
+                            ]
+                        )
+                        .encodeJSON()
+                    await emitJournalPreempted(
+                        episodeId: episodeId,
+                        cause: .taskExpired,
+                        metadataJSON: expiredMetadata
+                    )
+                    logger.info(
+                        "Job \(job.jobId) requeued after a background window expired, without spending an attempt"
+                    )
+                    return
+                }
+
                 if attempts >= Self.maxAttemptCount {
                     await commitOutcomeArm(
                         "cancelCatch.supersede",

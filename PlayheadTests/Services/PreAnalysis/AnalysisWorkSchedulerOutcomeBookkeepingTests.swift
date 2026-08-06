@@ -164,8 +164,16 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
+        // playhead-lmrx: this fixture used to pass `.taskExpired`, which was
+        // incidental — the test is about the POISONED-JOB escape valve, not
+        // about OS expiry. `.taskExpired` no longer reaches this arm: an
+        // OS-reclaimed background window spends no attempt (it is evidence
+        // about the window, not the job), so it would never supersede and
+        // never escalate backoff. `.pipelineError` is the arm's own
+        // documented default and the honest cause for a poisoned decode, so
+        // every assertion below is unchanged in meaning.
         let processed = await scheduler.processNextDispatchableJobForTesting(
-            cancelAfterRunnerStart: .taskExpired
+            cancelAfterRunnerStart: .pipelineError
         )
 
         #expect(processed, "Scheduler test hook should process cancel-mid-decode")
@@ -303,8 +311,16 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
                 clock: { fixedNow }
             )
 
+            // playhead-lmrx: this fixture used to pass `.taskExpired`, which was
+            // incidental — the test is about the POISONED-JOB escape valve, not
+            // about OS expiry. `.taskExpired` no longer reaches this arm: an
+            // OS-reclaimed background window spends no attempt (it is evidence
+            // about the window, not the job), so it would never supersede and
+            // never escalate backoff. `.pipelineError` is the arm's own
+            // documented default and the honest cause for a poisoned decode, so
+            // every assertion below is unchanged in meaning.
             let processed = await scheduler.processNextDispatchableJobForTesting(
-                cancelAfterRunnerStart: .taskExpired
+                cancelAfterRunnerStart: .pipelineError
             )
             #expect(processed, "Scheduler test hook should process \(jobId)")
 
@@ -398,8 +414,16 @@ struct AnalysisWorkSchedulerOutcomeBookkeepingTests {
             audioProvider: audioStub,
             downloads: downloads
         )
+        // playhead-lmrx: this fixture used to pass `.taskExpired`, which was
+        // incidental — the test is about the POISONED-JOB escape valve, not
+        // about OS expiry. `.taskExpired` no longer reaches this arm: an
+        // OS-reclaimed background window spends no attempt (it is evidence
+        // about the window, not the job), so it would never supersede and
+        // never escalate backoff. `.pipelineError` is the arm's own
+        // documented default and the honest cause for a poisoned decode, so
+        // every assertion below is unchanged in meaning.
         let processed = await scheduler.processNextDispatchableJobForTesting(
-            cancelAfterRunnerStart: .taskExpired
+            cancelAfterRunnerStart: .pipelineError
         )
 
         #expect(processed, "Scheduler test hook should process cancel-loop")

@@ -380,7 +380,7 @@ actor AnalysisCoordinator {
     /// so that a coordinator stop initiated mid-backfill (e.g. thermal=critical
     /// triggering `BackgroundProcessingService.handleCapabilityUpdate`) tears
     /// down the polling loop promptly instead of spinning for up to 25 minutes.
-    /// Reset in ``startCapabilityObserver()`` and ``runPendingBackfill()``.
+    /// Reset in ``startCapabilityObserver()`` and ``runPendingBackfill(deadline:)``.
     private var stopRequested = false
 
     // MARK: - Init

@@ -50,6 +50,26 @@ import Foundation
 /// right" is the defect this type exists to remove, so a new instance must come
 /// with its own measurement.
 struct BackgroundGrantBudget: Sendable, Equatable {
+
+    /// Where a budget's numbers came from.
+    ///
+    /// Carried as DATA rather than left to the doc comment because the whole
+    /// point of this type is that a value nobody measured must not be able to
+    /// pass as one that was. A budget that says `.measured` is checked against
+    /// the ledger by `BackgroundGrantBudgetMeasurementTests`; a budget that says
+    /// `.assumed` is exempt from that check and is, by construction, not
+    /// evidence of anything.
+    enum Provenance: Sendable, Equatable {
+        /// Derived from `sampleSize` observations in `background_task_runs` /
+        /// `semantic_scan_results`. The derivation belongs in the doc comment of
+        /// the specific instance.
+        case measured(sampleSize: Int)
+        /// No observations exist for this task class. The value preserves prior
+        /// behaviour so the change is not a regression, and it must never be
+        /// quoted as evidence about that class.
+        case assumed
+    }
+
     /// The grant length to design against, in seconds of wall clock.
     ///
     /// Deliberately NOT the mean and NOT the p50 of all expiries. See
@@ -57,21 +77,47 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     let designGrant: Duration
 
     /// Wall clock held back from ``designGrant`` so the handler can finish:
-    /// resolve its outcome, write the `background_task_runs` UPDATE, and call
-    /// `setTaskCompleted`. A handler that spends its whole grant on work and
-    /// then gets reclaimed mid-teardown leaves exactly the `expired` row with
-    /// NULL counters this bead is about.
+    /// resolve its outcome, read the counters it is about to persist, write the
+    /// `background_task_runs` UPDATE, and call `setTaskCompleted`. A handler
+    /// that spends its whole grant on work and then gets reclaimed mid-teardown
+    /// leaves exactly the `expired` row with NULL counters this bead is about.
     let teardownReserve: Duration
 
-    /// The smallest amount of remaining budget worth starting a dispatch pass
-    /// with. Below this, a pass cannot reach even one durable checkpoint, so
-    /// starting it converts remaining grant into nothing.
-    let minimumUnitBudget: Duration
+    /// The smallest remaining grant worth starting a dispatch pass with.
+    ///
+    /// **This is the cost of the smallest DURABLE ARTIFACT the pipeline writes,
+    /// NOT an estimate of what a pass costs, and the distinction is the whole
+    /// reason it is named this way.** A dispatch pass is an entire
+    /// `AnalysisJobRunner` job — decode, transcript, features, ad detection, the
+    /// FM phase — and the device ledger says a pass routinely outlives the whole
+    /// grant, so no honest floor would ever admit one. What the floor bounds is
+    /// different and weaker: below it, a pass that starts cannot reach even ONE
+    /// checkpoint before the window closes, so starting it converts the tail of
+    /// a grant into nothing at all. Above it, a pass may still not finish — but
+    /// it can bank something.
+    ///
+    /// **Scope, stated because the first draft of this comment overstated it.**
+    /// `drainEligible` consults this only BETWEEN passes. Of the 203 expired
+    /// backfill grants measured, 108 contained exactly one dispatch and 33
+    /// contained none, so roughly 30 windows ever reach a second pass and this
+    /// gate is asked about those. It is a genuine bound on wasted tail-of-grant
+    /// dispatch; it is NOT the fix for the 199-of-203 barren windows, and
+    /// nothing here should be read as claiming otherwise.
+    let minimumCheckpointBudget: Duration
 
-    init(designGrant: Duration, teardownReserve: Duration, minimumUnitBudget: Duration) {
+    /// Whether the three durations above are measurements or assumptions.
+    let provenance: Provenance
+
+    init(
+        designGrant: Duration,
+        teardownReserve: Duration,
+        minimumCheckpointBudget: Duration,
+        provenance: Provenance
+    ) {
         self.designGrant = designGrant
         self.teardownReserve = teardownReserve
-        self.minimumUnitBudget = minimumUnitBudget
+        self.minimumCheckpointBudget = minimumCheckpointBudget
+        self.provenance = provenance
     }
 
     /// How much of the grant may be spent attempting work.
@@ -91,21 +137,22 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         grantStart + workBudget
     }
 
-    /// Is there enough grant left to start another unit of work?
+    /// Is there enough grant left for a pass that starts now to reach a
+    /// checkpoint?
     ///
     /// The comparison is `>=` so a budget exactly equal to the floor still
-    /// admits a pass — the floor is "the cost of one unit", and a unit that
-    /// costs exactly its own cost fits.
-    func canStartUnit(remaining: Duration) -> Bool {
-        remaining >= minimumUnitBudget
+    /// admits a pass — the floor is the cost of one durable artifact, and an
+    /// artifact that costs exactly its own cost fits.
+    func canReachCheckpoint(remaining: Duration) -> Bool {
+        remaining >= minimumCheckpointBudget
     }
 
-    /// Convenience over ``canStartUnit(remaining:)`` for callers holding a
+    /// Convenience over ``canReachCheckpoint(remaining:)`` for callers holding a
     /// deadline rather than a remaining duration. A deadline already in the
     /// past yields a negative remainder, which is correctly below any
     /// non-negative floor.
-    func canStartUnit(before deadline: ContinuousClock.Instant, now: ContinuousClock.Instant) -> Bool {
-        canStartUnit(remaining: now.duration(to: deadline))
+    func canReachCheckpoint(before deadline: ContinuousClock.Instant, now: ContinuousClock.Instant) -> Bool {
+        canReachCheckpoint(remaining: now.duration(to: deadline))
     }
 
     // MARK: - Measured instances
@@ -128,35 +175,69 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     ///   a percentile: a handler that cannot reach its terminal write produces
     ///   precisely the unreadable `expired` row this bead exists to fix, so the
     ///   reserve is sized to the worst teardown actually seen.
-    /// - `minimumUnitBudget` = **60 s**. Denominator: the 142 `latencyMs` values
-    ///   in `semantic_scan_results`, one per FM coarse window — the smallest
-    ///   unit playhead-26od makes durable. p50 6.0 s, p75 20.3 s, p90 49.0 s,
-    ///   **p95 57.5 s**, rounded up to 60. A dispatch pass started with less
-    ///   than this remaining cannot bank even one window.
+    /// - `minimumCheckpointBudget` = **60 s**. Denominator: the 142 `latencyMs`
+    ///   values in `semantic_scan_results`, one per FM coarse window — the
+    ///   smallest artifact playhead-26od makes durable. p50 6.0 s, p75 20.3 s,
+    ///   p90 49.0 s, **p95 57.5 s**, rounded up to 60. Read the field's own doc
+    ///   comment before quoting this: it is the cost of an ARTIFACT, not of a
+    ///   pass.
     ///
     /// Work budget is therefore 255 − 36 = **219 s**, against the 1500 s the
     /// handler used to assume.
+    ///
+    /// **One exclusion, named because it is not obvious.** The nine `failed`
+    /// backfill rows average 1581 s and reach 2299 s, which looks like evidence
+    /// of much longer grants. They are all `lastErrorCode = 'orphan_at_launch'`
+    /// — rows reaped by a LATER launch, so their `finishedAt` is the reaping,
+    /// not the end of a grant. They are excluded from every percentile above.
     static let backfillProcessing = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
-        minimumUnitBudget: .seconds(60)
+        minimumCheckpointBudget: .seconds(60),
+        provenance: .measured(sampleSize: 203)
+    )
+
+    /// `com.playhead.app.analysis.backfill.charged` — the playhead-i6oi
+    /// charger-maintenance sibling, which shares `handleBackfillTask`.
+    ///
+    /// **ASSUMED, NOT MEASURED, AND DELIBERATELY DIFFERENT.** The 2026-08-06
+    /// pull contains **zero** rows for this identifier — `SELECT DISTINCT
+    /// taskIdentifier FROM background_task_runs` returns only the plain
+    /// backfill, recovery and rediff ids — so there is no observation of what
+    /// iOS grants a charger-class window. Applying the plain identifier's
+    /// measured 219 s here would be the exact error this type exists to prevent:
+    /// a number measured on one population spent on another. It would also be a
+    /// live regression risk, because the charger class is expected to grant
+    /// LONGER windows (that is the whole point of playhead-i6oi) and a 219 s cap
+    /// would surrender the rest of an overnight grant.
+    ///
+    /// So this keeps the 30-minute horizon the handler assumed before
+    /// playhead-lmrx — no behaviour change for the class nobody has measured —
+    /// and says out loud that it is an assumption. The next pull can settle it:
+    /// `background_task_runs` already records `taskIdentifier`, and as of this
+    /// bead it also records what each window achieved.
+    static let backfillProcessingCharged = BackgroundGrantBudget(
+        designGrant: .seconds(1800),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+        provenance: .assumed
     )
 
     /// `com.playhead.app.preanalysis.recovery`.
     ///
     /// Same shape, same denominators, different population: the 5 expired
     /// recovery runs average 159.0 s, and the 92 that finished normally average
-    /// 5.1 s (86 `recovered_work` at 5.1 s, 6 `no_op` at 0.7 s). Recovery is the
-    /// HEALTHY sibling — it is not what this bead measured — so its grant is
-    /// assumed to be the same OS class as backfill (both are `BGProcessingTask`
-    /// on the same device) and the same 255/36 split applies. It carried a
-    /// 5-minute (300 s) drain deadline, already within 1.2x of the measured
-    /// grant rather than 5.07x, so this changes it only marginally; the point is
-    /// that both handlers now derive the number from the same measurement
-    /// instead of two unrelated constants.
+    /// 5.1 s (86 `recovered_work` at 5.1 s, 6 `no_op` at 0.7 s), with the
+    /// longest single run at 164.4 s. Recovery is the HEALTHY sibling — it is
+    /// not what this bead measured — so its grant is taken to be the same OS
+    /// class as backfill (both are `BGProcessingTask` on the same device) and
+    /// the same 255/36 split applies. Shortening its drain from 300 s to 219 s
+    /// is safe against that 164.4 s maximum, and marked `.assumed` because the
+    /// grant length itself was borrowed rather than observed on this identifier.
     static let preAnalysisRecovery = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
-        minimumUnitBudget: .seconds(60)
+        minimumCheckpointBudget: .seconds(60),
+        provenance: .assumed
     )
 }

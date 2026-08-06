@@ -72,41 +72,68 @@ private struct UncheckedSendableBox<T>: @unchecked Sendable {
 /// findings, and collapsing them is the same class of error as the one this box
 /// exists to fix. `finishRun` binds through `COALESCE(?, col)`, so a `nil` here
 /// leaves the column untouched rather than overwriting it with a fabricated 0.
+///
+/// **`jobsAdmitted` IS DELIBERATELY NOT HERE.** The pre-lmrx handler wrote
+/// `jobsAdmitted: baselinePending` — the same number it wrote for `jobsSeen` —
+/// and all 12 `admitted_work` rows in the 2026-08-06 pull duly carry
+/// `jobsSeen == jobsAdmitted`. Ask the diagnostic question of it: what would
+/// that column read if NOTHING had been admitted? The same. It is not a
+/// measurement of admission, it is a copy of the denominator, and this handler
+/// has no honest admission count to offer — `drainEligible` awaits each pass to
+/// completion, so a window whose only pass never returns cannot say whether the
+/// pass it started counts as admitted. Leaving the column NULL says "not
+/// measured", which is true. Writing the denominator into it says something
+/// false, and this bead exists because of a ledger that said false things.
 final class BackgroundGrantCounters: Sendable {
     private struct State {
         var jobsSeen: Int?
-        var jobsAdmitted: Int?
         var jobsCompleted: Int?
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
 
-    /// Record the queue depth observed at the start of the grant. This is the
-    /// DENOMINATOR — how much work was waiting — and it is deliberately
-    /// recorded before the drain mutates anything.
+    /// Record the queue depth observed at the start of the grant — the
+    /// DENOMINATOR. Recorded before the drain mutates anything.
     func noteBaseline(pending: Int) {
-        state.withLock {
-            $0.jobsSeen = pending
-            $0.jobsAdmitted = pending
-        }
+        state.withLock { $0.jobsSeen = pending }
     }
 
-    /// Record how many jobs left the queue during this grant.
+    /// Record how many of the jobs pending at the start of this grant reached
+    /// terminal SUCCESS.
     ///
-    /// The NUMERATOR against ``noteBaseline(pending:)``'s denominator, and it is
-    /// a measurement rather than a restatement: it is taken by re-reading the
-    /// pending count, so a grant that admitted work and finished none reports
-    /// `jobsCompleted = 0` instead of leaving the field NULL and looking the
-    /// same as a grant that never started.
+    /// The NUMERATOR over ``noteBaseline(pending:)``'s denominator, and over the
+    /// same population by construction — the caller passes the size of an
+    /// intersection with the baseline id set, not a difference of two counts.
+    /// See `AnalysisWorkScheduler.pendingJobIdsForLedger()` for why a count
+    /// delta is the wrong instrument here.
+    ///
+    /// Zero is a measurement and is stored as one: "admitted work and finished
+    /// none" is this bead's headline finding, and it must not read as NULL.
     func noteCompleted(_ completed: Int) {
         state.withLock { $0.jobsCompleted = completed }
     }
 
     /// The counters as they stand, for whichever path reaches `finishRun`
     /// first — the work task's normal return or the expiration handler.
-    var snapshot: (jobsSeen: Int?, jobsAdmitted: Int?, jobsCompleted: Int?) {
-        state.withLock { ($0.jobsSeen, $0.jobsAdmitted, $0.jobsCompleted) }
+    var snapshot: (jobsSeen: Int?, jobsCompleted: Int?) {
+        state.withLock { ($0.jobsSeen, $0.jobsCompleted) }
     }
+}
+
+/// playhead-lmrx: the identities of the jobs pending when a grant opened.
+///
+/// Shared with the expiration handler for the same reason the counters are: the
+/// completion count has to be taken over the population the baseline named, and
+/// in 80 % of grants the only path that reaches a terminal ledger write is the
+/// expiration handler, which cannot see the work task's locals.
+final class BackgroundGrantBaselineIds: Sendable {
+    private let ids = OSAllocatedUnfairLock<Set<String>?>(initialState: nil)
+
+    func store(_ value: Set<String>) { ids.withLock { $0 = value } }
+
+    /// `nil` when the grant ended before the baseline was ever read — which is
+    /// a different thing from an empty queue, and must stay distinguishable.
+    var value: Set<String>? { ids.withLock { $0 } }
 }
 
 // MARK: - Protocols for Testability
@@ -779,6 +806,14 @@ actor BackgroundProcessingService {
         // playhead-i6oi: charger-class backfill sibling routes to the SAME
         // handler. Whichever class iOS grants a window to (battery-idle or
         // charger-maintenance), the identical backfill drain runs.
+        //
+        // playhead-lmrx: but NOT the same budget. Every grant measurement in
+        // this repo comes from the plain identifier — the pull has zero rows for
+        // this one — and the charger class exists precisely because it is
+        // expected to behave differently. Spending the plain identifier's 219 s
+        // here would both be unevidenced and risk surrendering most of an
+        // overnight grant, so this class keeps the horizon the handler assumed
+        // before lmrx and says so in `Provenance.assumed`.
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged,
             using: nil
@@ -788,7 +823,12 @@ actor BackgroundProcessingService {
                 return
             }
             let sendableTask = UncheckedSendableBox(processingTask)
-            Task { await self.handleBackfillTask(sendableTask.value) }
+            Task {
+                await self.handleBackfillTask(
+                    sendableTask.value,
+                    budget: .backfillProcessingCharged
+                )
+            }
         }
 
         BGTaskScheduler.shared.register(
@@ -1181,7 +1221,17 @@ actor BackgroundProcessingService {
 
     /// Handle the backfill BGProcessingTask. Runs analysis on episodes that
     /// have incomplete transcription or ad detection.
-    func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) async {
+    /// - Parameter budget: the measured grant this handler is spending.
+    ///   Defaults to the plain `com.playhead.app.analysis.backfill` budget; the
+    ///   playhead-i6oi charger-class sibling shares this handler and passes
+    ///   ``BackgroundGrantBudget/backfillProcessingCharged`` instead, because
+    ///   the pull contains ZERO observations of that identifier and spending the
+    ///   plain identifier's measurement on it would be exactly the
+    ///   wrong-population error this type exists to stop (playhead-lmrx).
+    func handleBackfillTask(
+        _ task: any BackgroundProcessingTaskProtocol,
+        budget: BackgroundGrantBudget = .backfillProcessing
+    ) async {
         logger.info("Backfill task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
@@ -1220,10 +1270,13 @@ actor BackgroundProcessingService {
         // extending it. Read synchronously, before the first `await`, for the
         // same playhead-c25o reason the expiration handler is armed here.
         let grantStart = ContinuousClock.now
-        let budget = BackgroundGrantBudget.backfillProcessing
         // playhead-lmrx: shared with the expiration handler so an `expired` row
-        // reports what the window achieved instead of only that it ended.
+        // reports what the window achieved instead of only that it ended. The
+        // baseline IDS live alongside it because `jobsCompleted` must be counted
+        // over the same population `jobsSeen` measured — see
+        // `AnalysisWorkScheduler.pendingJobIdsForLedger()`.
         let counters = BackgroundGrantCounters()
+        let baselineIdsBox = BackgroundGrantBaselineIds()
         let startRunTask = Task {
             let scenePhase = await BGTaskTelemetryScenePhase.current()
             await runLedgerForStart.recordRunStart(
@@ -1335,11 +1388,18 @@ actor BackgroundProcessingService {
             // injected (early-launch race), we treat baseline as 0 so
             // the eventual outcome falls into no_eligible_work / no_op
             // semantics rather than misclassifying as admitted work.
-            let baselinePending = await self.analysisWorkScheduler?.pendingJobCountForLedger() ?? 0
-            // playhead-lmrx: publish the baseline the moment it is known, not at
-            // the normal-return `finishRun` 60 lines below. In a full-length
-            // grant that return is never reached — the OS reclaims first — which
-            // is exactly why every `expired` row carries NULL counters.
+            // playhead-lmrx: capture the pending IDENTITIES, not just the count.
+            // The count answers `jobsSeen`; the identities are what make
+            // `jobsCompleted` a measurement over the same population rather than
+            // a difference of two global counts (which a concurrent failure or a
+            // tier-advance mint would corrupt in opposite directions).
+            let baselineIds = await self.analysisWorkScheduler?.pendingJobIdsForLedger() ?? []
+            let baselinePending = baselineIds.count
+            // Publish the baseline the moment it is known, not at the
+            // normal-return `finishRun` below. In a full-length grant that
+            // return is never reached — the OS reclaims first — which is exactly
+            // why every `expired` row carries NULL counters today.
+            baselineIdsBox.store(baselineIds)
             counters.noteBaseline(pending: baselinePending)
 
             // Drive the analysis pipeline to drain pending backfill jobs.
@@ -1383,7 +1443,7 @@ actor BackgroundProcessingService {
             if let scheduler = self.analysisWorkScheduler {
                 await scheduler.drainEligible(
                     deadline: workDeadline,
-                    minimumUnitBudget: budget.minimumUnitBudget
+                    minimumCheckpointBudget: budget.minimumCheckpointBudget
                 )
             }
             await self.analysisWorkScheduler?.wake()
@@ -1414,13 +1474,9 @@ actor BackgroundProcessingService {
                 baselinePending > 0 ? .admittedWork : .noEligibleWork
             // playhead-lmrx: `jobsCompleted` was never written on this path, so
             // all 12 `admitted_work` rows in the 2026-08-06 pull read NULL and
-            // "26 jobs admitted, 0 completed" had to be inferred. Measure it:
-            // re-read the queue depth and report how far it FELL. A grant that
-            // admitted work and finished none now records 0 — which is a
-            // finding — instead of NULL, which is silence.
-            let residualPending = await self.analysisWorkScheduler?.pendingJobCountForLedger()
-                ?? baselinePending
-            counters.noteCompleted(max(0, baselinePending - residualPending))
+            // "26 jobs admitted, 0 completed" had to be inferred. Measure it —
+            // over the baseline POPULATION, and counting terminal SUCCESS only.
+            await self.recordGrantCompletions(counters: counters, baselineIds: baselineIds)
             let achieved = counters.snapshot
             // Wait for the row insert to land before the UPDATE.
             await startRunTask.value
@@ -1429,7 +1485,6 @@ actor BackgroundProcessingService {
                 update: BackgroundTaskRunOutcomeUpdate(
                     outcome: outcome,
                     jobsSeen: achieved.jobsSeen,
-                    jobsAdmitted: achieved.jobsAdmitted,
                     jobsCompleted: achieved.jobsCompleted
                 )
             )
@@ -1475,7 +1530,29 @@ actor BackgroundProcessingService {
                 // reschedule is: iOS may suspend the process the moment a task
                 // is completed, and a cancellation lost to that suspension is a
                 // job stranded exactly as before.
-                await self?.analysisWorkScheduler?.cancelCurrentJob(cause: .taskExpired)
+                //
+                // AND WE WAIT FOR IT. `cancelCurrentJob` only sets a flag and
+                // calls `cancel()`; the writes that make this a resume point —
+                // `state = 'queued'`, `nextEligibleAt`, the `preempted` journal
+                // row — land later on the scheduler's own task. Firing the
+                // cancel and walking straight to `setTaskCompleted` invites iOS
+                // to suspend the process while they are in flight, which loses
+                // the durability the cancel exists to buy. The wait is bounded
+                // by the SAME teardown reserve the budget already holds back for
+                // this teardown, so it cannot outlive the grant; a timeout is
+                // logged and teardown continues, because a late requeue is still
+                // better than an unreported task.
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                    let settled = await scheduler.awaitCurrentJobSettled(
+                        within: budget.teardownReserve
+                    )
+                    if !settled {
+                        self?.logger.warning(
+                            "Backfill expiration: in-flight job did not settle within \(budget.teardownReserve, privacy: .public); its requeue may be lost to suspension"
+                        )
+                    }
+                }
                 await self?.emitExpire(
                     identifier: BackgroundTaskID.backfillProcessing,
                     taskRef: task as AnyObject,
@@ -1510,15 +1587,26 @@ actor BackgroundProcessingService {
                     // the warning channel. A future ledger method that
                     // exposes per-run outcome would let us split these
                     // cases — tracked as a follow-up.
-                    // playhead-lmrx: persist the counters this path ALREADY
-                    // HOLDS. Pre-fix it wrote outcome/cause/expiration and
-                    // nothing else, so `jobsSeen`/`jobsAdmitted`/`jobsCompleted`
-                    // were NULL on all 203 expired rows and the ledger could not
-                    // answer "how much did this window achieve" for 80 % of the
-                    // grants it recorded. `nil` fields stay `nil` — `finishRun`
-                    // binds through `COALESCE(?, col)` — so a window that
-                    // expired before the baseline was even read still reports
-                    // NULL rather than a fabricated 0.
+                    // playhead-lmrx: persist what this window ACHIEVED, not only
+                    // that it ended. Pre-fix this call wrote
+                    // outcome/cause/expiration and nothing else, so
+                    // `jobsSeen`/`jobsAdmitted`/`jobsCompleted` were NULL on all
+                    // 203 expired rows and the ledger could not answer "how much
+                    // did this window achieve" for 80 % of the grants it
+                    // recorded. `nil` fields stay `nil` — `finishRun` binds
+                    // through `COALESCE(?, col)` — so a window that expired
+                    // before the baseline was even read still reports NULL
+                    // rather than a fabricated 0.
+                    //
+                    // The completion count is taken HERE rather than inherited,
+                    // because the whole point is that this path is the only one
+                    // 80 % of grants reach.
+                    if let baselineIds = baselineIdsBox.value {
+                        await self.recordGrantCompletions(
+                            counters: counters,
+                            baselineIds: baselineIds
+                        )
+                    }
                     let achieved = counters.snapshot
                     let advanced = await self.runLedger.finishRun(
                         runId: runId,
@@ -1526,7 +1614,6 @@ actor BackgroundProcessingService {
                             outcome: .expired,
                             cause: InternalMissCause.taskExpired.rawValue,
                             jobsSeen: achieved.jobsSeen,
-                            jobsAdmitted: achieved.jobsAdmitted,
                             jobsCompleted: achieved.jobsCompleted,
                             expiration: true
                         )
@@ -1853,6 +1940,27 @@ actor BackgroundProcessingService {
         markComplete(task, success: false)
     }
 
+    /// playhead-lmrx: measure how many of the jobs pending when this grant
+    /// opened have reached terminal SUCCESS, and publish it to `counters`.
+    ///
+    /// One helper rather than two copies because BOTH terminal paths need it and
+    /// they must agree: the work task's normal return (reached by ~20 % of
+    /// grants) and the expiration handler (the other 80 %). A completion count
+    /// computed one way on one path and another way on the other is a ledger
+    /// whose column means two things.
+    ///
+    /// Not "no longer pending" and not a delta of counts — see
+    /// `AnalysisWorkScheduler.completedJobIdsForLedger(among:)` for why both of
+    /// those measure something other than what the column is named.
+    private func recordGrantCompletions(
+        counters: BackgroundGrantCounters,
+        baselineIds: Set<String>
+    ) async {
+        guard let scheduler = analysisWorkScheduler else { return }
+        let completed = await scheduler.completedJobIdsForLedger(among: baselineIds)
+        counters.noteCompleted(completed.count)
+    }
+
     // MARK: - Pre-Analysis Recovery
 
     /// Handle the pre-analysis recovery BGProcessingTask. Runs reconciliation
@@ -1973,7 +2081,7 @@ actor BackgroundProcessingService {
                     let budget = BackgroundGrantBudget.preAnalysisRecovery
                     await scheduler.drainEligible(
                         deadline: budget.workDeadline(from: recoveryGrantStart),
-                        minimumUnitBudget: budget.minimumUnitBudget
+                        minimumCheckpointBudget: budget.minimumCheckpointBudget
                     )
                 }
                 // Re-check cancellation after the drain: a mid-drain
