@@ -2352,11 +2352,30 @@ struct SchedulerExpiredLeaseReclaimTests {
                 "positive control: a second sweep must have reached the store — otherwise the assertion below is vacuous")
 
         let inflight = try await store.fetchJob(byId: "mk6z-inflight")
-        #expect(inflight?.state == "running", """
-            The sweep reclaimed a row this very process is running. `currentJobId` names the LAST \
-            dispatch, not what is in flight, so the sibling's completion nils it while the drain's \
-            job is still working — the exclusion must be read from the in-flight SET.
+        // `state == "running"` is NOT a witness here, and finding that out cost
+        // this test a round. A reclaimed row goes back to `queued` with
+        // `nextEligibleAt` still nil, so it is immediately eligible again and
+        // the same run loop re-dispatches it on the very next pass — which
+        // re-acquires the lease and puts the row back to `running` with owner
+        // `preAnalysis`. Both answers therefore read `running`, and the earlier
+        // version of this test passed under the mutant that reintroduces the
+        // defect.
+        //
+        // That is the bead's own defect class committed inside its test: a
+        // column naming "SOME claim exists" read as though it named "the
+        // ORIGINAL claim survived". The witnesses below are the two things a
+        // reclaim-then-reacquire necessarily moves and a survivor cannot.
+        #expect(inflight?.attemptCount == 4, """
+            The sweep reclaimed a row this process is running: `attemptCount` went 4 -> 5, and \
+            `reclaimExpiredLeases` is the only thing here that charges it. `currentJobId` names \
+            the LAST dispatch, not what is in flight — the sibling's completion nils it while the \
+            drain's job is still working — so the exclusion must be read from the in-flight SET.
             """)
+        #expect(inflight?.leaseExpiresAt == t0 + 300, """
+            The lease deadline moved off `leaseAcquiredAt + leaseExpirySeconds`, so this row is a \
+            NEW claim minted after a reclaim rather than the original one surviving the sweep.
+            """)
+        #expect(inflight?.state == "running", "the claim must still be running")
         #expect(inflight?.leaseOwner == "preAnalysis", "the live claim's owner must survive the sweep")
 
         park.release()
