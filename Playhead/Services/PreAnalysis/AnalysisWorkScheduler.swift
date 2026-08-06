@@ -4490,10 +4490,17 @@ actor AnalysisWorkScheduler {
                 // episode survive many windows; without this it would make one
                 // survive four.
                 //
-                // NOT HYPOTHETICAL. The 2026-08-06 pull already carries two
-                // rows at `maxAttemptsReached:cancelMidRun` and two
-                // `analysisWorkScheduler.cancelCatchSupersede` journal events —
-                // this arm has already permanently abandoned episodes.
+                // THE ARM IS PROVEN LETHAL, AND THE EXPIRY PATH INTO IT IS NEW.
+                // The 2026-08-06 pull carries two rows at
+                // `maxAttemptsReached:cancelMidRun` and two
+                // `analysisWorkScheduler.cancelCatchSupersede` journal events,
+                // so this arm has already permanently abandoned two episodes.
+                // Both of those carry `original_cancel_cause = pipeline_error`,
+                // NOT `task_expired` — stated precisely because the tempting
+                // shorthand ("expiry already killed two episodes") is false and
+                // would be the same sloppiness this bead is filed under. What
+                // the pull shows is that the terminal is reachable and real;
+                // what lmrx adds is a second, far commoner road to it.
                 //
                 // THE ACCEPTED TRADE, stated plainly: a job that is ONLY ever
                 // ended by window expiry now retries forever. That is correct —

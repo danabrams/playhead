@@ -610,8 +610,14 @@ struct ExpiredWindowAttemptAccountingTests {
         // superseded the job with `nextEligibleAt: nil` and
         // `maxAttemptsReached:cancelMidRun` — and a superseded row NEVER comes
         // back, because `workKey` is UNIQUE and `insertJob` is `INSERT OR
-        // IGNORE` over a key stable across launches. The 2026-08-06 pull already
-        // contains two episodes killed this way.
+        // IGNORE` over a key stable across launches.
+        //
+        // The 2026-08-06 pull contains two episodes killed at this terminal, so
+        // it is real rather than theoretical — though both carry
+        // `original_cancel_cause = pipeline_error`, not `task_expired`. The
+        // terminal was already reachable; what this bead would have added,
+        // without the exemption under test, is a road to it that 80 % of grants
+        // travel.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         try await insertJob(store: store, downloads: downloads, jobId: "long-episode", attemptCount: 4)
@@ -650,8 +656,14 @@ struct ExpiredWindowAttemptAccountingTests {
         let dispatch = Task {
             await scheduler.processNextDispatchableJobForTesting()
         }
-        // Give the dispatch a moment to take the job and enter decode.
+        // Give the dispatch a moment to take the job and enter decode. Bounded
+        // explicitly rather than leaning on `.timeLimit`: a hang here would
+        // otherwise read as a load flake instead of as "the job never
+        // dispatched", which is a different bug.
+        var spins = 0
         while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 500, "the seeded job never entered decode")
             try await Task.sleep(for: .milliseconds(20))
         }
         let settled = await scheduler.awaitCurrentJobSettled(

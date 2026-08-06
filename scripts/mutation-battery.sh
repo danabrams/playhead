@@ -12906,13 +12906,9 @@ EOF
   # non-unique anchor.
   LX02)
     snippet OLD <<'EOF'
-                await self?.analysisWorkScheduler?.cancelCurrentJob(cause: .taskExpired)
-                await self?.emitExpire(
-                    identifier: BackgroundTaskID.backfillProcessing,
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
 EOF
     snippet NEW <<'EOF'
-                await self?.emitExpire(
-                    identifier: BackgroundTaskID.backfillProcessing,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12922,7 +12918,6 @@ EOF
   LX03)
     snippet OLD <<'EOF'
                             jobsSeen: achieved.jobsSeen,
-                            jobsAdmitted: achieved.jobsAdmitted,
                             jobsCompleted: achieved.jobsCompleted,
                             expiration: true
 EOF
