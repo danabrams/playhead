@@ -1795,6 +1795,14 @@ FOCUSED_SUITES=(
   # exemption to every cause would redden nothing an LX rail names.
   -only-testing:PlayheadTests/AnalysisWorkSchedulerOutcomeBookkeepingTests
   -only-testing:PlayheadTests/AnalysisWorkSchedulerJournalEmissionTests
+  # playhead-lmrx review round: the SOURCE CANARIES over the very method this
+  # bead rewrites. `BackfillSchedulerBoundingTests` pins playhead-c25o's rule
+  # that `handleBackfillTask` may not suspend before arming its expiration
+  # handler — and it pins it by matching the method's text, so this bead's own
+  # signature change silently broke the anchor and no round ran the suite that
+  # would have said so. It belongs in the scored set for exactly that reason.
+  -only-testing:PlayheadTests/BackfillSchedulerBoundingTests
+  -only-testing:PlayheadTests/BackgroundProcessingServiceLedgerTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`

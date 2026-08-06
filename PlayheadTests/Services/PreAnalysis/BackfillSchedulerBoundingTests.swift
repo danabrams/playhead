@@ -186,12 +186,21 @@ struct BackfillSchedulerBoundingTests {
     @Test("handleBackfillTask has no suspension point before it arms the expiration handler")
     func handleBackfillTaskHasNoAwaitBeforeArming() throws {
         let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
+        // playhead-lmrx (review round): anchored on the DECLARATION, not on a
+        // whole one-line signature. `firstBody` takes the first `{` after the
+        // anchor, so this survives parameters being added or the signature
+        // being wrapped across lines — and playhead-lmrx did both, which broke
+        // the old anchor. A canary that matches nothing does not fail quietly
+        // here (the `#require` below catches it), but it was also not in any
+        // suite the bead's own rounds ran, so nobody saw it for two commits.
+        // Anchoring on what cannot drift is the fix; broadening the gate's
+        // suite list is the other half.
         let body = try #require(
             SwiftSourceInspector.firstBody(
                 in: source,
-                after: "func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) async {"
+                after: "func handleBackfillTask("
             ),
-            "handleBackfillTask's signature drifted — update this canary"
+            "handleBackfillTask's declaration drifted — update this canary"
         )
         // `firstBody` returns "" (not nil) on an unbalanced brace, which
         // would make every check below vacuously true.
