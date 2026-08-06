@@ -1319,6 +1319,11 @@ BGPS="Playhead/Services/AnalysisCoordinator/BackgroundProcessingService.swift"
 # `transcript_chunks.transcriptVersion` column rather than through a call.
 # Added for CN07.
 ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swift"
+# playhead-lmrx: the measured description of one BGTask grant. Every number in
+# it is derived from `background_task_runs` / `semantic_scan_results` on the
+# 2026-08-06 pull, and every one of them can be quietly restored to a value
+# nobody measured — which is precisely how `25 * 60` survived in the handler.
+GRANT="Playhead/Services/AnalysisCoordinator/BackgroundGrantBudget.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -1328,7 +1333,7 @@ MUTABLE_FILES=(
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
-  "$BGPS"
+  "$BGPS" "$GRANT"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1769,6 +1774,19 @@ FOCUSED_SUITES=(
   # the situation `pushEvidenceCatalog` (CN06) was in: private, unseamed, and
   # covered by nothing. Two tests, no build cost beyond compiling them.
   -only-testing:PlayheadTests/TranscriptCanonicalizationRuleCanaryTests
+  # playhead-lmrx: the six suites the LX series is scored against. Three are
+  # pure value tests over `BackgroundGrantBudget` / `BackgroundGrantCounters`
+  # (no build cost beyond compiling them); the other three drive a real
+  # `AnalysisWorkScheduler` + `AnalysisStore` through the BGTask handler,
+  # because the defects are in the WIRING — which deadline is handed over, who
+  # is told the grant ended, which columns a terminal write fills — and none of
+  # that is observable from a value test.
+  -only-testing:PlayheadTests/BackgroundGrantBudgetArithmeticTests
+  -only-testing:PlayheadTests/BackgroundGrantBudgetMeasurementTests
+  -only-testing:PlayheadTests/BackgroundGrantCountersTests
+  -only-testing:PlayheadTests/DrainEligibleStartGateTests
+  -only-testing:PlayheadTests/BackfillGrantBoundingTests
+  -only-testing:PlayheadTests/BackfillExpiryDurabilityTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2757,6 +2775,18 @@ T_MK6Z_IDEMPOTENT="the reconciler's reclaim does not re-charge a row the loop's 
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
 T_Y8F3_DEGRADED="the coverage-insufficient degraded terminal is not this bead's to re-request"
 T_Y8F3_STALE="an older cap-out under a newer clean terminal is not re-requested"
+
+# playhead-lmrx — a ~295 s background grant must be spent on work that can
+# finish or checkpoint inside it, and what it achieved must be readable after.
+T_LMRX_DEADLINE="the poll loop is handed a deadline inside the measured grant, not 25 minutes"
+T_LMRX_RESUME="expiry tells the SCHEDULER the grant is over, so the in-flight job requeues"
+T_LMRX_COUNTERS="an expired run records what the window achieved, not only that it ended"
+T_LMRX_STARTGATE="a pass is NOT started when the remaining grant is below the unit floor"
+T_LMRX_MEASURED="the backfill design grant does not exceed the measured grant"
+T_LMRX_CLAMP="workBudget clamps at zero rather than going negative"
+T_LMRX_BOUNDARY="canStartUnit admits exactly the floor and refuses below it"
+T_LMRX_ZERO="noteCompleted records zero as a measurement, not as absence"
+T_LMRX_UNITFLOOR="the start-gate floor is large enough to bank one durable window"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5498,6 +5528,61 @@ MUTATIONS=(
   # Reads as removing a redundant clause — every caller already selects rows
   # with a non-NULL owner — and it IS redundant except in the race.
   "MK10|539|STORE|$T_MK6Z_IDEMPOTENT"
+
+  # ---- playhead-lmrx: a granted background window must buy something (LX01-LX10) ----
+  #
+  # Measured on the 2026-08-06 pull: 203 of 254 backfill wakes (80.0 %) ended
+  # `expired` at 209.8 s average, only 4 of the 203 wrote a single
+  # `semantic_scan_results` row inside their own window, and 25 of 30
+  # `backfill_jobs` carry no `progressCursor`. Three separable defects produced
+  # that, and each half of each one is a rail here.
+  #
+  # ONE RAIL PER BATCH, deliberately. Several of these mutations redden a
+  # SECOND test in the same suite as a side effect (dropping the `workBudget`
+  # clamp also moves the subtraction fixture, inflating `designGrant` also moves
+  # every derived value), and a batch whose members can redden each other's
+  # expectations is exactly the miscredit the batching rule exists to prevent.
+  #
+  #   * LX01 restores the shipped constant verbatim: `ContinuousClock.now +
+  #     .seconds(25 * 60)` for the handler's work deadline. 1500 s is 5.07x the
+  #     p90 of the 203 measured grants (295.9 s). It reads as generous headroom
+  #     and is the reason the handler could never reach its own terminal write.
+  #   * LX02 deletes the one line that tells `AnalysisWorkScheduler` the grant
+  #     ended. `workTask.cancel()` is right above it and looks sufficient — but
+  #     the dispatched analysis job lives on the scheduler's task tree, not this
+  #     handler's, so without the cancel it runs on unaware into suspension:
+  #     no checkpoint, no requeue, a leased `running` row for the reaper.
+  #   * LX03 returns the expiration `finishRun` to outcome/cause/expiration
+  #     only — the shipped state, in which four fifths of all grants are
+  #     unreadable.
+  #   * LX04 restores the bare `now < deadline` loop condition, which admits a
+  #     whole analysis job with a millisecond of grant left.
+  #   * LX05 removes the EARLY publication of the baseline. Subtle and the most
+  #     likely to be "cleaned up": the counters are still assembled at the
+  #     normal return, so every happy-path test stays green — and every expired
+  #     row goes back to NULL, because in a full-length grant that return is
+  #     never reached.
+  #   * LX06/LX10 inflate the design grant and shrink the unit floor: the two
+  #     directions in which a measured budget decays back into a plausible
+  #     constant.
+  #   * LX07 drops the zero-clamp, so an over-reserved budget yields a NEGATIVE
+  #     duration and a deadline in the past — "already expired" for the wrong
+  #     reason, which masks a mis-specified budget instead of surfacing it.
+  #   * LX08 flips the start gate to a strict `>`, refusing a unit that costs
+  #     exactly its own measured cost.
+  #   * LX09 is the standing defect class in miniature: a measured ZERO written
+  #     as NULL, so "admitted work and completed none" — the bead's headline
+  #     finding — becomes indistinguishable from "never started".
+  "LX01|540|BGPS|$T_LMRX_DEADLINE"
+  "LX02|541|BGPS|$T_LMRX_RESUME"
+  "LX03|542|BGPS|$T_LMRX_COUNTERS"
+  "LX04|543|SCHED|$T_LMRX_STARTGATE"
+  "LX05|544|BGPS|$T_LMRX_COUNTERS"
+  "LX06|545|GRANT|$T_LMRX_MEASURED"
+  "LX07|546|GRANT|$T_LMRX_CLAMP"
+  "LX08|547|GRANT|$T_LMRX_BOUNDARY"
+  "LX09|548|BGPS|$T_LMRX_ZERO"
+  "LX10|549|GRANT|$T_LMRX_UNITFLOOR"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5848,6 +5933,16 @@ describe_mutation() {
     MK08) echo "mk6z: the sweep call site excludes nothing at all" ;;
     MK09) echo "mk6z: a finished dispatch clears the whole in-flight set, unmasking its sibling" ;;
     MK10) echo "mk6z: the reconciler re-charges attemptCount on a row the sweep already reclaimed" ;;
+    LX01) echo "lmrx: the handler's work deadline reverts to 25 minutes — 5.07x the p90 measured grant" ;;
+    LX02) echo "lmrx: a backfill expiry no longer tells the scheduler, so the in-flight job is abandoned unleased" ;;
+    LX03) echo "lmrx: the expiration finishRun drops the counters it holds, and 80% of grants go unreadable again" ;;
+    LX04) echo "lmrx: the drain start-gate goes — a whole analysis job may begin with a millisecond of grant left" ;;
+    LX05) echo "lmrx: the baseline is published only at the normal return, which a full-length grant never reaches" ;;
+    LX06) echo "lmrx: the design grant inflates past anything the OS was measured to give" ;;
+    LX07) echo "lmrx: the workBudget clamp goes, so an over-reserved budget deadlines in the past" ;;
+    LX08) echo "lmrx: the start gate refuses a unit costing exactly its own measured cost" ;;
+    LX09) echo "lmrx: a measured ZERO completion is written as NULL — 'completed none' reads as 'never started'" ;;
+    LX10) echo "lmrx: the unit floor shrinks below the cost of one durable FM window" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12742,6 +12837,110 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-lmrx ----
+
+  # LX01 — the shipped constant, restored verbatim. Both drivers read
+  # `workDeadline`, so one patch returns the whole handler to 25 minutes.
+  LX01)
+    patch "$file" \
+      '            let workDeadline = budget.workDeadline(from: grantStart)' \
+      '            let workDeadline = ContinuousClock.now + .seconds(25 * 60)' ;;
+
+  # LX02 — the backfill expiry stops telling the scheduler its grant ended. The
+  # anchor carries the following `emitExpire` identifier because the same cancel
+  # line also exists in the pre-analysis recovery handler, and `patch` refuses a
+  # non-unique anchor.
+  LX02)
+    snippet OLD <<'EOF'
+                await self?.analysisWorkScheduler?.cancelCurrentJob(cause: .taskExpired)
+                await self?.emitExpire(
+                    identifier: BackgroundTaskID.backfillProcessing,
+EOF
+    snippet NEW <<'EOF'
+                await self?.emitExpire(
+                    identifier: BackgroundTaskID.backfillProcessing,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX03 — the expiration `finishRun` returns to outcome/cause/expiration only.
+  # `expiration: true` is what makes the anchor the EXPIRY call site rather than
+  # the normal-return one.
+  LX03)
+    snippet OLD <<'EOF'
+                            jobsSeen: achieved.jobsSeen,
+                            jobsAdmitted: achieved.jobsAdmitted,
+                            jobsCompleted: achieved.jobsCompleted,
+                            expiration: true
+EOF
+    snippet NEW <<'EOF'
+                            expiration: true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX04 — the drain start-gate goes; a pass may begin with any remaining grant.
+  LX04)
+    patch "$file" \
+      '            guard remaining > .zero, remaining >= minimumUnitBudget else { break }' \
+      '            guard remaining > .zero else { break }' ;;
+
+  # LX05 — the baseline is no longer published when it is READ, only assembled
+  # at the normal return the OS usually pre-empts.
+  LX05)
+    snippet OLD <<'EOF'
+            counters.noteBaseline(pending: baselinePending)
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX06 — the design grant decays back into the constant it replaced.
+  LX06)
+    snippet OLD <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+EOF
+    snippet NEW <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(1500),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX07 — the zero-clamp goes, so an over-reserved budget yields a negative
+  # duration and a work deadline in the past.
+  LX07)
+    patch "$file" \
+      '        return remainder > .zero ? remainder : .zero' \
+      '        return remainder' ;;
+
+  # LX08 — the start gate refuses a unit that costs exactly its measured cost.
+  LX08)
+    patch "$file" \
+      '        remaining >= minimumUnitBudget' \
+      '        remaining > minimumUnitBudget' ;;
+
+  # LX09 — a measured zero is written as NULL, collapsing "completed none" into
+  # "never started".
+  LX09)
+    patch "$file" \
+      '        state.withLock { $0.jobsCompleted = completed }' \
+      '        state.withLock { $0.jobsCompleted = completed > 0 ? completed : nil }' ;;
+
+  # LX10 — the unit floor shrinks below the cost of one durable FM window.
+  LX10)
+    snippet OLD <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumUnitBudget: .seconds(60)
+EOF
+    snippet NEW <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumUnitBudget: .seconds(1)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -12809,6 +13008,7 @@ rec_file()   {
     EPPREP) printf '%s' "$EPPREP" ;;
     SCHED) printf '%s' "$SCHED" ;;
     BGPS)  printf '%s' "$BGPS" ;;
+    GRANT) printf '%s' "$GRANT" ;;
     CLAIM) printf '%s' "$CLAIM" ;;
     RECON) printf '%s' "$RECON" ;;
     ATOM)  printf '%s' "$ATOM" ;;
