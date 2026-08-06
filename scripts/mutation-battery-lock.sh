@@ -431,6 +431,24 @@ mb_lock_recover() {
     if [ "$cur" = "$pre" ]; then
       continue
     fi
+    # `post=?` means "no mutant hash recorded", and that is TWO different
+    # situations. It is a half-applied batch only when the run had announced it
+    # was mutating; if the state still says `clean`, the dead run never reached
+    # an `apply` at all, so a file that differs from pristine is SOMEBODY'S
+    # EDIT. Restoring on the hash alone would discard it — the same "a value
+    # that names one thing read as though it named another" this whole bead is
+    # about, committed by its own repair path.
+    if [ "$post" = "?" ] && [ "$st" != "mutated" ]; then
+      mb__say "REFUSING — $path differs from the pristine bytes the dead run"
+      mb__say "  recorded, but that run never applied a mutation (its state was"
+      mb__say "  '${st:-unknown}', not 'mutated'). This difference is somebody's"
+      mb__say "  edit and discarding it would destroy work."
+      mb__say "    pristine : $pre"
+      mb__say "    on disk  : $cur"
+      mb__say "  Inspect with: git diff -- $path"
+      refused=1
+      continue
+    fi
     if [ "$post" != "?" ] && [ "$cur" != "$post" ]; then
       mb__say "REFUSING — $path matches neither the pristine bytes the dead run"
       mb__say "  recorded nor the mutant it injected. Something edited it after"

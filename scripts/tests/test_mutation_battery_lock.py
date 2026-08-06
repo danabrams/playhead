@@ -308,6 +308,38 @@ class TestStaleLock(LockTestCase):
         self.assertIn("neither", out.stderr.lower())
         self.assertEqual("let pristine = 3  // a human's edit\n", self.repo.read())
 
+    def test_an_edit_made_after_a_crash_that_never_mutated_is_NOT_discarded(self):
+        # The dead run recorded pristine hashes and died before applying
+        # anything, so its state is `clean` and every `post` is `?`. A later
+        # difference is therefore SOMEBODY'S EDIT, not a half-applied mutation.
+        # Reading `post=?` as "mid-apply" regardless of state would discard it.
+        pid = self.hold()
+        self._kill9(pid)
+        self.assertIn("state=clean", (self.repo.lockdir / "state").read_text())
+        self.repo.write("let pristine = 9  // a human's edit\n")
+
+        out = bash('mb_lock_acquire ""; echo "RC=$?"', self.repo.dir)
+        self.assertIn("RC=2", out.stdout)
+        self.assertEqual("let pristine = 9  // a human's edit\n", self.repo.read())
+        self.assertIn("never applied a mutation", out.stderr)
+
+    def test_a_crash_MID_APPLY_is_still_restored(self):
+        # Positive control for the test above: the very same `post=?` DOES mean
+        # mid-apply once the state says `mutated`, and must be restored — a
+        # half-applied batch is the one shape no hash can describe.
+        pid = self.hold()
+        bash('MB_LOCK_DIR="%s"; MB_LOCK_OWNED=1\n'
+             'MB_LOCK_FILES_PRE="$(sed -n "/^file\t/p" "$MB_LOCK_DIR/state")\n"\n'
+             'mb_lock_note_mutating 7 "AA01 AA02"' % self.repo.lockdir,
+             self.repo.dir, check=True)
+        self.repo.write("let pristine = 2  // half a batch\n")
+        self._kill9(pid)
+
+        out = bash('mb_lock_acquire ""; echo "RC=$?"', self.repo.dir)
+        self.assertIn("RC=0", out.stdout)
+        self.assertEqual("let pristine = 1\n", self.repo.read())
+        self.assertIn("MID-APPLY", out.stderr)
+
     def test_a_stale_lock_from_another_worktree_is_never_acted_on(self):
         self.repo.lockdir.mkdir(parents=True)
         (self.repo.lockdir / "info").write_text(
