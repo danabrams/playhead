@@ -1925,26 +1925,115 @@ struct PreAnalysisConfigRegressionTests {
 @Suite("AnalysisWorkScheduler — expired-lease reclaim (playhead-mk6z)")
 struct SchedulerExpiredLeaseReclaimTests {
 
+    // MARK: - Test doubles
+
+    /// A decode that PARKS until released. `processJob` records the job as
+    /// in-flight immediately after it acquires the lease and clears it in a
+    /// `defer`, so parking inside the runner is the only way to hold a
+    /// scheduler in the "genuinely running this row" state long enough for a
+    /// concurrent run-loop sweep to be observed against it. Throwing on
+    /// release routes the job through the `.failed` arm, which gives the
+    /// drain a deterministic fixed point (the pattern
+    /// `AnalysisWorkSchedulerLaneGateRegressionTests` proves out).
+    private final class ParkingDecodeStub: AnalysisAudioProviding, @unchecked Sendable {
+        /// Only this episode parks. Every other episode fails immediately, so
+        /// a SIBLING dispatch can run to completion while one job is held.
+        private let parkedEpisodeID: String
+        private let lock = NSLock()
+        private var enteredFlag = false
+        private var releasedFlag = false
+
+        init(parking parkedEpisodeID: String) {
+            self.parkedEpisodeID = parkedEpisodeID
+        }
+
+        var hasEntered: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return enteredFlag
+        }
+
+        func release() {
+            lock.lock(); releasedFlag = true; lock.unlock()
+        }
+
+        private var isReleased: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return releasedFlag
+        }
+
+        /// A SYNC helper, deliberately: `NSLock.lock()` is unavailable from an
+        /// async context, and `decode` is async.
+        private func markEntered() {
+            lock.lock(); enteredFlag = true; lock.unlock()
+        }
+
+        func decode(
+            fileURL: LocalAudioURL,
+            episodeID: String,
+            shardDuration: TimeInterval
+        ) async throws -> [AnalysisShard] {
+            guard episodeID == parkedEpisodeID else {
+                throw AnalysisAudioError.decodingFailed("playhead-mk6z: sibling decode fails fast")
+            }
+            markEntered()
+            while !isReleased && !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            throw AnalysisAudioError.decodingFailed("playhead-mk6z: parked decode released")
+        }
+    }
+
+    /// A wall clock the test can move. Needed because the only honest way to
+    /// produce "a lease that expired while its owner is still working" is to
+    /// let the scheduler write the lease itself and then advance past it —
+    /// the renewal task does not tick for 120 s of REAL time, so it cannot
+    /// rescue the row inside a test.
+    private final class MutableClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: TimeInterval
+        init(_ value: TimeInterval) { self.value = value }
+        var now: TimeInterval {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+        func set(_ newValue: TimeInterval) {
+            lock.lock(); value = newValue; lock.unlock()
+        }
+    }
+
     private func makeScheduler(
         store: AnalysisStore,
         downloads: StubDownloadProvider = StubDownloadProvider(),
-        config: PreAnalysisConfig = PreAnalysisConfig()
+        config: PreAnalysisConfig = PreAnalysisConfig(),
+        audio: (any AnalysisAudioProviding)? = nil,
+        clock: (@Sendable () -> Date)? = nil
     ) -> AnalysisWorkScheduler {
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
         let runner = AnalysisJobRunner(
             store: store,
-            audioProvider: StubAnalysisAudioProvider(),
+            audioProvider: audio ?? StubAnalysisAudioProvider(),
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
             adDetection: StubAdDetectionProvider()
         )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
         return AnalysisWorkScheduler(
             store: store,
             jobRunner: runner,
-            capabilitiesService: CapabilitiesService(),
+            capabilitiesService: StubCapabilitiesProvider(
+                snapshot: makeCapabilitySnapshot(
+                    thermalState: .nominal,
+                    isLowPowerMode: false,
+                    isCharging: true
+                )
+            ),
             downloadManager: downloads,
+            batteryProvider: battery,
             transportStatusProvider: StubTransportStatusProvider(),
-            config: config
+            config: config,
+            clock: clock ?? { Date() }
         )
     }
 
@@ -2114,5 +2203,248 @@ struct SchedulerExpiredLeaseReclaimTests {
         let stale = try await store.fetchJob(byId: "mk6z-stale")
         #expect(stale?.state == "queued")
         #expect(stale?.leaseOwner == nil)
+    }
+
+    // MARK: - The exclusion the SCHEDULER supplies (review round)
+
+    /// playhead-mk6z review round. The three tests above prove the STORE
+    /// honours `excludingJobId`. Nothing proved the scheduler passes anything
+    /// but `nil`, and that gap hid a real defect.
+    ///
+    /// The sweep originally read `currentJobId`. That property names the job
+    /// dispatched MOST RECENTLY: `processJob` overwrites it on entry and nils
+    /// it in its `defer`. Two dispatch drivers can be inside `processJob` at
+    /// once — the run loop and `drainEligible`, whose own header says it is
+    /// "safe to run alongside the long-lived `runLoop()`" — so a sibling
+    /// dispatch's COMPLETION nils the identity of a job that is still running:
+    ///
+    ///     drain dispatches A   -> currentJobId = A
+    ///     loop  dispatches B   -> currentJobId = B      (A's identity lost)
+    ///     B completes          -> currentJobId = nil    (A still running)
+    ///     loop reaches its top -> sweeps with `nil`
+    ///
+    /// This test drives exactly that interleaving against the real scheduler
+    /// and the real store: a `drainEligible` pass owns and is parked inside
+    /// `mk6z-inflight`, the run loop dispatches and completes `mk6z-sibling`,
+    /// and only then does the loop reach its sweep. `mk6z-orphan` is the
+    /// observer's positive control — if it does not move, the sweep did not
+    /// fire and the assertion about the in-flight row proves nothing.
+    ///
+    /// The lease is written by the scheduler itself and then the injected
+    /// clock is moved past it, which is the one honest way to produce the row
+    /// the exclusion exists for: a runner that is genuinely working while its
+    /// renewal has been starved past the deadline.
+    @Test("the loop's sweep excludes the job this process is running, not merely the last one it dispatched (playhead-mk6z)",
+          .timeLimit(.minutes(2)))
+    func testSweepExcludesAStillRunningJobAfterASiblingDispatchCompletes() async throws {
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let t0 = Date().timeIntervalSince1970
+        let clock = MutableClock(t0)
+
+        // The row that must SURVIVE: dispatched by this process and still
+        // running when the sweep fires.
+        downloads.cachedURLs["ep-mk6z-inflight"] = URL(fileURLWithPath: "/tmp/ep-mk6z-inflight.m4a")
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-inflight",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-inflight",
+            workKey: "fp-mk6z-inflight:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-inflight",
+            // Strictly ahead of the sibling on both selection keys (`priority
+            // DESC, createdAt ASC`) so the drain's pass takes THIS row and the
+            // run loop is left with the sibling. Both are Now-lane (>= 20), and
+            // `nowCap` is 2, so the two dispatches genuinely overlap.
+            priority: 21,
+            desiredCoverageSec: 5417,
+            state: "queued",
+            attemptCount: 4,
+            createdAt: t0 - 10,
+            updatedAt: t0 - 10
+        ))
+        // The sibling: dispatched by the run loop, runs to completion, and its
+        // `defer` is what erases the in-flight row's identity. Its decode fails
+        // fast and `attemptCount 4` of `maxAttemptCount 5` makes it terminal in
+        // one pass, so it is a deterministic fixed point.
+        downloads.cachedURLs["ep-mk6z-sibling"] = URL(fileURLWithPath: "/tmp/ep-mk6z-sibling.m4a")
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-sibling",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-sibling",
+            workKey: "fp-mk6z-sibling:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-sibling",
+            priority: 20,
+            desiredCoverageSec: 5417,
+            state: "queued",
+            attemptCount: 4,
+            createdAt: t0,
+            updatedAt: t0
+        ))
+
+        let park = ParkingDecodeStub(parking: "ep-mk6z-inflight")
+        let scheduler = makeScheduler(
+            store: store,
+            downloads: downloads,
+            audio: park,
+            clock: { Date(timeIntervalSince1970: clock.now) }
+        )
+        await scheduler.updateScenePhase(.foreground)
+
+        // A BGTask-window drain claims the in-flight row and parks in the runner.
+        let drain = Task { await scheduler.drainEligible(deadline: ContinuousClock.now + .seconds(600)) }
+
+        var claimed = false
+        for _ in 0..<400 where !claimed {
+            try await Task.sleep(for: .milliseconds(25))
+            let row = try await store.fetchJob(byId: "mk6z-inflight")
+            claimed = row?.state == "running" && row?.leaseOwner != nil && park.hasEntered
+        }
+        #expect(claimed, "precondition: the drain pass must own mk6z-inflight and be parked inside its runner")
+
+        // Starve the renewal. The scheduler wrote `leaseExpiresAt = t0 + 300`
+        // itself; the renewal task does not tick for 120 s of real time, so
+        // moving the clock past the deadline is exactly "two renewal ticks
+        // failed to land while the runner is still working".
+        clock.set(t0 + 400)
+
+        // Start the run loop. Its FIRST iteration sweeps (the throttle starts
+        // at zero) and then dispatches the sibling, so this alone does not
+        // reach the defect: at that first sweep `currentJobId` still names the
+        // in-flight row. What matters is the sweep AFTER the sibling's `defer`.
+        await scheduler.startSchedulerLoop()
+
+        var siblingState: String?
+        for _ in 0..<400 where siblingState != "superseded" {
+            try await Task.sleep(for: .milliseconds(25))
+            siblingState = try await store.fetchJob(byId: "mk6z-sibling")?.state
+        }
+        #expect(siblingState == "superseded",
+                "precondition: the run loop must have dispatched AND completed the sibling — its defer is what nils currentJobId")
+
+        // Only now insert the orphan and defeat the 60 s sweep throttle, so the
+        // sweep that observes it is the one taken with `currentJobId == nil`
+        // and the in-flight row still running. Parked non-eligible so a
+        // successful reclaim leaves it `queued` rather than re-dispatching.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-orphan",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-orphan",
+            workKey: "fp-mk6z-orphan:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-orphan",
+            state: "running",
+            nextEligibleAt: t0 + 86_400,
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: t0 - 7_920,
+            createdAt: t0,
+            updatedAt: t0
+        ))
+        clock.set(t0 + 500)
+        // Preempt the loop's idle sleep so the next sweep is prompt rather
+        // than up to `rejectionBackoffSeconds` away.
+        await scheduler.wake()
+
+        var orphanState: String?
+        for _ in 0..<800 where orphanState != "queued" {
+            try await Task.sleep(for: .milliseconds(25))
+            orphanState = try await store.fetchJob(byId: "mk6z-orphan")?.state
+        }
+        #expect(orphanState == "queued",
+                "positive control: a second sweep must have reached the store — otherwise the assertion below is vacuous")
+
+        let inflight = try await store.fetchJob(byId: "mk6z-inflight")
+        #expect(inflight?.state == "running", """
+            The sweep reclaimed a row this very process is running. `currentJobId` names the LAST \
+            dispatch, not what is in flight, so the sibling's completion nils it while the drain's \
+            job is still working — the exclusion must be read from the in-flight SET.
+            """)
+        #expect(inflight?.leaseOwner == "preAnalysis", "the live claim's owner must survive the sweep")
+
+        park.release()
+        drain.cancel()
+        await scheduler.stop()
+    }
+
+    /// playhead-mk6z review round, harm mode 3. `recoverExpiredLease` is a
+    /// SELECT (`fetchJobsWithExpiredLeases`) followed by an UPDATE keyed on
+    /// `jobId` alone, so a renewal landing between the two is overwritten and
+    /// a live lease is cleared. At the reconciler's cadence (once per
+    /// bootstrap) that window is negligible; at the run loop's it is not,
+    /// which is why the predicate moved INSIDE the write. This proves the
+    /// race is closed, against the legacy path in the same store as the
+    /// contrast.
+    @Test("a renewal that lands after the row was seen as expired is honoured by the sweep (playhead-mk6z)")
+    func testRenewalAfterObservationIsHonouredBecauseThePredicateIsInTheWrite() async throws {
+        let store = try await makeTestStore()
+        let now = Date().timeIntervalSince1970
+
+        for jobId in ["mk6z-renewed", "mk6z-legacy"] {
+            try await store.insertJob(makeAnalysisJob(
+                jobId: jobId,
+                jobType: "preAnalysis",
+                episodeId: "ep-\(jobId)",
+                workKey: "fp-\(jobId):1:preAnalysis",
+                sourceFingerprint: "fp-\(jobId)",
+                state: "running",
+                leaseOwner: "preAnalysis",
+                leaseExpiresAt: now - 10
+            ))
+        }
+
+        // Step 1 — the reconciler's read. Both rows look dead.
+        let seen = try await store.fetchJobsWithExpiredLeases(before: now)
+        #expect(seen.contains { $0.jobId == "mk6z-renewed" })
+        #expect(seen.contains { $0.jobId == "mk6z-legacy" })
+
+        // Step 2 — the owner's renewal lands. Both rows are live again.
+        #expect(try await store.renewLease(jobId: "mk6z-renewed", owner: "preAnalysis", newExpiresAt: now + 300))
+        #expect(try await store.renewLease(jobId: "mk6z-legacy", owner: "preAnalysis", newExpiresAt: now + 300))
+
+        // Step 3 — the write, carrying the decision made in step 1.
+        let reclaimed = try await store.reclaimExpiredLeases(now: now, excludingJobId: nil)
+        #expect(reclaimed == 0, "the expiry predicate is re-evaluated at write time, so a renewed row no longer matches")
+
+        let renewedRow = try await store.fetchJob(byId: "mk6z-renewed")
+        #expect(renewedRow?.state == "running")
+        #expect(renewedRow?.leaseExpiresAt == now + 300)
+        #expect(renewedRow?.attemptCount == 0, "a row that was never reclaimed must not be charged an attempt")
+
+        // Contrast on the same observer, so the assertions above are reading a
+        // real difference rather than an inert store: the legacy path takes the
+        // step-1 decision at face value and clears a lease that is live again.
+        try await store.recoverExpiredLease(jobId: "mk6z-legacy")
+        let legacyRow = try await store.fetchJob(byId: "mk6z-legacy")
+        #expect(legacyRow?.state == "queued")
+        #expect(legacyRow?.leaseOwner == nil, "the TOCTOU the set-based reclaim exists to avoid")
+    }
+
+    /// playhead-mk6z review round, harm mode 3. Two sweeps racing the same
+    /// orphan must reclaim it ONCE. `attemptCount` feeds the exponential
+    /// backoff and `maxAttemptCount`, so a double-charge on one reclaim is a
+    /// job pushed toward `superseded` for a defect it did not commit.
+    @Test("concurrent sweeps reclaim an orphan exactly once (playhead-mk6z)")
+    func testTwoSweepsChargeTheOrphanOneAttempt() async throws {
+        let store = try await makeTestStore()
+        let now = Date().timeIntervalSince1970
+
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-contended",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-contended",
+            workKey: "fp-mk6z-contended:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-contended",
+            state: "running",
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: now - 600
+        ))
+
+        async let first = store.reclaimExpiredLeases(now: now, excludingJobId: nil)
+        async let second = store.reclaimExpiredLeases(now: now, excludingJobId: nil)
+        let counts = try await [first, second]
+
+        #expect(counts.reduce(0, +) == 1,
+                "the two sweeps together must move exactly one row; got \(counts)")
+        let row = try await store.fetchJob(byId: "mk6z-contended")
+        #expect(row?.state == "queued")
+        #expect(row?.attemptCount == 1, "a single reclaim charges a single attempt, whatever the contention")
     }
 }

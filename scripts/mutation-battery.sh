@@ -2750,6 +2750,7 @@ T_MK6Z_TERMINAL="the sweep resurrects no terminal row and disturbs no live lease
 T_MK6Z_BULLDOZE="start() does not age-reset a recovery request already pending (playhead-mk6z)"
 T_MK6Z_ARMS="start() still arms recovery when nothing is pending (playhead-mk6z)"
 T_MK6Z_LATCH="the recovery reschedule guard re-arms across consecutive wakes (playhead-mk6z)"
+T_MK6Z_INFLIGHT="the loop's sweep excludes the job this process is running, not merely the last one it dispatched (playhead-mk6z)"
 # y8f3's own tests, named here because DL05 must prove the widening is ADDITIVE
 # and DL02 must prove it did not swallow a neighbouring bead's terminal.
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
@@ -5465,6 +5466,29 @@ MUTATIONS=(
   "MK04|533|BGPS|$T_MK6Z_BULLDOZE"
   "MK05|534|BGPS|$T_MK6Z_ARMS"
   "MK06|535|BGPS|$T_MK6Z_LATCH"
+
+  # ---- playhead-mk6z review round: WHICH id the scheduler excludes (MK07-MK09) ----
+  #
+  # MK01-MK03 cover the store honouring `excludingJobId` and the loop being
+  # wired at all. Nothing covered the ARGUMENT, and the round-1 code passed the
+  # wrong one: `currentJobId` names the job dispatched MOST RECENTLY, and two
+  # dispatch drivers can be inside `processJob` at once (`runLoop` and
+  # `drainEligible`), so a sibling dispatch's COMPLETION nils the identity of a
+  # job that is still running and the next sweep reclaims live work.
+  #
+  #   * MK07 restores the shipped round-1 expression verbatim. It is the defect
+  #     itself, and it reads as the obvious simplification (`currentJobId` is
+  #     right there and is what the doc comment named).
+  #   * MK08 passes `nil` — "the expiry predicate already proved it dead".
+  #     Distinct from MK02 because MK02 mutates the STORE: a call site that
+  #     never supplies an id is invisible to every store-side rail.
+  #   * MK09 makes the removal in `processJob`'s `defer` a blanket clear, the
+  #     shape `currentJobId = nil` already has one line above. A single-dispatch
+  #     run cannot see it — only an OVERLAPPING dispatch can, which is the same
+  #     population the guard exists for.
+  "MK07|536|SCHED|$T_MK6Z_INFLIGHT"
+  "MK08|537|SCHED|$T_MK6Z_INFLIGHT"
+  "MK09|538|SCHED|$T_MK6Z_INFLIGHT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5811,6 +5835,9 @@ describe_mutation() {
     MK04) echo "mk6z: the launch reschedule goes back to the unguarded submit and age-resets the pending wake" ;;
     MK05) echo "mk6z: the guard fails CLOSED — a launch with nothing pending arms nothing at all" ;;
     MK06) echo "mk6z: the reentrancy latch never releases, silencing every later reschedule" ;;
+    MK07) echo "mk6z: the sweep excludes the LAST job dispatched instead of the one still running" ;;
+    MK08) echo "mk6z: the sweep call site excludes nothing at all" ;;
+    MK09) echo "mk6z: a finished dispatch clears the whole in-flight set, unmasking its sibling" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12660,6 +12687,30 @@ EOF
         recoveryRescheduleInFlight = true
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  # MK07 — the round-1 expression, verbatim. `currentJobId` is right there, the
+  # store's own doc comment names it, and it is correct in every single-dispatch
+  # run. It is wrong exactly when a sibling dispatch finished while another job
+  # is still in flight.
+  MK07)
+    patch "$file" \
+      '        let excludedJobId = inFlightJobIds.first' \
+      '        let excludedJobId = currentJobId' ;;
+
+  # MK08 — exclude nothing from the call site. Invisible to MK02, which mutates
+  # the STORE: a store that honours an exclusion it is never given is useless.
+  MK08)
+    patch "$file" \
+      '        let excludedJobId = inFlightJobIds.first' \
+      '        let excludedJobId: String? = nil' ;;
+
+  # MK09 — make the in-flight removal a blanket clear, mirroring the
+  # `currentJobId = nil` on the line above. Only an overlapping dispatch can
+  # see it.
+  MK09)
+    patch "$file" \
+      '            inFlightJobIds.remove(job.jobId)' \
+      '            inFlightJobIds.removeAll()' ;;
 
   # MK03 — drop the state filter. Reads as a simplification of a redundant
   # clause ("a terminal row has no lease"), and it is redundant only for rows
