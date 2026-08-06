@@ -934,23 +934,71 @@ struct BackfillExpiryDurabilityTests {
         }
     }
 
-    /// Ignores cancellation for a bounded interval, so a test can observe what
-    /// the expiration handler does WHILE the in-flight job is still unwinding.
-    /// `Task.sleep` would be useless here — it throws the instant the task is
-    /// cancelled, which is the opposite of the condition under test.
-    private final class UncancellableUnwindAudioStub: AnalysisAudioProviding, @unchecked Sendable {
-        private let hold: TimeInterval
-        init(hold: TimeInterval) { self.hold = hold }
+    /// A one-shot gate the TEST opens, so "the cancelled job is still
+    /// unwinding" is a fact the test controls rather than a duration it hopes
+    /// for. Awaiting a continuation somebody else resumes ignores task
+    /// cancellation by construction, which is exactly the state under test.
+    ///
+    /// The safety timer is why this is not simply a sleep in disguise: on the
+    /// correct ordering the gate is opened by the ledger write itself, so the
+    /// test is insensitive to how long the handler takes to get there. It is
+    /// only the WRONG ordering — where the write is behind the wait and the
+    /// wait is behind this gate — that ever reaches the timer, and it then
+    /// observes a settled scheduler and fails, which is the point.
+    private final class UnwindGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private var isOpen = false
+
+        func wait() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if isOpen {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+
+        /// Idempotent, and non-async so `NSLock` is taken outside an async
+        /// context.
+        func open() {
+            lock.lock()
+            if isOpen {
+                lock.unlock()
+                return
+            }
+            isOpen = true
+            let pending = waiters
+            waiters.removeAll()
+            lock.unlock()
+            for continuation in pending { continuation.resume() }
+        }
+
+        /// Deadlock insurance: opens the gate after `seconds` no matter what,
+        /// so a test that never reaches its own `open()` fails on an assertion
+        /// rather than hanging.
+        func openAfter(seconds: TimeInterval) {
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
+                open()
+            }
+        }
+    }
+
+    /// Blocks in `decode` on an ``UnwindGate``, ignoring cancellation until the
+    /// gate opens.
+    private final class GatedUnwindAudioStub: AnalysisAudioProviding, @unchecked Sendable {
+        private let gate: UnwindGate
+        init(gate: UnwindGate) { self.gate = gate }
         func decode(
             fileURL: LocalAudioURL,
             episodeID: String,
             shardDuration: TimeInterval
         ) async throws -> [AnalysisShard] {
-            await withCheckedContinuation { continuation in
-                DispatchQueue.global().asyncAfter(deadline: .now() + hold) {
-                    continuation.resume()
-                }
-            }
+            await gate.wait()
             try Task.checkCancellation()
             return []
         }
@@ -1228,9 +1276,12 @@ struct BackfillExpiryDurabilityTests {
         // which the expirationHandler can never fire. A job in flight at that
         // moment is stranded exactly as the bead describes.
         //
-        // Driven deterministically: the drain runs against an empty queue, the
-        // job is dispatched WHILE the poll loop is parked, and the handler's
-        // normal return then has to deal with it.
+        // Driven with NO timing dependence: the job is put in flight by another
+        // driver BEFORE the handler starts. Its lease then makes it invisible
+        // to `fetchNextEligibleJob`, so the handler's own drain dispatches
+        // nothing and its poll loop returns at once — reproducing "the handler
+        // reaches its normal return while a job it did not dispatch is still
+        // running", which is the shape `runLoop()` produces in production.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         let scheduler = makeScheduler(
@@ -1239,21 +1290,6 @@ struct BackfillExpiryDurabilityTests {
             downloads: downloads
         )
 
-        let coordinator = StubAnalysisCoordinator()
-        coordinator.runPendingBackfillDuration = .seconds(3)
-        let bps = BackgroundProcessingService(
-            coordinator: coordinator,
-            capabilitiesService: CapabilitiesService(),
-            taskScheduler: StubTaskScheduler(),
-            batteryProvider: StubBatteryProvider()
-        )
-        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
-
-        let task = StubBackgroundTask()
-        let workTask = Task { await bps.handleBackfillTask(task) }
-        await coordinator.runPendingBackfillEntries.wait(for: 1)
-
-        // Now mint the work, mid-window, the way a tier advance does.
         downloads.cachedURLs["ep-late-dispatch"] = URL(fileURLWithPath: "/tmp/ep-late-dispatch.m4a")
         try await store.insertJob(makeAnalysisJob(
             jobId: "late-dispatch",
@@ -1270,11 +1306,21 @@ struct BackfillExpiryDurabilityTests {
         var spins = 0
         while await !scheduler.hasCurrentRunningTaskForTesting() {
             spins += 1
-            try #require(spins < 500, "the late-minted job never entered decode")
+            try #require(spins < 1000, "the seeded job never entered decode")
             try await Task.sleep(for: .milliseconds(20))
         }
 
-        _ = await workTask.value
+        let coordinator = StubAnalysisCoordinator()
+        let bps = BackgroundProcessingService(
+            coordinator: coordinator,
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider()
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        await bps.handleBackfillTask(task)
         await task.awaitCompletion()
 
         let after = try #require(try await store.fetchJob(byId: "late-dispatch"))
@@ -1308,10 +1354,13 @@ struct BackfillExpiryDurabilityTests {
         // `running` — no outcome at all — where before it at least reached
         // `expired` with NULL counters.
         //
-        // The probe is taken INSIDE `finishRun`, so this asserts ordering
-        // directly rather than by wall clock: the job's decode ignores
-        // cancellation for a bounded interval, so "still unwinding when the row
-        // was written" is a deterministic fact, not a race.
+        // The probe is taken INSIDE `finishRun`, and the cancelled job is held
+        // by a gate the ledger write itself opens — so "still unwinding when
+        // the row was written" is a fact this test controls, not a duration it
+        // races. An earlier draft used a fixed 2 s hold and went red under the
+        // mutation battery's own suite load, which is exactly the kind of
+        // timing assertion this repo gates behind `PerfGate`; this one has no
+        // timing assertion left to gate.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-slow-unwind"] = URL(fileURLWithPath: "/tmp/ep-slow-unwind.m4a")
@@ -1328,13 +1377,20 @@ struct BackfillExpiryDurabilityTests {
         )
         try await store.insertJob(job)
 
+        let gate = UnwindGate()
+        gate.openAfter(seconds: 20)
+        defer { gate.open() }
         let scheduler = makeScheduler(
             store: store,
-            audio: UncancellableUnwindAudioStub(hold: 2.0),
+            audio: GatedUnwindAudioStub(gate: gate),
             downloads: downloads
         )
         let ledger = OrderProbeRunLedger {
-            await scheduler.hasCurrentRunningTaskForTesting()
+            let stillUnwinding = await scheduler.hasCurrentRunningTaskForTesting()
+            // The write has landed; let the cancelled job finish unwinding so
+            // the settle below has something to observe.
+            gate.open()
+            return stillUnwinding
         }
         let coordinator = StubAnalysisCoordinator()
         coordinator.runPendingBackfillDuration = .seconds(30)
