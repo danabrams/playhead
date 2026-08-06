@@ -1122,6 +1122,76 @@ struct SchedulingTests {
         }
     }
 
+    // playhead-mk6z: `schedulePreAnalysisRecovery()` had no
+    // `pendingTaskRequestIdentifiers()` check and no reentrancy flag, while its
+    // neighbour `scheduleBackfillIfNeeded()` has both — and that neighbour's own
+    // comment states the reason: `BGTaskScheduler.submit(_:)` de-dups on
+    // identifier, but every submit AGE-RESETS the pending request's scheduling,
+    // so repeated submits keep pushing the wake further out (the playhead-txq3
+    // bulldozing pattern, itself inherited from playhead-y5mk).
+    //
+    // The exposure is concentrated at ONE of the two call sites, and this test
+    // pins that one. A cold launch triggered BY the recovery BGTask runs the
+    // handler's self-rearm (`handlePreAnalysisRecovery`, "Schedule the next
+    // occurrence") AND `start()`, in that order, inside a single process. The
+    // second submit age-resets the first.
+    @Test("start() does not age-reset a recovery request already pending (playhead-mk6z)",
+          .timeLimit(.minutes(1)))
+    func startDoesNotBulldozeAPendingRecoveryRequest() async throws {
+        let (bps, _, scheduler, _) = makeBPS()
+
+        // The handler's self-rearm, which happens first on a BGTask-triggered
+        // cold launch. After this the request is pending.
+        await bps.schedulePreAnalysisRecovery()
+        #expect(scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.preAnalysisRecovery
+        }.count == 1, "precondition: the self-rearm submitted exactly one request")
+
+        // The same launch then runs start().
+        await bps.start()
+        await bps.stop()
+
+        let recoveryRequests = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.preAnalysisRecovery
+        }
+        #expect(recoveryRequests.count == 1,
+                "start() must not re-submit a recovery request that is already pending — every submit age-resets the wake")
+
+        // Positive control on the same observer. `submittedRequests` is an
+        // append-only log of EVERY submit, so the assertion above is only
+        // meaningful if start() demonstrably reached its scheduling step and
+        // this log can see what it did. Backfill is submitted from the same
+        // step and is already guarded, so its presence proves the observer
+        // works and start() ran to completion.
+        let backfillRequests = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.backfillProcessing
+                || $0.identifier == BackgroundTaskID.backfillProcessingCharged
+        }
+        #expect(!backfillRequests.isEmpty,
+                "positive control: start() reached scheduleBackfillIfNeeded and the submit log records it")
+    }
+
+    @Test("start() still arms recovery when nothing is pending (playhead-mk6z)",
+          .timeLimit(.minutes(1)))
+    func startArmsRecoveryWhenNothingPending() async throws {
+        let (bps, _, scheduler, _) = makeBPS()
+
+        // The guard must skip a DUPLICATE, never the first submit — a launch
+        // that arms nothing is the playhead-fuo6 blackout, the opposite defect.
+        await bps.start()
+        await bps.stop()
+
+        let recoveryRequests = scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.preAnalysisRecovery
+        }
+        #expect(recoveryRequests.count == 1,
+                "a launch with no pending recovery request must arm exactly one")
+        if let request = recoveryRequests.first as? BGProcessingTaskRequest {
+            #expect(request.requiresExternalPower == true,
+                    "the guard must not change the request's class")
+        }
+    }
+
     @Test("Scheduler failure is logged not crashed")
     func schedulerFailureDoesNotCrash() async throws {
         let scheduler = StubTaskScheduler()
