@@ -3159,7 +3159,9 @@ struct AnalysisStoreCoverageRulerTests {
         #expect(all.unionedSeconds == 900)
 
         // The fast-only sibling is unchanged and still answers the narrower
-        // question the transcript engine asks it.
+        // question — "how far has the FAST pass got?" — which is a real question
+        // even though playhead-6r4z moved its last production consumer, the
+        // transcript engine's shard-ordering index, onto the union above.
         let fastOnly = try await store.fetchFastTranscriptCoveredRanges(assetId: "a-9y9e-ranges")
         #expect(AnalysisCoverageMath.unionedSeconds(fastOnly) == 500)
     }

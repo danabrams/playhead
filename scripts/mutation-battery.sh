@@ -1077,7 +1077,7 @@ ADSVC="Playhead/Services/AdDetection/AdDetectionService.swift"
 PODC="Playhead/Services/AdDetection/AdPodContinuation.swift"
 # playhead-mptr: the artifact-backed shard skip (K2 series). MPTRIDX owns the
 # merge/overlap/skip policy; the two SQL rails live in STORE.
-MPTRIDX="Playhead/Services/TranscriptEngine/FastTranscriptCoverageIndex.swift"
+MPTRIDX="Playhead/Services/TranscriptEngine/TranscriptCoverageIndex.swift"
 # playhead-kvs8: the FM daemon throttle (Q01-Q08). THROT is the single
 # definition + the named causes; RUNNER carries the defer branch that replaced
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
@@ -1310,7 +1310,7 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/TestScratchReaperTests
   # playhead-mptr: the artifact-backed ordering rails (K2 series). Both suites
   # are pure value-type / small-store tests, well under a second.
-  -only-testing:PlayheadTests/FastTranscriptCoverageIndexTests
+  -only-testing:PlayheadTests/TranscriptCoverageIndexTests
   -only-testing:PlayheadTests/FastTranscriptCoveredRangesStoreTests
   -only-testing:PlayheadTests/SkipOrchestratorThresholdControlTests
   -only-testing:PlayheadTests/SkipOrchestratorRevertTests

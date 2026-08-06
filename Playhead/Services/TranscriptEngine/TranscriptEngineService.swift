@@ -1116,11 +1116,23 @@ actor TranscriptEngineService {
         // On failure the index is empty and the watermark nil, so every shard
         // sorts as uncovered and the order is exactly the pre-mptr order —
         // the safe direction to fail in.
-        var coverageIndex = FastTranscriptCoverageIndex.empty
+        //
+        // playhead-6r4z: THE READ IS BOTH PASSES, and it was `pass = 'fast'`
+        // alone until this bead — which made the fix above partly defeat itself.
+        // Audio the FINAL pass covers has no fast row to point at, so it failed
+        // the artifact test, sorted UNCOVERED, and floated to the FRONT of the
+        // very pass minted to read the audio behind it. On the 2026-08-03 pull
+        // that is 215 shards / 6,450 s of re-read across seven of twelve assets,
+        // and on 48E903D7 the re-read prefix beats the new audio 1,230 s to
+        // 103 s inside a flat 300 s cap. Of those 215 shards ZERO lacked a chunk
+        // of either pass, so this widening moves only audio a real row backs.
+        // The WATERMARK below is deliberately still the fast one — see
+        // `TranscriptCoverageIndex`'s header for why the two halves differ.
+        var coverageIndex = TranscriptCoverageIndex.empty
         var coverageWatermark: Double?
         do {
-            coverageIndex = FastTranscriptCoverageIndex(
-                chunkRanges: try await store.fetchFastTranscriptCoveredRanges(assetId: analysisAssetId)
+            coverageIndex = TranscriptCoverageIndex(
+                transcribedRegion: try await store.fetchTranscribedRegion(assetId: analysisAssetId)
             )
             coverageWatermark = try await store.fetchFastTranscriptCoverageEndTime(id: analysisAssetId)
         } catch {

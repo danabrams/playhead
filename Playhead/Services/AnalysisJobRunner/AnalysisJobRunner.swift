@@ -759,7 +759,7 @@ actor AnalysisJobRunner {
             // over every shard, and playhead-mptr deliberately ORDERS
             // already-backed shards last rather than skipping them (a skipped
             // shard can never take the duplicate-fingerprint arm's `speakerId` /
-            // `avgConfidence` upgrade — see `FastTranscriptCoverageIndex
+            // `avgConfidence` upgrade — see `TranscriptCoverageIndex
             // .orderingUncoveredFirst`). So on an asset with nothing left to
             // read, the entire budget is spent re-reading, the cap wins, and the
             // timeout arm of the task group above returns a HARDCODED

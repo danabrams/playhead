@@ -10462,11 +10462,26 @@ actor AnalysisStore {
     /// playhead-mptr: the time ranges an asset's `pass = 'fast'` transcript
     /// chunks actually back, ascending by start.
     ///
-    /// Deliberately NOT `fetchTranscriptChunks(assetId:)`: the transcript
-    /// engine asks this once per run purely to decide which shards it can
-    /// skip, and it needs two REAL columns per row rather than the text of
-    /// every chunk in the episode. On a long episode that is the difference
-    /// between two doubles and several megabytes of transcript.
+    /// Deliberately NOT `fetchTranscriptChunks(assetId:)`: a caller asking this
+    /// wants two REAL columns per row rather than the text of every chunk in the
+    /// episode. On a long episode that is the difference between two doubles and
+    /// several megabytes of transcript.
+    ///
+    /// **playhead-6r4z: this has no production consumer, and it is kept
+    /// deliberately rather than by omission.** Its one consumer was the
+    /// transcript engine's shard-ordering index, which read the fast pass alone
+    /// and therefore treated audio the FINAL pass covers as never read — 215
+    /// shards / 6,450 s across seven of twelve assets on the 2026-08-03 pull. The
+    /// index now takes a ``TranscribedRegion``.
+    ///
+    /// What keeps this function here is that rails TY32 and TY34 in
+    /// `scripts/mutation-battery-untypeable.py` are only worth something while
+    /// the tempting narrow thing is still in REACH: they assert that writing this
+    /// getter where the readable region belongs FAILS TO COMPILE, which is
+    /// evidence about types. Delete it and those mutations fail with "no such
+    /// member" instead — a different claim, and a much weaker one. It also
+    /// remains the honest answer to "how far has the FAST pass got?", which is a
+    /// real question even with no caller asking it today.
     ///
     /// Filters match ``reconcileFastTranscriptCoverage(id:)`` exactly —
     /// `pass = 'fast'` and `endTime > startTime` — so the skip decision and
