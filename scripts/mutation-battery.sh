@@ -2751,6 +2751,7 @@ T_MK6Z_BULLDOZE="start() does not age-reset a recovery request already pending (
 T_MK6Z_ARMS="start() still arms recovery when nothing is pending (playhead-mk6z)"
 T_MK6Z_LATCH="the recovery reschedule guard re-arms across consecutive wakes (playhead-mk6z)"
 T_MK6Z_INFLIGHT="the loop's sweep excludes the job this process is running, not merely the last one it dispatched (playhead-mk6z)"
+T_MK6Z_IDEMPOTENT="the reconciler's reclaim does not re-charge a row the loop's sweep already reclaimed (playhead-mk6z)"
 # y8f3's own tests, named here because DL05 must prove the widening is ADDITIVE
 # and DL02 must prove it did not swallow a neighbouring bead's terminal.
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
@@ -5489,6 +5490,14 @@ MUTATIONS=(
   "MK07|536|SCHED|$T_MK6Z_INFLIGHT"
   "MK08|537|SCHED|$T_MK6Z_INFLIGHT"
   "MK09|538|SCHED|$T_MK6Z_INFLIGHT"
+
+  # MK10 — drop the idempotence clause this bead had to add to the OTHER
+  # reclaimer. Until mk6z there was one reclaimer per process bootstrap and
+  # `WHERE jobId = ?` alone cost nothing; the 60 s sweep makes the reconciler's
+  # SELECT-then-UPDATE a race that charges one orphan's `attemptCount` twice.
+  # Reads as removing a redundant clause — every caller already selects rows
+  # with a non-NULL owner — and it IS redundant except in the race.
+  "MK10|539|STORE|$T_MK6Z_IDEMPOTENT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5838,6 +5847,7 @@ describe_mutation() {
     MK07) echo "mk6z: the sweep excludes the LAST job dispatched instead of the one still running" ;;
     MK08) echo "mk6z: the sweep call site excludes nothing at all" ;;
     MK09) echo "mk6z: a finished dispatch clears the whole in-flight set, unmasking its sibling" ;;
+    MK10) echo "mk6z: the reconciler re-charges attemptCount on a row the sweep already reclaimed" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12711,6 +12721,14 @@ EOF
     patch "$file" \
       '            inFlightJobIds.remove(job.jobId)' \
       '            inFlightJobIds.removeAll()' ;;
+
+  # MK10 — drop the idempotence clause from `recoverExpiredLease`. Invisible to
+  # every rail above: they exercise ONE reclaimer at a time, and this defect
+  # needs both.
+  MK10)
+    patch "$file" \
+      '            WHERE jobId = ? AND leaseOwner IS NOT NULL' \
+      '            WHERE jobId = ?' ;;
 
   # MK03 — drop the state filter. Reads as a simplification of a redundant
   # clause ("a terminal row has no lease"), and it is redundant only for rows

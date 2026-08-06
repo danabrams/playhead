@@ -2436,6 +2436,56 @@ struct SchedulerExpiredLeaseReclaimTests {
         #expect(legacyRow?.leaseOwner == nil, "the TOCTOU the set-based reclaim exists to avoid")
     }
 
+    /// playhead-mk6z review round, harm mode 3. The bead adds a SECOND
+    /// reclaimer running every 60 s alongside the reconciler's per-bootstrap
+    /// one, and the reconciler's is a SELECT (`fetchJobsWithExpiredLeases`)
+    /// followed by an UPDATE keyed on `jobId` alone. A sweep landing between
+    /// the two charged `attemptCount` twice for ONE real orphan.
+    ///
+    /// That matters because `attemptCount` is what `maxAttemptCount` reads to
+    /// mark an episode permanently `superseded` — three rows on the 2026-08-06
+    /// device pull sit at exactly 5 — so the extra charge is an episode billed
+    /// for a defect it did not commit.
+    @Test("the reconciler's reclaim does not re-charge a row the loop's sweep already reclaimed (playhead-mk6z)")
+    func testReconcilerReclaimIsIdempotentAgainstTheLoopSweep() async throws {
+        let store = try await makeTestStore()
+        let now = Date().timeIntervalSince1970
+
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-raced",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-raced",
+            workKey: "fp-mk6z-raced:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-raced",
+            state: "running",
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: now - 600
+        ))
+
+        // The reconciler's step 1: it observes the row as expired and commits
+        // to reclaiming it.
+        let observed = try await store.fetchJobsWithExpiredLeases(before: now)
+        #expect(observed.contains { $0.jobId == "mk6z-raced" },
+                "precondition: the reconciler must have selected this row")
+
+        // The run loop's 60 s sweep lands in the gap and reclaims it first.
+        let swept = try await store.reclaimExpiredLeases(now: now, excludingJobId: nil)
+        #expect(swept == 1, "precondition: the sweep moved the row")
+
+        // The reconciler's step 2 now runs against a row that has already been
+        // returned to the queue.
+        try await store.recoverExpiredLease(jobId: "mk6z-raced")
+
+        let row = try await store.fetchJob(byId: "mk6z-raced")
+        #expect(row?.attemptCount == 1, """
+            One orphan was charged twice. `attemptCount` counts FAILED ATTEMPTS; a second \
+            reclaimer arriving after the first is not a second failure, and the charge is what \
+            `maxAttemptCount` reads to supersede an episode permanently.
+            """)
+        #expect(row?.state == "queued")
+        #expect(row?.leaseOwner == nil)
+    }
+
     /// playhead-mk6z review round, harm mode 3. Two sweeps racing the same
     /// orphan must reclaim it ONCE. `attemptCount` feeds the exponential
     /// backoff and `maxAttemptCount`, so a double-charge on one reclaim is a

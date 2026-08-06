@@ -14724,12 +14724,34 @@ actor AnalysisStore {
 
     /// Recovers an expired lease: sets state to queued, clears lease fields,
     /// and increments attemptCount.
+    ///
+    /// playhead-mk6z (review round): `leaseOwner IS NOT NULL` is what makes
+    /// this idempotent against ``reclaimExpiredLeases(now:excludingJobId:)``,
+    /// and it was not needed until this bead shipped a SECOND reclaimer.
+    ///
+    /// The reconciler's `recoverExpiredLeases` is a SELECT
+    /// (`fetchJobsWithExpiredLeases`) followed by this UPDATE, once per row.
+    /// While there was one reclaimer per process bootstrap, the gap between
+    /// the two statements cost nothing. The run loop now sweeps every 60 s, so
+    /// a sweep can land inside that gap: it returns the row to `queued` and
+    /// charges `attemptCount`, and this UPDATE — keyed on `jobId` alone —
+    /// then charges it AGAIN for the same orphan. `attemptCount` is what
+    /// `maxAttemptCount` reads to decide an episode is permanently
+    /// `superseded` (three rows on the 2026-08-06 pull are sitting at exactly
+    /// 5), so a double charge is a real episode billed for a defect it did not
+    /// commit — `attemptCount` names FAILED ATTEMPTS being read as though it
+    /// named RECLAIMS.
+    ///
+    /// This cannot change behaviour for any existing caller: the only
+    /// production caller selects its rows through `fetchJobsWithExpiredLeases`,
+    /// whose own predicate already requires a non-NULL owner. It only
+    /// subtracts the second write in the race.
     func recoverExpiredLease(jobId: String) throws {
         let sql = """
             UPDATE analysis_jobs
             SET state = 'queued', leaseOwner = NULL, leaseExpiresAt = NULL,
                 attemptCount = attemptCount + 1, updatedAt = ?
-            WHERE jobId = ?
+            WHERE jobId = ? AND leaseOwner IS NOT NULL
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
