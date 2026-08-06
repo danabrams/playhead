@@ -1897,3 +1897,222 @@ struct PreAnalysisConfigRegressionTests {
         UserDefaults.standard.removeObject(forKey: "PreAnalysisConfig")
     }
 }
+
+// MARK: - Expired-lease reclaim (playhead-mk6z)
+
+/// playhead-mk6z. Measured on Dan's phone 2026-08-06: an `analysis_jobs` row
+/// sat `state='running'` with `leaseOwner='preAnalysis'` and a five-minute
+/// lease that had expired **132 minutes** earlier, while ten jobs sat queued.
+///
+/// The reclaim machinery exists — `AnalysisCoordinator.recoverOrphans` and
+/// `AnalysisJobReconciler.recoverExpiredLeases` both handle exactly this row —
+/// but every path that invokes them is a **process-bootstrap** path
+/// (`PlayheadRuntime`'s launch Task) or an **OS-granted BGTask**
+/// (`preAnalysisRecovery`, which additionally sets
+/// `requiresExternalPower = true`). The long-lived `AnalysisWorkScheduler`
+/// run loop — the one component that keeps running for the rest of the
+/// process's life, polling every five seconds — never reclaims, and
+/// `fetchNextEligibleJob` selects only `queued`/`paused`/`failed`, so a
+/// `running` row is structurally invisible to it. An orphan minted *after*
+/// bootstrap therefore pins its episode out of the queue until the app is
+/// relaunched.
+///
+/// The reclaim is **expiry-based, not liveness-based**, and that is safe here
+/// because the lease is already a heartbeat: `leaseRenewalTask` re-stamps
+/// `leaseExpiresAt = now + 300` every 120 s for as long as an in-process owner
+/// lives, so an expired lease means at least two renewal ticks failed to land.
+/// The second test pins the exact guard that keeps it from killing live work.
+@Suite("AnalysisWorkScheduler — expired-lease reclaim (playhead-mk6z)")
+struct SchedulerExpiredLeaseReclaimTests {
+
+    private func makeScheduler(
+        store: AnalysisStore,
+        downloads: StubDownloadProvider = StubDownloadProvider(),
+        config: PreAnalysisConfig = PreAnalysisConfig()
+    ) -> AnalysisWorkScheduler {
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: StubAnalysisAudioProvider(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider()
+        )
+        return AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: CapabilitiesService(),
+            downloadManager: downloads,
+            transportStatusProvider: StubTransportStatusProvider(),
+            config: config
+        )
+    }
+
+    @Test("the live scheduler loop returns a lease-expired running row to the queue")
+    func testLoopReclaimsExpiredLeaseWithoutDisturbingALiveOne() async throws {
+        let store = try await makeTestStore()
+        let now = Date().timeIntervalSince1970
+
+        // The device row. `nextEligibleAt` is parked in the future so that a
+        // successful reclaim leaves the row `queued` rather than immediately
+        // dispatching it — this test is about the reclaim, not the dispatch.
+        let orphan = makeAnalysisJob(
+            jobId: "mk6z-orphan",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-orphan",
+            workKey: "fp-mk6z-orphan:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-orphan",
+            state: "running",
+            nextEligibleAt: now + 3600,
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: now - 7920  // 132 minutes stale, as measured
+        )
+        // F2F2FC4C from the same pull: `running` with a lease 172 s in the
+        // FUTURE. A healthy, live claim. Whatever reclaims the orphan must
+        // not touch this row.
+        let liveExpiry = now + 172
+        let live = makeAnalysisJob(
+            jobId: "mk6z-live",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-live",
+            workKey: "fp-mk6z-live:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-live",
+            state: "running",
+            nextEligibleAt: now + 3600,
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: liveExpiry
+        )
+        try await store.insertJob(orphan)
+        try await store.insertJob(live)
+
+        let scheduler = makeScheduler(store: store)
+        await scheduler.startSchedulerLoop()
+        defer { Task { await scheduler.stop() } }
+
+        var observed: AnalysisJob?
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            let fetched = try await store.fetchJob(byId: "mk6z-orphan")
+            if fetched?.state == "queued" {
+                observed = fetched
+                break
+            }
+            observed = fetched
+        }
+
+        #expect(observed?.state == "queued",
+                "A lease that expired 132 minutes ago must be returned to the queue by the running scheduler, not left for the next app launch")
+        #expect(observed?.leaseOwner == nil, "Reclaim must clear the dead owner")
+        #expect(observed?.leaseExpiresAt == nil, "Reclaim must clear the stale deadline")
+
+        // Positive control on the SAME observer: `fetchJob` demonstrably
+        // reports a row the reclaim did not touch, so the assertions above
+        // are reading a real difference rather than a query that sees
+        // nothing. If the reclaim were indiscriminate this row would have
+        // moved too.
+        let untouched = try await store.fetchJob(byId: "mk6z-live")
+        #expect(untouched?.state == "running",
+                "A lease 172 s in the future is a live claim and must survive the sweep")
+        #expect(untouched?.leaseOwner == "preAnalysis")
+        #expect(untouched?.leaseExpiresAt == liveExpiry)
+    }
+
+    @Test("the sweep never reclaims the row the caller is running, however stale its lease looks")
+    func testSweepExcludesTheCallersOwnInFlightJob() async throws {
+        let store = try await makeTestStore()
+        let now = Date().timeIntervalSince1970
+
+        // Both rows are indistinguishable on the clock: `running`, owned, and
+        // expired by the same amount. The ONLY thing separating them is that
+        // the caller knows it is running `mk6z-mine` — proof of life by
+        // identity rather than by timestamp, which is what makes it safe to
+        // reclaim on expiry alone without diagnosing why the other stopped.
+        for jobId in ["mk6z-mine", "mk6z-theirs"] {
+            try await store.insertJob(makeAnalysisJob(
+                jobId: jobId,
+                jobType: "preAnalysis",
+                episodeId: "ep-\(jobId)",
+                workKey: "fp-\(jobId):1:preAnalysis",
+                sourceFingerprint: "fp-\(jobId)",
+                state: "running",
+                leaseOwner: "preAnalysis",
+                leaseExpiresAt: now - 600
+            ))
+        }
+
+        let reclaimed = try await store.reclaimExpiredLeases(
+            now: now,
+            excludingJobId: "mk6z-mine"
+        )
+        #expect(reclaimed == 1, "Exactly the one row the caller does not own should move")
+
+        let mine = try await store.fetchJob(byId: "mk6z-mine")
+        #expect(mine?.state == "running", "A scheduler must never reclaim the job it is itself running")
+        #expect(mine?.leaseOwner == "preAnalysis")
+
+        // Positive control on the same observer: `mk6z-theirs` differs from
+        // `mk6z-mine` in nothing but the exclusion, and it DID move — so the
+        // assertions above are reading the guard, not an inert sweep.
+        let theirs = try await store.fetchJob(byId: "mk6z-theirs")
+        #expect(theirs?.state == "queued")
+        #expect(theirs?.leaseOwner == nil)
+        #expect(theirs?.leaseExpiresAt == nil)
+        #expect(theirs?.attemptCount == 1, "Reclaim feeds the same backoff counter recoverExpiredLease does")
+    }
+
+    @Test("the sweep resurrects no terminal row and disturbs no live lease")
+    func testSweepLeavesTerminalRowsAndLiveLeasesAlone() async throws {
+        let store = try await makeTestStore()
+        let now = Date().timeIntervalSince1970
+
+        // A completed row whose lease columns were never cleared. Reading
+        // `leaseExpiresAt < now` as "this job needs re-running" would put
+        // finished work back on the queue forever.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-complete",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-complete",
+            workKey: "fp-mk6z-complete:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-complete",
+            state: "complete",
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: now - 600
+        ))
+        // F2F2FC4C: a healthy claim, 172 s of lease left.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-fresh",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-fresh",
+            workKey: "fp-mk6z-fresh:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-fresh",
+            state: "running",
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: now + 172
+        ))
+        // The one row that SHOULD move — the observer's positive control.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mk6z-stale",
+            jobType: "preAnalysis",
+            episodeId: "ep-mk6z-stale",
+            workKey: "fp-mk6z-stale:1:preAnalysis",
+            sourceFingerprint: "fp-mk6z-stale",
+            state: "running",
+            leaseOwner: "preAnalysis",
+            leaseExpiresAt: now - 600
+        ))
+
+        let reclaimed = try await store.reclaimExpiredLeases(now: now, excludingJobId: nil)
+        #expect(reclaimed == 1, "Only the stale running row is reclaimable")
+
+        let completed = try await store.fetchJob(byId: "mk6z-complete")
+        #expect(completed?.state == "complete", "A terminal row must not be resurrected by a stale lease column")
+
+        let fresh = try await store.fetchJob(byId: "mk6z-fresh")
+        #expect(fresh?.state == "running", "A lease 172 s in the future is live work")
+        #expect(fresh?.leaseExpiresAt == now + 172)
+
+        let stale = try await store.fetchJob(byId: "mk6z-stale")
+        #expect(stale?.state == "queued")
+        #expect(stale?.leaseOwner == nil)
+    }
+}

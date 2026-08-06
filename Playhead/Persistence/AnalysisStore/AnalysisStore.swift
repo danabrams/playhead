@@ -14738,6 +14738,60 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-mk6z: set-based, expiry-CAS reclaim of every lease whose
+    /// deadline has already passed. Returns how many rows moved.
+    ///
+    /// Distinct from ``recoverExpiredLease(jobId:)`` in the two ways that make
+    /// it safe to run from the **live scheduler loop** rather than only from a
+    /// process-bootstrap sweep:
+    ///
+    ///  1. **The expiry predicate is in the UPDATE, not in a preceding SELECT.**
+    ///     `recoverExpiredLease` takes a `jobId` the reconciler chose from an
+    ///     earlier `fetchJobsWithExpiredLeases`, and its `WHERE` clause is
+    ///     `jobId = ?` alone — so between the two statements a renewal can land
+    ///     and the reclaim will still fire, clearing a lease that is once again
+    ///     live. Folding the predicate into the same statement makes the read
+    ///     and the write one atomic decision: a row whose owner renewed
+    ///     (`leaseExpiresAt` back in the future) no longer matches and is left
+    ///     exactly as it is.
+    ///  2. **`excludingJobId` protects the caller's own in-flight job by
+    ///     identity rather than by clock.** The scheduler knows which row it is
+    ///     running; that is exact knowledge of liveness, not an inference from a
+    ///     timestamp, and it holds even if the renewal task is starved past the
+    ///     deadline while the runner is genuinely working.
+    ///
+    /// The state filter matches ``AnalysisJobReconciler``'s `recoverExpiredLeases`
+    /// (`running` / `queued` / `paused`) so a terminal row — `complete`,
+    /// `failed`, `superseded` — is never resurrected by a lease column nobody
+    /// bothered to clear.
+    ///
+    /// - Parameters:
+    ///   - now: the instant to test the deadline against.
+    ///   - excludingJobId: a job the caller knows to be alive; pass `nil` when
+    ///     the caller owns nothing.
+    /// - Returns: the number of rows returned to `queued`.
+    func reclaimExpiredLeases(now: TimeInterval, excludingJobId: String?) throws -> Int {
+        let sql = """
+            UPDATE analysis_jobs
+            SET state = 'queued', leaseOwner = NULL, leaseExpiresAt = NULL,
+                attemptCount = attemptCount + 1, updatedAt = ?
+            WHERE leaseOwner IS NOT NULL
+              AND leaseExpiresAt IS NOT NULL
+              AND leaseExpiresAt < ?
+              AND state IN ('running', 'queued', 'paused')
+              AND jobId <> ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        bind(stmt, 2, now)
+        // A job id is never the empty string, so the sentinel excludes nothing
+        // and the statement stays a single prepared shape for both callers.
+        bind(stmt, 3, excludingJobId ?? "")
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
     /// Increments the attempt count for a job. Used after failures to drive exponential backoff.
     func incrementAttemptCount(jobId: String) throws {
         let sql = """
