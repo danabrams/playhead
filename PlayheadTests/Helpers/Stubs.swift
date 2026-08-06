@@ -336,6 +336,17 @@ final class StubTaskScheduler: BackgroundTaskScheduling, @unchecked Sendable {
     func seedPending(_ request: BGTaskRequest) {
         pendingIdentifiers.insert(request.identifier)
     }
+
+    /// Drop an identifier from the pending set without running its handler —
+    /// models iOS CONSUMING a request when it launches the task. Needed to
+    /// observe a guarded scheduler across more than one arm/consume cycle:
+    /// without it every second call is legitimately skipped as "already
+    /// pending", and a reentrancy latch that never releases is
+    /// indistinguishable from a working guard (playhead-mk6z, the failure
+    /// mode playhead-c25o documents).
+    func clearPending(_ identifier: String) {
+        pendingIdentifiers.remove(identifier)
+    }
 }
 
 // MARK: - StubAnalysisCoordinator

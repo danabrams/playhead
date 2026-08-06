@@ -1312,6 +1312,8 @@ AJRUN="Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift"
 # session lifecycle and pushes the evidence catalog onto the SkipOrchestrator.
 # Added for CN06, the fourth instance of the pre-hc7e final-only collapse.
 ACOORD="Playhead/Services/AnalysisCoordinator/AnalysisCoordinator.swift"
+# playhead-mk6z: the BGTask scheduling/handler surface.
+BGPS="Playhead/Services/AnalysisCoordinator/BackgroundProcessingService.swift"
 # playhead-iu0t R2: the episode-summary backfill coordinator — the FIFTH
 # instance of the collapse, and the one that reached it through the persisted
 # `transcript_chunks.transcriptVersion` column rather than through a call.
@@ -1326,6 +1328,7 @@ MUTABLE_FILES=(
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
+  "$BGPS"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1395,6 +1398,11 @@ FOCUSED_SUITES=(
   # tests, ~0.2 s — two are pure store calls and the third drives the real run
   # loop, which is the only place able to observe that the sweep is WIRED at all.
   -only-testing:PlayheadTests/SchedulerExpiredLeaseReclaimTests
+  # playhead-mk6z: the BGTask reschedule guard (MK04-MK06). `Scheduling` is the
+  # suite that owns every submit-path assertion; ~5 s, and it is the only thing
+  # able to observe an age-reset, since a bulldozed request is still pending and
+  # looks identical from every other angle.
+  -only-testing:PlayheadTests/SchedulingTests
   # playhead-mptr: the artifact-backed ordering rails (K2 series). Both suites
   # are pure value-type / small-store tests, well under a second.
   -only-testing:PlayheadTests/TranscriptCoverageIndexTests
@@ -2739,6 +2747,9 @@ T_DL_MIXED="an episode that reaches both dead ends still gets one budget, not tw
 T_MK6Z_LOOP="the live scheduler loop returns a lease-expired running row to the queue"
 T_MK6Z_MINE="the sweep never reclaims the row the caller is running, however stale its lease looks"
 T_MK6Z_TERMINAL="the sweep resurrects no terminal row and disturbs no live lease"
+T_MK6Z_BULLDOZE="start() does not age-reset a recovery request already pending (playhead-mk6z)"
+T_MK6Z_ARMS="start() still arms recovery when nothing is pending (playhead-mk6z)"
+T_MK6Z_LATCH="the recovery reschedule guard re-arms across consecutive wakes (playhead-mk6z)"
 # y8f3's own tests, named here because DL05 must prove the widening is ADDITIVE
 # and DL02 must prove it did not swallow a neighbouring bead's terminal.
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
@@ -5435,6 +5446,25 @@ MUTATIONS=(
   "MK01|530|SCHED|$T_MK6Z_LOOP"
   "MK02|531|STORE|$T_MK6Z_MINE"
   "MK03|532|STORE|$T_MK6Z_TERMINAL"
+
+  # ---- playhead-mk6z: the recovery reschedule guard (MK04-MK06) ----
+  #
+  # `schedulePreAnalysisRecovery()` shipped with neither the pending check nor
+  # the reentrancy flag its neighbour has carried since playhead-txq3, so every
+  # launch age-reset the pending recovery wake. All three rails attack the ONE
+  # guarded entry point, because that is where the mechanism lives.
+  #
+  # MK05 and MK06 are the two directions the guard can fail that are NOT the
+  # original defect, and each has exactly one witness:
+  #   * MK05 fails CLOSED — arm only what is already armed. That is the
+  #     playhead-fuo6 blackout and no bulldozing rail can see it, because a
+  #     process that submits nothing also never age-resets anything.
+  #   * MK06 drops the latch release. Invisible to a single call and to two
+  #     consecutive calls; only a rail that CONSUMES the request between them
+  #     can tell a stuck latch from a working guard.
+  "MK04|533|BGPS|$T_MK6Z_BULLDOZE"
+  "MK05|534|BGPS|$T_MK6Z_ARMS"
+  "MK06|535|BGPS|$T_MK6Z_LATCH"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5778,6 +5808,9 @@ describe_mutation() {
     MK01) echo "mk6z: the run loop stops sweeping — reclaim is back to bootstrap-only" ;;
     MK02) echo "mk6z: the sweep forgets which job the caller is running and reclaims on the clock alone" ;;
     MK03) echo "mk6z: any expired lease is reclaimable, so a completed row is requeued forever" ;;
+    MK04) echo "mk6z: the launch reschedule goes back to the unguarded submit and age-resets the pending wake" ;;
+    MK05) echo "mk6z: the guard fails CLOSED — a launch with nothing pending arms nothing at all" ;;
+    MK06) echo "mk6z: the reentrancy latch never releases, silencing every later reschedule" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12592,6 +12625,42 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # MK04 — restore the pre-bead call site. Reads as a simplification (why await
+  # a query to submit a request the OS de-dups anyway?) and is exactly the
+  # defect: submit de-dups, but it also age-resets.
+  MK04)
+    snippet OLD <<'EOF'
+        await schedulePreAnalysisRecoveryIfNeeded()
+EOF
+    snippet NEW <<'EOF'
+        schedulePreAnalysisRecovery()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK05 — negate the guard. A one-character class of typo, and it inverts the
+  # meaning into "only re-arm something already armed", i.e. arm nothing, ever.
+  MK05)
+    snippet OLD <<'EOF'
+        if pendingIdentifiers.contains(BackgroundTaskID.preAnalysisRecovery) {
+EOF
+    snippet NEW <<'EOF'
+        if !pendingIdentifiers.contains(BackgroundTaskID.preAnalysisRecovery) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK06 — hold the reentrancy latch forever. The `defer` looks redundant next
+  # to an early `return` on every branch; dropping it is the c25o latch defect,
+  # which costs every subsequent reschedule for the process lifetime.
+  MK06)
+    snippet OLD <<'EOF'
+        recoveryRescheduleInFlight = true
+        defer { recoveryRescheduleInFlight = false }
+EOF
+    snippet NEW <<'EOF'
+        recoveryRescheduleInFlight = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # MK03 — drop the state filter. Reads as a simplification of a redundant
   # clause ("a terminal row has no lease"), and it is redundant only for rows
   # whose terminal transition happened to clear the lease columns. For any row
@@ -12670,6 +12739,7 @@ rec_file()   {
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;
     SCHED) printf '%s' "$SCHED" ;;
+    BGPS)  printf '%s' "$BGPS" ;;
     CLAIM) printf '%s' "$CLAIM" ;;
     RECON) printf '%s' "$RECON" ;;
     ATOM)  printf '%s' "$ATOM" ;;

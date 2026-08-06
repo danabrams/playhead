@@ -1192,6 +1192,38 @@ struct SchedulingTests {
         }
     }
 
+    // playhead-mk6z: the guard's reentrancy latch must RELEASE. The pending
+    // query is a suspension point, so `schedulePreAnalysisRecoveryIfNeeded()`
+    // holds `recoveryRescheduleInFlight` across it — and playhead-c25o records
+    // what a latch that never clears costs: "the `defer` never ran, so the
+    // latch stayed set and every later backfill/feed-refresh reschedule was a
+    // no-op for the process lifetime."
+    //
+    // A single call cannot see this, and neither can two calls in a row: the
+    // second is legitimately skipped as already-pending, so a stuck latch and a
+    // working guard produce identical output. Consuming the request between the
+    // two calls — which is exactly what iOS does when it launches the task — is
+    // what makes the two distinguishable.
+    @Test("the recovery reschedule guard re-arms across consecutive wakes (playhead-mk6z)",
+          .timeLimit(.minutes(1)))
+    func recoveryGuardReleasesItsReentrancyLatch() async throws {
+        let (bps, _, scheduler, _) = makeBPS()
+
+        await bps.schedulePreAnalysisRecoveryIfNeeded()
+        #expect(scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.preAnalysisRecovery
+        }.count == 1, "first wake arms one request")
+
+        // iOS launches the task: the request is consumed and no longer pending.
+        scheduler.clearPending(BackgroundTaskID.preAnalysisRecovery)
+
+        await bps.schedulePreAnalysisRecoveryIfNeeded()
+        #expect(scheduler.submittedRequests.filter {
+            $0.identifier == BackgroundTaskID.preAnalysisRecovery
+        }.count == 2,
+        "the second wake must arm again — a latch that never releases silences recovery for the whole process lifetime")
+    }
+
     @Test("Scheduler failure is logged not crashed")
     func schedulerFailureDoesNotCrash() async throws {
         let scheduler = StubTaskScheduler()
