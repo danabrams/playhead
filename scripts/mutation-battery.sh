@@ -45,15 +45,26 @@
 #      the field is SPLIT ON ';', so a test whose name contains a semicolon can
 #      never be matched (one K2 test was renamed for exactly this).
 #
-#   2. `--dry-run` DOES NOT RELIABLY RESTORE. Running batches 200-203 back to
-#      back in one shell loop left six mutations live on disk while every batch
-#      printed "the tree was restored"; batch 203 then reported phantom "anchor
-#      drift" because it was patching an already-mutated file. Real runs leave
-#      the tree dirty too. Nothing reached HEAD only because commits staged
-#      EXPLICIT PATHS — which is the same discipline the `git add -A` warning at
-#      the top of this file demands, and this is the second mechanism that makes
-#      it necessary. ALWAYS `git checkout -- .` and re-check `git status` between
-#      invocations, and never trust the restore message alone.
+#   2. THE "`--dry-run` DOES NOT RELIABLY RESTORE" WARNING WAS A SYMPTOM, AND
+#      ITS CAUSE IS FIXED — but read this before you delete the caution.
+#      Running batches 200-203 back to back left six mutations live on disk
+#      while every batch printed "the tree was restored". The cause was NOT the
+#      restore: it was `$MPTRIDX` missing from `MUTABLE_FILES`, so
+#      `restore_sources` never checked that file out and `restore_and_verify`
+#      never hashed it (playhead-6r4z R1, fixed in #353 together with the
+#      per-invocation assertion below that every mutation's file is in the
+#      list). A file in the list has always been restored, byte-verified after
+#      every batch, and re-verified at the end.
+#
+#      THE OLD REMEDY WAS WORSE THAN THE DISEASE. It said "ALWAYS
+#      `git checkout -- .` between invocations", and on 2026-08-04 three agents
+#      destroyed their own uncommitted work doing exactly that. This script has
+#      never run a blanket checkout: `restore_sources` is
+#      `git checkout -- "${MUTABLE_FILES[@]}"` and cannot touch a file it does
+#      not mutate. What to do instead is `git status --porcelain -- Playhead`
+#      between invocations — it ANSWERS the question rather than papering over
+#      it — and, since playhead-pu7e, simply not run two batteries at once: the
+#      residue those loops kept finding was usually the other run's.
 #
 # THE R AND P SERIES LIVE ELSEWHERE (playhead-voez, playhead-3nfa)
 # ----------------------------------------------------------------
@@ -135,6 +146,35 @@
 #
 # Exits non-zero if any mutation survives, if the tree is dirty at start, if a
 # batch fails to build, or if restoration is not byte-exact.
+#
+#   1  a mutation SURVIVED
+#   2  refused to start (dirty tree, bad selection, a mutation whose file is not
+#      in MUTABLE_FILES, a red baseline, or an unresolved crashed run)
+#   3  a mutation could not be EVALUATED
+#   4  the tree was NOT restored byte-exactly — inspect before anything else
+#   75 another battery is already running in this worktree (EX_TEMPFAIL)
+#
+# ONE BATTERY PER WORKTREE — ENFORCED SINCE playhead-pu7e
+# -------------------------------------------------------
+# `scripts/mutation-battery-lock.sh` takes a lock in this worktree's own git
+# directory for the WHOLE run, and a second invocation exits 75 naming the
+# holder's pid, start time and arguments.
+#
+# The clean-tree guard could not do this and it is worth understanding why,
+# because "it refuses on a dirty tree" reads like mutual exclusion. Between run
+# A's `restore_and_verify` and its next `apply` the tree is genuinely CLEAN, so
+# run B passes the guard and starts. From then on each run's restore reverts the
+# other's mutant, and NOTHING detects it — A's byte-exactness check passes,
+# because A's own restore succeeded. Measured cost (playhead-9y9e R1): four
+# verdict attempts destroyed, all four reported as "the baseline did not run
+# tests (rc=65)". Rails RT11, SC25, SC30 and SC33 still carry the implementer's
+# own verdicts because no reviewer could obtain an independent one.
+#
+# The lock also survives `kill -9`, which no trap can: it records each mutable
+# file's pristine hash before mutating and the mutant's hash after, so the next
+# run restores exactly what the dead one wrote (keeping a rescue copy under
+# /private/tmp/playhead-mutation-battery-rescue.*), and REFUSES when a file
+# matches neither — that is somebody's edit, not our mutant.
 #
 # LAST WHOLE-BATTERY RUN — the single provenance line
 #   2026-07-28 (playhead-auz3). 35 live entries — COUNTED, not carried over;
@@ -739,9 +779,12 @@
 #       where the un-skipped ones had been falling ~2 GiB per attempt.
 #
 #   ONE THING TO KNOW IF YOU EDIT SOURCE WHILE A BATTERY RUNS: it restores with
-#   `git checkout -- .`, so an uncommitted edit made mid-run is DISCARDED. Commit
-#   first. (Also: a working-tree read during a run shows MUTATED source. Read
-#   `git show HEAD:<path>` if you need the truth while one is in flight.)
+#   a SCOPED `git checkout -- "${MUTABLE_FILES[@]}"`, so an uncommitted edit to
+#   one of THOSE files made mid-run is DISCARDED, and an edit to anything else is
+#   untouched. (An earlier revision of this header said `git checkout -- .`, and
+#   that was wrong in the direction that gets work destroyed — people copied it.)
+#   Commit first. (Also: a working-tree read during a run shows MUTATED source.
+#   Read `git show HEAD:<path>` if you need the truth while one is in flight.)
 #
 #   Batch 409 is NOT a coverage-hole batch. SC30/SC31 restore a defect that was
 #   live on this branch: the sweep's transcript gate divided the RAW interval
@@ -1036,6 +1079,19 @@ cd "$(dirname "$0")/.." || {
   exit 2
 }
 REPO_ROOT="$(pwd)"
+
+# playhead-pu7e: the run lock, its crash-recovery path, and the honest diagnosis
+# for a run that produced no tests. REFUSE if it is missing rather than running
+# unlocked — an unlocked battery is precisely the failure this file is guarding
+# against, and it fails silently in the direction that reads as a verdict.
+if [ ! -f "$REPO_ROOT/scripts/mutation-battery-lock.sh" ]; then
+  echo "mutation-battery: scripts/mutation-battery-lock.sh is missing. Refusing to" >&2
+  echo "run without the worktree lock — two concurrent batteries revert each" >&2
+  echo "other's mutants and every verdict on both sides becomes fiction." >&2
+  exit 2
+fi
+# shellcheck source=scripts/mutation-battery-lock.sh
+. "$REPO_ROOT/scripts/mutation-battery-lock.sh"
 
 : "${DEVELOPER_DIR:=/Applications/Xcode-beta.app/Contents/Developer}"
 export DEVELOPER_DIR
@@ -1727,6 +1783,10 @@ on_exit() {
     # explicit-feedback transactions — sitting in the working tree.
     restore_sources
   fi
+  # playhead-pu7e: AFTER the restore, never before. Releasing first would let a
+  # waiting battery start while this one's mutant is still on disk — the exact
+  # interleaving the lock exists to close, reintroduced at the last moment.
+  mb_lock_release
   if [ "$KEEP_WORK" -eq 1 ]; then
     echo "mutation-battery: per-batch xcodebuild logs kept in $WORK" >&2
   else
@@ -12590,6 +12650,11 @@ restore_and_verify() {
     FATAL=1
     return 1
   fi
+  # playhead-pu7e: only now is the tree provably pristine again, so only now may
+  # the lock drop the `post` hashes it recorded. Doing it on the `restore_sources`
+  # call rather than on the VERIFIED restore would let a recovery match a file
+  # against bytes that no longer describe it.
+  mb_lock_note_restored
   return 0
 }
 
@@ -12716,6 +12781,10 @@ ONLY=""
 ONLY_BATCH=""
 LIST_ONLY=0
 DRY_RUN=0
+# Captured before the parse consumes them: the lock records this so a REFUSED
+# run can tell you what the holder is doing, which is what decides whether
+# waiting is worth it.
+INVOCATION_ARGV="$*"
 while [ $# -gt 0 ]; do
   case "$1" in
     --list)    LIST_ONLY=1; shift ;;
@@ -12784,8 +12853,27 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# playhead-pu7e: the lock comes BEFORE the clean-tree guard, and the order is
+# the point. A live holder mid-batch has a mutant on disk, so a second run that
+# checked the tree first would be told "commit your work first" — a claim about
+# the operator's editor when the cause is another battery. Same misattribution
+# one layer over from the rc=65 message this bead also fixes.
+mb_lock_acquire "$INVOCATION_ARGV"
+LOCK_RC=$?
+if [ "$LOCK_RC" -ne 0 ]; then
+  exit "$LOCK_RC"
+fi
+# Advisory only, and deliberately not a refusal: the lock covers THIS worktree,
+# which is the scope of the source corruption, but the simulator and
+# CoreSimulator are shared across worktrees and Xcode itself.
+mb_warn_if_xcodebuild_running
+
 require_clean_tree
 TREE_OWNED=1
+# From here until release this process is the only legitimate writer of these
+# files. Recording their pristine hashes NOW is what lets a later run tell this
+# run's mutant from somebody's work if this one is SIGKILLed.
+mb_lock_record_pre "${MUTABLE_FILES[@]}"
 
 HASHES_BEFORE=""
 for f in "${MUTABLE_FILES[@]}"; do
@@ -12827,6 +12915,15 @@ FATAL=0
 RESTORE_OK=1
 START_TS="$(date +%s)"
 
+# playhead-pu7e: stamp the run. Operators drive this battery one `--only` at a
+# time and redirect each invocation to its own file, and a verdict table carries
+# nothing that says WHEN it was produced — so a file left over from an earlier
+# round reads exactly like a fresh KILLED. playhead-e75l R7 nearly credited a
+# batch that never ran for that reason, and caught it only by collecting logs by
+# mtime. A timestamp does not make the collection correct, but it does make a
+# stale file self-identifying from its own contents, which is what was missing.
+RUN_STARTED_HUMAN="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "mutation-battery: run started $RUN_STARTED_HUMAN  pid $$  argv: ${INVOCATION_ARGV:-<none>}"
 echo "mutation-battery: DEVELOPER_DIR=$DEVELOPER_DIR"
 echo "mutation-battery: ${#SELECTED[@]} mutation(s) in ${#BATCH_IDS[@]} batch(es)"
 echo
@@ -12852,8 +12949,12 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
   BUILD_COUNT=$((BUILD_COUNT + 1))
   last_attempt "$BASE_LOG" >"$BASE_LOG.last"
   if ! grep -q "Test run with" "$BASE_LOG.last"; then
-    echo "mutation-battery: the baseline did not run tests (rc=$BASE_RC)" >&2
-    grep -m 20 -E "error:|BUILD FAILED|Killed: 9" "$BASE_LOG" >&2 || true
+    # playhead-pu7e: this used to print "the baseline did not run tests", which
+    # is a claim ABOUT THE TREE, and then grep `error:|BUILD FAILED|Killed: 9`.
+    # A concurrent battery matches none of those and a wedged simulator matches
+    # only misleadingly, so both were reported as a broken baseline. Four
+    # verdicts in playhead-9y9e R1 went to the wrong explanation that way.
+    mb_diagnose_no_tests "$BASE_LOG" "$BASE_RC" "the baseline"
     KEEP_WORK=1
     exit 2
   fi
@@ -12907,6 +13008,15 @@ for b in "${BATCH_IDS[@]}"; do
 
   echo "=== batch $b: ${#MEMBERS[@]} mutation(s) ==="
   APPLY_FAILED=0
+  MEMBER_NAMES=""
+  for rec in "${MEMBERS[@]}"; do
+    MEMBER_NAMES="${MEMBER_NAMES}${MEMBER_NAMES:+ }$(rec_name "$rec")"
+  done
+  # Recorded BEFORE the first edit, with the mutant hashes still unknown. A run
+  # killed between here and the note below left a HALF-applied batch, which no
+  # single hash can describe — so recovery is told that outright rather than
+  # inferring it from a mismatch it would (correctly) refuse to act on.
+  mb_lock_note_mutating "$b" "$MEMBER_NAMES"
   for rec in "${MEMBERS[@]}"; do
     name="$(rec_name "$rec")"
     file="$(rec_file "$rec")"
@@ -12917,6 +13027,7 @@ for b in "${BATCH_IDS[@]}"; do
       break
     fi
   done
+  [ "$APPLY_FAILED" -eq 0 ] && mb_lock_note_applied
 
   if [ "$APPLY_FAILED" -eq 1 ]; then
     for rec in "${MEMBERS[@]}"; do
@@ -12946,10 +13057,11 @@ for b in "${BATCH_IDS[@]}"; do
 
   last_attempt "$LOG" >"$LOG.last"
   if ! grep -q "Test run with" "$LOG.last"; then
-    echo "mutation-battery: batch $b did not run tests (build failure?), rc=$RC" >&2
-    grep -m 20 -E "error:|BUILD FAILED|Killed: 9" "$LOG" >&2 || true
+    # playhead-pu7e: "(build failure?)" was a guess printed as a finding. See
+    # the baseline branch above.
+    mb_diagnose_no_tests "$LOG" "$RC" "batch $b"
     for rec in "${MEMBERS[@]}"; do
-      echo "$(rec_name "$rec")|ERROR|batch did not build/run" >>"$RESULTS"
+      echo "$(rec_name "$rec")|ERROR|batch did not build/run — see the DIAGNOSIS above" >>"$RESULTS"
     done
     FATAL=1
     restore_and_verify "batch $b" || break
@@ -13031,6 +13143,10 @@ done <"$RESULTS"
 echo "-------------------------------------------------------------------------"
 printf 'builds: %d   wall clock: %dm%02ds   survivors: %d   errors: %d\n' \
   "$BUILD_COUNT" "$((ELAPSED / 60))" "$((ELAPSED % 60))" "$SURVIVORS" "$ERRORS"
+# Repeated at the FOOT as well as the head: a collector that tails the table
+# would otherwise never see it, and the table is the part that gets quoted.
+printf 'run started %s   pid %d   argv: %s\n' \
+  "$RUN_STARTED_HUMAN" "$$" "${INVOCATION_ARGV:-<none>}"
 
 if [ "$SURVIVORS" -gt 0 ] || [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
   KEEP_WORK=1
