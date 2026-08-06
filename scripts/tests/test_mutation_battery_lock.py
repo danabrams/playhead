@@ -111,6 +111,9 @@ class LockTestCase(unittest.TestCase):
                 proc.wait(timeout=10)
 
     def hold(self, argv="--only RT14", ready_timeout=15):
+        return self.hold_files(self.repo.file, argv=argv, ready_timeout=ready_timeout)
+
+    def hold_files(self, *files, argv="--only RT14", ready_timeout=15):
         """Start a process that ACQUIRES the lock and then sits on it.
 
         Returns the holder's pid. The holder writes a sentinel once it owns the
@@ -119,9 +122,9 @@ class LockTestCase(unittest.TestCase):
         sentinel = self.repo.dir / "held"
         body = (
             'mb_lock_acquire "%s" || exit $?\n'
-            'mb_lock_record_pre "%s"\n'
+            'mb_lock_record_pre %s\n'
             'echo ok > "%s"\n'
-            "sleep 300\n" % (argv, self.repo.file, sentinel)
+            "sleep 300\n" % (argv, " ".join('"%s"' % f for f in files), sentinel)
         )
         proc = subprocess.Popen(
             ["bash", "-c", 'set -uo pipefail\n. "%s" || exit 99\n%s' % (LOCK_SH, body)],
@@ -161,6 +164,10 @@ class TestAcquireAndRelease(LockTestCase):
         status = subprocess.run(["git", "status", "--porcelain"], cwd=str(self.repo.dir),
                                 capture_output=True, text=True).stdout
         self.assertNotIn("mutation-battery.lock", status)
+        # Positive control on that observer: `git status` in this repo DOES
+        # report a new file, so the absence above is an absence and not a query
+        # that could never have seen anything.
+        self.assertIn("path.txt", status)
 
     def test_lock_path_is_scoped_to_the_git_directory(self):
         out = bash("mb_lock_path", self.repo.dir, check=True)
@@ -199,6 +206,26 @@ class TestContention(LockTestCase):
         bash('mb_lock_acquire ""; mb_lock_release', self.repo.dir)
         self.assertTrue(self.repo.lockdir.exists(), "the holder's lock was deleted by a refused run")
         self.assertEqual(before, (self.repo.lockdir / "info").read_bytes())
+
+    def test_release_refuses_when_the_lock_is_now_held_by_a_different_pid(self):
+        # The last line of defence if a reclaim ever misjudges: a process that
+        # believes it owns the lock must still not delete one somebody else's
+        # pid is written into.
+        self.repo.lockdir.mkdir(parents=True)
+        (self.repo.lockdir / "info").write_text("pid=999999\nargv=--only ZZ99\n")
+        out = bash('MB_LOCK_DIR="%s"; MB_LOCK_OWNED=1; mb_lock_release; echo "RC=$?"'
+                   % self.repo.lockdir, self.repo.dir)
+        self.assertIn("RC=0", out.stdout)
+        self.assertTrue(self.repo.lockdir.exists())
+        self.assertIn("not releasing", out.stderr)
+        # Positive control: with OUR pid in the file it IS released, so the
+        # refusal above is the pid check and not a release that never works.
+        (self.repo.lockdir / "info").write_text("pid=PIDPLACEHOLDER\n")
+        out = bash('sed -i "" "s/PIDPLACEHOLDER/$$/" "%s/info"\n'
+                   'MB_LOCK_DIR="%s"; MB_LOCK_OWNED=1; mb_lock_release; echo "RC=$?"'
+                   % (self.repo.lockdir, self.repo.lockdir), self.repo.dir)
+        self.assertIn("RC=0", out.stdout)
+        self.assertFalse(self.repo.lockdir.exists(), out.stderr)
 
     def test_a_lock_directory_with_no_info_yet_is_not_stolen(self):
         # The holder wins `mkdir` and is descheduled before it writes `info`.
@@ -321,7 +348,8 @@ class TestStaleLock(LockTestCase):
         out = bash('mb_lock_acquire ""; echo "RC=$?"', self.repo.dir)
         self.assertIn("RC=2", out.stdout)
         self.assertEqual("let pristine = 9  // a human's edit\n", self.repo.read())
-        self.assertIn("never applied a mutation", out.stderr)
+        self.assertIn("DID NOT WRITE this file", out.stderr)
+        self.assertIn("state\n  'clean'", out.stderr.replace("mutation-battery: ", ""))
 
     def test_a_crash_MID_APPLY_is_still_restored(self):
         # Positive control for the test above: the very same `post=?` DOES mean
@@ -339,6 +367,39 @@ class TestStaleLock(LockTestCase):
         self.assertIn("RC=0", out.stdout)
         self.assertEqual("let pristine = 1\n", self.repo.read())
         self.assertIn("MID-APPLY", out.stderr)
+
+    def test_an_edit_to_a_file_the_batch_never_touched_is_not_called_a_mutant(self):
+        # A batch mutates one or two files; the lock records `post` for ALL of
+        # them, so an untouched file has post == pre. A later difference there
+        # is unambiguously somebody's edit — the dead run provably did not write
+        # that file — and saying "matches neither the pristine bytes nor the
+        # mutant it injected" names a mutant that was never there.
+        repo = self.repo
+        second = "src/other.swift"
+        (repo.dir / second).write_text("let other = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo.dir), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "two"], cwd=str(repo.dir), check=True,
+                       capture_output=True)
+        pid = self.hold_files(repo.file, second)
+        repo.write("let pristine = 2  // MUTANT\n")   # only the FIRST file
+        bash('MB_LOCK_DIR="%s"; MB_LOCK_OWNED=1\n'
+             'MB_LOCK_FILES_PRE="$(sed -n "/^file\t/p" "$MB_LOCK_DIR/state")\n"\n'
+             'mb_lock_note_mutating 3 "XX01"\nmb_lock_note_applied' % repo.lockdir,
+             repo.dir, check=True)
+        self._kill9(pid)
+        (repo.dir / second).write_text("let other = 99  // a human's edit\n")
+
+        out = bash('mb_lock_acquire ""; echo "RC=$?"', repo.dir)
+        self.assertIn("RC=2", out.stdout)
+        self.assertIn("DID NOT WRITE this file", out.stderr)
+        self.assertIn("src/other.swift", out.stderr)
+        # And it must NOT print a "mutant" hash for a file that carries none.
+        self.assertNotIn("mutant   :", out.stderr)
+        self.assertEqual("let other = 99  // a human's edit\n",
+                         (repo.dir / second).read_text())
+        # And nothing else was touched either: a refusal must not half-restore.
+        self.assertEqual("let pristine = 2  // MUTANT\n", repo.read())
+        self.assertIn("nothing was restored", out.stderr.lower())
 
     def test_a_stale_lock_from_another_worktree_is_never_acted_on(self):
         self.repo.lockdir.mkdir(parents=True)
@@ -541,6 +602,23 @@ class TestBatteryRefusesAConcurrentRun(unittest.TestCase):
         self.assertEqual(2, out.returncode, out.stderr)
         self.assertIn("commit your work first", out.stderr)
         self.assertIn(rel, out.stderr)
+
+    def test_a_run_whose_output_pipe_closes_still_releases_the_lock(self):
+        # Operators pipe this battery to `head`/`tail` constantly — CLAUDE.md
+        # documents `fast-gate.sh | tail` as its own hazard. Bash dies on
+        # SIGPIPE WITHOUT running an EXIT trap unless PIPE is trapped, so an
+        # untrapped run would leave both its lock and, one line earlier, its
+        # mutant behind. Observed doing exactly that while demonstrating crash
+        # recovery for this bead.
+        proc = subprocess.run(
+            "'%s' --dry-run --only %s 2>&1 | head -3" % (BATTERY, SAMPLE_MUTATION),
+            shell=True, cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+        self.assertIn("mutation-battery:", proc.stdout)
+        self.assertFalse(self.lockdir.exists(),
+                         "SIGPIPE left the lock behind: " + proc.stdout)
+        status = subprocess.run(["git", "status", "--porcelain", "--", "Playhead"],
+                                cwd=str(ROOT), capture_output=True, text=True).stdout
+        self.assertEqual("", status.strip(), "SIGPIPE left a mutant on disk")
 
     def test_an_uncontended_dry_run_still_succeeds(self):
         # Positive control for the refusals above: they are contention, not a

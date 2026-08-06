@@ -284,8 +284,11 @@ mb_lock_acquire() {
   mb__say "  its terminal, or the box went down. Its EXIT trap did not run, so the"
   mb__say "  tree may still carry its mutation."
   if ! mb_lock_recover "$dir"; then
-    mb__say "refusing to take the lock while the previous run's mutation is"
-    mb__say "unresolved. Nothing has been changed. Fix the tree, then re-run."
+    # Deliberately does NOT claim "nothing has been changed" — `mb_lock_recover`
+    # is the only thing that knows whether it refused before acting or a restore
+    # failed partway, and it says which.
+    mb__say "refusing to take the lock while the previous run's state is"
+    mb__say "unresolved. Fix the tree, then re-run."
     MB_LOCK_DIR=""
     return 2
   fi
@@ -396,12 +399,22 @@ mb_lock_note_restored() {
 # ---------------------------------------------------------------------------
 # Recovery
 # ---------------------------------------------------------------------------
-# Restore whatever a dead holder left mutated, and ONLY that. Returns 0 when the
-# tree is provably pristine afterwards, 1 when anything was left unresolved — in
-# which case nothing was written.
+# Restore whatever a dead holder left mutated, and ONLY that.
+#
+# TWO PASSES, and the split is load-bearing. Pass 1 CLASSIFIES every recorded
+# file and writes nothing; pass 2 acts only if pass 1 raised no objection. A
+# single loop that restored as it went would, on hitting an objection halfway
+# down, have already restored the files above it — and then print "Nothing has
+# been changed", which is the exact shape of lie this whole bead is about. (The
+# one case that can still leave a partial tree is a `git checkout` FAILING in
+# pass 2. That is an action that failed rather than a decision that changed its
+# mind, and it says so.)
+#
+# Returns 0 when the tree is provably pristine afterwards, 1 otherwise.
 mb_lock_recover() {
   local dir="$1" state="$1/state" info="$1/info"
-  local st recorded_wt cur pre post path saved tag touched=0 refused=0
+  local st recorded_wt cur pre post path saved tag plan="" touched=0 refused=0
+  local batch names
 
   recorded_wt="$(mb__field "$info" worktree)"
   if [ -n "$recorded_wt" ] && [ "$recorded_wt" != "$(pwd)" ]; then
@@ -417,7 +430,10 @@ mb_lock_recover() {
     return 0
   fi
   st="$(mb__field "$state" state)"
+  batch="$(mb__field "$state" batch)"
+  names="$(mb__field "$state" names)"
 
+  # ---- pass 1: classify, write nothing --------------------------------------
   while IFS='	' read -r tag pre post path; do
     [ "${tag:-}" = "file" ] || continue
     [ -n "${path:-}" ] || continue
@@ -431,18 +447,18 @@ mb_lock_recover() {
     if [ "$cur" = "$pre" ]; then
       continue
     fi
-    # `post=?` means "no mutant hash recorded", and that is TWO different
-    # situations. It is a half-applied batch only when the run had announced it
-    # was mutating; if the state still says `clean`, the dead run never reached
-    # an `apply` at all, so a file that differs from pristine is SOMEBODY'S
-    # EDIT. Restoring on the hash alone would discard it — the same "a value
-    # that names one thing read as though it named another" this whole bead is
-    # about, committed by its own repair path.
-    if [ "$post" = "?" ] && [ "$st" != "mutated" ]; then
+
+    # A batch mutates one or two files, but the lock records `post` for EVERY
+    # mutable file, so an untouched one has post == pre. The dead run provably
+    # did not write that file, which makes a difference there somebody's edit —
+    # and calling it "neither the pristine bytes nor the mutant it injected"
+    # names a mutant that was never there. Same for `post=?` while the state is
+    # still `clean`: the run had not reached an `apply` at all.
+    if [ "$post" = "$pre" ] || { [ "$post" = "?" ] && [ "$st" != "mutated" ]; }; then
       mb__say "REFUSING — $path differs from the pristine bytes the dead run"
-      mb__say "  recorded, but that run never applied a mutation (its state was"
-      mb__say "  '${st:-unknown}', not 'mutated'). This difference is somebody's"
-      mb__say "  edit and discarding it would destroy work."
+      mb__say "  recorded, but that run DID NOT WRITE this file (state"
+      mb__say "  '${st:-unknown}', no mutant recorded for it). The difference is"
+      mb__say "  somebody's edit and discarding it would destroy work."
       mb__say "    pristine : $pre"
       mb__say "    on disk  : $cur"
       mb__say "  Inspect with: git diff -- $path"
@@ -460,7 +476,20 @@ mb_lock_recover() {
       refused=1
       continue
     fi
+    plan="${plan}${pre}	${post}	${path}
+"
+  done <"$state"
 
+  if [ "$refused" -ne 0 ]; then
+    mb__say "nothing was restored — a recovery is all-or-nothing, so the files it"
+    mb__say "  could have put back are still exactly as you found them."
+    return 1
+  fi
+  [ -n "$plan" ] || return 0
+
+  # ---- pass 2: act ----------------------------------------------------------
+  while IFS='	' read -r pre post path; do
+    [ -n "${path:-}" ] || continue
     saved="$(mb__rescue "$path")" || {
       mb__say "REFUSING — could not write a rescue copy of $path under"
       mb__say "  /private/tmp, and an auto-restore without one is just a delete."
@@ -471,7 +500,7 @@ mb_lock_recover() {
       mb__say "$path differs from pristine and the dead run was MID-APPLY, so the"
       mb__say "  tree holds a partial mutation. Restoring it."
     else
-      mb__say "$path carries the dead run's mutation verbatim (batch $(mb__field "$state" batch), $(mb__field "$state" names)). Restoring it."
+      mb__say "$path carries the dead run's mutation verbatim (batch $batch, $names). Restoring it."
     fi
     mb__say "  rescue copy: $saved"
     if ! git checkout -- "$path" 2>/dev/null; then
@@ -489,9 +518,14 @@ mb_lock_recover() {
       continue
     fi
     touched=$((touched + 1))
-  done <"$state"
+  done <<<"$plan"
 
-  [ "$refused" -eq 0 ] || return 1
+  if [ "$refused" -ne 0 ]; then
+    mb__say "a restore FAILED partway. $touched file(s) were put back before it"
+    mb__say "  did; the tree is NOT in the state it was when this started. Check"
+    mb__say "  'git status --porcelain' before doing anything else."
+    return 1
+  fi
   if [ "$touched" -gt 0 ]; then
     mb__say "recovered $touched file(s) left mutated by the dead run. State '$st'."
   fi
@@ -504,11 +538,23 @@ mb_lock_recover() {
 # Only ever removes a lock this process owns. A run that REFUSED must not delete
 # the live holder's lock on its way out — that would hand the worktree to a third
 # run while the holder is still mutating it.
+#
+# The owner is read with a pure-bash loop rather than `$(mb__field …)`, and that
+# is not style. This function runs from an EXIT trap, and one way to reach that
+# trap is SIGPIPE — at which point bash is holding an unflushed stdout buffer
+# from the write that failed. A command substitution forks a subshell that
+# INHERITS that buffer and flushes it into the substitution's pipe, so `$(…)`
+# came back as "74929\n=== batch 1: 1 mutation(s) ===" and the release refused
+# its own lock. Measured 2026-08-06. No fork, no contamination.
 mb_lock_release() {
-  local dir="$MB_LOCK_DIR" owner
+  local dir="$MB_LOCK_DIR" owner="" line
   [ "$MB_LOCK_OWNED" -eq 1 ] || return 0
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
-  owner="$(mb__field "$dir/info" pid)"
+  if [ -f "$dir/info" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in pid=*) owner="${line#pid=}"; break ;; esac
+    done <"$dir/info"
+  fi
   if [ "$owner" != "$$" ]; then
     mb__say "not releasing $dir — it is now held by pid $owner, not $$."
     return 0
@@ -533,10 +579,15 @@ mb_lock_release() {
 # `scripts/fast-gate.sh`'s own `run_gate` invocation verbatim — `xcodebuild test
 # -scheme Playhead …` — so it matches what this repo actually spawns rather than
 # a generic guess.
+#
+# TRUNCATED to 140 columns, deliberately. `FOCUSED_SUITES` puts ~150
+# `-only-testing:` flags on that command line, so the untruncated form is about
+# 10 KB per process — printed in full it buries the sentence that says what to
+# do, which is the whole purpose of the warning.
 mb_other_xcodebuilds() {
   ps -Ao pid=,command= 2>/dev/null \
     | grep '[x]codebuild test -scheme Playhead' \
-    | awk -v me="$$" '$1 != me'
+    | awk -v me="$$" '$1 != me { print substr($0, 1, 140) (length($0) > 140 ? " …" : "") }'
 }
 
 mb_warn_if_xcodebuild_running() {

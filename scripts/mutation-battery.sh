@@ -1795,6 +1795,21 @@ on_exit() {
 }
 trap on_exit EXIT
 trap 'echo; echo "mutation-battery: interrupted — restoring sources" >&2; exit 130' INT TERM
+# playhead-pu7e: PIPE as well, and it is not theoretical. Bash's DEFAULT SIGPIPE
+# disposition kills the shell WITHOUT running the EXIT trap, so a run whose
+# output is piped to `head` — or to anything that stops reading, which is how
+# this battery is driven half the time — dies mid-report leaving BOTH its lock
+# and, one line earlier, its injected mutant on disk. Observed exactly that
+# while demonstrating crash recovery for this bead. Trapping it makes the write
+# fail instead of killing us, so `on_exit` runs.
+#
+# `exec >/dev/null` FIRST: the descriptor that just broke is still ours, and
+# bash is holding the unflushed remains of the write that failed. Anything the
+# EXIT trap forks — a command substitution, say — inherits that buffer and
+# flushes it into its own pipe, which is how `mb_lock_release` once read its
+# owner as "74929" plus a stray line of this script's output and refused to
+# release its own lock.
+trap 'exec >/dev/null; exit 141' PIPE
 
 # ---------------------------------------------------------------------------
 # The battery.  NAME|BATCH|FILE_KEY|expected display names (';'-separated)
