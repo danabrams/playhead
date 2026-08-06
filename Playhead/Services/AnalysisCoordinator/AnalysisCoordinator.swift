@@ -487,7 +487,21 @@ actor AnalysisCoordinator {
     ///
     /// Returns when no more work is pending, or when `Task.isCancelled`
     /// becomes true (i.e. iOS expired the background window).
-    func runPendingBackfill() async {
+    /// - Parameter deadline: the instant this poll loop must stop by. Callers
+    ///   spending an OS background grant pass
+    ///   `BackgroundGrantBudget.backfillProcessing.workDeadline(from:)`.
+    ///   Deliberately has NO default (playhead-lmrx): the only party that knows
+    ///   when the grant opened is the handler that received it, and a default
+    ///   here would be a second, unmeasured spelling of the constant this
+    ///   parameter exists to delete.
+    ///
+    ///   The 25-minute cap it replaced was not merely generous, it was
+    ///   self-defeating: the measured grant is 294 s (p50, n=203 expired
+    ///   backfill runs), so the loop could never return normally, and
+    ///   `handleBackfillTask`'s terminal `finishRun` — the one write that
+    ///   records `jobsSeen`/`jobsAdmitted` — sat downstream of a return that
+    ///   never happened. That is why all 203 expired rows carry NULL counters.
+    func runPendingBackfill(deadline: ContinuousClock.Instant) async {
         // Clear any prior stop request. stop() sets this flag to break the
         // polling loop in a previous backfill run, but a NEW backfill invocation
         // (from a fresh BGProcessingTask) must be allowed to run. Without this
@@ -496,9 +510,6 @@ actor AnalysisCoordinator {
         stopRequested = false
         logger.info("runPendingBackfill: draining pending analysis jobs")
 
-        // Maximum lifetime cap so we never spin forever inside one BG window
-        // even if the scheduler keeps producing new tier jobs.
-        let deadline = ContinuousClock.now + .seconds(25 * 60)
         // Poll interval — 1s gives the scheduler loop time to make progress
         // without burning the actor on tight queries.
         let pollInterval: Duration = .seconds(1)

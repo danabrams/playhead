@@ -2778,9 +2778,27 @@ actor AnalysisWorkScheduler {
     /// (BG expiration) and the caller-supplied `deadline`. Safe to run
     /// alongside the long-lived `runLoop()` — dispatch is lease-guarded, so a
     /// racing pass on the same job cleanly loses the CAS and skips.
-    func drainEligible(deadline: ContinuousClock.Instant) async {
+    ///
+    /// playhead-lmrx: `minimumUnitBudget` is a START GATE, not a kill switch. A
+    /// bare `now < deadline` admits a pass with a millisecond left, and a pass
+    /// is a whole analysis job — so the loop could convert the tail of a grant
+    /// into work that is guaranteed to be abandoned. The floor is the measured
+    /// cost of the smallest unit the pipeline makes durable (one FM coarse
+    /// window; see ``BackgroundGrantBudget/backfillProcessing``), so below it a
+    /// pass cannot reach even one checkpoint. Defaults to `.zero`, which is
+    /// exactly the pre-lmrx condition, so callers that are not spending an OS
+    /// grant (tests, foreground drains) are unchanged.
+    func drainEligible(
+        deadline: ContinuousClock.Instant,
+        minimumUnitBudget: Duration = .zero
+    ) async {
         guard config.isEnabled else { return }
-        while !Task.isCancelled, ContinuousClock.now < deadline {
+        while !Task.isCancelled {
+            // ONE clock read per iteration: the deadline test and the floor test
+            // must agree about what "now" is, or a pass can be admitted by the
+            // first and disowned by the second.
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            guard remaining > .zero, remaining >= minimumUnitBudget else { break }
             let dispatched = await runSingleDispatchPass()
             if !dispatched { break }
             // playhead-bbut: cooperative yield between passes. In the one
