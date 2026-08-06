@@ -981,6 +981,13 @@ struct BackfillExpiryDurabilityTests {
         /// Deadlock insurance: opens the gate after `seconds` no matter what,
         /// so a test that never reaches its own `open()` fails on an assertion
         /// rather than hanging.
+        ///
+        /// **Arm this as LATE as possible.** An earlier draft armed it at the
+        /// top of the test, so setup and the spin-to-in-flight loop spent the
+        /// same budget the handler's teardown needs — and it went red under the
+        /// mutation battery's suite load twice. The window that has to fit is
+        /// only "expiration fired" → "the ledger row was written"; everything
+        /// before that is unbounded and must not be charged here.
         func openAfter(seconds: TimeInterval) {
             DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
                 open()
@@ -1339,7 +1346,7 @@ struct BackfillExpiryDurabilityTests {
     }
 
     @Test("the expired row is durable BEFORE the handler waits for anything",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(2)))
     func expiredRowLandsBeforeTheSettleWait() async throws {
         // playhead-lmrx review round. playhead-hygc.1.4 ordered the expiration
         // `finishRun` first on purpose — "so a subsequent crash (or OS-forced
@@ -1378,7 +1385,6 @@ struct BackfillExpiryDurabilityTests {
         try await store.insertJob(job)
 
         let gate = UnwindGate()
-        gate.openAfter(seconds: 20)
         defer { gate.open() }
         let scheduler = makeScheduler(
             store: store,
@@ -1418,6 +1424,13 @@ struct BackfillExpiryDurabilityTests {
             try await Task.sleep(for: .milliseconds(20))
         }
 
+        // Deadlock insurance, armed HERE and not a line earlier: from this
+        // point the only thing that has to fit is the handler's teardown up to
+        // its ledger write, which is a cancel, a telemetry emit and two SQLite
+        // statements. On the correct ordering the gate is opened by that write,
+        // so this timer is never reached; on the wrong one it is what turns a
+        // hang into a named failure.
+        gate.openAfter(seconds: 30)
         task.simulateExpiration()
         _ = await workTask.value
         await task.awaitCompletion()
