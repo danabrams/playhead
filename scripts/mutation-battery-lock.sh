@@ -83,6 +83,18 @@ MB_LOCK_INFO_WAIT_SECONDS="${MB_LOCK_INFO_WAIT_SECONDS:-5}"
 # recorded, so nothing was mutated under it (the first mutation happens many
 # seconds later, after `require_clean_tree` and `mb_lock_record_pre`), and it is
 # safe to reclaim without touching a single source file.
+#
+# THAT INFERENCE IS ONLY SOUND BECAUSE `mb__take` ENFORCES IT (review round,
+# playhead-pu7e). It reads "no owner recorded" as "no owner ever existed", which
+# is the absence-for-absence substitution this bead exists to remove — and it was
+# false as shipped: `mb__write_info`'s redirection was UNCHECKED, so a holder
+# whose identity write failed (ENOSPC on a box that hit 100 % capacity four times
+# on 2026-08-01, EDQUOT, EACCES) went on to mutate the tree while its lock sat
+# ownerless, and five minutes later — inside a 4-9 minute run — the next battery
+# reclaimed it as ABANDONED. Two batteries, one worktree, which is the whole
+# defect. `mb__take` now refuses and REMOVES the directory when it cannot record
+# an owner, so an ownerless lock really can only come from a death between the
+# `mkdir` and the rename.
 MB_LOCK_ABANDON_SECONDS="${MB_LOCK_ABANDON_SECONDS:-300}"
 
 # ---------------------------------------------------------------------------
@@ -130,6 +142,24 @@ mb__holder_alive() {
 }
 
 mb__pid_start() { ps -o lstart= -p "$1" 2>/dev/null | mb__trim; }
+
+# Is the live process with this pid itself a mutation battery?
+#
+# Corroboration, added in the review round, and it may only ever push toward
+# REFUSING. `mb__holder_alive` reads a start-time mismatch as "the recorded
+# process is gone and its pid was recycled", which is right for a well-formed
+# record — but a MALFORMED one produces the same mismatch while the holder is
+# very much alive. Planted with a half-written `pid_start` and it reclaimed a
+# live holder's lock: exit 0, MB_LOCK_OWNED=1, two batteries in one worktree.
+# `mb__write_info` now renames the record into place so this code can no longer
+# author a partial one, and this is the second wall: before believing a recorded
+# pid is dead, ask what that pid is actually running.
+mb__pid_is_battery() {
+  local pid="$1" cmd
+  case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+  case "$cmd" in *mutation-battery*) return 0 ;; *) return 1 ;; esac
+}
 
 # Seconds since a path was last modified. BSD stat first (this is a macOS box),
 # GNU stat as the fallback, and 0 — i.e. "brand new, do not reclaim" — when
@@ -180,6 +210,65 @@ mb__rescue() {
 }
 
 # ---------------------------------------------------------------------------
+# Taking it: mkdir + record who we are, as ONE step that either happens or does
+# not (review round, playhead-pu7e)
+# ---------------------------------------------------------------------------
+# Returns 0 holding the lock with our identity on disk, 1 when the directory
+# already exists (i.e. genuine contention — the caller decides live vs stale),
+# and 2 when nothing is held and nothing can be.
+#
+# The two things it exists to keep apart, both of which used to read as
+# contention:
+#
+#   * `mkdir` FAILING IS NOT EVIDENCE THAT SOMEBODY HOLDS THIS. EEXIST is the
+#     contended case; ENOSPC, EACCES, EROFS and a missing parent all land on the
+#     same non-zero exit. As shipped, every one of them printed "Another run took
+#     it while this one was waiting" and returned 75 — EX_TEMPFAIL, i.e. "retry
+#     later" — sending the operator to wait for a process that does not exist.
+#     The directory's own existence is the discriminator and it is free.
+#   * TAKING THE DIRECTORY IS NOT THE SAME AS OWNING IT. If the identity cannot
+#     be written there is no owner for anyone to see, and the lock is worse than
+#     no lock: this run believes it is exclusive while the next one reads an
+#     ownerless directory. So the directory is REMOVED rather than left behind —
+#     we created it atomically, so no other process can be inside it, and its
+#     removal hands the worktree to the next run honestly instead of silently.
+mb__take() {
+  local dir="$1" argv="${2:-}" err
+  if ! err="$(mkdir "$dir" 2>&1)"; then
+    [ -d "$dir" ] && return 1
+    if [ -e "$dir" ]; then
+      mb__say "REFUSING — the run lock path exists but is NOT a directory, so it"
+      mb__say "  was not left by a battery and no battery can take it."
+      mb__say "    $dir"
+      mb__say "  Inspect it and remove it by hand."
+      return 2
+    fi
+    mb__say "REFUSING — could not create the run lock and NOBODY holds it: the"
+    mb__say "  directory does not exist, so this is NOT contention and waiting"
+    mb__say "  will not help."
+    mb__say "    $dir"
+    mb__say "    ${err:-mkdir failed without a message}"
+    mb__say "  A full volume, a read-only or missing git directory will each do"
+    mb__say "  this. Refusing to run unlocked — an unlocked battery is how two"
+    mb__say "  runs silently destroy each other's verdicts."
+    return 2
+  fi
+  if ! mb__write_info "$argv"; then
+    rm -rf "$dir" 2>/dev/null
+    mb__say "REFUSING — took the run lock but could NOT record who holds it, so"
+    mb__say "  no other run could tell this worktree was busy. The directory has"
+    mb__say "  been removed rather than left ownerless: an ownerless lock is"
+    mb__say "  reclaimed as ABANDONED after ${MB_LOCK_ABANDON_SECONDS}s, which is"
+    mb__say "  inside a normal run, and that would put two batteries here."
+    mb__say "    $dir"
+    mb__say "  A full volume is the usual cause: check df and \$TMPDIR/Deleting-*."
+    return 2
+  fi
+  MB_LOCK_OWNED=1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Acquire
 # ---------------------------------------------------------------------------
 # $1 — the invocation's own arguments, for the refusal message. Knowing the
@@ -188,7 +277,7 @@ mb__rescue() {
 # Returns 0 holding the lock, 75 on live contention, 2 on anything else.
 mb_lock_acquire() {
   local argv="${1:-}" dir info holder_pid holder_start holder_argv holder_when
-  local age waited now
+  local age waited now take
 
   dir="$(mb_lock_path)" || {
     mb__say "cannot resolve this worktree's git directory, so the run lock has"
@@ -199,10 +288,12 @@ mb_lock_acquire() {
   MB_LOCK_DIR="$dir"
   info="$dir/info"
 
-  if mkdir "$dir" 2>/dev/null; then
-    mb__write_info "$argv"
-    MB_LOCK_OWNED=1
-    return 0
+  mb__take "$dir" "$argv"
+  take=$?
+  [ "$take" -eq 0 ] && return 0
+  if [ "$take" -eq 2 ]; then
+    MB_LOCK_DIR=""
+    return 2
   fi
 
   # Someone got there first — or died there. Give the winner a moment to write
@@ -216,10 +307,12 @@ mb_lock_acquire() {
 
   if [ ! -d "$dir" ]; then
     # Released while we waited.
-    if mkdir "$dir" 2>/dev/null; then
-      mb__write_info "$argv"
-      MB_LOCK_OWNED=1
-      return 0
+    mb__take "$dir" "$argv"
+    take=$?
+    [ "$take" -eq 0 ] && return 0
+    if [ "$take" -eq 2 ]; then
+      MB_LOCK_DIR=""
+      return 2
     fi
     mb__say "REFUSING — lost the race for this worktree's battery lock at $dir."
     mb__say "Another run took it while this one was waiting. Re-run when it ends."
@@ -235,11 +328,16 @@ mb_lock_acquire() {
       mb__say "  its first write. Nothing was recorded, therefore nothing was"
       mb__say "  mutated under it: no source file is touched by this reclaim."
       rm -rf "$dir" 2>/dev/null
-      if mkdir "$dir" 2>/dev/null; then
-        mb__write_info "$argv"
-        MB_LOCK_OWNED=1
-        return 0
+      mb__take "$dir" "$argv"
+      take=$?
+      [ "$take" -eq 0 ] && return 0
+      if [ "$take" -eq 2 ]; then
+        MB_LOCK_DIR=""
+        return 2
       fi
+      # take == 1: another run claimed it between our rm and our mkdir. Fall
+      # through to the refusal below rather than looping — a second battery is
+      # the outcome this refuses, and it is now genuinely there.
     fi
     mb__say "REFUSING — another mutation battery is already running in this worktree."
     mb__say "  lock       : $dir"
@@ -277,6 +375,26 @@ mb_lock_acquire() {
     return 75
   fi
 
+  # Before believing the recorded pid is gone: is it running a battery right now?
+  # Only reachable when the pid is alive and the recorded start time disagrees,
+  # i.e. either a recycled pid (reclaim is right) or a record we misread (reclaim
+  # would steal a live lock). Asking what the process IS separates them, and the
+  # answer can only ever make us refuse.
+  if mb__pid_is_battery "$holder_pid"; then
+    mb__say "REFUSING — the lock's recorded start time does not match pid"
+    mb__say "  $holder_pid, which would normally mean that pid was recycled — but"
+    mb__say "  pid $holder_pid IS RUNNING A MUTATION BATTERY right now. A record"
+    mb__say "  this run cannot read is not evidence that its holder is dead, and"
+    mb__say "  reclaiming on it would put two batteries in this worktree."
+    mb__say "  lock       : $dir"
+    mb__say "  recorded   : ${holder_start:-<unrecorded>}"
+    mb__say "  actual     : $(mb__pid_start "$holder_pid")"
+    mb__say "  If that pid belongs to a battery in a DIFFERENT worktree, this"
+    mb__say "  lock is genuinely stale — remove $dir by hand."
+    MB_LOCK_DIR=""
+    return 75
+  fi
+
   # Stale. Say so, put the tree back, then take it.
   mb__say "reclaiming a STALE lock — pid ${holder_pid:-<unrecorded>} is gone"
   mb__say "  (started ${holder_when:-unknown}, invoked as ${holder_argv:-<no arguments>})"
@@ -294,10 +412,12 @@ mb_lock_acquire() {
   fi
   rm -rf "$dir" 2>/dev/null
 
-  if mkdir "$dir" 2>/dev/null; then
-    mb__write_info "$argv"
-    MB_LOCK_OWNED=1
-    return 0
+  mb__take "$dir" "$argv"
+  take=$?
+  [ "$take" -eq 0 ] && return 0
+  if [ "$take" -eq 2 ]; then
+    MB_LOCK_DIR=""
+    return 2
   fi
 
   # Two processes reclaimed the same stale lock and the other won the mkdir. The
@@ -309,8 +429,26 @@ mb_lock_acquire() {
   return 75
 }
 
+# Write the holder's identity. TEMP-AND-RENAME, and CHECKED — both added in the
+# review round, and both for the same reason `mb__write_state` was already doing
+# it: a reader must see the whole record or none of it.
+#
+#   * Half an `info` is worse than no `info`. A reader that catches
+#     `pid=<live>` plus a truncated `pid_start=` compares the fragment against
+#     the real start time, finds a mismatch, and declares a LIVE holder stale —
+#     then reclaims its lock. Planted and reproduced: exit 0, MB_LOCK_OWNED=1,
+#     two batteries. `rename(2)` is atomic, so no reader can observe a partial
+#     record and the wait loop's `-s "$info"` test becomes exact.
+#   * The result was DISCARDED. `mb_lock_acquire` set MB_LOCK_OWNED=1 whatever
+#     happened here, so a run whose identity write failed mutated the tree while
+#     its lock sat ownerless — and the ABANDONED rule handed the worktree to the
+#     next battery 300 s later. Reproduced with an unwritable lock directory;
+#     ENOSPC is the production shape of it.
+#
+# Returns non-zero, having left no partial `info` behind, if it could not record
+# the identity in full.
 mb__write_info() {
-  local argv="${1:-}"
+  local argv="${1:-}" tmp="$MB_LOCK_DIR/info.tmp.$$"
   {
     printf 'pid=%s\n' "$$"
     printf 'pid_start=%s\n' "$(mb__pid_start "$$")"
@@ -321,8 +459,14 @@ mb__write_info() {
     # Newlines would break the one-key-per-line format and turn a value into a
     # forged key on read-back.
     printf 'argv=%s\n' "$(printf '%s' "$argv" | tr '\n\r' '  ')"
-  } >"$MB_LOCK_DIR/info"
-  printf 'state=clean\n' >"$MB_LOCK_DIR/state"
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  # `-s` as well as the write status: a full volume can report a successful
+  # close and leave nothing, and an empty `info` is exactly what the ABANDONED
+  # rule reads as "nobody was ever here".
+  [ -s "$tmp" ] || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$MB_LOCK_DIR/info" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  printf 'state=clean\n' >"$MB_LOCK_DIR/state" 2>/dev/null || return 1
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -331,6 +475,12 @@ mb__write_info() {
 # Call ONCE, immediately after `require_clean_tree` has proved every mutable file
 # is pristine. From here until release this process is the only legitimate writer
 # of these files, which is what makes recovery decidable.
+#
+# Returns non-zero if it could not write the record. The caller must STOP: this
+# is the last moment before the first mutation, so refusing costs nothing, and
+# running on would leave a mutant no later run can identify as ours — which is
+# the case `mb_lock_recover` correctly refuses to act on, i.e. a wedged worktree
+# needing a human. Same unchecked-write class as `mb__write_info` above.
 mb_lock_record_pre() {
   local f out=""
   [ "$MB_LOCK_OWNED" -eq 1 ] || return 0
@@ -339,7 +489,14 @@ mb_lock_record_pre() {
 "
   done
   MB_LOCK_FILES_PRE="$out"
-  mb__write_state clean "" ""
+  if ! mb__write_state clean "" ""; then
+    mb__say "REFUSING — could not record the pristine hashes of the mutable files"
+    mb__say "  in $MB_LOCK_DIR. Without them a crash leaves a mutant that no later"
+    mb__say "  run can tell from your work, so it would be refused by hand instead"
+    mb__say "  of restored. Nothing has been mutated. Check df."
+    return 1
+  fi
+  return 0
 }
 
 # state file: `state=`, `batch=`, `names=`, then one `file<TAB>pre<TAB>post<TAB>path`
@@ -684,6 +841,21 @@ mb_diagnose_no_tests() {
       mb__say "  (CommandLineTools, which has no simctl). It is NOT the"
       mb__say "  clone-parallelism gotcha of 2026-07-16 and chasing it wastes the"
       mb__say "  round — the wedged runner above is the cause."
+    fi
+    # Review round: list them HERE too, not only under CONTENTION. The commonest
+    # way this box gets a wedged runner is playhead-zsqh — a SIGKILLed battery
+    # leaves its `xcodebuild` child alive (reproduced here: pid 50621 outlived
+    # parent 44904) and that orphan still holds the simulator. `simctl shutdown
+    # all` loses to a live orphan, which re-boots the device underneath it, so
+    # naming the process to kill has to come BEFORE the recovery command or the
+    # recovery reads as "did not work".
+    others="$(mb_other_xcodebuilds)"
+    if [ -n "$others" ]; then
+      mb__say "  an xcodebuild is STILL LIVE on this box and is the first suspect:"
+      printf '%s\n' "$others" | sed 's/^/mutation-battery:     /' >&2
+      mb__say "  If no run owns it, it is an ORPHAN of a killed battery"
+      mb__say "  (playhead-zsqh). KILL IT FIRST — the shutdown below loses to a"
+      mb__say "  live orphan, which boots the device again underneath it."
     fi
     mb__say "  Recover the simulator before re-running (DEVELOPER_DIR-qualified,"
     mb__say "  or xcrun resolves against the global xcode-select and fails):"

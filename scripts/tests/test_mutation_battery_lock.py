@@ -117,6 +117,43 @@ class LockTestCase(unittest.TestCase):
                 proc.kill()
                 proc.wait(timeout=10)
 
+    def spawn_named(self, basename, *args):
+        """Start a live process whose `ps -o command=` contains `basename`.
+
+        Two tests below turn on what a pid is RUNNING, so the argv is the point
+        and `exec sleep` — the obvious way to make one killable — would erase it.
+        Hence a process GROUP: the wrapper keeps its name and the group kill
+        reaps the `sleep` with it. stdio goes to /dev/null because an orphaned
+        `sleep` holding the caller's stdout makes `python3 -m unittest … | tee`
+        hang for five minutes after an otherwise green run.
+        """
+        d = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mb-fakeproc."))
+        self.addCleanup(shutil.rmtree, str(d), True)
+        exe = d / basename
+        exe.write_text("#!/bin/bash\nsleep 300\n")
+        exe.chmod(0o755)
+        proc = subprocess.Popen(
+            [str(exe), *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+
+        def reap():
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait(timeout=10)
+
+        self.addCleanup(reap)
+        # The wrapper must be visible to `ps` before anything asks about it.
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            cmd = subprocess.run(["ps", "-o", "command=", "-p", str(proc.pid)],
+                                 capture_output=True, text=True).stdout
+            if basename in cmd:
+                return proc
+            time.sleep(0.02)
+        self.fail("fake %s never appeared in ps" % basename)
+
     def hold(self, argv="--only RT14", ready_timeout=15):
         return self.hold_files(self.repo.file, argv=argv, ready_timeout=ready_timeout)
 
@@ -256,6 +293,92 @@ class TestContention(LockTestCase):
 
 
 # ---------------------------------------------------------------------------
+# 1b. Taking the lock is not the same as holding it (review round)
+#
+# Three planted states, each of which the shipped code judged wrong, and all
+# three are the bead's own defect class one layer down: an ABSENCE read as
+# somebody else's PRESENCE, and a directory read as an owner.
+# ---------------------------------------------------------------------------
+class TestTakingIsNotHolding(LockTestCase):
+    def test_a_mkdir_that_fails_for_another_reason_is_not_called_contention(self):
+        # `mkdir` failing is not evidence anybody holds this. ENOSPC — on a box
+        # that hit 100 % capacity four times on 2026-08-01 — EACCES and EROFS all
+        # land on the same non-zero exit as EEXIST, and every one of them used to
+        # print "Another run took it while this one was waiting" and return 75:
+        # EX_TEMPFAIL, i.e. wait for a process that does not exist.
+        gitdir = self.repo.dir / ".git"
+        gitdir.chmod(0o500)
+        self.addCleanup(gitdir.chmod, 0o700)
+        out = bash('mb_lock_acquire "--only M05"; echo "RC=$?"', self.repo.dir, timeout=90)
+        self.assertIn("RC=2", out.stdout, out.stderr)
+        self.assertIn("NOBODY holds it", out.stderr)
+        self.assertNotIn("Another run took it", out.stderr)
+        self.assertIn("Permission denied", out.stderr)  # mkdir's own words, quoted
+
+    def test_a_lock_whose_owner_cannot_be_recorded_is_not_claimed(self):
+        # The chain this closes: mkdir succeeds, the identity write fails, the
+        # result is discarded, MB_LOCK_OWNED=1 and the run mutates the tree while
+        # its lock sits ownerless — and 300 s later, INSIDE a 4-9 minute run, the
+        # next battery reclaims that directory as ABANDONED. Two batteries, one
+        # worktree, which is the entire bead.
+        out = bash(
+            'mkdir() { command mkdir "$@" && chmod 500 "${!#}"; }\n'
+            'mb_lock_acquire "--only M05"; echo "RC=$?"; echo "OWNED=$MB_LOCK_OWNED"',
+            self.repo.dir, timeout=90)
+        self.assertIn("RC=2", out.stdout, out.stderr)
+        self.assertIn("OWNED=0", out.stdout)
+        self.assertIn("could NOT record who holds it", out.stderr)
+        # And the directory is GONE rather than left ownerless — leaving it is
+        # what arms the ABANDONED reclaim above.
+        self.assertFalse(self.repo.lockdir.exists(), out.stderr)
+
+    def test_an_uncontended_acquire_still_records_a_complete_identity(self):
+        # Positive control for both tests above on the same observer: without it
+        # they would pass against a lock that never manages to record anything.
+        out = bash('mb_lock_acquire "--only M07"; echo "RC=$?"', self.repo.dir)
+        self.assertIn("RC=0", out.stdout, out.stderr)
+        keys = [line.split("=", 1)[0]
+                for line in (self.repo.lockdir / "info").read_text().splitlines()]
+        self.assertEqual(
+            ["pid", "pid_start", "started", "started_human", "worktree", "host", "argv"],
+            keys)
+        # `info` is renamed into place, so no reader can ever see half of it and
+        # no temp file is left inside the lock for one to trip over.
+        self.assertEqual(sorted(p.name for p in self.repo.lockdir.iterdir()),
+                         ["info", "state"])
+
+    def test_record_pre_refuses_rather_than_mutating_with_nothing_recorded(self):
+        # The same unchecked-write class one call later, and the last moment
+        # before the first mutation. Without the pristine hashes on disk a crash
+        # leaves a mutant no later run can tell from somebody's work — which
+        # `mb_lock_recover` correctly REFUSES to act on, i.e. a wedged worktree
+        # needing a human. Refusing here costs nothing: nothing is mutated yet.
+        out = bash('mb_lock_acquire "" || exit 9\n'
+                   'chmod 500 "$MB_LOCK_DIR"\n'
+                   'mb_lock_record_pre "%s"; echo "RC=$?"\n'
+                   'chmod 700 "$MB_LOCK_DIR"' % self.repo.file,
+                   self.repo.dir)
+        self.assertIn("RC=1", out.stdout, out.stderr)
+        self.assertIn("could not record the pristine hashes", out.stderr)
+
+        # Positive control on the same observer: a writable lock records them.
+        shutil.rmtree(self.repo.lockdir, ignore_errors=True)
+        out = bash('mb_lock_acquire "" || exit 9\n'
+                   'mb_lock_record_pre "%s"; echo "RC=$?"\n'
+                   'grep -c "^file" "$MB_LOCK_DIR/state"' % self.repo.file,
+                   self.repo.dir)
+        self.assertIn("RC=0", out.stdout, out.stderr)
+        self.assertIn("1", out.stdout.split()[-1])
+
+    def test_a_regular_file_at_the_lock_path_is_named_as_such(self):
+        self.repo.lockdir.parent.mkdir(parents=True, exist_ok=True)
+        self.repo.lockdir.write_text("not a directory\n")
+        out = bash('mb_lock_acquire ""; echo "RC=$?"', self.repo.dir, timeout=90)
+        self.assertIn("RC=2", out.stdout, out.stderr)
+        self.assertIn("NOT a directory", out.stderr)
+
+
+# ---------------------------------------------------------------------------
 # 2. Staleness and recovery
 # ---------------------------------------------------------------------------
 class TestStaleLock(LockTestCase):
@@ -306,6 +429,28 @@ class TestStaleLock(LockTestCase):
         )
         out = bash('mb_lock_acquire ""; echo "RC=$?"', self.repo.dir)
         self.assertIn("RC=75", out.stdout)
+
+    def test_a_record_this_run_cannot_read_is_not_evidence_the_holder_is_dead(self):
+        # The other reading of a start-time mismatch, and the dangerous one. A
+        # HALF-WRITTEN `pid_start` mismatches exactly like a recycled pid does,
+        # and the shipped code reclaimed on it: planted with `pid=<live>` plus a
+        # truncated start time it returned 0 with MB_LOCK_OWNED=1 while the named
+        # holder was still running — two batteries in one worktree.
+        #
+        # `mb__write_info` renames the record into place now, so this code can no
+        # longer author a partial one; this is the second wall. Before believing a
+        # recorded pid is dead, ask what that pid is running.
+        holder = self.spawn_named("mutation-battery.sh", "--only", "M05")
+        self.repo.lockdir.mkdir(parents=True)
+        (self.repo.lockdir / "info").write_text("pid=%d\npid_start=Thu Aug" % holder.pid)
+        out = bash('mb_lock_acquire ""; echo "RC=$?"; echo "OWNED=$MB_LOCK_OWNED"',
+                   self.repo.dir, timeout=90)
+        self.assertIn("RC=75", out.stdout, out.stderr)
+        self.assertIn("OWNED=0", out.stdout)
+        self.assertIn("IS RUNNING A MUTATION BATTERY", out.stderr)
+        self.assertTrue(self.repo.lockdir.exists(), "the live holder's lock was removed")
+        # The holder is untouched and still running.
+        self.assertIsNone(holder.poll())
 
     def test_the_dead_runs_mutant_is_restored_and_a_rescue_copy_is_kept(self):
         pid = self.hold()
@@ -453,6 +598,35 @@ class TestDiagnosis(LockTestCase):
                 self.assertIn("RUNNER NEVER LAUNCHED", err)
                 self.assertIn(signature.split(".")[0][:24], err)
                 self.assertIn("simctl", err)
+
+    def test_a_wedged_runner_names_the_live_xcodebuild_before_the_recovery(self):
+        # playhead-zsqh, and the reason this belongs in the RUNNER branch and not
+        # only under CONTENTION: a SIGKILLed battery leaves its `xcodebuild` child
+        # alive (reproduced in this review round — pid 50621 outlived its parent
+        # 44904) and that orphan holds the simulator. `simctl shutdown all` loses
+        # to it, because the orphan boots the device again underneath, so the
+        # recovery reads as "did not work" unless the process to kill is named.
+        orphan = self.spawn_named(
+            "xcodebuild", "test", "-scheme", "Playhead", "-testPlan", "PlayheadFastTests")
+        err = self.diagnose(
+            "Testing started\nblessSimulatorHub failed. Simulator service hub "
+            "IS NOT still alive\n** TEST FAILED **\n")
+        self.assertIn("RUNNER NEVER LAUNCHED", err)
+        self.assertIn("STILL LIVE", err)
+        self.assertIn(str(orphan.pid), err)
+        self.assertIn("ORPHAN", err)
+        # Named BEFORE the recovery command, or the recovery gets blamed.
+        self.assertLess(err.index("KILL IT FIRST"), err.index("simctl shutdown all"))
+
+    def test_a_wedged_runner_with_no_live_build_does_not_invent_an_orphan(self):
+        # Negative control for the test above on the same observer: with nothing
+        # running it must not print the orphan paragraph at all.
+        err = self.diagnose(
+            "Testing started\nblessSimulatorHub failed. Simulator service hub "
+            "IS NOT still alive\n** TEST FAILED **\n")
+        self.assertIn("RUNNER NEVER LAUNCHED", err)
+        self.assertNotIn("STILL LIVE", err)
+        self.assertNotIn("ORPHAN", err)
 
     def test_the_simctl_utility_error_is_labelled_a_SECONDARY_symptom(self):
         # This line is xcodebuild's diagnostic collection shelling out through

@@ -12887,8 +12887,10 @@ require_clean_tree
 TREE_OWNED=1
 # From here until release this process is the only legitimate writer of these
 # files. Recording their pristine hashes NOW is what lets a later run tell this
-# run's mutant from somebody's work if this one is SIGKILLed.
-mb_lock_record_pre "${MUTABLE_FILES[@]}"
+# run's mutant from somebody's work if this one is SIGKILLed — so if it cannot be
+# recorded, STOP. Nothing is mutated yet, and running on would trade a free
+# refusal for a worktree that needs a human after the next crash.
+mb_lock_record_pre "${MUTABLE_FILES[@]}" || exit 2
 
 HASHES_BEFORE=""
 for f in "${MUTABLE_FILES[@]}"; do
