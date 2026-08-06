@@ -14,9 +14,16 @@ The unit under test answers three questions the battery got wrong:
     not run tests", which is a claim about the tree. Three real causes produce it
     and only one of them implicates the tree at all.
 
-Everything here is hermetic except the four rails at the bottom, which drive the
-real `scripts/mutation-battery.sh`. Those are still buildless: a refused run stops
-at the lock, before `require_clean_tree` and before any mutation is applied.
+Everything here is hermetic except the rails at the bottom, which drive the real
+`scripts/mutation-battery.sh`. Those are still BUILDLESS: a refused run stops at
+the lock, before `require_clean_tree` and before any mutation is applied, and the
+two that do run go through `--dry-run`. Two of them dirty a real mutable file to
+prove which guard fires; both restore the original BYTES in a `finally`, never
+via git.
+
+`SAMPLE_MUTATION` and MUTABLE_FILES[0] are resolved out of the battery itself and
+RAISE if they cannot be found, rather than skipping. A rail that quietly stops
+testing is the failure mode this whole bead is about.
 
 Conventions follow test_disk_preflight.py: stdlib unittest, fixtures built in
 code, no network and no xcodebuild.
