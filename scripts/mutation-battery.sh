@@ -1391,6 +1391,10 @@ FOCUSED_SUITES=(
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
   -only-testing:PlayheadTests/TestScratchReaperTests
+  # playhead-mk6z: the expired-lease reclaim rails (MK series). One suite, three
+  # tests, ~0.2 s — two are pure store calls and the third drives the real run
+  # loop, which is the only place able to observe that the sweep is WIRED at all.
+  -only-testing:PlayheadTests/SchedulerExpiredLeaseReclaimTests
   # playhead-mptr: the artifact-backed ordering rails (K2 series). Both suites
   # are pure value-type / small-store tests, well under a second.
   -only-testing:PlayheadTests/TranscriptCoverageIndexTests
@@ -2730,6 +2734,11 @@ T_DL_CONST="the no-progress terminal arm writes the shared constant, not a liter
 # R1 review. The MIXED chain — one budget across both dead ends, not one each.
 # The single-class budget test cannot see a per-reason ledger; this can.
 T_DL_MIXED="an episode that reaches both dead ends still gets one budget, not two"
+
+# playhead-mk6z — the live scheduler loop reclaims a lease whose deadline passed.
+T_MK6Z_LOOP="the live scheduler loop returns a lease-expired running row to the queue"
+T_MK6Z_MINE="the sweep never reclaims the row the caller is running, however stale its lease looks"
+T_MK6Z_TERMINAL="the sweep resurrects no terminal row and disturbs no live lease"
 # y8f3's own tests, named here because DL05 must prove the widening is ADDITIVE
 # and DL02 must prove it did not swallow a neighbouring bead's terminal.
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
@@ -5403,6 +5412,29 @@ MUTATIONS=(
   # into a rescue whose target, budget and productivity argument were sized for
   # one member — so the killing row is a sibling that does not exist yet.
   "DL09|529|SCHED|$T_DL_DISCRIM"
+
+  # ---- playhead-mk6z: reclaim a lease whose deadline has passed (MK) ----
+  #
+  # WHAT IS BEING DEFENDED. Not the reclaim — `recoverExpiredLease` and
+  # `recoverOrphans` both did the right thing already — but the fact that
+  # something reclaims WITHOUT a new process. Every pre-existing caller is a
+  # bootstrap path or an OS-granted, externally-powered BGTask, so a row
+  # orphaned after launch stayed `running` (and `fetchNextEligibleJob` cannot
+  # select `running`) until the app was relaunched.
+  #
+  # WHY THE KILL SETS ARE SHAPED THIS WAY:
+  #   * MK01 removes the CALL. Only the loop rail can see it: both store rails
+  #     invoke `reclaimExpiredLeases` directly and pass with the wiring gone,
+  #     which is exactly the hole the loop rail exists to close.
+  #   * MK02 keeps the sweep and drops the caller-identity guard, the "the clock
+  #     already told us it is dead" simplification. Killed by the rail whose two
+  #     rows are identical on the clock and differ only in who owns them.
+  #   * MK03 drops the state filter — "an expired lease is an expired lease".
+  #     It resurrects finished work forever, and the terminal rail is the only
+  #     witness because every other fixture here is non-terminal.
+  "MK01|530|SCHED|$T_MK6Z_LOOP"
+  "MK02|531|STORE|$T_MK6Z_MINE"
+  "MK03|532|STORE|$T_MK6Z_TERMINAL"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5743,6 +5775,9 @@ describe_mutation() {
     KN07) echo "kanf: the flag is consumed unconditionally again, so a refused tap cannot retry" ;;
     KN08) echo "kanf: promote to the SOON floor — the row keeps starving in a deferred lane" ;;
     KN09) echo "kanf: the promotion rotates generationID, breaking the orphan-recovery join" ;;
+    MK01) echo "mk6z: the run loop stops sweeping — reclaim is back to bootstrap-only" ;;
+    MK02) echo "mk6z: the sweep forgets which job the caller is running and reclaims on the clock alone" ;;
+    MK03) echo "mk6z: any expired lease is reclaimable, so a completed row is requeued forever" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12527,6 +12562,47 @@ EOF
     patch "$file" \
       '        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode' \
       '        job.state == "complete" && job.lastErrorCode?.hasPrefix("coverageInsufficient") == true' ;;
+
+  # MK01 — delete the loop's sweep call. This is not a strawman: it is the state
+  # of the code before this bead, and it reads as obviously redundant because
+  # two other reclaimers already exist. What it removes is the only one that
+  # runs without a relaunch.
+  MK01)
+    snippet OLD <<'EOF'
+            await sweepExpiredLeasesIfDue()
+
+            let admission = await currentLaneAdmission()
+EOF
+    snippet NEW <<'EOF'
+            let admission = await currentLaneAdmission()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK02 — stop excluding the caller's own in-flight job. The tempting argument
+  # is that the expiry predicate has already established the row is dead, so the
+  # identity check is redundant. It is not: a runner starved past its renewal
+  # interval is alive and looks identical, and this reclaims the row out from
+  # under it.
+  MK02)
+    snippet OLD <<'EOF'
+        bind(stmt, 3, excludingJobId ?? "")
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 3, "")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MK03 — drop the state filter. Reads as a simplification of a redundant
+  # clause ("a terminal row has no lease"), and it is redundant only for rows
+  # whose terminal transition happened to clear the lease columns. For any row
+  # where it did not, the sweep requeues finished work on every pass, forever.
+  MK03)
+    snippet OLD <<'EOF'
+              AND state IN ('running', 'queued', 'paused')
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
