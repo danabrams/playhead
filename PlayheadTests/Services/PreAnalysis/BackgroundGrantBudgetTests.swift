@@ -988,12 +988,16 @@ struct BackfillExpiryDurabilityTests {
             scenePhase: String?
         ) async {}
 
+        /// Non-async so the lock is taken outside an async context — `NSLock`'s
+        /// `lock()`/`unlock()` are unavailable directly from one.
+        private func record(_ outcome: BackgroundTaskRunOutcome, observed: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            finishes.append((outcome, observed))
+        }
+
         @discardableResult
         func finishRun(runId: String, update: BackgroundTaskRunOutcomeUpdate) async -> Bool {
-            let observed = await probe()
-            lock.lock()
-            finishes.append((update.outcome, observed))
-            lock.unlock()
+            record(update.outcome, observed: await probe())
             return true
         }
 
