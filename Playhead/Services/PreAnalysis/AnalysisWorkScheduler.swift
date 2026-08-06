@@ -776,6 +776,26 @@ actor AnalysisWorkScheduler {
     /// by the prefix.
     static let maxAttemptsReachedPrefix = "maxAttemptsReached:"
 
+    /// playhead-dl9k: the OTHER terminal that ends an episode's dispatchability
+    /// — reached by running out of PROGRESS rather than out of ATTEMPTS.
+    ///
+    /// Written by the `coverageInsufficient.noProgress` arm when a tier pass
+    /// completes having moved none of the four coverage measures and
+    /// ``shouldRetryCoverageInsufficient(job:outcome:)`` therefore returns
+    /// false. The row terminates `state = 'complete'` with `nextEligibleAt =
+    /// nil`, which — `workKey` being UNIQUE and `insertJob` being `INSERT OR
+    /// IGNORE` — makes every subsequent enqueue for the episode the same silent
+    /// no-op ``maxAttemptsReachedPrefix`` documents, by a road
+    /// ``isAttemptCapTerminal(_:)`` deliberately does not match.
+    ///
+    /// **Reader and writer share this constant** for exactly the reason the
+    /// prefix above does: a discriminator that matches a literal its producer
+    /// spells elsewhere breaks silently the day someone edits the arm, and the
+    /// symptom — episodes quietly stranding again — is invisible to every test
+    /// that does not already know to look. Pinned by
+    /// `noProgressTerminalCodeIsSharedWithItsWriter`.
+    static let noProgressTerminalErrorCode = "coverageInsufficient:noProgress"
+
     /// Per-lane running-job counter. Enforces the Now/Soon/Background
     /// concurrency caps spelled out in playhead-r835. Today the scheduler
     /// runs at most one job at a time via `currentRunningTask`, so the
@@ -4472,7 +4492,7 @@ actor AnalysisWorkScheduler {
                             stateUpdate: .init(
                                 state: "complete",
                                 nextEligibleAt: nil,
-                                lastErrorCode: "coverageInsufficient:noProgress"
+                                lastErrorCode: Self.noProgressTerminalErrorCode
                             )
                         )
                     )
@@ -6313,6 +6333,57 @@ actor AnalysisWorkScheduler {
             && job.lastErrorCode?.hasPrefix(maxAttemptsReachedPrefix) == true
     }
 
+    /// playhead-dl9k: is this row a NO-PROGRESS terminal — the second way an
+    /// episode loses its last dispatchable row?
+    ///
+    /// Deliberately a SIBLING of ``isAttemptCapTerminal(_:)`` rather than a
+    /// loosening of it. That predicate is read elsewhere as the literal claim
+    /// "the attempt cap was reached", and a no-progress terminal reaches its
+    /// dead end with `attemptCount = 0` — all FIVE such rows on the 2026-08-03
+    /// device pull do, across three assets, every one `state = 'complete'`.
+    /// Widening it in place would have made a named claim false wherever it is
+    /// asked, which is this repo's recurring defect exactly.
+    ///
+    /// **Exact match, not a prefix — and the reason first written here was
+    /// FALSE** (R1 review, playhead-dl9k). It read: a
+    /// `hasPrefix("coverageInsufficient")` would swallow the neighbouring
+    /// `coverageInsufficient.maxAttempts` arm (playhead-gqx4's degraded
+    /// terminal), which is also `state = 'complete'` and is another bead's to
+    /// remedy. It would not. That arm is NAMED `coverageInsufficient.maxAttempts`
+    /// — the tag it passes to `commitOutcomeArm` — but the value it WRITES is
+    /// `"\(maxAttemptsReachedPrefix)coverageInsufficient"`, i.e.
+    /// `maxAttemptsReached:coverageInsufficient`, which carries the OTHER prefix
+    /// entirely and no prefix rule stated over `"coverageInsufficient"` can ever
+    /// match it. An arm's NAME was read as though it were the value that arm
+    /// produces — this repo's recurring defect, inside the sentence claiming to
+    /// avoid it. (`isAttemptCapTerminal` does not match that row either: it is
+    /// `complete`, not `superseded`. Nothing rescues gqx4's terminal today, which
+    /// is the intended scope and not an accident of this predicate's shape.)
+    ///
+    /// **The real reason, which is forward-looking.** `coverageInsufficient:` is
+    /// a give-up FAMILY and this predicate names ONE member of it — the arm that
+    /// completed having moved no coverage measure. Everything downstream (the
+    /// retry target, the shared budget, the "a retry is productive now" argument)
+    /// was reasoned about that member alone, so a prefix would silently enrol
+    /// every future sibling into a rescue nobody sized for it. Pinned from both
+    /// sides by `rescuableTerminalDiscrimination`, which asserts a sibling code
+    /// the prefix WOULD swallow, and by mutation rail DL09, which is that prefix.
+    static func isNoProgressTerminal(_ job: AnalysisJob) -> Bool {
+        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode
+    }
+
+    /// playhead-dl9k: may this row's episode be re-requested at a fresh ordinal?
+    ///
+    /// The union of the two dead ends, and the predicate the rescue actually
+    /// asks. Both classes share ONE budget because both derive their ordinal
+    /// from the same `baseWorkKey` — so ``maxCapOutRetries`` bounds how many
+    /// times an episode is rescued IN TOTAL, not per reason. That is the
+    /// conservative reading, and it is what stops an episode that finds both
+    /// dead ends from earning double the passes.
+    static func isRescuableTerminal(_ job: AnalysisJob) -> Bool {
+        isAttemptCapTerminal(job) || isNoProgressTerminal(job)
+    }
+
     /// playhead-y8f3: the `workKey` for cap-out retry `ordinal` off `baseWorkKey`.
     ///
     /// There is deliberately NO matching `capOutRetryOrdinal(workKey:)` parser
@@ -6332,8 +6403,15 @@ actor AnalysisWorkScheduler {
     /// a reason we can state" are different claims and only the second one is
     /// evidence that the bound holds.
     enum CapOutRetryDeclineReason: String, Sendable, Equatable {
-        /// The row that swallowed the re-enqueue is not an attempt-cap terminal
-        /// — a live job, a clean `complete`, or a genuine supersession.
+        /// The row that swallowed the re-enqueue is not a RESCUABLE terminal —
+        /// a live job, a clean `complete`, or a genuine supersession.
+        ///
+        /// playhead-dl9k widened what qualifies (see
+        /// ``isRescuableTerminal(_:)``) without renaming this case. The name
+        /// still describes the decline accurately — the row is not a terminal
+        /// this rescue owns — and the `rawValue` is what the reconciler logs, so
+        /// renaming it would break the continuity of a field diagnostic to fix a
+        /// word.
         case notACapOutTerminal
         /// Every ordinal up to ``maxCapOutRetries`` is already on disk. This is
         /// the terminating case: it is what stops an asset that never progresses.
@@ -6405,7 +6483,7 @@ actor AnalysisWorkScheduler {
         tiers: [Double],
         now: Double
     ) -> CapOutRetryDecision {
-        guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
+        guard isRescuableTerminal(chainTail) else { return .declined(.notACapOutTerminal) }
         guard let nextOrdinal else { return .declined(.budgetSpent) }
         guard capOutRetryCooldownElapsed(chainTail: chainTail, now: now) else {
             return .declined(.cooling)

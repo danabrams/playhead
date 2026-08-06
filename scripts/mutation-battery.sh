@@ -2594,6 +2594,29 @@ T_DR_CAUSEFIELDS="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCauseFieldsN
 # four untouched on BOTH lines. XCTest, same reason as the two above.
 T_DR_CONSECFIELD="FMDaemonRefusalSourceCanaryTests/testConsecutiveFieldsNameTheCounterTheStopRuleReads"
 
+# ---- playhead-dl9k: the no-progress terminal is re-requested (DL series) ----
+#
+# THE RESCUE AND ITS BOUNDARY, which are one claim. playhead-y8f3 re-requests an
+# episode whose base `workKey` is held by an ATTEMPT-CAP terminal; dl9k adds the
+# second road to the same dead end, the `coverageInsufficient.noProgress` arm's
+# `state = 'complete'` terminal. The risk is entirely one of OVER-matching —
+# `complete` is also how every healthy episode ends — so half this series
+# mutates the predicate WIDER rather than narrower, and is killed by the
+# neighbours it must not swallow.
+T_DL_REACH="a no-progress terminal becomes dispatchable again and transcribes more audio"
+T_DL_BUDGET="the no-progress chain shares the cap-out budget and terminates"
+T_DL_DISCRIM="only the no-progress terminal joins the rescuable class"
+T_DL_GUARDS="the no-progress terminal does not bypass the budget, cooldown or work floor"
+T_DL_CONST="the no-progress terminal arm writes the shared constant, not a literal"
+# R1 review. The MIXED chain — one budget across both dead ends, not one each.
+# The single-class budget test cannot see a per-reason ledger; this can.
+T_DL_MIXED="an episode that reaches both dead ends still gets one budget, not two"
+# y8f3's own tests, named here because DL05 must prove the widening is ADDITIVE
+# and DL02 must prove it did not swallow a neighbouring bead's terminal.
+T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
+T_Y8F3_DEGRADED="the coverage-insufficient degraded terminal is not this bead's to re-request"
+T_Y8F3_STALE="an older cap-out under a newer clean terminal is not re-requested"
+
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
@@ -5163,6 +5186,84 @@ MUTATIONS=(
   # The same value, and normally zero. Its own batch rather than sharing 519 for
   # the R3 reason: either alone kills the same test.
   "DR24|520|RUNNER|$T_DR_CONSECFIELD"
+
+  # ---- playhead-dl9k (DL series) ----
+  #
+  # BATCHING: one per batch, and not from caution. Seven of the nine redden
+  # `T_DL_DISCRIM`, which is the discrimination table and is by design the test
+  # every predicate edit reaches — so the contested-test floor IS nine. The two
+  # that do not (DL08, and DL06's wire-in) redden sets that overlap each other.
+  # Four of them (DL01/02/03/09) also patch the SAME source line, which is the
+  # second reason no two may share a batch: a batch cannot plant two edits at one
+  # site, and a batch that tried would mask its own control (playhead-7n7u).
+
+  # DL01 — the no-progress terminal's STATE reverts to y8f3's `superseded`. This
+  # is the bug as it shipped: the arm writes `complete`, so the whole stranded
+  # population goes back to matching nothing. The cheapest possible regression
+  # and the one a future edit to `isAttemptCapTerminal` is most likely to cause
+  # by copying its neighbour.
+  "DL01|521|SCHED|$T_DL_REACH;$T_DL_BUDGET;$T_DL_DISCRIM;$T_DL_GUARDS"
+
+  # DL02 — the error-code term is dropped, leaving `state == "complete"`. EVERY
+  # clean terminal becomes rescuable, which is this bead's whole risk in one
+  # line: 17 such rows on the 2026-07-31 pull would each earn two passes that
+  # read nothing. Killed by the two neighbours it swallows as well as by the
+  # table, because a decision-matrix test alone could be satisfied by an
+  # implementation that over-matches only in production.
+  "DL02|522|SCHED|$T_DL_DISCRIM;$T_Y8F3_DEGRADED;$T_Y8F3_STALE"
+
+  # DL03 — the state term is dropped, leaving the error code alone. A `queued`
+  # or `running` row carrying a no-progress code from a PREVIOUS attempt is then
+  # "rescuable" while it is still in flight, and the episode gets a second
+  # dispatchable row alongside the live one. The `activeJobIds` subtraction in
+  # step 7 hides this in most orderings, which is exactly why it is asserted on
+  # the predicate rather than left to the sweep.
+  "DL03|523|SCHED|$T_DL_DISCRIM"
+
+  # DL04 — the union collapses to `isAttemptCapTerminal` alone: the predicate
+  # exists, is named, is called, and does nothing. The "correct mechanism with
+  # no vehicle" shape this bead was filed for, reproduced one layer down.
+  "DL04|524|SCHED|$T_DL_REACH;$T_DL_BUDGET;$T_DL_DISCRIM;$T_DL_GUARDS;$T_DL_MIXED"
+
+  # DL05 — the union collapses the OTHER way, to `isNoProgressTerminal` alone.
+  # The widening must be ADDITIVE, and only y8f3's own reach test can see that
+  # it stopped being so. Without this entry a future simplification that reads
+  # "the no-progress case is the one we care about" costs the attempt-cap rescue
+  # silently.
+  "DL05|525|SCHED|$T_DL_DISCRIM;$T_Y8F3_REACH;$T_DL_MIXED"
+
+  # DL06 — the RECONCILER's cheap guard reverts to the narrow predicate while
+  # the decision keeps the wide one. Both call sites had to move; this proves
+  # the sweep is one of them. The pure decision matrix cannot see this at all —
+  # it is the "a correct mechanism production never invokes" family the reach
+  # queue has now paid for three times (9y9e, fil5, and this bead's own premise).
+  "DL06|526|RECON|$T_DL_REACH;$T_DL_BUDGET"
+
+  # DL07 — the DECISION's guard reverts to the narrow predicate while the
+  # reconciler keeps the wide one. The mirror of DL06, and the reason both are
+  # here: either alone leaves the rescue dead, and neither test set catches the
+  # other's site.
+  "DL07|527|SCHED|$T_DL_REACH;$T_DL_BUDGET;$T_DL_GUARDS"
+
+  # DL08 — the writing arm goes back to spelling the terminal string as a
+  # LITERAL instead of the shared constant. BEHAVIOURALLY IDENTICAL TODAY: every
+  # other test in this series still passes, because the two strings are equal.
+  # It is a rail against the day they stop being — a reader matching a literal
+  # its producer spells elsewhere fails silently, and the symptom is episodes
+  # quietly stranding again. Only the source canary can kill it, which is what
+  # makes the canary worth its cost.
+  "DL08|528|SCHED|$T_DL_CONST"
+
+  # DL09 — R1 review. The code match becomes a PREFIX over the give-up family
+  # (`coverageInsufficient`). This is the implementation the original comment
+  # claimed gqx4's degraded terminal ruled out, and it does not: that arm writes
+  # `maxAttemptsReached:coverageInsufficient`, which carries the other prefix, so
+  # before this rail every test in the series passed under the prefix and the
+  # exact match was an unpinned preference. What the prefix really costs is
+  # forward-looking — every FUTURE `coverageInsufficient:` sibling is enrolled
+  # into a rescue whose target, budget and productivity argument were sized for
+  # one member — so the killing row is a sibling that does not exist yet.
+  "DL09|529|SCHED|$T_DL_DISCRIM"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -12170,6 +12271,62 @@ EOF
                         consecutive=\(job.retryCount, privacy: .public) \
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-dl9k: the no-progress terminal is re-requested (DL series) ----
+
+  # The stranded population goes back to matching nothing.
+  DL01)
+    patch "$file" \
+      '        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode' \
+      '        job.state == "superseded" && job.lastErrorCode == noProgressTerminalErrorCode' ;;
+
+  # Every clean `complete` terminal becomes rescuable.
+  DL02)
+    patch "$file" \
+      '        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode' \
+      '        job.state == "complete"' ;;
+
+  # A live row carrying a stale no-progress code becomes rescuable mid-flight.
+  DL03)
+    patch "$file" \
+      '        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode' \
+      '        job.lastErrorCode == noProgressTerminalErrorCode' ;;
+
+  # The predicate exists, is called, and does nothing.
+  DL04)
+    patch "$file" \
+      "        isAttemptCapTerminal(job) || isNoProgressTerminal(job)" \
+      "        isAttemptCapTerminal(job)" ;;
+
+  # The widening stops being additive: y8f3's rescue is lost.
+  DL05)
+    patch "$file" \
+      "        isAttemptCapTerminal(job) || isNoProgressTerminal(job)" \
+      "        isNoProgressTerminal(job)" ;;
+
+  # The sweep keeps the narrow predicate; the decision is never reached.
+  DL06)
+    patch "$file" \
+      "        guard AnalysisWorkScheduler.isRescuableTerminal(tail) else {" \
+      "        guard AnalysisWorkScheduler.isAttemptCapTerminal(tail) else {" ;;
+
+  # The decision keeps the narrow predicate; the sweep's widening buys nothing.
+  DL07)
+    patch "$file" \
+      "        guard isRescuableTerminal(chainTail) else { return .declined(.notACapOutTerminal) }" \
+      "        guard isAttemptCapTerminal(chainTail) else { return .declined(.notACapOutTerminal) }" ;;
+
+  # Reader and writer stop sharing the constant. Behaviourally identical TODAY.
+  DL08)
+    patch "$file" \
+      "                                lastErrorCode: Self.noProgressTerminalErrorCode" \
+      '                                lastErrorCode: "coverageInsufficient:noProgress"' ;;
+
+  # The give-up FAMILY is adopted wholesale instead of the one member.
+  DL09)
+    patch "$file" \
+      '        job.state == "complete" && job.lastErrorCode == noProgressTerminalErrorCode' \
+      '        job.state == "complete" && job.lastErrorCode?.hasPrefix("coverageInsufficient") == true' ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
